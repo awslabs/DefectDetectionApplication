@@ -2358,6 +2358,19 @@ export class ComputeStack extends cdk.Stack {
         ddaGroundedSamWorker.functionName,
       );
       ddaGroundedSamWorker.grantInvoke(ddaAutolabelWorker);
+
+      // Prompt_Tuning_Preview for the grounded-sam family: the preview
+      // executor runs in DdaLabelingHandler and invokes the worker
+      // synchronously per sample (grounded-sam-prompt-tuning-preview
+      // Req 8.1). Flag off → no env entry, no grant: the preview start
+      // route then rejects grounded-sam runs with the not-deployed
+      // message (Req 6.1) while job creation keeps its Req 5.4
+      // degradation.
+      ddaLabelingHandler.addEnvironment(
+        'GROUNDED_SAM_WORKER_FUNCTION_NAME',
+        ddaGroundedSamWorker.functionName,
+      );
+      ddaGroundedSamWorker.grantInvoke(ddaLabelingHandler);
     }
 
     // ------------------------------------------------------------------

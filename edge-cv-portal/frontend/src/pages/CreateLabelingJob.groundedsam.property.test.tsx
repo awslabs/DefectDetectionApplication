@@ -100,6 +100,7 @@ const { apiMocks, navigateMock, recordedSelectProps } = vi.hoisted(() => ({
     getBedrockModels: vi.fn(),
     listWorkteams: vi.fn(),
     createLabelingJob: vi.fn(),
+    getImagePreview: vi.fn(),
   },
   navigateMock: vi.fn(),
   /** Latest props each rendered Select received, keyed by placeholder. */
@@ -174,6 +175,25 @@ interface CatalogModel {
   image_input?: boolean;
 }
 
+/**
+ * Settled empty listing for the real PromptTuningPreview, which now
+ * mounts under grounded-sam (grounded-sam-prompt-tuning-preview
+ * Req 10.3): a well-formed empty page settles the panel's listing
+ * deterministically into its empty-prefix state instead of leaving it to
+ * the Proxy's `{}` fallback (whose missing `images` field settles only
+ * by throwing into the listing error path).
+ */
+const emptyListing = {
+  prefix: 'images/',
+  bucket: 'data-bucket',
+  total_found: 0,
+  offset: 0,
+  limit: 50,
+  has_more: false,
+  images: [],
+  expires_in_seconds: 900,
+};
+
 /** Reset every mock to a benign default around a generated catalog. */
 function primeMocks(models: CatalogModel[]) {
   vi.clearAllMocks();
@@ -192,6 +212,7 @@ function primeMocks(models: CatalogModel[]) {
   });
   apiMocks.listWorkteams.mockResolvedValue({ workteams: [] });
   apiMocks.createLabelingJob.mockResolvedValue({});
+  apiMocks.getImagePreview.mockResolvedValue(emptyListing);
 }
 
 beforeEach(() => {

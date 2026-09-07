@@ -62,6 +62,22 @@
  * With none of them passed, behavior is identical to before — the one
  * rendered-surface addition is the "Clear selection" control beside the
  * selection summary while the selection is non-empty (Requirement 5.8).
+ *
+ * The grounded-sam arm (grounded-sam-prompt-tuning-preview Requirements
+ * 1.3, 1.4, 1.6, 2.1, 2.3, 3.9, 3.10, 5.5, 6.2, 7.1-7.3) shares the sample
+ * picker, the polling loop, the replacement semantics and the result
+ * plumbing unchanged. Under `model === 'grounded-sam'` the panel: skips
+ * the detection-prompt and token-budget pre-flight rules and instead
+ * enforces the shared Prompt_Guardrail over every label's Effective_Prompt
+ * (one violation per offender, in Label_Set order); sends the wizard's
+ * Prompt_Override entries pruned exactly as job submission prunes them and
+ * omits `detection_prompt` / `few_shot` / `downscale_max_edge` /
+ * `token_budget`; polls with the family's 240 s per-sample bound capped at
+ * the executor's 900 s ceiling; surfaces a start-rejection's
+ * `validation_errors` (the worker-not-deployed message) in the existing
+ * validation-errors alert; and renders a CPU timing expectation in place
+ * of the llm-only sizing controls. The `llm:` arm is byte-identical to
+ * before that feature.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Alert from '@cloudscape-design/components/alert';
@@ -90,6 +106,11 @@ import {
 } from '../../services/api';
 import PreviewResultCanvas from './PreviewResultCanvas';
 import type { LabelingModality } from './AnnotationCanvas';
+import {
+  ALIGNMENT_BREAKING_PATTERN,
+  effectivePrompt,
+  promptGuardrailMessage,
+} from '../../pages/promptOverrideGuardrails';
 
 /** Sample_Limit — the most Sample_Images one Preview_Run may carry (2.3). */
 export const SAMPLE_LIMIT = 5;
@@ -112,6 +133,21 @@ export const POLL_INTERVAL_MS = 2000;
 const PER_SAMPLE_BOUND_MS = 120_000;
 /** Slack over the per-sample bounds before the client gives up (1.8). */
 const RUN_BOUND_SLACK_MS = 60_000;
+/**
+ * Per-Sample_Image bound of a grounded-sam run — the Worker_Invoke_Bound,
+ * `GROUNDED_SAM_MAX_TIMEOUT_SECONDS` (grounded-sam-prompt-tuning-preview
+ * Requirement 3.9): the worker's CPU cold start alone approaches 140 s,
+ * so the llm family's 120 s would deterministically time out.
+ */
+const GSAM_PER_SAMPLE_BOUND_MS = 240_000;
+/**
+ * Cap on a grounded-sam run's pre-slack poll bound — the Preview_Executor's
+ * 900 s Lambda ceiling, matching the backend's lock TTL cap, so the client
+ * polls `min(n × 240 + 60, 900) + 60` seconds (Requirement 3.9).
+ */
+const GSAM_RUN_BOUND_CAP_MS = 900_000;
+/** The grounded-sam family accepts exactly these modalities (Req 3.3). */
+const GROUNDED_SAM_MODALITIES = ['Segmentation', 'ObjectDetection'];
 
 /**
  * Max_Image_Edge_Options — the six selectable Max_Image_Edge values, which
@@ -241,6 +277,16 @@ export function previewFewShotExamples(refs: {
  * Preview_API's validation so a rejection never reaches the network
  * (Requirements 1.4, 2.4, 6.2, 8.4). An empty list means the attempt is
  * allowed through.
+ *
+ * The model rule is a family dispatch (grounded-sam-prompt-tuning-preview
+ * Requirement 2.3): an `llm:`-prefixed identifier takes the pre-feature
+ * rules verbatim; exactly `grounded-sam` takes the family's arm — no
+ * detection-prompt rule and no token-budget rule (the family has neither
+ * input), modality restricted to Segmentation and ObjectDetection, the
+ * same label-set and sample-count rules, plus one violation per
+ * Prompt_Guardrail offender in Label_Set order using the shared
+ * `promptOverrideGuardrails` wording, so the panel rejects exactly the
+ * prompts job creation rejects.
  */
 export function validatePreviewRunInputs(input: {
   model: string;
@@ -253,40 +299,47 @@ export function validatePreviewRunInputs(input: {
   badExampleCount: number;
   /** Token_Budget_Selection as entered; absent or empty means omitted. */
   tokenBudget?: string;
+  /**
+   * Prompt_Override entries as they stand in the wizard, judged only under
+   * a grounded-sam selection (grounded-sam-prompt-tuning-preview Req 2.3).
+   */
+  promptOverrides?: Record<string, string>;
 }): string[] {
   const violations: string[] = [];
+  const isGroundedSamModel = input.model === 'grounded-sam';
 
-  if (!input.model.startsWith('llm:') || input.model.length <= 'llm:'.length) {
+  if (
+    !isGroundedSamModel &&
+    (!input.model.startsWith('llm:') || input.model.length <= 'llm:'.length)
+  ) {
     violations.push(
       `Model "${input.model || '(none)'}" is not a prompt-guided LLM model; the preview supports only llm: models`
     );
   }
 
-  if (!input.detectionPrompt.trim()) {
-    violations.push('A detection prompt is required');
-  } else if (input.detectionPrompt.length > MAX_DETECTION_PROMPT_LENGTH) {
-    violations.push(
-      `The detection prompt exceeds ${MAX_DETECTION_PROMPT_LENGTH.toLocaleString()} characters`
-    );
-  }
-
-  const modalities: string[] = [
-    'Classification',
-    'Segmentation',
-    'ObjectDetection',
-  ];
-  if (!modalities.includes(input.taskType)) {
-    violations.push(`Task type "${input.taskType || '(none)'}" is not supported`);
-  } else if (input.taskType === 'Classification') {
-    const matchesFixed =
-      input.labelSet.length === FIXED_CLASSIFICATION_LABEL_SET.length &&
-      FIXED_CLASSIFICATION_LABEL_SET.every((l, i) => input.labelSet[i] === l);
-    if (!matchesFixed) {
+  // The grounded-sam family's prompt inputs are the per-label overrides:
+  // it has no Detection_Prompt, so the rule does not apply to it.
+  if (!isGroundedSamModel) {
+    if (!input.detectionPrompt.trim()) {
+      violations.push('A detection prompt is required');
+    } else if (input.detectionPrompt.length > MAX_DETECTION_PROMPT_LENGTH) {
       violations.push(
-        `Classification requires the fixed label set ${FIXED_CLASSIFICATION_LABEL_SET.join(', ')}`
+        `The detection prompt exceeds ${MAX_DETECTION_PROMPT_LENGTH.toLocaleString()} characters`
       );
     }
-  } else {
+  }
+
+  if (isGroundedSamModel) {
+    // The family's two geometry modalities, the Preview_API's wording
+    // (grounded-sam-prompt-tuning-preview Req 3.3). The Label_Set rules
+    // still apply beside a modality violation — the family has no
+    // Classification arm to auto-supply a fixed set, so the label rule is
+    // always decidable, keeping the enumerate-everything posture.
+    if (!GROUNDED_SAM_MODALITIES.includes(input.taskType)) {
+      violations.push(
+        'The grounded-sam family supports Segmentation and ObjectDetection'
+      );
+    }
     const labels = input.labelSet.map((l) => l.trim());
     if (labels.length === 0 || labels.some((l) => !l)) {
       violations.push('Provide at least one non-empty label');
@@ -298,6 +351,41 @@ export function validatePreviewRunInputs(input: {
       );
     } else if (new Set(labels).size !== labels.length) {
       violations.push('Label names must be distinct');
+    }
+  } else {
+    const modalities: string[] = [
+      'Classification',
+      'Segmentation',
+      'ObjectDetection',
+    ];
+    if (!modalities.includes(input.taskType)) {
+      violations.push(
+        `Task type "${input.taskType || '(none)'}" is not supported`
+      );
+    } else if (input.taskType === 'Classification') {
+      const matchesFixed =
+        input.labelSet.length === FIXED_CLASSIFICATION_LABEL_SET.length &&
+        FIXED_CLASSIFICATION_LABEL_SET.every(
+          (l, i) => input.labelSet[i] === l
+        );
+      if (!matchesFixed) {
+        violations.push(
+          `Classification requires the fixed label set ${FIXED_CLASSIFICATION_LABEL_SET.join(', ')}`
+        );
+      }
+    } else {
+      const labels = input.labelSet.map((l) => l.trim());
+      if (labels.length === 0 || labels.some((l) => !l)) {
+        violations.push('Provide at least one non-empty label');
+      } else if (labels.length > MAX_LABELS) {
+        violations.push(`The label set supports at most ${MAX_LABELS} labels`);
+      } else if (labels.some((l) => l.length > MAX_LABEL_LENGTH)) {
+        violations.push(
+          `Every label must be at most ${MAX_LABEL_LENGTH} characters`
+        );
+      } else if (new Set(labels).size !== labels.length) {
+        violations.push('Label names must be distinct');
+      }
     }
   }
 
@@ -326,11 +414,33 @@ export function validatePreviewRunInputs(input: {
   // A non-empty Token_Budget_Selection that is not a whole number in the
   // accepted range is one more violation in this same list, so the run is
   // never started, no request is issued and no wizard state changes
-  // (llm-model-token-and-image-sizing Requirement 3.3).
-  if (parseTokenBudget(input.tokenBudget) === null) {
+  // (llm-model-token-and-image-sizing Requirement 3.3). The budget is an
+  // `llm:`-only input; the grounded-sam family has no such rule.
+  if (!isGroundedSamModel && parseTokenBudget(input.tokenBudget) === null) {
     violations.push(
       `The output token budget must be a whole number from ${TOKEN_BUDGET_RANGE_TEXT}`
     );
+  }
+
+  // Prompt_Guardrail over every label's Effective_Prompt, one corrective
+  // error per offending label in Label_Set order with the shared wording,
+  // so a period-bearing prompt never reaches the worker from the preview
+  // (grounded-sam-prompt-tuning-preview Req 2.3; the shared module is the
+  // wizard's and the backend's single source of truth for the rule).
+  if (isGroundedSamModel) {
+    for (const label of input.labelSet) {
+      const override = input.promptOverrides?.[label];
+      if (ALIGNMENT_BREAKING_PATTERN.test(effectivePrompt(label, override))) {
+        const survives =
+          typeof override === 'string' && override.trim() !== '';
+        violations.push(
+          promptGuardrailMessage({
+            label,
+            source: survives ? 'override' : 'label',
+          })
+        );
+      }
+    }
   }
 
   return violations;
@@ -384,6 +494,15 @@ export interface PromptTuningPreviewProps {
   labelSet: string[];
   /** Few_Shot_Option value as it stands in the wizard. */
   fewShotEnabled: boolean;
+  /**
+   * Per-label Prompt_Override entries as they stand in the wizard, keyed
+   * by label name — the grounded-sam family's prompt inputs
+   * (grounded-sam-prompt-tuning-preview Requirements 2.1, 2.3, 7.1). Read
+   * per run start, so an edit after a completed run rides the next run
+   * with no extra mechanism; a started run sends the entries pruned
+   * exactly as job submission prunes them. Unused by `llm:` selections.
+   */
+  promptOverrides?: Record<string, string>;
   /** Count of good example images staged in the wizard. */
   goodExampleCount: number;
   /** Count of bad example images staged in the wizard. */
@@ -457,6 +576,7 @@ export default function PromptTuningPreview({
   taskType,
   labelSet,
   fewShotEnabled,
+  promptOverrides,
   goodExampleCount,
   badExampleCount,
   ensureExampleImagesUploaded,
@@ -528,6 +648,14 @@ export default function PromptTuningPreview({
    */
   const isLlmAutoLabelModel =
     model.startsWith('llm:') && model.length > 'llm:'.length;
+
+  /**
+   * The grounded-sam family selection (grounded-sam-prompt-tuning-preview):
+   * shares the picker, poll loop and result plumbing, swaps the llm-only
+   * inputs for the per-label Prompt_Overrides, and adopts the family's
+   * 240 s per-sample poll bound.
+   */
+  const isGroundedSam = model === 'grounded-sam';
 
   /* --------------------------- run state -------------------------------- */
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
@@ -706,8 +834,18 @@ export default function PromptTuningPreview({
       if (pollToken.current) pollToken.current.cancelled = true;
       pollToken.current = token;
 
-      const deadline =
-        Date.now() + sampleCount * PER_SAMPLE_BOUND_MS + RUN_BOUND_SLACK_MS;
+      // Family-dependent overall bound (grounded-sam-prompt-tuning-preview
+      // Req 3.9): a grounded-sam run polls `min(n × 240 s + 60 s, 900 s)`
+      // — the backend's lock TTL, capped at the executor's Lambda ceiling —
+      // plus the same 60 s slack; an llm run keeps the pre-feature
+      // `n × 120 s + 60 s` expression byte-for-byte.
+      const runBoundMs = isGroundedSam
+        ? Math.min(
+            sampleCount * GSAM_PER_SAMPLE_BOUND_MS + RUN_BOUND_SLACK_MS,
+            GSAM_RUN_BOUND_CAP_MS
+          ) + RUN_BOUND_SLACK_MS
+        : sampleCount * PER_SAMPLE_BOUND_MS + RUN_BOUND_SLACK_MS;
+      const deadline = Date.now() + runBoundMs;
       const payloads: Record<number, PreviewResultPayload> = {};
       const payloadErrors: Record<number, string> = {};
 
@@ -770,7 +908,7 @@ export default function PromptTuningPreview({
         if (Date.now() >= deadline) {
           setRunError(
             `The preview run did not return results within ${Math.round(
-              (sampleCount * PER_SAMPLE_BOUND_MS + RUN_BOUND_SLACK_MS) / 1000
+              runBoundMs / 1000
             )} seconds. Start a new preview run.`
           );
           setRunInFlight(false);
@@ -779,7 +917,7 @@ export default function PromptTuningPreview({
         await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
       }
     },
-    [commitStatus]
+    [commitStatus, isGroundedSam]
   );
 
   /* --------------------------- run resume ------------------------------- */
@@ -823,6 +961,7 @@ export default function PromptTuningPreview({
       goodExampleCount,
       badExampleCount,
       tokenBudget: isLlmAutoLabelModel ? budgetEntry : '',
+      promptOverrides,
     });
     if (violations.length > 0) {
       // No request is issued and no wizard state is touched (req 1.4).
@@ -832,8 +971,10 @@ export default function PromptTuningPreview({
 
     setRunInFlight(true);
 
+    // A grounded-sam run has no Few_Shot_Option, so it never uploads
+    // example images (grounded-sam-prompt-tuning-preview Req 2.1).
     let examples: PreviewFewShotExample[] = [];
-    if (fewShotEnabled) {
+    if (!isGroundedSam && fewShotEnabled) {
       try {
         examples = previewFewShotExamples(await ensureExampleImagesUploaded());
       } catch (err: unknown) {
@@ -855,23 +996,49 @@ export default function PromptTuningPreview({
     const budgetSelection = isLlmAutoLabelModel
       ? parseTokenBudget(budgetEntry)
       : undefined;
+    // A grounded-sam request carries the Prompt_Override entries pruned
+    // exactly as job submission prunes them — only entries non-empty after
+    // trimming whose label is in the effective Label_Set, each raw value
+    // character-for-character, the key omitted entirely when none survive —
+    // and none of the llm-only fields: no detection_prompt, no few_shot,
+    // no downscale_max_edge, no token_budget
+    // (grounded-sam-prompt-tuning-preview Req 2.1, 7.1).
+    const overrideEntries = isGroundedSam
+      ? labelSet
+          .filter((l) => ((promptOverrides ?? {})[l] || '').trim() !== '')
+          .map((l) => [l, (promptOverrides ?? {})[l]] as [string, string])
+      : [];
     try {
-      const started = await apiService.startPreviewRun({
-        usecase_id: usecaseId,
-        dataset_prefix: datasetPrefix,
-        model,
-        detection_prompt: detectionPrompt,
-        task_type: taskType,
-        label_set: labelSet,
-        sample_images: samples,
-        few_shot: { enabled: fewShotEnabled, examples },
-        ...(isLlmAutoLabelModel
-          ? { downscale_max_edge: downscaleSetting }
-          : {}),
-        ...(typeof budgetSelection === 'number'
-          ? { token_budget: budgetSelection }
-          : {}),
-      });
+      const started = await apiService.startPreviewRun(
+        isGroundedSam
+          ? {
+              usecase_id: usecaseId,
+              dataset_prefix: datasetPrefix,
+              model,
+              task_type: taskType,
+              label_set: labelSet,
+              sample_images: samples,
+              ...(overrideEntries.length > 0
+                ? { prompt_overrides: Object.fromEntries(overrideEntries) }
+                : {}),
+            }
+          : {
+              usecase_id: usecaseId,
+              dataset_prefix: datasetPrefix,
+              model,
+              detection_prompt: detectionPrompt,
+              task_type: taskType,
+              label_set: labelSet,
+              sample_images: samples,
+              few_shot: { enabled: fewShotEnabled, examples },
+              ...(isLlmAutoLabelModel
+                ? { downscale_max_edge: downscaleSetting }
+                : {}),
+              ...(typeof budgetSelection === 'number'
+                ? { token_budget: budgetSelection }
+                : {}),
+            }
+      );
       // Report the new run's identity so the wizard can persist it for
       // later resumption (labeling-setup-session-recovery Requirement 5.6).
       onRunStarted?.({
@@ -884,6 +1051,29 @@ export default function PromptTuningPreview({
         labelSet,
       });
     } catch (err: unknown) {
+      // A grounded-sam start rejection carrying validation errors — the
+      // Not_Deployed_Message path among them — renders those messages in
+      // the existing validation-errors alert, leaving the panel and the
+      // wizard operable (grounded-sam-prompt-tuning-preview Req 6.2). The
+      // `llm:` family keeps the generic start-failure path untouched.
+      if (isGroundedSam && err instanceof ApiError) {
+        const validationEntries = (
+          err.details as { validation_errors?: unknown } | undefined
+        )?.validation_errors;
+        if (Array.isArray(validationEntries) && validationEntries.length > 0) {
+          setValidationErrors(
+            validationEntries.map((entry) =>
+              typeof entry === 'string'
+                ? entry
+                : String(
+                    (entry as { message?: unknown } | null)?.message ?? entry
+                  )
+            )
+          );
+          setRunInFlight(false);
+          return;
+        }
+      }
       // A start rejection leaves the previously displayed results intact
       // (req 5.4) and re-enables the control (req 1.8, 4.7).
       setRunError(
@@ -900,6 +1090,7 @@ export default function PromptTuningPreview({
     labelSet,
     selectedKeys,
     fewShotEnabled,
+    promptOverrides,
     goodExampleCount,
     badExampleCount,
     ensureExampleImagesUploaded,
@@ -907,6 +1098,7 @@ export default function PromptTuningPreview({
     datasetPrefix,
     pollRun,
     isLlmAutoLabelModel,
+    isGroundedSam,
     downscaleSetting,
     budgetEntry,
     onRunStarted,
@@ -1169,6 +1361,21 @@ export default function PromptTuningPreview({
               </FormField>
             </SpaceBetween>
           </div>
+        )}
+
+        {/* Timing expectation for the grounded-sam family only — the
+            worker runs on CPU (grounded-sam-prompt-tuning-preview
+            Requirement 1.6). */}
+        {isGroundedSam && (
+          <Box
+            fontSize="body-s"
+            color="text-body-secondary"
+            data-testid="preview-gsam-timing-note"
+          >
+            Inference runs on CPU at roughly 5 seconds per image once warm.
+            The first run after idle can take a few minutes while the worker
+            starts.
+          </Box>
         )}
 
         {/* --------------------------- run control ---------------------- */}

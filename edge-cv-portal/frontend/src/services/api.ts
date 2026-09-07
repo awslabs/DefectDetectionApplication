@@ -560,6 +560,13 @@ export interface DdaBoundingBox {
   top: number;
   width: number;
   height: number;
+  /**
+   * Region_Score — optional worker-reported confidence carried on
+   * grounded-sam preview result payloads for display beside the class name
+   * (grounded-sam-prompt-tuning-preview Requirement 5.3). Absent on every
+   * other payload; no existing consumer reads it.
+   */
+  score?: number;
 }
 
 /** RLE-encoded mask region keyed to a Label_Set class. */
@@ -574,6 +581,13 @@ export interface DdaMaskRegion {
    * backend likewise writes and validates a string.
    */
   rle: string;
+  /**
+   * Region_Score — optional worker-reported confidence carried on
+   * grounded-sam preview result payloads for display beside the class name
+   * (grounded-sam-prompt-tuning-preview Requirement 5.3). Absent on every
+   * other payload; no existing consumer reads it.
+   */
+  score?: number;
 }
 
 /**
@@ -691,28 +705,53 @@ export interface PreviewFewShotExample {
 
 /**
  * Body of `POST /labeling-preview/runs`: one Preview_Run over 1..5
- * Sample_Images with one model, one Detection_Prompt, one modality, one
- * Label_Set and one Few_Shot_Option value (llm-autolabel-prompt-tuning
- * Requirement 1.3). A 400 enumerates every violated rule, a 403 carries
+ * Sample_Images with one model, one modality and one Label_Set
+ * (llm-autolabel-prompt-tuning Requirement 1.3). An `llm:` run additionally
+ * carries one Detection_Prompt and one Few_Shot_Option value; a
+ * `grounded-sam` run omits both and instead carries optional per-label
+ * `prompt_overrides` (grounded-sam-prompt-tuning-preview Requirement 2.1).
+ * A 400 enumerates every violated rule, a 403 carries
  * the fixed `{error: 'Not authorized'}` body, and a 409 indicates another
  * Preview_Run is already in flight for the caller and Use_Case.
  */
 export interface StartPreviewRunRequest {
   usecase_id: string;
   dataset_prefix: string;
-  /** `llm:<model_identifier>` — the only family the Preview_API accepts. */
+  /**
+   * `llm:<model_identifier>` or `grounded-sam` — the families the
+   * Preview_API accepts (grounded-sam-prompt-tuning-preview supersedes
+   * the previous llm:-only rule).
+   */
   model: string;
-  /** Sent character-for-character; 1..2000 characters after trimming. */
-  detection_prompt: string;
+  /**
+   * Sent character-for-character; 1..2000 characters after trimming.
+   * Required for `llm:` runs; omitted by `grounded-sam` runs, whose family
+   * has no detection-prompt input (grounded-sam-prompt-tuning-preview).
+   */
+  detection_prompt?: string;
   task_type: 'Classification' | 'Segmentation' | 'ObjectDetection';
   label_set: string[];
   /** 1..5 entries, each a bare object key or an `s3://` URI. */
   sample_images: string[];
-  few_shot: {
+  /**
+   * Required for `llm:` runs; omitted by `grounded-sam` runs — the
+   * Preview_API rejects a grounded-sam request carrying few-shot
+   * enablement (grounded-sam-prompt-tuning-preview Requirement 3.4).
+   */
+  few_shot?: {
     enabled: boolean;
     /** At most 10 per designation; omitted refs are never read. */
     examples: PreviewFewShotExample[];
   };
+  /**
+   * Per-label Prompt_Override entries for a `grounded-sam` run, pruned
+   * exactly as job creation prunes them: only entries non-empty after
+   * trimming whose label is in the effective Label_Set, each value
+   * character-for-character as entered
+   * (grounded-sam-prompt-tuning-preview Requirement 2.1). Not sent for
+   * `llm:` runs.
+   */
+  prompt_overrides?: Record<string, string>;
   /**
    * Downscale_Setting for every image of the run: one Max_Image_Edge value
    * from 512 | 768 | 1024 | 1280 | 1536 | 2048, or `null`/omitted for

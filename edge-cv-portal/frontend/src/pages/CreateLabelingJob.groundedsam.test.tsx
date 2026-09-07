@@ -17,8 +17,10 @@
  * - a >256-character override blocks the setup step with an error naming
  *   the label, and exactly 256 characters is accepted (Req 2.6);
  * - none of the `llm:`-only controls (detection prompt, few-shot,
- *   sizing, prompt tuning preview) render for a grounded-sam selection
- *   (Req 7.3);
+ *   sizing) render for a grounded-sam selection, while the prompt tuning
+ *   preview — previously pinned absent — now renders for grounded-sam
+ *   (Req 7.3 as superseded by grounded-sam-prompt-tuning-preview
+ *   Req 10.1);
  * - a seeded Setup_Draft carrying `groundedSamPromptOverrides` restores
  *   the entries into the controls exactly as saved and the subsequent
  *   submit payload carries the surviving overrides (Req 6.2).
@@ -450,7 +452,7 @@ describe('CreateLabelingJob — over-length override blocks the setup step (Req 
 // ---------------------------------------------------------------------------
 
 describe('CreateLabelingJob — no llm-only controls render for grounded-sam (Req 7.3)', () => {
-  it('shows detection prompt, few-shot, sizing and preview for llm: and none of them for grounded-sam', async () => {
+  it('shows detection prompt, few-shot, sizing and preview for llm: and only the preview for grounded-sam', async () => {
     const { container } = await renderToDdaSetup('Segmentation');
     await fillSetupAndEnableAutoLabel(container);
 
@@ -474,7 +476,12 @@ describe('CreateLabelingJob — no llm-only controls render for grounded-sam (Re
     expect(
       screen.queryByText('Attach example images as few-shot examples')
     ).toBeNull();
-    expect(screen.queryByTestId('prompt-tuning-preview')).toBeNull();
+    // ...except the prompt tuning preview, which now renders for
+    // grounded-sam too (grounded-sam-prompt-tuning-preview Req 10.1
+    // superseding the original absence pin); await its listing settling
+    // into the empty-prefix state so the render is deterministic.
+    expect(screen.getByTestId('prompt-tuning-preview')).toBeInTheDocument();
+    await screen.findByTestId('preview-prefix-empty');
     expect(screen.queryByTestId('preview-sizing-controls')).toBeNull();
     expect(screen.queryByLabelText('Image downscaling')).toBeNull();
     expect(screen.queryByLabelText('Output token budget')).toBeNull();

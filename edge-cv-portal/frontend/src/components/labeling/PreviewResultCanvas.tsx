@@ -16,6 +16,13 @@
  * - Classification: `{label: 'normal' | 'anomaly'}` shown as label text
  *   beside the image (req 4.3).
  *
+ * Grounded-sam preview payloads may additionally carry a per-region /
+ * per-box Region_Score. WHERE a region or box carries a numeric `score`,
+ * the Segmentation legend entry / ObjectDetection box label appends it
+ * formatted to two decimals (grounded-sam-prompt-tuning-preview
+ * Requirements 5.1–5.3); a payload without scores — every llm payload —
+ * renders byte-identically to before that feature (Req 9.5).
+ *
  * Geometry, RLE decoding and class colors come from `AnnotationCanvas`'s
  * exported pure helpers (`clampBoxToImage`, `parseRleCounts`,
  * `decodeRleColumnMajor`, `CLASS_PALETTE`), so preview overlays use the
@@ -54,6 +61,17 @@ const CLASSIFICATION_NORMAL = 'normal';
 function hexToRgb(hex: string): [number, number, number] {
   const value = parseInt(hex.slice(1), 16);
   return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff];
+}
+
+/**
+ * Region_Score of a region/box: its `score` when that is a finite number
+ * (grounded-sam-prompt-tuning-preview Req 5.3), otherwise null — which is
+ * every llm payload, whose rendering must stay byte-identical (Req 9.5).
+ * Read structurally so any payload shape is handled totally.
+ */
+function scoreOf(shape: unknown): number | null {
+  const score = (shape as { score?: unknown }).score;
+  return typeof score === 'number' && Number.isFinite(score) ? score : null;
 }
 
 export interface PreviewResultCanvasProps {
@@ -100,6 +118,7 @@ export default function PreviewResultCanvas({
     if (taskType !== 'ObjectDetection' || !hasDimensions) return [];
     return (prelabel.boxes ?? []).map((box) => ({
       class: box.class,
+      score: scoreOf(box),
       ...clampBoxToImage(box, imageWidth, imageHeight),
     }));
   }, [taskType, prelabel.boxes, imageWidth, imageHeight, hasDimensions]);
@@ -215,6 +234,11 @@ export default function PreviewResultCanvas({
               }}
             >
               {box.class ?? 'unclassified'}
+              {box.score !== null && (
+                <span data-testid="preview-box-score">
+                  {` (${box.score.toFixed(2)})`}
+                </span>
+              )}
             </span>
           </div>
         );
@@ -256,24 +280,34 @@ export default function PreviewResultCanvas({
             <div data-testid="preview-region-legend">
               <Box variant="awsui-key-label">Mask regions</Box>
               <SpaceBetween size="xxs">
-                {regions.map((region, i) => (
-                  <div
-                    key={`preview-region-${i}`}
-                    data-testid="preview-region-class"
-                    style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-                  >
-                    <span
-                      aria-hidden="true"
-                      style={{
-                        display: 'inline-block',
-                        width: '12px',
-                        height: '12px',
-                        background: colorFor(region.class),
-                      }}
-                    />
-                    <Box variant="span">{region.class ?? 'unclassified'}</Box>
-                  </div>
-                ))}
+                {regions.map((region, i) => {
+                  const score = scoreOf(region);
+                  return (
+                    <div
+                      key={`preview-region-${i}`}
+                      data-testid="preview-region-class"
+                      style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          display: 'inline-block',
+                          width: '12px',
+                          height: '12px',
+                          background: colorFor(region.class),
+                        }}
+                      />
+                      <Box variant="span">
+                        {region.class ?? 'unclassified'}
+                        {score !== null && (
+                          <span data-testid="preview-region-score">
+                            {` (${score.toFixed(2)})`}
+                          </span>
+                        )}
+                      </Box>
+                    </div>
+                  );
+                })}
               </SpaceBetween>
             </div>
           )}

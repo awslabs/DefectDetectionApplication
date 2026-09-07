@@ -2133,13 +2133,15 @@ export default function CreateLabelingJob() {
         )}
 
         {/* Prompt_Tuning_Preview: offered inside the creation flow for the
-            prompt-guided LLM family only, so `sam`, `bedrock:` and a cleared
-            selection render nothing new (Req 1.1, 1.2, 10.5). The component
-            is fed entirely from wizard state and never writes back to it, so
-            the job stays submittable whether or not a Preview_Run has been
-            started, and prompt/model/few-shot edits flow straight into the
-            next run (Req 1.5, 5.1). */}
-        {autoLabelEnabled && isLlmAutoLabelModel && (
+            prompt-guided LLM family and grounded-sam
+            (grounded-sam-prompt-tuning-preview Req 1.1, 1.2), so `sam`,
+            `bedrock:` and a cleared selection render nothing new (Req 1.5).
+            The component is fed entirely from wizard state and never writes
+            back to it, so the job stays submittable whether or not a
+            Preview_Run has been started, and prompt/model/few-shot edits flow
+            straight into the next run (Req 1.5, 5.1). */}
+        {autoLabelEnabled &&
+          (isLlmAutoLabelModel || autoLabelModel === 'grounded-sam') && (
           <PromptTuningPreview
             /* A restore bumps the nonce so the preview remounts with the
                restored Sample_Selection and resumeRun applied
@@ -2151,6 +2153,10 @@ export default function CreateLabelingJob() {
             detectionPrompt={detectionPrompt}
             taskType={modality as LabelingModality}
             labelSet={effectiveLabelSet}
+            /* Grounded-sam runs send the wizard's per-label Prompt_Override
+               entries; the panel prunes them with the submit-payload rules
+               (grounded-sam-prompt-tuning-preview Req 2.1). */
+            promptOverrides={groundedSamPromptOverrides}
             fewShotEnabled={fewShotEnabled}
             goodExampleCount={combinedGoodExampleCount}
             badExampleCount={combinedBadExampleCount}

@@ -75,6 +75,7 @@ const { apiMocks, navigateMock } = vi.hoisted(() => ({
     getBedrockModels: vi.fn(),
     listWorkteams: vi.fn(),
     createLabelingJob: vi.fn(),
+    getImagePreview: vi.fn(),
   },
   navigateMock: vi.fn(),
 }));
@@ -125,6 +126,25 @@ vi.mock('../components/S3Browser', () => ({ default: () => null }));
 // ---------------------------------------------------------------------------
 
 /**
+ * Settled empty listing for the real PromptTuningPreview, which now
+ * mounts under grounded-sam (grounded-sam-prompt-tuning-preview
+ * Req 10.3): a well-formed empty page settles the panel's listing
+ * deterministically into its empty-prefix state instead of leaving it to
+ * the Proxy's `{}` fallback (whose missing `images` field settles only
+ * by throwing into the listing error path).
+ */
+const emptyListing = {
+  prefix: 'images/',
+  bucket: 'data-bucket',
+  total_found: 0,
+  offset: 0,
+  limit: 50,
+  has_more: false,
+  images: [],
+  expires_in_seconds: 900,
+};
+
+/**
  * Reset every mock to a benign default. The model catalog stays empty:
  * the auto-label select then offers exactly the static SAM and
  * Grounded-SAM entries for Segmentation/ObjectDetection — both model
@@ -146,6 +166,7 @@ function primeMocks() {
   });
   apiMocks.listWorkteams.mockResolvedValue({ workteams: [] });
   apiMocks.createLabelingJob.mockResolvedValue({});
+  apiMocks.getImagePreview.mockResolvedValue(emptyListing);
 }
 
 beforeEach(() => {

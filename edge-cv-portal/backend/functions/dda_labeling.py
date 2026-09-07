@@ -103,7 +103,18 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 import boto3
-from botocore.exceptions import ClientError
+# BotoConfig and the two timeout exception types serve the grounded-sam
+# preview sample path (grounded-sam-prompt-tuning-preview Req 4.1, 4.5):
+# the synchronous worker invoke is bounded by a read timeout with
+# retries disabled — the consumer's client construction — and a
+# read/connect timeout maps onto the preview's 'timeout' failure
+# category, distinguishable from every other invocation error.
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import (
+    ClientError,
+    ConnectTimeoutError,
+    ReadTimeoutError,
+)
 
 # Configure logging
 logger = logging.getLogger()
@@ -3614,6 +3625,43 @@ PREVIEW_FAILURE_CATEGORIES = (
     'unreadable_example_image',
 )
 
+# ---------------------------------------------------------------------------
+# Grounded-SAM preview family (grounded-sam-prompt-tuning-preview)
+# ---------------------------------------------------------------------------
+# The second family the Preview_API accepts beside `llm:` (that spec's
+# Req 3.1, superseding grounded-sam-autolabel's preview-absence pin).
+PREVIEW_GROUNDED_SAM_MODEL = 'grounded-sam'
+# The consumer's bound, adopted per sample (Req 4.1):
+# == dda_autolabel_worker.GROUNDED_SAM_MAX_TIMEOUT_SECONDS. The worker's
+# CPU cold start alone approaches 140 s, so the llm family's 120 s
+# per-sample bound would deterministically fail every first-run sample.
+PREVIEW_GSAM_PER_SAMPLE_SECONDS = 240
+# Run_Deadline_Guard threshold (Req 4.7): when the executor's remaining
+# Lambda time cannot accommodate another full worker invocation (plus
+# slack for the presign and the writes), the remaining samples resolve
+# as `timeout` failures without invoking — 5 × 240 s of worst-case
+# invokes exceeds the handler's 900 s timeout, and a run must reach a
+# terminal status rather than die mid-flight.
+PREVIEW_GSAM_DEADLINE_GUARD_MILLIS = (
+    (PREVIEW_GSAM_PER_SAMPLE_SECONDS + 30) * 1000)
+# 15-minute presigned URL for the worker's image fetch — the consumer's
+# PRESIGNED_URL_EXPIRY_SECONDS (Req 12.6 convention for time-limited
+# single-object grants).
+PREVIEW_GSAM_PRESIGN_EXPIRY_SECONDS = 900
+# Set by compute-stack.ts inside the deployGroundedSamWorker-gated
+# block (Req 8.1); empty on a flag-off deployment, in which case the
+# start route rejects grounded-sam preview requests with the
+# not-deployed message below (Req 6.1) while job creation keeps its
+# grounded-sam-autolabel Req 5.4 degradation.
+GROUNDED_SAM_WORKER_FUNCTION_NAME = os.environ.get(
+    'GROUNDED_SAM_WORKER_FUNCTION_NAME', '')
+PREVIEW_GSAM_NOT_DEPLOYED_MESSAGE = 'Grounded-SAM worker is not deployed'
+# Test injection point: when set, used instead of a boto3 Lambda client
+# for synchronous Grounded-SAM worker invocations — mirroring
+# dda_autolabel_worker's seam of the same names.
+grounded_sam_lambda_client = None
+_cached_grounded_sam_lambda_client = None
+
 
 def _now_epoch() -> int:
     """Current time as whole epoch seconds — the unit every preview
@@ -3644,25 +3692,40 @@ def _preview_sample_index(task_id: str) -> int:
     return int(task_id[len(PREVIEW_SAMPLE_SK_PREFIX):])
 
 
-def _preview_lock_ttl_seconds(sample_count: int) -> int:
-    """`min(sample_count * 120 + 60, 900)` (Req 8.8).
+def _preview_per_sample_seconds(model: str = '') -> int:
+    """The family's per-Sample_Image invocation bound
+    (grounded-sam-prompt-tuning-preview Req 3.6, 9.2): 240 s for
+    `grounded-sam` — the consumer's GROUNDED_SAM_MAX_TIMEOUT_SECONDS —
+    and the pre-feature 120 s for everything else, so the `llm:` family
+    keeps its bound byte-identically."""
+    if model == PREVIEW_GROUNDED_SAM_MODEL:
+        return PREVIEW_GSAM_PER_SAMPLE_SECONDS
+    return PREVIEW_PER_SAMPLE_SECONDS
+
+
+def _preview_lock_ttl_seconds(sample_count: int, model: str = '') -> int:
+    """`min(sample_count * per_sample + 60, 900)` (Req 8.8), the
+    per-sample term the family's (grounded-sam-prompt-tuning-preview
+    Req 3.6: 240 for grounded-sam, 120 otherwise). The defaulted `model`
+    keeps every pre-feature call site byte-identical.
 
     The claim can never outlive the executor: the run itself is bounded
-    by `sample_count` invocations of at most 120 s each, and the
-    executor's own Lambda timeout is 900 s. So a crashed or timed-out
-    executor self-heals within one run bound and the next request from
-    the same user succeeds — no reaper process is needed and no lock can
-    wedge a Use_Case permanently.
+    by `sample_count` invocations of at most the per-sample bound each,
+    and the executor's own Lambda timeout is 900 s (grounded-sam runs
+    additionally self-terminate under the Run_Deadline_Guard). So a
+    crashed or timed-out executor self-heals within one run bound and
+    the next request from the same user succeeds — no reaper process is
+    needed and no lock can wedge a Use_Case permanently.
     """
     return min(
-        max(int(sample_count), 0) * PREVIEW_PER_SAMPLE_SECONDS
+        max(int(sample_count), 0) * _preview_per_sample_seconds(model)
         + PREVIEW_LOCK_SLACK_SECONDS,
         PREVIEW_LOCK_TTL_MAX_SECONDS,
     )
 
 
 def _claim_preview_lock(usecase_id: str, user_sub: str, run_id: str,
-                        sample_count: int) -> bool:
+                        sample_count: int, model: str = '') -> bool:
     """Claim the per-user, per-Use_Case in-flight lock (Req 8.8).
 
     Returns True when the claim succeeded and False when this user
@@ -3680,7 +3743,7 @@ def _claim_preview_lock(usecase_id: str, user_sub: str, run_id: str,
     and invokes no model on that path.
     """
     now = _now_epoch()
-    expires_at = now + _preview_lock_ttl_seconds(sample_count)
+    expires_at = now + _preview_lock_ttl_seconds(sample_count, model)
     try:
         labeling_tasks_table.put_item(
             Item={
@@ -3780,13 +3843,15 @@ def _preview_stored_examples(examples: List[Any]) -> List[Dict]:
 
 def _write_preview_run_item(run_id: str, usecase_id: str, created_by: str,
                             model: str, task_type: str,
-                            label_set: List[str], detection_prompt: str,
+                            label_set: List[str],
+                            detection_prompt: Optional[str],
                             sample_count: int, few_shot_enabled: bool,
                             attached_example_count: int,
                             omitted_example_count: int = 0,
                             few_shot_examples: Optional[List[Dict]] = None,
                             downscale_max_edge: Optional[int] = None,
-                            token_budget: Optional[int] = None
+                            token_budget: Optional[int] = None,
+                            prompt_overrides: Optional[Dict[str, str]] = None
                             ) -> Dict:
     """Write the `PREVIEW#{run_id}` / `RUN` item in status Running.
 
@@ -3822,9 +3887,22 @@ def _write_preview_run_item(run_id: str, usecase_id: str, created_by: str,
     identity), so the budget recorded here, the budget audited, the
     budget the status route reports and the budget actually sent are the
     same integer by construction.
+
+    `detection_prompt` / `prompt_overrides`
+    (grounded-sam-prompt-tuning-preview Req 3.1): the two families'
+    prompt inputs. An `llm:` run always carries its validated
+    Detection_Prompt and never any overrides; a grounded-sam run
+    carries no Detection_Prompt (`None` leaves the attribute absent)
+    and records its surviving Prompt_Override map — the entries the
+    executor's Preview_Prompt_Map derivation reads — only when at least
+    one entry survived, so an override-free run's item shape matches an
+    llm run's minus the llm-only attributes, and llm RUN items stay
+    byte-identical to their pre-feature shape. The run expiry takes the
+    family's per-sample term through the same `_preview_lock_ttl_seconds`
+    form the lock claim uses.
     """
     now = _now_epoch()
-    expires_at = now + _preview_lock_ttl_seconds(sample_count)
+    expires_at = now + _preview_lock_ttl_seconds(sample_count, model)
     item = {
         'job_id': _preview_run_pk(run_id),
         'task_id': PREVIEW_RUN_SK,
@@ -3833,7 +3911,6 @@ def _write_preview_run_item(run_id: str, usecase_id: str, created_by: str,
         'model': model,
         'task_type': task_type,
         'label_set': label_set,
-        'detection_prompt': detection_prompt,
         'few_shot_enabled': bool(few_shot_enabled),
         'attached_example_count': int(attached_example_count),
         'omitted_example_count': int(omitted_example_count),
@@ -3843,12 +3920,16 @@ def _write_preview_run_item(run_id: str, usecase_id: str, created_by: str,
         'expires_at': expires_at,
         'ttl': expires_at + PREVIEW_ITEM_TTL_GRACE_SECONDS,
     }
+    if detection_prompt is not None:
+        item['detection_prompt'] = detection_prompt
     if few_shot_examples:
         item['few_shot_examples'] = few_shot_examples
     if downscale_max_edge is not None:
         item['downscale_max_edge'] = int(downscale_max_edge)
     if token_budget is not None:
         item['token_budget'] = int(token_budget)
+    if prompt_overrides:
+        item['prompt_overrides'] = dict(prompt_overrides)
     labeling_tasks_table.put_item(Item=item)
     return item
 
@@ -4447,15 +4528,32 @@ def _validate_preview_run_request(body: Dict) -> tuple:
                 errors.append(_validation_error(
                     'usecase_id', 'Use case has no data bucket configured'))
 
-    # --- model: the llm: family only (Req 8.5) -------------------------
+    # --- model: the llm: family or exactly grounded-sam (Req 8.5; ------
+    # grounded-sam-prompt-tuning-preview Req 3.2). The llm: arm below is
+    # the pre-feature rule verbatim; the rejection message names both
+    # accepted families.
     raw_model = body.get('model')
     model = raw_model if isinstance(raw_model, str) else ''
+    is_grounded_sam = model == PREVIEW_GROUNDED_SAM_MODEL
     model_identifier = None
-    if not model.startswith(PREVIEW_MODEL_PREFIX):
+    if is_grounded_sam:
+        # grounded-sam-prompt-tuning-preview Req 6.1: worker-not-deployed
+        # is a start-time validation rejection, not a per-sample failure.
+        # A preview run is ephemeral — burning a run, a lock claim and
+        # five failure payloads to report a deployment fact known before
+        # the run starts helps nobody. The env var is wired by
+        # compute-stack.ts inside the deployGroundedSamWorker-gated
+        # block, so a flag-off deployment answers exactly this message
+        # while job creation keeps its Req 5.4 degradation untouched.
+        if not GROUNDED_SAM_WORKER_FUNCTION_NAME:
+            errors.append(_validation_error(
+                'model', PREVIEW_GSAM_NOT_DEPLOYED_MESSAGE))
+    elif not model.startswith(PREVIEW_MODEL_PREFIX):
         errors.append(_validation_error(
             'model',
-            f"Preview runs require a prompt-guided LLM auto-label model "
-            f"identifier of the form '{PREVIEW_MODEL_PREFIX}<model_id>'",
+            f"Preview runs require the '{PREVIEW_GROUNDED_SAM_MODEL}' "
+            f"auto-label family or a prompt-guided LLM model identifier "
+            f"of the form '{PREVIEW_MODEL_PREFIX}<model_id>'",
             model=model))
     else:
         # Split on the first colon only: model identifiers legitimately
@@ -4468,12 +4566,19 @@ def _validate_preview_run_request(body: Dict) -> tuple:
         else:
             model_identifier = candidate
 
-    # --- Detection_Prompt (Req 8.4) ------------------------------------
+    # --- Detection_Prompt (Req 8.4) — llm: family only ------------------
     # Emptiness judged on the stripped value, length on the raw value;
     # the raw string is what the run carries, character-for-character.
+    # The grounded-sam family's prompt inputs are the per-label
+    # Prompt_Overrides; it has no Detection_Prompt, so the field is
+    # neither required nor recorded for a grounded-sam run
+    # (grounded-sam-prompt-tuning-preview design: "detection_prompt not
+    # required and not recorded").
     raw_prompt = body.get('detection_prompt')
     detection_prompt = None
-    if not isinstance(raw_prompt, str) or not raw_prompt.strip():
+    if is_grounded_sam:
+        pass
+    elif not isinstance(raw_prompt, str) or not raw_prompt.strip():
         errors.append(_validation_error(
             'detection_prompt',
             'A non-empty detection_prompt is required for a preview run'))
@@ -4489,10 +4594,26 @@ def _validate_preview_run_request(body: Dict) -> tuple:
     # --- Labeling_Modality and Label_Set (Req 8.4) ---------------------
     # Deliberately the same rules create_dda_job applies, including the
     # fixed binary Label_Set for Classification, so a request the preview
-    # accepts is a request the job creation flow accepts.
+    # accepts is a request the job creation flow accepts. The
+    # grounded-sam arm (grounded-sam-prompt-tuning-preview Req 3.3)
+    # accepts the family's two geometry modalities — job creation's
+    # compatibility matrix — and always validates its own Label_Set:
+    # the family has no Classification arm to auto-supply one, so the
+    # label-set rule is decidable (and reported) even beside a modality
+    # violation, keeping the enumerate-everything posture.
     modality = body.get('task_type') or body.get('modality')
     label_set: Optional[List[str]] = None
-    if modality not in VALID_MODALITIES:
+    if is_grounded_sam:
+        if modality not in AUTO_LABEL_MODEL_MODALITIES[
+                PREVIEW_GROUNDED_SAM_MODEL]:
+            errors.append(_validation_error(
+                'task_type',
+                'The grounded-sam family supports Segmentation and '
+                'ObjectDetection',
+                task_type=modality))
+        label_set, label_errors = _validate_label_set(body.get('label_set'))
+        errors.extend(label_errors)
+    elif modality not in VALID_MODALITIES:
         errors.append(_validation_error(
             'task_type',
             f"Labeling modality must be one of "
@@ -4503,6 +4624,52 @@ def _validate_preview_run_request(body: Dict) -> tuple:
     else:
         label_set, label_errors = _validate_label_set(body.get('label_set'))
         errors.extend(label_errors)
+
+    # --- Prompt_Overrides + Prompt_Guardrail — grounded-sam only -------
+    # (grounded-sam-prompt-tuning-preview Req 2.4, 2.5): the
+    # job-creation rules verbatim — an object, keys within the request's
+    # Label_Set, string values judged on raw length, blank-after-trim
+    # entries dropped, survivors kept character-for-character — then the
+    # shared `_prompt_guardrail_errors` over each label's
+    # Effective_Prompt, one error per offending label with the shared
+    # wording. A preview therefore accepts exactly the override map job
+    # creation accepts, and a period-bearing Effective_Prompt can never
+    # reach the worker from either surface. An `llm:` request never
+    # carries (and never validates) the key, exactly as before.
+    prompt_overrides: Dict[str, str] = {}
+    if is_grounded_sam:
+        raw_overrides = body.get('prompt_overrides')
+        if raw_overrides is not None and not isinstance(
+                raw_overrides, dict):
+            errors.append(_validation_error(
+                'prompt_overrides',
+                'prompt_overrides must be an object mapping '
+                'label names to prompt strings'))
+            raw_overrides = None
+        for key, value in (raw_overrides or {}).items():
+            if key not in (label_set or []):
+                errors.append(_validation_error(
+                    'prompt_overrides',
+                    f"prompt_overrides key '{key}' is not a "
+                    f"label of this job's label set",
+                    label=key))
+            elif not isinstance(value, str):
+                errors.append(_validation_error(
+                    'prompt_overrides',
+                    f"The prompt override for label '{key}' "
+                    f'must be text',
+                    label=key))
+            elif len(value) > PROMPT_OVERRIDE_MAX_LENGTH:
+                errors.append(_validation_error(
+                    'prompt_overrides',
+                    f"The prompt override for label '{key}' "
+                    f'must be at most '
+                    f'{PROMPT_OVERRIDE_MAX_LENGTH} characters',
+                    label=key))
+            elif value.strip():
+                prompt_overrides[key] = value
+        errors.extend(_prompt_guardrail_errors(
+            label_set or [], prompt_overrides))
 
     # --- dataset prefix: what the Sample_Images are scoped to ----------
     raw_prefix = body.get('dataset_prefix')
@@ -4545,10 +4712,22 @@ def _validate_preview_run_request(body: Dict) -> tuple:
         sample_keys.append(key)
 
     # --- Few_Shot_Option (Req 6.3) -------------------------------------
+    # The grounded-sam arm (grounded-sam-prompt-tuning-preview Req 3.4):
+    # few-shot examples are an llm: concept. Few-shot *enablement* — a
+    # bare true or an object with a truthy 'enabled' — is rejected as
+    # inapplicable to the family; absent and disabled spellings pass,
+    # and the family's recorded value is always False.
     few_shot_enabled = False
     few_shot_examples: List[Any] = []
     raw_few_shot = body.get('few_shot')
-    if raw_few_shot is None:
+    if is_grounded_sam:
+        if (raw_few_shot is True
+                or (isinstance(raw_few_shot, dict)
+                    and bool(raw_few_shot.get('enabled')))):
+            errors.append(_validation_error(
+                'few_shot',
+                'few_shot does not apply to the grounded-sam family'))
+    elif raw_few_shot is None:
         pass  # absent means disabled — the pre-feature request shape
     elif isinstance(raw_few_shot, bool):
         few_shot_enabled = raw_few_shot
@@ -4575,9 +4754,19 @@ def _validate_preview_run_request(body: Dict) -> tuple:
     # otherwise slip through numeric equality. Strings — including
     # '1024' and 'off' — are rejected with no conversion, which is why
     # Downscale_Off is encoded as null rather than a string sentinel.
+    # The grounded-sam arm (grounded-sam-prompt-tuning-preview Req 3.4):
+    # image sizing is an llm: concept — null (or absent) is the only
+    # accepted spelling under grounded-sam; any other value is
+    # inapplicable to the family, whatever it is.
     raw_downscale = body.get('downscale_max_edge')
     downscale_max_edge = None
-    if raw_downscale is None:
+    if is_grounded_sam:
+        if raw_downscale is not None:
+            errors.append(_validation_error(
+                'downscale_max_edge',
+                'downscale_max_edge does not apply to the grounded-sam '
+                'family'))
+    elif raw_downscale is None:
         pass  # Downscale_Off — the pre-feature request shape
     elif (isinstance(raw_downscale, int)
             and not isinstance(raw_downscale, bool)
@@ -4599,9 +4788,17 @@ def _validate_preview_run_request(body: Dict) -> tuple:
     # a digit string, a whole-valued float, an out-of-range integer — is
     # rejected with the accepted range, with no numeric conversion and
     # no clamping.
+    # The grounded-sam arm (grounded-sam-prompt-tuning-preview Req 3.4):
+    # a *present* token_budget key — any value, null included — is
+    # inapplicable to the family, which resolves no budget at all.
     raw_budget = body.get('token_budget')
     token_budget_selection = None
-    if 'token_budget' not in body:
+    if is_grounded_sam:
+        if 'token_budget' in body:
+            errors.append(_validation_error(
+                'token_budget',
+                'token_budget does not apply to the grounded-sam family'))
+    elif 'token_budget' not in body:
         pass  # absent — resolve through the mapping and the default
     elif (isinstance(raw_budget, int)
             and not isinstance(raw_budget, bool)
@@ -4624,6 +4821,10 @@ def _validate_preview_run_request(body: Dict) -> tuple:
         'detection_prompt': detection_prompt,
         'task_type': modality,
         'label_set': label_set,
+        # The surviving Prompt_Override map — {} for the llm: family and
+        # for an override-free grounded-sam request
+        # (grounded-sam-prompt-tuning-preview Req 3.1).
+        'prompt_overrides': prompt_overrides,
         'sample_keys': sample_keys,
         'few_shot_enabled': few_shot_enabled,
         'few_shot_examples': few_shot_examples,
@@ -4735,13 +4936,18 @@ def _start_preview_run(event, context):
         sample_keys = config['sample_keys']
         sample_count = len(sample_keys)
         run_id = _new_preview_run_id()
+        # grounded-sam-prompt-tuning-preview: the family dispatch. A
+        # grounded-sam run resolves no few-shot selection and no token
+        # budget, and its lock claim carries the family's 240 s
+        # per-sample term (Req 3.6) through the model passed below.
+        is_grounded_sam = config['model'] == PREVIEW_GROUNDED_SAM_MODEL
 
         # Req 8.8: one in-flight run per user and Use_Case. The claim is a
         # single conditional write, so concurrent requests cannot both
         # win, and the rejected request reads no object and invokes no
         # model.
         if not _claim_preview_lock(usecase_id, user_sub, run_id,
-                                   sample_count):
+                                   sample_count, model=config['model']):
             return create_response(409, {
                 'error': PREVIEW_IN_PROGRESS_MESSAGE})
         lock_claimed = True
@@ -4773,9 +4979,15 @@ def _start_preview_run(event, context):
         # idempotence on its own output makes that re-resolution the
         # identity, so the budget sent is provably the budget audited,
         # even if an administrator rewrites the mapping in between.
-        token_budget = resolve_token_budget(
+        #
+        # A grounded-sam run resolves no budget at all
+        # (grounded-sam-prompt-tuning-preview Req 3.1): the family's
+        # worker takes no token parameter, and None keeps the RUN item,
+        # the audit event and the status route free of sizing attributes
+        # exactly as a sizing-free llm run reads.
+        token_budget = (None if is_grounded_sam else resolve_token_budget(
             config['model_identifier'], config['token_budget'],
-            _llm_model_token_limits())
+            _llm_model_token_limits()))
 
         _write_preview_run_item(
             run_id=run_id,
@@ -4798,6 +5010,12 @@ def _start_preview_run(event, context):
             # here (Req 5.3, 1.6).
             downscale_max_edge=config['downscale_max_edge'],
             token_budget=token_budget,
+            # The surviving Prompt_Override map, recorded so the
+            # executor derives each sample's Preview_Prompt_Map from
+            # this run's own entries (grounded-sam-prompt-tuning-preview
+            # Req 3.1, 7.1); {} for the llm: family leaves the
+            # attribute absent — llm RUN items byte-identical.
+            prompt_overrides=config['prompt_overrides'],
         )
         # Every requested sample gets its Pending item up front, so the
         # status route answers with one entry per Sample_Image from the
@@ -5050,7 +5268,10 @@ def _handle_preview_action(action: str, event: Dict, context):
     answers it is task 9.1.
     """
     if action == PREVIEW_EXECUTOR_ACTION:
-        return execute_preview_run((event or {}).get('run_id'))
+        # The invocation context rides along for the grounded-sam
+        # Run_Deadline_Guard (grounded-sam-prompt-tuning-preview
+        # Req 4.7); the llm: sample path never reads it.
+        return execute_preview_run((event or {}).get('run_id'), context)
 
     message = f"Unknown dda_labeling action: {action!r}"
     logger.error(message)
@@ -5356,6 +5577,281 @@ def _run_preview_sample(run: Dict, clients: Dict[str, Any], usecase: Dict,
     return prelabel, (width, height), sent_dimensions
 
 
+# ---------------------------------------------------------------------------
+# Grounded-SAM preview sample path (grounded-sam-prompt-tuning-preview
+# Requirements 2.2, 4.1-4.6)
+# ---------------------------------------------------------------------------
+# The executor's second family, mirroring the consumer's
+# `_generate_grounded_sam_prelabel` contract step for step — presign,
+# synchronous invoke bounded at 240 s with retries disabled, strict
+# response validation — so a prompt that works in the preview works in
+# the job and one that fails fails the same way. The derivation and
+# validation are *replicated*, not imported: importing
+# `dda_autolabel_worker` here would execute that module's
+# environment/client initialization at import time. Equivalence with
+# the consumer is pinned by this spec's Properties 5 and 6 against the
+# consumer's functions as oracles, so drift is test-detected.
+
+
+def _get_grounded_sam_preview_lambda_client():
+    """Lambda client bounding the synchronous Grounded-SAM invocation
+    wall clock at 240 s (read timeout, retries disabled) — the
+    consumer's `_get_grounded_sam_lambda_client` construction verbatim
+    (Req 4.1), behind this module's own injection seam."""
+    global _cached_grounded_sam_lambda_client
+    if grounded_sam_lambda_client is not None:
+        return grounded_sam_lambda_client
+    if _cached_grounded_sam_lambda_client is None:
+        _cached_grounded_sam_lambda_client = boto3.client(
+            'lambda',
+            config=BotoConfig(
+                connect_timeout=10,
+                read_timeout=PREVIEW_GSAM_PER_SAMPLE_SECONDS,
+                retries={'max_attempts': 0},
+            ),
+        )
+    return _cached_grounded_sam_lambda_client
+
+
+def _grounded_sam_preview_prompts(label_set: List[str],
+                                  overrides: Any) -> List[Dict[str, str]]:
+    """The Preview_Prompt_Map (Req 2.2): one `{label, prompt}` pair per
+    Label_Set label in Label_Set order. A label's prompt is its
+    Prompt_Override when the override is a string that is non-empty
+    after trimming, otherwise the label name itself — the consumer's
+    `_grounded_sam_prompts` derivation, replicated exactly (see the
+    section note above on why it is not imported).
+
+    Pure and total over malformed `overrides` (None, non-dict, or
+    non-string values all degrade to the label-name fallback) — a
+    malformed run record never fails the sample here.
+    """
+    if not isinstance(overrides, dict):
+        overrides = {}
+    prompts = []
+    for label in label_set:
+        override = overrides.get(label)
+        if isinstance(override, str) and override.strip():
+            prompt = override
+        else:
+            prompt = label
+        prompts.append({'label': label, 'prompt': prompt})
+    return prompts
+
+
+def _run_grounded_sam_preview_sample(run: Dict, clients: Dict[str, Any],
+                                     usecase: Dict, dataset_bucket: str,
+                                     sample_key: str) -> tuple:
+    """Produce one Grounded_SAM_Preview_Run Sample_Image's Pre_Label, or
+    raise its single categorized failure (Req 4.1-4.6).
+
+    Total by construction, like `_run_preview_sample`: every step maps
+    its own errors onto exactly one existing category from
+    PREVIEW_FAILURE_CATEGORIES — `image_access_failure` for a presign
+    that cannot be produced, `timeout` for a read/connect timeout at the
+    240 s bound, `model_error` for everything else — so the status route
+    and the panel render grounded-sam failures with zero changes.
+
+    Returns:
+        `(prelabel, image_width, image_height)` — the Pre_Label in the
+        shapes `PreviewResultCanvas` consumes (Segmentation
+        `{regions: [{class, rle, score?}]}`, ObjectDetection
+        `{boxes: [{class, left, top, width, height, score?}]}`), plus
+        the worker-reported integer dimensions. The ObjectDetection
+        `score` carry-through is this path's one deliberate divergence
+        from the stored job shape (the consumer drops it for
+        Bedrock-shape byte-exactness): the preview payload is an
+        ephemeral display artifact and the score is exactly what a
+        prompt tuner needs. An empty `regions` list returns an empty
+        Pre_Label — a success, the renderer's no-detections state
+        (Req 4.4).
+    """
+    label_set = [str(label) for label in (run.get('label_set') or [])]
+    modality = run.get('task_type')
+
+    # Guarded at start-time validation (Req 6.1); re-checked here with
+    # the consumer's wording so a deployment flip between the start
+    # route and the executor still resolves as one categorized failure
+    # rather than an unintelligible invoke error.
+    if not GROUNDED_SAM_WORKER_FUNCTION_NAME:
+        raise PreviewSampleFailure(
+            'model_error',
+            'Grounded-SAM worker function is not configured')
+
+    # 1. Presign the Sample_Image (Req 4.1, 4.6) through the same
+    #    cross-account client machinery every preview read uses, with
+    #    the consumer's 15-minute expiry. Client construction and URL
+    #    generation both count as "the presigned URL cannot be
+    #    produced" — no invocation happens on this failure.
+    try:
+        presigned_url = _preview_s3_client(
+            clients, usecase, dataset_bucket).generate_presigned_url(
+                'get_object',
+                Params={'Bucket': dataset_bucket, 'Key': sample_key},
+                ExpiresIn=PREVIEW_GSAM_PRESIGN_EXPIRY_SECONDS)
+    except Exception as exc:  # noqa: BLE001 — Req 4.6, no invocation
+        raise PreviewSampleFailure(
+            PREVIEW_CATEGORY_IMAGE_ACCESS,
+            f'image s3://{dataset_bucket}/{sample_key} could not be '
+            f'presigned for the Grounded-SAM worker: {exc}') from exc
+
+    # 2. The consumer's invoke payload, byte for byte: presigned URL,
+    #    the Preview_Prompt_Map from this run's own recorded entries
+    #    (Req 2.2, 7.1), and the run's modality.
+    payload_out = {
+        'image_s3_presigned_url': presigned_url,
+        'prompts': _grounded_sam_preview_prompts(
+            label_set, run.get('prompt_overrides')),
+        'modality': modality,
+    }
+
+    # 3. Synchronous invoke bounded at 240 s with retries disabled
+    #    (Req 4.1). A read/connect timeout is the one outcome that maps
+    #    onto `timeout` (Req 4.5) — the preview distinguishes it where
+    #    the consumer folds both into one failure string, because the
+    #    category is what the panel renders.
+    try:
+        response = _get_grounded_sam_preview_lambda_client().invoke(
+            FunctionName=GROUNDED_SAM_WORKER_FUNCTION_NAME,
+            InvocationType='RequestResponse',
+            Payload=json.dumps(payload_out),
+        )
+        payload_bytes = response['Payload'].read()
+    except (ReadTimeoutError, ConnectTimeoutError) as exc:
+        raise PreviewSampleFailure(
+            'timeout',
+            f'Grounded-SAM worker invocation timed out after '
+            f'{PREVIEW_GSAM_PER_SAMPLE_SECONDS}s: {exc}') from exc
+    except Exception as exc:  # noqa: BLE001 — invocation error (Req 4.5)
+        raise PreviewSampleFailure(
+            'model_error',
+            f'Grounded-SAM worker invocation failed: {exc}') from exc
+
+    # 4. Function error and parse handling — the consumer's rules with
+    #    the consumer's [:512] function-error truncation (Req 4.5).
+    if response.get('FunctionError'):
+        raise PreviewSampleFailure(
+            'model_error',
+            f'Grounded-SAM worker failed: '
+            f"{payload_bytes.decode('utf-8', errors='replace')[:512]}")
+    try:
+        payload = json.loads(payload_bytes)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise PreviewSampleFailure(
+            'model_error',
+            f'Grounded-SAM worker returned unparseable output: '
+            f'{exc}') from exc
+
+    # 5. Validate with the consumer's `_generate_grounded_sam_prelabel`
+    #    rules, transcribed (Req 4.2): a `regions` list and integer
+    #    dimensions; per region a Label_Set member class; Segmentation
+    #    regions carry non-empty RLE geometry, ObjectDetection regions a
+    #    box of non-boolean numerics with positive extent inside the
+    #    image bounds.
+    regions = payload.get('regions') if isinstance(payload, dict) else None
+    image_width = (payload.get('image_width')
+                   if isinstance(payload, dict) else None)
+    image_height = (payload.get('image_height')
+                    if isinstance(payload, dict) else None)
+    if (not isinstance(regions, list)
+            or not isinstance(image_width, int)
+            or not isinstance(image_height, int)):
+        raise PreviewSampleFailure(
+            'model_error',
+            'Grounded-SAM worker returned a malformed response')
+
+    if modality == 'Segmentation':
+        prelabel_regions = []
+        for region in regions:
+            if not isinstance(region, dict):
+                raise PreviewSampleFailure(
+                    'model_error',
+                    'Grounded-SAM worker returned a malformed region '
+                    'entry')
+            class_name = region.get('class')
+            if (not isinstance(class_name, str)
+                    or class_name not in label_set):
+                raise PreviewSampleFailure(
+                    'model_error',
+                    f'Grounded-SAM worker returned class {class_name!r}, '
+                    f"which is not in the job's label set {label_set}")
+            if not region.get('rle'):
+                raise PreviewSampleFailure(
+                    'model_error',
+                    'Grounded-SAM worker returned a region without RLE '
+                    'geometry')
+            prelabel_region = {'class': class_name, 'rle': region['rle']}
+            if region.get('score') is not None:
+                prelabel_region['score'] = region['score']
+            prelabel_regions.append(prelabel_region)
+        prelabel = {
+            'modality': modality,
+            'regions': prelabel_regions,
+            'image_width': image_width,
+            'image_height': image_height,
+        }
+        return prelabel, image_width, image_height
+
+    # ObjectDetection: the worker nests geometry under `box`; the
+    # preview emits the Bedrock-shaped `{class, left, top, width,
+    # height}` floats the renderer consumes, validated with the
+    # consumer's rules, plus `score` when the worker returned one
+    # (Req 4.3 — the display-only divergence documented above).
+    boxes = []
+    for region in regions:
+        if not isinstance(region, dict):
+            raise PreviewSampleFailure(
+                'model_error',
+                'Grounded-SAM worker returned a malformed region entry')
+        class_name = region.get('class')
+        if not isinstance(class_name, str) or class_name not in label_set:
+            raise PreviewSampleFailure(
+                'model_error',
+                f'Grounded-SAM worker returned class {class_name!r}, '
+                f"which is not in the job's label set {label_set}")
+        box = region.get('box')
+        if not isinstance(box, dict):
+            raise PreviewSampleFailure(
+                'model_error',
+                'Grounded-SAM worker returned a region without box '
+                'geometry')
+        geometry = {}
+        for field in ('left', 'top', 'width', 'height'):
+            value = box.get(field)
+            if isinstance(value, bool) or not isinstance(value,
+                                                         (int, float)):
+                raise PreviewSampleFailure(
+                    'model_error',
+                    f"malformed box geometry: '{field}' is {value!r}")
+            geometry[field] = float(value)
+        if geometry['width'] <= 0 or geometry['height'] <= 0:
+            raise PreviewSampleFailure(
+                'model_error',
+                'malformed box geometry: width and height must be '
+                'positive')
+        if geometry['left'] < 0 or geometry['top'] < 0:
+            raise PreviewSampleFailure(
+                'model_error',
+                'malformed box geometry: negative coordinates')
+        if (geometry['left'] + geometry['width'] > image_width
+                or geometry['top'] + geometry['height'] > image_height):
+            raise PreviewSampleFailure(
+                'model_error',
+                f'box {geometry} lies outside the '
+                f'{image_width}x{image_height} image bounds')
+        box_entry = {'class': class_name, **geometry}
+        if region.get('score') is not None:
+            box_entry['score'] = region['score']
+        boxes.append(box_entry)
+    prelabel = {
+        'modality': modality,
+        'boxes': boxes,
+        'image_width': image_width,
+        'image_height': image_height,
+    }
+    return prelabel, image_width, image_height
+
+
 def _resolve_preview_dataset_location(usecase_id: str) -> tuple:
     """`(usecase, dataset_bucket, error)` for the run's Use_Case.
 
@@ -5377,18 +5873,27 @@ def _resolve_preview_dataset_location(usecase_id: str) -> tuple:
     return usecase, dataset_bucket, None
 
 
-def execute_preview_run(run_id: Optional[str]) -> Dict[str, Any]:
+def execute_preview_run(run_id: Optional[str],
+                        context=None) -> Dict[str, Any]:
     """Execute a Preview_Run's Sample_Images (task 9.1).
 
     Sequential by design: one Sample_Image at a time, each resolved and
-    written before the next begins, so the per-sample bound of 120 s
-    composes into the run bound the lock TTL is derived from and the
-    wizard sees results appear one by one.
+    written before the next begins, so the per-sample bound (120 s for
+    the llm: family, 240 s for grounded-sam) composes into the run bound
+    the lock TTL is derived from and the wizard sees results appear one
+    by one.
 
     Idempotent against a duplicated async delivery: a run that is no
     longer Running is not re-executed, and an already-resolved sample is
     not re-invoked, so no Sample_Image can ever receive a second model
     invocation (Req 3.1).
+
+    `context` is the executor's own Lambda invocation context, threaded
+    from `_handle_preview_action` for the grounded-sam
+    Run_Deadline_Guard (grounded-sam-prompt-tuning-preview Req 4.7);
+    None — every pre-feature caller — reads as "no deadline
+    information", which disables the guard and keeps llm: runs
+    byte-identical.
     """
     run = _read_preview_run_item(run_id) if run_id else None
     if not run:
@@ -5425,6 +5930,19 @@ def execute_preview_run(run_id: Optional[str]) -> Dict[str, Any]:
         run_downscale_max_edge = normalize_downscale_setting(
             _decimal_to_native(run.get('downscale_max_edge')))
 
+        # The per-sample family dispatch
+        # (grounded-sam-prompt-tuning-preview Req 4.x): grounded-sam
+        # samples go to the worker behind the Run_Deadline_Guard; every
+        # other model takes the pre-feature llm: path untouched.
+        # `deadline_reached` latches: the executor's remaining time only
+        # ever decreases, so once one sample cannot fit another 240 s
+        # invocation, this and every remaining Pending sample resolves
+        # as a `timeout` failure with zero invocations (Req 4.7) and the
+        # run still reaches Completed with the lock released (Req 4.8).
+        is_grounded_sam_run = (
+            run.get('model') == PREVIEW_GROUNDED_SAM_MODEL)
+        deadline_reached = False
+
         for item in samples:
             index = _preview_sample_index(item['task_id'])
             sample_key = item.get('sample_key') or ''
@@ -5439,21 +5957,45 @@ def execute_preview_run(run_id: Optional[str]) -> Dict[str, Any]:
                         PREVIEW_CATEGORY_IMAGE_ACCESS,
                         f'image {sample_key} is not accessible: '
                         f'{location_error}')
-                # The Source_Dimensions and the Sent_Dimensions both
-                # ride along from the shared chokepoint; on a run with a
-                # Downscale_Setting the payload carries the sizing
-                # report beside the pre-feature fields
-                # (llm-model-token-and-image-sizing Req 5.4, 5.10), with
-                # `image_width` / `image_height` keeping their meaning
-                # as the Source_Dimensions (Req 7.7).
-                prelabel, source_dimensions, sent_dimensions = (
-                    _run_preview_sample(
-                        run, clients, usecase, dataset_bucket, sample_key))
-                width, height = source_dimensions
-                payload = _preview_success_payload(
-                    sample_key, prelabel, width, height,
-                    sent_dimensions=sent_dimensions,
-                    downscale_max_edge=run_downscale_max_edge)
+                if is_grounded_sam_run:
+                    # Run_Deadline_Guard first (Req 4.7), then the
+                    # worker sample path; the success payload takes no
+                    # sizing kwargs — the grounded-sam payload is the
+                    # pre-feature shape with the worker's dimensions
+                    # (Req 4.3).
+                    if not deadline_reached and (
+                            context is not None
+                            and context.get_remaining_time_in_millis()
+                            < PREVIEW_GSAM_DEADLINE_GUARD_MILLIS):
+                        deadline_reached = True
+                    if deadline_reached:
+                        raise PreviewSampleFailure(
+                            'timeout',
+                            'the preview run deadline was reached '
+                            'before this sample could be invoked')
+                    prelabel, width, height = (
+                        _run_grounded_sam_preview_sample(
+                            run, clients, usecase, dataset_bucket,
+                            sample_key))
+                    payload = _preview_success_payload(
+                        sample_key, prelabel, width, height)
+                else:
+                    # The Source_Dimensions and the Sent_Dimensions both
+                    # ride along from the shared chokepoint; on a run
+                    # with a Downscale_Setting the payload carries the
+                    # sizing report beside the pre-feature fields
+                    # (llm-model-token-and-image-sizing Req 5.4, 5.10),
+                    # with `image_width` / `image_height` keeping their
+                    # meaning as the Source_Dimensions (Req 7.7).
+                    prelabel, source_dimensions, sent_dimensions = (
+                        _run_preview_sample(
+                            run, clients, usecase, dataset_bucket,
+                            sample_key))
+                    width, height = source_dimensions
+                    payload = _preview_success_payload(
+                        sample_key, prelabel, width, height,
+                        sent_dimensions=sent_dimensions,
+                        downscale_max_edge=run_downscale_max_edge)
             except PreviewSampleFailure as sample_failure:
                 failure = sample_failure
                 payload = _preview_failure_payload(

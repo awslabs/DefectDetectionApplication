@@ -338,6 +338,10 @@ describe('CreateLabelingJob — guidance renders under grounded-sam only (Req 3.
       /short noun phrase naming the visual thing/
     );
     expect(screen.getByText(PROMPT_GUIDANCE_CONSTRAINT)).toBeInTheDocument();
+    // The preview now mounts under grounded-sam too
+    // (grounded-sam-prompt-tuning-preview Req 10.2): let its listing
+    // settle before the model switch unmounts it.
+    await screen.findByTestId('preview-prefix-empty');
 
     // sam: no override entry renders, so neither the constraint text nor
     // the guidance content does.
