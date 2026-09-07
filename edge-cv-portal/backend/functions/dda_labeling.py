@@ -53,6 +53,29 @@ Labeler write routes (task 8.4, same permission + ownership checks):
                                              failure; withholds the
                                              task (Req 7.12)
 
+Work-stealing and pool routes (spec labeling-job-cleanup-work-
+stealing-and-podium, same labeler permission + current-membership
+checks):
+
+    GET  /labeler/jobs/{jobId}/pool          the caller's view of the
+                                             team pool: stealable_count,
+                                             job_complete, and the
+                                             podium when the job is
+                                             complete (Req 6.1, 7.5)
+    POST /labeler/jobs/{jobId}/steal         transfer one Stealable_Task
+                                             to the caller by the
+                                             deterministic Steal_Order
+                                             via a conditional write
+                                             (Req 5.1-5.9)
+
+Job deletion route (same spec, permission: manage_labeling_jobs in the
+job's Use_Case scope — the stop-route posture):
+
+    DELETE /labeling/{id}                    flip a resting job to
+                                             Deleting and async-invoke
+                                             the worker's delete_job
+                                             action (Req 1.1-1.8)
+
 Skip-verification Admin_Review routes (task 11.3, permission:
 manage_labeling_jobs via @rbac_check plus an explicit
 UseCaseAdmin/PortalAdmin role check matching skip-verification job
@@ -134,7 +157,10 @@ from shared_utils import (
     Permission,
 )
 from rbac_middleware import rbac_check
-from labeling_distribution import rebalance
+# `podium_ranking` is the one shared Podium_Ranking implementation
+# (labeling-job-cleanup-work-stealing-and-podium Req 7.6), consumed
+# here by the labeler pool route and by labeling.py's job detail.
+from labeling_distribution import podium_ranking, rebalance
 # LLM auto-labeling model identifier validation shared with the
 # per-image consumer (llm-auto-labeling Requirement 1.5).
 from dda_llm_guidance import validate_model_identifier
@@ -284,6 +310,19 @@ REVIEW_PAGE_SIZE_DEFAULT = 50
 REVIEW_PAGE_SIZE_MAX = 100
 # The only valid per-image review decisions (Req 9.6).
 REVIEW_DECISIONS = ('accepted', 'rejected')
+# Sentinel assignee of skip-verification auto-label result items —
+# structurally outside every team flow and never stealable (spec
+# labeling-job-cleanup-work-stealing-and-podium Req 5.4). Mirrors
+# dda_labeling_worker.AUTO_ASSIGNEE.
+AUTO_ASSIGNEE = 'AUTO'
+# Job deletion (spec labeling-job-cleanup-work-stealing-and-podium,
+# Req 1.1-1.5): a deletion may be requested only from a resting
+# status — an InProgress job must be stopped first. 'Deleting' is
+# deletable as the idempotent re-trigger of a stalled deletion.
+DELETABLE_STATUSES = ('Completed', 'Failed', 'Stopped', 'DeleteFailed',
+                      'Deleting')
+STATUS_DELETING = 'Deleting'
+STATUS_DELETE_FAILED = 'DeleteFailed'
 
 
 def handler(event, context):
@@ -364,6 +403,14 @@ def handler(event, context):
             if (http_method == 'GET'
                     and resource == '/labeler/jobs/{jobId}/next'):
                 return get_next_labeler_task(event, context)
+            # Work-stealing pool and steal routes (spec labeling-job-
+            # cleanup-work-stealing-and-podium, Req 5.1, 6.1).
+            if (http_method == 'GET'
+                    and resource == '/labeler/jobs/{jobId}/pool'):
+                return get_labeler_job_pool(event, context)
+            if (http_method == 'POST'
+                    and resource == '/labeler/jobs/{jobId}/steal'):
+                return steal_labeler_task(event, context)
             if (http_method == 'GET'
                     and resource == '/labeler/tasks/{taskId}/image-url'):
                 return get_task_image_url(event, context)
@@ -395,6 +442,14 @@ def handler(event, context):
         review_job_id = path_params.get('id')
         if review_job_id and resource.startswith('/labeling/'):
             _inject_job_usecase_scope(event, review_job_id)
+            # Job deletion request (spec labeling-job-cleanup-work-
+            # stealing-and-podium, Req 1.1, 1.6) — authorized with
+            # MANAGE_LABELING_JOBS in the job's Use_Case scope, which
+            # the injection above just resolved (the stop-route
+            # pattern).
+            if (http_method == 'DELETE'
+                    and resource == '/labeling/{id}'):
+                return request_job_deletion(event, context)
             if (http_method == 'GET'
                     and resource == '/labeling/{id}/review'):
                 return get_admin_review(event, context)
@@ -2859,6 +2914,440 @@ def report_presentation_failure(event, context):
                      exc_info=True)
         return create_response(500, {
             'error': 'Failed to record the presentation failure'})
+
+
+# ---------------------------------------------------------------------------
+# Work stealing and the labeler pool (spec labeling-job-cleanup-work-
+# stealing-and-podium — Requirements 5.1-5.9, 6.1, 7.5)
+# ---------------------------------------------------------------------------
+# The steal write is deliberately a separate conditional update from
+# `_conditional_reassign` (which stays byte-identical, Req 10.2): it
+# carries the stolen_from/stolen_at provenance in the same atomic
+# write, under the same `status = Assigned AND assignee_user_id =
+# :donor` condition — so two stealers can never both take one task and
+# a concurrent submission always wins (Req 5.3).
+
+
+def _stealable_tasks(tasks: List[Dict], caller: str) -> List[Dict]:
+    """Stealable_Task predicate over already-queried task items
+    (Req 5.4): status Assigned, an assignee that is neither the caller
+    nor the AUTO sentinel, and a Pre_Label not still Pending (stealing
+    a withheld task would hand the stealer a withheld image).
+    UNASSIGNED tasks qualify — they have no owner to inconvenience.
+    Pure: no I/O, input order preserved."""
+    stealable: List[Dict] = []
+    for task in tasks:
+        if task.get('status') != 'Assigned':
+            continue
+        assignee = task.get('assignee_user_id')
+        if not assignee or assignee in (caller, AUTO_ASSIGNEE):
+            continue
+        if ((task.get('prelabel_status') or 'None')
+                == PENDING_PRELABEL_STATUS):
+            continue
+        stealable.append(task)
+    return stealable
+
+
+def _steal_order(stealable: List[Dict], caller: str) -> List[Dict]:
+    """Steal_Order (Req 5.2): UNASSIGNED tasks first in ascending
+    task_id; then Donors by descending Stealable_Task count with ties
+    in ascending user id, tasks in ascending task_id within each
+    Donor. Pure and total — the same task population always yields the
+    same candidate order, whoever the caller is (the caller's own
+    tasks were already excluded by `_stealable_tasks`)."""
+    del caller  # excluded upstream; kept for the documented signature
+    unassigned = sorted(
+        (task for task in stealable
+         if task.get('assignee_user_id') == UNASSIGNED_ASSIGNEE),
+        key=lambda task: task['task_id'])
+    donor_tasks: Dict[str, List[Dict]] = {}
+    for task in stealable:
+        assignee = task.get('assignee_user_id')
+        if assignee == UNASSIGNED_ASSIGNEE:
+            continue
+        donor_tasks.setdefault(assignee, []).append(task)
+    ordered = list(unassigned)
+    for donor in sorted(donor_tasks,
+                        key=lambda d: (-len(donor_tasks[d]), d)):
+        ordered.extend(sorted(donor_tasks[donor],
+                              key=lambda task: task['task_id']))
+    return ordered
+
+
+@rbac_check([Permission.LABELING_TASKS_SELF], allow_global=True)
+def steal_labeler_task(event, context):
+    """POST /labeler/jobs/{jobId}/steal
+
+    Transfer exactly one Stealable_Task of the job to the caller
+    (Req 5.1), chosen by the deterministic Steal_Order (Req 5.2).
+    Candidates are walked with one conditional write each (`status =
+    Assigned AND assignee_user_id = :donor`) recording stolen_from and
+    stolen_at in the same update (Req 5.3, 5.8); a condition failure —
+    a concurrent submission, steal, or reassignment — moves on to the
+    next candidate. Exhaustion answers 409 with nothing changed
+    (Req 5.5); a non-InProgress job answers 409 naming the status
+    (Req 5.6). Non-members and missing/Ground-Truth jobs get the
+    labeler-route 403 with no resource data plus a
+    labeler_access_denied audit event (Req 5.7). The stolen task is
+    then served by the untouched next-task flow as the caller's own
+    (Req 5.9).
+    """
+    job_id = (event.get('pathParameters') or {}).get('jobId')
+    try:
+        user = get_user_from_event(event)
+        caller = user['user_id']
+
+        job = (labeling_jobs_table.get_item(Key={'job_id': job_id})
+               .get('Item') if job_id else None)
+        # A missing job, a Ground Truth job, and another team's job are
+        # indistinguishable to the caller: 403 with no data (Req 5.7).
+        if not job or job.get('labeling_backend') != 'DDA':
+            return _labeler_access_denied(
+                user, 'labeling_job', job_id, 'job_not_accessible')
+        if not _is_current_team_member(job.get('team_id'), caller):
+            return _labeler_access_denied(
+                user, 'labeling_job', job_id,
+                'caller_not_current_team_member',
+                job.get('usecase_id', ''))
+
+        if job.get('status') != 'InProgress':
+            # Req 5.6: 409 naming the job's status, nothing changed.
+            return create_response(409, {
+                'error': (
+                    f"Labeling job is not in progress: its status is "
+                    f"'{job.get('status')}'. No task was stolen."
+                ),
+                'job_id': job_id,
+                'status': job.get('status'),
+            })
+
+        ordered = _steal_order(
+            _stealable_tasks(_query_all_job_tasks(job_id), caller),
+            caller)
+
+        now = int(datetime.utcnow().timestamp())
+        for index, candidate in enumerate(ordered):
+            task_id = candidate['task_id']
+            donor = candidate.get('assignee_user_id')
+            try:
+                labeling_tasks_table.update_item(
+                    Key={'job_id': job_id, 'task_id': task_id},
+                    UpdateExpression='SET assignee_user_id = :caller, '
+                                     'stolen_from = :donor, '
+                                     'stolen_at = :now, '
+                                     'updated_at = :now',
+                    ConditionExpression='#status = :assigned '
+                                        'AND assignee_user_id = :donor',
+                    ExpressionAttributeNames={'#status': 'status'},
+                    ExpressionAttributeValues={
+                        ':caller': caller,
+                        ':donor': donor,
+                        ':assigned': 'Assigned',
+                        ':now': now,
+                    },
+                )
+            except ClientError as e:
+                if (e.response.get('Error', {}).get('Code')
+                        == 'ConditionalCheckFailedException'):
+                    # Req 5.3: lost to a concurrent submission, steal,
+                    # or reassignment — next candidate in Steal_Order.
+                    continue
+                raise
+
+            # First conditional-write winner: exactly one task moved.
+            # Remaining after the transfer = the pre-walk candidates
+            # minus this one and every candidate already lost to a
+            # concurrent write (Req 5.1).
+            remaining = len(ordered) - index - 1
+            log_audit_event(
+                user_id=caller,
+                action='task_stolen',
+                resource_type='labeling_task',
+                resource_id=task_id,
+                result='success',
+                details={
+                    'job_id': job_id,
+                    'stolen_from': donor,
+                    'stolen_at': now,
+                    'usecase_id': job.get('usecase_id', ''),
+                },
+            )
+            return create_response(200, {
+                'task_id': task_id,
+                'job_id': job_id,
+                'stolen_from': donor,
+                'stealable_count': remaining,
+            })
+
+        # Req 5.5: zero Stealable_Tasks, or every candidate was lost to
+        # a concurrent write — nothing changed.
+        return create_response(409, {
+            'error': 'No stealable tasks remain',
+            'job_id': job_id,
+            'stealable_count': 0,
+        })
+
+    except Exception as e:
+        logger.error(f"Error stealing a task in job {job_id}: {str(e)}",
+                     exc_info=True)
+        return create_response(500, {
+            'error': 'Failed to steal a task; no assignment was changed'})
+
+
+@rbac_check([Permission.LABELING_TASKS_SELF], allow_global=True)
+def get_labeler_job_pool(event, context):
+    """GET /labeler/jobs/{jobId}/pool
+
+    The job's team-pool state for the caller (Req 6.1), on a sibling
+    route so the pinned /next completion payload stays byte-identical
+    (Req 10.1): `stealable_count` is the exact Stealable_Task count
+    while the job is InProgress and zero otherwise; `job_complete`
+    mirrors the manifest-trigger condition (every active task
+    Submitted with a positive image_count); `podium` — the shared
+    Podium_Ranking over the Submitted tasks' (submitted_by,
+    submitted_at) pairs, emails joined for current team members only
+    (Req 7.5) — rides along exactly when `job_complete` holds. Denial
+    posture identical to the steal route.
+    """
+    job_id = (event.get('pathParameters') or {}).get('jobId')
+    try:
+        user = get_user_from_event(event)
+        caller = user['user_id']
+
+        job = (labeling_jobs_table.get_item(Key={'job_id': job_id})
+               .get('Item') if job_id else None)
+        if not job or job.get('labeling_backend') != 'DDA':
+            return _labeler_access_denied(
+                user, 'labeling_job', job_id, 'job_not_accessible')
+        if not _is_current_team_member(job.get('team_id'), caller):
+            return _labeler_access_denied(
+                user, 'labeling_job', job_id,
+                'caller_not_current_team_member',
+                job.get('usecase_id', ''))
+
+        # One full pass; Inactive tasks (failed distribution) count
+        # nowhere, exactly like the progress counts.
+        active = [task for task in _query_all_job_tasks(job_id)
+                  if task.get('status') != 'Inactive']
+
+        stealable_count = (len(_stealable_tasks(active, caller))
+                           if job.get('status') == 'InProgress' else 0)
+
+        submitted = [task for task in active
+                     if task.get('status') == 'Submitted']
+        image_count = int(job.get('image_count') or 0)
+        job_complete = image_count > 0 and len(submitted) == image_count
+
+        payload: Dict[str, Any] = {
+            'job_id': job_id,
+            'stealable_count': stealable_count,
+            'job_complete': job_complete,
+        }
+        if job_complete:
+            podium = podium_ranking(
+                (task.get('submitted_by'), task.get('submitted_at'))
+                for task in submitted)
+            # Req 7.5: emails ride along for current members only; a
+            # departed submitter's entry carries the user id alone.
+            member_emails = {
+                member.get('user_id'): member.get('email')
+                for member in _team_members(job.get('team_id') or '')
+            }
+            for entry in podium:
+                email = member_emails.get(entry['user_id'])
+                if email:
+                    entry['email'] = email
+            payload['podium'] = podium
+
+        return create_response(200, payload)
+
+    except Exception as e:
+        logger.error(f"Error reading the job pool for {job_id}: {str(e)}",
+                     exc_info=True)
+        return create_response(500, {
+            'error': 'Failed to read the job pool'})
+
+
+# ---------------------------------------------------------------------------
+# Job deletion request (spec labeling-job-cleanup-work-stealing-and-
+# podium — Requirements 1.1-1.8)
+# ---------------------------------------------------------------------------
+
+
+@rbac_check([Permission.MANAGE_LABELING_JOBS], allow_global=True)
+def request_job_deletion(event, context):
+    """DELETE /labeling/{id} — request the deletion of a resting DDA
+    labeling job (spec labeling-job-cleanup-work-stealing-and-podium,
+    Requirements 1.1-1.8; the stop route's authorization posture — the
+    router injected the job's Use_Case scope for @rbac_check, Req 1.6).
+
+    - Missing job: 404 with nothing changed (Req 1.2). Ground Truth
+      job: 400 — its lifecycle is SageMaker-managed (Req 1.3).
+    - A non-deletable status (InProgress is the only live one) is a
+      400 naming the status and the stop-first path (Req 1.4).
+    - Already Deleting: re-invoke the Deletion_Worker and answer 202 —
+      the idempotent recovery of a stalled deletion (Req 1.5).
+    - Otherwise the job is conditionally flipped to Deleting on the
+      read status with delete_requested_by/at recorded; a concurrent
+      status change makes the write fail, and the answer follows a
+      re-read of the fresh status with no partial write (Req 1.1, 1.8).
+    - Accepted requests audit `job_delete_requested` with the acting
+      user, the job id, and the prior status (Req 1.7), async-invoke
+      the worker with {action: 'delete_job', job_id}, and answer 202
+      {job_id, status: 'Deleting'}. The worker deletes artifacts, then
+      task items, then the job record last.
+    """
+    job_id = (event.get('pathParameters') or {}).get('id', '')
+    try:
+        job = labeling_jobs_table.get_item(
+            Key={'job_id': job_id}).get('Item')
+        if not job:
+            return create_response(404, {'error': 'Labeling job not found'})
+
+        backend = job.get('labeling_backend', 'GroundTruth')
+        if backend != 'DDA':
+            return create_response(400, {
+                'error': (
+                    'Only DDA labeling jobs can be deleted through this '
+                    'operation. This job uses the '
+                    f"'{backend}' backend, whose lifecycle is managed by "
+                    'SageMaker Ground Truth.'
+                ),
+                'labeling_backend': backend,
+            })
+
+        current_status = job.get('status')
+        if current_status not in DELETABLE_STATUSES:
+            # Req 1.4: name the status and the stop-first path; nothing
+            # has been written at this point.
+            return create_response(400, {
+                'error': (
+                    f"Labeling job {job_id} cannot be deleted: its status "
+                    f"is '{current_status}'. Only Completed, Failed, "
+                    'Stopped, or DeleteFailed jobs can be deleted — stop '
+                    'the job first, then delete it. The job is unchanged.'
+                ),
+                'status': current_status,
+            })
+
+        user = get_user_from_event(event)
+
+        if current_status == STATUS_DELETING:
+            # Req 1.5: idempotent recovery of a stalled deletion — no
+            # status flip, just a fresh worker invocation.
+            log_audit_event(
+                user_id=user['user_id'],
+                action='job_delete_requested',
+                resource_type='labeling_job',
+                resource_id=job_id,
+                result='success',
+                details={
+                    'usecase_id': job.get('usecase_id', ''),
+                    'labeling_backend': 'DDA',
+                    'previous_status': current_status,
+                },
+            )
+            _invoke_labeling_worker(
+                {'action': 'delete_job', 'job_id': job_id})
+            return create_response(202, {
+                'job_id': job_id,
+                'status': STATUS_DELETING,
+            })
+
+        now = int(datetime.utcnow().timestamp())
+        try:
+            # Req 1.1/1.8: the Deleting transition is conditional on
+            # the status just read, so a concurrent change can never be
+            # clobbered (the stop route's discipline).
+            labeling_jobs_table.update_item(
+                Key={'job_id': job_id},
+                UpdateExpression=('SET #status = :deleting, '
+                                  'delete_requested_by = :requested_by, '
+                                  'delete_requested_at = :now, '
+                                  'updated_at = :now'),
+                ConditionExpression='#status = :prior',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={
+                    ':deleting': STATUS_DELETING,
+                    ':prior': current_status,
+                    ':requested_by': user['user_id'],
+                    ':now': now,
+                },
+            )
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', '')
+            if error_code == 'ConditionalCheckFailedException':
+                # Req 1.8: the status changed between the read and the
+                # write — re-read and answer per the fresh status, with
+                # no partial write.
+                refreshed = labeling_jobs_table.get_item(
+                    Key={'job_id': job_id}).get('Item')
+                if not refreshed:
+                    return create_response(404, {
+                        'error': 'Labeling job not found'})
+                fresh_status = refreshed.get('status')
+                if fresh_status == STATUS_DELETING:
+                    # A concurrent deletion request won the race; the
+                    # deletion is in effect and its winner invoked the
+                    # worker and wrote the audit event.
+                    return create_response(202, {
+                        'job_id': job_id,
+                        'status': STATUS_DELETING,
+                    })
+                if fresh_status not in DELETABLE_STATUSES:
+                    return create_response(400, {
+                        'error': (
+                            f"Labeling job {job_id} cannot be deleted: "
+                            f"its status is '{fresh_status}'. Only "
+                            'Completed, Failed, Stopped, or DeleteFailed '
+                            'jobs can be deleted — stop the job first, '
+                            'then delete it. The job is unchanged.'
+                        ),
+                        'status': fresh_status,
+                    })
+                return create_response(409, {
+                    'error': (
+                        f"Labeling job {job_id} changed status "
+                        f"concurrently (now '{fresh_status}'); please "
+                        'retry the deletion.'
+                    ),
+                    'status': fresh_status,
+                })
+            raise
+
+        # Req 1.7: the acting user, the job id, and the prior status.
+        log_audit_event(
+            user_id=user['user_id'],
+            action='job_delete_requested',
+            resource_type='labeling_job',
+            resource_id=job_id,
+            result='success',
+            details={
+                'usecase_id': job.get('usecase_id', ''),
+                'labeling_backend': 'DDA',
+                'previous_status': current_status,
+                'delete_requested_at': now,
+            },
+        )
+
+        _invoke_labeling_worker({'action': 'delete_job', 'job_id': job_id})
+
+        return create_response(202, {
+            'job_id': job_id,
+            'status': STATUS_DELETING,
+        })
+
+    except Exception as e:
+        logger.error(f"Error requesting deletion of labeling job "
+                     f"{job_id}: {str(e)}", exc_info=True)
+        return create_response(500, {
+            'error': (
+                f"Labeling job {job_id} was not deleted: an error "
+                'occurred while requesting the deletion. The job is '
+                'unchanged; please retry.'
+            ),
+        })
 
 
 # ---------------------------------------------------------------------------

@@ -20,8 +20,13 @@ import {
 } from '@cloudscape-design/components';
 import { useParams, useNavigate } from 'react-router-dom';
 import { LabelingJob } from '../types';
-import { apiService, LabelingMemberProgress } from '../services/api';
+import {
+  apiService,
+  LabelingMemberProgress,
+  PodiumEntry,
+} from '../services/api';
 import ManifestTransformer from '../components/ManifestTransformer';
+import WinnerPodium from '../components/labeling/WinnerPodium';
 import {
   ALIGNMENT_BREAKING_PATTERN,
   PROMPT_GUIDANCE_CONSTRAINT,
@@ -30,10 +35,18 @@ import {
   promptGuardrailMessage,
 } from './promptOverrideGuardrails';
 
-/** Raw `GET /labeling/{id}` job payload, including DDA-only fields. */
+/**
+ * Raw `GET /labeling/{id}` job payload, including DDA-only fields.
+ * Extended locally with the additive `podium` key the backend carries
+ * exactly for Completed DDA team jobs
+ * (labeling-job-cleanup-work-stealing-and-podium Requirement 8.2).
+ */
 type ApiLabelingJob = Awaited<
   ReturnType<typeof apiService.getLabelingJob>
->['job'];
+>['job'] & {
+  /** Podium_Ranking entries; absent for every non-Completed/non-team job. */
+  podium?: PodiumEntry[];
+};
 
 /**
  * Progress display values for a DDA job (dda-data-labeling Requirements
@@ -77,6 +90,34 @@ export function canStopDdaJob(job: {
   status?: string;
 }): boolean {
   return job.labeling_backend === 'DDA' && job.status === 'InProgress';
+}
+
+/**
+ * The job statuses from which a deletion may be requested through the
+ * detail page — the resting statuses
+ * (labeling-job-cleanup-work-stealing-and-podium Requirement 4.1).
+ */
+const DELETABLE_DDA_STATUSES = [
+  'Completed',
+  'Failed',
+  'Stopped',
+  'DeleteFailed',
+];
+
+/**
+ * The Delete action applies only to DDA jobs resting in Completed,
+ * Failed, Stopped, or DeleteFailed status; InProgress (stop first) and
+ * Deleting jobs offer no delete control
+ * (labeling-job-cleanup-work-stealing-and-podium Requirements 4.1, 4.2).
+ */
+export function canDeleteDdaJob(job: {
+  labeling_backend?: string;
+  status?: string;
+}): boolean {
+  return (
+    job.labeling_backend === 'DDA' &&
+    DELETABLE_DDA_STATUSES.includes(job.status ?? '')
+  );
 }
 
 /**
@@ -177,6 +218,11 @@ export default function LabelingDetail() {
   const [showStopModal, setShowStopModal] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
+  // DDA delete flow (labeling-job-cleanup-work-stealing-and-podium
+  // Requirements 4.3, 4.4, 4.5).
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   // Re-run pre-labels flow
   // (grounded-sam-prompt-guardrails-and-prelabel-retry Requirements
   // 7.3-7.7): the dialog's per-label override entries, seeded from the
@@ -211,6 +257,10 @@ export default function LabelingDetail() {
         'Completed': 'completed',
         'Failed': 'failed',
         'Stopped': 'failed',
+        // Deletion lifecycle statuses
+        // (labeling-job-cleanup-work-stealing-and-podium Requirement 4.6).
+        'Deleting': 'in_progress',
+        'DeleteFailed': 'failed',
       };
       
       const mappedJob: LabelingJob = {
@@ -253,7 +303,10 @@ export default function LabelingDetail() {
   };
 
   // DDA jobs use the portal-managed status values directly
-  // (InProgress | Completed | Failed | Stopped, Requirement 11.3).
+  // (InProgress | Completed | Failed | Stopped, Requirement 11.3), plus
+  // the deletion lifecycle pair Deleting | DeleteFailed rendered
+  // distinctly (labeling-job-cleanup-work-stealing-and-podium
+  // Requirement 4.6).
   const getDdaStatusIndicator = (status: string) => {
     const statusMap: Record<
       string,
@@ -263,6 +316,8 @@ export default function LabelingDetail() {
       Completed: { type: 'success', label: 'Completed' },
       Failed: { type: 'error', label: 'Failed' },
       Stopped: { type: 'stopped', label: 'Stopped' },
+      Deleting: { type: 'in-progress', label: 'Deleting' },
+      DeleteFailed: { type: 'error', label: 'Delete Failed' },
     };
     const config = statusMap[status] || {
       type: 'in-progress' as const,
@@ -287,6 +342,28 @@ export default function LabelingDetail() {
       setStopError(`The job was not stopped: ${reason}`);
     } finally {
       setStopping(false);
+    }
+  };
+
+  // Request deletion of a resting DDA job
+  // (labeling-job-cleanup-work-stealing-and-podium Requirements 4.4,
+  // 4.5): the 202 answer refetches the detail so the job renders in the
+  // Deleting status; on failure the job renders unchanged and the error
+  // surfaces through the stop-flow alert pattern.
+  const handleDeleteJob = async () => {
+    if (!jobId) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await apiService.deleteLabelingJob(jobId);
+      setShowDeleteModal(false);
+      await loadJob();
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : 'Unknown error';
+      setDeleteError(`The job was not deleted: ${reason}`);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -429,6 +506,11 @@ export default function LabelingDetail() {
     const prelabelFailureReasons = rawJob.prelabel_failure_reasons || [];
     const isGroundedSamJob = autoLabelModel === 'grounded-sam';
     const rerunLabels = rawJob.label_set ?? [];
+    // Winner_Podium entries, carried by the detail payload exactly for
+    // Completed team jobs; the podium renders only when present and
+    // non-empty (labeling-job-cleanup-work-stealing-and-podium
+    // Requirements 8.1, 8.5).
+    const podiumEntries = rawJob.podium ?? [];
 
     return (
       <>
@@ -460,6 +542,19 @@ export default function LabelingDetail() {
                         }}
                       >
                         Stop Job
+                      </Button>
+                    )}
+                    {canDeleteDdaJob(rawJob) && (
+                      <Button
+                        data-testid="delete-job-button"
+                        onClick={() => {
+                          setDeleteError(null);
+                          setShowDeleteModal(true);
+                        }}
+                      >
+                        {rawJob.status === 'DeleteFailed'
+                          ? 'Retry Delete'
+                          : 'Delete Job'}
                       </Button>
                     )}
                   </SpaceBetween>
@@ -497,6 +592,17 @@ export default function LabelingDetail() {
               onDismiss={() => setStopError(null)}
             >
               {stopError} The job remains In Progress.
+            </Alert>
+          )}
+
+          {deleteError && (
+            <Alert
+              type="error"
+              header="Delete failed"
+              dismissible
+              onDismiss={() => setDeleteError(null)}
+            >
+              {deleteError} The job is unchanged.
             </Alert>
           )}
 
@@ -688,6 +794,12 @@ export default function LabelingDetail() {
             </Container>
           )}
 
+          {rawJob.status === 'Completed' && podiumEntries.length > 0 && (
+            <Container header={<Header variant="h2">Winner Podium</Header>}>
+              <WinnerPodium entries={podiumEntries} />
+            </Container>
+          )}
+
           {rawJob.team_id && (
             <Container
               header={<Header variant="h2">Team Progress</Header>}
@@ -807,6 +919,49 @@ export default function LabelingDetail() {
               already submitted are retained.
             </Box>
             {stopError && <Alert type="error">{stopError}</Alert>}
+          </SpaceBetween>
+        </Modal>
+
+        {/* Delete confirmation (the stop-modal precedent,
+            labeling-job-cleanup-work-stealing-and-podium Requirements
+            4.3-4.5): names the job and states exactly what the cleanup
+            removes (task assignments, pre-label/annotation artifacts)
+            and what it retains (dataset images, any generated training
+            manifest). */}
+        <Modal
+          visible={showDeleteModal}
+          onDismiss={() => setShowDeleteModal(false)}
+          header="Delete labeling job"
+          footer={
+            <Box float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button
+                  variant="link"
+                  onClick={() => setShowDeleteModal(false)}
+                  disabled={deleting}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  onClick={handleDeleteJob}
+                  loading={deleting}
+                  data-testid="delete-job-confirm"
+                >
+                  Delete Job
+                </Button>
+              </SpaceBetween>
+            </Box>
+          }
+        >
+          <SpaceBetween size="s">
+            <Box>
+              Are you sure you want to delete "{rawJob.job_name}"? Its task
+              assignments and pre-label/annotation artifacts are removed.
+              The dataset images and any generated training manifest are
+              retained.
+            </Box>
+            {deleteError && <Alert type="error">{deleteError}</Alert>}
           </SpaceBetween>
         </Modal>
 

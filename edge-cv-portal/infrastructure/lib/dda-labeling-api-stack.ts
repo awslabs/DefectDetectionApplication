@@ -48,10 +48,13 @@ export interface DdaLabelingApiStackProps extends cdk.NestedStackProps {
  * - DELETE /labeling-teams/{teamId}/members/{userId}      (remove member)
  * - GET    /labeler/jobs                                  (caller's jobs)
  * - GET    /labeler/jobs/{jobId}/next                     (next presentable task)
+ * - GET    /labeler/jobs/{jobId}/pool                     (team pool state + podium)
+ * - POST   /labeler/jobs/{jobId}/steal                    (steal one teammate task)
  * - POST   /labeler/tasks/{taskId}/submit                 (persist annotation)
  * - POST   /labeler/tasks/{taskId}/presentation-failure   (withhold task)
  * - GET    /labeler/tasks/{taskId}/image-url              (fresh presigned URL)
  * - POST   /labeling/{id}/stop                            (stop DDA job, labeling.py)
+ * - DELETE /labeling/{id}                                 (delete resting DDA job)
  * - GET    /labeling/{id}/review                          (auto-label results)
  * - POST   /labeling/{id}/review/decisions                (batch accept/reject)
  * - POST   /labeling/{id}/review/finalize                 (finalize + manifest)
@@ -122,13 +125,13 @@ export class DdaLabelingApiStack extends cdk.NestedStack {
       resource: apigateway.IResource,
       httpMethod: string,
       integration: apigateway.LambdaIntegration = ddaLabelingIntegration,
-    ) => {
-      methods.push(
-        resource.addMethod(httpMethod, integration, {
-          authorizer,
-          authorizationType: apigateway.AuthorizationType.COGNITO,
-        }),
-      );
+    ): apigateway.Method => {
+      const method = resource.addMethod(httpMethod, integration, {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      });
+      methods.push(method);
+      return method;
     };
 
     // ------------------------------------------------------------------
@@ -165,8 +168,16 @@ export class DdaLabelingApiStack extends cdk.NestedStack {
     const labelerJobsResource = labelerResource.addResource('jobs');
     addMethod(labelerJobsResource, 'GET');
 
+    const labelerJobResource = labelerJobsResource.addResource('{jobId}');
     // GET /labeler/jobs/{jobId}/next — next presentable unsubmitted task
-    addMethod(labelerJobsResource.addResource('{jobId}').addResource('next'), 'GET');
+    addMethod(labelerJobResource.addResource('next'), 'GET');
+    // GET /labeler/jobs/{jobId}/pool — team pool state: stealable_count,
+    // job_complete, podium (labeling-job-cleanup-work-stealing-and-podium,
+    // Req 6.1)
+    addMethod(labelerJobResource.addResource('pool'), 'GET');
+    // POST /labeler/jobs/{jobId}/steal — transfer one Stealable_Task to the
+    // caller via a conditional write (Req 5.1)
+    addMethod(labelerJobResource.addResource('steal'), 'POST');
 
     const labelerTaskResource = labelerResource
       .addResource('tasks')
@@ -181,6 +192,12 @@ export class DdaLabelingApiStack extends cdk.NestedStack {
     // ------------------------------------------------------------------
     // Job lifecycle & review under the imported /labeling/{id}
     // ------------------------------------------------------------------
+    // DELETE /labeling/{id} — delete a resting DDA job
+    // (labeling-job-cleanup-work-stealing-and-podium, Req 1.1/1.6;
+    // MANAGE_LABELING_JOBS via @rbac_check in dda_labeling.py). The
+    // resource's OPTIONS preflight is owned by the ApiGatewayStack's
+    // defaultCorsPreflightOptions — only the method attaches here.
+    const deleteJobMethod = addMethod(labelingJobResource, 'DELETE');
     // POST /labeling/{id}/stop — labeling.py owns the stop route
     // (MANAGE_LABELING_JOBS, Req 11.4)
     const stopResource = labelingJobResource.addResource('stop', {
@@ -260,5 +277,9 @@ export class DdaLabelingApiStack extends cdk.NestedStack {
     deployment.node.addDependency(reviewResource);
     deployment.node.addDependency(rerunPrelabelsResource);
     deployment.node.addDependency(previewResource);
+    // DELETE /labeling/{id} attaches directly to the imported resource, so
+    // no subtree dependency above covers it — depend on the method itself
+    // (labeling-job-cleanup-work-stealing-and-podium).
+    deployment.node.addDependency(deleteJobMethod);
   }
 }

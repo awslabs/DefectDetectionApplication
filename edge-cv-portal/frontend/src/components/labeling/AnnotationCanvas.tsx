@@ -22,6 +22,17 @@
  * timestamp) the component invokes `onImageUrlRefresh` and swaps the image
  * without touching annotation state (req 12.7).
  *
+ * A task with a non-empty Pre_Label additionally offers the client-only
+ * Clear_Prelabels_Control (testid `clear-prelabels`): it removes exactly
+ * the Prelabel_Origin state — `prelabel-box-` boxes even when re-classed,
+ * still-intact prelabel-painted pixels (tracked against a bitmap copy
+ * taken at initialization), classless proposals, and an untouched
+ * prelabel classification — while every user edit survives. Clearing
+ * takes a full-state snapshot first and swaps the control for the
+ * Restore_Control (testid `restore-prelabels`), a one-level session
+ * undo. No API call is involved; the stored Pre_Label is never modified
+ * (labeling-job-cleanup-work-stealing-and-podium req 9.1–9.8).
+ *
  * Consumers should remount per Task_Assignment (e.g. `key={task.task_id}`)
  * so annotation state resets between tasks.
  */
@@ -207,6 +218,19 @@ interface SegProposal {
   mask: Uint8Array;
 }
 
+/**
+ * Prelabel_Snapshot — the full annotation state captured at the moment the
+ * Clear_Prelabels_Control is activated, backing the one-level restore
+ * (labeling-job-cleanup-work-stealing-and-podium req 9.5).
+ */
+interface PrelabelSnapshot {
+  classification: string | null;
+  boxes: EditableBox[];
+  /** Deep copy of the label-indexed segmentation bitmap, when one exists. */
+  bitmap: Uint8Array | null;
+  proposals: SegProposal[];
+}
+
 export interface AnnotationCanvasHandle {
   /**
    * Returns the list of missing elements blocking submission (empty when
@@ -304,6 +328,16 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
     const [proposals, setProposals] = useState<SegProposal[]>([]);
     const segInitializedRef = useRef(false);
 
+    /* ---------------- clear pre-labels state (req 9.1–9.5) --------- */
+    // Copy of the label bitmap taken right after the Segmentation
+    // Pre_Label painting in handleImageLoad — the provenance record that
+    // makes "pixel still holds the class the Pre_Label initialized it
+    // to" a comparable fact (req 9.3).
+    const prelabelBitmapRef = useRef<Uint8Array | null>(null);
+    // Prelabel_Snapshot backing the one-level restore (req 9.5).
+    const prelabelSnapshotRef = useRef<PrelabelSnapshot | null>(null);
+    const [prelabelsCleared, setPrelabelsCleared] = useState(false);
+
     /* ---------------- tool state ---------------------------------- */
     const [selectedClassIndex, setSelectedClassIndex] = useState(0);
     const [segTool, setSegTool] = useState<'brush' | 'eraser'>('brush');
@@ -387,6 +421,9 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
             }
           });
           segBitmapRef.current = bitmap;
+          // Provenance record for clear-prelabels: the bitmap exactly as
+          // the Pre_Label painted it, before any user stroke (req 9.3).
+          prelabelBitmapRef.current = bitmap.slice();
           setProposals(classless);
           setSegVersion((v) => v + 1);
         }
@@ -564,6 +601,67 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
       setProposals((prev) => prev.filter((p) => p.id !== id));
       setSegVersion((v) => v + 1);
       setEdited(true);
+    }, []);
+
+    /* ---------------- clear / restore pre-labels (req 9.2–9.5) ----- */
+    const handleClearPrelabels = useCallback(() => {
+      // Prelabel_Snapshot first, so restore is an exact one-level undo
+      // (req 9.5). Boxes and proposals are only ever replaced immutably,
+      // so holding the current arrays is safe; the segmentation bitmap
+      // is mutated in place and needs a deep copy.
+      prelabelSnapshotRef.current = {
+        classification,
+        boxes,
+        bitmap: segBitmapRef.current ? segBitmapRef.current.slice() : null,
+        proposals,
+      };
+      if (taskType === 'Classification') {
+        // Deselect only a selection still equal to the Pre_Label's
+        // label; a selection the labeler changed is their own work
+        // (req 9.4).
+        if (classification !== null && classification === prelabel?.label) {
+          setClassification(null);
+        }
+      } else if (taskType === 'ObjectDetection') {
+        // Prelabel_Origin boxes keep their id through class edits, so
+        // the id prefix drops them even when re-classed; user-drawn
+        // boxes (`box-{timestamp}-{n}`) survive (req 9.2).
+        setBoxes((prev) =>
+          prev.filter((b) => !b.id.startsWith('prelabel-box-'))
+        );
+      } else {
+        // Segmentation: zero exactly the pixels that still hold the
+        // class the Pre_Label initialized them to (the provenance copy
+        // makes this comparable); pixels the labeler painted or
+        // repainted differ from the copy and survive. Remaining
+        // classless proposals are removed (req 9.3).
+        const bitmap = segBitmapRef.current;
+        const prelabelBitmap = prelabelBitmapRef.current;
+        if (bitmap && prelabelBitmap) {
+          for (let p = 0; p < bitmap.length; p++) {
+            if (prelabelBitmap[p] !== 0 && bitmap[p] === prelabelBitmap[p]) {
+              bitmap[p] = 0;
+            }
+          }
+        }
+        setProposals([]);
+        setSegVersion((v) => v + 1);
+      }
+      setPrelabelsCleared(true);
+    }, [taskType, classification, boxes, proposals, prelabel]);
+
+    const handleRestorePrelabels = useCallback(() => {
+      const snapshot = prelabelSnapshotRef.current;
+      if (!snapshot) return;
+      // Reinstate the Prelabel_Snapshot wholesale (req 9.5).
+      setClassification(snapshot.classification);
+      setBoxes(snapshot.boxes);
+      if (snapshot.bitmap) {
+        segBitmapRef.current = snapshot.bitmap.slice();
+      }
+      setProposals(snapshot.proposals);
+      setSegVersion((v) => v + 1);
+      setPrelabelsCleared(false);
     }, []);
 
     /* ---------------- overlay rendering ---------------------------- */
@@ -974,6 +1072,29 @@ const AnnotationCanvas = forwardRef<AnnotationCanvasHandle, AnnotationCanvasProp
         )}
 
         <SpaceBetween size="xs" direction="horizontal">
+          {/* Clear/restore pre-labels (req 9.1, 9.5): Clear renders
+              exactly while the task carries a non-empty Pre_Label and it
+              has not been cleared; after clearing, the Restore_Control
+              takes its slot until restore re-offers Clear. Disabled
+              before the image loads so a Segmentation clear cannot race
+              the prelabel painting (same guard as Submit). */}
+          {hasPrelabel && !prelabelsCleared && (
+            <Button
+              data-testid="clear-prelabels"
+              onClick={handleClearPrelabels}
+              disabled={!imageSize && taskType !== 'Classification'}
+            >
+              Clear pre-labels
+            </Button>
+          )}
+          {hasPrelabel && prelabelsCleared && (
+            <Button
+              data-testid="restore-prelabels"
+              onClick={handleRestorePrelabels}
+            >
+              Restore pre-labels
+            </Button>
+          )}
           {showApproveAsIs && (
             <Button
               onClick={handleSubmit}

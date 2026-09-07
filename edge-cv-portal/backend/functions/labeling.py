@@ -32,6 +32,11 @@ from shared_utils import (
     Permission
 )
 from rbac_middleware import rbac_check
+# `podium_ranking` is the one shared Podium_Ranking implementation
+# (labeling-job-cleanup-work-stealing-and-podium Req 7.6), consumed
+# here by the DDA job detail payload and by dda_labeling.py's labeler
+# pool route.
+from labeling_distribution import podium_ranking
 
 dynamodb = boto3.resource('dynamodb')
 labeling_jobs_table = dynamodb.Table(os.environ.get('LABELING_JOBS_TABLE', 'LabelingJobs'))
@@ -915,6 +920,7 @@ def _get_dda_labeling_job(job: Dict):
 
     # Per-member submitted/remaining counts for team jobs (Req 11.2).
     member_progress = []
+    team_members: List[Dict] = []
     if job.get('team_id'):
         per_assignee: Dict[str, Dict[str, int]] = {}
         for task in active_tasks:
@@ -927,7 +933,8 @@ def _get_dda_labeling_job(job: Dict):
                 counts['submitted'] += 1
             else:
                 counts['remaining'] += 1
-        for member in _query_team_members(job['team_id']):
+        team_members = _query_team_members(job['team_id'])
+        for member in team_members:
             counts = per_assignee.get(
                 member['user_id'], {'submitted': 0, 'remaining': 0})
             member_progress.append({
@@ -937,6 +944,31 @@ def _get_dda_labeling_job(job: Dict):
                 'remaining': counts['remaining'],
             })
     job['member_progress'] = member_progress
+
+    # Winner_Podium (labeling-job-cleanup-work-stealing-and-podium,
+    # Req 7.5, 8.2, 10.4): the additive `podium` key for Completed
+    # team jobs only, computed by the one shared Podium_Ranking
+    # (Req 7.6) over the already-queried active tasks' Submitted
+    # (submitted_by, submitted_at) pairs, with emails joined from the
+    # already-queried team members — zero extra table reads. Every
+    # other job (non-team, non-Completed, Ground Truth — structurally
+    # excluded above — or Skip_Verification_Mode, which has no team)
+    # carries no podium key, keeping its payload byte-identical.
+    if job.get('team_id') and job.get('status') == 'Completed':
+        podium = podium_ranking(
+            (t.get('submitted_by'), t.get('submitted_at'))
+            for t in active_tasks if t.get('status') == 'Submitted')
+        # Req 7.5: emails ride along for current members only; a
+        # departed submitter's entry carries the user id alone.
+        member_emails = {
+            member.get('user_id'): member.get('email')
+            for member in team_members
+        }
+        for entry in podium:
+            email = member_emails.get(entry['user_id'])
+            if email:
+                entry['email'] = email
+        job['podium'] = podium
 
     return create_response(200, {'job': job})
 

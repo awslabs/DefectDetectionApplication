@@ -19,6 +19,19 @@
  * count (Requirement 7.11). Presentation failures are reported and the
  * view continues to the next presentable task (Requirement 7.12).
  *
+ * Completion view extras (labeling-job-cleanup-work-stealing-and-podium):
+ * each arrival at the completion state fetches the job's team-pool state
+ * from `GET /labeler/jobs/{jobId}/pool`. A fully submitted job renders
+ * the Winner_Podium from the pool's podium entries (Requirement 8.3);
+ * otherwise a positive stealable count renders the take-work offer whose
+ * button issues one `POST /labeler/jobs/{jobId}/steal` and presents the
+ * stolen task through the existing next-task flow, repeating on every
+ * return to completion until nothing is left (Requirements 6.2-6.4). A
+ * none-remain 409 refreshes the pool without an error indication
+ * (Requirement 6.5); zero stealable and an incomplete job — or a pool
+ * fetch failure — leave the existing completion message unchanged
+ * (Requirement 6.6).
+ *
  * The AnnotationCanvas is remounted per task (`key={task_id}`) so
  * annotation state resets between tasks.
  */
@@ -42,12 +55,14 @@ import {
   ApiError,
   apiService,
   DdaAnnotation,
+  LabelerJobPoolResponse,
   LabelerJobSummary,
   LabelerNextTaskResponse,
 } from '../../services/api';
 import AnnotationCanvas, {
   LabelingModality,
 } from '../../components/labeling/AnnotationCanvas';
+import WinnerPodium from '../../components/labeling/WinnerPodium';
 import { getErrorMessage } from '../../utils/errorHandling';
 
 /** A good/bad example image opened in the lightbox modal. */
@@ -130,6 +145,16 @@ export default function LabelerWorkspace() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<LightboxImage | null>(null);
 
+  // Team-pool state for the completion view
+  // (labeling-job-cleanup-work-stealing-and-podium Requirements 6.2-6.6,
+  // 8.3). Null means unavailable — not yet fetched, fetch failed, or a
+  // task is presenting — and renders the plain completion view.
+  const [pool, setPool] = useState<LabelerJobPoolResponse | null>(null);
+  const [stealing, setStealing] = useState(false);
+  // Bumped to refetch the pool without a new completion payload — the
+  // none-remain 409 path (Requirement 6.5).
+  const [poolRefresh, setPoolRefresh] = useState(0);
+
   const loadJobs = useCallback(async () => {
     setJobsLoading(true);
     setJobsError(null);
@@ -177,6 +202,36 @@ export default function LabelerWorkspace() {
       setNextTask(null);
     }
   }, [activeJobId, loadNextTask]);
+
+  /**
+   * Fetch the job's team-pool state on every arrival at the completion
+   * state (labeling-job-cleanup-work-stealing-and-podium Requirements
+   * 6.2, 6.4): `loadNextTask` sets a fresh payload object each time, so
+   * completing a stolen task re-runs this effect and the offer repeats
+   * until nothing is left. A pool fetch failure leaves `pool` null,
+   * degrading to the existing completion view (no new error surface).
+   */
+  useEffect(() => {
+    if (!activeJobId || !nextTask?.complete) {
+      setPool(null);
+      return;
+    }
+    let cancelled = false;
+    setPool(null);
+    apiService
+      .getLabelerJobPool(activeJobId)
+      .then((response) => {
+        if (!cancelled) {
+          setPool(response);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to load the team work pool:', err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeJobId, nextTask, poolRefresh]);
 
   const enterJob = (jobId: string) => {
     setSearchParams({ job: jobId });
@@ -244,6 +299,33 @@ export default function LabelerWorkspace() {
       console.error('Failed to report presentation failure:', err);
     }
     await loadNextTask(activeJobId);
+  };
+
+  /**
+   * Take-work activation (labeling-job-cleanup-work-stealing-and-podium
+   * Requirements 6.3, 6.5): one Steal_Request; on success the stolen
+   * task is presented through the existing next-task flow. A 409 means
+   * no stealable tasks remain (or the job left InProgress) — refresh
+   * the pool and re-render the completion view without an error
+   * indication. Other failures leave the offer standing for a retry.
+   */
+  const handleStealTask = async () => {
+    if (!activeJobId) {
+      return;
+    }
+    setStealing(true);
+    try {
+      await apiService.stealTask(activeJobId);
+      await loadNextTask(activeJobId);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setPoolRefresh((n) => n + 1);
+      } else {
+        console.error('Failed to take a teammate task:', err);
+      }
+    } finally {
+      setStealing(false);
+    }
   };
 
   const activeJob = jobs.find((job) => job.job_id === activeJobId);
@@ -400,6 +482,31 @@ export default function LabelerWorkspace() {
                 because the image could not be presented.
               </StatusIndicator>
             )}
+            {pool?.job_complete && pool.podium && pool.podium.length > 0 ? (
+              // The whole team is done: the Winner_Podium renders in
+              // place of the take-work offer
+              // (labeling-job-cleanup-work-stealing-and-podium Req 8.3).
+              <WinnerPodium entries={pool.podium} />
+            ) : pool && pool.stealable_count > 0 ? (
+              // Teammate work remains: the take-work offer names the
+              // count (Req 6.2) and repeats on every return to the
+              // completion state (Req 6.4). Zero stealable with the job
+              // incomplete — or no pool at all — adds nothing, leaving
+              // the existing completion message unchanged (Req 6.6).
+              <SpaceBetween size="xs">
+                <div>
+                  Teammates still have {pool.stealable_count} unsubmitted{' '}
+                  {pool.stealable_count === 1 ? 'image' : 'images'}.
+                </div>
+                <Button
+                  data-testid="steal-task-button"
+                  loading={stealing}
+                  onClick={handleStealTask}
+                >
+                  Take a task
+                </Button>
+              </SpaceBetween>
+            ) : null}
             <Button onClick={backToJobs}>Back to jobs</Button>
           </SpaceBetween>
         </Alert>

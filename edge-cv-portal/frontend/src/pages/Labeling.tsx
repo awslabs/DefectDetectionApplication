@@ -55,6 +55,35 @@ interface ManifestValidation {
   };
 }
 
+/**
+ * One jobs-table row: the shared LabelingJob shape plus the persisted
+ * `labeling_backend` discriminator every list-payload job carries (the
+ * backend defaults legacy jobs to GroundTruth). The page's own delete
+ * predicate needs the discriminator because Ground Truth jobs never offer
+ * deletion, and `status` is widened to the raw backend string because the
+ * DDA lifecycle statuses (InProgress, Completed, Failed, Stopped,
+ * Deleting, DeleteFailed) exceed the shared union
+ * (labeling-job-cleanup-work-stealing-and-podium Requirements 4.1, 4.2).
+ */
+interface LabelingJobRow extends Omit<LabelingJob, 'status'> {
+  status: string;
+  labeling_backend: 'DDA' | 'GroundTruth';
+}
+
+/**
+ * The job statuses from which a deletion may be requested from the list
+ * page — the resting statuses, compared against the raw backend status
+ * strings the list payload carries. InProgress (stop first) and Deleting
+ * jobs offer no delete control
+ * (labeling-job-cleanup-work-stealing-and-podium Requirements 4.1, 4.2).
+ */
+const DELETABLE_DDA_STATUSES = [
+  'Completed',
+  'Failed',
+  'Stopped',
+  'DeleteFailed',
+];
+
 export default function Labeling() {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -64,10 +93,16 @@ export default function Labeling() {
   const canManageTeams =
     user?.role === 'UseCaseAdmin' || user?.role === 'PortalAdmin';
   const [dataSourceType, setDataSourceType] = useState<'labeling' | 'pre-labeled'>('labeling');
-  const [jobs, setJobs] = useState<LabelingJob[]>([]);
+  const [jobs, setJobs] = useState<LabelingJobRow[]>([]);
   const [datasets, setDatasets] = useState<PreLabeledDataset[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedItems, setSelectedItems] = useState<any[]>([]);
+  // Deletion of the selected resting DDA job
+  // (labeling-job-cleanup-work-stealing-and-podium Requirements 4.1-4.5):
+  // `jobToDelete` doubles as the confirmation-modal visibility and pins
+  // the named job while the dialog is open.
+  const [jobToDelete, setJobToDelete] = useState<LabelingJobRow | null>(null);
+  const [deletingJob, setDeletingJob] = useState(false);
   const [useCases, setUseCases] = useState<UseCase[]>([]);
   const [selectedUseCase, setSelectedUseCase] = useState<SelectProps.Option | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -127,8 +162,8 @@ export default function Labeling() {
         usecase_id: useCaseId,
       });
       
-      // Transform API response to match LabelingJob type
-      const transformedJobs: LabelingJob[] = response.jobs.map(job => ({
+      // Transform API response to match the page's row type
+      const transformedJobs: LabelingJobRow[] = response.jobs.map(job => ({
         job_id: job.job_id,
         usecase_id: useCaseId,
         name: job.job_name,
@@ -137,12 +172,21 @@ export default function Labeling() {
         task_type: job.task_type as LabelingJob['task_type'],
         images_count: job.image_count,
         labeled_count: job.labeled_objects || 0,
-        status: job.status as LabelingJob['status'],
+        status: job.status,
         progress_percent: job.progress_percent || 0,
         ground_truth_job_arn: '', // Not provided by list endpoint
         workforce_type: 'private', // Default value
         created_by: '', // Not provided by list endpoint
         created_at: job.created_at,
+        // The list payload carries the persisted labeling_backend per job
+        // (legacy jobs are defaulted to GroundTruth server-side); it is
+        // read off the raw item because the typed list response predates
+        // the field. Anything but 'DDA' offers no delete control
+        // (labeling-job-cleanup-work-stealing-and-podium Req 4.1).
+        labeling_backend:
+          (job as { labeling_backend?: string }).labeling_backend === 'DDA'
+            ? 'DDA'
+            : 'GroundTruth',
       }));
       
       setJobs(transformedJobs);
@@ -261,9 +305,39 @@ export default function Labeling() {
     }
   };
 
-  const getStatusIndicator = (status: LabelingJob['status']) => {
+  // Request deletion of the selected resting DDA job
+  // (labeling-job-cleanup-work-stealing-and-podium Requirements 4.4, 4.5,
+  // 4.7): the 202 answer reloads the list so the job renders in the
+  // Deleting status (a completed deletion's later reload drops the row);
+  // on failure the error surfaces through the page's existing alert
+  // pattern with the job rendered unchanged.
+  const handleDeleteJob = async () => {
+    if (!jobToDelete) return;
+    setDeletingJob(true);
+    try {
+      await apiService.deleteLabelingJob(jobToDelete.job_id);
+      setJobToDelete(null);
+      setSelectedItems([]);
+      await loadLabelingJobs();
+    } catch (err) {
+      setJobToDelete(null);
+      setError(getErrorMessage(err, 'Failed to delete labeling job'));
+      console.error('Delete job error:', err);
+    } finally {
+      setDeletingJob(false);
+    }
+  };
+
+  const getStatusIndicator = (status: LabelingJobRow['status']) => {
     const normalizedStatus = status.toLowerCase().replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase();
     
+    // The deletion lifecycle pair renders distinctly: Deleting as
+    // in-progress, Delete Failed as an error
+    // (labeling-job-cleanup-work-stealing-and-podium Requirement 4.6).
+    // Both spellings of each snake-cased status are keyed because the
+    // leading toLowerCase() precedes the camelCase split — the backend's
+    // 'DeleteFailed' reaches the map as 'deletefailed', the same way
+    // 'InProgress' reaches it as 'inprogress'.
     const statusMap: Record<string, { type: 'pending' | 'in-progress' | 'success' | 'error' | 'info', label: string }> = {
       pending: { type: 'pending', label: 'Pending' },
       in_progress: { type: 'in-progress', label: 'In Progress' },
@@ -271,15 +345,42 @@ export default function Labeling() {
       completed: { type: 'success', label: 'Completed' },
       failed: { type: 'error', label: 'Failed' },
       stopped: { type: 'info', label: 'Stopped' },
+      deleting: { type: 'in-progress', label: 'Deleting' },
+      delete_failed: { type: 'error', label: 'Delete Failed' },
+      deletefailed: { type: 'error', label: 'Delete Failed' },
     };
     const config = statusMap[normalizedStatus] || { type: 'info' as const, label: status };
     return <StatusIndicator type={config.type}>{config.label}</StatusIndicator>;
   };
 
+  // The selected jobs-table row (the selection model is shared with the
+  // datasets table and cleared on source switch), and the inline delete
+  // predicate on the page's own row type: only a resting DDA job offers
+  // the control — never InProgress or Deleting, and never Ground Truth
+  // (labeling-job-cleanup-work-stealing-and-podium Requirements 4.1, 4.2).
+  const selectedJob =
+    dataSourceType === 'labeling'
+      ? (selectedItems[0] as LabelingJobRow | undefined)
+      : undefined;
+  const selectedJobDeletable =
+    selectedJob !== undefined &&
+    selectedJob.labeling_backend === 'DDA' &&
+    DELETABLE_DDA_STATUSES.includes(selectedJob.status);
+
   const getPrimaryAction = () => {
     if (dataSourceType === 'labeling') {
       return (
         <SpaceBetween direction="horizontal" size="xs">
+          {selectedJob && selectedJobDeletable && (
+            <Button
+              data-testid="delete-job-button"
+              onClick={() => setJobToDelete(selectedJob)}
+            >
+              {selectedJob.status === 'DeleteFailed'
+                ? 'Retry Delete'
+                : 'Delete Job'}
+            </Button>
+          )}
           {canManageTeams && (
             <Button onClick={() => navigate('/labeling/teams')}>
               Manage Teams
@@ -523,6 +624,48 @@ export default function Labeling() {
             }
           />
         )}
+
+        {/* Delete confirmation for the selected DDA job — the detail
+            page's wording verbatim (labeling-job-cleanup-work-stealing-
+            and-podium Requirements 4.3, 4.4): names the job and states
+            exactly what the cleanup removes (task assignments, pre-label/
+            annotation artifacts) and what it retains (dataset images, any
+            generated training manifest). */}
+        <Modal
+          visible={jobToDelete !== null}
+          onDismiss={() => setJobToDelete(null)}
+          header="Delete labeling job"
+          footer={
+            <Box float="right">
+              <SpaceBetween direction="horizontal" size="xs">
+                <Button
+                  variant="link"
+                  onClick={() => setJobToDelete(null)}
+                  disabled={deletingJob}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  onClick={handleDeleteJob}
+                  loading={deletingJob}
+                  data-testid="delete-job-confirm"
+                >
+                  Delete Job
+                </Button>
+              </SpaceBetween>
+            </Box>
+          }
+        >
+          {jobToDelete && (
+            <Box>
+              Are you sure you want to delete "{jobToDelete.name}"? Its
+              task assignments and pre-label/annotation artifacts are
+              removed. The dataset images and any generated training
+              manifest are retained.
+            </Box>
+          )}
+        </Modal>
 
         <Modal
           visible={showCreateModal}

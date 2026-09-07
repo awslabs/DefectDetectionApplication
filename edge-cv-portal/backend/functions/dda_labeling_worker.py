@@ -11,6 +11,9 @@ handler dispatches on the payload's `action` field:
     {action: 'retry_prelabels',    job_id}              spec grounded-sam-prompt-
                                                         guardrails-and-prelabel-retry,
                                                         task 2.1 (this module)
+    {action: 'delete_job',         job_id}              spec labeling-job-cleanup-
+                                                        work-stealing-and-podium,
+                                                        task 1.2 (this module)
 
 `distribute` (Requirements 5.1, 5.2, 5.6):
 
@@ -106,6 +109,30 @@ rerun_prelabels):
    shared fan-out helper — the distributor's byte-identical message
    shape, with image_s3_uri taken from the stored task items instead
    of dataset re-enumeration (Req 6.2, 6.6).
+
+`delete_job` (spec labeling-job-cleanup-work-stealing-and-podium,
+task 1.2 — Requirements 2.1-2.8, 3.1-3.5, 10.6), invoked async by the
+`DELETE /labeling/{id}` route (dda_labeling.request_job_deletion):
+
+1. Re-check eligibility (the retry_prelabels re-check pattern): a job
+   that is absent or not in the Deleting status records the invocation
+   skipped with zero deletions (Req 2.5).
+2. Delete every object under the job's own Job_Artifact_Prefix —
+   labeling/{usecase_id}/{job_id}/ in PORTAL_ARTIFACTS_BUCKET — via
+   paginated list_objects_v2 and delete_objects batches of <= 1000
+   (Req 2.1). This is the action's ONLY S3 mutation: the prefix is
+   computed from the job record's own ids, no dataset-bucket client is
+   ever constructed, and the Use_Case output bucket's labeled/{job_id}/
+   manifest and masks are retained (Req 3.1-3.5, 10.6).
+3. Delete every task item of the job (paginated query on PK job_id +
+   batch_writer deletes, Req 2.2), then the job record LAST, so an
+   interrupted deletion stays visible as a Deleting job whose DELETE
+   re-trigger re-runs the idempotent cleanup (Req 2.3, 2.4, 2.8).
+4. Success writes the job_deleted audit event with the deleted counts
+   (Req 2.7); any failure conditionally records status=DeleteFailed +
+   failure_reason (still-Deleting condition — never clobbers a
+   concurrent change) with already-deleted items left deleted
+   (Req 2.6).
 """
 import json
 import logging
@@ -211,6 +238,9 @@ def handler(event, context):
         retry_prelabels    reset Failed pre-labels and re-enqueue them
                            (spec grounded-sam-prompt-guardrails-and-
                            prelabel-retry, task 2.1)
+        delete_job         delete a Deleting job's artifacts, task
+                           items, and record (spec labeling-job-
+                           cleanup-work-stealing-and-podium, task 1.2)
     """
     action = (event or {}).get('action')
     job_id = (event or {}).get('job_id')
@@ -227,6 +257,9 @@ def handler(event, context):
 
     if action == 'retry_prelabels':
         return retry_prelabels_job(job_id)
+
+    if action == 'delete_job':
+        return delete_job_data(job_id)
 
     message = f"Unknown worker action: {action!r}"
     logger.error(message)
@@ -1399,3 +1432,195 @@ def _fail_manifest_generation(job: Dict, reason: str) -> None:
         logger.error(f"Could not mark job {job['job_id']} Failed: {e}")
     except Exception as e:  # noqa: BLE001 — nothing further to unwind
         logger.error(f"Could not mark job {job['job_id']} Failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# delete_job (spec labeling-job-cleanup-work-stealing-and-podium,
+# task 1.2 — Requirements 2.1-2.8, 3.1-3.5, 10.6)
+# ---------------------------------------------------------------------------
+
+def delete_job_data(job_id: str) -> Dict[str, Any]:
+    """Delete a Deleting job's artifact objects, task items, and job
+    record — in that strict order, record last (Req 2.1-2.4).
+
+    Invoked async by dda_labeling.request_job_deletion with
+    {action: 'delete_job', job_id}. The route already validated the
+    Deletable_Status and flipped the job to Deleting, but the async
+    invoke may race a manual status change, so eligibility is
+    re-checked here (the retry_prelabels re-check pattern): a job that
+    is absent or not Deleting records the invocation skipped with zero
+    deletions (Req 2.5).
+
+    Every cleanup step is idempotent (missing objects and items are
+    no-ops), so a repeated DELETE against a stalled Deleting job — or a
+    DeleteFailed retry — completes the remaining deletions (Req 2.8).
+    Any failure conditionally records DeleteFailed + failure_reason,
+    leaving already-deleted items deleted (Req 2.6).
+    """
+    if not job_id:
+        message = 'delete_job requires a job_id'
+        logger.error(message)
+        return {'error': message}
+
+    job = labeling_jobs_table.get_item(Key={'job_id': job_id}).get('Item')
+    if not job:
+        # Req 2.5: the record is already gone (a prior run finished, or
+        # the invoke raced) — skipped, zero deletions.
+        logger.warning(f"Labeling job {job_id} not found; skipping "
+                       f"deletion")
+        return {'job_id': job_id, 'action': 'delete_job',
+                'skipped': True, 'reason': 'job not found'}
+
+    if job.get('status') != 'Deleting':
+        # Req 2.5: never walk a job the route did not flip to Deleting.
+        logger.warning(f"Job {job_id} is {job.get('status')}; skipping "
+                       f"deletion")
+        return {'job_id': job_id, 'action': 'delete_job',
+                'skipped': True, 'status': job.get('status'),
+                'reason': f"job is {job.get('status')}"}
+
+    try:
+        return _delete_job_data(job)
+    except Exception as e:  # noqa: BLE001 — Req 2.6: any cleanup
+        # failure records DeleteFailed with the reason; already-deleted
+        # items stay deleted and a later DELETE retries the remainder.
+        logger.error(f"Deletion failed for job {job_id}: {e}",
+                     exc_info=True)
+        _fail_job_deletion(job_id, f"Job deletion failed: {e}")
+        return {'job_id': job_id, 'action': 'delete_job',
+                'status': 'DeleteFailed', 'error': str(e)}
+
+
+def _delete_job_data(job: Dict) -> Dict[str, Any]:
+    job_id = job['job_id']
+    usecase_id = job['usecase_id']
+
+    # (a) Artifact objects under the job's own Job_Artifact_Prefix
+    # (Req 2.1, 3.1-3.5).
+    artifact_objects_deleted = _delete_job_artifacts(usecase_id, job_id)
+
+    # (b) The job's task items (Req 2.2). Sibling jobs' items are
+    # untouched by construction: the query and every delete key carry
+    # this job_id (Req 3.4, 10.6).
+    tasks_deleted = _delete_job_task_items(job_id)
+
+    # (c) The job record LAST (Req 2.3, 2.4): an interruption before
+    # this line leaves a visible Deleting job whose DELETE re-trigger
+    # re-runs the idempotent cleanup.
+    labeling_jobs_table.delete_item(Key={'job_id': job_id})
+
+    # Req 2.7: the completion audit event, attributed to the deletion
+    # requester the route recorded on the job item.
+    log_audit_event(
+        user_id=(job.get('delete_requested_by')
+                 or job.get('created_by') or 'system'),
+        action='job_deleted',
+        resource_type='labeling_job',
+        resource_id=job_id,
+        result='success',
+        details={
+            'usecase_id': usecase_id,
+            'tasks_deleted': tasks_deleted,
+            'artifact_objects_deleted': artifact_objects_deleted,
+        },
+    )
+
+    logger.info(f"Deleted job {job_id}: {tasks_deleted} task item(s), "
+                f"{artifact_objects_deleted} artifact object(s)")
+    return {'job_id': job_id, 'action': 'delete_job', 'deleted': True,
+            'tasks_deleted': tasks_deleted,
+            'artifact_objects_deleted': artifact_objects_deleted}
+
+
+def _delete_job_artifacts(usecase_id: str, job_id: str) -> int:
+    """Delete every object under the job's Job_Artifact_Prefix in the
+    portal artifacts bucket; returns the deleted-object count.
+
+    This is the delete_job action's ONLY S3 mutation, and it is
+    structurally confined (Req 3.1, 3.2): every deleted key comes out
+    of a listing whose Prefix is labeling/{usecase_id}/{job_id}/ —
+    computed from the job record's own ids — against the module-level
+    portal-account client. No dataset-bucket client is ever
+    constructed, so the Dataset_Location cannot be touched; the
+    Use_Case output bucket's labeled/{job_id}/ deliverables, sibling
+    jobs' prefixes, and labeling-previews/ never match the prefix
+    (Req 3.3-3.5, 10.6). Re-runs list whatever remains — already-
+    deleted objects are no-ops (Req 2.8).
+    """
+    if not PORTAL_ARTIFACTS_BUCKET:
+        raise RuntimeError(
+            'PORTAL_ARTIFACTS_BUCKET is not configured; the job '
+            'artifacts cannot be deleted')
+    prefix = f"labeling/{usecase_id}/{job_id}/"
+    deleted = 0
+    while True:
+        # Re-list from the start each pass: one page is at most 1000
+        # keys — exactly the delete_objects batch limit — and deleting
+        # the listed page then re-listing walks arbitrarily large
+        # prefixes without continuation-token/deletion interaction.
+        response = s3_client.list_objects_v2(
+            Bucket=PORTAL_ARTIFACTS_BUCKET, Prefix=prefix)
+        contents = response.get('Contents') or []
+        if not contents:
+            break
+        keys = [{'Key': obj['Key']} for obj in contents]
+        result = s3_client.delete_objects(
+            Bucket=PORTAL_ARTIFACTS_BUCKET,
+            Delete={'Objects': keys, 'Quiet': True})
+        errors = result.get('Errors') or []
+        if errors:
+            # Req 2.6: a partial batch failure fails the step (and the
+            # run records DeleteFailed); the successfully deleted keys
+            # stay deleted and a retry picks up the remainder.
+            raise RuntimeError(
+                f"{len(errors)} artifact object(s) could not be "
+                f"deleted (first: {errors[0]})")
+        deleted += len(keys)
+        if not response.get('IsTruncated'):
+            break
+    return deleted
+
+
+def _delete_job_task_items(job_id: str) -> int:
+    """Delete every task item of the job (Req 2.2): the paginated
+    PK-query enumeration (_job_task_ids) plus batch_writer deletes.
+    DynamoDB deletes of missing keys are no-ops, so re-runs are
+    idempotent (Req 2.8). Returns the deleted-item count."""
+    task_ids = _job_task_ids(job_id)
+    if not task_ids:
+        return 0
+    with labeling_tasks_table.batch_writer() as batch:
+        for task_id in task_ids:
+            batch.delete_item(Key={'job_id': job_id, 'task_id': task_id})
+    return len(task_ids)
+
+
+def _fail_job_deletion(job_id: str, reason: str) -> None:
+    """Req 2.6: record DeleteFailed with the failure reason,
+    conditional on the job still being Deleting — a concurrent status
+    change is never clobbered, and (because the condition fails on a
+    missing item) a job record already deleted is never resurrected."""
+    try:
+        labeling_jobs_table.update_item(
+            Key={'job_id': job_id},
+            UpdateExpression='SET #status = :failed, '
+                             'failure_reason = :reason, '
+                             'updated_at = :now',
+            ConditionExpression='#status = :deleting',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={
+                ':failed': 'DeleteFailed',
+                ':deleting': 'Deleting',
+                ':reason': reason[:1024],
+                ':now': int(datetime.utcnow().timestamp()),
+            },
+        )
+    except ClientError as e:
+        if (e.response.get('Error', {}).get('Code')
+                == 'ConditionalCheckFailedException'):
+            logger.warning(f"Job {job_id} is no longer Deleting; "
+                           f"DeleteFailed status not applied")
+            return
+        logger.error(f"Could not mark job {job_id} DeleteFailed: {e}")
+    except Exception as e:  # noqa: BLE001 — nothing further to unwind
+        logger.error(f"Could not mark job {job_id} DeleteFailed: {e}")

@@ -649,6 +649,52 @@ export interface LabelerNextTaskResponse {
   withheld_count?: number;
 }
 
+// Labeling job cleanup, work stealing, and podium types
+// (labeling-job-cleanup-work-stealing-and-podium).
+
+/**
+ * One ranked Winner_Podium entry of the Podium_Ranking: place 1-3, the
+ * submitter's Submitted-task count, and their Final_Submission_Timestamp;
+ * `email` is carried exactly when the submitter is a current member of the
+ * job's Labeling_Team (labeling-job-cleanup-work-stealing-and-podium
+ * Requirements 7.4, 7.5, 8.2).
+ */
+export interface PodiumEntry {
+  place: 1 | 2 | 3;
+  user_id: string;
+  email?: string;
+  submitted: number;
+  /** Epoch seconds of the submitter's last submission within the job. */
+  final_submitted_at: number;
+}
+
+/**
+ * Response of `GET /labeler/jobs/{jobId}/pool`: the job's team-pool state
+ * for the caller — the exact count of Stealable_Tasks (zero unless the job
+ * is InProgress), the Job_Complete condition, and the `podium` list exactly
+ * when Job_Complete holds (labeling-job-cleanup-work-stealing-and-podium
+ * Requirements 6.1, 8.2).
+ */
+export interface LabelerJobPoolResponse {
+  job_id: string;
+  stealable_count: number;
+  job_complete: boolean;
+  podium?: PodiumEntry[];
+}
+
+/**
+ * Response of `POST /labeler/jobs/{jobId}/steal`: the one Task_Assignment
+ * transferred to the caller, the Donor it was taken from (a teammate's sub
+ * or `UNASSIGNED`), and the count of Stealable_Tasks remaining after the
+ * transfer (labeling-job-cleanup-work-stealing-and-podium Requirement 5.1).
+ */
+export interface StealTaskResponse {
+  task_id: string;
+  job_id: string;
+  stolen_from: string;
+  stealable_count: number;
+}
+
 /**
  * One per-image row of `GET /labeling/{id}/review`: the auto-labeled
  * result or failed status plus the current accept/reject decision
@@ -2218,6 +2264,27 @@ class ApiService {
   }
 
   /**
+   * Request deletion of a resting DDA Labeling_Job (status Completed,
+   * Failed, Stopped, DeleteFailed, or Deleting as the idempotent
+   * re-trigger); the 202 answer carries `status: 'Deleting'` and the async
+   * cleanup removes the job's task assignments and pre-label/annotation
+   * artifacts while retaining the dataset images and any generated
+   * training manifest (labeling-job-cleanup-work-stealing-and-podium
+   * Requirements 1.1, 1.5, 4.4). A 400 indicates a Ground Truth job or a
+   * job that must be stopped first; a 404 indicates the job does not
+   * exist.
+   */
+  async deleteLabelingJob(jobId: string): Promise<{
+    job_id: string;
+    status: string;
+    message?: string;
+  }> {
+    return this.request(`/labeling/${encodeURIComponent(jobId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /**
    * Re-run Pre_Label generation for a DDA Labeling_Job's Failed
    * pre-label tasks, optionally replacing a grounded-sam job's
    * `prompt_overrides` in the same request; the body field is omitted
@@ -2262,6 +2329,33 @@ class ApiService {
    */
   async getNextTask(jobId: string): Promise<LabelerNextTaskResponse> {
     return this.request(`/labeler/jobs/${encodeURIComponent(jobId)}/next`);
+  }
+
+  /**
+   * Fetch the job's team-pool state for the caller: the count of
+   * Stealable_Tasks, the Job_Complete condition, and the Winner_Podium
+   * entries exactly when the job is complete
+   * (labeling-job-cleanup-work-stealing-and-podium Requirements 6.1, 8.2).
+   * A 403 indicates the caller is not a current member of the job's
+   * Labeling_Team or the job is missing or Ground Truth.
+   */
+  async getLabelerJobPool(jobId: string): Promise<LabelerJobPoolResponse> {
+    return this.request(`/labeler/jobs/${encodeURIComponent(jobId)}/pool`);
+  }
+
+  /**
+   * Take exactly one Stealable_Task from a teammate (or the UNASSIGNED
+   * pool) in an InProgress team job; the transferred task is then served
+   * through the existing next-task flow
+   * (labeling-job-cleanup-work-stealing-and-podium Requirements 5.1, 6.3).
+   * A 409 indicates no stealable tasks remain or the job is not
+   * InProgress; a 403 indicates the caller is not a current member of the
+   * job's Labeling_Team or the job is missing or Ground Truth.
+   */
+  async stealTask(jobId: string): Promise<StealTaskResponse> {
+    return this.request(`/labeler/jobs/${encodeURIComponent(jobId)}/steal`, {
+      method: 'POST',
+    });
   }
 
   /**

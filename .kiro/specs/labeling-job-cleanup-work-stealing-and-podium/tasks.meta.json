@@ -1,0 +1,437 @@
+{
+  "pbtResults": {
+    "2.9 Write the podium rendering property test": {
+      "status": "passed",
+      "lastRunTimestamp": 1788795395230
+    },
+    "2.7 Write the canvas clear/restore property test": {
+      "status": "passed",
+      "lastRunTimestamp": 1788796936239
+    },
+    "1.7 Write the podium property tests": {
+      "status": "passed",
+      "lastRunTimestamp": 1788798797466
+    },
+    "2.8 Write the workspace steal-loop property test": {
+      "status": "passed",
+      "lastRunTimestamp": 1788797955815
+    },
+    "1.5 Write the deletion property tests": {
+      "status": "passed",
+      "lastRunTimestamp": 1788798259867
+    },
+    "1.6 Write the work-stealing property tests": {
+      "status": "passed",
+      "lastRunTimestamp": 1788798284557
+    }
+  },
+  "executionHistory": {
+    "1.1 Add `podium_ranking` to the shared layer `labeling_distribution.py`": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793019966
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793060390
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788794097573
+      }
+    ],
+    "1.2 Add the `delete_job` action to `dda_labeling_worker.py`": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793021978
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793062297
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788794099912
+      }
+    ],
+    "1.3 Add the deletion, pool, and steal routes to `dda_labeling.py`": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793023310
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788794112351
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788795109675
+      }
+    ],
+    "1.4 Add the podium key to the DDA job detail payload in `labeling.py`": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793024874
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788794114397
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797016422
+      }
+    ],
+    "2.1 Extend the API client in `api.ts`": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793026483
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793064384
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788794102177
+      }
+    ],
+    "2.2 Create the `WinnerPodium` component": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793027913
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793066195
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788794103582
+      }
+    ],
+    "2.3 Add clear/restore to `AnnotationCanvas.tsx`": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793029498
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793067695
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788794105794
+      }
+    ],
+    "2.4 Add the steal loop and completion podium to `LabelerWorkspace.tsx`": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793031071
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788794117644
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788795111511
+      }
+    ],
+    "2.5 Add the delete control and podium to `LabelingDetail.tsx`": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793032442
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788794119242
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788795113603
+      }
+    ],
+    "2.6 Add the list delete control to `Labeling.tsx`": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793034057
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788795123342
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797018715
+      }
+    ],
+    "3.1 Register the routes in `dda-labeling-api-stack.ts`": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793035172
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788794115863
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788795115527
+      }
+    ],
+    "4. Checkpoint — Ensure all tests pass, ask the user if questions arise": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793036541
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788799792941
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788800547709
+      }
+    ],
+    "5.1 Deploy the compute stack (worker flag MANDATORY, bare CloudFront domain) and the frontend": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793038029
+      }
+    ],
+    "5.2 Live verification — scratch job driven through steal, podium, and deletion on ryvan-cookies": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788793039337
+      }
+    ],
+    "3. Infrastructure: the three routes in the DDA labeling nested stack": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788795116706
+      }
+    ],
+    "2.7 Write the canvas clear/restore property test": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788795125319
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797022243
+      }
+    ],
+    "2.9 Write the podium rendering property test": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788795127141
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797022867
+      }
+    ],
+    "2.13 Write the canvas clear example tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788795128542
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797025484
+      }
+    ],
+    "1. Backend: shared ranking, deletion worker, labeling routes, detail podium": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797017453
+      }
+    ],
+    "2. Frontend: API client, podium component, canvas clear, workspace loop, job pages": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797020082
+      }
+    ],
+    "1.5 Write the deletion property tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797032589
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788798376197
+      }
+    ],
+    "1.6 Write the work-stealing property tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797034219
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788798377030
+      }
+    ],
+    "1.7 Write the podium property tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797035672
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788798378711
+      }
+    ],
+    "2.8 Write the workspace steal-loop property test": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797037707
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788798380582
+      }
+    ],
+    "3.2 Write the CDK assertion tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788797039072
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788798381716
+      }
+    ],
+    "1.8 Write the deletion example tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788798388551
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788799244919
+      }
+    ],
+    "1.9 Write the work-stealing example tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788798390247
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788799246866
+      }
+    ],
+    "1.10 Write the podium payload example tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788798391348
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788799248723
+      }
+    ],
+    "2.10 Write the workspace example tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788798393066
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788799250168
+      }
+    ],
+    "2.11 Write the detail-page example tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788798394598
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788799251985
+      }
+    ],
+    "2.12 Write the list-page example tests": [
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788799258816
+      },
+      {
+        "executionId": "eef43593-ba5a-48ab-b346-62665f99a088",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788799791454
+      }
+    ]
+  }
+}
