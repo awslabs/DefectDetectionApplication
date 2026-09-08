@@ -854,22 +854,23 @@ export default function LabelingDetail() {
                       ? rawJob.label_set.join(', ')
                       : '-',
                 },
+                // Timestamps are stored as epoch seconds; convert to ms for Date
                 {
                   label: 'Created',
                   value: rawJob.created_at
-                    ? new Date(rawJob.created_at).toLocaleString()
+                    ? new Date(rawJob.created_at * 1000).toLocaleString()
                     : '-',
                 },
                 {
                   label: 'Completed',
                   value: rawJob.completed_at
-                    ? new Date(rawJob.completed_at).toLocaleString()
+                    ? new Date(rawJob.completed_at * 1000).toLocaleString()
                     : '-',
                 },
                 {
                   label: 'Stopped',
                   value: rawJob.stopped_at
-                    ? new Date(rawJob.stopped_at).toLocaleString()
+                    ? new Date(rawJob.stopped_at * 1000).toLocaleString()
                     : '-',
                 },
                 {
@@ -1239,21 +1240,23 @@ export default function LabelingDetail() {
                           '-'
                         ),
                       },
+                      // Timestamps are stored as epoch seconds; convert to ms for Date
                       {
                         label: 'Created',
-                        value: new Date(job.created_at).toLocaleString(),
+                        value: new Date(job.created_at * 1000).toLocaleString(),
                       },
                       {
                         label: 'Completed',
                         value: job.completed_at
-                          ? new Date(job.completed_at).toLocaleString()
+                          ? new Date(job.completed_at * 1000).toLocaleString()
                           : '-',
                       },
                       {
                         label: 'Duration',
+                        // Operands in epoch seconds; 3600 seconds per hour
                         value: job.completed_at
-                          ? `${Math.round((job.completed_at - job.created_at) / 3600000)} hours`
-                          : `${Math.round((Date.now() - job.created_at) / 3600000)} hours (ongoing)`,
+                          ? `${Math.round((job.completed_at - job.created_at) / 3600)} hours`
+                          : `${Math.round((Date.now() / 1000 - job.created_at) / 3600)} hours (ongoing)`,
                       },
                     ]}
                   />

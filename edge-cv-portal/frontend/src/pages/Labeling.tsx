@@ -521,7 +521,8 @@ export default function Labeling() {
               {
                 id: 'created_at',
                 header: 'Created',
-                cell: (item) => new Date(item.created_at).toLocaleString(),
+                // created_at is epoch seconds; convert to ms (same convention as the datasets table below)
+                cell: (item) => new Date(item.created_at * 1000).toLocaleString(),
                 sortingField: 'created_at',
               },
             ]}
