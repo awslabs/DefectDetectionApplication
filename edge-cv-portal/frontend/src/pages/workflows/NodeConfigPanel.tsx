@@ -82,6 +82,8 @@ import {
   isAravisCompatibleCamera,
   isCameraReferenceParameter,
   isV4l2CompatibleCamera,
+  STATIC_IMAGE_FOCUS_PARAM,
+  STATIC_IMAGE_FOCUS_VALUE,
   type CameraBindingHint,
   type CameraSourceEntry,
 } from './cameraReference';
@@ -1316,6 +1318,12 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
               const params = new URLSearchParams();
               if (selectedUsecaseId) params.set('usecase_id', selectedUsecaseId);
               params.set('tab', 'cameras');
+              // Focus target so the Cameras tab brings the static-image
+              // panel into view and flags it on arrival, instead of
+              // landing above a multi-row cameras table with the pin
+              // controls off-screen (static-image-camera-binding-and-pin-
+              // discoverability Requirement 2.5).
+              params.set(STATIC_IMAGE_FOCUS_PARAM, STATIC_IMAGE_FOCUS_VALUE);
               window.open(
                 `/devices/${encodeURIComponent(selectedDeviceId)}?${params.toString()}`,
                 '_blank',

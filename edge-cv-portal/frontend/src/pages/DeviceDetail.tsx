@@ -22,6 +22,10 @@ import {
 import { apiService } from '../services/api';
 import { Device, InstalledComponent, DeviceDeployment, ModelProviderStatus } from '../types';
 import DeviceCamerasTab from '../components/DeviceCamerasTab';
+import {
+  STATIC_IMAGE_FOCUS_PARAM,
+  STATIC_IMAGE_FOCUS_VALUE,
+} from './workflows/cameraReference';
 import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
 import RemoteAccessTab from '../components/RemoteAccessTab';
 import ResultsTab from '../components/ResultsTab';
@@ -74,6 +78,15 @@ export default function DeviceDetail() {
   const [archError, setArchError] = useState<string | null>(null);
 
   const usecaseId = searchParams.get('usecase_id');
+
+  // ?focus=static-image accompanies the pin shortcut's ?tab=cameras: the
+  // Cameras tab brings the "Static image camera" panel into view and
+  // flags it on arrival, so the pin controls are not left off-screen
+  // below the cameras table (static-image-camera-binding-and-pin-
+  // discoverability Requirement 2.5). Passed as a prop — DeviceCamerasTab
+  // stays router-independent.
+  const focusStaticImage =
+    searchParams.get(STATIC_IMAGE_FOCUS_PARAM) === STATIC_IMAGE_FOCUS_VALUE;
 
   // Logs state
   const [logGroups, setLogGroups] = useState<LogGroup[]>([]);
@@ -715,7 +728,11 @@ export default function DeviceDetail() {
             id: 'cameras',
             label: 'Cameras',
             content: (
-              <DeviceCamerasTab deviceId={device.device_id} usecaseId={usecaseId || ''} />
+              <DeviceCamerasTab
+                deviceId={device.device_id}
+                usecaseId={usecaseId || ''}
+                focusStaticImage={focusStaticImage}
+              />
             ),
           },
           {

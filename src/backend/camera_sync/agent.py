@@ -21,6 +21,16 @@ state, the first successful write after a connectivity outage is
 automatically the complete catch-up publication (3.3) — no separate queue
 of unpublished deltas is needed.
 
+The one exception to "full state only" is key RETIREMENT
+(:data:`RETIRED_CAMERA_SOURCE_IDS`, feature
+static-image-camera-binding-and-pin-discoverability Requirement 2.9):
+shadow updates MERGE nested maps, so a camera key a newer build stops
+reporting stays alive in the shadow document and the Portal's
+missing-from-report deletion path never fires. Such a key is therefore
+written ONCE with an explicit ``null``, which removes it — the same
+mechanism the Portal already uses in ``_clear_static_camera_shadow_key``.
+Only keys the device really published are retired, and only once.
+
 Report triggers (all funnel through :meth:`EdgeSyncAgent.report_inventory`):
 
 - LocalServer start: :meth:`EdgeSyncAgent.start` schedules an immediate
@@ -63,6 +73,7 @@ from fastapi import HTTPException
 from marshmallow import ValidationError
 
 from camera_sync.inventory import (
+    STATIC_IMAGE_ARAVIS_STABLE_ID,
     CameraSourceState,
     build_inventory,
     configured_camera_source_id,
@@ -112,6 +123,15 @@ REASON_DISCOVERY_MANAGED = "discovery-managed"
 #: discovered-only hardware reports under its ``disc-…`` discovery id.
 _CONFIGURED_PREFIX = "cfg-"
 _DISCOVERED_PREFIX = "disc-"
+
+#: Camera keys this build no longer reports and that must be RETIRED from
+#: the shadow — deleted with an explicit ``null`` rather than merely
+#: omitted (feature static-image-camera-binding-and-pin-discoverability,
+#: Requirement 2.9). Currently just the aravis-enumerated duplicate of the
+#: Static_Image_Camera, whose exclusion from the reported inventory landed
+#: in :mod:`camera_sync.inventory` (third hardware finding). Derived from
+#: the shipped enumeration identity, never hardcoded (Requirement 2.11).
+RETIRED_CAMERA_SOURCE_IDS: Tuple[str, ...] = (STATIC_IMAGE_ARAVIS_STABLE_ID,)
 
 #: Capability-truncation ladder: (max formats per camera, max resolutions
 #: per format). ``None`` means unlimited. Tried in order until the document
@@ -225,6 +245,9 @@ def _truncate_document(
     truncated = dict(document)
     cameras: Dict[str, Any] = {}
     for csid, entry in document["cameras"].items():
+        if not isinstance(entry, Mapping):
+            cameras[csid] = entry  # retirement tombstone (a null value)
+            continue
         shrunk, changed = _shrink_capabilities(
             entry.get("capabilities") or {}, max_formats, max_resolutions
         )
@@ -247,6 +270,7 @@ def build_report_document(
     discovery_errors: Optional[Iterable[Mapping[str, Any]]] = None,
     acks: Optional[Mapping[str, str]] = None,
     aliases: Optional[Mapping[str, str]] = None,
+    retirements: Optional[Iterable[str]] = None,
     max_bytes: int = MAX_REPORT_BYTES,
 ) -> Dict[str, Any]:
     """Pure builder of the complete reported document (design section 3).
@@ -262,9 +286,21 @@ def build_report_document(
     match the pending create entry's ``portal_change_id`` (Requirement
     5.3). Aliases are one-shot — omitted from the next report, they age
     out of the registry through the reducer's deletion path.
+
+    ``retirements`` are already-published camera keys that must cease to
+    exist in the shadow (feature
+    static-image-camera-binding-and-pin-discoverability, Requirement 2.9):
+    each is written with an explicit ``null`` value, which is the only way
+    to REMOVE a key from a shadow document — updates merge nested maps, so
+    a key merely omitted from a full report stays alive in every documents
+    event and the Portal's missing-from-report deletion path never fires.
+    A key present in the live inventory is never retired (a live entry
+    always wins), and the null never reaches the Portal parser: the
+    documents event carries the post-merge state, from which the key is
+    gone. Retirements are one-shot, driven by the caller.
     """
     acks = acks or {}
-    cameras = {
+    cameras: Dict[str, Any] = {
         entry.camera_source_id: _camera_entry(
             entry,
             versions.get(entry.camera_source_id, 1),
@@ -275,6 +311,9 @@ def build_report_document(
     for alias_csid, real_csid in (aliases or {}).items():
         if real_csid in cameras and alias_csid not in cameras:
             cameras[alias_csid] = dict(cameras[real_csid])
+    for retired_csid in sorted(retirements or ()):
+        if retired_csid not in cameras:
+            cameras[retired_csid] = None
     document: Dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
         "reportedAt": int(reported_at_ms),
@@ -433,6 +472,19 @@ class EdgeSyncAgent:
         self._consumed_acks: Dict[str, str] = {}
         self._consumed_aliases: Dict[str, str] = {}
         self._consumed_failures: Dict[str, Dict[str, Any]] = {}
+
+        # One-shot retirement of already-published camera keys this build
+        # no longer reports (feature
+        # static-image-camera-binding-and-pin-discoverability, Requirement
+        # 2.9 — the aravis-enumerated Static_Image_Camera duplicate).
+        # Same lifecycle as the acks/aliases/failures above: pending until
+        # a report carrying them is written SUCCESSFULLY (so an offline
+        # retry still carries the deletion), then retired for the rest of
+        # the process and pruned from the version floor so nothing
+        # re-emits it.
+        self._pending_retirements: set = set()
+        self._consumed_retirements: set = set()
+        self._retired_registrations: set = set()
 
         self._stop_event = threading.Event()
         self._wakeup = threading.Event()
@@ -764,6 +816,10 @@ class EdgeSyncAgent:
         snapshot = (
             self._discovery.latest_snapshot if self._discovery is not None else None
         )
+        # Collected BEFORE the state store is advanced: `advance` rewrites
+        # the state file from the current inventory, which is one of the
+        # two records answering "previously reported".
+        retirements = self._collect_retirements()
         inventory = self._load_inventory(snapshot)
         versions = self._state_store.advance(inventory, self._reported_versions)
         discovery_errors = [
@@ -779,6 +835,7 @@ class EdgeSyncAgent:
             self._consumed_acks = dict(acks)
             self._consumed_aliases = dict(aliases)
             self._consumed_failures = {k: dict(v) for k, v in failures.items()}
+            self._consumed_retirements = set(retirements)
         # A source with an outstanding apply failure reports through the
         # `failures` map, not `cameras` (design reported-document shape):
         # the Portal keeps its recorded entry marked failed (Req 5.4).
@@ -794,7 +851,40 @@ class EdgeSyncAgent:
             discovery_errors=discovery_errors,
             acks=acks,
             aliases=aliases,
+            retirements=retirements,
         )
+
+    def _collect_retirements(self) -> Tuple[str, ...]:
+        """The already-published camera keys this report must RETIRE with
+        an explicit ``null`` (Requirement 2.9).
+
+        A key qualifies exactly once, and only when the device really
+        published it: shadow updates MERGE nested maps, so a key this
+        build no longer reports would otherwise stay alive in the shadow
+        forever and the Portal's missing-from-report deletion path would
+        never fire (bugfix.md 1.11). A device that never published the key
+        gets NO retirement write at all — deleting a key that was never
+        there is a pointless shadow write.
+
+        "Previously reported" is answered from the same two independent
+        records :meth:`_static_previously_reported` uses (see
+        :meth:`_previously_reported`), never from a third mechanism.
+        """
+        newly = [
+            key
+            for key in RETIRED_CAMERA_SOURCE_IDS
+            if key not in self._retired_registrations
+            and key not in self._pending_retirements
+            and self._previously_reported(key)
+        ]
+        if newly:
+            logger.info(
+                "Retiring already-published camera registration(s) %s from "
+                "the camera-registry shadow (explicit null delete)",
+                ", ".join(newly),
+            )
+        self._pending_retirements.update(newly)
+        return tuple(sorted(self._pending_retirements))
 
     def _make_session(self):
         """A DB session from the injected factory (default: the LocalServer
@@ -874,14 +964,29 @@ class EdgeSyncAgent:
         return self._static_absent_since_ms
 
     def _static_previously_reported(self) -> bool:
-        if STATIC_IMAGE_CAMERA_ID in self._reported_versions:
+        return self._previously_reported(STATIC_IMAGE_CAMERA_ID)
+
+    def _previously_reported(self, camera_source_id: str) -> bool:
+        """Whether the Portal has already seen ``camera_source_id`` in a
+        report, from two independent records (Requirements 6.2, 2.9).
+
+        The start-time shadow reported-versions floor survives state-file
+        loss or corruption; the version state store, persisted on every
+        successful report, tracks entries first reported at runtime after
+        that GET (and covers a GET that failed because the device started
+        offline). Either record knowing the id means the Portal has seen
+        it. Generalized from the Static_Image_Camera absence gate so the
+        duplicate-key retirement reuses exactly this answer rather than
+        inventing a third mechanism.
+        """
+        if camera_source_id in self._reported_versions:
             return True
         try:
             state = self._state_store.load()
         except Exception:  # noqa: BLE001 - state read must not break reports
             logger.exception("Camera sync state store read failed")
             state = None
-        return bool(state) and STATIC_IMAGE_CAMERA_ID in state
+        return bool(state) and camera_source_id in state
 
     def _derive_static_absent_since(self) -> int:
         marker = None
@@ -920,9 +1025,20 @@ class EdgeSyncAgent:
                 for csid, failure in self._consumed_failures.items():
                     if self._apply_failures.get(csid) == failure:
                         del self._apply_failures[csid]
+                # The retirement this document carried is now applied: the
+                # shadow key is gone. Prune it from the version floor so
+                # nothing re-derives "previously reported" from it — the
+                # state store prunes itself, since `advance` rewrites the
+                # file from the current inventory, which no longer carries
+                # the key (Requirement 2.9's one-shot, no-churn rule).
+                for csid in self._consumed_retirements:
+                    self._pending_retirements.discard(csid)
+                    self._retired_registrations.add(csid)
+                    self._reported_versions.pop(csid, None)
                 self._consumed_acks = {}
                 self._consumed_aliases = {}
                 self._consumed_failures = {}
+                self._consumed_retirements = set()
             return True
         except Exception:  # noqa: BLE001 - offline/transport errors retry
             logger.exception(

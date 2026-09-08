@@ -166,6 +166,19 @@ export interface StaticImageDeviceReported {
   absentSince?: number | null;
 }
 
+/**
+ * Query parameter the node panel's "Pin a static test image…" shortcut
+ * carries into the device page, and that the device Cameras tab reads to
+ * bring the "Static image camera" panel into view and flag it on arrival
+ * (static-image-camera-binding-and-pin-discoverability Requirement 2.5).
+ * Shared by the writer (`NodeConfigPanel`) and the reader
+ * (`DeviceDetail`) so the two cannot drift apart.
+ */
+export const STATIC_IMAGE_FOCUS_PARAM = 'focus';
+
+/** Value of `STATIC_IMAGE_FOCUS_PARAM` targeting the static-image panel. */
+export const STATIC_IMAGE_FOCUS_VALUE = 'static-image';
+
 /** Response of `GET /devices/{id}/cameras/static-image` (status view). */
 export interface StaticImagePinStatusResponse {
   deviceId: string;
@@ -359,13 +372,65 @@ export function isAravisCompatibleCamera(camera: CameraSourceEntry): boolean {
 }
 
 /**
+ * The Static_Image_Camera's enumeration id as the device reports it
+ * inside the entry's capability metadata — `capabilities.staticImage.id`
+ * as a non-empty string, else null
+ * (static-image-camera-binding-and-pin-discoverability Requirement 2.1).
+ *
+ * The device reports the static camera with an EMPTY `params` block and
+ * its identity under `capabilities.staticImage`
+ * (`_static_image_entry()` in `src/backend/camera_sync/inventory.py`),
+ * which is the shipped, hardware-verified inventory contract. The id is
+ * read from that block rather than compared against a hardcoded
+ * `'static-image-camera'`, so a future change to the device's fixed
+ * enumeration identity flows through.
+ *
+ * Registry payloads are external input, so the lookup is guarded the
+ * way `getCameraBindingHint` guards the advisory hint: a null, array, or
+ * non-object `staticImage`, or a non-string / empty `id`, resolves null
+ * instead of throwing.
+ */
+function staticImageCapabilityId(camera: CameraSourceEntry): string | null {
+  const block = (camera.capabilities ?? {}).staticImage;
+  if (
+    block === null ||
+    block === undefined ||
+    typeof block !== 'object' ||
+    Array.isArray(block)
+  ) {
+    return null;
+  }
+  const id = (block as Record<string, JsonValue>).id;
+  return typeof id === 'string' && id !== '' ? id : null;
+}
+
+/**
  * The Aravis camera id a Camera_Source resolves to (`params.cameraId`
  * as a non-empty string), or null when the source carries none
  * (Requirement 3.3 population and 3.5 display).
+ *
+ * `params.cameraId` is resolved FIRST and unchanged; a `StaticImage`
+ * entry that carries no usable one falls back to its capabilities
+ * identity, so the Static_Image_Camera the picker already offers binds
+ * instead of leaving `camera_id` unset
+ * (static-image-camera-binding-and-pin-discoverability Requirements 2.1,
+ * 2.2, 3.1). The fallback is scoped to `StaticImage` deliberately:
+ * `isAravisCompatibleCamera()` resolves ids in its `Camera` arm, so a
+ * type-agnostic fallback would let a `Camera` entry carrying a
+ * StaticImage capabilities block become Aravis-compatible and widen the
+ * offered set past the deploy-time compatible set (Requirement 3.4).
+ * `StaticImage` is already unconditionally compatible, so the type gate
+ * costs this fix nothing.
  */
 export function cameraIdValue(camera: CameraSourceEntry): string | null {
   const cameraId = (camera.params ?? {}).cameraId;
-  return typeof cameraId === 'string' && cameraId !== '' ? cameraId : null;
+  if (typeof cameraId === 'string' && cameraId !== '') {
+    return cameraId;
+  }
+  if (camera.type === 'StaticImage') {
+    return staticImageCapabilityId(camera);
+  }
+  return null;
 }
 
 /**

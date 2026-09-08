@@ -1086,8 +1086,13 @@ describe('NodeConfigPanel', () => {
         await waitFor(() => expect(shortcut).not.toBeDisabled());
         fireEvent.click(shortcut);
 
+        // The URL also carries the static-image focus target the device
+        // Cameras tab reads to bring the pin panel into view on arrival
+        // (static-image-camera-binding-and-pin-discoverability Req 2.5);
+        // the usecase_id and tab parameters, the new tab, and `noopener`
+        // are unchanged.
         expect(windowOpen).toHaveBeenCalledWith(
-          '/devices/dev-1?usecase_id=uc-1&tab=cameras',
+          '/devices/dev-1?usecase_id=uc-1&tab=cameras&focus=static-image',
           '_blank',
           'noopener'
         );

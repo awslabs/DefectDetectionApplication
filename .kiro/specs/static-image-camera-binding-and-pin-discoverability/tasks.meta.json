@@ -1,0 +1,31 @@
+{
+  "pbtResults": {
+    "1. Write bug condition exploration test": {
+      "status": "passed",
+      "failingExample": "Bug condition CONFIRMED on unfixed code — 8 failed | 3 passed (11 tests, 3 files).\n\nDefect 1 (fast-check counterexamples, staticImageCameraBinding.property.test.ts):\n[1] cameraIdValue: seed 1139895914, path \"0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0\", shrunk 15x\n    Counterexample: [{\"camera_source_id\":\" \",\"name\":null,\"params\":{},\"origin\":\"edge-discovered\",\"sync_status\":\"synced\",\"absent\":false,\"absent_since\":1,\"stale\":false,\"type\":\"StaticImage\",\"capabilities\":{\"staticImage\":{\"id\":\" \"}}}]\n    AssertionError: expected null to be ' ' (cameraIdValue returned null)\n[2] applyAravisCameraSelection: seed -69712963, path \"0:0:...:0\" (21), shrunk 20x\n    Counterexample: [{},{\"camera_source_id\":\" \",\"name\":\"\",\"params\":undefined,\"origin\":\"edge-discovered\",\"sync_status\":\"synced\",\"absent\":false,\"absent_since\":null,\"stale\":false,\"type\":\"StaticImage\",\"capabilities\":{\"staticImage\":{\"id\":\" \"}}},\" \"]\n    AssertionError: expected undefined to be ' ' (parameters.camera_id absent)\n[3] Live jetson-thor1 shadow entry (params:{}, capabilities.staticImage.id:'static-image-camera'):\n    cameraIdValue -> null (expected 'static-image-camera')\n    applyAravisCameraSelection({}, entry, 'jetson-thor1').parameters has no 'camera_id' key (hasOwnProperty false)\n    with prior {gain:3,exposure:1000,other:'keep'} -> camera_id still undefined\n\nDefect 2 (component/shortcut):\n[4] DeviceCamerasTab.staticImageFocus.test.tsx, focusStaticImage set:\n    AssertionError: expected \"vi.fn()\" to be called at least once (Element.prototype.scrollIntoView never called — no scroll on arrival)\n    TestingLibraryElementError: Unable to find an element by: [data-testid=\"static-image-focus-flag\"] (no arrival flag)\n[5] NodeConfigPanel.pinShortcut.test.tsx:\n    window.open URL '/devices/jetson-thor1?usecase_id=uc-1&tab=cameras' -> searchParams.get('focus') === null (expected 'static-image')\n\nThe 3 passing tests are the bug-condition-establishing ones (picker offers the StaticImage entry, 9-row landing with the panel below the table, shortcut hidden in manual-entry mode) — they must keep passing.",
+      "lastRunTimestamp": 1788884959500
+    },
+    "6. Write bug condition exploration test for the duplicate registration (device-side)": {
+      "status": "passed",
+      "failingExample": "Bug-condition exploration: the tests FAIL on unfixed code, which is the SUCCESS\noutcome — the duplicate is confirmed. Container run: 4 failed, 1 passed.\n\n1) test_static_image_camera_is_registered_exactly_once (hypothesis, shrunk):\n   Falsifying example: sources=[], v4l2=[], physical=[], pinned=False,\n   fresh_pass=False, metadata=None, absent_since=None, tracker_absent_since=0\n   AssertionError: one virtual Static_Image_Camera must yield exactly 0\n   registration(s) (pinned=False, absentSince=None); got 1:\n   [('arv-6c84191b7fe6', 'AravisDiscovered', True,\n     {'cameraId': 'static-image-camera', 'serial': 'STATIC-IMAGE-0',\n      'protocol': 'StaticImage', 'address': 'internal'})]\n\n2) test_live_jetson_thor1_duplicate_pair_is_a_single_registration\n   (unpinned-after-reported, the exact live payload):\n   got [('arv-6c84191b7fe6', 'AravisDiscovered', True,\n         {'cameraId': 'static-image-camera', 'serial': 'STATIC-IMAGE-0',\n          'protocol': 'StaticImage', 'address': 'internal'}),\n        ('static-image-camera', 'StaticImage', True, {})]\n   -> TWO registrations for one virtual camera, expected exactly one.\n\n3) test_live_jetson_thor1_pinned_merge_is_a_single_registration (pinned):\n   got [('arv-6c84191b7fe6', 'AravisDiscovered', False,\n         {'cameraId': 'static-image-camera', 'serial': 'STATIC-IMAGE-0',\n          'protocol': 'StaticImage', 'address': 'internal'})]\n   reported alongside the dedicated 'static-image-camera' entry.\n\n4) test_published_duplicate_key_is_retired_exactly_once (migration half):\n   Falsifying example: already_published=True, pinned=False, report_count=1\n   AssertionError: the already-published duplicate arv-6c84191b7fe6 must be\n   retired exactly 1 time(s) across 1 report(s); retirement writes: [];\n   reported camera keys per write: [['static-image-camera']]\n\nPassing by design (supporting identity pin, not a bug-condition assertion):\ntest_derived_static_image_aravis_stable_id_matches_live_registry —\naravis_stable_id('AWS-DDA','Static Image Camera','STATIC-IMAGE-0',\n'static-image-camera') == 'arv-6c84191b7fe6', derived, never hardcoded.",
+      "lastRunTimestamp": 1788885161592
+    },
+    "2. Write preservation property tests (BEFORE implementing fix)": {
+      "status": "passed",
+      "lastRunTimestamp": 1788886007714
+    },
+    "7. Write preservation property tests for the device track (BEFORE implementing the fix)": {
+      "status": "passed",
+      "lastRunTimestamp": 1788886199894
+    },
+    "3.3 Verify bug condition exploration test now passes": {
+      "status": "passed",
+      "lastRunTimestamp": 1788886551366
+    },
+    "3.4 Verify preservation tests still pass": {
+      "status": "passed",
+      "lastRunTimestamp": 1788886615215
+    }
+  },
+  "executionHistory": {}
+}

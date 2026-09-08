@@ -13,7 +13,7 @@
  * The small formatting helpers are exported pure functions so the
  * component tests (task 8.2) can target them directly.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Badge,
@@ -193,6 +193,15 @@ interface StaticImagePanelProps {
   usecaseId: string;
   /** Whether the user holds the device-mutation permission (Req 8.1). */
   canMutate: boolean;
+  /**
+   * Whether this panel is the arrival target of the node panel's
+   * "Pin a static test image…" shortcut. When set, the panel carries a
+   * visual arrival flag so the pin controls — not the prominent
+   * "Create camera source" button, whose type options exclude
+   * StaticImage by design — read as the obvious next action
+   * (static-image-camera-binding-and-pin-discoverability Reqs 2.5, 2.6).
+   */
+  focused?: boolean;
 }
 
 /**
@@ -203,7 +212,12 @@ interface StaticImagePanelProps {
  * replace, and remove actions gated on the mutation permission
  * (Reqs 1.5, 7.2, 8.1); polls the status route while pending.
  */
-function StaticImagePanel({ deviceId, usecaseId, canMutate }: StaticImagePanelProps) {
+function StaticImagePanel({
+  deviceId,
+  usecaseId,
+  canMutate,
+  focused = false,
+}: StaticImagePanelProps) {
   const [status, setStatus] = useState<StaticImagePinStatusResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -317,6 +331,23 @@ function StaticImagePanel({ deviceId, usecaseId, canMutate }: StaticImagePanelPr
         </Header>
       }
     >
+      {/* Arrival flag for the node panel's pin shortcut (Reqs 2.5, 2.6):
+          rendered inside the panel the shortcut scrolls to, so the pin
+          controls are unmistakably the next action. */}
+      {focused && (
+        <Box margin={{ bottom: 'm' }}>
+          <Alert
+            type="info"
+            data-testid="static-image-focus-flag"
+            header="Pin a static test image here"
+          >
+            The workflow node&apos;s camera picker sent you here. Upload an
+            image below to pin it to this device&apos;s static-image-camera
+            source; the node then binds to it like any other camera.
+          </Alert>
+        </Box>
+      )}
+
       {loading ? (
         <Box textAlign="center" padding="m">
           <Spinner />
@@ -508,9 +539,23 @@ interface CameraFormState {
 interface DeviceCamerasTabProps {
   deviceId: string;
   usecaseId: string;
+  /**
+   * Set when the tab was reached through the node panel's "Pin a static
+   * test image…" shortcut (`focus=static-image`, read from the query in
+   * `DeviceDetail` and passed down — this component takes no router
+   * dependency). The static-image panel is then scrolled into view once
+   * loading has resolved and flagged as the arrival target
+   * (static-image-camera-binding-and-pin-discoverability Reqs 2.5, 2.6).
+   * Optional: every other call site renders exactly as before.
+   */
+  focusStaticImage?: boolean;
 }
 
-export default function DeviceCamerasTab({ deviceId, usecaseId }: DeviceCamerasTabProps) {
+export default function DeviceCamerasTab({
+  deviceId,
+  usecaseId,
+  focusStaticImage = false,
+}: DeviceCamerasTabProps) {
   const { user } = useAuth();
   const [camerasResponse, setCamerasResponse] = useState<DeviceCamerasResponse | null>(null);
   const [conflictsResponse, setConflictsResponse] =
@@ -550,6 +595,22 @@ export default function DeviceCamerasTab({ deviceId, usecaseId }: DeviceCamerasT
   useEffect(() => {
     loadAll();
   }, [loadAll]);
+
+  // Arrival from the node panel's pin shortcut: bring the static-image
+  // panel into view once the registry load has resolved and the panel is
+  // mounted (Req 2.5). Scrolled at most once per arrival so a later
+  // refresh or poll never yanks the page around; jsdom does not
+  // implement scrollIntoView, hence the optional call.
+  const staticImagePanelRef = useRef<HTMLDivElement | null>(null);
+  const scrolledToStaticImage = useRef(false);
+  useEffect(() => {
+    if (!focusStaticImage || loading || loadError !== null) return;
+    if (scrolledToStaticImage.current) return;
+    const wrapper = staticImagePanelRef.current;
+    if (wrapper === null) return;
+    scrolledToStaticImage.current = true;
+    wrapper.scrollIntoView?.({ block: 'start' });
+  }, [focusStaticImage, loading, loadError]);
 
   const handleRefreshNow = async () => {
     try {
@@ -852,12 +913,16 @@ export default function DeviceCamerasTab({ deviceId, usecaseId }: DeviceCamerasT
       />
 
       {/* Static image camera provisioning (cloud-static-camera-
-          provisioning task 9.1) */}
-      <StaticImagePanel
-        deviceId={deviceId}
-        usecaseId={usecaseId}
-        canMutate={canManageDeviceCameras(user?.role)}
-      />
+          provisioning task 9.1). The wrapper is the scroll target for the
+          node panel's pin shortcut (Req 2.5). */}
+      <div ref={staticImagePanelRef}>
+        <StaticImagePanel
+          deviceId={deviceId}
+          usecaseId={usecaseId}
+          canMutate={canManageDeviceCameras(user?.role)}
+          focused={focusStaticImage}
+        />
+      </div>
 
       {/* Conflict events (Reqs 6.3, 6.4) */}
       <Table
@@ -953,6 +1018,18 @@ export default function DeviceCamerasTab({ deviceId, usecaseId }: DeviceCamerasT
               The change is delivered to the device over the sync channel
               and stays pending until the device applies it.
             </Alert>
+            {/* Requirement 2.6: the static camera is discovery-managed, so
+                it is not a creatable type here — point at the panel that
+                does own it instead of leaving a dead end. */}
+            <Box
+              variant="small"
+              color="text-body-secondary"
+              data-testid="camera-form-static-image-note"
+            >
+              Looking to pin a static test image? Use the &quot;Static image
+              camera&quot; panel further down this tab — that source is
+              discovery-managed, so it is not created here.
+            </Box>
             <FormField label="Name">
               <Input
                 value={form.name}

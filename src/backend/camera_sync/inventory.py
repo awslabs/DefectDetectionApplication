@@ -44,6 +44,35 @@ Aravis branch (feature aravis-camera-input, Requirements 2.1, 2.3, 2.4,
   cameras produce output identical to the pre-feature merge
   (Requirement 7.2).
 
+Static_Image_Camera de-duplication (third hardware finding, jetson-thor1 /
+LocalServer.arm64JP7 1.0.24 — feature
+static-image-camera-binding-and-pin-discoverability, Requirements 2.7,
+2.8, 2.11): the virtual Static_Image_Camera was registered TWICE in the
+reported Camera_Registry. ``getCameras()`` appends
+``Camera(**STATIC_IMAGE_CAMERA_IDENTITY)`` to the Aravis bus enumeration
+while a Pinned_Image exists (base spec static-image-camera-source), so
+``enumerate_aravis()`` maps it like a physical GenICam camera and derives
+:data:`STATIC_IMAGE_ARAVIS_STABLE_ID` (``arv-6c84191b7fe6`` for the
+shipped identity) for it, while this merge appends its own dedicated
+entry under ``STATIC_IMAGE_CAMERA_ID`` — two rows, two absence
+lifecycles, and two Aravis-picker options for one camera. The merge
+therefore SKIPS the aravis-enumerated static camera when emitting the
+discovered-only entries, in every pin state (after an unpin the tracker
+still holds it as an absent leftover), so the dedicated entry — the only
+one carrying the pin metadata and the explicit-absence lifecycle — is the
+single reported registration. The exclusion is scoped to that emission
+loop only: the tracked index feeding the configured merge is untouched,
+so a user's Image_Source whose ``cameraId`` is ``static-image-camera``
+keeps merging with ``capabilities.aravis`` and the tracked absent state
+exactly as before (Requirement 3.18). Device-local enumeration is
+deliberately left alone — ``getCameras()``, ``rescan_cameras()``, the
+``getCamera()`` short-circuit, and the local aravis frame feeds all
+depend on the static camera enumerating like a GenICam camera
+(Requirement 3.13); the cloud REPORT is the only place that
+de-duplicates. Retiring the already-published ``arv-`` key from devices
+that reported it is the agent's job (:mod:`camera_sync.agent`), since
+shadow updates MERGE nested maps and omission alone cannot remove a key.
+
 ``build_inventory`` is pure: it accepts plain data (Image_Source model or
 ORM objects — anything attribute- or dict-shaped — and a
 ``DiscoveryResult`` or ``InventorySnapshot``) and returns a deterministic,
@@ -52,7 +81,7 @@ sorted list of :class:`CameraSourceState`.
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from camera_discovery.aravis import DiscoveredAravisCamera
+from camera_discovery.aravis import DiscoveredAravisCamera, aravis_stable_id
 from utils.static_image_camera import (
     STATIC_IMAGE_CAMERA_ID,
     STATIC_IMAGE_CAMERA_IDENTITY,
@@ -76,6 +105,22 @@ TYPE_STATIC_IMAGE = "StaticImage"
 #: Reported ``name`` for the Static_Image_Camera entry — the fixed
 #: enumeration model name (Requirement 6.1).
 STATIC_IMAGE_CAMERA_NAME = STATIC_IMAGE_CAMERA_IDENTITY["model"]
+
+#: The discovery stable id the aravis-enumerated Static_Image_Camera
+#: derives (third hardware finding — feature
+#: static-image-camera-binding-and-pin-discoverability, Requirement 2.11).
+#: DERIVED from the shipped enumeration identity through the real
+#: ``aravis_stable_id`` — never hardcoded — so a future identity change
+#: flows through to both the exclusion below and the agent's one-shot
+#: retirement of the already-published key. Equals ``arv-6c84191b7fe6``
+#: for the shipped identity, the id observed in the live
+#: ``dda-camera-registry`` shadow for ``jetson-thor1``.
+STATIC_IMAGE_ARAVIS_STABLE_ID = aravis_stable_id(
+    STATIC_IMAGE_CAMERA_IDENTITY["vendor"],
+    STATIC_IMAGE_CAMERA_IDENTITY["model"],
+    STATIC_IMAGE_CAMERA_IDENTITY["serial"],
+    STATIC_IMAGE_CAMERA_IDENTITY["physical_id"],
+)
 
 #: The configured Image_Source ``type`` whose ``cameraId`` references an
 #: Aravis camera (merge key for Requirement 2.4).
@@ -128,6 +173,16 @@ def build_inventory(
     identical to the pre-feature merge. ``static_image_metadata`` (the
     pin store's status metadata) is folded into the entry's
     ``staticImage`` capabilities.
+
+    The aravis-enumerated static camera — a discovered Aravis camera whose
+    ``camera_id`` equals ``STATIC_IMAGE_CAMERA_ID``, which
+    ``enumerate_aravis()`` derives from the synthetic bus entry
+    ``getCameras()`` appends while pinned — is EXCLUDED from the reported
+    discovery entries in every pin state, so this dedicated entry is the
+    single registration for the one virtual camera (third hardware
+    finding, Requirements 2.7, 2.8). A configured Image_Source
+    referencing that ``cameraId`` still merges with it exactly as before
+    (Requirement 3.18).
 
     ``static_image_absent_since`` (second hardware finding, jetson-thor1
     / LocalServer.arm64JP7 1.0.23 — Requirement 6.2): AWS IoT shadow
@@ -234,6 +289,22 @@ def build_inventory(
         if stable_id in merged_stable_ids:
             continue
         camera, absent, absent_since = tracked[stable_id]
+        # De-duplicate the Static_Image_Camera (third hardware finding —
+        # Requirements 2.7, 2.8): the aravis-enumerated static camera
+        # never reports as its own discovery entry, because the dedicated
+        # entry appended below is the single registration and is the only
+        # one carrying the pin metadata and the explicit-absence
+        # lifecycle. Matched on ``camera_id`` — the semantic key both
+        # rows share and the id a workflow node binds to — rather than on
+        # the derived STATIC_IMAGE_ARAVIS_STABLE_ID, so an identity
+        # change cannot silently un-match. Applied in EVERY pin state:
+        # after an unpin the tracker still holds this camera as an absent
+        # leftover, and it is the dedicated entry's own absence lifecycle
+        # the Portal consumes. Scoped to this emission loop only, so the
+        # configured merge above (a user's Image_Source whose
+        # ``cameraId`` is ``static-image-camera``) is untouched (3.18).
+        if _is_static_image_aravis_camera(camera):
+            continue
         # A camera whose merge key merged under a different stable id
         # (absent leftover displaced by a present camera) still reports
         # separately — its stable id is what bindings reference.
@@ -285,6 +356,23 @@ def build_inventory(
 
 
 # --- helpers -----------------------------------------------------------------
+
+
+def _is_static_image_aravis_camera(camera) -> bool:
+    """True for the aravis-enumerated Static_Image_Camera — the synthetic
+    bus entry ``getCameras()`` appends while a Pinned_Image exists (third
+    hardware finding, Requirements 2.7, 2.11).
+
+    Matched on the semantic key (``camera_id`` equal to the fixed
+    ``STATIC_IMAGE_CAMERA_ID``), not on the derived
+    :data:`STATIC_IMAGE_ARAVIS_STABLE_ID`, so a change to the shipped
+    enumeration identity cannot silently stop matching. Only Aravis-family
+    cameras carry a ``camera_id`` at all, so a V4L2 camera never matches.
+    """
+    return (
+        isinstance(camera, DiscoveredAravisCamera)
+        and camera.camera_id == STATIC_IMAGE_CAMERA_ID
+    )
 
 
 def _static_image_identity() -> Dict[str, Any]:
