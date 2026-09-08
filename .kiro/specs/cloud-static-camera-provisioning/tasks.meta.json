@@ -61,5 +61,20 @@
       "lastRunTimestamp": 1788765479004
     }
   },
-  "executionHistory": {}
+  "executionHistory": {
+    "12.1 Verify the full portal→device matrix on real hardware, every affected arch": [
+      {
+        "executionId": "91e6e69f-6bed-4c9f-8026-a6cdbcc76fa7",
+        "chatSessionId": "sess_82345018-8bf2-4523-9fcf-e1d8eec99774",
+        "timestamp": 1788839538303
+      }
+    ],
+    "12. On-device verification (manual — workspace builds rule, mandatory before commit)": [
+      {
+        "executionId": "91e6e69f-6bed-4c9f-8026-a6cdbcc76fa7",
+        "chatSessionId": "sess_82345018-8bf2-4523-9fcf-e1d8eec99774",
+        "timestamp": 1788839539911
+      }
+    ]
+  }
 }
