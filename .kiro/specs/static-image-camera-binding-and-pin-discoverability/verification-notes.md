@@ -12,6 +12,12 @@ the pin route were issued. Everything below is a GET, a read-only lambda invoke,
 static analysis of the served bundle. The device was touched only through two read-only
 `curl` calls against its own loopback routes.
 
+> **Amendment (17:37–17:43Z, same day).** The user subsequently **approved pinning a test
+> image**, so step (b) and the present-camera parts of (c)/(d) were completed in a second
+> pass. Sections 1-7 below remain exactly as recorded and remain read-only; the pinned run
+> is **§8**, and the image is intentionally **left pinned**. The "What remains UNVERIFIED"
+> section at the end has been updated accordingly.
+
 - Deploy under test: 2026-09-08 17:19:24–17:24:50Z via `./deploy-frontend.sh`, log
   `edge-cv-portal/deploy-frontend-static-image-camera-binding-20260908T171924Z.out`
   (400 lines); frontend bundle `index-Cdb5gJPC.js` (replaces `index-BE4O437x.js`, which
@@ -349,9 +355,328 @@ live data), 3.6 (absence still device-reported), 3.8 (five type options), 3.10/3
 confirmed on hardware), 3.14/3.20 (both duplicates bind the same id), 3.16 (Fake camera
 healthy and unchanged).
 
+## 8. Pinned-path verification (user-approved live pin)
+
+**Scope of this section: MUTATING, with explicit user approval.** Task 5 step (b) plus the
+present-camera parts of (c)/(d), run 17:37:29–17:43:07Z against the same deploy verified in
+§§1-7 (bundle re-fetched mid-run and confirmed unchanged, below). One pin request was
+submitted through the Portal API; **the image is deliberately left PINNED** — no
+`DELETE .../pin`, no unpin, no restart, no config change, no source-file change, no build,
+no deploy. Artifacts under `/tmp/staticcam-verify/pin/`.
+
+### 8.1 Test image
+
+Generated locally with Pillow 11.3.0 (deep-blue field, yellow border, red disc, white
+diagonals, three text labels — visually unmistakable against the previous 320×240 pins):
+
+| property | value |
+|---|---|
+| file name | `dda-static-pin-test-640x480.png` |
+| format | `PNG` (RGB, decoded and fully loaded to verify) |
+| dimensions | 640 × 480 |
+| size | 12,063 bytes (0.02 % of the 50 MB `MAX_PIN_IMAGE_BYTES` limit) |
+| sha256 | `83cca4bb036a4faef925a54b8b34e784a7d04e7b67dc1079ba6e139fc9ea5205` |
+
+**Chain of custody closed end to end.** The `PIN_REQUEST#01788889080505#55fe9832` item in
+`dda-portal-camera-registry` records `sha256 = 83cca4bb036a4faef925a54b8b34e784a7d04e7b67dc1079ba6e139fc9ea5205`,
+`size_bytes = 12063`, `format = PNG`, `file_name = dda-static-pin-test-640x480.png`,
+`s3_key = static-image-pins/jetson-thor1/01788889080505#55fe9832` — the hash the Portal
+computed over the staged bytes is **identical** to the local file's, and the device echoed
+back 640 × 480 / PNG / 12,063 / same file name. The bytes that reached the device are the
+bytes generated here.
+
+### 8.2 Pin lifecycle and timings
+
+Same synthesized-event method as §1 (real deployed `CameraRegistryHandler…-8wszcxZw5oy0`,
+`requestContext.authorizer.claims` PortalAdmin path, `pathParameters.id = jetson-thor1`,
+`queryStringParameters.usecase_id = 645504ce-a60a-4009-8349-7548c0025cd3`).
+
+| # | step | time (UTC) | outcome |
+|---|---|---|---|
+| 0 | `GET /cameras/static-image` (pre-pin baseline) | 17:37:29 | 200; `latest` = `remove` / **applied** (`01788839397371#6af1b999`); `deviceReported {present: false, absent: true, absentSince: 1788839397466}`; 13 history records |
+| 1 | `POST /cameras/static-image/upload-url` | 17:37:41.276 | **200**; `stagingKey static-image-pins/staging/f92b1b8d08484e00835bd39e56cb71ab`, `bucket dda-component-us-east-1-164152369890`, `expiresInSeconds 900` |
+| 2 | `PUT` presigned URL | 17:37:52.871 | **HTTP 200**, 12,063 bytes uploaded |
+| 3 | `POST /cameras/static-image/pin` (`stagingKey` + `fileName`) | 17:37:59.283 → returned 17:38:00.853 | **201**; `pinRequestId 01788889080505#55fe9832`, `status pending` |
+| 4 | device confirmation (recorded on the item) | `createdAt 1788889080505` → `completedAt 1788889081197` | **applied in 692 ms**; `deviceMetadata.pinnedAtEpochMs 1788889081193` |
+| 5 | `GET /cameras/static-image` poll #1 | 17:38:11 | already **terminal**: `applied`, no `failureReason`, `connectivity` correctly absent (only emitted while pending) |
+| 6 | `GET /cameras/static-image` | 17:38:43 | **`deviceReported {present: true, absent: false}`**, `absentSince` gone — ~42 s after submit |
+| 7 | device SSH read-only checks | 17:38:51 | see §8.3 |
+| 8 | `GET /devices/jetson-thor1/cameras` | 17:39:07 | dedicated row **present** (v7, report `1788889081218`); `arv-` duplicate still `absent` (v4) |
+| 9 | `GET /devices/jetson-thor1/cameras` | 17:40:33 | `arv-` duplicate **present** (v5, report `1788889153915` = 17:39:13.915Z) |
+| 10 | served-bundle re-fetch | 17:41:22 | `index-Cdb5gJPC.js`, sha256 `6d83bf3d…094ef2` — **unchanged** from §2 |
+| 11 | `GET /cameras/static-image` (final) | 17:43:07 | `applied` + `deviceReported {present: true, absent: false}`; **left pinned** |
+
+**Elapsed:** submit → `applied` **0.69 s** (device round trip); submit → portal-visible
+`deviceReported.present: true` **~42 s**; submit → *both* registry rows present **~2 min
+34 s** wall (the underlying device report landed at 17:39:13.9Z, 73 s after submit).
+No `failed` status at any point, so no retry was needed and none was attempted.
+
+Terminal `latest`, verbatim:
+
+```json
+{ "pinRequestId": "01788889080505#55fe9832", "op": "pin", "status": "applied",
+  "createdAt": 1788889080505, "completedAt": 1788889081197,
+  "deviceMetadata": { "width": 640, "height": 480, "format": "PNG",
+                      "fileName": "dda-static-pin-test-640x480.png",
+                      "fileSizeBytes": 12063, "pinnedAtEpochMs": 1788889081193 } }
+```
+
+Two staged-lifecycle details worth recording, both pre-existing designed behavior:
+the pre-pin baseline still carried `deviceMetadata` from the *previous* pin
+(`race2-a.png`, 320 × 240) even though the latest op was an applied `remove` — that is
+`build_status_view`'s "most recent **pin**-type request, if applied" rule (Req 1.7), not a
+staleness bug; and history grew 13 → 14 with the new request at the head, superseding
+nothing (no request was pending).
+
+### 8.3 Device-side confirmation (read-only, over SSH)
+
+Two loopback GETs at 17:38:51Z. Nothing written, restarted, or reconfigured:
+
+```
+GET http://127.0.0.1:5000/static-image-camera/pin
+{"pinned":true,"cameraId":"static-image-camera",
+ "metadata":{"fileName":"dda-static-pin-test-640x480.png","format":"PNG",
+             "width":640,"height":480,"fileSizeBytes":12063,
+             "pinnedAtEpochMs":1788889081193}}
+
+GET http://127.0.0.1:5000/cameras
+[{"id":"Fake_1","model":"Fake","address":"0.0.0.0","physical_id":"Fake_1",
+  "protocol":"Fake","serial":"1","vendor":"Aravis"},
+ {"id":"Basler-26760165225D-23405149","model":"acA4600-10uc","address":"USB3",
+  "physical_id":"26760165225D","protocol":"USB3Vision","serial":"23405149","vendor":"Basler"},
+ {"id":"static-image-camera","model":"Static Image Camera","address":"internal",
+  "physical_id":"static-image-camera","protocol":"StaticImage","serial":"STATIC-IMAGE-0",
+  "vendor":"AWS-DDA"}]
+```
+
+- `pinned: true` with **metadata matching the pinned image field for field** — file name,
+  `PNG`, 640 × 480, 12,063 bytes — and `cameraId: static-image-camera`
+- **Requirement 3.13 proven on hardware.** `/cameras` now enumerates
+  `static-image-camera` **alongside** `Fake_1` and the Basler, exactly the third element
+  `getCameras()` appends while a Pinned_Image exists. §6 recorded the complementary
+  unpinned shape (two entries, no static camera) on the same device four minutes earlier,
+  so both halves of the enumeration contract are now observed live. This is the behavior
+  the device fix deliberately leaves alone — de-duplication happens only in the cloud
+  report, never in device-local enumeration
+- The single-Basler enumeration noted in §6 persists (registry has two present Basler
+  rows); unchanged by the pin, out of this spec's scope, not a defect claim
+
+### 8.4 Portal registry — the pre-fix PINNED baseline for task 10
+
+`GET /devices/jetson-thor1/cameras` at 17:40:33Z: `state synced`, `device_status HEALTHY`,
+**`count: 9`** (unchanged from §3 — the pin flips absence, it does not add rows),
+`last_report_at 1788889153915`. Every row present, none stale:
+
+| `camera_source_id` | type | absent | version | name |
+|---|---|---|---|---|
+| `arv-6c84191b7fe6` | AravisDiscovered | **false** | 5 | AWS-DDA Static Image Camera |
+| `arv-c9dd20f60ee1` | AravisDiscovered | false | 1171 | Aravis Fake |
+| `arv-797b019251e9` | AravisDiscovered | false | 1 | Basler acA4600-10uc |
+| `arv-cf582dea7590` | AravisDiscovered | false | 2 | Basler acA4600-10uc |
+| `cfg-28183exv` | Camera | false | 9 | Basler-26760165225D-23405149 |
+| `cfg-o70qz7ci` | Camera | false | 860 | Basler-267601652282-23405186 |
+| **`static-image-camera`** | **StaticImage** | **false** | 7 | Static Image Camera |
+| `cfg-iebllnt4` | Folder | false | 2 | cookies |
+| `cfg-pgc367hy` | Folder | false | 2 | yolotest |
+
+Both static-image rows verbatim from the live response — **this is the pre-fix pinned
+baseline task 10 re-checks after the user's component build**:
+
+```json
+{ "camera_source_id": "arv-6c84191b7fe6", "name": "AWS-DDA Static Image Camera",
+  "type": "AravisDiscovered", "origin": "edge-discovered", "version": 5,
+  "last_reported_at": 1788889153915, "sync_status": "synced",
+  "absent": false, "stale": false,
+  "params": { "serial": "STATIC-IMAGE-0", "cameraId": "static-image-camera",
+              "protocol": "StaticImage", "address": "internal" },
+  "capabilities": { "aravis": { "address": "internal", "protocol": "StaticImage",
+              "serial": "STATIC-IMAGE-0", "vendor": "AWS-DDA",
+              "model": "Static Image Camera", "physicalId": "static-image-camera" } } }
+
+{ "camera_source_id": "static-image-camera", "name": "Static Image Camera",
+  "type": "StaticImage", "origin": "edge-discovered", "version": 7,
+  "last_reported_at": 1788889153915, "sync_status": "synced",
+  "absent": false, "stale": false,
+  "params": {},
+  "capabilities": { "staticImage": { "id": "static-image-camera",
+              "physicalId": "static-image-camera", "model": "Static Image Camera",
+              "vendor": "AWS-DDA", "address": "internal", "protocol": "StaticImage",
+              "serial": "STATIC-IMAGE-0",
+              "width": 640, "height": 480, "format": "PNG",
+              "fileName": "dda-static-pin-test-640x480.png", "fileSizeBytes": 12063,
+              "pinnedAtEpochMs": 1788889081193 } } }
+```
+
+What changed against the §3 (unpinned) snapshot:
+
+- **Dedicated `static-image-camera` row: `absent: true` → `absent: false`, `absent_since`
+  key gone, version 6 → 7**, and the pin metadata **folded into
+  `capabilities.staticImage`** next to the fixed identity: `width 640`, `height 480`,
+  `format PNG`, `fileName dda-static-pin-test-640x480.png`, `fileSizeBytes 12063`,
+  `pinnedAtEpochMs 1788889081193`. `params` stays **`{}`** — the shipped inventory
+  contract is unchanged by the pin, which is precisely why the frontend fix has to read
+  the id from `capabilities.staticImage.id`
+- **`arv-6c84191b7fe6` duplicate: `absent: true` → `absent: false`, `absent_since` gone,
+  version 4 → 5.** Its `params.cameraId` / `capabilities.aravis` block is byte-identical
+  to §3
+- `count` stayed 9; the other seven rows are unchanged
+
+**The duplicate flipped one report LATE, and that is worth knowing for task 10.** The
+17:38:01.218Z report (triggered by the pin confirmation) carried the dedicated entry
+present but still showed the `arv-` row absent, because the agent reports against
+`self._discovery.latest_snapshot` — a cache refreshed on the discovery service's own
+re-enumeration cycle (`DEFAULT_INTERVAL_SECONDS = 300`, overridable via
+`CameraDiscoveryIntervalSeconds`). The duplicate only appears once the bus is
+re-enumerated and `getCameras()` returns the appended static camera; here that happened
+at 17:39:13.915Z, 73 s after the pin. So **the pinned state converges in two steps
+pre-fix**: dedicated row immediately, `arv-` duplicate at the next discovery scan.
+Post-build (task 10) the second step must produce **no** change to any `arv-6c84191b7fe6`
+row at all — and the key must be retired from the shadow with an explicit null exactly
+once — so task 10 should re-read the inventory **at least one full discovery interval
+after the pin**, not just seconds after it, or it risks reading a green result that only
+reflects the stale snapshot.
+
+**Task 10 comparison target, stated explicitly.** Pinned, pre-fix (now): `count: 9`,
+**two** present static-image rows (`arv-6c84191b7fe6` AravisDiscovered + dedicated
+`static-image-camera` StaticImage), two Aravis-picker options for one camera. Pinned,
+post-fix (expected): **`count: 8`**, exactly **one** present static-image row
+(`static-image-camera`, carrying the pin metadata), **zero** rows with
+`camera_source_id == "arv-6c84191b7fe6"` — deleted by the Portal's existing
+missing-from-report path once the agent retires the shadow key — and one picker option.
+
+### 8.5 Binding proof on the PRESENT payload
+
+The served bundle was re-fetched at 17:41:22Z and is still `index-Cdb5gJPC.js`, sha256
+`6d83bf3d6f6b88718bd21df4eed0003a7d02b2c04328dd5dcadcdf040b094ef2`, with the three
+shipped functions re-extracted verbatim (`Oae` = `staticImageCapabilityId`,
+`Wj` = `cameraIdValue`, `zae` = `applyAravisCameraSelection`, `d6` =
+`isAravisCompatibleCamera`; still exactly **one** `params??{}).cameraId` occurrence). The
+§2 listings therefore still describe the running code. Those functions were transliterated
+into oracles (`/tmp/staticcam-verify/pin/binding_replay.py`) and applied to the
+**now-present** 9-entry payload, with the required-parameter check mirroring
+`checkParameterValue()` in `parameters.ts` for a required `camera_id` string:
+
+| `camera_source_id` | type | absent | offered | OLD `cameraIdValue` | FIXED `cameraIdValue` | `camera_id` after apply | violation |
+|---|---|---|---|---|---|---|---|
+| `arv-6c84191b7fe6` | AravisDiscovered | false | yes | `'static-image-camera'` | `'static-image-camera'` | `'static-image-camera'` | none |
+| `arv-c9dd20f60ee1` | AravisDiscovered | false | yes | `'Fake_1'` | `'Fake_1'` | `'Fake_1'` | none |
+| `arv-797b019251e9` | AravisDiscovered | false | yes | `'Basler-26760165225D-23405149'` | same | same | none |
+| `arv-cf582dea7590` | AravisDiscovered | false | yes | `'Basler-267601652282-23405186'` | same | same | none |
+| `cfg-28183exv` | Camera | false | yes | `'Basler-26760165225D-23405149'` | same | same | none |
+| `cfg-o70qz7ci` | Camera | false | yes | `'Basler-267601652282-23405186'` | same | same | none |
+| **`static-image-camera`** | **StaticImage** | **false** | **yes** | **`None`** | **`'static-image-camera'`** | **`'static-image-camera'`** | **none** |
+| `cfg-iebllnt4` | Folder | false | no | `None` | `None` | absent | `V4_MISSING_REQUIRED_PARAMETER` |
+| `cfg-pgc367hy` | Folder | false | no | `None` | `None` | absent | `V4_MISSING_REQUIRED_PARAMETER` |
+
+The two `Folder` rows are **not offered** by the picker, so their violation is
+unreachable — it is what a source the picker never presents would produce, listed only for
+completeness.
+
+Detail on the two static-image entries, applied over a prior parameter record
+`{gain: 5, exposure: 100}`:
+
+```
+static-image-camera  (StaticImage, absent=false)
+  resolved via   capabilities.staticImage.id   (the fixed fallback)
+  parameters     {"camera_id": "static-image-camera", "exposure": 100, "gain": 5}
+  hint           {"cameraName": "Static Image Camera",
+                  "cameraSourceId": "static-image-camera",
+                  "sourceDeviceId": "jetson-thor1"}
+  violation      None            prior record untouched: yes    entry untouched: yes
+
+arv-6c84191b7fe6     (AravisDiscovered, absent=false)
+  resolved via   params.cameraId
+  parameters     {"camera_id": "static-image-camera", "exposure": 100, "gain": 5}
+  hint           {"cameraName": "AWS-DDA Static Image Camera",
+                  "cameraSourceId": "arv-6c84191b7fe6",
+                  "sourceDeviceId": "jetson-thor1"}
+  violation      None            prior record untouched: yes    entry untouched: yes
+```
+
+- **Requirements 2.2, 2.3 on a PRESENT camera.** The `StaticImage` entry — still
+  `params: {}`, now `absent: false` and carrying the pin metadata — resolves
+  `'static-image-camera'` and `applyAravisCameraSelection` writes it into `camera_id`.
+  `Required parameter 'camera_id' has no value` is structurally impossible for this
+  entry: the resolution is non-null, so the key is always set to a non-empty string. This
+  closes the §4 gap — the payload the replay ran over is no longer the absent one, it is
+  the pinned, present, metadata-bearing entry a user would select today
+- **bugfix.md 3.20 — both offered duplicates resolve the SAME id.** Resolved-id set
+  across both present rows = `{'static-image-camera'}`, size **1**. Whichever of the two
+  options the user picks binds the same device-side camera, and that camera is now
+  actually serving the pinned frame
+- **Requirement 3.4 — offered set unchanged.** `isAravisCompatibleCamera` over the
+  present payload returns the identical seven ids in the identical order under the OLD and
+  FIXED resolvers (`arv-6c84191b7fe6`, `arv-c9dd20f60ee1`, `arv-797b019251e9`,
+  `arv-cf582dea7590`, `cfg-28183exv`, `cfg-o70qz7ci`, `static-image-camera`); both
+  `Folder` rows stay out of both
+- **Requirements 3.1, 3.3, purity.** All six non-static offered entries resolve
+  byte-identically under both resolvers from `params.cameraId`; `gain`/`exposure` copying
+  is unchanged (neither static row carries numeric ones, so the prior `5`/`100` survive
+  untouched); neither the prior parameter record nor the registry entry is mutated
+
+### 8.6 Aravis Fake camera unaffected by the pin (Req 3.16)
+
+`arv-c9dd20f60ee1` after the pin: exactly **one** row matching `Fake_1` in the payload,
+`absent: false`, `version: 1171`, `params.cameraId: 'Fake_1'`, resolving `'Fake_1'`
+**from params** under both resolvers, with **no `staticImage` capability block** anywhere
+on the entry (`'staticImage' in capabilities` → `False`) — and even if there were one, the
+`type === 'StaticImage'` gate would skip the fallback. Applying the selection yields
+`{"camera_id": "Fake_1"}` with no violation. Identical to the §5 baseline apart from the
+`last_reported_at` bump; the pin did not touch it.
+
+### 8.7 What §8 did NOT cover
+
+The browser click-through itself (steps c/d rendered in a real browser) is still not
+observed — no UI automation available, same constraint as §1. What ships in the verified
+bundle plus what the live payload now contains determines the rendered outcome: the panel
+reads `camera_id` from the same `applyAravisCameraSelection` result proven above, the
+violation comes from the same `checkParameterValue` proven above, and the focus/scroll/flag
+path was read out of the served bundle in §2 (iii). The task 1/2/3 suites assert all three
+at the component level.
+
+### 8.8 State left behind (intentional)
+
+- **`jetson-thor1` is left with `dda-static-pin-test-640x480.png` PINNED**, per the user's
+  choice. `pinned: true`, static camera present in both the device enumeration and the
+  Portal registry, `latest` Pin_Request `01788889080505#55fe9832` = `applied`
+- Portal-side records created by this run: one `PIN_REQUEST#01788889080505#55fe9832` item,
+  one canonical S3 object `static-image-pins/jetson-thor1/01788889080505#55fe9832`, one
+  `pin_static_image` audit event. The staging object was deleted by the pin route on
+  success (and has a 1-day lifecycle rule as backstop)
+- Nothing else was mutated: no unpin, no source file, no `tasks.md` checkbox, no commit,
+  no build, no deploy
+
 ## What remains UNVERIFIED
 
-Two gaps, both by design of this run, neither indicating a problem:
+One gap remains. Item 1 below was closed by §8; item 2 is the device track's component
+build, which is the user's to run.
+
+1. ~~**Pending the user's pin approval**~~ — **RESOLVED 17:37–17:43Z, see §8.** The user
+   approved the pin and it was exercised end to end: upload-url → presigned PUT → pin
+   submit (201, `01788889080505#55fe9832`) → `applied` in 692 ms →
+   `deviceReported.present: true`, with the device confirming `pinned: true` and
+   enumerating the static camera, the registry flipping both static rows to
+   `absent: false`, and the binding replay resolving `'static-image-camera'` on the
+   **present** payload with no required-parameter violation. The image is left pinned.
+   Still outside this method's reach (unchanged constraint, §8.7): the browser
+   click-through of steps (c)/(d) — the panel visibly rendering
+   `camera_id = static-image-camera`, the violation visibly disappearing, and the Cameras
+   tab visibly landing on the flagged static-image panel. All three ship in the verified
+   bundle and are asserted by the task 1/2/3 suites
+2. **Pending the user's Greengrass component build** (device track, tasks 6-10, ~100
+   min + a deployment revision). `jetson-thor1` still runs the pre-fix LocalServer, and
+   §8.4 confirms it behaviorally: with a pin in place it reports **two** present
+   static-image rows. That is the expected and correct state for a frontend-only deploy —
+   §8.5 shows both options bind the same id on the present payload, so the duplicate is
+   cosmetic, not a dead end. Requirements 2.7-2.10 (one registration per pin state) and
+   the one-shot shadow-key retirement (2.9, 2.11) remain the subject of task 10, which now
+   has a concrete pinned baseline to diff against (§8.4: `count: 9` → expected `8`, two
+   present static rows → expected one, `arv-6c84191b7fe6` → expected gone) and a timing
+   caveat (re-read at least one full discovery interval after pinning, since the duplicate
+   surfaces one report late)
+
+<details>
+<summary>Superseded — the original read-only framing of gap 1 (kept for the record)</summary>
 
 1. **Pending the user's pin approval** (task 5 step b, and the parts of c/d that need a
    present camera). Not exercised, because pinning mutates live state on a Jetson in use:
@@ -377,5 +702,17 @@ Two gaps, both by design of this run, neither indicating a problem:
    registration per pin state) and the one-shot shadow-key retirement (2.9, 2.11) are
    untested against live hardware and remain the subject of task 10
 
-Cleanup: none required — artifacts confined to `/tmp/staticcam-verify/`; no portal state
-and no device state created or mutated (read-only invokes and GETs only).
+</details>
+
+## Cleanup
+
+- **§§1-7 (read-only run):** nothing to clean — analysis artifacts confined to
+  `/tmp/staticcam-verify/`; no portal state and no device state created or mutated
+- **§8 (pinned run):** no cleanup performed **by design**. The user chose to leave the
+  test image pinned, so `dda-static-pin-test-640x480.png` stays pinned on `jetson-thor1`,
+  along with its `PIN_REQUEST#01788889080505#55fe9832` item, its canonical S3 object
+  `static-image-pins/jetson-thor1/01788889080505#55fe9832`, and the `pin_static_image`
+  audit event. The staging object was removed by the pin route itself on success. Local
+  artifacts (test image, synthesized events, raw responses, binding replay) are in
+  `/tmp/staticcam-verify/pin/`. To undo later:
+  `DELETE /devices/jetson-thor1/cameras/static-image/pin`
