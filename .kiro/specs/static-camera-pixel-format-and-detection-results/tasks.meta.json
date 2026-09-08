@@ -1,0 +1,252 @@
+{
+  "pbtResults": {
+    "1. Write bug condition exploration test for the static camera's pixel format": {
+      "status": "passed",
+      "failingExample": "7 failed, 1 passed — the failures ARE the confirmation of Defect A (Property 1: Bug Condition).\n\n1) test_config_file_resolves_rgb_for_the_shipped_static_camera_identity\nAssertionError: STATIC_IMAGE_CAMERA_IDENTITY['vendor'] = 'AWS-DDA' is not a top-level key of default_camera_configurations.json (shipped keys: ['Allied Vision', 'Basler', 'ICAM', 'Lucid Vision Labs', 'Nvidia CSI', 'OMRON SENTECH', 'Zebra Technologies', 'default']), so the vendor-then-model lookup collapses to default/default and resolves the BGGR Bayer demosaic 'capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert'\n\n2) test_provisioning_persists_the_rgb_chain  (Falsifying example: spec=(1, 1, 0, 'JPEG'))\nAssertionError: Image_Source oxxv3nbq persisted 'capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert'\n- capsfilter caps=video/x-raw,format=RGB ! videoconvert\n+ capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert\n\n3) test_built_pipeline_declares_rgb_caps_and_no_demosaic  (Falsifying example: spec=(1, 1, 0, 'JPEG'), override={})\nAssertionError: create_buffer would declare the packed-RGB Pinned_Image bytes as 'video/x-bayer,format=bggr'; assert 'video/x-bayer,format=bggr' == 'video/x-raw,format=RGB'\n\n4) test_live_image_source_preview_launch_is_rgb\nAssertionError: built launch string is the live device one verbatim:\nappsrc name=appsrc ! capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert ! videocrop top=0 bottom=0 left=0 right=0 ! jpegenc idct-method=2 quality=100 ! filesink location=/aws_dda/image-capture/preview/default_file_prefix-my6j3zx1.jpg\n\n5-7) backfill (Requirement 2.5) — AssertionError: dao.sqlite_db.db_backfill.migration_static_camera_pipeline_db(session) does not exist ... Existing migrations in that module: ['migration_cleanup_imgsrc_db', 'migration_cleanup_workflow_db']  (falsifying example: sources=[('000000', 0, 0)])\n\nThe 1 pass is test_live_counterexamples_are_the_shipped_bayer_default: the anchor that reproduces the device log character-for-character and proves the live stored chain IS the shipped default/default fall-through.",
+      "lastRunTimestamp": 1788895217851
+    },
+    "3. Write bug condition exploration test for detection result persistence": {
+      "status": "passed",
+      "failingExample": "Property 3: Bug Condition (Defect B) — 8 of 13 tests FAIL on unfixed code, which is the SUCCESS outcome for a bug-condition exploration test. Counterexamples:\n\n1. test_detection_row_validates_for_storage (hypothesis, 25 examples) — fails on the minimal example:\n   row={'captureId': '00000000', 'captureType': 'Inference', 'workflowId': '0000', 'inferenceCreationTime': 0, 'prediction': 'Detection', 'confidence': 0.0, 'anomalyScore': 0.0, 'anomalyThreshod': 0.0, 'inputImageFilePath': '/aws_dda/image-capture/0000.jpg', 'outputImageFilePath': '/aws_dda/image-capture/0000.jpg', 'modelId': '0000', 'modelName': '0000', 'flagForReview': False, 'downloaded': False, 'humanReviewRequired': False, 'modelConfidenceThresholds': {'AnomalyThreshold': 0.9, 'NormalThreshold': 0.1}}\n   marshmallow.exceptions.ValidationError: {'prediction': ['Must be one of: Normal, Anomaly.']}\n\n2. test_db_marshalled_detection_result_validates_for_storage (hypothesis) — convert_inference_res_to_save_in_db SUCCEEDS (confirming bugfix.md 1.10) and produces prediction 'Detection'; the row is then rejected:\n   ValidationError: {'prediction': ['Must be one of: Normal, Anomaly.']}\n   minimal inference_res inferenceResult={'confidence': 0.0, 'inference_result': 'Detection', 'anomaly_score': 0.0, 'anomaly_threshold': 0.0, 'detections': {}, 'detection_count': 0}\n\n3. test_live_detection_row_validates_for_storage — the live jetson-thor1 row (captureId db9721b27fc54b8f993fb06ef8738631, workflowId pagb7vj8, modelId model-yolo-test-jetson-xavier-jp7, confidence 0.8879303932189941, anomalyThreshod 1.0):\n   ValidationError: {'prediction': ['Must be one of: Normal, Anomaly.']}\n\n4. TestDetectionResultPersistence::test_detection_row_stores_and_reads_back — through the REAL accessor:\n   inference_result_accessor.py:58 ValidationError -> line 67 re-raise\n   fastapi.exceptions.HTTPException: 400: Unable to store inference result. {'prediction': ['Must be one of: Normal, Anomaly.']}'.\n\n5. TestDetectionResultPersistence::test_summary_counts_detection_rows (hypothesis) — normal=0, anomaly=0, detection=1:\n   AssertionError: Requirement 2.9: the summary must report a 'detection' count of 1; got None from stats {'totalInference': 0, 'normal': 0, 'anomaly': 0}\n   (no detection key at all, and totalInference under-reports: 0 vs 1 row in window)\n\n6. TestDetectionMarshalToStore::test_live_detection_capture_marshals_and_stores — end-to-end marshal->store with the real deviceFleetAuxiliaryOutputs/Inputs shape for task=object_detection. save_image_object and convert_inference_res_to_save_in_db BOTH succeed and produce {'prediction': 'Detection', 'modelId': 'model-yolo-test-jetson-xavier-jp7', 'captureId': 'db9721b27fc54b8f993fb06ef8738631', 'confidence': 0.8879303932189941, 'anomalyScore': 0.8879303932189941, 'anomalyThreshod': 1.0, ...}; storage rejects it:\n   ValidationError: {'prediction': ['Must be one of: Normal, Anomaly.']}\n\n7. test_history_page_label_is_not_hardcoded_anomaly — source-level (no frontend framework stood up):\n   AssertionError: Requirement 2.10: ClassificationTypeTag hardcodes the label 'Anomaly' for every non-Normal prediction. '>Anomaly<' is contained here: pe=\"error\">Anomaly</StatusIndicator>\n\n8. TestPersistenceFailureObservability::test_persistence_failure_logs_workflow_and_capture_id:\n   AssertionError: Requirement 2.11: a persistence failure must be logged at ERROR naming the workflow id (wf-98a1213d) and the capture id (23ce5ea6ad6544e793a3445235696d7a). ERROR records seen: []. The persistence call raised RuntimeError('simulated persistence failure'), so the failure path really was exercised.\n\nThe 5 PASSING tests are the scoping guards that must hold both before and after the fix (Requirement 2.7): humanClassification still rejects 'Detection' on InferenceResultSchema and CapturedDataSchema; OUTPUT_RULE / PREDICTION / CAPTURE_TYPE unchanged; the results-list prediction query Literal still only Normal/Anomaly; the marshal still emits 'Detection'.",
+      "lastRunTimestamp": 1788895959383
+    }
+  },
+  "executionHistory": {
+    "1. Write bug condition exploration test for the static camera's pixel format": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897830970
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897855456
+      }
+    ],
+    "2. Write preservation property tests for Defect A (BEFORE implementing the fix)": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897832586
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897859651
+      }
+    ],
+    "3. Write bug condition exploration test for detection result persistence": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897833863
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897863580
+      }
+    ],
+    "4. Write preservation property tests for Defect B (BEFORE implementing the fix)": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897835075
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897867795
+      }
+    ],
+    "5.1 Give the static camera an RGB conversion chain in the camera configuration file": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897836267
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897887719
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899757956
+      }
+    ],
+    "5.2 Converge the already-persisted Bayer chain on existing static-camera Image_Sources": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897837358
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897888939
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899759193
+      }
+    ],
+    "5.3 Verify bug condition exploration test now passes": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897838587
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899760750
+      }
+    ],
+    "5.4 Verify preservation tests still pass": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897839694
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899761645
+      }
+    ],
+    "6.1 Accept the detection prediction value for stored inference results": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897840930
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897889980
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899763471
+      }
+    ],
+    "6.2 Count detection results in the workflow results summary": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897842222
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897891319
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899764387
+      }
+    ],
+    "6.3 Label a detection result faithfully on the results history page": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897843510
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897892714
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899766032
+      }
+    ],
+    "6.4 Make a persistence failure loud and identifiable": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897844801
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897893595
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899766904
+      }
+    ],
+    "6.5 Verify bug condition exploration test now passes": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897846058
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899768204
+      }
+    ],
+    "6.6 Verify preservation tests still pass": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897847424
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899769411
+      }
+    ],
+    "7. Checkpoint - Ensure all tests pass": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897848626
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899775764
+      },
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788904757298
+      }
+    ],
+    "8. Build hand-off and post-build on-device verification": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788897849961
+      }
+    ],
+    "5. Fix for the static camera's Bayer-demosaiced frames": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899762805
+      }
+    ],
+    "6. Fix for manually-run detection inference never persisting": [
+      {
+        "executionId": "a9bc61b5-fa9a-444e-8f08-87f607218b03",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788899770804
+      }
+    ]
+  }
+}

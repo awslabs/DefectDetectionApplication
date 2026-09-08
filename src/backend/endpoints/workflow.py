@@ -121,21 +121,61 @@ def configure_image_source_and_run_pipeline(workflow:Workflow, db: Session, late
         return gst_pipeline_executor.execute_workflow_pipeline(workflow, db, latency_metrics=latency_metrics)
     return "", {}
 
+def _identifier(source, key):
+    """Best-effort id lookup on a dict-or-model. Safe to call from an except
+    block: it never raises, so it cannot mask the failure being reported."""
+    if source is None:
+        return None
+    try:
+        if hasattr(source, "get"):
+            return source.get(key)
+        return getattr(source, key, None)
+    except Exception:
+        return None
+
 def save_full_inference_result(inference_result, workflow):
-    with Timer(metric_name="InferenceResultStoringTime"):
-        if inference_result.get("image"):
-            del inference_result["image"]
-        inference_result["captureType"] = INFERENCE
-        db_inference_res = inference_results_utils.convert_inference_res_to_save_in_db(inference_result, workflow)
-        with SessionLocal() as session:
-            inference_result_accessor.store_inference_result(session, db_inference_res)
+    """Persist a completed inference result.
+
+    Runs as a FastAPI BackgroundTask AFTER the response has already been sent, so
+    a failure here can never reach the caller. Log it at ERROR naming the
+    workflow and the capture, then swallow it: letting it escape the background
+    task anonymously is how a persistence failure stayed invisible.
+    """
+    workflow_id = _identifier(workflow, "workflowId")
+    capture_id = _identifier(inference_result, "captureId")
+    try:
+        with Timer(metric_name="InferenceResultStoringTime"):
+            if inference_result.get("image"):
+                del inference_result["image"]
+            inference_result["captureType"] = INFERENCE
+            db_inference_res = inference_results_utils.convert_inference_res_to_save_in_db(inference_result, workflow)
+            with SessionLocal() as session:
+                inference_result_accessor.store_inference_result(session, db_inference_res)
+    except Exception as err:
+        logger.error(
+            "Failed to store inference result for workflow %s, capture %s: %s",
+            workflow_id, capture_id, err, exc_info=True
+        )
 
 def read_full_results_and_save(workflow, db, trigger_timestamp, capture_id, latency_metrics):
-    result = read_inference_result(workflow, capture_id)
-    latency_metrics.commit_timestamps(db, result["captureId"])
-    total_processing_time = (latency_metrics.get_timestamp(INFERENCE_RECEIVED_TIMESTAMP) - trigger_timestamp) * 1000
-    result["processingTime"] = total_processing_time
-    save_full_inference_result(result, workflow)
+    """Read the full inference result and persist it.
+
+    The returnPartialResultsEarly background task. Same contract as
+    save_full_inference_result: the response is already sent, so a failure is
+    logged identifiably and swallowed rather than escaping anonymously.
+    """
+    workflow_id = _identifier(workflow, "workflowId")
+    try:
+        result = read_inference_result(workflow, capture_id)
+        latency_metrics.commit_timestamps(db, result["captureId"])
+        total_processing_time = (latency_metrics.get_timestamp(INFERENCE_RECEIVED_TIMESTAMP) - trigger_timestamp) * 1000
+        result["processingTime"] = total_processing_time
+        save_full_inference_result(result, workflow)
+    except Exception as err:
+        logger.error(
+            "Failed to read and store inference result for workflow %s, capture %s: %s",
+            workflow_id, capture_id, err, exc_info=True
+        )
 
 @router.post("/workflows/{workflow_id}/run")
 async def run_inference_for_stream(

@@ -340,7 +340,10 @@ class TestInferenceResultAccessor(LocalServerBaseTestCase):
 
     def test_get_inference_result_summary(self):
         result_data = self.accessor.get_inference_result_summary(self.session, "fake-wf-id", 0)
-        summary = {'totalInference': 2, 'normal': 1, 'anomaly': 1}
+        # 'detection' is an additive bucket: Detection rows were previously counted
+        # nowhere and excluded from totalInference. normal / anomaly / totalInference
+        # keep exactly their pre-existing values for this Normal+Anomaly window.
+        summary = {'totalInference': 2, 'normal': 1, 'anomaly': 1, 'detection': 0}
         self.assertEqual(result_data['stats'], summary)
         self.assertEqual(result_data['lastResetTime'], 0)
 

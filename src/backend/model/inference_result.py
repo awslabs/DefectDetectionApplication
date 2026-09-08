@@ -26,7 +26,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from marshmallow import Schema, fields, post_load, validate
-from utils.constants import PREDICTION, DB_TEXT_NOTE_MAX_LENGTH, CAPTURE_TYPE
+from utils.constants import PREDICTION, STORED_PREDICTION, DB_TEXT_NOTE_MAX_LENGTH, CAPTURE_TYPE
 
 class InferenceResult:
     def __init__(self, captureId, captureType, workflowId, inferenceCreationTime, prediction, confidence, anomalyScore,
@@ -80,7 +80,11 @@ class InferenceResultSchema(Schema):
     captureType = fields.Str(validate=validate.OneOf(CAPTURE_TYPE), required=True)
     workflowId = fields.Str(required=True)
     inferenceCreationTime = fields.Int(required=True)
-    prediction = fields.Str(validate=validate.OneOf(PREDICTION), required=True)
+    # STORED_PREDICTION, not PREDICTION: a detection model's result is typed
+    # "Detection" by the marshal and must be storable. humanClassification below
+    # deliberately stays on PREDICTION - a human verdict is a binary judgement,
+    # not a model task type.
+    prediction = fields.Str(validate=validate.OneOf(STORED_PREDICTION), required=True)
     confidence = fields.Float(required=True)
     anomalyLabels = fields.List(fields.Dict(required=False), required=False)
     anomalyScore = fields.Float(required=True)

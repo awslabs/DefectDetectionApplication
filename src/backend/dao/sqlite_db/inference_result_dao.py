@@ -32,7 +32,7 @@ from typing import List
 
 from data_models.common import InferenceResultHistoryModel
 from .models import InferenceResult
-from utils.constants import ANOMALY, NORMAL
+from utils.constants import ANOMALY, NORMAL, DETECTION
 
 
 def get_inference_result_by_capture_id(db: Session, capture_id: str):
@@ -109,7 +109,22 @@ def get_inference_result_summary(db: Session, workflow_id, summaryStartTime):
         .where(InferenceResult.inferenceCreationTime >= summaryStartTime)
         .where(InferenceResult.prediction == ANOMALY)
     )
+    # Detection rows are counted in no bucket today, so totalInference
+    # under-reports for every object-detection workflow. The key is additive and
+    # normal / anomaly keep exactly their existing values.
+    stmt4 = (
+        select(func.count())
+        .where(InferenceResult.workflowId == workflow_id)
+        .where(InferenceResult.inferenceCreationTime >= summaryStartTime)
+        .where(InferenceResult.prediction == DETECTION)
+    )
     normal_count = db.scalar(stmt2)
     anomaly_count = db.scalar(stmt3)
-    
-    return {"totalInference": normal_count + anomaly_count, "normal": normal_count, "anomaly": anomaly_count}
+    detection_count = db.scalar(stmt4)
+
+    return {
+        "totalInference": normal_count + anomaly_count + detection_count,
+        "normal": normal_count,
+        "anomaly": anomaly_count,
+        "detection": detection_count,
+    }

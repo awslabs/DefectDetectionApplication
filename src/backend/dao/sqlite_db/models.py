@@ -29,7 +29,7 @@
 from sqlalchemy import Column, ForeignKey, Integer, String, Enum, JSON, Float, Boolean
 from sqlalchemy.orm import relationship, backref
 from model.image_source import ImageSourceType
-from utils.constants import ANOMALY, NORMAL, GPIO_FALLING, GPIO_RISING, CAPTURE, INFERENCE
+from utils.constants import ANOMALY, NORMAL, STORED_PREDICTION, GPIO_FALLING, GPIO_RISING, CAPTURE, INFERENCE
 
 from .sqlite_db_operations import Base, BaseMetadata
 
@@ -117,7 +117,13 @@ class InferenceResult(BaseMetadata):
     captureType = Column(Enum(CAPTURE, INFERENCE, name="enum_capture_type"))
     workflowId = Column(String, index=True)
     inferenceCreationTime = Column(Integer)
-    prediction = Column(Enum(ANOMALY, NORMAL, name="enum_prediction_type"))
+    # Sourced from STORED_PREDICTION so it cannot drift from
+    # InferenceResultSchema.prediction. SQLAlchemy INSERTs an unlisted value
+    # without complaint but raises LookupError on READBACK, and
+    # store_inference_result ends in a db.refresh(), so a detection row needs
+    # this member as much as it needs the schema's. sqlite emits a bare VARCHAR
+    # with no CHECK constraint, so this needs no DDL change and no migration.
+    prediction = Column(Enum(*STORED_PREDICTION, name="enum_prediction_type"))
     confidence = Column(Float)
     anomalyLabels = Column(JSON)
     anomalyScore = Column(Float)
