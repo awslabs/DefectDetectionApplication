@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
+import { normalizeCloudFrontDomain } from './context-helpers';
 
 export class StorageStack extends cdk.Stack {
   public readonly useCasesTable: dynamodb.Table;
@@ -734,7 +735,12 @@ export class StorageStack extends cdk.Stack {
     // `cloudFrontDomain` CDK context the compute stack uses; before the
     // first frontend deployment (domain unknown) any origin is allowed —
     // access is still gated by the presigned URLs themselves.
-    const corsCloudFrontDomain = this.node.tryGetContext('cloudFrontDomain');
+    // Normalized through the Domain_Normalizer (portal-deploy-flag-hardening
+    // Req 3.2/3.3/3.6): any spelling (bare, scheme-prefixed, trailing-slashed)
+    // yields the bare domain, so the ternary below emits exactly one scheme.
+    const corsCloudFrontDomain = normalizeCloudFrontDomain(
+      this.node.tryGetContext('cloudFrontDomain'),
+    );
     this.portalArtifactsBucket = new s3.Bucket(this, 'PortalArtifactsBucket', {
       bucketName: `dda-portal-artifacts-${this.account}-${this.region}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,

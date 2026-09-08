@@ -9,12 +9,22 @@
  *   DdaLabelingHandler's environment and grants DdaLabelingHandler
  *   lambda:InvokeFunction on the Grounded_SAM_Worker, inside the existing
  *   gated block.
- * - 8.2: with the flag absent, DdaLabelingHandler's environment carries no
+ * - 8.2: with the flag off, DdaLabelingHandler's environment carries no
  *   GROUNDED_SAM_WORKER_FUNCTION_NAME entry and no grounded-sam worker
- *   resources exist — today's flag-off template.
+ *   resources exist — the flag-off template.
  * - 8.3: with the flag set true, the existing DdaAutolabelWorker wiring
  *   (env + invoke grant) and the Grounded_SAM_Worker definition are
  *   unchanged by this feature.
+ *
+ * Default flip (portal-deploy-flag-hardening): `deployGroundedSamWorker`
+ * now defaults ON — four flag-less deploys each deleted the live worker
+ * under the old default-OFF gate. The without-worker shape is therefore no
+ * longer the no-context synth but the explicit-false synth
+ * ({ deployGroundedSamWorker: 'false' }, the deliberate teardown path,
+ * portal-deploy-flag-hardening Req 1.4/2.2); this suite's flag-OFF synth
+ * context changed accordingly (task 4.1, Requirement 6.2) with its
+ * assertions unchanged. The no-context WITH-worker default shape is pinned
+ * by grounded-sam-worker-infra.test.ts.
  *
  * On flag-ON synthesis and Docker: grounded-sam-worker-infra.test.ts
  * deliberately avoided a flag-on synth on the assumption that
@@ -86,9 +96,11 @@ function synthComputeTemplate(context?: Record<string, string>): Template {
 
 beforeAll(() => {
   // The CLI's `-c deployGroundedSamWorker=true` arrives as the string
-  // 'true'; compute-stack.ts accepts `=== true || === 'true'`.
+  // 'true'. The flag now defaults ON (portal-deploy-flag-hardening), so
+  // the without-worker case requires the explicit-false context — the
+  // CLI's `-c deployGroundedSamWorker=false` spelling.
   flagOnTemplate = synthComputeTemplate({ deployGroundedSamWorker: 'true' });
-  flagOffTemplate = synthComputeTemplate();
+  flagOffTemplate = synthComputeTemplate({ deployGroundedSamWorker: 'false' });
 }, 900_000);
 
 /** The single Lambda function in `template` with the given handler. */

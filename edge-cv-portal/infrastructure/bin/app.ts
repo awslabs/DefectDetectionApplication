@@ -10,6 +10,7 @@ import { NodeDesignerStack } from '../lib/node-designer-stack';
 import { BuildFleetStack } from '../lib/build-fleet-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
 import { FrontendStack } from '../lib/frontend-stack';
+import { normalizeCloudFrontDomain } from '../lib/context-helpers';
 
 const app = new cdk.App();
 
@@ -47,7 +48,12 @@ const testRunnerStack = new TestRunnerStack(app, 'EdgeCVPortalTestRunnerStack', 
 // Compute Stack (Lambda functions, API Gateway)
 // Note: cloudFrontDomain is optional and can be set after initial deployment
 // to enable automatic CORS configuration on Data Account buckets
-const cloudFrontDomain = app.node.tryGetContext('cloudFrontDomain');
+// Normalized to the bare domain (portal-deploy-flag-hardening Req 3.1): the
+// consumers prepend the scheme themselves, so the `https://`-prefixed context
+// spelling corrupted live config with `https://https://…` on 2026-09-07.
+const cloudFrontDomain = normalizeCloudFrontDomain(
+  app.node.tryGetContext('cloudFrontDomain'),
+);
 // Trusted UseCase account IDs that portal Lambdas may assume DDAPortalAccessRole
 // into. Resolved (in priority order) from:
 //   1. CDK context   `-c trustedUseCaseAccountIds=<id>,<id>`

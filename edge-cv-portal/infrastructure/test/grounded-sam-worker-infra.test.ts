@@ -1,26 +1,42 @@
 /**
  * Static infrastructure assertions for the grounded-sam-autolabel worker
- * gating (task 5.2).
+ * gating (originally grounded-sam-autolabel task 5.2; default synth
+ * rebaselined by portal-deploy-flag-hardening task 4.1, whose Requirement
+ * 6.1 declares this amendment).
+ *
+ * The `deployGroundedSamWorker` context flag now defaults ON
+ * (portal-deploy-flag-hardening Requirement 1): four flag-less deploys each
+ * deleted the live DdaGroundedSamWorker under the old default-OFF gate, so
+ * the default (no-context) synth asserted here is the WITH-worker case —
+ * the exact shape of a routine flag-less portal deployment. Only an
+ * explicit false context omits the worker (that shape is pinned by
+ * gsam-preview-infra.test.ts's flag-OFF suite).
  *
  * Requirements covered:
- * - 5.2: with the Worker_Flag (`deployGroundedSamWorker`) absent, the
- *   ComputeStack defines no Grounded_SAM_Worker resources and
- *   DdaAutolabelWorker's environment carries no
- *   GROUNDED_SAM_WORKER_FUNCTION_NAME entry.
- * - 5.5: the existing DdaSamWorker definition stays behind its own
- *   `deploySamWorker` flag (also absent here, so also not synthesized) and
- *   DdaAutolabelWorker's own configuration — handler, runtime, timeout,
- *   memory, layers, and its always-present environment keys — is exactly
- *   the pre-feature configuration.
+ * - portal-deploy-flag-hardening 1.1/1.6/1.7: the default synth defines the
+ *   Grounded_SAM_Worker with its shipped configuration (image package,
+ *   x86_64, 10240 MB, 300 s, no environment block) and the complete
+ *   Worker_Wiring: GROUNDED_SAM_WORKER_FUNCTION_NAME plus an invoke grant
+ *   on BOTH DdaAutolabelWorker and DdaLabelingHandler.
+ * - portal-deploy-flag-hardening 5.2: the sibling DdaSamWorker stays behind
+ *   its own `deploySamWorker` flag (still default OFF and absent here, so
+ *   still not synthesized) and DdaAutolabelWorker's environment still
+ *   carries no SAM_WORKER_FUNCTION_NAME entry.
+ * - grounded-sam-autolabel 5.5: DdaAutolabelWorker's own configuration —
+ *   handler, runtime, timeout, memory, layers, and its static environment
+ *   values — is exactly the pre-feature configuration; its exact
+ *   environment key set gains exactly one key,
+ *   GROUNDED_SAM_WORKER_FUNCTION_NAME.
  *
- * Flag-ON synthesis is DELIBERATELY NOT tested here: setting
- * `deployGroundedSamWorker=true` (or `deploySamWorker=true`) makes
- * `DockerImageCode.fromImageAsset` perform a real Docker build at synth
- * time — a multi-gigabyte build downloading the Grounding DINO ONNX model,
- * its tokenizer, and the SAM archive. That is the same reason no
- * `deploySamWorker=true` jest test exists today. The gated deploy (task
- * 7.2) is the flag-on verification. This suite must add zero Docker
- * activity to the synth.
+ * On flag-on synthesis and Docker: this header previously claimed that a
+ * flag-on synth performs a real multi-gigabyte Docker build at synth time.
+ * That claim was wrong, as established by gsam-preview-infra.test.ts
+ * (which synthesizes flag-ON under jest): `DockerImageCode.fromImageAsset`
+ * only runs AssetStaging at synth time — it copies and fingerprints the
+ * small backend/grounded-sam-worker source directory (~136 KB); the
+ * `docker build` itself is performed by cdk-assets at deploy time, never
+ * during `Template.fromStack`. The worker joining the default synth
+ * therefore adds zero Docker activity to this suite.
  *
  * Conventions follow llm-model-token-and-image-sizing-infra.test.ts /
  * workflow-manager-gaps-infra.test.ts: synthesize once in beforeAll with a
@@ -43,7 +59,9 @@ let computeTemplate: Template;
 beforeAll(() => {
   // Default synth: NO context at all — in particular neither
   // deployGroundedSamWorker nor deploySamWorker — the exact shape of a
-  // routine portal deployment (Req 5.2).
+  // routine portal deployment. Under portal-deploy-flag-hardening this is
+  // the WITH-worker shape: the flag defaults ON and only an explicit false
+  // omits the worker (Req 1.1).
   const app = new cdk.App();
 
   const storage = new StorageStack(app, 'Storage');
@@ -90,35 +108,118 @@ function lambdaByHandler(handler: string): [string, any] {
   return matches[0] as [string, any];
 }
 
-describe('default synth defines no gated worker resources (Requirement 5.2)', () => {
-  test('no image-package Lambda function exists in the ComputeStack template', () => {
-    // Both container-image workers (DdaGroundedSamWorker and DdaSamWorker)
-    // are the only DockerImageFunction sources in the stack and both sit
-    // behind default-OFF context flags, so a default synth must contain no
-    // AWS::Lambda::Function with PackageType: Image.
+/** The single DdaGroundedSamWorker function resource in the template. */
+function groundedSamWorkerFunction(): [string, any] {
+  const matches = Object.entries(
+    computeTemplate.findResources('AWS::Lambda::Function')
+  ).filter(([logicalId]) => logicalId.startsWith('DdaGroundedSamWorker'));
+  expect(matches).toHaveLength(1);
+  return matches[0] as [string, any];
+}
+
+/**
+ * All IAM policy statements attached to `roleRef` (an AWS::IAM::Role
+ * logical id) that allow lambda:InvokeFunction on a resource referencing
+ * `workerLogicalId`. The portal Lambda roles' default policies exceed the
+ * inline-policy size limit, so CDK splits them into overflow
+ * AWS::IAM::ManagedPolicy resources — search both types (the
+ * gsam-preview-infra.test.ts precedent).
+ */
+function invokeStatementsOnWorker(
+  roleRef: string,
+  workerLogicalId: string
+): any[] {
+  const policies = [
+    ...Object.values(computeTemplate.findResources('AWS::IAM::Policy')),
+    ...Object.values(computeTemplate.findResources('AWS::IAM::ManagedPolicy')),
+  ] as any[];
+  return policies
+    .filter((p) => p.Properties.Roles?.some((r: any) => r.Ref === roleRef))
+    .filter((p) => p.Properties.PolicyDocument?.Statement)
+    .flatMap((p) => p.Properties.PolicyDocument.Statement as any[])
+    .filter((s) => {
+      if (s.Effect !== 'Allow') return false;
+      const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+      if (!actions.includes('lambda:InvokeFunction')) return false;
+      const resources = Array.isArray(s.Resource) ? s.Resource : [s.Resource];
+      return resources.some((r: any) =>
+        JSON.stringify(r).includes(workerLogicalId)
+      );
+    });
+}
+
+/** The logical id of the role a function resource executes as. */
+function roleRefOf(fn: any): string {
+  const roleRef = fn.Properties.Role['Fn::GetAtt']?.[0];
+  expect(roleRef).toBeDefined();
+  return roleRef;
+}
+
+describe('default synth defines the grounded-sam worker and its wiring (portal-deploy-flag-hardening Requirement 1.1)', () => {
+  test('exactly one image-package Lambda function exists: DdaGroundedSamWorker with its shipped configuration', () => {
+    // DdaGroundedSamWorker now defaults ON (portal-deploy-flag-hardening);
+    // the sibling DdaSamWorker stays behind its own default-OFF
+    // `deploySamWorker` flag (absent here), so a default synth contains
+    // exactly one AWS::Lambda::Function with PackageType: Image — the
+    // grounded-sam worker, with its shipped configuration unchanged
+    // (Req 1.6).
     const imageFunctions = Object.entries(
       computeTemplate.findResources('AWS::Lambda::Function')
     ).filter(
       ([, resource]) => (resource as any).Properties.PackageType === 'Image'
     );
-    expect(imageFunctions).toEqual([]);
+    expect(imageFunctions).toHaveLength(1);
+    const [logicalId, worker] = imageFunctions[0] as [string, any];
+    expect(logicalId).toMatch(/^DdaGroundedSamWorker/);
+    expect(worker.Properties.PackageType).toBe('Image');
+    expect(worker.Properties.Architectures).toEqual(['x86_64']);
+    expect(worker.Properties.MemorySize).toBe(10240);
+    expect(worker.Properties.Timeout).toBe(300);
+    // No threshold environment block: the handler's own defaults are the
+    // intended values for this worker (grounded-sam-autolabel).
+    expect(worker.Properties.Environment).toBeUndefined();
   });
 
-  test('no DdaGroundedSamWorker or DdaSamWorker logical ids exist anywhere in the template', () => {
+  test('DdaGroundedSamWorker logical ids are present; DdaSamWorker logical ids are still absent', () => {
     const template = computeTemplate.toJSON();
-    const workerIds = Object.keys(template.Resources ?? {}).filter(
-      (logicalId) =>
-        logicalId.startsWith('DdaGroundedSamWorker') ||
-        logicalId.startsWith('DdaSamWorker')
-    );
-    expect(workerIds).toEqual([]);
+    const logicalIds = Object.keys(template.Resources ?? {});
+    expect(
+      logicalIds.filter((logicalId) =>
+        logicalId.startsWith('DdaGroundedSamWorker')
+      )
+    ).not.toEqual([]);
+    expect(
+      logicalIds.filter((logicalId) => logicalId.startsWith('DdaSamWorker'))
+    ).toEqual([]);
   });
 
-  test("DdaAutolabelWorker's environment carries neither GROUNDED_SAM_WORKER_FUNCTION_NAME nor SAM_WORKER_FUNCTION_NAME", () => {
-    const [, fn] = lambdaByHandler('dda_autolabel_worker.handler');
-    const env = fn.Properties.Environment.Variables;
-    expect(env.GROUNDED_SAM_WORKER_FUNCTION_NAME).toBeUndefined();
-    expect(env.SAM_WORKER_FUNCTION_NAME).toBeUndefined();
+  test("DdaAutolabelWorker and DdaLabelingHandler carry GROUNDED_SAM_WORKER_FUNCTION_NAME referencing the worker; SAM_WORKER_FUNCTION_NAME is still absent", () => {
+    const [workerLogicalId] = groundedSamWorkerFunction();
+    const [, autolabel] = lambdaByHandler('dda_autolabel_worker.handler');
+    expect(
+      autolabel.Properties.Environment.Variables
+        .GROUNDED_SAM_WORKER_FUNCTION_NAME
+    ).toEqual({ Ref: workerLogicalId });
+    expect(
+      autolabel.Properties.Environment.Variables.SAM_WORKER_FUNCTION_NAME
+    ).toBeUndefined();
+    const [, labeling] = lambdaByHandler('dda_labeling.handler');
+    expect(
+      labeling.Properties.Environment.Variables
+        .GROUNDED_SAM_WORKER_FUNCTION_NAME
+    ).toEqual({ Ref: workerLogicalId });
+  });
+
+  test('both Worker_Wiring invoke grants are present: the DdaAutolabelWorker and DdaLabelingHandler roles may invoke the worker (Requirement 1.7)', () => {
+    const [workerLogicalId] = groundedSamWorkerFunction();
+    const [, autolabel] = lambdaByHandler('dda_autolabel_worker.handler');
+    const [, labeling] = lambdaByHandler('dda_labeling.handler');
+    expect(
+      invokeStatementsOnWorker(roleRefOf(autolabel), workerLogicalId).length
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      invokeStatementsOnWorker(roleRefOf(labeling), workerLogicalId).length
+    ).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -143,13 +244,15 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
     expect(layers[1]).toMatch(/^ImagingLayer/);
   });
 
-  test('the environment carries exactly the pre-feature key set', () => {
+  test('the environment carries exactly the pre-feature key set plus GROUNDED_SAM_WORKER_FUNCTION_NAME', () => {
     const [, fn] = lambdaByHandler('dda_autolabel_worker.handler');
     const env = fn.Properties.Environment.Variables;
     // lambdaEnvironment (the shared portal Lambda environment) plus the
     // three DdaAutolabelWorker-specific keys (CODE_VERSION and the two
-    // per-model `llm:` settings). No key added, none removed: the
-    // grounded-sam family's prompt inputs ride the job record, not the
+    // per-model `llm:` settings), plus exactly one key gained by the
+    // default-ON Worker_Flag (portal-deploy-flag-hardening Req 6.1):
+    // GROUNDED_SAM_WORKER_FUNCTION_NAME. No other key added, none removed:
+    // the grounded-sam family's prompt inputs ride the job record, not the
     // environment.
     expect(Object.keys(env).sort()).toEqual(
       [
@@ -161,6 +264,7 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
         'DDA_LOCAL_SERVER_VERSION',
         'DEPLOYMENTS_TABLE',
         'DEVICES_TABLE',
+        'GROUNDED_SAM_WORKER_FUNCTION_NAME',
         'LABELING_JOBS_TABLE',
         'LABELING_TASKS_TABLE',
         'LABELING_TEAMS_TABLE',

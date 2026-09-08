@@ -26,6 +26,7 @@ import { UserAdminApiStack } from './user-admin-api-stack';
 import { QuickSetupApiStack } from './quick-setup-api-stack';
 import { DdaLabelingApiStack } from './dda-labeling-api-stack';
 import { WorkflowManagerGapsApiStack } from './workflow-manager-gaps-api-stack';
+import { groundedSamWorkerEnabled } from './context-helpers';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
@@ -2277,20 +2278,25 @@ export class ComputeStack extends cdk.Stack {
 
     // Grounded-SAM worker (dda_grounded_sam_worker): container-image Lambda
     // bundling CPU ONNX Grounding DINO + a SAM mask model
-    // (backend/grounded-sam-worker/Dockerfile). Building the image downloads
-    // the DINO model, its tokenizer, and the SAM archive and produces a
-    // multi-GB Docker build, so it is gated behind the
-    // `deployGroundedSamWorker` CDK context flag
-    // (-c deployGroundedSamWorker=true; default OFF) — ordinary portal
-    // deployments must not require Docker or the model downloads. When
+    // (backend/grounded-sam-worker/Dockerfile). The `deployGroundedSamWorker`
+    // CDK context flag defaults ON (portal-deploy-flag-hardening): four
+    // flag-less deploys each DELETED the live worker under the old
+    // default-OFF gate, breaking grounded-sam pre-labeling and the
+    // prompt-tuning preview until someone redeployed with the flag. Only an
+    // explicit false (-c deployGroundedSamWorker=false — the deliberate
+    // teardown path) omits the worker now; absent, true, 'true', and any
+    // unrecognized value deploy it. Default-on does not force multi-GB
+    // builds on routine deploys: synth only stages the small source
+    // directory, the docker build runs at deploy time via cdk-assets and is
+    // ECR-cached by source fingerprint (the gsam-preview-infra.test.ts-
+    // verified fact) — the image rebuilds only when grounded-sam-worker/
+    // source changes. Flag-off degradation semantics are unchanged: when
     // disabled, GROUNDED_SAM_WORKER_FUNCTION_NAME is simply absent from the
     // autolabel worker environment and grounded-sam jobs report pre-label
     // failures instead.
-    const deployGroundedSamWorkerContext =
-      this.node.tryGetContext('deployGroundedSamWorker');
-    const deployGroundedSamWorker =
-      deployGroundedSamWorkerContext === true ||
-      deployGroundedSamWorkerContext === 'true';
+    const deployGroundedSamWorker = groundedSamWorkerEnabled(
+      this.node.tryGetContext('deployGroundedSamWorker'),
+    );
     if (deployGroundedSamWorker) {
       // The baked models are overridable per deployment
       // (-c groundedSamDinoModelUrl=... / -c groundedSamDinoTokenizerUrl=...
