@@ -94,8 +94,8 @@ flowchart TD
   - Non-regression inventory — the ONLY pre-existing files with diffs are: `lib/compute-stack.ts` (flag read + comment, task 2.1), `bin/app.ts` (normalized read, 2.2), `lib/storage-stack.ts` (normalized read, 2.3), `cdk.json` (context entry, 2.4), `package.json`/`package-lock.json` (fast-check devDependency, 1.2, only if it ran), and the two declared rebaselined suites `test/grounded-sam-worker-infra.test.ts` + `test/gsam-preview-infra.test.ts` (4.1). Explicitly zero diff on: `edge-cv-portal/deploy-frontend.sh` (Req 4.2, 4.3), `.kiro/steering/builds.md` (Req 5.5), `test/labeling-cleanup-infra.test.ts` (Req 6.3), the `deploySamWorker` block (Req 5.2), and every application source (backend `functions/`, frontend `src/`, `grounded-sam-worker/`) (Req 5.3, 5.4). Any diff outside this set: stop and raise it
   - _Requirements: 4.2, 4.3, 5.1, 5.2, 5.3, 5.4, 5.5, 6.1, 6.2, 6.3_
 
-- [ ] 6. Deploy and verify live — the flag-less deploy IS the proof
-  - [ ] 6.1 Prove spelling equivalence, then deploy WITHOUT the worker flag
+- [x] 6. Deploy and verify live — the flag-less deploy IS the proof
+  - [x] 6.1 Prove spelling equivalence, then deploy WITHOUT the worker flag
     - Follow `.kiro/steering/builds.md` gates first: `pgrep -af "gdk component build"` and `pgrep -af "build-custom.sh"` must both be empty — portal deploys never overlap component builds
     - From `edge-cv-portal/infrastructure` (account 164152369890, us-east-1; `npm run build` first): **synth equivalence BEFORE deploying** — `npx cdk synth EdgeCVPortalComputeStack -c cloudFrontDomain=d23v4ltibogb5x.cloudfront.net > /tmp/pdfh-synth-bare.yaml` and the same with `-c cloudFrontDomain=https://d23v4ltibogb5x.cloudfront.net > /tmp/pdfh-synth-https.yaml`, then `diff` the two files — MUST be identical (Req 3.5, through the real App_Entry); repeat for `EdgeCVPortalStorageStack` (its own context read)
     - Inspect: `npx cdk diff EdgeCVPortalComputeStack -c cloudFrontDomain=d23v4ltibogb5x.cloudfront.net` — deliberately WITHOUT `deployGroundedSamWorker` — expect **NO `DdaGroundedSamWorker` deletion** (the default now keeps it; the live stack already carries the flag-on template, worker `…-9paW7gMXvjg2`, and the live domain config is already clean/bare, so the diff should show no worker-resource change and only the trivial changes this spec makes, if any reach the template). Optionally also `npx cdk diff EdgeCVPortalStorageStack -c cloudFrontDomain=d23v4ltibogb5x.cloudfront.net` — expect no CORS change (live origin already single-scheme). A `DdaGroundedSamWorker` removal in either diff is a STOP
@@ -103,7 +103,7 @@ flowchart TD
     - Capture everything to a spec-named log: `edge-cv-portal/deploy-portal-deploy-flag-hardening-$(date -u +%Y%m%dT%H%M%SZ).log` (tee); afterwards handle the `cdk.out` drift guards per builds.md before any subsequent component build (move `cdk.out` aside or rebaseline the guard hashes)
     - _Requirements: 1.1, 2.2, 3.1, 3.4, 3.5, 4.1, 5.1_
 
-  - [ ] 6.2 Live verification — the worker survived a flag-less deploy end to end
+  - [x] 6.2 Live verification — the worker survived a flag-less deploy end to end
     - Account 164152369890, us-east-1, portal `d23v4ltibogb5x.cloudfront.net`. Record everything in `.kiro/specs/portal-deploy-flag-hardening/verification-notes.md` (the prompt-tuning-preview precedent)
     - Worker alive: `aws lambda get-function` on the `DdaGroundedSamWorker*` physical name (resolve via `list-functions`) → exists, MemorySize 10240, Timeout 300, PackageType Image — and the physical name is UNCHANGED from before the deploy (`…-9paW7gMXvjg2`), proving no delete/recreate
     - Wiring intact: `DdaLabelingHandler` and `DdaAutolabelWorker` both carry `GROUNDED_SAM_WORKER_FUNCTION_NAME` naming that worker (`get-function-configuration`)
