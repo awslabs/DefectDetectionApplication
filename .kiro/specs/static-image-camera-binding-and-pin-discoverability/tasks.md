@@ -270,7 +270,7 @@ path deletes the registry entry with no Portal change at all.
   - **Do NOT run `gdk component build` or `build-custom.sh` in this task** - builds take ~100 minutes and the user drives them
   - Ensure everything passes; ask the user if questions arise
 
-- [ ] 10. Hand off the device build, then verify on-device (post-build)
+- [x] 10. Hand off the device build, then verify on-device (post-build)
   - **This task does NOT build or deploy anything.** It states exactly what the user needs to build and deploy, then verifies the result once they have
   - **What the user builds**: the LocalServer component for the target devices - `jetson-thor1` runs `aws.edgeml.dda.LocalServer.arm64JP7`, currently **1.0.24**, so the fix lands as the next patch (1.0.25). Per `.kiro/steering/builds.md`: set `gdk-config.json` to that component name, confirm `pgrep -af "gdk component build"` and `pgrep -af "build-custom.sh"` both return nothing, move `cdk.out` aside, confirm the preservation guards are green (task 9), then `gdk component build` and publish - one target at a time, never two builds at once, and no portal deploy while a build runs
   - **What the user deploys**: a Greengrass deployment revision pinning the new component version to `jetson-thor1` (and any other device that should get the fix; `dlap701` is the other SSH-reachable device - build the variant matching its architecture if it is included)
