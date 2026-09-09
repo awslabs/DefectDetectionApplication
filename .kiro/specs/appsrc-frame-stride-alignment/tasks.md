@@ -250,7 +250,7 @@ Root conftest hypothesis profiles: `fast` = 25 examples, `HYPOTHESIS_PROFILE=ci`
   - Ensure all tests pass; ask the user if questions arise
   - _Requirements: all_
 
-- [ ] 5. Build hand-off and post-build on-device verification
+- [x] 5. Build hand-off and post-build on-device verification
   - **THIS TASK BUILDS NOTHING AND DEPLOYS NOTHING.** A component build takes ~100 minutes, corrupts other builds if run concurrently, and is the user's to drive. This task hands off, then verifies what the user's build produced
   - **Components and versions this supersedes**, both built from commit `318d021`: `aws.edgeml.dda.LocalServer.arm64JP6` **1.0.66** on the JP6 AGX Orin (thing `ryanorinagxdevkithomelabjp622`) and `aws.edgeml.dda.LocalServer.arm64JP7` **1.0.25** on `jetson-thor1` -> next patch each (`bash build-custom.sh aws.edgeml.dda.LocalServer.arm64JP6 NEXT_PATCH`, or `TARGETS="6" ./run_jp_builds.sh`; same for `7`), then a deployment revision to reach each device
   - **Pre-flight gates from `.kiro/steering/builds.md`, in order**:
