@@ -1728,6 +1728,7 @@ def run_bridged_pipeline(
         PipelineSyntaxException,
     )
     from gi.repository.GLib import GError
+    from gstreamer.frame_stride import reconcile_to_caps_stride
     from gstreamer.gst_pipeline import PIPELINE_TIMEOUT_SEC, GstPipelineManager
 
     manager = GstPipelineManager()  # reused for its parse_msg tag parsing
@@ -1841,6 +1842,21 @@ def run_bridged_pipeline(
             except CustomPythonNodeError as e:
                 GLib.idle_add(fail, str(e), e)
                 return Gst.FlowReturn.ERROR
+            # Reconcile the handler's output with the NEGOTIATED caps this
+            # appsrc is pushing under, so a raw handle()-contract node that
+            # returns a tightly packed buffer against padded caps cannot push
+            # a short buffer (``_invoke_process_frame`` already writes rows
+            # back at the input's own stride, so for the process_frame
+            # contract this is a no-op returning the same object).
+            # strict=False deliberately: this site is mid-stream and a new
+            # exception here would fail runs that work today.
+            out_bytes = reconcile_to_caps_stride(
+                out_bytes,
+                caps.to_string() if caps is not None else "",
+                width,
+                height,
+                strict=False,
+            )
             out_buffer = Gst.Buffer.new_wrapped(out_bytes)
             out_buffer.pts = buffer.pts
             out_buffer.dts = buffer.dts
@@ -1886,15 +1902,26 @@ def run_bridged_pipeline(
                 raise PipelineExecutionException(
                     "fed appsrc element missing from the pipeline"
                 )
-            fed_source.set_property(
-                "caps",
-                Gst.Caps.from_string(
-                    _fed_frame_caps(launch_string, frame_data)
-                ),
-            )
+            # ONE caps string, used for both the property and the
+            # reconciliation, so the declared caps and the buffer layout
+            # cannot disagree.
+            fed_caps = _fed_frame_caps(launch_string, frame_data)
+            fed_source.set_property("caps", Gst.Caps.from_string(fed_caps))
             fed_source.set_property("block", True)
             fed_source.set_property("format", Gst.Format.TIME)
-            fed_buffer = Gst.Buffer.new_wrapped(frame_data["data"])
+            # Same up-front reconciliation as create_buffer: a Produced_Frame
+            # of unaligned width is tightly packed, and these caps imply
+            # GST_ROUND_UP_4 rows. The frame dict is never mutated — only the
+            # bytes handed to Gst.Buffer.new_wrapped.
+            fed_buffer = Gst.Buffer.new_wrapped(
+                reconcile_to_caps_stride(
+                    frame_data["data"],
+                    fed_caps,
+                    frame_data.get("width"),
+                    frame_data.get("height"),
+                    strict=True,
+                )
+            )
 
         for bridge in bridges:
             sink = pipeline.get_by_name(bridge.sink_name)

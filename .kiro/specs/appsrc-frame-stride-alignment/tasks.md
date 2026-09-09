@@ -150,7 +150,7 @@ Root conftest hypothesis profiles: `fast` = 25 examples, `HYPOTHESIS_PROFILE=ci`
 
 ## Tasks
 
-- [ ] 1. Write bug condition exploration test for appsrc frame stride alignment
+- [x] 1. Write bug condition exploration test for appsrc frame stride alignment
   - **Property 1: Bug Condition** - Wrapped buffer size disagrees with the stride its declared caps imply, and the mismatch is silent
   - **CRITICAL**: These tests MUST FAIL on unfixed code - failure confirms the defect exists
   - **DO NOT attempt to fix the tests or the code when they fail**
@@ -175,7 +175,7 @@ Root conftest hypothesis profiles: `fast` = 25 examples, `HYPOTHESIS_PROFILE=ci`
   - Mark task complete when the tests are written, run, and the failures are documented
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.12, 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 2.8, 2.10, 2.11_
 
-- [ ] 2. Write preservation property tests (BEFORE implementing the fix)
+- [x] 2. Write preservation property tests (BEFORE implementing the fix)
   - **Property 2: Preservation** - Aligned widths byte-identical and copy-free, Bayer untouched, bus handling and the store contract unchanged
   - **IMPORTANT**: Follow observation-first methodology - run the UNFIXED code first, record the actual outputs, then assert those recorded outputs
   - New file: `test/backend-test/gstreamer/test_property_appsrc_frame_stride_preservation.py`
@@ -194,9 +194,9 @@ Root conftest hypothesis profiles: `fast` = 25 examples, `HYPOTHESIS_PROFILE=ci`
   - Mark task complete when the tests are written, run, and passing on unfixed code
   - _Requirements: 1.9, 1.10, 1.11, 1.13, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13_
 
-- [ ] 3. Fix for the unreconciled appsrc frame stride
+- [x] 3. Fix for the unreconciled appsrc frame stride
 
-  - [ ] 3.1 Add the shared stride reconciliation helper
+  - [x] 3.1 Add the shared stride reconciliation helper
     - New module `src/backend/gstreamer/frame_stride.py` (pure Python, NO `gi` import, so it stays cheap to import and testable outside GStreamer)
     - `BYTES_PER_PIXEL = {"RGB": 3, "BGR": 3, "RGBA": 4, "BGRA": 4, "GRAY8": 1}` — the formats the code paths actually declare. Any other format is UNKNOWN and passes through untouched (Requirement 3.10). Task 1 cross-checks every key against `GstVideo.VideoInfo`, so an error in this table fails a test rather than a device preview
     - `expected_stride(frame_format, width)` returns `GST_ROUND_UP_4(width * BYTES_PER_PIXEL[frame_format])` — `((row_bytes + 3) // 4) * 4`; `expected_size(frame_format, width, height)` returns `expected_stride * height`
@@ -212,7 +212,7 @@ Root conftest hypothesis profiles: `fast` = 25 examples, `HYPOTHESIS_PROFILE=ci`
     - _Preservation: Property 2 in bugfix.md - identical object for aligned input, Bayer and unknown caps pass through, bus handling unchanged_
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.10, 3.4, 3.5, 3.7, 3.10_
 
-  - [ ] 3.2 Apply the helper at the three wrapping sites
+  - [x] 3.2 Apply the helper at the three wrapping sites
     - `src/backend/gstreamer/gst_pipeline.py` `create_buffer` (line 76): build the caps string exactly as today, then wrap `reconcile_to_caps_stride(data, caps_string, wd, ht, strict=True)` instead of `data`. Everything else in the function — the regex, the caps append, `block`, `format`, the return shape — stays as is (Requirement 3.7). This single call covers preview, capture, the classic workflow path, AND the deployed-workflow Frame_Feed, since all four reach `create_buffer`
     - `src/backend/workflow_engine/python_bridge.py` fed `appsrc` (line 1897): reconcile `frame_data["data"]` against the caps `_fed_frame_caps` just produced, `strict=True`. Compute the caps string once and reuse it for both `set_property("caps", ...)` and the reconciliation so the two cannot disagree
     - `src/backend/workflow_engine/python_bridge.py` bridge output (line 1844): reconcile `out_bytes` against the NEGOTIATED caps already extracted in the pump (`frame_format`, `width`, `height` from lines 1811-1817), `strict=False`. No new failure mode mid-stream (Requirement 2.9); when `_invoke_process_frame` did its job this is a no-op returning the same object
@@ -224,7 +224,7 @@ Root conftest hypothesis profiles: `fast` = 25 examples, `HYPOTHESIS_PROFILE=ci`
     - _Preservation: Property 2 in bugfix.md - the frame dict, the caps strings, the launch strings and the bus behavior all unchanged_
     - _Requirements: 2.1, 2.3, 2.6, 2.7, 2.8, 2.9, 3.2, 3.3, 3.6, 3.7, 3.8, 3.9, 3.11_
 
-  - [ ] 3.3 Verify bug condition exploration test now passes
+  - [x] 3.3 Verify bug condition exploration test now passes
     - **Property 1: Expected Behavior** - Wrapped buffer size agrees with the stride its declared caps imply
     - **IMPORTANT**: Re-run the SAME tests from task 1 - do NOT write new tests
     - The tests from task 1 encode the expected behavior; when they pass, the fix is confirmed
@@ -232,7 +232,7 @@ Root conftest hypothesis profiles: `fast` = 25 examples, `HYPOTHESIS_PROFILE=ci`
     - **EXPECTED OUTCOME**: Tests PASS (confirms the defect is fixed) — in particular the rendered-pixel assertions for `RGB` 810x1080 and 773x512 now match the source instead of returning mean `0.00/0.00/0.00`
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.6, 2.7, 2.8, 2.10, 2.11_
 
-  - [ ] 3.4 Verify preservation tests still pass
+  - [x] 3.4 Verify preservation tests still pass
     - **Property 2: Preservation** - Aligned widths byte-identical and copy-free, Bayer untouched, bus handling and the store contract unchanged
     - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
     - Run `test/backend-test/gstreamer/test_property_appsrc_frame_stride_preservation.py` with the container command above
@@ -240,7 +240,7 @@ Root conftest hypothesis profiles: `fast` = 25 examples, `HYPOTHESIS_PROFILE=ci`
     - Also re-run the neighbours that document the untouched surface, each in its OWN process: `test/backend-test/static_image_camera/test_workflow_feed.py`, `test/backend-test/static_image_camera/test_property_static_camera_pixel_format.py`, `test/backend-test/static_image_camera/test_property_static_camera_pixel_format_preservation.py`, `test/backend-test/gstreamer/`
     - Confirm the zero-diff constraints hold: `git diff --stat` shows changes only in `src/backend/gstreamer/frame_stride.py` (new), `src/backend/gstreamer/gst_pipeline.py`, `src/backend/workflow_engine/python_bridge.py`, and the two new test files
 
-- [ ] 4. Checkpoint - Ensure all tests pass
+- [x] 4. Checkpoint - Ensure all tests pass
   - Run the device backend suite in the flask-app container with the command above, **one suite path per invocation** (see the process-split note: `static_image_camera` stubs `utils.server_setup`, and `camera_sync/test_property_reconnect_catch_up.py::test_reconnect_publishes_complete_current_state` hangs when it follows `utils` in one process)
   - `LD_LIBRARY_PATH=/opt/tritonserver/lib:/usr/local/cuda/lib64` is what clears the `libtritonserver.so` import failures; it is environmental, not a code fix
   - **Establish the pre-existing failure set rather than trusting it**: `git archive HEAD` into a scratch directory, run the same suites there, and diff the FAILED id lists. **Never `git stash`** — it would disturb the untracked test files this spec adds. Expect **16** known ids to fail in BOTH trees and to be ignored: 4 streaming e2e, `restart-component`, `stop-component` (x2), `test_get_station_logo_returns_logo`, `test_get_image_source_by_id`, `test_connect_camera_endpoint`, captured-images invalid-path (x2), streams-api (x2), workflows-api load-input-image (x2). Anything else must be green

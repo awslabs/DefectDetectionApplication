@@ -29,6 +29,7 @@ import os
 from utils import utils
 from utils.constants import INFERENCE_RECEIVED_TIMESTAMP
 from exceptions.api.gst_pipeline_exception import PipelineExecutionException, PipelineSyntaxException
+from gstreamer.frame_stride import reconcile_to_caps_stride
 from resources.accessors.latency_time_accessor import LatencyTimeAccessor
 
 #  Aravis API reference:
@@ -68,12 +69,25 @@ class GstPipelineManager:
         match = re.search(pattern, pipeline_str)
         first_caps = match.group(1)
 
+        caps_string = f"{first_caps} ,width={wd} , height={ht}"
+
         source = pipeline.get_by_name("appsrc")
-        source.set_property("caps", Gst.Caps.from_string(f"{first_caps} ,width={wd} , height={ht}"))
+        source.set_property("caps", Gst.Caps.from_string(caps_string))
         source.set_property("block", True)
         source.set_property("format", Gst.Format.TIME)
 
-        return source, Gst.Buffer.new_wrapped(data)
+        # Reconcile the bytes with the row stride the caps just declared
+        # BEFORE wrapping them: GStreamer rounds a packed video/x-raw row up
+        # to a 4-byte multiple, so a tightly packed unaligned-width frame is
+        # short of what these caps promise and gst_video_frame_map_id refuses
+        # the map (measured on device: RGB 810x1080 supplies 2624400 where the
+        # caps demand 2626560, and the preview answers 200 over a BLACK
+        # image). Aligned widths get the identical object back, so nothing
+        # that works today changes; a size no row layout explains raises here,
+        # before the pipeline reaches PLAYING. The frame dict is never touched
+        # — only the bytes handed to Gst.Buffer.new_wrapped.
+        return source, Gst.Buffer.new_wrapped(
+            reconcile_to_caps_stride(data, caps_string, wd, ht, strict=True))
 
     def run_pipeline(self, pipeline_str, frame_data = None, latency_metrics = None, status_sink = None) -> dict:
         # ``status_sink`` is an OPTIONAL callable ``sink(element_name, kind,
