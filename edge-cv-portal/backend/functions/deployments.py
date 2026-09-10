@@ -23,6 +23,10 @@ from shared_utils import (
 # passed-validation run with zero error findings. workflow_guards does
 # not need the workflow_core layer, so it is importable here.
 import workflow_guards
+# Pre-submit closure validation (spec: deployment-preflight-validation): the
+# LAST pre-submit gate on both submit paths. Pure over injected callables and
+# free of any dependency on this module, so it imports cleanly here.
+import deployment_preflight
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -1509,6 +1513,27 @@ def create_deployment(body, user):
                 }
             }
         
+        # Pre-submit closure validation (deployment-preflight-validation
+        # 2.1, 2.6, 2.10): the LAST gate before submission, over the FINAL
+        # components map (auto-includes, subscribe accessControl merge and
+        # revision detection all already applied). Every existing gate above
+        # keeps precedence and its exact payload (3.4); this one never
+        # mutates the map (3.14) and never blocks on a check it could not
+        # perform (2.9). Reuses the greengrassv2 client, the resolved target
+        # thing names and the existing-deployment lookup already in hand.
+        preflight_devices = (
+            resolved_plugin_devices
+            or resolve_target_thing_names(iot_client, target_devices,
+                                          target_thing_group))
+        preflight_error = check_deployment_preflight(
+            greengrass_client, region, account_id, components_map,
+            preflight_devices, existing_deployment=existing_deployment,
+            acknowledged=body.get(
+                deployment_preflight.ACKNOWLEDGEMENT_FIELD),
+            context='create_deployment')
+        if preflight_error:
+            return preflight_error
+
         response = greengrass_client.create_deployment(**deployment_params)
         
         deployment_id = response.get('deploymentId')
@@ -1923,6 +1948,127 @@ def _decimal_to_native(obj):
     elif isinstance(obj, list):
         return [_decimal_to_native(i) for i in obj]
     return obj
+
+
+# ---------------------------------------------------------------------------
+# Pre-submit closure validation (spec: deployment-preflight-validation)
+#
+# Resolves the FINAL submitted component set's transitive recipe
+# ComponentDependencies closure ONCE and asks three questions of it: platform
+# satisfiability (2.2, 2.3, 2.7, 2.8), dependency resolvability (2.4, 2.5) and
+# de-selected-but-still-required (2.11-2.15). Every finding comes back in ONE
+# response, classified blocking-invalid / acknowledgement-required /
+# unverified (2.6, 2.16).
+#
+# Runs LAST among the pre-submit gates on BOTH submit paths, so every existing
+# gate keeps precedence and its exact code/payload (3.4), and it NEVER mutates
+# the components map it is handed (3.14 — enforced by the deep copy in
+# deployment_preflight.evaluate plus the assertion below).
+#
+# Deliberately NOT applied to the automated store-limit remediation submits
+# (_submit_store_remediation, _resume_original_deployment): those are machine
+# remediation with nobody to acknowledge a finding, and gating them would
+# wedge remediation.
+# ---------------------------------------------------------------------------
+
+#: Entries the portal adds to (or carries in) a deployment on the operator's
+#: behalf. Excluded from the de-selection diff so an auto-include that stopped
+#: applying is never mistaken for an operator de-selection (task 4.4).
+PORTAL_AUTO_INCLUDED_COMPONENTS = frozenset({
+    'aws.greengrass.Nucleus',
+    'aws.greengrass.LogManager',
+    'aws.greengrass.ShadowManager',
+    'aws.edgeml.dda.InferenceUploader',
+})
+
+
+def _preflight_previous_components(greengrass_client, existing_deployment):
+    """The target's current deployment components, or {} when there is no
+    previous deployment or it cannot be read (fail open, 2.9)."""
+    if not existing_deployment:
+        return {}
+    components = existing_deployment.get('components')
+    if isinstance(components, dict) and components:
+        return dict(components)
+    deployment_id = existing_deployment.get('deploymentId')
+    if not deployment_id:
+        return {}
+    try:
+        detail = greengrass_client.get_deployment(deploymentId=deployment_id)
+        return dict((detail or {}).get('components') or {})
+    except Exception as e:
+        logger.info(
+            f"preflight: could not read components of existing deployment "
+            f"{deployment_id}: {e}")
+        return {}
+
+
+def _preflight_device_platforms(greengrass_client, thing_names):
+    """{thing name: known platform attributes} for the target devices.
+
+    os/architecture from get_core_device, variant from the portal's own
+    DEVICES_TABLE.target_architecture by identity map (evidence.md §1.3). An
+    attribute that cannot be read is absent, which makes a manifest
+    constraining it UNVERIFIED rather than incompatible (2.9, 3.8).
+    """
+    device_archs = {}
+    try:
+        _device_flags, device_archs = load_device_gate_info(thing_names)
+    except Exception as e:
+        logger.info(f"preflight: could not read device records: {e}")
+    return deployment_preflight.resolve_device_platforms(
+        thing_names,
+        lambda thing_name: greengrass_client.get_core_device(
+            coreDeviceThingName=thing_name),
+        device_archs)
+
+
+def check_deployment_preflight(greengrass_client, region, account_id,
+                               components_map, thing_names,
+                               existing_deployment=None, acknowledged=None,
+                               context=''):
+    """The pre-submit closure validation. Returns an error response when the
+    submission must be refused, otherwise None (submit unchanged, 2.10).
+
+    Never raises and never mutates ``components_map``.
+    """
+    before = json.dumps(
+        {name: (entry or {}).get('componentVersion')
+         for name, entry in (components_map or {}).items()}, sort_keys=True)
+    try:
+        fetch_recipe, list_versions = deployment_preflight.greengrass_fetchers(
+            greengrass_client, region, account_id)
+        outcome = deployment_preflight.evaluate(
+            components_map,
+            _preflight_device_platforms(greengrass_client, thing_names),
+            fetch_recipe, list_versions,
+            previous_components=_preflight_previous_components(
+                greengrass_client, existing_deployment),
+            acknowledged=acknowledged,
+            excluded_names=PORTAL_AUTO_INCLUDED_COMPONENTS)
+    except Exception as e:
+        # Fail OPEN (2.9): a validation that cannot run never blocks a submit.
+        logger.warning(f"preflight: validation skipped ({context}): {e}",
+                       exc_info=True)
+        return None
+
+    after = json.dumps(
+        {name: (entry or {}).get('componentVersion')
+         for name, entry in (components_map or {}).items()}, sort_keys=True)
+    # 3.14: the validation reports; it never edits the operator's set.
+    assert before == after, (
+        'deployment preflight mutated the components map: '
+        f'{before} -> {after}')
+
+    if outcome.findings:
+        logger.info(
+            f"preflight ({context}): {outcome.summary()} "
+            f"{json.dumps(outcome.findings, default=str)}")
+    if outcome.refusal:
+        return _workflow_error(409, outcome.refusal['code'],
+                               outcome.refusal['message'],
+                               outcome.refusal['details'])
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -3823,6 +3969,25 @@ def create_workflow_deployment(body, user):
                     'action': 'NOTIFY_COMPONENTS'
                 }
             }
+
+        # Pre-submit closure validation (deployment-preflight-validation
+        # 2.1, 2.6, 2.10): the LAST gate on this path too, over the FINAL
+        # merged components map (the target's carried-over components, the
+        # ShadowManager ensure, the workflow entry at its registered version
+        # and the subscribe accessControl merge all already applied). It runs
+        # AFTER the LocalServer floor, plugin, vLLM and camera-binding gates,
+        # so each of those keeps precedence and its exact payload (3.4), and
+        # BEFORE the camera-binding shadow delivery below so a refusal writes
+        # nothing to any device. Reuses resolved_devices and the
+        # existing-deployment lookup already in hand.
+        preflight_error = check_deployment_preflight(
+            greengrass_client, region, account_id, components_map,
+            resolved_devices, existing_deployment=existing_deployment,
+            acknowledged=body.get(
+                deployment_preflight.ACKNOWLEDGEMENT_FIELD),
+            context='create_workflow_deployment')
+        if preflight_error:
+            return preflight_error
 
         # Camera_Binding delivery (Reqs 8.2, 8.6): each target thing's
         # dda-camera-bindings shadow gets desired.bindings["{wf}/{ver}"]
