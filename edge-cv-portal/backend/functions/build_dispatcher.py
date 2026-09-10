@@ -91,7 +91,7 @@ import shlex
 import time
 import uuid
 from decimal import Decimal
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
@@ -270,6 +270,46 @@ SETTLEMENT_WINDOW_MS = int(os.environ.get(
 #: the deterministic command comment always runs FIRST (Req 2.7).
 AMBIGUOUS_SEND_VISIBILITY_MS = int(os.environ.get(
     'BUILD_SEND_VISIBILITY_MS', str(5 * 60 * 1000)))
+#: Bounded exit-75 deferral safety valve (build-agent-exit75-deferral,
+#: bugfix.md 3.8 do-not-confuse guard): a genuine lock-held deferral is
+#: re-verified on the 5-minute pre-dispatch cadence, but a WEDGED lock
+#: must not defer forever. The valve bounds deferral PRESSURE (how many
+#: deferral cycles this job has consumed), NOT wall-clock since the
+#: first deferral: elapsed time is also consumed by healthy pre-dispatch
+#: pgrep deferrals and by the build itself, so a wall clock lets an
+#: unrelated wait exhaust the budget and hard-fail the very first
+#: genuine deferral it then sees. 0 (the default) derives the pressure
+#: budget from the job's OWN resolved runtime ceiling
+#: (build_reconciliation.effective_budget, which honors the
+#: runtime_budgets target/mode overrides the real hard ceiling uses)
+#: divided by the re-verification interval; a positive value overrides
+#: that derivation in ms. The valve never masks
+#: lock_ownership_heal_command: every re-dispatch runs the root-side
+#: ownership heal first.
+LOCK_DEFERRAL_WINDOW_MS = int(os.environ.get(
+    'BUILD_LOCK_DEFERRAL_WINDOW_MS', '0'))
+#: Deferral cycles allowed for an UNCORROBORATED rc 75 — a terminal
+#: 'Failed' invocation carrying the agent's deferral code but NOT its
+#: deterministic lock-held marker text (e.g. an inner build tool that
+#: itself exited 75 while its `failed` phase event was lost). One cycle
+#: still protects the runner from termination while a build may be
+#: running, but the job cannot loop through repeated full rebuilds
+#: before settling.
+LOCK_DEFERRAL_UNCORROBORATED_MAX_CYCLES = int(os.environ.get(
+    'BUILD_LOCK_DEFERRAL_UNCORROBORATED_CYCLES', '1'))
+#: External backstop for the requeued deferral state
+#: (build-agent-exit75-deferral): a deferred job keeps its live runner,
+#: and neither the runtime watchdog (building/publishing only) nor the
+#: queue-wait budget (frozen by the pre-existing dispatched_at) can
+#: expire it. When no deferral activity — a re-dispatch attempt or
+#: another deferral — has been recorded for this long, the deferral is
+#: STALLED and is settled through the same lock-holder-confirmed exit
+#: the valve uses, so a job that stops being re-dispatched can never
+#: hold a runner indefinitely. Six re-verification intervals leaves a
+#: healthy 5-minute defer/re-dispatch cadence far inside the bound.
+LOCK_DEFERRAL_STALL_MS = int(os.environ.get(
+    'BUILD_LOCK_DEFERRAL_STALL_MS',
+    str(6 * build_planner.PREDISPATCH_RETRY_INTERVAL_MS)))
 #: Diagnostic source tag for the scheduled tick (design data model).
 EVIDENCE_SOURCE_SCHEDULED = 'scheduled_reconciliation'
 
@@ -2005,13 +2045,6 @@ def verify_and_start_dedicated(job: Dict[str, Any],
         release_server(server['server_id'], job['build_job_id'])
         return
 
-    # Clean verification: queued -> building (Req 7.5) + agent dispatch.
-    if not transition_job(
-            job['build_job_id'], build_domain.STATUS_QUEUED,
-            build_domain.next_status(build_domain.STATUS_QUEUED,
-                                     build_domain.EVENT_DISPATCH_DEDICATED),
-            extra={'dispatched_at': now, 'started_at': now}):
-        return  # raced (e.g. cancellation); allocation release next tick
     # Execution-attempt claim recorded BEFORE the SendCommand
     # (build-fleet-execution-failures Req 2.7): dispatch_state moves
     # claimed -> sending -> sent around the send, and the deterministic
@@ -2022,14 +2055,32 @@ def verify_and_start_dedicated(job: Dict[str, Any],
         job['build_job_id'], str(uuid.uuid4()), instance_id, now)
     attempt['dispatch_state'] = build_reconciliation.DISPATCH_SENDING
     attempt['sending_at'] = now
-    update_job_fields(job['build_job_id'], {
-        'bootstrap': bootstrap_note,
-        'execution_attempt': attempt,
-        # Separately recorded preflight evidence (task 7.1, Req 2.8):
-        # the local contract passed; the machine-side checks and disk
-        # recording arrive with the agent's execution-start event.
-        'preflight': to_dynamo(preflight_record(preflight, repo_dir, now)),
-    })
+    # Clean verification: queued -> building (Req 7.5) + agent dispatch.
+    # The claim rides in THIS conditional transition (build-agent-exit75-
+    # deferral Req 2.3): the queued -> building condition is already the
+    # one-writer-wins arbiter for a dedicated dispatch, so recording the
+    # attempt in the same write makes the claim conditional too — a tick
+    # that loses the transition writes nothing at all and never sends,
+    # and no window exists in which two ticks hold a claim for one job
+    # (overlapping scheduled + async on-submit executions run the same
+    # full tick). It also keeps every dedicated-dispatch persistence
+    # write on the transition_job/update_job_fields seams.
+    if not transition_job(
+            job['build_job_id'], build_domain.STATUS_QUEUED,
+            build_domain.next_status(build_domain.STATUS_QUEUED,
+                                     build_domain.EVENT_DISPATCH_DEDICATED),
+            extra={'dispatched_at': now, 'started_at': now,
+                   'execution_attempt': attempt,
+                   'bootstrap': bootstrap_note,
+                   # Separately recorded preflight evidence (task 7.1,
+                   # Req 2.8): the local contract passed; the
+                   # machine-side checks and disk recording arrive with
+                   # the agent's execution-start event.
+                   'preflight': to_dynamo(
+                       preflight_record(preflight, repo_dir, now))}):
+        # Raced (e.g. cancellation, or a concurrent tick that already
+        # claimed this dispatch): allocation release happens next tick.
+        return
     try:
         command_id, log_stream = send_agent(
             job, instance_id, repo_dir,
@@ -2143,6 +2194,90 @@ def fail_bootstrap_timeout(job: Dict[str, Any],
              ledger=plan_job_ledger(job, cleanup_required=True))
 
 
+#: Outcomes of one lock-held-deferral re-dispatch attempt.
+REDISPATCH_DONE = 'redispatched'        # queued -> provisioning this tick
+REDISPATCH_WAIT = 'wait'                # not due / lock still held: stay
+REDISPATCH_RUNNER_GONE = 'runner_gone'  # bound runner no longer exists
+
+
+def redispatch_lock_deferred(job: Dict[str, Any],
+                             plan: 'build_planner.RunnerPlan',
+                             now: int) -> str:
+    """Re-dispatch one exit-75-deferred ephemeral Build_Job onto its OWN
+    runner, gated exactly as the dedicated pre-dispatch path is
+    (build-agent-exit75-deferral Req 2.2, bugfix.md 3.4 pattern).
+
+    Two gates, both mandatory:
+
+    1. the 5-minute re-verification cadence
+       (``build_planner.is_reverification_due`` on ``deferred_at``);
+    2. the pgrep BUILD-PROCESS VERIFICATION the dedicated path runs
+       through ``decide_predispatch``. This is not optional politeness:
+       the agent command's preamble runs `chown -R`, `git fetch` and
+       `git checkout --force -B <ref> origin/<ref>` as the build user
+       BEFORE ``portal-build-agent.sh`` ever reaches ``flock``, and
+       ``portal-build.sh`` writes the TRACKED ``gdk-config.json`` to
+       select the component for its target. Re-sending the agent while
+       the lock holder builds would therefore rewrite tracked files
+       underneath a running build — the corruption mode
+       .kiro/steering/builds.md prohibits — even though the agent itself
+       would immediately defer again. So the send happens only once no
+       build process is observed; an UNVERIFIABLE check keeps the job
+       deferred (fail closed, the ``run_shell_sync`` None convention).
+
+    A verified-absent runner instance short-circuits to
+    REDISPATCH_RUNNER_GONE so the caller can provision replacement
+    compute; ``runner.terminated_at`` alone is NOT a liveness signal
+    (only this dispatcher's own termination sets it)."""
+    runner = job.get('runner') or {}
+    instance_id = runner.get('instance_id')
+    if not build_planner.is_reverification_due(job.get('deferred_at'), now):
+        return REDISPATCH_WAIT  # re-verification not due yet: stays queued
+    if runner_instance_alive(instance_id) is False:
+        # Record the verification so the stalled-deferral backstop does
+        # not judge the replacement runner's bootstrap by a stale clock.
+        update_job_fields(job['build_job_id'], {'deferred_at': now})
+        job['deferred_at'] = now
+        return REDISPATCH_RUNNER_GONE
+    # Root-side lock-ownership heal first (bugfix.md 3.8): the
+    # root-owned-lock 'Bad file descriptor' pattern must stay healed by
+    # its own mechanism, never masked by (or mistaken for) this deferral.
+    output = run_shell_sync(
+        instance_id,
+        [lock_ownership_heal_command()] + VERIFY_BUILD_PROCESS_COMMANDS)
+    decision = build_planner.decide_predispatch(job, output, now)
+    if output is None or decision.action == build_planner.PREDISPATCH_DEFER:
+        # A build is running on the runner (or the check could not be
+        # positively completed): do NOT re-send the agent — its command
+        # preamble would rewrite the tree the holder is building in.
+        # Record this verification attempt so the cadence advances and
+        # the stalled-deferral backstop sees the activity.
+        update_job_fields(job['build_job_id'], {'deferred_at': now})
+        job['deferred_at'] = now
+        logger.info(
+            f"Build_Job {job['build_job_id']}: lock-held deferral NOT "
+            f"re-dispatched on runner {instance_id}: "
+            + (f"build process(es) still running "
+               f"{list(decision.build_processes)}" if output is not None
+               else "the build-process verification could not be "
+                    "positively completed (fail closed)"))
+        return REDISPATCH_WAIT
+    if transition_job(
+            job['build_job_id'], build_domain.STATUS_QUEUED,
+            plan.status,  # provisioning (Req 3.1)
+            extra={'dispatched_at': now, 'deferred_at': now}):
+        # Keep the scanned dict coherent so the agent-start loop can
+        # re-dispatch on the existing runner THIS tick.
+        job['status'] = plan.status
+        job['dispatched_at'] = now
+        job['deferred_at'] = now
+        logger.info(
+            f"Build_Job {job['build_job_id']}: lock-held deferral "
+            f"re-dispatch on the SAME runner {instance_id} — build "
+            f"process verification clean (no new compute)")
+    return REDISPATCH_DONE
+
+
 def provision_ephemeral(jobs: List[Dict[str, Any]], now: int) -> None:
     """Provision Ephemeral_Build_Runners for the dispatch-eligible queued
     ephemeral Build_Jobs: exactly one runner per job, sizing from the
@@ -2152,13 +2287,32 @@ def provision_ephemeral(jobs: List[Dict[str, Any]], now: int) -> None:
     this tick, TIMEOUT fails the job at the bootstrap stage and releases
     the runner."""
     for plan in build_planner.plan_ephemeral_provisioning(jobs):
+        job = next(j for j in jobs
+                   if j.get('build_job_id') == plan.build_job_id)
+        # Exit-75 lock-held deferral requeue (build-agent-exit75-
+        # deferral Req 2.2): a queued ephemeral job that kept its LIVE
+        # runner binding through defer_lock_held_job re-verifies on the
+        # SAME runner — no new compute is ever provisioned for it.
+        runner = job.get('runner') or {}
+        if job.get('lock_deferral') and runner.get('instance_id') \
+                and not runner.get('terminated_at'):
+            outcome = redispatch_lock_deferred(job, plan, now)
+            if outcome != REDISPATCH_RUNNER_GONE:
+                continue  # re-dispatched, or waiting: never new compute
+            # The bound runner is positively GONE (spot reclaim, external
+            # termination): an absent runner.terminated_at only records
+            # that THIS dispatcher never terminated it. Fall through and
+            # provision replacement compute rather than waiting forever
+            # behind the instance_ssm_online gate.
+            logger.warning(
+                f"Build_Job {plan.build_job_id}: the deferred job's runner "
+                f"{runner.get('instance_id')} no longer exists; "
+                f"provisioning replacement compute")
         if not transition_job(
                 plan.build_job_id, build_domain.STATUS_QUEUED,
                 plan.status,  # provisioning (Req 3.1)
                 extra={'dispatched_at': now}):
             continue  # raced (e.g. cancellation)
-        job = next(j for j in jobs
-                   if j.get('build_job_id') == plan.build_job_id)
         job = dict(job, status=plan.status)
         # The directory this runner's bootstrap will clone into; recorded
         # on the runner record below so later ticks invoke the agent from
@@ -2236,17 +2390,40 @@ def provision_ephemeral(jobs: List[Dict[str, Any]], now: int) -> None:
             continue
         # Execution-attempt claim recorded BEFORE the SendCommand
         # (build-fleet-execution-failures Req 2.7): the deterministic
-        # command comment supports ambiguous-send recovery.
+        # command comment supports ambiguous-send recovery. The claim is
+        # a CONDITIONAL one-writer-wins write (build-agent-exit75-
+        # deferral Req 2.3): the in-memory `ssm.command_id` gate above
+        # cannot see a claim another overlapping tick persisted AFTER
+        # this tick's scan (the incident's 4-second window — commands
+        # 1b538196/a13a0825, attempts 88dcd6b8/6c6b5483), so the
+        # condition arbitrates at write time and the loser skips the
+        # send silently.
         attempt = build_reconciliation.new_execution_attempt(
             job['build_job_id'], str(uuid.uuid4()), instance_id, now)
         attempt['dispatch_state'] = build_reconciliation.DISPATCH_SENDING
         attempt['sending_at'] = now
-        update_job_fields(job['build_job_id'], {
-            'execution_attempt': attempt,
-            # Separately recorded preflight evidence (task 7.1, Req 2.8).
-            'preflight': to_dynamo(
-                preflight_record(preflight, repo_dir, now)),
-        })
+        claim = claim_execution_attempt(
+            job['build_job_id'], attempt,
+            prior_attempt=job.get('execution_attempt'),
+            extra_fields={
+                # Separately recorded preflight evidence (task 7.1,
+                # Req 2.8).
+                'preflight': to_dynamo(
+                    preflight_record(preflight, repo_dir, now)),
+            })
+        if claim != CLAIM_WON:
+            # The two refusals are different situations to debug: a live
+            # attempt already owns this dispatch (no race happened),
+            # versus a genuinely lost race at write time.
+            logger.info(
+                f"Build_Job {job['build_job_id']}: "
+                + ("a live execution attempt already owns this dispatch "
+                   "(ambiguous-send recovery owns it)"
+                   if claim == CLAIM_LIVE_ATTEMPT else
+                   "lost the execution-attempt claim to a concurrent "
+                   "tick")
+                + "; skipping the send")
+            continue
         try:
             command_id, log_stream = send_agent(
                 job, instance_id, repo_dir,
@@ -2283,6 +2460,54 @@ def provision_ephemeral(jobs: List[Dict[str, Any]], now: int) -> None:
 # (build-fleet-execution-failures task 5.2, Req 2.5, 2.6, 2.7, 2.11,
 # 3.2, 3.4)
 
+#: Outcomes of one invocation read (build-agent-exit75-deferral Req 2.5):
+#: "the service says no such invocation exists" and "the invocation
+#: could not be READ" are different facts and must not collapse into one
+#: None. Only ABSENT is evidence about the command; UNREADABLE
+#: (throttling, AccessDenied, 5xx, incomplete identity) is evidence
+#: about the API call and can never authorize a resend.
+INVOCATION_READ_RETRIEVED = 'retrieved'
+INVOCATION_READ_ABSENT = 'absent'
+INVOCATION_READ_UNREADABLE = 'unreadable'
+
+
+class InvocationRead(NamedTuple):
+    """One GetCommandInvocation read: its outcome plus the invocation
+    when retrieved (see the INVOCATION_READ_* vocabulary)."""
+    state: str
+    invocation: Optional[Dict[str, Any]]
+    error_code: Optional[str] = None
+
+
+def read_invocation(command_id: Optional[str],
+                    instance_id: Optional[str]) -> InvocationRead:
+    """READ-ONLY GetCommandInvocation reporting WHY there is no
+    invocation (build-agent-exit75-deferral Req 2.5).
+
+    ``InvocationDoesNotExist``/``InvalidCommandId`` -> ABSENT (the
+    service has no invocation record for this command on this
+    instance); every other ``ClientError`` and an incomplete identity ->
+    UNREADABLE (the fact is unknown, so callers must WAIT rather than
+    treat it as absence). The raw response exists only in local memory
+    long enough to be sanitized — never logged/persisted as-is
+    (Req 2.10)."""
+    if not command_id or not instance_id:
+        return InvocationRead(INVOCATION_READ_UNREADABLE, None,
+                              'IncompleteCommandIdentity')
+    try:
+        return InvocationRead(
+            INVOCATION_READ_RETRIEVED,
+            ssm.get_command_invocation(CommandId=command_id,
+                                       InstanceId=instance_id))
+    except ClientError as e:
+        code = e.response.get('Error', {}).get('Code', '')
+        if code in ('InvocationDoesNotExist', 'InvalidCommandId'):
+            return InvocationRead(INVOCATION_READ_ABSENT, None, code)
+        logger.warning(f"GetCommandInvocation({command_id}) "
+                       f"failed: {code}")
+        return InvocationRead(INVOCATION_READ_UNREADABLE, None, code)
+
+
 def retrieve_invocation(command_id: Optional[str],
                         instance_id: Optional[str]
                         ) -> Optional[Dict[str, Any]]:
@@ -2290,27 +2515,120 @@ def retrieve_invocation(command_id: Optional[str],
     (Req 2.1/2.5). None on ``InvocationDoesNotExist`` (eventual
     consistency) or incomplete identity. The raw response exists only in
     local memory long enough to be sanitized — never logged/persisted
-    as-is (Req 2.10)."""
-    if not command_id or not instance_id:
+    as-is (Req 2.10).
+
+    Retained UNCHANGED for the reconciliation paths whose bounded-lookup
+    logic already treats every unretrieved read as "pending, retry"; the
+    resend gate uses :func:`read_invocation` instead, because there
+    "absent" and "unreadable" must decide differently."""
+    return read_invocation(command_id, instance_id).invocation
+
+
+def runner_instance_state(instance_id: Optional[str]) -> Optional[str]:
+    """The EC2 lifecycle state name of one runner instance, or None when
+    it could not be positively read (build-agent-exit75-deferral): an
+    absent ``runner.terminated_at`` only records that THIS dispatcher
+    never terminated the instance — a spot reclaim or an external
+    termination leaves it absent while no instance exists. Callers that
+    reuse a runner must verify actual state; unknown stays unknown
+    (fail closed)."""
+    if not instance_id:
         return None
     try:
-        return ssm.get_command_invocation(CommandId=command_id,
-                                          InstanceId=instance_id)
+        response = ec2.describe_instances(InstanceIds=[instance_id])
     except ClientError as e:
         code = e.response.get('Error', {}).get('Code', '')
-        if code not in ('InvocationDoesNotExist', 'InvalidCommandId'):
-            logger.warning(f"GetCommandInvocation({command_id}) "
-                           f"failed: {code}")
+        if code in ('InvalidInstanceID.NotFound',
+                    'InvalidInstanceID.Malformed'):
+            return build_domain.SERVER_STATE_TERMINATED
+        logger.warning(f"DescribeInstances({instance_id}) failed: {code}")
         return None
+    for reservation in response.get('Reservations', []):
+        for instance in reservation.get('Instances', []):
+            if instance.get('InstanceId') == instance_id:
+                return (instance.get('State') or {}).get('Name')
+    return build_domain.SERVER_STATE_TERMINATED
+
+
+#: EC2 instance states in which a runner can still be executing a build.
+RUNNER_LIVE_INSTANCE_STATES = ('pending', 'running')
+
+
+def runner_instance_alive(instance_id: Optional[str]) -> Optional[bool]:
+    """True/False/None(unknown) for "this runner instance can still be
+    running a build" (see :func:`runner_instance_state`)."""
+    state = runner_instance_state(instance_id)
+    if state is None:
+        return None
+    return state in RUNNER_LIVE_INSTANCE_STATES
+
+
+class CommandMatch(NamedTuple):
+    """One recent-command match for a job's ambiguous-send recovery
+    (build-agent-exit75-deferral Req 2.4).
+
+    - ``command_id`` / ``attempt_id`` / ``comment``: the found command's
+      identity and the job/attempt binding parsed from its deterministic
+      ``dda-build:<job>:<attempt>`` comment
+    - ``list_status``: the ListCommands-reported status (delivery-level;
+      'Undeliverable' details here are NOT proof of non-execution — the
+      incident's command 1b538196 reported Failed/Undeliverable while it
+      executed and held the build lock)
+    - ``exact``: True iff the comment equals the CURRENT attempt's
+      comment (the pre-fix full-equality match, preservation bugfix.md
+      3.5: an exact match is attached without a resend, unchanged)
+    """
+    command_id: str
+    attempt_id: str
+    comment: str
+    list_status: Optional[str]
+    exact: bool
+
+
+def settled_command_ids(job: Dict[str, Any]) -> Set[str]:
+    """Command ids this job has ALREADY settled and must never re-attach
+    (build-agent-exit75-deferral Req 2.4).
+
+    Without this exclusion the job-id lookup can, past the visibility
+    bound, match a previous deferral cycle's exit-75 command: it shows
+    execution evidence, gets attached, reconciles to rc 75 again and
+    re-defers the job — burning deferral pressure while the command the
+    current attempt actually sent stays orphaned. ``defer_lock_held_job``
+    records every command it settles (``lock_deferral.last_command_id``
+    plus the bounded ``settled_command_ids`` history)."""
+    deferral = job.get('lock_deferral') or {}
+    settled: Set[str] = set()
+    last = deferral.get('last_command_id')
+    if isinstance(last, str) and last:
+        settled.add(last)
+    history = deferral.get('settled_command_ids')
+    if isinstance(history, (list, tuple)):
+        settled.update(c for c in history if isinstance(c, str) and c)
+    return settled
 
 
 def find_command_by_comment(instance_id: Optional[str],
-                            comment: Optional[str]) -> Optional[str]:
-    """Recent-command lookup for an ambiguous send (Req 2.7): the
-    command whose Comment equals the attempt's deterministic
-    ``dda-build:<job>:<attempt>`` marker, or None. READ-ONLY."""
-    if build_reconciliation.parse_command_comment(comment) is None:
+                            comment: Optional[str],
+                            exclude_command_ids: Optional[Set[str]] = None
+                            ) -> Optional[CommandMatch]:
+    """Recent-command lookup for an ambiguous send (Req 2.7, fixed per
+    build-agent-exit75-deferral Req 2.4): match every command whose
+    comment PARSES to the same JOB id via ``parse_command_comment``
+    instead of requiring full-comment equality — a PRIOR attempt's
+    ``dda-build:<job>:<other-attempt>`` command is now findable and
+    attachable (the pre-fix equality match could never see it, so the
+    recovery proceeded as if no command existed and double-sent).
+
+    Preference order: the CURRENT attempt's exact match first (the
+    preserved pre-fix behavior), else the most recent non-terminal
+    match (ListCommands returns most recent first), else the most
+    recent match of any status. ``exclude_command_ids`` drops commands
+    this job already settled (see :func:`settled_command_ids`).
+    READ-ONLY."""
+    parsed = build_reconciliation.parse_command_comment(comment)
+    if parsed is None:
         return None
+    job_id = parsed[0]
     kwargs: Dict[str, Any] = {'MaxResults': 50}
     if instance_id:
         kwargs['InstanceId'] = instance_id
@@ -2320,10 +2638,124 @@ def find_command_by_comment(instance_id: Optional[str],
         logger.warning(f"ListCommands for ambiguous-send recovery "
                        f"failed: {e.response.get('Error', {}).get('Code')}")
         return None
+    excluded = exclude_command_ids or set()
+    exact: Optional[CommandMatch] = None
+    nonterminal: Optional[CommandMatch] = None
+    first: Optional[CommandMatch] = None
     for command in response.get('Commands', []):
-        if command.get('Comment') == comment:
-            return command.get('CommandId')
-    return None
+        candidate = build_reconciliation.parse_command_comment(
+            command.get('Comment'))
+        if candidate is None or candidate[0] != job_id:
+            continue  # a different job's (or unmarked) command
+        if command.get('CommandId') in excluded:
+            continue  # already settled on this job: never re-attach
+        match = CommandMatch(
+            command_id=command.get('CommandId'),
+            attempt_id=candidate[1],
+            comment=command.get('Comment'),
+            list_status=command.get('Status'),
+            exact=command.get('Comment') == comment)
+        if match.exact and exact is None:
+            exact = match
+        if match.list_status not in \
+                build_reconciliation.SSM_TERMINAL_STATUSES \
+                and nonterminal is None:
+            nonterminal = match
+        if first is None:
+            first = match
+    return exact or nonterminal or first
+
+
+#: Outcomes of one execution-attempt claim (build-agent-exit75-deferral
+#: Req 2.3). The two refusals are DIFFERENT situations to debug: a live
+#: attempt already owns this job's dispatch (nothing raced — the
+#: ambiguous-send recovery owns it), versus a genuine lost race against
+#: a concurrent tick execution.
+CLAIM_WON = 'claimed'
+CLAIM_LIVE_ATTEMPT = 'live_attempt'
+CLAIM_LOST = 'lost'
+
+
+def claim_execution_attempt(build_job_id: str,
+                            attempt: Dict[str, Any],
+                            prior_attempt: Optional[Dict[str, Any]],
+                            extra_fields: Optional[Dict[str, Any]] = None
+                            ) -> str:
+    """CONDITIONAL pre-SendCommand execution-attempt claim for the
+    EPHEMERAL send loop: exactly one concurrent tick execution can win
+    it (build-agent-exit75-deferral Req 2.3, the ``claim_resend``
+    conditional-write precedent).
+
+    Only the ephemeral loop needs this helper. A dedicated dispatch is
+    already arbitrated by its conditional queued -> building transition
+    and records the attempt inside that same write
+    (``verify_and_start_dedicated``); the ephemeral runner, by contrast,
+    is ALREADY in provisioning when the agent is sent, so no status
+    transition arbitrates the send and the attempt itself must carry the
+    condition.
+
+    ``prior_attempt`` is the attempt from the caller's OWN scan
+    snapshot. The condition asserts the persisted record still matches
+    that snapshot at write time:
+
+    - snapshot saw NO attempt -> the whole ``execution_attempt``
+      attribute must still be absent (or an explicit NULL): a tick
+      holding a stale pre-claim snapshot loses to the tick that already
+      claimed and sent (incident: overlapping scheduled + async ticks
+      minted attempts 88dcd6b8/6c6b5483 and sent commands
+      1b538196/a13a0825 4 s apart — the second unconditional SET
+      orphaned the first command). The condition deliberately does NOT
+      use ``attribute_not_exists(execution_attempt.attempt_id)``, which
+      also passes for an attempt MAP that merely lacks ``attempt_id``
+      and would let this claim overwrite it;
+    - snapshot saw a SETTLED prior attempt -> equality on its
+      ``attempt_id`` plus ``dispatch_state = terminal``: only a settled
+      attempt (e.g. a lock-held deferral) may be superseded, and only by
+      one writer;
+    - snapshot saw a LIVE (sending/sent) prior attempt -> never claim:
+      the ambiguous-send recovery owns it (CLAIM_LIVE_ATTEMPT, refused
+      locally with no write attempted).
+
+    Returns CLAIM_WON, CLAIM_LIVE_ATTEMPT or CLAIM_LOST; on either
+    refusal the caller MUST skip the send silently (the next tick
+    reconciles). ``extra_fields`` ride in the same conditional update so
+    a refused claim writes nothing at all."""
+    prior = prior_attempt or {}
+    prior_id = prior.get('attempt_id')
+    if prior_id and prior.get('dispatch_state') != \
+            build_reconciliation.DISPATCH_TERMINAL:
+        return CLAIM_LIVE_ATTEMPT  # never mint a second live command
+    names = {'#att': 'execution_attempt'}
+    values: Dict[str, Any] = {':attempt': attempt}
+    sets = ['#att = :attempt']
+    if prior_id:
+        condition = ('#att.attempt_id = :prior_aid AND '
+                     '#att.dispatch_state = :terminal')
+        values[':prior_aid'] = prior_id
+        values[':terminal'] = build_reconciliation.DISPATCH_TERMINAL
+    else:
+        condition = ('attribute_not_exists(#att) OR '
+                     'attribute_type(#att, :null_type)')
+        values[':null_type'] = 'NULL'
+    for index, (key, value) in enumerate(sorted((extra_fields or {})
+                                                .items())):
+        names[f'#x{index}'] = key
+        values[f':x{index}'] = value
+        sets.append(f'#x{index} = :x{index}')
+    try:
+        jobs_table().update_item(
+            Key={'build_job_id': build_job_id},
+            UpdateExpression='SET ' + ', '.join(sets),
+            ConditionExpression=condition,
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+        return CLAIM_WON
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == \
+                'ConditionalCheckFailedException':
+            return CLAIM_LOST
+        raise
 
 
 def claim_resend(build_job_id: str, attempt_id: Optional[str],
@@ -2355,43 +2787,177 @@ def claim_resend(build_job_id: str, attempt_id: Optional[str],
         raise
 
 
+def cancel_command_confirmed(command_id: str,
+                             instance_id: Optional[str]) -> bool:
+    """Cancel a possibly-live prior agent command and CONFIRM the
+    cancellation (build-agent-exit75-deferral Req 2.5): True only when,
+    after the CancelCommand call, the command's invocation evidence is
+    POSITIVELY terminal, or the service positively reports that no
+    invocation exists for this command on this instance (it never
+    reached it, and the accepted cancel means it never will).
+
+    An invocation that could not be READ — throttling, AccessDenied, a
+    5xx — is NOT absence (Req 2.5): the gate must fail CLOSED there, or
+    SSM throttling (plausible when every job's tick does ListCommands
+    plus GetCommandInvocation) would authorize a resend over a live
+    command. A resend is permitted only on True; anything else keeps the
+    recovery waiting for the next tick."""
+    try:
+        kwargs: Dict[str, Any] = {'CommandId': command_id}
+        if instance_id:
+            kwargs['InstanceIds'] = [instance_id]
+        ssm.cancel_command(**kwargs)
+    except ClientError as e:
+        logger.warning(f"CancelCommand({command_id}) failed: "
+                       f"{e.response.get('Error', {}).get('Code')}")
+        return False
+    read = read_invocation(command_id, instance_id)
+    if read.state == INVOCATION_READ_ABSENT:
+        # The service positively reports no invocation record on the
+        # instance: the command never reached it; combined with the
+        # accepted cancel it cannot run.
+        return True
+    if read.state != INVOCATION_READ_RETRIEVED:
+        logger.info(
+            f"Cancellation of {command_id} not confirmed: the "
+            f"invocation could not be read ({read.error_code}); waiting "
+            f"rather than authorizing a resend")
+        return False
+    return (read.invocation or {}).get('Status') in \
+        build_reconciliation.SSM_TERMINAL_STATUSES
+
+
+def prior_command_proven_never_executed(match: CommandMatch,
+                                        instance_id: Optional[str]
+                                        ) -> Optional[bool]:
+    """Non-execution evidence for a prior attempt's command
+    (build-agent-exit75-deferral Req 2.5), as a three-valued answer.
+
+    - ``False`` — the command EXECUTED or is executing (an
+      ``ExecutionStartDateTime``, or a non-terminal invocation): it must
+      be ATTACHED, never resent over.
+    - ``None`` — INDETERMINATE. Two shapes land here, and both mean
+      "wait, or cancel-and-confirm first": (a) the invocation could not
+      be READ (throttling/AccessDenied/5xx — a fact about the API call,
+      not about the command); (b) the invocation IS terminal but records
+      no ``ExecutionStartDateTime``. Shape (b) is EXACTLY the incident's
+      command 1b538196 — SSM 'Failed'/'Undeliverable', rc -1, no
+      recorded execution start — which was in fact executing and
+      holding the build lock. Missing execution evidence on a
+      delivery-failed invocation is therefore never proof of
+      non-execution.
+    - ``True`` — the service positively reports NO invocation record for
+      this command on this instance while ListCommands already shows the
+      command delivery-terminal. Two independent reads agree the
+      document never ran there. The caller only reaches this predicate
+      past ``AMBIGUOUS_SEND_VISIBILITY_MS``, so post-send registration
+      lag (the ordinary reason for an absent invocation) is excluded."""
+    read = read_invocation(match.command_id, instance_id)
+    if read.state == INVOCATION_READ_UNREADABLE:
+        return None  # unknown: cancel-and-confirm before any resend
+    if read.state == INVOCATION_READ_ABSENT:
+        if match.list_status in build_reconciliation.SSM_TERMINAL_STATUSES:
+            return True
+        return None  # delivery not even terminal: nothing is proven
+    invocation = read.invocation or {}
+    if invocation.get('ExecutionStartDateTime') \
+            or invocation.get('Status') not in \
+            build_reconciliation.SSM_TERMINAL_STATUSES:
+        return False  # executed (or still executing): attach, never resend
+    # Terminal invocation with no recorded execution start: the incident
+    # shape. Indeterminate — never proof of non-execution.
+    return None
+
+
 def recover_ambiguous_send(job: Dict[str, Any],
                            servers_by_id: Dict[str, Dict[str, Any]],
                            now: int) -> None:
     """Recover a dispatch attempt stuck in `sending` with no persisted
     command id (execution stopped between SendCommand and the command_id
-    write): search recent commands for the attempt's deterministic
-    comment and attach the existing command — NEVER blindly resend.
-    Only after the visibility bound proves no command exists may ONE
-    conditional new attempt be sent (Req 2.7, at most one effective
-    dispatch)."""
+    write): search recent commands for THIS JOB's deterministic comment
+    marker and attach the existing command — NEVER blindly resend. A
+    PRIOR attempt's command for the same job is attachable too
+    (build-agent-exit75-deferral Req 2.4): its command_id/attempt
+    binding is adopted so reconciliation and agent-result correlation
+    follow the command that actually exists. Only after the visibility
+    bound proves no live-or-executed command exists may ONE conditional
+    new attempt be sent (Req 2.7 / 2.5: at most one effective dispatch,
+    never two concurrently live agent commands for one job)."""
     attempt = dict(job.get('execution_attempt') or {})
     build_job_id = job['build_job_id']
     instance_id = attempt.get('instance_id') \
         or job_instance_id(job, servers_by_id)
     comment = attempt.get('command_comment')
 
-    found = find_command_by_comment(instance_id, comment)
-    if found:
-        # The command exists: attach it; reconciliation now owns it.
+    def _attach(match: CommandMatch) -> None:
+        # The command exists: attach it; reconciliation now owns it. The
+        # exact (current-attempt) match keeps the pre-fix write shape
+        # unchanged (preservation bugfix.md 3.5).
+        if not match.exact:
+            # A PRIOR attempt's command (Req 2.4). Its attempt identity
+            # must become the job's, because the agent was started with
+            # THAT attempt id and every phase event it emits is
+            # correlated by attempt_id (evidence_matches_attempt).
+            # Recording the adoption EXPLICITLY — instead of silently
+            # rewriting identity in place — keeps the attempt's clocks
+            # honest: claimed_at/sending_at described the dispatch this
+            # tick abandoned, not the command now bound, so they move
+            # into the adoption record and the live clocks describe the
+            # adopted binding (unknown send time -> the adoption time).
+            attempt.update({
+                'attempt_id': match.attempt_id,
+                'command_comment': match.comment,
+                'adopted_command': to_dynamo({
+                    'command_id': match.command_id,
+                    'attempt_id': match.attempt_id,
+                    'command_comment': match.comment,
+                    'list_status': match.list_status,
+                    'adopted_at': now,
+                    # The dispatch this tick gave up on, kept for
+                    # forensics (its clocks are NOT the adopted
+                    # command's).
+                    'superseded_attempt_id': attempt.get('attempt_id'),
+                    'superseded_claimed_at': attempt.get('claimed_at'),
+                    'superseded_sending_at': attempt.get('sending_at'),
+                }),
+                'claimed_at': None,
+                'sending_at': None,
+            })
         attempt.update({
-            'command_id': found,
+            'command_id': match.command_id,
             'dispatch_state': build_reconciliation.DISPATCH_SENT,
             'sent_at': attempt.get('sent_at') or now,
         })
         fields = {
             'execution_attempt': attempt,
-            'ssm': {**(job.get('ssm') or {}), 'command_id': found,
+            'ssm': {**(job.get('ssm') or {}),
+                    'command_id': match.command_id,
                     'instance_id': instance_id},
             'log': {'group': BUILD_LOG_GROUP,
-                    'stream': ssm_log_stream(found, instance_id)},
+                    'stream': ssm_log_stream(match.command_id,
+                                             instance_id)},
         }
         update_job_fields(build_job_id, fields)
         # Keep the in-memory job coherent for the rest of THIS tick
         # (later steps rewrite bookkeeping maps from their scan).
         job.update(fields)
         logger.info(f"Build_Job {build_job_id}: ambiguous send recovered "
-                    f"to existing command {found} (no resend)")
+                    f"to existing command {match.command_id} "
+                    f"({'current' if match.exact else 'prior'} attempt, "
+                    f"no resend)")
+
+    # Commands this job has already settled are NOT candidates (Req 2.4):
+    # re-attaching a previous deferral cycle's exit-75 command would
+    # re-defer the job while the command the current attempt actually
+    # sent stays orphaned.
+    found = find_command_by_comment(
+        instance_id, comment,
+        exclude_command_ids=settled_command_ids(job))
+    if found and (found.exact or found.list_status not in
+                  build_reconciliation.SSM_TERMINAL_STATUSES):
+        # The current attempt's own command, or any command for this job
+        # that is not even delivery-terminal: attach, never resend.
+        _attach(found)
         return
 
     sending_since = attempt.get('sending_at') or attempt.get('claimed_at')
@@ -2400,6 +2966,25 @@ def recover_ambiguous_send(job: Dict[str, Any],
         return  # within the visibility bound: never resend yet
     if not instance_id or not comment:
         return
+    if found:
+        # Past the visibility bound with a PRIOR attempt's command that
+        # reported terminal at the DELIVERY level. Never trust that
+        # alone (build-agent-exit75-deferral Req 2.5): a resend is
+        # permitted only once the command is proven
+        # terminal-without-execution or its cancellation is CONFIRMED;
+        # execution evidence means ATTACH instead. The gate runs here,
+        # after the bound, so no cancellation is ever issued for a
+        # command that could still be the one this job is waiting on.
+        never_executed = prior_command_proven_never_executed(
+            found, instance_id)
+        if never_executed is False:
+            _attach(found)
+            return
+        if never_executed is None and not cancel_command_confirmed(
+                found.command_id, instance_id):
+            return  # not provably dead and not confirmably cancelled: wait
+        # Proven never-executed or cancel-confirmed: the conditional
+        # resend below may proceed (still one-writer-wins).
     if not claim_resend(build_job_id, attempt.get('attempt_id'),
                         sending_since, now):
         return  # another writer claimed/settled the attempt
@@ -2444,6 +3029,430 @@ def classification_message(classification:
             f"'{command_status}' before reporting a build result: "
             f"{classification.reason}. Retained command evidence was "
             f"recorded in the execution diagnostic.")
+
+
+#: Per-dispatch timing anchors cleared on an exit-75 deferral requeue so
+#: a later re-dispatch can never inherit a stale clock: the hard ceiling
+#: anchors on execution_started_at and observe_execution_start is
+#: first-writer-wins, so a retained anchor from the deferred attempt
+#: would both block the new attempt's own anchor and charge the deferral
+#: wait to its runtime.
+_ATTEMPT_SCOPED_TIMING_FIELDS = (
+    'provisioning_started_at', 'provisioning_ended_at',
+    'execution_started_at', 'execution_ended_at',
+    'last_heartbeat_at', 'last_progress_at', 'last_progress_kind',
+    'heartbeat_sequence', 'progress_sequence',
+)
+
+
+#: Bounded history of command ids a job has settled as lock-held
+#: deferrals (see settled_command_ids); enough to exclude the cycles a
+#: 50-command ListCommands window can still surface.
+_LOCK_DEFERRAL_HISTORY_LIMIT = 10
+
+
+def lock_deferral_window_ms(job: Dict[str, Any]) -> int:
+    """The runtime ceiling the deferral pressure budget is derived from
+    (build-agent-exit75-deferral): the explicit override when
+    configured, else the job's OWN resolved hard runtime ceiling.
+
+    ``build_reconciliation.effective_budget`` is the resolver the real
+    hard ceiling uses, so a target configured through
+    ``runtime_budgets[target][mode]`` /
+    ``runtime_budgets[target].default`` yields the SAME number here —
+    ``build_planner.max_runtime_ms`` reads only the snapshot's
+    ``max_runtime_hours`` and would size an 8-hour target's valve at the
+    4-hour compatibility default. Only the job's own
+    ``config_snapshot`` is consulted, never current configuration
+    (Req 9.3 discipline)."""
+    if LOCK_DEFERRAL_WINDOW_MS > 0:
+        return LOCK_DEFERRAL_WINDOW_MS
+    return int(build_reconciliation.effective_budget(job).hard_runtime_ms)
+
+
+def lock_deferral_cycle_budget(job: Dict[str, Any],
+                               corroborated: bool = True) -> int:
+    """How many exit-75 deferral CYCLES this job may consume before the
+    safety valve settles it (build-agent-exit75-deferral, bugfix.md 3.8).
+
+    Pressure, not wall-clock: each cycle costs at least one
+    re-verification interval (the re-dispatch is gated on
+    ``is_reverification_due``), so the budget still expresses "about one
+    runtime ceiling of waiting" — but time spent NOT deferring for the
+    lock (a healthy pre-dispatch pgrep wait, or the build itself) can no
+    longer exhaust it, and a legitimate deferral arriving late in a
+    job's life can no longer hard-fail on its first cycle.
+
+    ``corroborated`` False means the rc-75 invocation did NOT carry the
+    agent's deterministic lock-held marker text (an inner tool that
+    itself exited 75, with its `failed` phase event lost): one cycle
+    only, so it cannot loop through repeated full rebuilds."""
+    if not corroborated:
+        return max(1, LOCK_DEFERRAL_UNCORROBORATED_MAX_CYCLES)
+    interval = max(1, build_planner.PREDISPATCH_RETRY_INTERVAL_MS)
+    window = lock_deferral_window_ms(job)
+    return max(1, -(-int(window) // interval))  # ceil division
+
+
+def defer_lock_held_job(job: Dict[str, Any], command_id: str,
+                        update_diagnostic: Optional[Dict[str, Any]],
+                        now: int, corroborated: bool = True) -> bool:
+    """Route one settled exit-75 lock-held deferral back to the queue
+    (build-agent-exit75-deferral Req 2.1/2.2), MIRRORING the pre-dispatch
+    ``PREDISPATCH_DEFER`` handling of ``verify_and_start_dedicated``:
+
+    - conditional transition back to queued (one writer wins; a raced
+      write means another writer already owns this attempt's outcome);
+    - the ORIGINAL ``created_at`` is retained (never touched), so the
+      job stays at the head of its queue in submission order;
+    - ``deferred_at`` records this deferral and drives the 5-minute
+      ``is_reverification_due`` re-dispatch cadence;
+    - the ``runner``/instance binding and any dedicated server
+      allocation are KEPT, so the next tick re-verifies on the SAME
+      runner (attaching to a surviving command via the job-id lookup or
+      re-dispatching once the lock frees);
+    - NO ``cleanup_required=True`` terminal ledger is planned and no
+      termination-watchdog eligibility is created — the runner must not
+      be terminated while the lock-holder build may be running
+      (incident: i-089a77f72bc558147 terminated under command
+      1b538196's live build);
+    - the settled attempt's command bookkeeping is cleared
+      (``ssm.command_id`` -> None, attempt settled terminal) so
+      re-dispatch is possible ONLY through the conditional
+      one-writer-wins attempt claim (claim_execution_attempt).
+
+    Returns False when the bounded deferral safety valve is exhausted —
+    the caller then settles through the UNCHANGED generic terminal path
+    (a wedged lock cannot defer forever; the root-owned-lock
+    exit-75-forever pattern of job 01b18948 stays owned by
+    ``lock_ownership_heal_command``, which every re-dispatch runs first
+    — bugfix.md 3.8)."""
+    build_job_id = job['build_job_id']
+    job_status = job['status']
+    attempt = dict(job.get('execution_attempt') or {})
+    deferral = dict(job.get('lock_deferral') or {})
+    first_deferred_at = deferral.get('first_deferred_at') or now
+    count = int(deferral.get('count') or 0) + 1
+    # Corroboration is sticky: once ANY cycle of this deferral carried
+    # the agent's marker text, the job keeps the full pressure budget.
+    corroborated = bool(corroborated) or bool(
+        deferral.get('marker_corroborated'))
+    if count > lock_deferral_cycle_budget(job, corroborated):
+        return False  # safety valve: stop deferring, settle terminally
+
+    history = [c for c in (deferral.get('settled_command_ids') or [])
+               if isinstance(c, str) and c and c != command_id]
+    history.append(command_id)
+    fields: Dict[str, Any] = {
+        # PREDISPATCH_DEFER shape (build_dispatcher lines ~1963-1971):
+        # queued at the head of the queue, original created_at retained
+        # (deliberately NOT written), deferred_at recorded.
+        'deferred_at': now,
+        'lock_deferral': to_dynamo({
+            'count': count,
+            'first_deferred_at': first_deferred_at,
+            'last_deferred_at': now,
+            'last_command_id': command_id,
+            # Every command this job settled as a deferral: the
+            # ambiguous-send lookup must never re-attach one of them
+            # (settled_command_ids).
+            'settled_command_ids': history[
+                -_LOCK_DEFERRAL_HISTORY_LIMIT:],
+            'marker_corroborated': corroborated,
+            'cycle_budget': lock_deferral_cycle_budget(job, corroborated),
+        }),
+        # Clear the command bookkeeping so the send gate can re-dispatch
+        # (only via the conditional claim); the settled attempt keeps its
+        # identity/command for forensics but is terminal for dispatch.
+        'ssm': {**(job.get('ssm') or {}), 'command_id': None},
+        'execution_attempt': {
+            **attempt,
+            'dispatch_state': build_reconciliation.DISPATCH_TERMINAL,
+            'settled_at': now,
+            'settled_as': 'lock_held_deferral',
+        },
+        # Fresh reconciliation state for the NEXT attempt's command: the
+        # settled command's lookup/settlement state must not leak into a
+        # later re-dispatch.
+        'reconciliation': None,
+    }
+    if isinstance(job.get('timing'), dict):
+        fields['timing'] = to_dynamo({
+            k: v for k, v in job['timing'].items()
+            if k not in _ATTEMPT_SCOPED_TIMING_FIELDS})
+    if update_diagnostic is not None:
+        # The sanitized evidence of the deferred command stays on the
+        # job (observability without log archaeology).
+        fields['execution_diagnostic'] = to_dynamo(update_diagnostic)
+
+    # NOTE deliberately absent: no plan_job_ledger, no terminal_effects,
+    # no fail_job — a deferral is NOT a terminal outcome, so the
+    # termination watchdog can never see this runner (bugfix.md 2.2).
+    if not transition_job(build_job_id, job_status,
+                          build_domain.STATUS_QUEUED, extra=fields):
+        return True  # raced: another writer recorded this outcome
+    # Best-effort audit so the incident timeline is visible (Req 2.2).
+    audit('build_deferred_lock_held', build_job_id, 'success', {
+        'command_id': command_id,
+        'instance_id': (job.get('ssm') or {}).get('instance_id')
+        or (job.get('runner') or {}).get('instance_id'),
+        'response_code': build_reconciliation.AGENT_LOCK_HELD_EXIT_CODE,
+        'deferral_count': count,
+        'deferral_cycle_budget': lock_deferral_cycle_budget(
+            job, corroborated),
+        'marker_corroborated': corroborated,
+        'first_deferred_at': first_deferred_at,
+        'status_at_deferral': job_status,
+    })
+    # Keep the in-memory job coherent for the rest of THIS tick (later
+    # steps rewrite bookkeeping maps from their scan).
+    job.update(fields)
+    job['status'] = build_domain.STATUS_QUEUED
+    logger.info(
+        f"Build_Job {build_job_id}: agent exit-75 lock-held deferral for "
+        f"command {command_id} — requeued at the head of its queue "
+        f"(deferral {count}, runner binding kept, no cleanup planned)")
+    return True
+
+
+def lock_holder_build_absent(job: Dict[str, Any]) -> Optional[bool]:
+    """True iff terminating this job's EPHEMERAL runner cannot kill a
+    running build (build-agent-exit75-deferral Req 2.2).
+
+    Every exit that abandons a lock-held deferral must pass this gate
+    first: the deferral's own premise is that a build holds
+    ``/var/lock/dda-build.lock`` on that runner, and a terminal
+    ephemeral job is terminated by ``termination_watchdog`` on status
+    alone — so settling terminally while the holder runs re-creates the
+    exact incident harm (i-089a77f72bc558147 terminated under command
+    1b538196's live build). The confirmation follows the runtime
+    watchdog / ``reconcile_compute_cleanup`` precedent: pgrep-confirm
+    the protected build processes are absent, and treat unknown process
+    state as NOT absent (fail closed).
+
+    - dedicated jobs: True — no instance is terminated for them; the
+      terminal path releases the slot, and the concurrent build on the
+      server is untouched;
+    - no runner recorded: True — there is nothing to protect;
+    - an instance that is positively NOT alive (spot-reclaimed,
+      externally terminated): True — no build can be running on it, and
+      pgrep would only ever return unknown;
+    - otherwise the pgrep confirmation: True / False / None (unknown)."""
+    if job.get('execution_mode') != build_domain.EXECUTION_MODE_EPHEMERAL:
+        return True
+    instance_id = (job.get('runner') or {}).get('instance_id')
+    if not instance_id:
+        return True
+    if runner_instance_alive(instance_id) is False:
+        return True
+    return confirm_no_build_processes(instance_id)
+
+
+def hold_lock_deferral_exit(job: Dict[str, Any],
+                            command_id: Optional[str],
+                            observed: Optional[bool], now: int,
+                            cause: str) -> None:
+    """Record that an abandoned lock-held deferral is being HELD because
+    a build may still be running on the runner (build-agent-exit75-
+    deferral Req 2.2).
+
+    The job stays exactly where it is — nonterminal, so no
+    termination-watchdog eligibility exists — and the next tick
+    re-confirms. This is self-limiting: once the holder's build exits
+    (or its instance is gone) the confirmation succeeds and the same
+    exit settles the job."""
+    deferral = dict(job.get('lock_deferral') or {})
+    first_held_at = deferral.get('valve_held_since') or now
+    fields = {'lock_deferral': to_dynamo({
+        **deferral,
+        'valve_exhausted_at': deferral.get('valve_exhausted_at') or now,
+        'valve_held_since': first_held_at,
+        'valve_last_checked_at': now,
+        'valve_hold_cause': cause,
+        'build_process_absent': observed,
+    })}
+    update_job_fields(job['build_job_id'], fields)
+    job.update(fields)
+    if deferral.get('valve_exhausted_at') is None:
+        audit('build_lock_deferral_valve_held', job['build_job_id'],
+              'failure', {
+                  'command_id': command_id,
+                  'instance_id': (job.get('runner') or {}).get(
+                      'instance_id'),
+                  'cause': cause,
+                  'build_process_absent': observed,
+                  'deferral_count': deferral.get('count'),
+                  'status_at_hold': job.get('status'),
+              })
+    logger.warning(
+        f"Build_Job {job['build_job_id']}: lock-held deferral abandoned "
+        f"({cause}) but the runner still has (or may have) a running "
+        f"build (build_process_absent={observed!r}); holding the job "
+        f"nonterminal so no runner is terminated under a live build")
+
+
+def lock_deferral_activity_at(job: Dict[str, Any]) -> Optional[int]:
+    """The last recorded ACTIVITY of a job's lock-held deferral: another
+    deferral, or a re-dispatch attempt (both write ``deferred_at``).
+
+    ``first_deferred_at`` is only a fallback for a record carrying
+    neither clock — it marks when the deferral STARTED, so counting it
+    as activity would keep resetting the stall bound."""
+    deferral = job.get('lock_deferral') or {}
+    stamps = [v for v in (deferral.get('last_deferred_at'),
+                          job.get('deferred_at'))
+              if isinstance(v, (int, float))]
+    if stamps:
+        return int(max(stamps))
+    first = deferral.get('first_deferred_at')
+    return int(first) if isinstance(first, (int, float)) else None
+
+
+def lock_deferral_watchdog(jobs: List[Dict[str, Any]],
+                           servers_by_id: Dict[str, Dict[str, Any]],
+                           now: int) -> None:
+    """EXTERNAL backstop for the requeued exit-75 deferral state
+    (build-agent-exit75-deferral, bugfix.md 3.8).
+
+    The deferral valve inside ``defer_lock_held_job`` only advances when
+    ANOTHER exit-75 settlement arrives. Every other way the deferred
+    state can persist is otherwise unbounded: the runtime watchdog
+    filters to building/publishing, and the queue-wait budget is frozen
+    because the deferral deliberately keeps the earlier ``dispatched_at``
+    (so the measured wait never grows). A job that stops being
+    re-dispatched — its runner impaired, its SSM ping never returning
+    Online, its re-dispatch gate never clean — would hold a live runner
+    forever.
+
+    This deadline is on the REQUEUED STATE itself: no deferral activity
+    (another deferral or a re-dispatch attempt, both of which write
+    ``deferred_at``) for ``LOCK_DEFERRAL_STALL_MS`` means the deferral
+    is stalled. It then settles through the same lock-holder-confirmed
+    exit the valve uses — never terminating a runner while a build may
+    still be running on it."""
+    for job in jobs:
+        try:
+            status = job.get('status') or ''
+            if status not in (build_domain.STATUS_QUEUED,
+                              build_domain.STATUS_PROVISIONING):
+                continue
+            deferral = job.get('lock_deferral') or {}
+            if not deferral:
+                continue
+            activity = lock_deferral_activity_at(job)
+            if activity is None or now - activity <= LOCK_DEFERRAL_STALL_MS:
+                continue
+            command_id = deferral.get('last_command_id')
+            absent = lock_holder_build_absent(job)
+            if absent is not True:
+                hold_lock_deferral_exit(job, command_id, absent, now,
+                                        'deferral_stalled')
+                continue
+            instance_id = job_instance_id(job, servers_by_id)
+            ledger = plan_job_ledger(
+                job,
+                cleanup_required=(job.get('execution_mode') ==
+                                  build_domain.EXECUTION_MODE_EPHEMERAL))
+            moved = fail_job(
+                job, build_reconciliation.CODE_BUILD_LOCK_HELD,
+                f"The build lock stayed held and the deferral stopped "
+                f"progressing for more than "
+                f"{LOCK_DEFERRAL_STALL_MS // 60000} minutes "
+                f"({deferral.get('count')} deferral cycle(s)); no build "
+                f"process remains on the runner.",
+                'build_lock_deferral_stalled',
+                {'instance_id': instance_id,
+                 'command_id': command_id,
+                 'deferral_count': deferral.get('count'),
+                 'last_deferral_activity_at': activity},
+                ledger=ledger,
+                extra={'lock_deferral': to_dynamo({
+                    **deferral,
+                    'stalled_at': now,
+                    'build_process_absent': True,
+                })})
+            if moved:
+                release_and_promote(
+                    dict(job, status=build_domain.STATUS_FAILED), ledger)
+                logger.warning(
+                    f"Build_Job {job['build_job_id']}: exit-75 deferral "
+                    f"stalled (no activity since {activity}); settled "
+                    f"with {build_reconciliation.CODE_BUILD_LOCK_HELD} "
+                    f"after confirming no build process remains")
+        except Exception as e:  # one job never poisons the tick
+            logger.warning(f"Lock-deferral backstop for Build_Job "
+                           f"{job.get('build_job_id')} failed: {e}")
+
+
+def reconcile_provisioning_lock_held(
+        job: Dict[str, Any], command_id: str,
+        servers_by_id: Dict[str, Dict[str, Any]], now: int) -> None:
+    """NARROW reconciliation route for a command-bearing PROVISIONING
+    ephemeral job whose agent reported the exit-75 lock-held deferral
+    (build-agent-exit75-deferral Req 2.1/2.2).
+
+    The agent takes ``flock -n`` in Step 1 and exits 75 there, BEFORE it
+    emits ``phase=building`` — so an ephemeral job that defers is still
+    ``provisioning``, and ``command_reconciliation`` only routes
+    building/publishing jobs to ``reconcile_running_command``. Without
+    this route the common exit-75 shape wedges: no deferral, no failure,
+    ``ssm.command_id`` still set (the ephemeral send gate skips the job),
+    the ambiguous-send recovery skips a `sent` attempt, and no watchdog
+    covers ``provisioning`` — the runner bills forever. The incident job
+    was only covered because an orphaned command had already moved it to
+    ``building``.
+
+    The route is deliberately narrow: it acts ONLY on the lock-held
+    deferral classification. Every other terminal invocation on a
+    provisioning job is left exactly where the design put it ("a
+    queued/provisioning job has no agent outcome to lose" —
+    ``decide_ssm_fallback``), so no new terminal decisions are
+    introduced for this status."""
+    attempt = job.get('execution_attempt') or {}
+    instance_id = (attempt.get('instance_id')
+                   or (job.get('ssm') or {}).get('instance_id')
+                   or job_instance_id(job, servers_by_id))
+    invocation = retrieve_invocation(command_id, instance_id)
+    if invocation is None:
+        return  # no retrievable evidence: unchanged (never fabricated)
+    if invocation.get('Status') not in \
+            build_reconciliation.SSM_TERMINAL_STATUSES:
+        return  # nonterminal: the provisioning/readiness path owns it
+    classification = build_reconciliation.classify_attempt(
+        current_status=job['status'], invocation=invocation, now=now)
+    if not build_reconciliation.is_lock_held_deferral(classification):
+        return  # anything else keeps today's provisioning behavior
+    diagnostic = build_reconciliation.build_execution_diagnostic(
+        attempt={'attempt_id': attempt.get('attempt_id'),
+                 'command_id': command_id,
+                 'instance_id': instance_id},
+        invocation=invocation,
+        classification=classification.error_code,
+        source=EVIDENCE_SOURCE_SCHEDULED,
+        observed_at=now,
+        disk=(job.get('preflight') or {}).get('disk'))
+    corroborated = build_reconciliation.is_lock_held_evidence(invocation)
+    if defer_lock_held_job(job, command_id, diagnostic, now,
+                           corroborated=corroborated):
+        return
+    # Valve exhausted for a provisioning job: settle only once no build
+    # process remains on the runner (never terminate a live build).
+    absent = lock_holder_build_absent(job)
+    if absent is not True:
+        hold_lock_deferral_exit(job, command_id, absent, now,
+                                'valve_exhausted')
+        return
+    ledger = plan_job_ledger(job, cleanup_required=True)
+    if fail_job(job, build_reconciliation.CODE_BUILD_LOCK_HELD,
+                'The build lock stayed held past the bounded deferral '
+                'window; deferral abandoned.',
+                'build_failed',
+                {'instance_id': instance_id, 'command_id': command_id,
+                 'command_status': invocation.get('Status')},
+                ledger=ledger,
+                extra={'execution_diagnostic': to_dynamo(diagnostic)}):
+        release_and_promote(
+            dict(job, status=build_domain.STATUS_FAILED), ledger)
 
 
 def reconcile_running_command(job: Dict[str, Any], command_id: str,
@@ -2517,6 +3526,46 @@ def reconcile_running_command(job: Dict[str, Any], command_id: str,
     application = build_reconciliation.apply_evidence(
         job_status, job.get('execution_diagnostic'), incoming,
         classification, now)
+
+    # Post-dispatch exit-75 lock-held deferral (build-agent-exit75-
+    # deferral Req 2.1/2.2): the agent honestly reported the build lock
+    # held by another build; route the job back to the pre-dispatch
+    # deferral semantics instead of a terminal finalization. Runs after
+    # classification so agent results / cancellation / hard ceiling /
+    # infrastructure loss (authorities 1-4) and preflight/ENOSPC
+    # evidence keep deciding exactly as today (bugfix.md 3.2, 3.3).
+    if build_reconciliation.is_lock_held_deferral(classification):
+        if defer_lock_held_job(
+                job, command_id,
+                application.update_diagnostic or incoming, now,
+                corroborated=build_reconciliation.is_lock_held_evidence(
+                    raw_invocation)):
+            return
+        # Bounded deferral safety valve exhausted (bugfix.md 3.8): a
+        # wedged lock must not defer forever. But the exit must not
+        # re-create the incident harm: a terminal ephemeral job is
+        # terminated by the termination watchdog on status alone, so the
+        # runner's protected build processes are pgrep-confirmed absent
+        # FIRST (the runtime-watchdog / reconcile_compute_cleanup
+        # precedent). While a build may still be running the job is held
+        # nonterminal and re-confirmed next tick.
+        absent = lock_holder_build_absent(job)
+        if absent is not True:
+            hold_lock_deferral_exit(job, command_id, absent, now,
+                                    'valve_exhausted')
+            return
+        # Settle through the UNCHANGED generic terminal path below with
+        # the additive BUILD_LOCK_HELD code (never re-labeling an
+        # existing code's semantics, bugfix.md 3.9).
+        classification = build_reconciliation.Classification(
+            decided=True, status=build_domain.STATUS_FAILED,
+            error_code=build_reconciliation.CODE_BUILD_LOCK_HELD,
+            authority=5,
+            reason='the build lock stayed held past the bounded '
+                   'deferral window; deferral abandoned')
+        application = build_reconciliation.apply_evidence(
+            job_status, job.get('execution_diagnostic'), incoming,
+            classification, now)
 
     recon_state = {
         'command_id': command_id,
@@ -2702,6 +3751,18 @@ def command_reconciliation(jobs: List[Dict[str, Any]],
             elif status in AGENT_RUNNING_STATUSES:
                 reconcile_running_command(job, command_id,
                                           servers_by_id, now)
+            elif status == build_domain.STATUS_PROVISIONING \
+                    and job.get('execution_mode') == \
+                    build_domain.EXECUTION_MODE_EPHEMERAL:
+                # The agent exits 75 in Step 1, BEFORE emitting
+                # phase=building, so an ephemeral lock-held deferral is
+                # still `provisioning` (build-agent-exit75-deferral
+                # Req 2.1/2.2). NARROW route: only the lock-held
+                # deferral is acted on — every other terminal
+                # invocation on a provisioning job keeps today's
+                # behavior.
+                reconcile_provisioning_lock_held(job, command_id,
+                                                 servers_by_id, now)
         except Exception as e:
             logger.warning(f"Command reconciliation for Build_Job "
                            f"{job.get('build_job_id')} failed: {e}")
@@ -3161,6 +4222,11 @@ def run_tick(now: Optional[int] = None) -> Dict[str, Any]:
     command_reconciliation(jobs, servers_by_id, now)
     # 3. Runtime timeout watchdog (3.8).
     runtime_timeout_watchdog(jobs, servers_by_id, now)
+    # 3.5 Exit-75 lock-held deferral backstop (build-agent-exit75-
+    #     deferral): the requeued deferral state is outside every other
+    #     watchdog's scope, so a job that stops being re-dispatched can
+    #     never hold its runner indefinitely.
+    lock_deferral_watchdog(jobs, servers_by_id, now)
     # 4. Serialization watchdog (7.7, 7.8).
     serialization_watchdog(jobs, servers_by_id, now)
     # 5. Termination watchdog (3.2, 3.9).

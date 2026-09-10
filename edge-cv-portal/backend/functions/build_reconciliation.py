@@ -436,6 +436,13 @@ CODE_QUEUE_WAIT_TIMEOUT = 'QUEUE_WAIT_TIMEOUT'
 CODE_MAX_RUNTIME_EXCEEDED = 'MAX_RUNTIME_EXCEEDED'
 CODE_RUNNER_DISK_FULL = 'RUNNER_DISK_FULL'
 CODE_COMMAND_PREFLIGHT_FAILED = 'COMMAND_PREFLIGHT_FAILED'
+#: ADDITIVE deferral marker (build-agent-exit75-deferral Req 2.1, 3.9):
+#: the agent's documented lock-held deferral (exit 75, EX_TEMPFAIL from
+#: scripts/portal-build-agent.sh: "dispatcher should defer, Req 7.5/7.6")
+#: observed post-dispatch. It labels a NON-terminal deferral outcome —
+#: never a hard failure — and never re-uses or changes the semantics of
+#: any existing code.
+CODE_BUILD_LOCK_HELD = 'BUILD_LOCK_HELD'
 
 STABLE_ERROR_CODES = frozenset({
     CODE_COMMAND_LAUNCH_FAILED,
@@ -451,6 +458,7 @@ STABLE_ERROR_CODES = frozenset({
     CODE_MAX_RUNTIME_EXCEEDED,
     CODE_RUNNER_DISK_FULL,
     CODE_COMMAND_PREFLIGHT_FAILED,
+    CODE_BUILD_LOCK_HELD,
 })
 
 #: Terminal SSM invocation statuses (provider vocabulary).
@@ -645,6 +653,83 @@ def _invocation_text_fields(invocation: Optional[Dict[str, Any]]
     return fields
 
 
+#: The agent's documented lock-held deferral exit code (EX_TEMPFAIL):
+#: scripts/portal-build-agent.sh exits 75 when `flock -n` on
+#: /var/lock/dda-build.lock fails because another build holds the lock
+#: ("dispatcher should defer, Req 7.5/7.6" — the script header contract).
+AGENT_LOCK_HELD_EXIT_CODE = 75
+
+#: ASCII-only, stable fragment of the agent's deterministic lock-held
+#: stdout marker (scripts/portal-build-agent.sh line 242: "Build lock
+#: ${LOCK_FILE} is held by another build — deferring (exit 75)."). Only
+#: the fragment BEFORE the em dash is matched, so a transport/locale
+#: mangling of the non-ASCII dash can never hide the marker, and the
+#: lock file path (interpolated in the script) is not re-spelled here.
+LOCK_HELD_MARKER_FRAGMENT = 'is held by another build'
+
+
+def is_lock_held_marker_evidence(*texts: Any) -> bool:
+    """True iff any provided text carries the agent's deterministic
+    lock-held marker fragment (build-agent-exit75-deferral).
+
+    This is CORROBORATION, never classification: the deferral decision
+    keys on ResponseCode 75 alone (bugfix.md 3.1 pins that the marker
+    text with a non-75 code stays a genuine failure, and a genuine
+    deferral must never be re-hard-failed just because its stdout was
+    truncated, re-encoded, or unavailable). The dispatcher uses this
+    predicate only to size the bounded deferral pressure budget: an
+    UNCORROBORATED rc 75 — e.g. an inner build tool that itself exited
+    75 with its own output and a lost `failed` phase event — gets a
+    single deferral cycle instead of a full budget, so it cannot loop
+    through repeated full rebuilds before settling."""
+    for text in texts:
+        if isinstance(text, str) and LOCK_HELD_MARKER_FRAGMENT in text:
+            return True
+    return False
+
+
+def is_lock_held_evidence(invocation: Optional[Dict[str, Any]]) -> bool:
+    """True iff the invocation's captured text corroborates the agent's
+    lock-held deferral marker (see :func:`is_lock_held_marker_evidence`
+    for why this never gates the classification)."""
+    return is_lock_held_marker_evidence(
+        *_invocation_text_fields(invocation))
+
+
+def is_lock_held_response_code(invocation: Optional[Dict[str, Any]]
+                               ) -> bool:
+    """True iff the invocation's ``ResponseCode`` is the agent's exit-75
+    lock-held deferral code (build-agent-exit75-deferral Req 2.1).
+
+    The code is read DEFENSIVELY — an int or a numeric string — exactly
+    as tolerant as the diagnostic construction's ``provider_field`` /
+    ``normalize_evidence`` handling of the same field. The decision keys
+    on the response code ONLY, never on stdout text: the lock-held
+    marker text alone with any other code stays a genuine failure
+    (preservation bugfix.md 3.1)."""
+    value = (invocation or {}).get('ResponseCode')
+    if isinstance(value, bool):
+        return False  # bools are ints in Python; never a shell code
+    if isinstance(value, int):
+        return value == AGENT_LOCK_HELD_EXIT_CODE
+    if isinstance(value, str):
+        try:
+            return int(value.strip()) == AGENT_LOCK_HELD_EXIT_CODE
+        except ValueError:
+            return False
+    return False
+
+
+def is_lock_held_deferral(classification: 'Classification') -> bool:
+    """True iff a classification is the NON-terminal exit-75 lock-held
+    deferral marker produced by :func:`classify_attempt` (build-agent-
+    exit75-deferral Req 2.1/2.2): the settlement path routes it to the
+    pre-dispatch ``PREDISPATCH_DEFER`` semantics instead of a terminal
+    finalization."""
+    return (not classification.decided
+            and classification.error_code == CODE_BUILD_LOCK_HELD)
+
+
 def classify_attempt(
         current_status: str,
         invocation: Optional[Dict[str, Any]] = None,
@@ -757,6 +842,34 @@ def classify_attempt(
                 error_code=CODE_RUNNER_DISK_FULL, authority=5,
                 reason='invocation output carries disk-exhaustion '
                        '(ENOSPC) evidence')
+        # Exit-75 lock-held deferral (build-agent-exit75-deferral
+        # Req 2.1): the agent's DOCUMENTED contract — exit 75
+        # (EX_TEMPFAIL) means /var/lock/dda-build.lock is held by
+        # another build and the dispatcher should DEFER AND RETRY,
+        # never hard-fail. Design choice: an UNDECIDED classification
+        # (decided=False, the job stays nonterminal) carrying the
+        # additive CODE_BUILD_LOCK_HELD marker the settlement path
+        # (build_dispatcher.reconcile_running_command) acts on by
+        # mirroring the pre-dispatch PREDISPATCH_DEFER requeue. An
+        # undecided outcome was chosen over a decided non-failed one
+        # because apply_evidence then naturally keeps status/error/
+        # ended_at untouched on every delivery path (EventBridge or
+        # scheduled, duplicated or reordered — idempotent, bugfix.md
+        # 3.10), and no terminal ledger/cleanup can ever be planned
+        # from it (bugfix.md 2.2). This case sits AFTER the preflight
+        # and ENOSPC evidence checks (their codes win at every
+        # response code, bugfix.md 3.2) and BEFORE the generic
+        # fallthrough, which stays byte-identical for every other
+        # code (bugfix.md 3.1). Agent results retain authority 1
+        # regardless (bugfix.md 3.3). Incident: command a13a0825 /
+        # attempt 6c6b5483 / job 851042a7 (2026-09-09).
+        if is_lock_held_response_code(invocation):
+            return Classification(
+                decided=False, status=current_status,
+                error_code=CODE_BUILD_LOCK_HELD, authority=5,
+                reason='invocation Failed with the agent lock-held '
+                       'deferral code (exit 75); dispatcher defers '
+                       'and retries')
         return Classification(
             decided=True, status=build_domain.STATUS_FAILED,
             error_code=CODE_COMMAND_EXECUTION_FAILED, authority=5,
