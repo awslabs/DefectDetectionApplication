@@ -290,6 +290,30 @@ def stack(aws_stack):
     os.environ.pop("TRAINING_JOBS_TABLE", None)
     os.environ.pop("CAMERA_REGISTRY_TABLE", None)
 
+    # ...and never leak the TABLES either. TEARDOWN HYGIENE ONLY — the
+    # "IMMUTABLE oracle" rule above is about this file's recorded
+    # EXPECTATIONS (its assertions are never rebaselined), NOT about fixture
+    # cleanliness, so do not revert this.
+    #
+    # `conftest.aws_stack` is SESSION-scoped, so one moto DynamoDB backend is
+    # shared by the whole directory run, and DynamoDB's ListTables returns at
+    # most 100 names per page in insertion order. Leaving these two tables
+    # behind pushed `test-edge-credentials` from name #100 to #102 — off page
+    # one — and the `test_user_admin_*` fixtures guard their table creation
+    # with an UNPAGINATED `if … not in list_tables()["TableNames"]`, so every
+    # one of those modules then tried to re-create an existing table and
+    # errored with `ResourceInUseException: Table already exists`
+    # (186 ERRORs). Deleting them keeps this module's footprint out of later
+    # modules' pagination window.
+    for table_name in (PREFLIGHT_TRAINING_JOBS_TABLE,
+                       PREFLIGHT_CAMERA_REGISTRY_TABLE):
+        try:
+            client.delete_table(TableName=table_name)
+        except Exception:      # pragma: no cover - teardown is best-effort
+            # ResourceNotFoundException, or anything else: a teardown must
+            # never fail a run.
+            pass
+
 
 @pytest.fixture(scope="module")
 def deployments(stack):
@@ -448,6 +472,42 @@ class PreflightGreengrass(FakeGreengrass):
 # Harnesses (reused, not rebuilt — tasks.md Notes)
 # ==========================================================================
 
+#: Devices-table rows written by `put_device_record` during the CURRENT test,
+#: as (table, device_id) pairs, so `_devices_table_isolation` can delete
+#: exactly those rows again — never a row another module seeded.
+#:
+#: TEARDOWN HYGIENE, NOT A CHANGE OF EXPECTATIONS (see the `stack` teardown
+#: note above): the IMMUTABLE-oracle rule governs this file's recorded
+#: EXPECTATIONS, not its fixture cleanliness. `conftest.aws_stack` is
+#: SESSION-scoped and the devices table is keyed on `device_id` ALONE, so a
+#: row written for one of the verbatim incident device names outlives the test
+#: and is read by every later module resolving the same id.
+#: `test_model_status_devices_read.py` pins the NO-record rendering of
+#: `jetson-thor1` (`target_architecture: None`) and neither seeds nor cleans
+#: that row, so the `arm64_jp7` record the 3.1 reference cases write here was
+#: read by that oracle. The incident names stay exactly as they are; what is
+#: fixed is that the rows do not survive the test that wrote them.
+_SEEDED_DEVICE_ROWS = []
+
+
+@pytest.fixture(autouse=True)
+def _devices_table_isolation():
+    """Delete exactly the devices-table rows this test seeded.
+
+    Tolerant by construction: a teardown must never fail a run, and the row
+    may legitimately be gone already. No assertion is affected — the deletes
+    happen after the test body has finished asserting.
+    """
+    _SEEDED_DEVICE_ROWS.clear()
+    yield
+    while _SEEDED_DEVICE_ROWS:
+        table, device_id = _SEEDED_DEVICE_ROWS.pop()
+        try:
+            table.delete_item(Key={"device_id": device_id})
+        except Exception:      # pragma: no cover - teardown is best-effort
+            pass
+
+
 class GenericSubmitEnv(ShadowManagerEnv):
     """`ShadowManagerEnv` (endpoint-level `create_deployment` through the
     real handler) with the extended fake and the Devices-table / plugin /
@@ -464,6 +524,9 @@ class GenericSubmitEnv(ShadowManagerEnv):
         if arch is not None:
             item["target_architecture"] = arch
         self.env.stack.tables.devices.put_item(Item=item)
+        # Tracked so `_devices_table_isolation` removes it on teardown: the
+        # devices table is SESSION-scoped and keyed on `device_id` alone.
+        _SEEDED_DEVICE_ROWS.append((self.env.stack.tables.devices, thing_name))
 
     def seed_plugin_record(self, plugin_id, record_version, lifecycle_state,
                            archs):
@@ -545,6 +608,8 @@ class PreflightWorkflowEnv(WorkflowDeployEnv):
         if arch is not None:
             item["target_architecture"] = arch
         self.env.stack.tables.devices.put_item(Item=item)
+        # Same teardown tracking as GenericSubmitEnv.put_device_record.
+        _SEEDED_DEVICE_ROWS.append((self.env.stack.tables.devices, thing_name))
 
     def seed_plugin_record(self, plugin_id, record_version, lifecycle_state,
                            archs):

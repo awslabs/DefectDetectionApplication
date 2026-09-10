@@ -235,6 +235,44 @@ def wf_env(env, deployments, monkeypatch):
     return WorkflowDeployEnv(env, deployments, monkeypatch)
 
 
+#: Devices-table rows written by ``seed_jp7_device`` during the CURRENT test,
+#: as (table, device_id) pairs, so ``_devices_table_isolation`` can delete
+#: exactly those rows again — never any row another module seeded.
+#:
+#: TEARDOWN HYGIENE, NOT A CHANGE OF EXPECTATIONS. ``conftest.aws_stack`` is
+#: SESSION-scoped and the devices table is keyed on ``device_id`` ALONE, so a
+#: row this suite writes for one of the verbatim incident device names
+#: outlives the test and is read by every later module that resolves the same
+#: id. ``test_model_status_devices_read.py`` (the model-gpu-fallback-visibility
+#: oracle) pins the NO-record rendering of ``jetson-thor1``
+#: (``target_architecture: None``) and neither seeds nor cleans that row, so a
+#: leaked ``target_architecture: arm64_jp7`` from this suite's Leg C/D
+#: ``@example(thing_name=CE_C_DEVICE)`` made that oracle read this suite's
+#: state. The incident names (``jetson-thor1``, ``adlink-dlap-701``) are
+#: deliberate fidelity and stay exactly as they are — what is fixed is that
+#: the rows do not survive the test that wrote them.
+_SEEDED_DEVICE_ROWS = []
+
+
+@pytest.fixture(autouse=True)
+def _devices_table_isolation():
+    """Delete exactly the devices-table rows this test seeded.
+
+    Tolerant by construction: a teardown must never fail a run, and the row
+    may legitimately be gone already (a later example re-seeds the same id).
+    No assertion in this file — or in any other — is affected: the deletes
+    happen after the test body has finished asserting.
+    """
+    _SEEDED_DEVICE_ROWS.clear()
+    yield
+    while _SEEDED_DEVICE_ROWS:
+        table, device_id = _SEEDED_DEVICE_ROWS.pop()
+        try:
+            table.delete_item(Key={'device_id': device_id})
+        except Exception:      # pragma: no cover - teardown is best-effort
+            pass
+
+
 # --------------------------------------------------------------------------
 # Catalog seeding
 # --------------------------------------------------------------------------
@@ -275,6 +313,10 @@ def seed_jp7_device(gg, tables, thing_name,
     if target_architecture:
         item['target_architecture'] = target_architecture
     tables.devices.put_item(Item=item)
+    # Track the row so `_devices_table_isolation` removes it on teardown: the
+    # devices table is SESSION-scoped and `device_id` is its only key, so a
+    # leaked row is read by every later module resolving the same id.
+    _SEEDED_DEVICE_ROWS.append((tables.devices, thing_name))
 
 
 def fresh_catalog(harness, thing_names):

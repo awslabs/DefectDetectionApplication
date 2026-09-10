@@ -243,7 +243,7 @@ graph TD
 
 ## Tasks
 
-- [ ] 1. Settle the three unverified-in-repo assumptions with read-only live evidence (no production code, no tests)
+- [x] 1. Settle the three unverified-in-repo assumptions with read-only live evidence (no production code, no tests)
   - **GOAL**: the closure resolver's contract must rest on observed API
     behaviour, not on an assumption. bugfix.md names three open items; each
     gets its own subtask and its answer is recorded in
@@ -258,7 +258,7 @@ graph TD
     tried — a resolver that must guess then guesses FAIL-OPEN (2.9), never
     fail-closed
 
-  - [ ] 1.1 Does `DescribeComponent`'s `platforms[].attributes` reliably carry `variant`?
+  - [x] 1.1 Does `DescribeComponent`'s `platforms[].attributes` reliably carry `variant`?
     - `components.py:127-158` (`target_architectures_from_platforms`) assumes
       it does for `dda.plugin.*`; bugfix.md flags this as unverified for every
       component class
@@ -279,7 +279,7 @@ graph TD
       and `describe-component` is not used at all
     - _Requirements: 2.2, 2.3, 2.8_
 
-  - [ ] 1.2 Does Greengrass expose the root-vs-dependency split through a readable cloud API pre-submit?
+  - [x] 1.2 Does Greengrass expose the root-vs-dependency split through a readable cloud API pre-submit?
     - Counterexample C's split is visible in the device's own bookkeeping
       (`GroupToRootComponents` omits the component, `ComponentToGroups` still
       contains it) — the open question is whether the portal can read that,
@@ -296,7 +296,7 @@ graph TD
       walk — which is the assumption to avoid resting on silently
     - _Requirements: 2.11, 2.12_
 
-  - [ ] 1.3 How is the target device's platform actually reported?
+  - [x] 1.3 How is the target device's platform actually reported?
     - `get_core_device` is read at `deployments.py:304` and `devices.py:283`
       and yields `platform` + `architecture` only — on the evidence in-repo
       there is NO `variant` in that response, while 2.2 requires judging
@@ -318,7 +318,7 @@ graph TD
       could not
     - _Requirements: 2.2, 2.9, 3.8_
 
-- [ ] 2. Write bug condition exploration property tests (BEFORE implementing the fix)
+- [x] 2. Write bug condition exploration property tests (BEFORE implementing the fix)
   - **Property 1: Bug Condition** - Platform mismatch, unresolvable dependency and de-selected-but-still-required are all caught before submit
   - **CRITICAL**: all three legs MUST FAIL on the unfixed tree — failure
     confirms the bug condition exists
@@ -384,7 +384,7 @@ graph TD
     `.kiro/specs/deployment-preflight-validation/counterexamples.md`
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 1.10_
 
-- [ ] 3. Write the observation-first preservation oracle (BEFORE implementing the fix)
+- [x] 3. Write the observation-first preservation oracle (BEFORE implementing the fix)
   - **Property 2: Preservation** - Every submission that resolves today submits byte-identically, with every existing gate's semantics, codes and payloads intact
   - **IMPORTANT**: observation-first — run the UNFIXED code on
     non-bug-condition inputs, RECORD the actual outputs, then encode them as
@@ -472,9 +472,9 @@ graph TD
     baseline to preserve). Record every baseline count
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14_
 
-- [ ] 4. Fix: one closure resolver, three validators over it, both submit paths
+- [x] 4. Fix: one closure resolver, three validators over it, both submit paths
 
-  - [ ] 4.1 Closure resolver — fetch each recipe once, reuse everywhere, fail open
+  - [x] 4.1 Closure resolver — fetch each recipe once, reuse everywhere, fail open
     - New `edge-cv-portal/backend/functions/deployment_preflight.py`:
       `resolve_closure(roots, fetch_recipe, list_versions, describe=None)`
       returning a resolved closure object — nodes keyed
@@ -504,7 +504,7 @@ graph TD
     - _Preservation: 3.10, 3.12 — no recipe, artifact or published version is altered; packaging behaviour untouched_
     - _Requirements: 2.1, 2.9_
 
-  - [ ] 4.2 Platform-satisfiability validator (blocking-invalid)
+  - [x] 4.2 Platform-satisfiability validator (blocking-invalid)
     - `validate_platforms(closure, device_platforms)` over the ALREADY-resolved
       closure — no second walk, no second fetch
     - A manifest is satisfied when every attribute it constrains matches the
@@ -523,7 +523,7 @@ graph TD
     - _Preservation: 3.2, 3.8 — variant-less aarch64 stays universal; unresolvable group members never block_
     - _Requirements: 2.2, 2.3, 2.7, 2.8_
 
-  - [ ] 4.3 Dependency-resolvability validator (blocking-invalid)
+  - [x] 4.3 Dependency-resolvability validator (blocking-invalid)
     - `validate_resolvability(closure)`: for every edge, the depended-on name
       must have ≥1 published version satisfying the `VersionRequirement`
       (semver range semantics matching what Greengrass negotiates; reuse
@@ -544,7 +544,7 @@ graph TD
     - _Preservation: 3.3 — JetPack-matched twins keep resolving; public AWS names never flagged_
     - _Requirements: 2.4, 2.5_
 
-  - [ ] 4.4 De-selected-but-still-required validator + specific acknowledgement (acknowledgement-required)
+  - [x] 4.4 De-selected-but-still-required validator + specific acknowledgement (acknowledgement-required)
     - `validate_deselected_still_required(closure, previous_components, submitted_components)`:
       de-selected = previous deployment's components minus the FINAL submitted
       map (auto-included portal entries excluded from the diff); for each, walk
@@ -578,7 +578,7 @@ graph TD
     - _Preservation: 3.11, 3.14 — a removal with no remaining dependant is unchanged; the submitted set is never mutated_
     - _Requirements: 2.11, 2.12, 2.13, 2.14, 2.15_
 
-  - [ ] 4.5 Single-pass classifier and response shape
+  - [x] 4.5 Single-pass classifier and response shape
     - `classify_findings(...)` merges the three validators' output into ONE
       response classifying each finding as exactly one of blocking-invalid,
       acknowledgement-required or unverified (2.6, 2.16), with every fault
@@ -597,7 +597,7 @@ graph TD
     - _Preservation: 3.1, 3.4 — clean submits and existing gate payloads unchanged_
     - _Requirements: 2.6, 2.7, 2.9, 2.10, 2.16_
 
-  - [ ] 4.6 Wire into both submit paths as the LAST pre-submit gate
+  - [x] 4.6 Wire into both submit paths as the LAST pre-submit gate
     - `create_deployment`: after the plugin (`:1238`) and vLLM (`:1258`) gates
       and after the final `components_map` is assembled (auto-includes,
       subscribe accessControl, revision detection at `:1474`), immediately
@@ -617,7 +617,7 @@ graph TD
     - _Preservation: 3.4 gate precedence and payloads; 3.1 document identity; store remediation ungated_
     - _Requirements: 2.1, 2.6, 2.10, 3.1, 3.4, 3.14_
 
-  - [ ] 4.7 Frontend: render the three finding classes and offer a specific acknowledgement
+  - [x] 4.7 Frontend: render the three finding classes and offer a specific acknowledgement
     - New pure module
       `edge-cv-portal/frontend/src/pages/deployments/deploymentPreflight.ts`
       with `parsePreflightRejection(code, message, details)` — exactly the
@@ -651,7 +651,7 @@ graph TD
     - _Preservation: 3.5, 3.6, 3.7 — catalog filter, revise-mode keep-and-remove, no-device-selected discoverability_
     - _Requirements: 2.13, 2.14, 2.15, 2.16, 3.5, 3.6, 3.7_
 
-  - [ ] 4.8 Verify the bug condition exploration suite now passes
+  - [x] 4.8 Verify the bug condition exploration suite now passes
     - **Property 1: Expected Behavior** - Platform mismatch, unresolvable dependency and de-selected-but-still-required are all caught before submit
     - **IMPORTANT**: re-run the SAME suite from task 2 UNMODIFIED — do NOT
       write new tests
@@ -660,7 +660,7 @@ graph TD
       append the flip to `counterexamples.md`
     - _Requirements: 2.1, 2.3, 2.5, 2.6, 2.13, 2.14, 2.16_
 
-  - [ ] 4.9 Verify the preservation oracle still passes
+  - [x] 4.9 Verify the preservation oracle still passes
     - **Property 2: Preservation** - Every submission that resolves today submits byte-identically, with every existing gate's semantics, codes and payloads intact
     - **IMPORTANT**: re-run the SAME suite from task 3 UNMODIFIED — do NOT
       rebaseline. A failure means the fix leaked outside the bug condition and
@@ -670,13 +670,13 @@ graph TD
     - **EXPECTED OUTCOME**: all PASS at the recorded baselines, zero count drift
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14_
 
-- [ ] 5. Fix-checking property suites
+- [x] 5. Fix-checking property suites
   - All in `edge-cv-portal/backend/tests/test_deployment_preflight_properties.py`
     (hypothesis, ≥100 examples via `HYPOTHESIS_PROFILE=ci`, ONE property per
     test, each tagged
     `# Feature: deployment-preflight-validation, Property N: <title>`)
 
-  - [ ] 5.1 Fail-open — no account read failure can ever take deployment submission down
+  - [x] 5.1 Fail-open — no account read failure can ever take deployment submission down
     - **Property 3: Fix Checking** - Fail-open under any greengrassv2 exception
     - `# Feature: deployment-preflight-validation, Property 3: fail-open under any greengrassv2 exception`
     - _For any_ greengrassv2 call in the validation path (`get_component`,
@@ -691,7 +691,7 @@ graph TD
       non-negotiable
     - _Requirements: 2.9, 2.10_
 
-  - [ ] 5.2 Single-pass three-class classification
+  - [x] 5.2 Single-pass three-class classification
     - **Property 4: Fix Checking** - Every finding classified exactly once in one pass
     - `# Feature: deployment-preflight-validation, Property 4: every finding classified exactly once in one pass`
     - _For any_ generated mix of A-shaped faults, B-shaped faults, C-shaped
@@ -701,7 +701,7 @@ graph TD
       unchanged
     - _Requirements: 2.6, 2.9, 2.10, 2.16_
 
-  - [ ] 5.3 Acknowledgement specificity and set-change invalidation
+  - [x] 5.3 Acknowledgement specificity and set-change invalidation
     - **Property 5: Fix Checking** - A specific acknowledgement can never authorize a different finding
     - `# Feature: deployment-preflight-validation, Property 5: a specific acknowledgement can never authorize a different finding`
     - _For any_ acknowledgement list and _for any_ computed C-finding set: the
@@ -712,7 +712,7 @@ graph TD
       and the submission refused again
     - _Requirements: 2.14_
 
-  - [ ] 5.4 One closure, three validators — recipes fetched once
+  - [x] 5.4 One closure, three validators — recipes fetched once
     - **Property 6: Fix Checking** - Each recipe is fetched at most once per validation
     - `# Feature: deployment-preflight-validation, Property 6: each recipe is fetched at most once per validation`
     - _For any_ generated component graph (including diamonds, shared
@@ -724,7 +724,7 @@ graph TD
       — proving they are validators over one closure and not three walks
     - _Requirements: 2.1, 2.11_
 
-- [ ] 6. Checkpoint — everything green, nothing committed
+- [x] 6. Checkpoint — everything green, nothing committed
   - Full portal backend sweep:
     `HYPOTHESIS_PROFILE=ci ~/.dda-test-venv/bin/python -m pytest edge-cv-portal/backend/tests -q -p no:cacheprovider`
     — new suites green, every task-3 baseline count matched; record any
@@ -787,3 +787,52 @@ graph TD
       normal operation
   - Record what was verified, on which devices, and what could not be verified
   - _Requirements: 2.1, 2.3, 2.5, 2.6, 2.13, 2.14, 2.16, 3.1_
+
+## Execution record (tasks 1-6 COMPLETE; task 7 awaiting the user)
+
+**Task 1 evidence** settled all three unverified assumptions from live
+read-only calls (187 components compared both ways, 45 core devices, 86
+`jetson-thor1` revisions). It forced three requirement corrections before any
+code was written — 2.8's wildcard rules, 2.4's dual namespace, and 2.9's
+recorded asymmetry against the plugin gate's fail-closed behaviour. **2.8 as
+originally written would have refused EVERY submission**, because Nucleus
+(`{"os":"linux"}`, no architecture) and ShadowManager (`{"os":"*"}`) are
+auto-included on every portal deployment and a literal matcher reports them
+incompatible with every device.
+
+**Task 2** (exploration, 9 tests) went 6 failed -> 9 passed. **Task 3**
+(preservation oracle, 43 tests) passed on the unfixed tree and still passes
+unmodified. **Task 5** (properties, 18 tests, 1600 generated examples) found
+no bug in the implementation; its Property 3 breaks one greengrassv2 call at a
+time across 7 exception shapes and 7 malformed recipe bodies and asserts the
+submission is still permitted. Property 7 was added to close a gap the task-4
+implementer found in the immutable oracle: its devices never report a platform,
+so several platform claims there pass via fail-open rather than via the matcher
+deciding.
+
+**Task 4** implemented one memoized closure resolver with three validators over
+it, wired as the LAST pre-submit gate on both paths. Requirement **2.5a** was
+added mid-implementation: an unpinned `>=0.0.0` edge on a name with no
+published version is unverified, not blocking, because a requirement every
+version satisfies is also satisfied by whatever the device already holds —
+exactly how Counterexample C's removed component stayed resolved — and it is
+the edge `workflow_packaging` emits by design.
+
+**Task 6 checkpoint: GO.** All 16 baseline counts matched; frontend 1630/1630
+with a clean build; no preservation-tracked file touched so no rebaseline; the
+security guard pair green. Two cross-module test-isolation faults that the new
+test files introduced were found and FIXED (teardown only, no assertion
+altered): the preservation oracle's two session tables pushed
+`test-edge-credentials` past ListTables' 100-name page and broke the
+`test_user_admin_*` creation guards (186 errors), and both new suites leaked a
+`jetson-thor1` devices row that the model-gpu-fallback-visibility oracle reads
+(4 failures). Whole-directory errors 227 -> 41, matching the clean baseline
+id-for-id.
+
+**Watch on the first real deployment after the gate goes live**: the gate adds
+recipe + version + device reads across the full transitive closure on every
+submit, so watch Lambda duration on a large set (the incident deployment had 14
+roots) and grep for `preflight: validation skipped`, which means the fail-open
+path fired and the submit went through unvalidated — correct behaviour, but it
+signals a failing account read. A 500 rather than a 409 from a submit would
+point at the 3.14 mutation assertion, the one deliberately fail-closed edge.
