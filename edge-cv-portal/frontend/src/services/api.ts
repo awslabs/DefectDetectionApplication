@@ -3028,6 +3028,17 @@ class ApiService {
       auto_rollback?: boolean;
       timeout_seconds?: number;
     };
+    /**
+     * SPECIFIC acknowledgement of de-selected components that stay
+     * installed as resolved dependencies of components still selected
+     * (deployment-preflight-validation 2.14). Additive and optional: the
+     * pre-submit closure validation refuses the first submit with 409
+     * PREFLIGHT_ACKNOWLEDGEMENT_REQUIRED and proceeds on a re-submit
+     * naming EXACTLY the components of that finding. A blanket or stale
+     * acknowledgement does not match, and it never clears a 409
+     * PREFLIGHT_VALIDATION_FAILED blocking finding.
+     */
+    acknowledged_retained_components?: string[];
   }): Promise<{
     deployment_id: string;
     iot_job_id: string;
@@ -3116,6 +3127,13 @@ class ApiService {
       Record<string, { cameraSourceId: string } | { override: Record<string, unknown> }>
     >;
     confirmed_warnings?: string[];
+    /**
+     * SPECIFIC acknowledgement of de-selected components retained as
+     * resolved dependencies (deployment-preflight-validation 2.14) — the
+     * same additive field the generic submit path carries. See
+     * `createDeployment` above.
+     */
+    acknowledged_retained_components?: string[];
   }): Promise<{
     deployment_id: string;
     iot_job_id: string;

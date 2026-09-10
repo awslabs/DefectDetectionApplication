@@ -18,6 +18,7 @@ import {
   Box,
   Table,
   Badge,
+  Checkbox,
   ColumnLayout,
   Tabs,
   Modal,
@@ -65,6 +66,19 @@ import {
   unboundCells,
   withBindingCell,
 } from './deployments/cameraBindings';
+import {
+  PREFLIGHT_VALIDATION_FAILED,
+  PreflightRejection,
+  RetainedAcknowledgement,
+  acknowledgementForSubmit,
+  componentSelectionKey,
+  describePreflightFinding,
+  describeRequirer,
+  isComponentAcknowledged,
+  parsePreflightRejection,
+  prunedAcknowledgement,
+  withAcknowledgedComponent,
+} from './deployments/deploymentPreflight';
 import { CameraBindingMatrix } from './deployments/CameraBindingMatrix';
 import { isWorkflowComponent, workflowComponentName } from './workflows/workflowComponentName';
 
@@ -272,6 +286,20 @@ export default function CreateDeployment() {
   const [gateRejection, setGateRejection] = useState<PluginGateRejection | null>(null);
   // Backend 409 VLLM_ARCH_UNSUPPORTED rejection (vllm-triton-inference 3.4)
   const [vllmGateRejection, setVllmGateRejection] = useState<VllmGateRejection | null>(null);
+  // Backend 409 pre-submit closure validation refusal
+  // (deployment-preflight-validation 2.13-2.16): PREFLIGHT_VALIDATION_FAILED
+  // (any blocking-invalid finding) or PREFLIGHT_ACKNOWLEDGEMENT_REQUIRED
+  // (only de-selected-but-still-required findings). Findings are rendered
+  // grouped by class — blocking findings must be fixed by editing the
+  // component set, acknowledgement-required ones are cleared by naming them.
+  const [preflightRejection, setPreflightRejection] = useState<PreflightRejection | null>(null);
+  // The SPECIFIC acknowledgement of named de-selected components (2.14),
+  // anchored to the component selection it was made against. It is NOT
+  // cleared between submits — that is the point, the re-submit carries it —
+  // but it IS dropped the moment the component set changes, so a changed
+  // submission is re-reported instead of silently authorized.
+  const [retainedAcknowledgement, setRetainedAcknowledgement] =
+    useState<RetainedAcknowledgement | null>(null);
   // Supported Target_Architecture sets of selected model-vllm-* components,
   // keyed by component name — read from the backing vLLM_Model_Record's
   // published_component.supported_architectures via the model detail API
@@ -489,6 +517,24 @@ export default function CreateDeployment() {
   }, [targetDevices, allDevices, selectedComponents, targetType]);
 
   const hasComponentRemovals = Object.keys(componentsToBeRemoved).length > 0;
+
+  // Signature of the component set being submitted
+  // (deployment-preflight-validation 2.14). The backend matches an
+  // acknowledgement by EXACT set equality against the finding it computes
+  // for the SUBMITTED set, so any add, removal or version change must
+  // invalidate a pending acknowledgement rather than carry it over.
+  const selectionKey = useMemo(
+    () => componentSelectionKey(selectedComponents),
+    [selectedComponents]
+  );
+
+  // Drop a pending acknowledgement as soon as the component set changes.
+  // The submit path guards on the same key (acknowledgementForSubmit), so
+  // this effect only keeps the checkboxes honest — it is not what makes the
+  // invalidation safe.
+  useEffect(() => {
+    setRetainedAcknowledgement(prev => prunedAcknowledgement(prev, selectionKey));
+  }, [selectionKey]);
 
   // Selected packaged Workflow_Components (dda.workflow.*) resolved to
   // their workflow identity (camera-registry-sync 12.1).
@@ -1222,6 +1268,11 @@ export default function CreateDeployment() {
     setError('');
     setGateRejection(null);
     setVllmGateRejection(null);
+    // The refusal is re-derived from this submission's response; the
+    // acknowledgement is deliberately NOT cleared here, since a re-submit
+    // carrying it is exactly how an acknowledgement-required finding is
+    // cleared (2.14).
+    setPreflightRejection(null);
     setShowRemovalWarning(false);
     setShowGroupConflictWarning(false);
 
@@ -1275,6 +1326,16 @@ export default function CreateDeployment() {
         }
       }
 
+      // The SPECIFIC acknowledgement of named de-selected components
+      // (deployment-preflight-validation 2.14). Undefined unless the
+      // operator acknowledged at least one component FOR THIS component
+      // set — an acknowledgement made against a different set is not sent,
+      // so the backend recomputes the finding and refuses again.
+      const acknowledgedRetained = acknowledgementForSubmit(
+        retainedAcknowledgement,
+        selectionKey
+      );
+
       const deploymentData = {
         usecase_id: selectedUseCase.value,
         deployment_name: deploymentName || undefined,
@@ -1292,7 +1353,8 @@ export default function CreateDeployment() {
         rollout_config: {
           auto_rollback: autoRollback,
           timeout_seconds: parseInt(timeoutSeconds) || 60
-        }
+        },
+        acknowledged_retained_components: acknowledgedRetained
       };
 
       // Workflow components with Camera_Input_Nodes are submitted through
@@ -1329,6 +1391,7 @@ export default function CreateDeployment() {
               rollout_config: deploymentData.rollout_config,
               camera_bindings: buildCameraBindings(bindingSelections[workflowId] || {}),
               confirmed_warnings: Array.from(confirmedWarningIds),
+              acknowledged_retained_components: acknowledgedRetained,
             });
             lastDeploymentId = workflowResponse.deployment_id;
           } catch (err) {
@@ -1379,10 +1442,18 @@ export default function CreateDeployment() {
       const vllmRejection = err instanceof ApiError
         ? parseVllmGateRejection(err.code, err.message, err.details)
         : null;
+      // 409 PREFLIGHT_VALIDATION_FAILED / PREFLIGHT_ACKNOWLEDGEMENT_REQUIRED
+      // (deployment-preflight-validation 2.13-2.16): the pre-submit closure
+      // validation refused the submission. Nothing was sent to Greengrass.
+      const preflight = err instanceof ApiError
+        ? parsePreflightRejection(err.code, err.message, err.details)
+        : null;
       if (rejection) {
         setGateRejection(rejection);
       } else if (vllmRejection) {
         setVllmGateRejection(vllmRejection);
+      } else if (preflight) {
+        setPreflightRejection(preflight);
       } else {
         setError(getErrorMessage(err, 'Failed to create deployment'));
       }
@@ -1453,6 +1524,138 @@ export default function CreateDeployment() {
                       </li>
                     ))}
                   </ul>
+                </SpaceBetween>
+              </Alert>
+            )}
+
+            {/* Pre-submit closure validation refusal
+                (deployment-preflight-validation 2.13-2.16). Findings are
+                grouped by class, because the classes ask different things
+                of the operator: a blocking-invalid finding must be fixed by
+                editing the component set (no acknowledgement bypasses it),
+                an acknowledgement-required finding is cleared by
+                acknowledging the NAMED component and re-submitting, and an
+                unverified finding blocks nothing. Nothing was sent to
+                Greengrass. */}
+            {preflightRejection && (
+              <Alert
+                type={preflightRejection.code === PREFLIGHT_VALIDATION_FAILED ? 'error' : 'warning'}
+                dismissible
+                onDismiss={() => setPreflightRejection(null)}
+                header={preflightRejection.code === PREFLIGHT_VALIDATION_FAILED
+                  ? 'Deployment not submitted: components cannot be deployed to the target device(s)'
+                  : 'Deployment not submitted: de-selected component(s) will remain installed on the device'}
+              >
+                <SpaceBetween size="s">
+                  <span>{preflightRejection.message}</span>
+
+                  {/* blocking-invalid (2.3, 2.5): no acknowledgement control
+                      is offered — these are only resolvable by editing the
+                      component set. */}
+                  {preflightRejection.blocking.length > 0 && (
+                    <div>
+                      <Box variant="h5">
+                        Must be resolved by editing the component set (
+                        {preflightRejection.blocking.length})
+                      </Box>
+                      <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                        {preflightRejection.blocking.map((finding, i) => (
+                          <li key={`blocking-${finding.componentName}-${i}`}>
+                            {describePreflightFinding(finding)}
+                            {finding.remediation && (
+                              <Box variant="small">{finding.remediation}</Box>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* acknowledgement-required (2.13, 2.14, 2.15): the
+                      effective outcome is stated in full and the
+                      acknowledgement names the specific component. */}
+                  {preflightRejection.acknowledgementRequired.length > 0 && (
+                    <div>
+                      <Box variant="h5">
+                        Will NOT be removed from the device (
+                        {preflightRejection.acknowledgementRequired.length})
+                      </Box>
+                      <SpaceBetween size="s">
+                        {preflightRejection.acknowledgementRequired.map((finding, i) => (
+                          <Box key={`retained-${finding.componentName}-${i}`}>
+                            <Box variant="strong">
+                              {describePreflightFinding(finding)}
+                            </Box>
+                            {finding.requiredBy.length > 0 && (
+                              <>
+                                <Box variant="small">
+                                  Still required by the selected component(s):
+                                </Box>
+                                <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                                  {finding.requiredBy.map((requirer, j) => (
+                                    <li key={`requirer-${requirer.componentName}-${j}`}>
+                                      {describeRequirer(requirer)}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </>
+                            )}
+                            <Box variant="small">
+                              De-select the component(s) above to remove{' '}
+                              {finding.componentName} from the device, or
+                              acknowledge that it stays installed and re-submit.
+                            </Box>
+                            {preflightRejection.blocking.length === 0 ? (
+                              <Checkbox
+                                checked={isComponentAcknowledged(
+                                  retainedAcknowledgement,
+                                  finding.componentName,
+                                  selectionKey
+                                )}
+                                onChange={({ detail }) =>
+                                  setRetainedAcknowledgement(prev =>
+                                    withAcknowledgedComponent(
+                                      prev,
+                                      finding.componentName,
+                                      detail.checked,
+                                      selectionKey
+                                    )
+                                  )
+                                }
+                              >
+                                Acknowledge that {finding.componentName} stays
+                                installed on the target device(s), then submit
+                                again to proceed
+                              </Checkbox>
+                            ) : (
+                              <Box variant="small">
+                                Resolve the blocking finding(s) above first —
+                                acknowledging a retained component cannot make
+                                an invalid deployment deployable.
+                              </Box>
+                            )}
+                          </Box>
+                        ))}
+                      </SpaceBetween>
+                    </div>
+                  )}
+
+                  {/* unverified (2.9): reported, blocks nothing. */}
+                  {preflightRejection.unverified.length > 0 && (
+                    <div>
+                      <Box variant="h5">
+                        Could not be checked before submit — not blocking (
+                        {preflightRejection.unverified.length})
+                      </Box>
+                      <ul style={{ margin: 0, paddingLeft: '20px' }}>
+                        {preflightRejection.unverified.map((finding, i) => (
+                          <li key={`unverified-${finding.componentName}-${i}`}>
+                            {describePreflightFinding(finding)}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </SpaceBetween>
               </Alert>
             )}
