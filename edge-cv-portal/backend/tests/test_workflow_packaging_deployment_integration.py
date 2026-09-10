@@ -17,6 +17,14 @@ existing components while replacing the older Workflow_Component version
 
 Packaging *atomicity* (Requirement 7.5) is covered separately by
 test_workflow_packaging_atomicity.py and is not duplicated here.
+
+The ``FakeGreengrass`` fake in this module is the shared deployment-path
+harness for the whole portal suite. It carries an ADDITIVE published-
+component catalog (``seed_component_version`` + ``get_component`` /
+``list_component_versions`` / ``describe_component``, and the
+platform/architecture fields of ``get_core_device``) contributed by
+.kiro/specs/deployment-preflight-validation. Empty by default, so every
+pre-existing consumer keeps its behaviour unchanged.
 """
 import io
 import json
@@ -73,6 +81,64 @@ class _FakePaginator:
         return iter(self._pages_fn(**kwargs))
 
 
+# --------------------------------------------------------------------------
+# Component ARN helpers (deployment-preflight-validation, additive)
+#
+# Greengrass resolves account components under
+# `arn:aws:greengrass:{region}:{account_id}:components:{name}` and
+# AWS-managed ones under the `aws` namespace
+# (`…:{region}:aws:components:{name}`). ListComponentVersions against the
+# WRONG namespace returns an EMPTY LIST rather than raising
+# (.kiro/specs/deployment-preflight-validation/evidence.md §1.1), so the
+# fakes below are namespace-sensitive on purpose.
+# --------------------------------------------------------------------------
+
+AWS_MANAGED_COMPONENT_PREFIX = "aws.greengrass."
+
+
+def _semver_key(version):
+    """Sort key for a component version string (non-numeric parts sort as 0)."""
+    parts = []
+    for part in str(version or "").split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def default_component_namespace(component_name):
+    """The namespace a component name is published under: `aws` for the
+    AWS-managed public components, the account id otherwise."""
+    return ("aws" if str(component_name).startswith(AWS_MANAGED_COMPONENT_PREFIX)
+            else ACCOUNT_ID)
+
+
+def component_arn(component_name, component_version=None, namespace=None,
+                  region=REGION):
+    """A component (version) ARN in the account or the `aws` namespace."""
+    namespace = namespace or default_component_namespace(component_name)
+    arn = f"arn:aws:greengrass:{region}:{namespace}:components:{component_name}"
+    if component_version:
+        arn = f"{arn}:versions:{component_version}"
+    return arn
+
+
+def parse_component_arn(arn):
+    """``(namespace, component_name, component_version_or_None)`` of a
+    component ARN. Component names carry dots but never colons, so the
+    ``:components:`` / ``:versions:`` separators are unambiguous."""
+    arn = str(arn or "")
+    if ":components:" not in arn:
+        return None, None, None
+    head, tail = arn.split(":components:", 1)
+    fields = head.split(":")
+    namespace = fields[4] if len(fields) > 4 else None
+    if ":versions:" in tail:
+        name, version = tail.split(":versions:", 1)
+    else:
+        name, version = tail, None
+    return namespace, name, version or None
+
+
 class FakeGreengrass:
     """Stateful fake of the Use_Case-account greengrassv2 client covering
     the operations the workflow deployment flow uses: installed-component
@@ -87,14 +153,35 @@ class FakeGreengrass:
         self.effective = {}      # thing_name -> [effectiveDeployments entries]
         self.nucleus_versions = {}  # thing_name -> running Nucleus version
         self.create_deployment_calls = []
+        # ---- additive (deployment-preflight-validation) -----------------
+        # Published component catalog: recipes (ComponentDependencies +
+        # Manifests[].Platform) and per-namespace published version lists,
+        # backing get_component / list_component_versions /
+        # describe_component. Empty by default, so every pre-existing
+        # consumer keeps its current behaviour (an unseeded name resolves
+        # to zero versions exactly as the un-extended fake did by raising
+        # AttributeError on the paginator and falling back).
+        self.recipes = {}             # (namespace, name, version) -> recipe
+        self.component_versions = {}  # (namespace, name) -> [versions]
+        self.core_device_platforms = {}   # thing_name -> platform fields
+        self.get_component_calls = []
+        self.list_component_versions_calls = []
+        self.describe_component_calls = []
 
     # ------------------------------------------------------------- setup
     def register_device(self, thing_name, local_server_version=None,
-                        arch="x86_64", nucleus_version=None):
+                        arch="x86_64", nucleus_version=None,
+                        platform=None, architecture=None, runtime=None):
         """A core device; with a LocalServer component when a version is
         given, otherwise with no LocalServer installed. A `nucleus_version`
         makes the device report a running Nucleus via get_core_device (the
-        deployment flow pins auto-included AWS components to it)."""
+        deployment flow pins auto-included AWS components to it).
+
+        `platform` / `architecture` / `runtime` (additive) make
+        get_core_device report the device's platform the way the live API
+        does — `platform=linux architecture=aarch64 runtime=
+        aws_nucleus_classic` and NO `variant`, identically for JP5, JP6 and
+        JP7 devices (evidence.md §1.3)."""
         self.installed.setdefault(thing_name, [])
         if local_server_version is not None:
             self.installed[thing_name].append({
@@ -103,6 +190,58 @@ class FakeGreengrass:
             })
         if nucleus_version is not None:
             self.nucleus_versions[thing_name] = nucleus_version
+        reported = {"platform": platform, "architecture": architecture,
+                    "runtime": runtime}
+        reported = {k: v for k, v in reported.items() if v is not None}
+        if reported:
+            self.core_device_platforms.setdefault(thing_name, {}).update(reported)
+
+    # ------------------------- additive: published component catalog ----
+    def seed_component_version(self, component_name, component_version,
+                               platforms=None, dependencies=None,
+                               namespace=None):
+        """Publish `component_name` v`component_version` with the recipe the
+        live account publishes: `Manifests[].Platform` blocks and a verbatim
+        `ComponentDependencies` value.
+
+        `platforms` is a list of Platform blocks; an element of None models
+        the degenerate manifest whose Platform is JSON null (`testmodel`,
+        `alienmodel` — evidence.md §1.1). `platforms=None` means one such
+        unconstrained manifest. `dependencies=None` is written through
+        verbatim as `ComponentDependencies: null`, exactly what
+        `dda.workflow.8784b33b-…` v1.0.0 publishes.
+
+        `namespace` defaults to `aws` for `aws.greengrass.*` and the account
+        id otherwise; pass it explicitly to model a name published under a
+        namespace the resolver does not expect."""
+        namespace = namespace or default_component_namespace(component_name)
+        manifests = []
+        for platform in ([None] if platforms is None else platforms):
+            manifests.append({"Platform": platform, "Lifecycle": {}})
+        self.recipes[(namespace, component_name, component_version)] = {
+            "RecipeFormatVersion": "2020-01-25",
+            "ComponentName": component_name,
+            "ComponentVersion": component_version,
+            "ComponentDependencies": dependencies,
+            "Manifests": manifests,
+        }
+        versions = self.component_versions.setdefault(
+            (namespace, component_name), [])
+        if component_version not in versions:
+            versions.append(component_version)
+
+    def seed_component_versions(self, component_name, versions,
+                                platforms=None, dependencies=None,
+                                namespace=None):
+        """seed_component_version for every version in `versions`."""
+        for version in versions:
+            self.seed_component_version(
+                component_name, version, platforms=platforms,
+                dependencies=dependencies, namespace=namespace)
+
+    def published_versions(self, component_name, namespace=None):
+        namespace = namespace or default_component_namespace(component_name)
+        return list(self.component_versions.get((namespace, component_name), []))
 
     def seed_deployment(self, target_arn, components, name="pre-existing"):
         """An already-effective Greengrass deployment for a target."""
@@ -156,13 +295,81 @@ class FakeGreengrass:
 
     def get_core_device(self, coreDeviceThingName=None):
         version = self.nucleus_versions.get(coreDeviceThingName)
-        if version is None:
+        reported = self.core_device_platforms.get(coreDeviceThingName)
+        if version is None and not reported:
             raise ClientError(
                 {"Error": {"Code": "ResourceNotFoundException",
                            "Message": "no such core device"}},
                 "GetCoreDevice")
-        return {"coreDeviceThingName": coreDeviceThingName,
-                "coreVersion": version}
+        response = {"coreDeviceThingName": coreDeviceThingName}
+        if version is not None:
+            response["coreVersion"] = version
+        # Additive: the live API also reports platform / architecture /
+        # runtime and never a `variant` (evidence.md §1.3).
+        response.update(reported or {})
+        return response
+
+    # ------------------------- additive: published component catalog ----
+    def get_component(self, arn=None, recipeOutputFormat=None, **_):
+        """GetComponent, the recipe read the closure walk needs: returns the
+        seeded recipe as a JSON body (the real API returns bytes) and raises
+        ResourceNotFoundException for an unpublished (namespace, name,
+        version) — the live behaviour a plausible-but-unpublished version
+        produces (evidence.md §4.2)."""
+        self.get_component_calls.append(
+            {"arn": arn, "recipeOutputFormat": recipeOutputFormat})
+        recipe = self.recipes.get(parse_component_arn(arn))
+        if recipe is None:
+            raise ClientError(
+                {"Error": {"Code": "ResourceNotFoundException",
+                           "Message": f"Component ({arn}) does not exist"}},
+                "GetComponent")
+        return {"recipeOutputFormat": recipeOutputFormat or "JSON",
+                "recipe": json.dumps(recipe).encode("utf-8")}
+
+    def _component_versions_for_arn(self, arn):
+        namespace, name, _ = parse_component_arn(arn)
+        versions = self.component_versions.get((namespace, name), [])
+        # The real API answers newest-first.
+        return sorted(versions, key=_semver_key, reverse=True)
+
+    def list_component_versions(self, arn=None, **_):
+        """ListComponentVersions. Namespace-sensitive and non-raising: the
+        WRONG namespace yields an EMPTY LIST, never an exception, which is
+        why a resolvability check must query both namespaces
+        (evidence.md §1.1 / §5.6)."""
+        self.list_component_versions_calls.append(arn)
+        namespace, name, _ = parse_component_arn(arn)
+        return {"componentVersions": [
+            {"componentName": name, "componentVersion": version,
+             "arn": component_arn(name, version, namespace=namespace)}
+            for version in self._component_versions_for_arn(arn)
+        ]}
+
+    def _pages_list_component_versions(self, arn=None, **_):
+        return [self.list_component_versions(arn=arn)]
+
+    def describe_component(self, arn=None, **_):
+        """DescribeComponent. Mirrors the recipe's manifest platforms
+        exactly (187/187 agreement, evidence.md §1.1) and carries NO
+        ComponentDependencies — which is why the closure walk reads the
+        recipe instead."""
+        self.describe_component_calls.append(arn)
+        namespace, name, version = parse_component_arn(arn)
+        recipe = self.recipes.get((namespace, name, version))
+        if recipe is None:
+            raise ClientError(
+                {"Error": {"Code": "ResourceNotFoundException",
+                           "Message": f"Public component ({arn}) does not exist"}},
+                "DescribeComponent")
+        platforms = []
+        for manifest in recipe.get("Manifests", []):
+            platform = manifest.get("Platform")
+            platforms.append({"attributes": dict(platform or {})})
+        return {"arn": arn, "componentName": name,
+                "componentVersion": version, "platforms": platforms,
+                "status": {"componentState": "DEPLOYABLE",
+                           "vendorGuidance": "ACTIVE"}}
 
     def create_deployment(self, **params):
         # The real CreateDeployment API requires componentVersion on every
