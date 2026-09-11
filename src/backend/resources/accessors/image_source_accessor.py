@@ -34,6 +34,7 @@ from utils.camera_manager import (
     connect_camera,
     disconnect_camera,
     get_camera_status,
+    get_camera_feature_bounds,
     CameraStatusEnum
 )
 
@@ -276,9 +277,31 @@ class ImageSourceAccessor:
         # Auto-select known camera config based on brand/model
         cameraVendor = cameraVendor if cameraVendor in self.default_camera_config else "default"
         cameraModel = cameraModel if cameraModel in self.default_camera_config[cameraVendor] else "default"
+
+        # Seed gain/exposure from the camera's ACTUAL current values so the
+        # edit page's initial numbers reflect the device instead of an
+        # arbitrary constant (500 us was presented as the camera's value even
+        # though it was never read from it). Best-effort and read-only:
+        # get_camera_feature_bounds only reads from an existing connection —
+        # it never opens/claims the device — and returns {} when the camera
+        # is not connected, in which case the legacy defaults stand.
+        gain, exposure = 1, 500
+        try:
+            bounds = get_camera_feature_bounds(cameraId) or {}
+            device_gain = (bounds.get("gain") or {}).get("current")
+            device_exposure = (bounds.get("exposure") or {}).get("current")
+            if isinstance(device_gain, (int, float)):
+                gain = device_gain
+            if isinstance(device_exposure, (int, float)):
+                exposure = device_exposure
+        except Exception as e:
+            logger.warning(
+                f"Could not seed image source config from camera {cameraId} "
+                f"current values; using defaults: {e}"
+            )
         return {
-            "gain": 1,
-            "exposure": 500,
+            "gain": gain,
+            "exposure": exposure,
             "processingPipeline": self.default_camera_config.get(cameraVendor).get(cameraModel).get("processingPipeline")
         }
     

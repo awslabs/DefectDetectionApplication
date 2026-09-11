@@ -385,6 +385,69 @@ RUN find / -name "libpython${PYTHON_VERSION}.so.1.0" -print
 
 RUN apt clean -y
 
+# ── Runtime loader path for the pip-provided CUDA 13 libraries ─────────────
+# (model-gpu-fallback root cause, adlink-dlap-701 2026-09-11.) The ORT CUDA
+# execution provider dlopens libcublas.so.13 / libcublasLt.so.13 /
+# libcudart.so.13 / libcufft.so.12 when a session is created. On the deployed
+# device the docker-compose CUDA mount shadows this image's /usr/local/cuda
+# with an empty directory (the same mechanism as the ptxas shadowing above),
+# so the ONLY mount-proof copies of those libraries are the pip
+# `nvidia-*-cu13` wheels the torch layer installed under
+# dist-packages/nvidia/*/lib — which is not on the default loader path;
+# every ONNX model silently fell back to CPUExecutionProvider ("GPU
+# inference degraded"). Register those directories with ldconfig. The
+# `00-` prefix makes this conf sort BEFORE the base image's CUDA conf so
+# the ld.so cache resolves the cu13 sonames to the mount-proof pip copies,
+# not to the shadowable /usr/local/cuda paths. LD_LIBRARY_PATH still takes
+# precedence over the cache, so intentional runtime overrides are unaffected.
+RUN NVDIRS=$(ls -d /usr/local/lib/python*/dist-packages/nvidia/*/lib 2>/dev/null || true); \
+    if [ -n "$NVDIRS" ]; then \
+        printf '%s\n' $NVDIRS > /etc/ld.so.conf.d/00-nvidia-pip-cu13.conf && \
+        ldconfig && \
+        echo "registered pip nvidia lib dirs with ldconfig:" && \
+        cat /etc/ld.so.conf.d/00-nvidia-pip-cu13.conf; \
+    else \
+        echo "no pip nvidia lib dirs found (VLLM_ENABLE=${VLLM_ENABLE}); skipping ldconfig registration"; \
+    fi
+# Gate (GPU builds): the CUDA provider library must FULLY resolve its dynamic
+# dependencies with no LD_LIBRARY_PATH help, and a MOUNT-PROOF copy of each
+# CUDA runtime soname it needs must be in the ld.so cache — i.e. one that does
+# not live under the /usr/local/cuda tree the deployed compose mount shadows.
+# get_available_providers() (the gate below) cannot catch this class of
+# breakage: it reads the compiled-in provider list WITHOUT dlopening the
+# provider library, which is exactly how the 2026-09-11 device-wide CPU
+# fallback shipped while that check passed.
+#
+# The cache lookup is asserted per soname rather than trusting which copy ldd
+# happens to pick, so this gate cannot fail the (1-2 h) build over ld.so
+# ordering while a usable mount-proof copy is in fact present.
+RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
+        ORT_CUDA_LIB=$(python3 -c "import onnxruntime, os; print(os.path.join(os.path.dirname(onnxruntime.__file__), 'capi', 'libonnxruntime_providers_cuda.so'))") && \
+        LDD_OUT=$(env -u LD_LIBRARY_PATH ldd "$ORT_CUDA_LIB") && \
+        echo "$LDD_OUT" | grep -E "libcublas|libcublasLt|libcudart|libcufft|libcudnn" && \
+        { if echo "$LDD_OUT" | grep -q "not found"; then \
+              echo "ERROR: unresolved ORT CUDA provider deps:"; \
+              echo "$LDD_OUT" | grep "not found"; \
+              exit 1; \
+          fi; } && \
+        if ls -d /usr/local/lib/python*/dist-packages/nvidia/*/lib >/dev/null 2>&1; then \
+            for soname in $(echo "$LDD_OUT" | grep -oE "lib(cublas|cublasLt|cudart|cufft)\.so\.[0-9]+" | sort -u); do \
+                if ! ldconfig -p | grep -F "$soname" | grep -qvE "/usr/local/cuda"; then \
+                    echo "ERROR: no mount-proof copy of $soname in the ld.so cache — every cached copy lives under /usr/local/cuda, which the deployed docker-compose CUDA mount shadows at runtime; ONNX models would silently fall back to CPUExecutionProvider on device"; \
+                    ldconfig -p | grep -F "$soname" || true; \
+                    exit 1; \
+                fi; \
+                echo "mount-proof copy present for $soname"; \
+            done; \
+            echo "ORT CUDA provider deps resolved with mount-proof CUDA runtime copies"; \
+        else \
+            echo "WARNING: no pip nvidia CUDA dirs in this image (VLLM_ENABLE=${VLLM_ENABLE}), so the mount-proof assertion is skipped."; \
+            echo "WARNING: if the deployed docker-compose CUDA mount shadows /usr/local/cuda, ONNX models will fall back to CPUExecutionProvider on device."; \
+        fi; \
+    else \
+        echo "ORT CUDA provider ldd gate skipped (ONNXRUNTIME_GPU=${ONNXRUNTIME_GPU})"; \
+    fi
+
 # ── GPU-dependent import check gate (Requirements 1.6, 1.7, 5.7) ────────────
 # Consolidated gate: every GPU-dependent Python package this Dockerfile
 # installed (each package that loads CUDA/cuDNN/TensorRT libraries when

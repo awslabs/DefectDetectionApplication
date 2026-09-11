@@ -35,7 +35,12 @@ import EditImageSettingsPage from "./EditImageSettingsPage";
 import { NoCrop } from "../image-source/roi/RoIAnnotationImage";
 import { isArvisCameraImageSource, setHashValuesInUrl } from "components/utils";
 import { DynamicRouterHashKey } from "components/layout/constants";
-import { DEFAULT_SETTINGS_BOUNDS, toSettingsBounds } from "./bounds";
+import {
+  DEFAULT_SETTINGS_BOUNDS,
+  DeviceSeedValues,
+  deviceSeedValues,
+  toSettingsBounds,
+} from "./bounds";
 import { buildAdvancedSettings } from "./advancedFeatures";
 
 export default function EditImageSettings(): JSX.Element {
@@ -168,12 +173,36 @@ export default function EditImageSettings(): JSX.Element {
     },
   });
 
+  // Show the camera's REAL gain/exposure as the starting values. The stored
+  // configuration is seeded with static defaults at creation time (exposure
+  // 500), so on a camera that was never saved from this form the stored number
+  // is not what the sensor is set to — it was still presented as the camera's
+  // value. The device's `current` readings come back with the feature bounds,
+  // so seed from those and keep the stored config as the fallback (Nvidia CSI /
+  // ICam and disconnected cameras report no bounds and are unaffected).
+  //
+  // Captured ONCE, the first time bounds arrive: the form's `values` are
+  // reactive, and every preview re-applies the form's exposure to the device,
+  // so re-seeding on later reads could overwrite what the operator is editing.
+  const [deviceSeed, setDeviceSeed] = useState<DeviceSeedValues>();
+  useEffect(() => {
+    if (deviceSeed || !boundsQuery.data) return;
+    const seed = deviceSeedValues(boundsQuery.data);
+    if (seed.gain !== undefined || seed.exposure !== undefined) {
+      setDeviceSeed(seed);
+    }
+  }, [boundsQuery.data, deviceSeed]);
+
   const form = useForm({
     resolver,
     mode: "onBlur",
     values: {
-      editGain: getQuery.data?.imageSourceConfiguration.gain ?? 0,
-      editExposure: getQuery.data?.imageSourceConfiguration.exposure ?? 0,
+      editGain:
+        deviceSeed?.gain ?? getQuery.data?.imageSourceConfiguration.gain ?? 0,
+      editExposure:
+        deviceSeed?.exposure ??
+        getQuery.data?.imageSourceConfiguration.exposure ??
+        0,
       editGstreamerPipeline:
         getQuery.data?.imageSourceConfiguration.processingPipeline ?? "",
     },

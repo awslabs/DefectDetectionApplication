@@ -15,7 +15,7 @@
  * limitations under the License.
  *
  */
-import { CameraFeatureBounds } from "../../api/CameraAPI";
+import { CameraFeatureBound, CameraFeatureBounds } from "../../api/CameraAPI";
 import { EXPOSURE_MAX, EXPOSURE_MIN, GAIN_MAX, GAIN_MIN } from "./constants";
 
 /**
@@ -66,4 +66,45 @@ export function toSettingsBounds(data?: CameraFeatureBounds): SettingsBounds {
     exposureMax: exposure?.max != null ? Math.floor(exposure.max) : EXPOSURE_MAX,
     exposureUnit: unitLabel(exposure?.unit),
   };
+}
+
+/** Gain/exposure the form should start from, per {@link deviceSeedValues}. */
+export interface DeviceSeedValues {
+  gain?: number;
+  exposure?: number;
+}
+
+/**
+ * The camera's ACTUAL current gain/exposure, shaped for the edit form's
+ * initial values.
+ *
+ * The stored image-source configuration is seeded with static defaults when
+ * the source is created (historically exposure 500), so it can differ from
+ * what the sensor is really set to — the form then presents that default as
+ * if it were the camera's value. The feature-bounds response already carries
+ * the device's `current` readings, so prefer them for the initial display.
+ *
+ * Returns `undefined` per control when the device did not report a usable
+ * number, so the caller keeps its stored-config fallback. Values are rounded
+ * to integers (the numeric inputs and the rounded bounds are integral) and
+ * clamped into the reported min/max so a seeded value can never land outside
+ * what the form's own validation accepts.
+ */
+export function deviceSeedValues(
+  data?: CameraFeatureBounds,
+): DeviceSeedValues {
+  if (!data) return {};
+
+  const seedOf = (bound?: CameraFeatureBound): number | undefined => {
+    const current = bound?.current;
+    if (typeof current !== "number" || !Number.isFinite(current)) {
+      return undefined;
+    }
+    let value = Math.round(current);
+    if (bound?.min != null) value = Math.max(value, Math.ceil(bound.min));
+    if (bound?.max != null) value = Math.min(value, Math.floor(bound.max));
+    return value;
+  };
+
+  return { gain: seedOf(data.gain), exposure: seedOf(data.exposure) };
 }
