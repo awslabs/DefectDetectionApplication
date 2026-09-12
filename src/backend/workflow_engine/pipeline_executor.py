@@ -87,7 +87,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from workflow_engine import branching, csi_capture, detections, run_artifacts
 from workflow_engine import executor as executor_hook
-from workflow_engine import python_bridge, rendering
+from workflow_engine import python_bridge, rendering, roi_crop
 from workflow_engine.aravis_feed import AravisFeedError, plan_aravis_feeds
 from workflow_engine.python_source import (
     PythonSourceError,
@@ -2664,6 +2664,11 @@ class WorkflowExecutor:
         (binding/rendered) parameters for cameras without a local
         Image_Source.
 
+        That same configuration's Region_Of_Interest (``imageCrop``) is
+        applied to the compiled chain as a ``videocrop`` element (see
+        :meth:`_apply_device_roi`), so a deployed workflow crops to the
+        ROI the operator configured just as the classic path does.
+
         Returns the grabbed ``{'data','height','width'}`` frame, or None
         when the document has no Aravis binding points (the pre-feature
         path, Requirement 6.6). Raises :class:`AravisFeedError` (with the
@@ -2698,6 +2703,9 @@ class WorkflowExecutor:
                 "Aravis camera '{0}' returned no frame".format(feed.camera_id),
             )
         self._point_appsrc_at_frame_feed(document, feed, frame_data)
+        # After the appsrc rewrite: that step may inject bayer2rgb under
+        # the same nodeId, and the crop must land downstream of it.
+        self._apply_device_roi(document, feed, grab_config, frame_data)
         logger.info(
             "Aravis frame feed planned for node %s: camera '%s' (%dx%d)",
             feed.node_id,
@@ -2768,6 +2776,106 @@ class WorkflowExecutor:
             frame_format,
         )
         return frame_data, ({feed.node_id: metadata} if metadata else {})
+
+    @staticmethod
+    def _apply_device_roi(
+        document: dict, feed, grab_config, frame_data: dict
+    ) -> bool:
+        """Apply the device Image_Source ROI to the compiled chain.
+
+        The operator's Region_Of_Interest lives on the Image_Source as
+        ``imageCrop`` (four pixel edge insets). The classic capture path
+        turns it into a ``videocrop`` element; a compiled document has no
+        such step, so a deployed workflow used to infer on the full sensor
+        frame no matter what ROI was configured. This splices the same
+        ``videocrop`` in after the source node's last element — downstream
+        of the ``bayer2rgb``/``videoconvert`` that give it a format it can
+        consume, and upstream of inference and every capture branch, so
+        detection and the persisted images both see the ROI.
+
+        Returns whether an element was inserted. Every reason for NOT
+        inserting is logged and none of them fail the run: a workflow that
+        ran before this existed must keep running.
+
+        - a graph that already renders a ``videocrop`` (its author placed a
+          Crop node) is left alone rather than cropped twice;
+        - a malformed ROI is reported and ignored;
+        - an all-zero ROI is a no-op, so the launch string stays
+          byte-identical to the pre-feature one;
+        - an ROI that would consume the whole frame is reported and
+          skipped, because ``videocrop`` would fail to negotiate and take
+          the run down with it.
+        """
+        if not isinstance(grab_config, dict):
+            return False
+        raw_crop = grab_config.get("imageCrop")
+        if raw_crop is None:
+            return False
+
+        if roi_crop.has_explicit_crop(document):
+            logger.info(
+                "Node %s: the workflow graph already crops, so the device "
+                "Image_Source ROI is not applied (the graph's Crop node "
+                "wins; remove it to use the device ROI instead)",
+                feed.node_id,
+            )
+            return False
+
+        crop = roi_crop.normalized_crop(raw_crop)
+        if crop is None:
+            logger.warning(
+                "Node %s: ignoring an unusable Image_Source ROI %r — it "
+                "must carry non-negative whole-pixel top/bottom/left/right "
+                "insets",
+                feed.node_id,
+                raw_crop,
+            )
+            return False
+        if roi_crop.is_no_op(crop):
+            logger.debug(
+                "Node %s: Image_Source ROI is all zeros; no crop applied",
+                feed.node_id,
+            )
+            return False
+
+        width = frame_data.get("width") or 0
+        height = frame_data.get("height") or 0
+        if not roi_crop.fits_frame(crop, width, height):
+            logger.warning(
+                "Node %s: Image_Source ROI %s does not fit the %sx%s frame "
+                "from camera '%s', so it is not applied — reconfigure the "
+                "region of interest for this camera",
+                feed.node_id,
+                crop,
+                width,
+                height,
+                feed.camera_id,
+            )
+            return False
+
+        if not roi_crop.insert_crop_after_node(document, feed.node_id, crop):
+            logger.warning(
+                "Node %s: could not apply the Image_Source ROI — the "
+                "compiled document renders no element for the node",
+                feed.node_id,
+            )
+            return False
+
+        cropped_width, cropped_height = roi_crop.cropped_size(
+            crop, int(width), int(height)
+        )
+        logger.info(
+            "Node %s: applied the device Image_Source ROI %s — the workflow "
+            "runs on %dx%d of the %sx%s frame from camera '%s'",
+            feed.node_id,
+            crop,
+            cropped_width,
+            cropped_height,
+            width,
+            height,
+            feed.camera_id,
+        )
+        return True
 
     @staticmethod
     def _point_appsrc_at_frame_feed(
