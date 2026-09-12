@@ -116,6 +116,10 @@ class YoloDetectionPostProcessor(InferencePostProcessor):
 
     def __call__(self, model_output: List[np.ndarray], *args, **kwargs) -> List[ObjectDetectionResult]:
         src_img_size = kwargs.get("src_img_size")  # (width, height) of source image
+        # Letterboxed models hand their transform through the graph's
+        # `preprocess_metad` channel; without it a padded input would be unmapped
+        # back to source coordinates and every box would be offset and mis-scaled.
+        letterbox = self._letterbox_metadata(kwargs.get("preprocess_metad"))
         raw = self._select_output(model_output)
         if raw is None:
             return []
@@ -164,7 +168,8 @@ class YoloDetectionPostProcessor(InferencePostProcessor):
             for k in kept:
                 box = cls_boxes[k]
                 results.append(
-                    self._make_result(box, int(cls), float(cls_scores[k]), src_img_size)
+                    self._make_result(box, int(cls), float(cls_scores[k]),
+                                      src_img_size, letterbox)
                 )
         return results
 
@@ -204,10 +209,57 @@ class YoloDetectionPostProcessor(InferencePostProcessor):
             arr = arr.T
         return arr
 
-    def _make_result(self, box_xyxy, cls_id, score, src_img_size) -> ObjectDetectionResult:
+    @staticmethod
+    def _letterbox_metadata(preprocess_metad):
+        """The letterbox transform from the pre-processor, or None.
+
+        Tolerates the several shapes `preprocess_metad` can take: the namespaced
+        ``{'letterbox': {...}}`` the basic pre-processor emits, or a bare
+        transform dict. Anything without a usable ``ratio`` is ignored, so an
+        unrelated pre-processor's metadata (the polar transform, say) travelling
+        the same channel cannot be mistaken for a letterbox.
+        """
+        if not isinstance(preprocess_metad, dict):
+            return None
+        candidate = preprocess_metad.get("letterbox", preprocess_metad)
+        if not isinstance(candidate, dict):
+            return None
+        try:
+            ratio = float(candidate.get("ratio"))
+        except (TypeError, ValueError):
+            return None
+        if ratio <= 0:
+            return None
+        return {
+            "ratio": ratio,
+            "pad_x": float(candidate.get("pad_x", 0.0)),
+            "pad_y": float(candidate.get("pad_y", 0.0)),
+        }
+
+    def _make_result(self, box_xyxy, cls_id, score, src_img_size,
+                     letterbox=None) -> ObjectDetectionResult:
         x_min, y_min, x_max, y_max = (float(v) for v in box_xyxy)
+        if letterbox is not None:
+            # Letterboxed input: undo the centre pad, then the single uniform
+            # scale. Both axes share one ratio, which is the whole point of
+            # letterboxing -- using the squash scaling below would offset every
+            # box by the padding and stretch it by the aspect ratio.
+            ratio = letterbox["ratio"]
+            pad_x, pad_y = letterbox["pad_x"], letterbox["pad_y"]
+            x_min = (x_min - pad_x) / ratio
+            x_max = (x_max - pad_x) / ratio
+            y_min = (y_min - pad_y) / ratio
+            y_max = (y_max - pad_y) / ratio
+            if src_img_size:
+                # Clamp to the source frame: a box overlapping the padding can
+                # otherwise land slightly outside it, and downstream consumers
+                # crop by these coordinates (bedrock_inference's
+                # crop_detection_index).
+                sw, sh = float(src_img_size[0]), float(src_img_size[1])
+                x_min, x_max = max(0.0, x_min), min(sw, x_max)
+                y_min, y_max = max(0.0, y_min), min(sh, y_max)
         # Scale from network input space back to the source image, if known.
-        if src_img_size and self.network_input:
+        elif src_img_size and self.network_input:
             sw, sh = float(src_img_size[0]), float(src_img_size[1])
             sx = sw / float(self.network_input)
             sy = sh / float(self.network_input)
