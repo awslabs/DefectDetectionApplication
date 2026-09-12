@@ -1,8 +1,12 @@
 /**
  * Pure URL builders for every LocalServer route the HMI consumes.
  *
- * The HMI is served same-origin with the API (the `/hmi` static mount on the
- * LocalServer), so all URLs are root-relative paths. Every dynamic path
+ * The HMI is served same-origin with the API by default (the `/hmi` static
+ * mount on the LocalServer), in which case every URL below is a root-relative
+ * path exactly as before. When the bundle is hosted detached from the
+ * LocalServer (a static server on another port, or another machine), the
+ * configured API_Base from `base.ts` is prefixed so the requests still reach
+ * the device; the LocalServer already allows cross-origin callers. Every dynamic path
  * segment and query value is encoded with `encodeURIComponent`, so arbitrary
  * ids, node names, ports, and tokens can never break out of their URL part.
  *
@@ -14,7 +18,18 @@
  * (Requirements 1.3, 5.5).
  */
 
+import { getApiBase } from "./base";
+
 const enc = encodeURIComponent;
+
+/**
+ * API_Base prefix for every builder below. Empty (same-origin) unless the
+ * host page configured one, so a bundle served by the LocalServer's own
+ * `/hmi` mount produces exactly the URLs it always did.
+ */
+function base(): string {
+  return getApiBase();
+}
 
 // --------------------------------------------------------------------------
 // Auth
@@ -22,7 +37,20 @@ const enc = encodeURIComponent;
 
 /** `POST /local-auth/login` — Session_Token issuance. */
 export function loginUrl(): string {
-  return "/local-auth/login";
+  return `${base()}/local-auth/login`;
+}
+
+/**
+ * `GET /local-auth/status` — the unauthenticated probe that says whether a
+ * login form is needed at all.
+ *
+ * It lives here, with the other builders, specifically so it carries the
+ * API_Base: the entry points used to hold this path as a local constant, which
+ * meant a detached bundle asked its own static server for the status and got a
+ * 404, leaving the login form up on a device that issues no tokens.
+ */
+export function localAuthStatusUrl(): string {
+  return `${base()}/local-auth/status`;
 }
 
 // --------------------------------------------------------------------------
@@ -31,7 +59,7 @@ export function loginUrl(): string {
 
 /** `GET /workflows/registrations` — workflow discovery + retry probe. */
 export function registrationsUrl(): string {
-  return "/workflows/registrations";
+  return `${base()}/workflows/registrations`;
 }
 
 /**
@@ -42,17 +70,17 @@ export function registrationExecutionsUrl(
   registrationId: string,
   limit: number = 10,
 ): string {
-  return `/workflows/registrations/${enc(registrationId)}/executions?limit=${enc(String(limit))}`;
+  return `${base()}/workflows/registrations/${enc(registrationId)}/executions?limit=${enc(String(limit))}`;
 }
 
 /** `GET /workflows/executions/{executionId}/results` — results inventory. */
 export function executionResultsUrl(executionId: string): string {
-  return `/workflows/executions/${enc(executionId)}/results`;
+  return `${base()}/workflows/executions/${enc(executionId)}/results`;
 }
 
 /** `GET /workflows/executions/{executionId}/metadata` — verdict metadata. */
 export function executionMetadataUrl(executionId: string): string {
-  return `/workflows/executions/${enc(executionId)}/metadata`;
+  return `${base()}/workflows/executions/${enc(executionId)}/metadata`;
 }
 
 // --------------------------------------------------------------------------
@@ -65,7 +93,7 @@ export function executionMetadataUrl(executionId: string): string {
  * parameter (Requirements 1.3, 5.5).
  */
 export function outputImageUrl(executionId: string, token: string): string {
-  return `/workflows/executions/${enc(executionId)}/output-image?token=${enc(token)}`;
+  return `${base()}/workflows/executions/${enc(executionId)}/output-image?token=${enc(token)}`;
 }
 
 /**
@@ -80,7 +108,7 @@ export function nodeImageUrl(
   token: string,
 ): string {
   return (
-    `/workflows/executions/${enc(executionId)}/node-image` +
+    `${base()}/workflows/executions/${enc(executionId)}/node-image` +
     `?nodeId=${enc(nodeId)}&port=${enc(port)}&token=${enc(token)}`
   );
 }

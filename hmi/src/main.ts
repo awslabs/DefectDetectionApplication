@@ -18,7 +18,8 @@
  * LocalServer's guarded static mount (Requirement 6.7).
  */
 
-import { configureApiClient, login } from "./api/client";
+import { apiFetch, configureApiClient, login } from "./api/client";
+import { localAuthStatusUrl } from "./api/routes";
 import type { Execution } from "./api/types";
 import { startupScreen } from "./auth/session";
 import { activeRegistrations, selectDefaultRegistration } from "./logic/selection";
@@ -157,7 +158,50 @@ async function bootstrap(): Promise<void> {
 // Startup
 // --------------------------------------------------------------------------
 
-renderer.render(state);
-if (state.auth.screen === "app") {
-  void bootstrap(); // resumed session (Requirement 1.5)
+/**
+ * `GET /local-auth/status` → `{localLoginEnabled}` — unauthenticated, so it can
+ * be asked before there is any session.
+ *
+ * The PATH only; the request goes through `localAuthStatusUrl()` so it carries
+ * the configured API_Base when this bundle is hosted detached.
+ */
+export const LOCAL_AUTH_STATUS_URL = "/local-auth/status";
+
+/**
+ * True iff the status body explicitly reports local login **disabled**.
+ *
+ * Only an explicit `false` counts: an unreachable device or an unparseable body
+ * leaves the login form in place rather than silently letting an operator into
+ * an app that will then fail every request.
+ */
+function reportsLoginDisabled(body: unknown): boolean {
+  if (typeof body !== "object" || body === null) return false;
+  return (body as Record<string, unknown>)["localLoginEnabled"] === false;
 }
+
+/**
+ * Startup: resume a live session, else decide whether a login form is needed
+ * at all.
+ *
+ * A device with local login DISABLED issues no tokens, so presenting the form
+ * is a dead end — submitting it can only ever return 403 ("local login is
+ * disabled"), which is what an operator on such a device used to be left
+ * staring at. Its API also requires no token in that configuration, so the
+ * app is entered directly with no credentials, the same transition a
+ * successful login makes. `triple.html` already behaved this way; this brings
+ * the single-inspection entry in line with it.
+ */
+async function start(): Promise<void> {
+  renderer.render(state);
+  if (state.auth.screen === "app") {
+    await bootstrap(); // resumed session (Requirement 1.5)
+    return;
+  }
+  const status = await apiFetch(localAuthStatusUrl());
+  if (status.ok && reportsLoginDisabled(status.data)) {
+    dispatch({ type: "login-succeeded", atEpochMs: Date.now() });
+    await bootstrap();
+  }
+}
+
+void start();

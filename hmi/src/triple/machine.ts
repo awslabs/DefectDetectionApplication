@@ -455,12 +455,43 @@ function slotsResolver(
   return (executionId) => runSlots[executionId];
 }
 
+/** True iff the two strips hold the same entries, in the same order. */
+function sameHistory(
+  a: readonly HistoryEntry[],
+  b: readonly HistoryEntry[],
+): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return a.every((entry, index) => {
+    const other = b[index];
+    return (
+      other !== undefined &&
+      entry.executionId === other.executionId &&
+      entry.verdict === other.verdict &&
+      entry.startedAt === other.startedAt
+    );
+  });
+}
+
 /**
  * Folds a poll payload into the history strip: the initial population from
  * the runs the LocalServer already knows about (7.8), then idempotent
  * insertion of each terminal run at its ordering position (7.2). An entry
  * already present with the same verdict and start time is left untouched, so
  * repeated polls of an unchanged payload leave the strip identical.
+ *
+ * The per-entry guard alone is not enough to keep that identity. A terminal
+ * run that sits OUTSIDE the capacity window is absent from the strip, so the
+ * guard never matches it, and `insertHistoryEntry` appends it only for the
+ * capacity trim to drop it again — yielding an array that is element-wise
+ * equal to the previous one but a different object, on every single poll. The
+ * two orderings involved are not the same relation either (`buildHistory`
+ * orders by `compareTerminalRunsDesc`, `insertHistoryEntry` positions by
+ * `startedAt` alone), so a run can be retained under one and "older than
+ * everything" under the other. Comparing the result by content closes both
+ * cases at once: the strip's identity changes only when its contents do,
+ * which is what the non-destructive requirement (3.4) asks for and what
+ * spares the renderer a needless history re-render every two seconds.
  */
 function mergeHistory(
   history: HistoryEntry[],
@@ -484,7 +515,7 @@ function mergeHistory(
     }
     next = insertHistoryEntry(next, entry);
   }
-  return next;
+  return sameHistory(history, next) ? history : next;
 }
 
 /** True iff `history` holds a terminal run that `previous` did not (7.4). */

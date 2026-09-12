@@ -47,6 +47,7 @@
 import "./kiosk.css";
 
 import { apiFetch, configureApiClient, login } from "../api/client";
+import { localAuthStatusUrl } from "../api/routes";
 import type { Execution } from "../api/types";
 import { startupScreen } from "../auth/session";
 import { resolveWorkflowName, type ConfigValue } from "./config";
@@ -67,8 +68,10 @@ import { createTripleRenderer, type PanelImageLoader } from "./render";
  * `GET /local-auth/status` → `{localLoginEnabled}` — the unauthenticated route
  * that decides whether a login form is needed at all (Requirement 1.8).
  *
- * Declared here rather than in `api/routes.ts` because the shared modules are
- * reused unchanged by this spec.
+ * The PATH only. The request itself goes through `localAuthStatusUrl()` in
+ * `api/routes.ts` so it carries the configured API_Base: a bundle hosted
+ * detached from the LocalServer must ask the DEVICE for this, not its own
+ * static server (which answers 404 and leaves the login form up).
  */
 export const LOCAL_AUTH_STATUS_URL = "/local-auth/status";
 
@@ -260,7 +263,7 @@ export function startTripleApp(options: TripleAppOptions = {}): TripleApp {
     }
     // The form is only actually needed when the device has local login on
     // (1.8); an unreachable or unparseable status leaves it displayed.
-    const status = await apiFetch(LOCAL_AUTH_STATUS_URL);
+    const status = await apiFetch(localAuthStatusUrl());
     if (status.ok && reportsLoginDisabled(status.data)) {
       // Same app-entry transition a successful login takes, without
       // credentials: no token is needed on a device with local login off.
