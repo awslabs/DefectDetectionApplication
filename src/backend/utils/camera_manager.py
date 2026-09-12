@@ -51,9 +51,30 @@ from utils.static_image_camera import (
     get_store as get_static_image_store,
 )
 
-from threading import Lock
+from threading import RLock
 
-get_frame_lock = Lock()
+#: Serializes every operation that OPENS, CLOSES or GRABS FROM a camera.
+#:
+#: A USB3Vision device admits exactly one claim, so two overlapping opens make
+#: the second fail with ``LIBUSB_ERROR_BUSY`` and leave the cached ``Camera``
+#: broken -- every later open then fails the same way and the camera is
+#: stranded until the process restarts. Observed on a DLAP-701 when saving an
+#: Image_Source ROI while the ~2 Hz live preview was polling: two ``Connecting``
+#: log lines 26 ms apart, then ``LIBUSB_ERROR_BUSY`` on the second.
+#:
+#: ``get_camera_frame`` held this lock around its own lazy ``connect_camera``,
+#: but ``connect_camera`` / ``disconnect_camera`` reached directly from an
+#: endpoint or a config-change reconnect took nothing, so a grab and an open
+#: could run concurrently. All three now acquire it.
+#:
+#: RLock, not Lock: ``get_camera_frame`` already holds it when it calls
+#: ``connect_camera``, so a plain lock would self-deadlock on that nesting.
+#:
+#: Waits are bounded -- ``Camera.get_frame`` pops with a timeout derived from
+#: the exposure -- so a reconnect queued behind an in-flight grab cannot hang
+#: indefinitely, and serialising the two is what we want anyway: a reconnect
+#: must not tear the device out from under a grab in progress.
+get_frame_lock = RLock()
 
 # Upper bound for how long to wait for a single frame before giving up, on top
 # of the configured exposure time. Prevents a stalled USB/GenICam transfer from
@@ -642,18 +663,21 @@ def connect_camera(camera_id):
             f"image pin API before using this camera."
         )
 
-    if camera_id in camera_objects:
-        disconnect_camera(camera_id)
+    # Serialized against every other open/close/grab: overlapping opens make the
+    # second fail LIBUSB_ERROR_BUSY and strand the device (see get_frame_lock).
+    with get_frame_lock:
+        if camera_id in camera_objects:
+            disconnect_camera(camera_id)
 
-    camera = manager_base.Camera(camera_id)
-    camera_objects[camera_id] = camera
-    camera_status = get_camera_status(camera_id)
+        camera = manager_base.Camera(camera_id)
+        camera_objects[camera_id] = camera
+        camera_status = get_camera_status(camera_id)
 
-    if camera_status.status == CameraStatusEnum.CONNECTED:
-        return True
-    else: # Connection Failed
-        disconnect_camera(camera_id)
-        raise AravisCameraException(camera_status.error)
+        if camera_status.status == CameraStatusEnum.CONNECTED:
+            return True
+        else: # Connection Failed
+            disconnect_camera(camera_id)
+            raise AravisCameraException(camera_status.error)
 
 
 def get_camera_feature_bounds(camera_id):
@@ -719,22 +743,26 @@ def disconnect_camera(camera_id):
     # static id, so disconnect is a successful no-op.
     if camera_id == STATIC_IMAGE_CAMERA_ID:
         return True
-    logger.info(f'Deleting camera: {camera_id}')
-    if camera_id in camera_objects:
-        _disconnect_camera(camera_id)
-        del camera_objects[camera_id]
-        logger.info(f"Deleted camera {camera_id}")
-    return True
+    # Serialized with opens and grabs: releasing the claim while another thread
+    # is opening or grabbing is how the device ends up stranded.
+    with get_frame_lock:
+        logger.info(f'Deleting camera: {camera_id}')
+        if camera_id in camera_objects:
+            _disconnect_camera(camera_id)
+            del camera_objects[camera_id]
+            logger.info(f"Deleted camera {camera_id}")
+        return True
 
 def disconnect_all_cameras():
-    if camera_objects:
-        logger.info('Disconnecting all cameras')
-        for camera_id in camera_objects:
-            _disconnect_camera(camera_id)
-        del camera_objects
-        logger.info('Deleted all cameras')
-    else:
-        logger.info("No cameras found during disconnect process")
+    with get_frame_lock:
+        if camera_objects:
+            logger.info('Disconnecting all cameras')
+            for camera_id in camera_objects:
+                _disconnect_camera(camera_id)
+            del camera_objects
+            logger.info('Deleted all cameras')
+        else:
+            logger.info("No cameras found during disconnect process")
 
 def _get_camera_frame(camera_id, camera, camera_config):
     try:
