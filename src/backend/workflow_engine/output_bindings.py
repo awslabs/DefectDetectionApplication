@@ -597,6 +597,24 @@ AWS_IOT_REQUIRED_PARAMETERS = (
 )
 
 
+def aws_iot_endpoint(parameters: Dict[str, Any], fallback_host: str) -> str:
+    """The host an ``aws_iot`` node connects to (mqtt-iot-endpoint).
+
+    An explicit, non-blank ``iot_endpoint`` (an AWS IoT Core data endpoint
+    in any account/region, e.g. ``xxxx-ats.iot.eu-west-1.amazonaws.com``)
+    wins; otherwise ``fallback_host`` (the node's ``broker_host``, which
+    every pre-feature aws_iot workflow used as the endpoint) is returned
+    unchanged. Whitespace around the endpoint is trimmed; nothing else is
+    normalised — the value goes to paho as the hostname. Shared by the
+    publish path here and the subscribe transport in
+    ``trigger_runtime.AwsIotTlsSubscriber``.
+    """
+    endpoint = parameters.get("iot_endpoint")
+    if isinstance(endpoint, str) and endpoint.strip():
+        return endpoint.strip()
+    return fallback_host
+
+
 def _default_mqtt_publisher(
     host: str,
     port: int,
@@ -605,6 +623,8 @@ def _default_mqtt_publisher(
     qos: int,
     client_id: Optional[str] = None,
     tls: Optional[Dict[str, str]] = None,
+    *,
+    retain: bool = False,
 ) -> None:
     """Publish one message through the LocalServer-bundled paho-mqtt
     client (Requirement 9.5).
@@ -613,9 +633,15 @@ def _default_mqtt_publisher(
     arguments — ``ca_certs``/``certfile``/``keyfile`` device file paths —
     that paho applies to the client via ``Client.tls_set`` for the
     mutual-TLS connection; ``client_id`` (the IoT thing name) becomes the
-    MQTT client id."""
+    MQTT client id.
+
+    ``retain`` (keyword-only, mqtt-retained-publish) sets the MQTT retain
+    bit so the broker keeps the message as the topic's last known value.
+    It is forwarded to paho only when true, so a non-retained publish is
+    the exact pre-feature ``publish.single`` call."""
     import paho.mqtt.publish as mqtt_publish
 
+    retain_kwargs = {"retain": True} if retain else {}
     mqtt_publish.single(
         topic,
         payload=payload,
@@ -624,6 +650,7 @@ def _default_mqtt_publisher(
         port=int(port),
         client_id=client_id or "",
         tls=dict(tls) if tls else None,
+        **retain_kwargs
     )
 
 
@@ -633,7 +660,9 @@ def _default_mqtt_publisher(
 GREENGRASS_MAX_QOS = 1
 
 
-def _default_greengrass_publisher(topic: str, payload: str, qos: int) -> None:
+def _default_greengrass_publisher(
+    topic: str, payload: str, qos: int, *, retain: bool = False
+) -> None:
     """Publish one message through the device's Greengrass-managed MQTT
     via the Greengrass IPC ``PublishToIoTCore`` operation.
 
@@ -644,11 +673,23 @@ def _default_greengrass_publisher(topic: str, payload: str, qos: int) -> None:
     stays importable everywhere (matching the paho/opcua pattern);
     ``qos`` is mapped to the IPC ``QOS`` enum (clamped to 0/1).
 
+    ``retain`` (keyword-only, mqtt-retained-publish) asks AWS IoT Core to
+    keep the message as the topic's retained value. It is assigned on the
+    IPC request only when true, so a non-retained publish sends the exact
+    pre-feature request. Retained publishing needs an awsiotsdk whose
+    ``PublishToIoTCoreRequest`` carries ``retain`` (>= 1.13) and a nucleus
+    that forwards it (>= 2.10); an SDK without the field raises a
+    ``RuntimeError`` before anything is sent instead of silently
+    publishing non-retained.
+
     A nucleus denial (``UnauthorizedError``) is re-raised as a
     ``RuntimeError`` naming the denied topic and the LocalServer
     component's ``aws.greengrass.ipc.mqttproxy`` accessControl
     configuration (with the recipe location) so the run error is
-    actionable instead of a bare ``UnauthorizedError``."""
+    actionable instead of a bare ``UnauthorizedError``. For a retained
+    publish the message additionally names ``iot:RetainPublish``, which
+    AWS IoT Core evaluates separately from ``iot:Publish`` in the core
+    device's IoT policy."""
     import awsiot.greengrasscoreipc
     import awsiot.greengrasscoreipc.model as model
 
@@ -658,6 +699,14 @@ def _default_greengrass_publisher(topic: str, payload: str, qos: int) -> None:
     request.topic_name = topic
     request.payload = payload.encode("utf-8")
     request.qos = qos_value
+    if retain:
+        if not hasattr(request, "retain"):
+            raise RuntimeError(
+                "Retained publishing to topic '{0}' requires awsiotsdk "
+                ">= 1.13 (PublishToIoTCoreRequest.retain) and Greengrass "
+                "nucleus >= 2.10; the installed SDK has no retain "
+                "field".format(topic))
+        request.retain = True
 
     ipc_client = awsiot.greengrasscoreipc.connect()
     operation = ipc_client.new_publish_to_iot_core()
@@ -665,7 +714,7 @@ def _default_greengrass_publisher(topic: str, payload: str, qos: int) -> None:
     try:
         operation.get_response().result(timeout=10.0)
     except model.UnauthorizedError as error:
-        raise RuntimeError(
+        message = (
             "Greengrass IPC denied PublishToIoTCore for topic "
             "'{0}': the LocalServer component's "
             "aws.greengrass.ipc.mqttproxy accessControl configuration "
@@ -676,7 +725,14 @@ def _default_greengrass_publisher(topic: str, payload: str, qos: int) -> None:
             "recipe-arm64.yaml / recipe-amd64.yaml, "
             "ComponentConfiguration accessControl) and redeploy.".format(
                 topic)
-        ) from error
+        )
+        if retain:
+            message += (
+                " A retained publish additionally requires "
+                "'iot:RetainPublish' on the topic in the core device's "
+                "IoT policy (the Greengrass core certificate's policy), "
+                "not only 'iot:Publish'.")
+        raise RuntimeError(message) from error
 
 
 def _opcua_coerce(value: Any, variant_type: Any) -> Any:
@@ -3526,7 +3582,16 @@ class OutputBindingProcessor:
         device-local certificate paths are passed as ``tls_set``
         arguments, a ``broker_port`` left at the plain-MQTT default
         (1883) switches to the standard mutual-TLS port (8883), and the
-        qos is clamped to 1 (AWS IoT Core does not support QoS 2).
+        qos is clamped to 1 (AWS IoT Core does not support QoS 2). The
+        host is ``iot_endpoint`` when set (an IoT Core data endpoint in
+        any account/region — mqtt-iot-endpoint), else ``broker_host``.
+
+        ``retain`` (mqtt-retained-publish) sets the MQTT retain bit on
+        whichever path is selected. It reaches the publisher as the
+        keyword ``retain=True`` only when enabled, so a workflow without
+        it (every pre-feature workflow) makes the exact pre-feature
+        publisher call; the sent-message detail then carries
+        ``, retained`` after the path name.
         """
         payload = render_template(
             str(parameters.get("payload_template") or "{inference_json}"),
@@ -3541,21 +3606,30 @@ class OutputBindingProcessor:
                 payload_text, attached)
         topic = str(parameters["topic"])
         qos = int(parameters.get("qos", 0))
+        retain = bool(parameters.get("retain", False))
+        # Passed as a keyword only when set: the pinned Publisher_Call
+        # shapes for every pre-feature workflow stay `(args, {})`, and a
+        # publisher that does not understand the flag fails loudly
+        # (TypeError) instead of silently publishing non-retained.
+        retain_kwargs = {"retain": True} if retain else {}
 
         if parameters.get("greengrass"):
             # Zero-config Greengrass-managed publishing: the on-device
             # nucleus owns the AWS IoT Core connection, so only the
             # topic/payload/qos are supplied (no broker host/port, no
             # certificate paths).
-            self._greengrass_publisher(topic, payload_text, qos)
-            return self._mqtt_detail(topic, qos, "greengrass", payload_text)
+            self._greengrass_publisher(
+                topic, payload_text, qos, **retain_kwargs)
+            return self._mqtt_detail(
+                topic, qos, "greengrass", payload_text, retain)
 
-        host = str(parameters["broker_host"])
         port = int(parameters.get("broker_port", DEFAULT_MQTT_PORT))
 
         if not parameters.get("aws_iot"):
-            self._mqtt_publisher(host, port, topic, payload_text, qos)
-            return self._mqtt_detail(topic, qos, "plain", payload_text)
+            host = str(parameters["broker_host"])
+            self._mqtt_publisher(
+                host, port, topic, payload_text, qos, **retain_kwargs)
+            return self._mqtt_detail(topic, qos, "plain", payload_text, retain)
 
         missing = [
             name for name in AWS_IOT_REQUIRED_PARAMETERS
@@ -3564,6 +3638,20 @@ class OutputBindingProcessor:
         if missing:
             raise ValueError(
                 "AWS IoT publishing requires {0}".format(", ".join(missing)))
+        # mqtt-iot-endpoint: an explicit AWS IoT Core data endpoint (any
+        # account/region) takes precedence over broker_host on this path;
+        # an empty/absent iot_endpoint keeps the pre-feature broker_host
+        # behaviour byte-for-byte. A node with neither (only reachable
+        # around the validator) fails with a named gap instead of trying
+        # to connect to an empty host.
+        broker_host = parameters.get("broker_host")
+        host = aws_iot_endpoint(
+            parameters, str(broker_host) if broker_host is not None else "")
+        if not host.strip():
+            raise ValueError(
+                "AWS IoT publishing requires iot_endpoint or broker_host "
+                "(the AWS IoT Core endpoint, e.g. xxxxxxxx-ats.iot.<region>."
+                "amazonaws.com)")
         if port == DEFAULT_MQTT_PORT:
             port = AWS_IOT_TLS_PORT
         qos = min(qos, AWS_IOT_MAX_QOS)
@@ -3574,9 +3662,9 @@ class OutputBindingProcessor:
         }
         self._mqtt_publisher(
             host, port, topic, payload_text, qos,
-            str(parameters["iot_thing_name"]), tls,
+            str(parameters["iot_thing_name"]), tls, **retain_kwargs
         )
-        return self._mqtt_detail(topic, qos, "aws_iot", payload_text)
+        return self._mqtt_detail(topic, qos, "aws_iot", payload_text, retain)
 
     @staticmethod
     def _embed_attached_metadata(
@@ -3616,12 +3704,18 @@ class OutputBindingProcessor:
             {"payload": payload_text, "metadata": attached}, default=str)
 
     @staticmethod
-    def _mqtt_detail(topic: str, qos: int, path: str, payload_text: str) -> str:
+    def _mqtt_detail(
+        topic: str, qos: int, path: str, payload_text: str,
+        retain: bool = False,
+    ) -> str:
         """Compose an mqtt_publish sent-message detail (Requirement 1.1):
         topic, qos, publish path (plain/aws_iot/greengrass), and the rendered
-        payload truncated to the preview bound (Requirement 2.3)."""
+        payload truncated to the preview bound (Requirement 2.3). A retained
+        publish (mqtt-retained-publish) appends ``, retained`` to the path
+        segment; a non-retained one is the pre-feature string."""
+        flags = "{0}, retained".format(path) if retain else path
         return "sent to topic '{0}' (qos {1}, {2}): {3}".format(
-            topic, qos, path, _preview(payload_text))
+            topic, qos, flags, _preview(payload_text))
 
     def _run_opcua_write(
         self, parameters: Dict[str, Any], metadata: Dict[str, Any]

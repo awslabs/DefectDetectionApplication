@@ -42,6 +42,9 @@ _MQTT_CONNECTION_PARAMS = (
     "qos",
     "greengrass",
     "aws_iot",
+    # mqtt-iot-endpoint: the explicit IoT Core endpoint is a connection
+    # parameter shared by both nodes, so the mirror is enforced for it too.
+    "iot_endpoint",
     "iot_thing_name",
     "iot_ca_cert_path",
     "iot_client_cert_path",
