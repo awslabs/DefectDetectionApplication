@@ -107,6 +107,18 @@ export default function SmartImport() {
   // Object-detection decoder family: 'yolo' (single tensor + NMS) or 'rf_detr'
   // (DETR-family, two tensors, NMS-free top-k). Only relevant for detection.
   const [detectionArch, setDetectionArch] = useState<string>('yolo');
+  // Letterbox by default: detectors exported from ultralytics (including this
+  // repo's datasets/detection_training/train.py) are trained letterboxed, and
+  // serving them squashed silently costs confidence. Untick for a model that
+  // was genuinely trained on squashed input.
+  const [preserveAspect, setPreserveAspect] = useState(true);
+  // Detection decode settings. Without class names the on-device postprocessor
+  // labels every box with its numeric class id ("0"), which downstream
+  // consumers matching on a label string will never match. The thresholds
+  // default to the same values the backend applies.
+  const [classNames, setClassNames] = useState('');
+  const [scoreThreshold, setScoreThreshold] = useState('0.25');
+  const [iouThreshold, setIouThreshold] = useState('0.45');
   const [autoCompile, setAutoCompile] = useState(true);
   const [compilationTargets, setCompilationTargets] = useState<MultiselectProps.Option[]>([
     { label: 'x86_64 CPU', value: 'x86_64-cpu' }
@@ -221,6 +233,55 @@ export default function SmartImport() {
       return;
     }
 
+    // Detection decode settings apply only to object detection; everything else
+    // sends undefined so the backend keeps its own defaults.
+    const isDetection = modelType === 'object_detection';
+    const parsedClassNames = classNames
+      .split(',')
+      .map(n => n.trim())
+      .filter(n => n.length > 0);
+    const detectionClassNames =
+      isDetection && parsedClassNames.length > 0 ? parsedClassNames : undefined;
+
+    // A class-name list shorter than num_classes silently falls back to numeric
+    // labels for the missing ids on device, so catch the mismatch here.
+    const declaredClasses = numClasses ? parseInt(numClasses) : undefined;
+    if (
+      detectionClassNames &&
+      declaredClasses &&
+      detectionClassNames.length !== declaredClasses
+    ) {
+      setError(
+        `Class names (${detectionClassNames.length}) must match number of classes (${declaredClasses})`
+      );
+      return;
+    }
+
+    // Thresholds: blank means "let the backend default apply", so only a
+    // present-but-unusable value is an error. Kept as plain locals rather than a
+    // helper returning a sentinel, so the type stays number | undefined.
+    let detectionScoreThreshold: number | undefined;
+    let detectionIouThreshold: number | undefined;
+    if (isDetection) {
+      if (scoreThreshold.trim() !== '') {
+        const value = parseFloat(scoreThreshold);
+        if (isNaN(value) || value < 0 || value > 1) {
+          setError('Score threshold must be a number between 0 and 1');
+          return;
+        }
+        detectionScoreThreshold = value;
+      }
+      // NMS is YOLO-only; RF-DETR is set-based top-k, so it has no IoU knob.
+      if (detectionArch === 'yolo' && iouThreshold.trim() !== '') {
+        const value = parseFloat(iouThreshold);
+        if (isNaN(value) || value < 0 || value > 1) {
+          setError('IoU threshold must be a number between 0 and 1');
+          return;
+        }
+        detectionIouThreshold = value;
+      }
+    }
+
     setConverting(true);
     setError(null);
 
@@ -238,6 +299,11 @@ export default function SmartImport() {
           modelType === 'object_detection' || modelType === 'segmentation'
             ? detectionArch
             : undefined,
+        preserve_aspect:
+          modelType === 'object_detection' ? preserveAspect : undefined,
+        class_names: detectionClassNames,
+        score_threshold: detectionScoreThreshold,
+        iou_threshold: detectionIouThreshold,
         auto_import: true,
       });
 
@@ -510,6 +576,21 @@ export default function SmartImport() {
                   </FormField>
                 )}
 
+                {modelType === 'object_detection' && (
+                  <FormField
+                    label="Input resize geometry"
+                    description="Must match how the model was trained. Letterbox scales by a single ratio and centre-pads; squash stretches the frame to the network input. A mismatch does not error — it just loses detections (~1.35x mean confidence, up to 5.7x on high-resolution frames)."
+                  >
+                    <Checkbox
+                      checked={preserveAspect}
+                      onChange={({ detail }) => setPreserveAspect(detail.checked)}
+                    >
+                      Preserve aspect ratio (letterbox) — correct for
+                      ultralytics/YOLO-trained models
+                    </Checkbox>
+                  </FormField>
+                )}
+
                 {modelType === 'segmentation' && (
                   <FormField
                     label="Segmentation architecture"
@@ -582,6 +663,50 @@ export default function SmartImport() {
                     placeholder={inspectionResult?.num_classes?.toString() || '10'}
                   />
                 </FormField>
+
+                {modelType === 'object_detection' && (
+                  <ExpandableSection headerText="Detection decode settings" defaultExpanded>
+                    <SpaceBetween size="s">
+                      <FormField
+                        label="Class names"
+                        description="Comma-separated, in class-id order. Without these the device labels every detection with its numeric class id (class 0 becomes the label &quot;0&quot;), so anything matching on a label string will not match."
+                        constraintText="Optional, e.g. blue_plate"
+                      >
+                        <Input
+                          value={classNames}
+                          onChange={({ detail }) => setClassNames(detail.value)}
+                          placeholder="blue_plate"
+                        />
+                      </FormField>
+
+                      <FormField
+                        label="Score threshold"
+                        description="Minimum confidence for a detection to be kept."
+                      >
+                        <Input
+                          type="number"
+                          value={scoreThreshold}
+                          onChange={({ detail }) => setScoreThreshold(detail.value)}
+                          placeholder="0.25"
+                        />
+                      </FormField>
+
+                      {detectionArch === 'yolo' && (
+                        <FormField
+                          label="IoU threshold"
+                          description="Overlap above which NMS suppresses the weaker of two boxes. YOLO only — RF-DETR is NMS-free."
+                        >
+                          <Input
+                            type="number"
+                            value={iouThreshold}
+                            onChange={({ detail }) => setIouThreshold(detail.value)}
+                            placeholder="0.45"
+                          />
+                        </FormField>
+                      )}
+                    </SpaceBetween>
+                  </ExpandableSection>
+                )}
 
                 <ExpandableSection headerText="Compilation Options" defaultExpanded>
                   <SpaceBetween size="s">

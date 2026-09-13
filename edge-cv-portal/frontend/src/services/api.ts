@@ -3653,6 +3653,9 @@ class ApiService {
     // 'rf_detr' (DETR-family, two tensors, NMS-free top-k). Only used when
     // model_type === 'object_detection'.
     detection_arch?: string;
+    // Detection resize geometry: letterbox (true) vs squash (false). Must match
+    // how the model was trained — a mismatch silently degrades detections.
+    preserve_aspect?: boolean;
   }): Promise<{
     converted_model_s3_uri: string;
     model_name: string;

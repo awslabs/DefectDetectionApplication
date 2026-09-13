@@ -503,6 +503,7 @@ def generate_dda_package(
     score_threshold: float = 0.25,
     iou_threshold: float = 0.45,
     detection_arch: str = 'yolo',
+    preserve_aspect: bool = False,
 ) -> str:
     """
     Generate a DDA-compatible package from a raw model file.
@@ -518,6 +519,15 @@ def generate_dda_package(
         for object_detection).
     :param detection_arch: object-detection decoder family — 'yolo' (single
         tensor, NMS) or 'rf_detr' (DETR-family, two tensors, NMS-free).
+    :param preserve_aspect: letterbox the frame into the network input instead
+        of squashing it. MUST match how the model was trained: a detector
+        fine-tuned letterboxed (ultralytics' default) and served squashed loses
+        ~1.35x mean confidence and up to 5.7x on high-resolution frames, and
+        nothing errors — see docs/detection-training-gap.md §7. Written into
+        the manifest's top-level ``detection`` block, which
+        lfv_model_template.__load_model_graph_config merges into every stage so
+        BasicPreProcessor._preserve_aspect finds it. Defaults to False to keep
+        existing squash-trained imports byte-identical.
     """
     temp_dir = None
     is_onnx = str(export_format).lower() == 'onnx'
@@ -670,6 +680,11 @@ def generate_dda_package(
                     "num_classes": num_classes or 80,
                     "score_threshold": score_threshold,
                     "network_input": image_width,
+                    # Resize geometry, written explicitly (rather than left to
+                    # the device default) so the manifest states which of the
+                    # two paths the model was trained for instead of silently
+                    # inheriting the squash.
+                    "preserve_aspect": bool(preserve_aspect),
                 }
                 # NMS is YOLO-only; DETR-family is set-based (top-k, no NMS).
                 if detection_arch == 'rf_detr':
@@ -759,6 +774,7 @@ def convert_model(event: Dict, context: Any) -> Dict:
         "image_height": 224,
         "num_classes": 10,  // optional
         "class_names": ["class1", "class2"],  // optional
+        "preserve_aspect": true,  // optional, detection: letterbox instead of squash
         "auto_import": true  // optional, auto-import after conversion
     }
     """
@@ -791,6 +807,10 @@ def convert_model(event: Dict, context: Any) -> Dict:
         iou_threshold = float(body.get('iou_threshold', 0.45))
         # Detection decoder family: 'yolo' (default) or 'rf_detr'.
         detection_arch = str(body.get('detection_arch', 'yolo')).lower()
+        # Letterbox vs squash. Default False preserves the behavior of every
+        # existing caller; the geometry must match how the model was trained
+        # (see generate_dda_package).
+        preserve_aspect = bool(body.get('preserve_aspect', False))
         
         # Validate model type
         if model_type not in MODEL_TYPES:
@@ -880,6 +900,7 @@ def convert_model(event: Dict, context: Any) -> Dict:
                 score_threshold=score_threshold,
                 iou_threshold=iou_threshold,
                 detection_arch=detection_arch,
+                preserve_aspect=preserve_aspect,
             )
             
             # Upload converted package to S3
@@ -900,7 +921,10 @@ def convert_model(event: Dict, context: Any) -> Dict:
                     'source_uri': model_s3_uri,
                     'output_uri': output_s3_uri,
                     'model_type': model_type,
-                    'dimensions': f"{image_width}x{image_height}"
+                    'dimensions': f"{image_width}x{image_height}",
+                    # Recorded because a geometry mismatch is silent on device:
+                    # this is the audit trail for which path was chosen.
+                    'preserve_aspect': preserve_aspect,
                 }
             )
             
