@@ -1,7 +1,82 @@
-# Blue-plate detector retrain — resume notes
+# Blue-plate detector retrain — outcome and open items
 
-Written 2026-09-13 ~01:15Z, mid-flight, at shutdown. Everything described here
-is committed; nothing is in an inconsistent state. Read "Resume here" first.
+**Status (2026-09-13 04:20Z): DEPLOYED AND VERIFIED ON DEVICE.** The retrained
+detector is running on `adlink-dlap-701` (DLAP JP7) inside the production
+workflow `blue-plate-detection-guided-inspection`, and has been exercised
+end-to-end by four workflow executions. The sections below the outcome are the
+original mid-flight resume notes, kept for the record.
+
+## Outcome
+
+![blue plate detections](images/blue-plate-v2-detections.jpg)
+
+Execution `10e23f5c-5ad5-425a-a39f-7d624904991b` on the DLAP, one of four
+completed runs (three console-triggered with encoded-image payloads, one
+`quality/invoke` publish). Full-resolution frame with boxes:
+`images/blue-plate-v2-detections-full.jpg` (2001x2352).
+
+| | old model (`yolo-world-blue-plate`) | new model (`blue_plate_detector_v2`) |
+|---|---|---|
+| plate #0 confidence | 0.209 | **0.904** |
+| plate #1 confidence | 0.109 | **0.853** |
+| score_threshold | 0.08 (crutch) | 0.25 |
+| resize path | squash | **letterbox** (`preserve_aspect: true`) |
+| boxes | same two plates | same two plates, within ~1px across all 4 runs |
+
+Deployed state: `model-blue-plate-detector-v2-jetson-xavier-jp7` **2.0.0**
+(RUNNING, Triton READY), workflow `dda.workflow.25794912-…` **20.0.0**
+(graph version 19, `model_1.modelName = blue_plate_detector_v2`), old model
+component removed from the deployment and from the Triton repo. Deployment
+`650faa25-8af7-4ea8-b61e-b29ca8fa3cca`, revision built from revision 27 with
+only the three intended changes. LocalServer 1.0.29 unchanged. Backend served
+200s throughout ~30 min of checks; no crash-loop.
+
+## Open items found during verification
+
+1. **Detection label is `person`, not `blue_plate`.** `class_names` was not
+   set on the `blue_plate_detector_v2` import, and the fallback is a COCO
+   class-0 name (not `"0"` as previously assumed). Cosmetic for this workflow
+   (conditionals gate on `is_anomalous`; Bedrock crops by detection index) but
+   it is what the results viewer / HMI show. Fix: re-import under the SAME
+   name with Class names = `blue_plate`, re-package, redeploy the model
+   component only. No workflow change.
+2. **`bedrock_3` fails every run**: `crop_detection_index 2 but only 2
+   detection(s)`. Pre-existing (the old model also found exactly two plates in
+   this scene). Either the scene has two plates and the node should go, or it
+   has three and both models miss one — the test image decides which.
+3. **`qwen3-vl-8b-instruct` is FAILED** since the deployment restarted
+   LocalServer: `Free memory on device (37.55/122.83 GiB) ... less than desired
+   GPU memory utilization (0.5, 61.41 GiB)`. All four ONNX models now come up
+   on GPU after the restart and starve vLLM. Breaks the LLM node `n3` in
+   "IMTS - Swagfactory", which also subscribes to `quality/invoke`. Fix: lower
+   `gpu_memory_utilization`, or stop the ONNX models not needed on this device
+   (`yolo-test`, `cookies-segmentation` look like leftovers).
+4. **Nothing listens on 8081** on the device (`ss -ltnp`, `curl` → 000). The
+   HMI that consumes this workflow is not running there, or is bound elsewhere.
+5. Three `quality/invoke` subscribers fire on every trigger (25794912,
+   596c8577, 91084dbd) — a test trigger for one workflow runs all three.
+6. `deployGroundedSamWorker` defaults ON and its download step has no timeout;
+   it hung a portal deploy for 67 min. Deploy with
+   `-c deployGroundedSamWorker=false` unless that worker is actually needed.
+
+## Device access notes (for the next person)
+
+- `aws iotsecuretunneling open-tunnel` (NOT `aws iot open-tunnel` as
+  `docs/connect-to-device.md` says — that subcommand does not exist in this
+  CLI). Local proxy per that doc, `--destination-client-type V1`.
+- A V1 tunnel accepts exactly ONE connection ("simultaneous connections are
+  not enabled"). Batch everything into a single `ssh ... 'bash -s' < script`.
+- Two workflow systems coexist on the device: `/workflows/registrations`
+  (graph workflows — the one that matters) and `/workflows` (legacy, e.g.
+  `u724uckx` "blue blate test"). `/aws_dda/inference-results/<id>/` holds
+  LEGACY captures only. Graph-workflow results live under
+  `/workflows/executions/{id}/{results,log,node-status,output-image,
+  node-image?nodeId=&port=}` — the `log` endpoint's final "Workflow execution
+  ... completed; tags:" line carries the detections and confidences.
+- `YOLO decode` lines do NOT appear in the Greengrass component log or the
+  flask-app container log; use the execution log endpoint instead.
+- The device sudo password was shared in-session on 2026-09-13 and should be
+  rotated. `/tmp/dpw_remote` on the device may still hold it: `shred -u`.
 
 ---
 
