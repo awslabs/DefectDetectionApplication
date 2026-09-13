@@ -1,9 +1,12 @@
 # Detection (YOLO) training in the DDA portal — implementation gap
 
-Status: **not implemented.** Everything from capture through labeling works
-today, and everything from ONNX packaging through device deployment works
-today. The missing middle is *detector training*. This note records exactly
-what has to be built, with the call sites that currently block it.
+Status: **partially implemented.** Everything from capture through labeling
+works today, and everything from ONNX packaging through device deployment works
+today. Training itself now works too, but only as a standalone SageMaker job
+launched by hand (§3, `datasets/detection_training/`) — it writes no
+`dda-portal-training-jobs` record, so such a run is invisible to the portal and
+to the packaging/publish flow. What remains is the *portal wiring*: §4–§8. This
+note records what has to be built, with the call sites that currently block it.
 
 Written 2026-09-12 from a working session on the `blue_plate` use case.
 
@@ -21,7 +24,8 @@ Written 2026-09-12 from a working session on the `blue_plate` use case.
 | ONNX → Greengrass component | `packaging.package_onnx_component` | works |
 | On-device ONNX serving | `OnnxRunner` + `YoloDetectionPostProcessor` | works |
 
-`manifest_to_detector_dataset.py` is validated by `.debug_tmp/test_converter.py`
+`manifest_to_detector_dataset.py` is validated by
+`edge-cv-portal/backend/tests/test_manifest_to_detector_dataset.py`
 against manifests built with the portal's own `dda_manifest.serialize_manifest`.
 It handles the DDA literal `bounding-box` attribute *and* a Ground Truth
 job-named attribute, keeps negatives as explicit empty label files, stratifies
@@ -50,13 +54,21 @@ Labels: `s3://ryvan-cookies/labeled/labeling-9cbcdb4c/output.manifest`
 
 ---
 
-## 3. Gap: new SageMaker training entry point
+## 3. Gap: new SageMaker training entry point — CLOSED
 
-**Does not exist.** The only custom SageMaker script in the repo is the ~40-line
-`_ONNX_EXPORT_SCRIPT` in `edge-cv-portal/backend/functions/compilation.py`,
-which expects a TorchScript `mochi.pt`.
+**Built and validated on real data:** `datasets/detection_training/train.py`,
+with `build_sourcedir.sh` and a README recording the launch parameters. It
+produced `blue-plate-yolo-20260912-231818` (Completed, test mAP@50 0.995).
+Note it trains at a **square** `IMGSZ` rather than the rectangular
+`1088x1280` recommended in §2 — see the README's geometry contract.
 
-Build a script-mode entry point that, inside one training job:
+What follows describes what that entry point does; the portal wiring in §4–§6
+is still open. For context, the only other custom SageMaker script in the repo
+is the ~40-line `_ONNX_EXPORT_SCRIPT` in
+`edge-cv-portal/backend/functions/compilation.py`, which expects a TorchScript
+`mochi.pt`.
+
+The entry point, inside one training job:
 
 1. reads the DDA ObjectDetection manifest from its input channel;
 2. downloads the referenced images (`source-ref` S3 URIs);
