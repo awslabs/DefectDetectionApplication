@@ -38,3 +38,8 @@ src/frontend/build/
 # Generated from vite.config.ts by tsc
 edge-cv-portal/frontend/vite.config.js
 edge-cv-portal/frontend/vite.config.d.ts
+# Agent/debug scratch: pulled device frames, model.onnx copies, staging dirs.
+# Routinely holds GB-scale binaries that must never be committed.
+.debug_tmp/
+# Local scratch for datasets/sync_captures_to_s3.py (pulled + staged frames)
+.dda_capture_sync/
