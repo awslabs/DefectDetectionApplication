@@ -315,8 +315,17 @@ export default function SmartImport() {
           // ONNX runs on the ONNX Runtime engine — no Neo compilation. Go
           // straight to packaging (architecture-agnostic) with auto-publish so
           // a deployable component is created in one step.
+          //
+          // Deliberately NOT forwarding `targets`: the ONNX artifact is
+          // portable, one package serves every platform, and this screen offers
+          // no platform picker for ONNX. Passing the Neo compilation-target
+          // selection here silently narrowed the fan-out instead — and since
+          // COMPILATION_TARGETS has no jetson-xavier-jp7 entry at all, a JP7
+          // device could never receive an ONNX model imported from this screen.
+          // Omitting it lets packaging.py apply its full portable target set
+          // (jp5, jp6, jp7, x86_64-cpu).
           try {
-            await apiService.startPackaging(result.training_id, targets, true);
+            await apiService.startPackaging(result.training_id, undefined, true);
             setSuccess(`Model imported and packaging started (ONNX, no compilation needed)! Training ID: ${result.training_id}`);
           } catch (pkgErr) {
             console.error('Packaging trigger failed:', pkgErr);
