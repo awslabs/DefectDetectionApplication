@@ -159,14 +159,20 @@ public:
         *   ]
         * }
         */
-        if(_modelMetadata.find(modelName) == _modelMetadata.end() )
         {
-            nlohmann::json m = _modelMetadata[modelName];
-            if(m.find("state") != m.end()  && m["state"] == "LOADING")
+            // Only skip when a load for this model is genuinely in flight (this
+            // guard used to test `== end()`, which made it dead code and let
+            // every caller enqueue yet another load of an already-loading model).
+            auto existing = _modelMetadata.find(modelName);
+            if(existing != _modelMetadata.end())
             {
-                // Model is already being loaded
-                TraceInfo("Model %s is already being loaded", modelName);
-                return S_FALSE;
+                const nlohmann::json& m = existing.value();
+                if(m.contains("state") && m["state"] == "LOADING")
+                {
+                    // Model is already being loaded
+                    TraceInfo("Model %s is already being loaded", modelName);
+                    return S_FALSE;
+                }
             }
         }
         TraceInfo("Enqueuing model %s for loading", modelName);
@@ -177,17 +183,53 @@ public:
         _loaded_models[modelName] = false;
         return hr;
     }
+    // Record a failed load as a terminal state so it can never be mistaken for
+    // an in-flight one. LoadModel() writes "LOADING" before the job runs, and
+    // ListModels()/ModelMetadata() only refresh states for models present in
+    // Triton's repository index. A model whose directory is missing from the
+    // repository (e.g. its Greengrass component was undeployed while a local
+    // workflow still references it) fails with TRITONSERVER_ERROR_NOT_FOUND and
+    // never appears in that index, so without this the entry stayed "LOADING"
+    // for the life of the process and the backend refused both start (needs
+    // UNKNOWN/UNAVAILABLE) and stop (needs READY). "UNAVAILABLE" + "reason" is
+    // the vocabulary Triton's own index uses for a model that failed to load.
+    void _markModelLoadFailed(const char* modelName, const std::string& reason)
+    {
+        std::unique_lock<std::mutex> lock(_metadata_mutex);
+        nlohmann::json meta;
+        meta["name"] = modelName;
+        meta["state"] = "UNAVAILABLE";
+        meta["reason"] = reason;
+        _modelMetadata[modelName] = meta;
+        _loaded_models[modelName] = false;
+        TraceError("Model %s failed to load, marked UNAVAILABLE: %s", modelName, reason.c_str());
+    }
+
     HRESULT _LoadModel(const char* modelName)
     {
         HRESULT hr = S_OK;
         nlohmann::json meta, index;
         std::string index_buffer;
+        std::string failure_reason = "model load failed";
+        bool loaded = false;
         TRITONSERVER_Message* modelMetadata;
         const char* buffer;
         size_t sz;
 
         TraceInfo("Loading model %s", modelName);
-        CHECK_TRITON_RES(TRITONSERVER_ServerLoadModel(_server, modelName));
+        {
+            // Expanded from CHECK_TRITON_RES so the Triton error message can be
+            // kept as the failure reason.
+            TRITONSERVER_Error* err = TRITONSERVER_ServerLoadModel(_server, modelName);
+            if (err != nullptr)
+            {
+                failure_reason = TRITONSERVER_ErrorMessage(err);
+                TraceError("Error in triton server: (%s) %s", triton_err_strings[TRITONSERVER_ErrorCode(err)].c_str(), failure_reason.c_str());
+                TRITONSERVER_ErrorDelete(err);
+                hr = E_FAIL;
+                goto Cleanup;
+            }
+        }
         CHECK_TRITON_RES(TRITONSERVER_ServerModelMetadata(_server, modelName, -1, &modelMetadata));
         CHECK_TRITON_RES(TRITONSERVER_MessageSerializeToJson(modelMetadata, &buffer, &sz));
         // Update MetaData of loaded model
@@ -209,11 +251,19 @@ public:
             std::unique_lock<std::mutex> lock(_metadata_mutex);
             _modelMetadata[modelName] = meta;
             _loaded_models[modelName] = true;
+            loaded = true;
             // For ensemble load the internal model metadata as well.
             CHECKHR(_checkIfAdditionalModelsLoaded(modelName));
             TraceInfo("Model %s loaded successfully", modelName);
         }
     Cleanup:
+        if (FAILED(hr) && !loaded)
+        {
+            // The model itself never reached Triton's READY state (load or
+            // metadata fetch failed). A failure after `loaded` is only the
+            // ensemble sub-model bookkeeping and must not mask a loaded model.
+            _markModelLoadFailed(modelName, failure_reason);
+        }
         return hr;
     }
 

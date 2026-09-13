@@ -49,6 +49,13 @@ PACKAGING_REL = "edge-cv-portal/backend/functions/packaging.py"
 # the REAL module is loaded from the same directory and injected alongside the
 # stubs. This keeps the actual production transform under test.
 MODEL_NAMING_REL = "edge-cv-portal/backend/functions/model_naming.py"
+# Shared-layer pure module (no boto3, no I/O). packaging.py does
+# ``from detection_training import (...)`` (portal-detection-training) for the
+# trained-YOLO record predicate + device-manifest builder; loaded REAL, like
+# model_naming, so the production import resolves under the isolated loader.
+DETECTION_TRAINING_REL = (
+    "edge-cv-portal/backend/layers/shared/python/detection_training.py"
+)
 
 
 def _shared_utils_stub():
@@ -92,6 +99,11 @@ def _make_stubs(lambda_client):
         # ``from model_naming import safe_model_name``.
         "model_naming": load_module_from_path(
             "model_naming_preservation", MODEL_NAMING_REL
+        ),
+        # REAL shared-layer module — resolves packaging.py's
+        # ``from detection_training import (...)``.
+        "detection_training": load_module_from_path(
+            "detection_training_preservation", DETECTION_TRAINING_REL
         ),
     }
 

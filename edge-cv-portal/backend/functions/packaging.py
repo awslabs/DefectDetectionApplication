@@ -39,6 +39,14 @@ from shared_utils import (
 # (vllm-model-name-mismatch Requirement 2.2).
 from model_naming import safe_model_name
 
+# Portal-trained Object Detection (YOLO): record predicate + the device
+# manifest builder shared with training.py (portal-detection-training).
+from detection_training import (
+    DETECTION_STAGE_TYPE,
+    build_detection_device_manifest,
+    is_trained_detection_record,
+)
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -318,6 +326,137 @@ def package_onnx_component(trained_model_s3: str, s3_client, usecase: Dict) -> s
         return s3_uri
     except Exception as e:
         logger.error(f"Error packaging ONNX component: {str(e)}")
+        raise
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _decimal_plain(value, default):
+    """Decimal/str/int -> float or int for manifest JSON; `default` on None."""
+    if value is None:
+        return default
+    if isinstance(value, Decimal):
+        return int(value) if value % 1 == 0 else float(value)
+    return value
+
+
+def package_trained_detection_component(trained_model_s3: str, training_job: Dict,
+                                        s3_client, usecase: Dict) -> str:
+    """Build the Greengrass model-component ZIP for a portal-trained Object
+    Detection (YOLO) job — no Neo, one architecture-agnostic artifact.
+
+    The training job (datasets/detection_training/train.py) writes a FLAT
+    artifact: model.onnx + best.pt + training_metadata.json at the tar root,
+    with no manifest of its own. The device manifest is therefore synthesized
+    here from the Detection_Record_Fields training.py persisted on the record
+    (`detection.{network_input_width, class_names, num_classes,
+    score_threshold, iou_threshold, preserve_aspect}`), through the same
+    builder Smart Import's manifest is pinned to
+    (detection_training.build_detection_device_manifest), and laid out exactly
+    like package_onnx_component's payload: manifest.json at the ZIP root and
+    model.onnx NESTED under the stage_type dir (yolo_object_detection/).
+
+    training_metadata.json's `imgsz` is the size the ONNX graph was actually
+    exported at, so it wins over the record when both exist (Req 5.5).
+    """
+    temp_dir = None
+    try:
+        parsed = urlparse(trained_model_s3)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip('/')
+
+        temp_dir = tempfile.mkdtemp(prefix="dda_det_pkg_")
+        local_tar = os.path.join(temp_dir, 'model.tar.gz')
+        logger.info(f"Downloading trained detection artifact from {trained_model_s3}")
+        s3_client.download_file(bucket, key, local_tar)
+
+        extract_dir = os.path.join(temp_dir, 'extracted')
+        os.makedirs(extract_dir, exist_ok=True)
+        with tarfile.open(local_tar, 'r:gz') as tar:
+            tar.extractall(extract_dir)
+        os.remove(local_tar)
+
+        onnx_src = None
+        meta_path = None
+        for root, _dirs, files in os.walk(extract_dir):
+            for f in files:
+                if f.endswith('.onnx') and onnx_src is None:
+                    onnx_src = os.path.join(root, f)
+                elif f == 'training_metadata.json' and meta_path is None:
+                    meta_path = os.path.join(root, f)
+        if not onnx_src:
+            raise FileNotFoundError(
+                "No .onnx model file found in trained detection artifact")
+
+        meta = {}
+        if meta_path:
+            try:
+                with open(meta_path, 'r') as fh:
+                    meta = json.load(fh) or {}
+            except (OSError, ValueError) as e:
+                logger.warning(f"training_metadata.json unreadable, using record fields only: {e}")
+
+        det = training_job.get('detection') or {}
+        record_input = _decimal_plain(det.get('network_input_width'), None)
+        artifact_input = meta.get('imgsz')
+        if artifact_input is not None and record_input is not None \
+                and int(artifact_input) != int(record_input):
+            logger.warning(
+                f"Detection network input mismatch: artifact exported at {artifact_input}, "
+                f"record says {record_input}; using the artifact's size")
+        network_input = int(artifact_input if artifact_input is not None else (record_input or 1280))
+
+        class_names = [str(c) for c in (det.get('class_names') or [])]
+        num_classes = int(_decimal_plain(det.get('num_classes'), None) or len(class_names) or 1)
+        hints = meta.get('device_manifest_hints') or {}
+        score_threshold = float(_decimal_plain(
+            det.get('score_threshold'), hints.get('score_threshold', 0.25)))
+        iou_threshold = float(_decimal_plain(
+            det.get('iou_threshold'), hints.get('iou_threshold', 0.45)))
+        preserve_aspect = det.get('preserve_aspect', hints.get('preserve_aspect', True))
+
+        manifest = build_detection_device_manifest(
+            image_width=network_input,
+            image_height=network_input,
+            num_classes=num_classes,
+            class_names=class_names or None,
+            score_threshold=score_threshold,
+            iou_threshold=iou_threshold,
+            preserve_aspect=bool(preserve_aspect),
+        )
+        # The exported graph's real output shape (e.g. [1, 5, 33600] at 1280)
+        # replaces the nominal 8400 anchors when the trainer recorded it.
+        real_shape = meta.get('onnx_output_shape')
+        if isinstance(real_shape, list) and len(real_shape) == 3 \
+                and all(isinstance(d, int) for d in real_shape):
+            manifest['model_graph']['stages'][0]['output_shape'] = real_shape
+
+        payload_dir = os.path.join(temp_dir, 'payload')
+        stage_dir = os.path.join(payload_dir, DETECTION_STAGE_TYPE)
+        os.makedirs(stage_dir, exist_ok=True)
+        with open(os.path.join(payload_dir, 'manifest.json'), 'w') as f:
+            json.dump(manifest, f, indent=2)
+        shutil.copy(onnx_src, os.path.join(stage_dir, manifest['runtime_artifact']))
+
+        component_uuid = str(uuid.uuid4()).split('-')[-1]
+        zip_filename = f"{component_uuid}_greengrass_model_component.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _dirs, files in os.walk(payload_dir):
+                for file in files:
+                    fp = os.path.join(root, file)
+                    zipf.write(fp, os.path.relpath(fp, payload_dir))
+
+        s3_key = f"model_artifacts/model-{component_uuid}/{zip_filename}"
+        s3_uri = f"s3://{usecase['s3_bucket']}/{s3_key}"
+        logger.info(f"Uploading trained detection component package to {s3_uri} "
+                    f"(input {network_input}, classes {class_names}, "
+                    f"preserve_aspect={bool(preserve_aspect)})")
+        s3_client.upload_file(zip_path, usecase['s3_bucket'], s3_key)
+        return s3_uri
+    except Exception as e:
+        logger.error(f"Error packaging trained detection component: {str(e)}")
         raise
     finally:
         if temp_dir and os.path.exists(temp_dir):
@@ -855,6 +994,65 @@ def package_components(event: Dict, context: Any) -> Dict:
                 'training_id': training_id,
                 'packaged_components': packaged_components,
                 'message': f'Packaged vLLM component for {len(vllm_targets)} target(s)',
+                'component_creation_triggered': auto_triggered,
+            })
+
+        # ── Trained detection (ONNX) bypass ────────────────────────────────
+        # Portal-trained Object Detection jobs already exported model.onnx in
+        # the training job, so like imported ONNX they need no Neo compilation
+        # and one architecture-agnostic package serves every target. Kept as
+        # its own block (not merged into the import branch below) so the
+        # imported-ONNX code stays textually identical
+        # (portal-detection-training Req 5.2, 5.8).
+        if is_trained_detection_record(training_job):
+            if training_job.get('status') != 'Completed':
+                return create_response(400, {
+                    'error': f"Training job must be completed. Current status: {training_job.get('status')}"
+                })
+            trained_model_s3 = training_job.get('artifact_s3')
+            if not trained_model_s3:
+                return create_response(400, {'error': 'Training job has no model artifact'})
+            usecase = get_usecase(usecase_id)
+            s3_usecase = get_usecase_client(
+                's3', usecase,
+                session_name=f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64])
+
+            detection_targets = requested_targets or [
+                'jetson-xavier-jp5', 'jetson-xavier-jp6', 'jetson-xavier-jp7',
+                'x86_64-cpu']
+            logger.info(f"Trained detection: packaging one ONNX artifact for targets {detection_targets}")
+            try:
+                component_s3_uri = package_trained_detection_component(
+                    trained_model_s3, training_job, s3_usecase, usecase)
+            except Exception as e:
+                logger.error(f"Trained detection component packaging failed: {str(e)}")
+                return create_response(500, {
+                    'error': f"Failed to package detection component: {str(e)}"})
+
+            packaged_components = [
+                {'target': t, 'component_package_s3': component_s3_uri, 'status': 'packaged'}
+                for t in detection_targets
+            ]
+            table = dynamodb.Table(TRAINING_JOBS_TABLE)
+            timestamp = int(datetime.utcnow().timestamp() * 1000)
+            table.update_item(
+                Key={'training_id': training_id},
+                UpdateExpression='SET packaged_components = :components, updated_at = :updated',
+                ExpressionAttributeValues={':components': packaged_components, ':updated': timestamp},
+            )
+            log_audit_event(
+                user_id=user_id, action='package_components', resource_type='training_job',
+                resource_id=training_id, result='success',
+                details={'targets': detection_targets, 'packaged_count': len(detection_targets),
+                         'runtime': 'onnx', 'model_type': 'object_detection'},
+            )
+            auto_triggered = body.get('auto_triggered', False)
+            if auto_triggered:
+                _trigger_component_creation(training_id, training_job)
+            return create_response(200, {
+                'training_id': training_id,
+                'packaged_components': packaged_components,
+                'message': f'Packaged detection (ONNX) component for {len(detection_targets)} target(s)',
                 'component_creation_triggered': auto_triggered,
             })
 

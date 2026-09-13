@@ -55,6 +55,66 @@ def _split_s3(uri):
     return bucket, key
 
 
+IMAGE_EXTS = (".jpg", ".jpeg", ".png")
+
+
+def _download_prefix(s3, images_s3, images):
+    """Download every image under an S3 prefix (IMAGES_S3 override path)."""
+    # Trailing slash matters: without it, S3 prefix matching is plain string
+    # matching and would also pull a sibling prefix sharing the same name
+    # (e.g. `<name>-other-resolutions/`).
+    ib, ik = _split_s3(images_s3)
+    if ik and not ik.endswith("/"):
+        ik += "/"
+    n_img = 0
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=ib, Prefix=ik):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/") or not key.lower().endswith(IMAGE_EXTS):
+                continue
+            s3.download_file(ib, key, str(images / key.rsplit("/", 1)[-1]))
+            n_img += 1
+    return n_img
+
+
+def _download_source_refs(s3, manifest_lines, images):
+    """Download the image behind every manifest `source-ref` (portal path).
+
+    The converter keys images by basename, so two source-refs sharing a
+    basename under different prefixes would silently overwrite each other;
+    warn loudly instead of guessing.
+    """
+    seen = {}
+    n_img = 0
+    for i, line in enumerate(manifest_lines, 1):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            print(f"WARN: manifest line {i} is not JSON; skipped", flush=True)
+            continue
+        ref = entry.get("source-ref")
+        if not isinstance(ref, str) or not ref.startswith("s3://"):
+            print(f"WARN: manifest line {i} has no s3:// source-ref; skipped",
+                  flush=True)
+            continue
+        name = ref.rsplit("/", 1)[-1]
+        if name in seen:
+            if seen[name] != ref:
+                print(f"WARN: basename collision {name!r}: {seen[name]} vs {ref}; "
+                      f"keeping the first", flush=True)
+            continue
+        seen[name] = ref
+        b, k = _split_s3(ref)
+        try:
+            s3.download_file(b, k, str(images / name))
+        except Exception as e:
+            print(f"WARN: could not download {ref}: {e}", flush=True)
+            continue
+        n_img += 1
+    return n_img
+
+
 def stage_data():
     """Download manifest + images, then build the YOLO dataset.
 
@@ -74,28 +134,20 @@ def stage_data():
         s3.download_file(mb, mk, str(manifest))
     except Exception as e:
         sys.exit(f"FATAL: could not download manifest {MANIFEST_S3}: {e}")
-    n_lines = sum(1 for ln in manifest.read_text().splitlines() if ln.strip())
-    print(f"manifest lines: {n_lines}", flush=True)
+    manifest_lines = [ln for ln in manifest.read_text().splitlines() if ln.strip()]
+    print(f"manifest lines: {len(manifest_lines)}", flush=True)
 
-    # Trailing slash matters: without it, S3 prefix matching is plain string
-    # matching and would also pull a sibling prefix sharing the same name
-    # (e.g. `<name>-other-resolutions/`).
-    ib, ik = _split_s3(IMAGES_S3)
-    if ik and not ik.endswith("/"):
-        ik += "/"
-    exts = (".jpg", ".jpeg", ".png")
-    n_img = 0
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=ib, Prefix=ik):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if key.endswith("/") or not key.lower().endswith(exts):
-                continue
-            s3.download_file(ib, key, str(images / key.rsplit("/", 1)[-1]))
-            n_img += 1
+    if IMAGES_S3:
+        n_img = _download_prefix(s3, IMAGES_S3, images)
+        where = IMAGES_S3
+    else:
+        # Portal launches set only MANIFEST_S3: the manifest's own source-ref
+        # URIs are the authoritative image list, so pull exactly those.
+        n_img = _download_source_refs(s3, manifest_lines, images)
+        where = f"{MANIFEST_S3} (source-ref)"
     print(f"images downloaded: {n_img}", flush=True)
     if n_img == 0:
-        sys.exit(f"FATAL: no images downloaded from s3://{ib}/{ik}")
+        sys.exit(f"FATAL: no images downloaded from {where}")
 
     dataset = WORK / "dataset"
     r = sh([sys.executable, str(CODE_DIR / "manifest_to_detector_dataset.py"),
@@ -243,9 +295,9 @@ def export(model, metrics):
 
 
 def main():
-    if not MANIFEST_S3 or not IMAGES_S3:
-        sys.exit("FATAL: MANIFEST_S3 and IMAGES_S3 are required")
-    print(f"MANIFEST_S3={MANIFEST_S3}\nIMAGES_S3={IMAGES_S3}\n"
+    if not MANIFEST_S3:
+        sys.exit("FATAL: MANIFEST_S3 is required")
+    print(f"MANIFEST_S3={MANIFEST_S3}\nIMAGES_S3={IMAGES_S3 or '(from source-ref)'}\n"
           f"IMGSZ={IMGSZ} EPOCHS={EPOCHS} BATCH={BATCH} "
           f"BASE_WEIGHTS={BASE_WEIGHTS}", flush=True)
     _dataset, yaml_path = stage_data()

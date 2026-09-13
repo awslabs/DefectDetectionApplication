@@ -74,6 +74,10 @@ class TritonEdgeClient:
             logger.info(f"Triton models(including base and marshal): {models_list_response}")
             for model, state in models_list_response.items():
                 __model_dict = {"model_component": model, "status": state.get("state", "UNKNOWN")}
+                # The edgemlsdk wrapper records why a load failed (Triton's own
+                # index also carries `reason` for UNAVAILABLE models).
+                if state.get("reason"):
+                    __model_dict["reason"] = state["reason"]
                 models.append(__model_dict)
             return models
         except Exception as e:

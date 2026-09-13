@@ -239,6 +239,13 @@ def get_features_triton(triton_server=None):
                 logger.warning(
                     f"executionProviderInfo merge skipped for {model_id}: {e}"
                 )
+            # A model whose load failed (e.g. its component was undeployed but a
+            # workflow still references it) reports UNAVAILABLE with the Triton
+            # error as its reason; surface it like the vLLM failureReason. Copy
+            # first: get_default_configs_lfv is lru_cached.
+            if model.get("status") == "UNAVAILABLE" and model.get("reason"):
+                default_configs_dict = dict(default_configs_dict)
+                default_configs_dict["failureReason"] = model["reason"]
             results.append(
                 ListFeatureConfigurationAPIModel(
                     type="TritonModel",
