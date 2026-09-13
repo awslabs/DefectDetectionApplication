@@ -81,6 +81,22 @@ def create_response(status_code: int, body: Any, headers: Optional[Dict] = None)
     }
 
 
+def _display_identity(email: Optional[str], username: Optional[str], user_id: Optional[str]) -> str:
+    """The value handlers persist as `created_by`.
+
+    Prefer the email, but never hand downstream the literal 'unknown' when a
+    real identifier exists: a Cognito user created without an `email`
+    attribute (e.g. the bootstrap `admin` user) issues ID tokens with no email
+    claim, and the JWT authorizer forwards the string 'unknown' in its place —
+    which is how every record such a user creates ended up showing
+    "Created By: unknown". Fall back to the username, then the sub.
+    """
+    for candidate in (email, username, user_id):
+        if candidate and str(candidate).strip() and str(candidate).strip().lower() != 'unknown':
+            return str(candidate).strip()
+    return 'unknown'
+
+
 def get_user_from_event(event: Dict) -> Dict[str, str]:
     """Extract user information from API Gateway event"""
     try:
@@ -89,20 +105,24 @@ def get_user_from_event(event: Dict) -> Dict[str, str]:
         # Check if using Cognito User Pools authorizer (claims)
         claims = authorizer.get('claims', {})
         if claims:
+            user_id = claims.get('sub', 'unknown')
+            username = claims.get('cognito:username', claims.get('username', 'unknown'))
             return {
-                'user_id': claims.get('sub', 'unknown'),
-                'email': claims.get('email', 'unknown'),
-                'username': claims.get('cognito:username', 'unknown'),
+                'user_id': user_id,
+                'email': _display_identity(claims.get('email'), username, user_id),
+                'username': username,
                 'role': claims.get('custom:role', 'Viewer')
             }
         
         # Check if using Lambda JWT authorizer (context)
         context = authorizer
         if context.get('userId'):
+            user_id = context.get('userId', 'unknown')
+            username = context.get('username', 'unknown')
             return {
-                'user_id': context.get('userId', 'unknown'),
-                'email': context.get('email', 'unknown'),
-                'username': context.get('username', 'unknown'),
+                'user_id': user_id,
+                'email': _display_identity(context.get('email'), username, user_id),
+                'username': username,
                 'role': context.get('role', 'Viewer')
             }
         

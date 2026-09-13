@@ -37,6 +37,9 @@ from compilation_status import (  # noqa: F401  (derive_compilation_status re-ex
     POLL_KIND_TRAINING,
     POLL_KIND_COMPILATION,
 )
+# Portal-trained Object Detection records already hold model.onnx and take the
+# same no-Neo path as imported ONNX (portal-detection-training Req 5.1).
+from detection_training import is_trained_detection_record
 
 # Configure logging
 logger = logging.getLogger()
@@ -452,8 +455,17 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
         # architecture-agnostic — SageMaker Neo neither accepts them (Neo starts
         # from a TorchScript .pt) nor is needed. Skip compilation and chain
         # straight to packaging (which has its own ONNX path).
-        if _is_onnx_import(training_job):
-            logger.info(f"Imported ONNX model {training_id}: skipping Neo compilation")
+        #
+        # Portal-trained Object Detection (YOLO) jobs take the same exit: their
+        # training job already exported model.onnx (train.py), and the artifact
+        # carries no mochi.json, so extract_and_repackage_model below would
+        # raise. Neo cannot emit ONNX anyway (that is what the 'onnx'
+        # pseudo-target exists for), so even that step is redundant here.
+        if _is_onnx_import(training_job) or is_trained_detection_record(training_job):
+            if _is_onnx_import(training_job):
+                logger.info(f"Imported ONNX model {training_id}: skipping Neo compilation")
+            else:
+                logger.info(f"Trained detection (ONNX) model {training_id}: skipping Neo compilation")
             table = dynamodb.Table(TRAINING_JOBS_TABLE)
             table.update_item(
                 Key={'training_id': training_id},

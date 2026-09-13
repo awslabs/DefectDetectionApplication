@@ -1,14 +1,20 @@
 # Detection (YOLO) training in the DDA portal — implementation gap
 
-Status: **partially implemented.** Everything from capture through labeling
-works today, and everything from ONNX packaging through device deployment works
-today. Training itself now works too, but only as a standalone SageMaker job
-launched by hand (§3, `datasets/detection_training/`) — it writes no
-`dda-portal-training-jobs` record, so such a run is invisible to the portal and
-to the packaging/publish flow. What remains is the *portal wiring*: §4–§8. This
-note records what has to be built, with the call sites that currently block it.
+Status: **implemented (cloud side), awaiting deploy + on-device verification.**
+Everything from capture through labeling works, everything from ONNX packaging
+through device deployment works, and as of 2026-09-13 the portal wiring in
+§4–§8 is built under `.kiro/specs/portal-detection-training/`: `training.py`
+accepts `object_detection`, validates bounding-box manifests, and launches
+`datasets/detection_training/train.py` in script mode; `compilation.py` and
+`packaging.py` bypass Neo and package the exported `model.onnx` with
+`preserve_aspect: true`; `CreateTraining.tsx` offers Object Detection and no
+longer misclassifies bounding-box manifests as Ground Truth; `compute-stack.ts`
+bundles the entry point into the training Lambda. The remaining steps are the
+portal deploy and the on-device check (tasks 9–10 of that spec). The sections
+below are kept as the record of what was missing and why.
 
-Written 2026-09-12 from a working session on the `blue_plate` use case.
+Written 2026-09-12 from a working session on the `blue_plate` use case;
+status updated 2026-09-13.
 
 ---
 

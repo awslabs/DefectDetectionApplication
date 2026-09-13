@@ -38,11 +38,36 @@ Negatives (entries with zero boxes) are preserved and spread across splits:
 a detector needs background images to control false positives, and they
 must appear in validation too or the metric hides FP regressions.
 
+COCO LAYOUTS
+------------
+``--format coco`` writes one ``_annotations.coco.json`` per split. Where the
+images go and what the validation split is called depends on
+``--coco-layout``:
+
+    nested (default)                     rfdetr
+    dataset/                             dataset/
+      train/_annotations.coco.json         train/_annotations.coco.json
+      train/images/<file>                  train/<file>
+      val/_annotations.coco.json           valid/_annotations.coco.json
+      val/images/<file>                    valid/<file>
+      test/...                             test/...
+
+``rfdetr`` is what RF-DETR's loader reads (it joins
+``dataset_dir/<split>/<file_name>`` and expects ``train``/``valid``/``test``).
+The annotation JSON content is byte-identical between layouts; only the
+image paths and the validation directory name differ. The leakage-safe
+grouping, negative stratification and split fractions are the same too.
+
 Usage:
-    # COCO (RF-DETR and most frameworks)
+    # COCO, nested layout (most frameworks)
     python3 manifest_to_detector_dataset.py \\
         --manifest s3://ryvan-cookies/labeled/plates/output.manifest \\
         --images-dir ./frames --out ./dataset
+
+    # COCO in the layout RF-DETR's trainer reads
+    python3 manifest_to_detector_dataset.py \\
+        --manifest ./output.manifest --images-dir ./frames \\
+        --out ./dataset --format coco --coco-layout rfdetr
 
     # YOLO txt + data.yaml (ultralytics)
     python3 manifest_to_detector_dataset.py \\
@@ -71,6 +96,18 @@ OBJECT_DETECTION_TYPE = "groundtruth/object-detection"
 #: of 2.0: dedupe removes only true duplicates, whereas here we want any
 #: plausibly-related frames kept on the same side of the split.
 DEFAULT_GROUP_THRESHOLD = 6.0
+
+#: COCO on-disk layouts understood by --coco-layout. See the module docstring.
+COCO_LAYOUTS = ("nested", "rfdetr")
+DEFAULT_COCO_LAYOUT = "nested"
+
+#: Logical split name -> directory name, per COCO layout. Splitting always
+#: works in terms of train/val/test; only the rfdetr layout renames the
+#: validation directory (RF-DETR's loader looks for ``valid``).
+COCO_SPLIT_DIRS = {
+    "nested": {"train": "train", "val": "val", "test": "test"},
+    "rfdetr": {"train": "train", "val": "valid", "test": "test"},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -309,12 +346,28 @@ def place_image(src, dst, link):
         shutil.copy2(src, dst)
 
 
-def write_coco(assigned, class_names, images_dir, out, link):
+def write_coco(assigned, class_names, images_dir, out, link,
+               layout=DEFAULT_COCO_LAYOUT):
+    """Write one ``<split_dir>/_annotations.coco.json`` per non-empty split.
+
+    ``layout`` selects only where images land and what the validation
+    directory is called (see COCO_SPLIT_DIRS); the JSON content is identical
+    for every layout:
+
+    * ``nested``: images under ``<split>/images/``, splits ``train|val|test``.
+    * ``rfdetr``: images beside the JSON in ``<split>/``, validation split
+      directory named ``valid`` -- the tree RF-DETR's loader reads.
+    """
+    if layout not in COCO_LAYOUTS:
+        raise ValueError(f"unknown COCO layout {layout!r}; "
+                         f"expected one of {COCO_LAYOUTS}")
+    split_dirs = COCO_SPLIT_DIRS[layout]
     out = Path(out)
     for split, recs in assigned.items():
         if not recs:
             continue
-        img_dir = out / split / "images"
+        split_dir = out / split_dirs[split]
+        img_dir = split_dir / "images" if layout == "nested" else split_dir
         images, annotations = [], []
         ann_id = 1
         for img_id, rec in enumerate(recs, 1):
@@ -345,7 +398,7 @@ def write_coco(assigned, class_names, images_dir, out, link):
             "categories": [{"id": i + 1, "name": n}
                            for i, n in enumerate(class_names)],
         }
-        ann_path = out / split / "_annotations.coco.json"
+        ann_path = split_dir / "_annotations.coco.json"
         ann_path.parent.mkdir(parents=True, exist_ok=True)
         ann_path.write_text(json.dumps(coco, indent=2))
 
@@ -442,6 +495,13 @@ def main():
                     help="Local directory holding the images")
     ap.add_argument("--out", required=True, help="Output dataset directory")
     ap.add_argument("--format", choices=["coco", "yolo"], default="coco")
+    ap.add_argument("--coco-layout", choices=list(COCO_LAYOUTS),
+                    default=DEFAULT_COCO_LAYOUT,
+                    help="COCO tree shape (--format coco only). 'nested' "
+                         "(default) = <split>/images/<file> with splits "
+                         "train|val|test; 'rfdetr' = images beside "
+                         "<split>/_annotations.coco.json with the validation "
+                         "split named 'valid', as RF-DETR's loader expects")
     ap.add_argument("--val-frac", type=float, default=0.15)
     ap.add_argument("--test-frac", type=float, default=0.15)
     ap.add_argument("--group-threshold", type=float,
@@ -475,13 +535,17 @@ def main():
     assigned = split_groups(records, groups, args.val_frac, args.test_frac)
 
     if args.format == "coco":
-        write_coco(assigned, class_names, args.images_dir, args.out, args.link)
+        write_coco(assigned, class_names, args.images_dir, args.out, args.link,
+                   layout=args.coco_layout)
     else:
         write_yolo(assigned, class_names, args.images_dir, args.out, args.link)
 
     report(records, assigned, class_names, skipped, n_groups,
            args.net_input_height)
-    print(f"\nwrote {args.format} dataset -> {Path(args.out).resolve()}")
+    layout_note = (f" ({args.coco_layout} layout)"
+                   if args.format == "coco" else "")
+    print(f"\nwrote {args.format} dataset{layout_note} -> "
+          f"{Path(args.out).resolve()}")
 
 
 if __name__ == "__main__":

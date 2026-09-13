@@ -6,6 +6,8 @@ Based on DDA_SageMaker_Model_Training_and_Compilation.ipynb
 import json
 import os
 import logging
+import tempfile
+from decimal import Decimal
 from typing import Dict, Any, Optional
 from datetime import datetime
 import boto3
@@ -25,6 +27,24 @@ from manifest_transformer import (
     detect_ground_truth_attributes,
     transform_manifest_entry,
     transform_manifest_lines
+)
+# Object Detection (YOLO) training: shared vocabulary + pure helpers
+# (.kiro/specs/portal-detection-training/). Same layer as manifest_transformer.
+from detection_training import (
+    MODEL_TYPE_OBJECT_DETECTION,
+    DETECTION_ARCH,
+    DETECTION_DEFAULT_INSTANCE_TYPE,
+    DETECTION_DEFAULT_MAX_RUNTIME_SECONDS,
+    DETECTION_ENTRY_POINT,
+    DETECTION_METRIC_DEFINITIONS,
+    DETECTION_VOLUME_SIZE_GB,
+    build_sourcedir_tarball,
+    decode_final_metrics,
+    detection_job_environment,
+    is_trained_detection_record,
+    parse_detection_hyperparameters,
+    resolve_detection_training_image,
+    validate_detection_manifest_entry,
 )
 
 # Configure logging
@@ -267,6 +287,312 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
         }
 
 
+# ── Object Detection (YOLO) training ───────────────────────────────────────
+# Detection jobs do not use the AWS Marketplace algorithm. They run the repo's
+# datasets/detection_training/train.py on a SageMaker PyTorch GPU DLC in
+# script mode (the same mechanism compilation._start_onnx_export_job uses),
+# and the finished model.onnx is packaged directly — no Neo. Everything below
+# is reached only for model_type == 'object_detection'; the LFV code path in
+# create_training_job is untouched.
+
+def validate_detection_manifest(manifest_uri: str, usecase: Dict) -> Dict:
+    """Validate the first line of a manifest as an Object Detection entry.
+
+    Mirrors validate_marketplace_manifest's S3 access pattern but delegates
+    the shape check to detection_training.validate_detection_manifest_entry,
+    which accepts the DDA literal `bounding-box` attribute and a Ground Truth
+    job-named attribute. Never suggests the Manifest Transformer (it has no
+    ObjectDetection handling).
+
+    Returns {'valid', 'errors', 'message', 'class_names', 'detected_attributes'}.
+    """
+    try:
+        if not manifest_uri.startswith('s3://'):
+            return {'valid': False, 'message': 'Invalid manifest URI format',
+                    'errors': ['Manifest URI must be an S3 URI (s3://bucket/key)'],
+                    'class_names': [], 'detected_attributes': []}
+        parts = manifest_uri.replace('s3://', '').split('/', 1)
+        if len(parts) != 2 or not parts[1]:
+            return {'valid': False, 'message': 'Could not parse manifest URI',
+                    'errors': ['Invalid S3 URI format'],
+                    'class_names': [], 'detected_attributes': []}
+        bucket, key = parts
+
+        s3_client = get_s3_client_for_bucket(usecase, bucket, 'validate-detection-manifest')
+        try:
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            content = response['Body'].read(10240).decode('utf-8')
+        except ClientError as e:
+            if e.response['Error']['Code'] in ('NoSuchKey', '404'):
+                return {'valid': False, 'message': 'Manifest file does not exist',
+                        'errors': [f'Manifest file not found: {manifest_uri}'],
+                        'class_names': [], 'detected_attributes': []}
+            raise
+
+        first_line = next((ln for ln in content.splitlines() if ln.strip()), None)
+        if first_line is None:
+            return {'valid': False, 'message': 'Manifest is empty',
+                    'errors': [f'Manifest has no entries: {manifest_uri}'],
+                    'class_names': [], 'detected_attributes': []}
+        try:
+            first_entry = json.loads(first_line)
+        except json.JSONDecodeError as e:
+            return {'valid': False, 'message': 'Manifest is not valid JSON Lines',
+                    'errors': [f'First manifest line is not valid JSON: {e}'],
+                    'class_names': [], 'detected_attributes': []}
+
+        result = validate_detection_manifest_entry(first_entry)
+        logger.info(f"Detection manifest attributes: {result['detected_attributes']}")
+        if not result['valid']:
+            return {'valid': False, 'message': 'Manifest is not an Object Detection manifest',
+                    'errors': result['errors'], 'class_names': [],
+                    'detected_attributes': result['detected_attributes']}
+
+        # Spot-check the first image exists (same courtesy as the LFV validator).
+        ref = first_entry.get('source-ref', '')
+        ref_parts = ref.replace('s3://', '').split('/', 1)
+        if len(ref_parts) == 2:
+            try:
+                ref_s3 = get_s3_client_for_bucket(usecase, ref_parts[0], 'validate-source-ref')
+                ref_s3.head_object(Bucket=ref_parts[0], Key=ref_parts[1])
+            except ClientError as e:
+                if e.response['Error']['Code'] in ('404', 'NoSuchKey'):
+                    return {'valid': False,
+                            'message': 'Manifest references images that do not exist in S3',
+                            'errors': [f'Referenced file not found: source-ref: {ref}'],
+                            'class_names': [], 'detected_attributes': result['detected_attributes']}
+
+        return {'valid': True, 'message': 'Manifest is valid for object_detection training',
+                'errors': [], 'class_names': result['class_names'],
+                'attribute': result['attribute'],
+                'detected_attributes': result['detected_attributes']}
+    except Exception as e:
+        logger.error(f"Error validating detection manifest: {str(e)}")
+        return {'valid': False, 'message': 'Failed to validate manifest',
+                'errors': [f'Validation error: {str(e)}'],
+                'class_names': [], 'detected_attributes': []}
+
+
+def _detection_code_dir() -> str:
+    """Where the bundled entry-point files live. The CDK TrainingHandler asset
+    copies them into functions/detection_training/; tests point the env var
+    at a staged temp dir."""
+    return (os.environ.get('DETECTION_TRAINING_CODE_DIR')
+            or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'detection_training'))
+
+
+def _to_dynamo_number(value):
+    """DynamoDB rejects Python floats; store them as Decimal via str()."""
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return value
+
+
+def _create_detection_training_job(
+    user: Dict,
+    body: Dict,
+    usecase: Dict,
+    usecase_id: str,
+    model_name: str,
+    model_version: str,
+    dataset_manifest_s3: str,
+    auto_compile: bool,
+    compilation_targets: list,
+    generation_session_id: Optional[str],
+) -> Dict:
+    """Launch datasets/detection_training/train.py as a SageMaker script-mode
+    job and persist the Detection_Record_Fields. Called from
+    create_training_job after the shared validation/access checks; raises
+    ClientError into the caller's shared error mapping."""
+    user_id = user['user_id']
+
+    # 1. Hyperparameters (validated at the boundary; 400 names the field).
+    try:
+        params = parse_detection_hyperparameters(body.get('hyperparameters') or {})
+    except ValueError as e:
+        return create_response(400, {'error': str(e)})
+
+    instance_type = body.get('instance_type') or DETECTION_DEFAULT_INSTANCE_TYPE
+    max_runtime = int(body.get('max_runtime_seconds') or DETECTION_DEFAULT_MAX_RUNTIME_SECONDS)
+
+    # 2. Manifest must be a bounding-box manifest.
+    logger.info("Validating manifest as an Object Detection manifest")
+    validation = validate_detection_manifest(dataset_manifest_s3, usecase)
+    if not validation['valid']:
+        logger.error(f"Detection manifest validation failed: {validation['errors']}")
+        return create_response(400, {
+            'error': 'Object Detection requires a bounding-box manifest',
+            'details': validation['errors'],
+            'detected_attributes': validation.get('detected_attributes', []),
+            'message': validation.get('message'),
+        })
+    class_names = body.get('class_names') or validation['class_names']
+    if not isinstance(class_names, list) or not class_names or \
+            not all(isinstance(c, str) and c.strip() for c in class_names):
+        return create_response(400, {
+            'error': 'class_names must be a non-empty list of strings'})
+    class_names = [c.strip() for c in class_names]
+
+    usecase_region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
+    sagemaker_usecase = get_usecase_client(
+        'sagemaker', usecase,
+        session_name=f"training-{user_id}-{int(datetime.utcnow().timestamp())}",
+        region=usecase_region)
+    s3_usecase = get_usecase_client(
+        's3', usecase,
+        session_name=f"training-s3-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+        region=usecase_region)
+
+    # 3. Job naming — identical rules to the LFV path.
+    training_id = str(uuid.uuid4())
+    safe_model_name = model_name.replace('.', '-').replace('_', '-')
+    timestamp_str = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+    training_job_name = f"{safe_model_name}-{timestamp_str}"
+    if len(training_job_name) > 63:
+        max_model_name_length = 63 - len(timestamp_str) - 1
+        training_job_name = f"{safe_model_name[:max_model_name_length]}-{timestamp_str}"
+        logger.warning(f"Model name truncated to fit SageMaker limits: {training_job_name}")
+
+    # 4. Stage sourcedir.tar.gz next to the job in the use-case bucket (the
+    #    SageMaker execution role in that account can read it; the portal
+    #    artifacts bucket may be in another account).
+    bucket = usecase['s3_bucket']
+    code_key = f"models/detection-training/{training_job_name}/sourcedir.tar.gz"
+    code_dir = _detection_code_dir()
+    with tempfile.TemporaryDirectory() as td:
+        source_tar = os.path.join(td, 'sourcedir.tar.gz')
+        bundled = build_sourcedir_tarball(code_dir, source_tar)
+        logger.info(f"Bundled detection entry point from {code_dir}: {bundled}")
+        s3_usecase.upload_file(source_tar, bucket, code_key)
+    code_s3 = f"s3://{bucket}/{code_key}"
+
+    # 5. Image + job environment.
+    training_image = resolve_detection_training_image(
+        usecase_region, os.environ.get('DETECTION_TRAINING_IMAGE'))
+    job_env = detection_job_environment(dataset_manifest_s3, params)
+    training_hyperparameters = {
+        'sagemaker_program': DETECTION_ENTRY_POINT,
+        'sagemaker_submit_directory': code_s3,
+        **job_env,
+    }
+
+    path_builder = create_s3_path_builder(bucket=bucket)
+    training_output_path = path_builder.get_training_output_uri(training_job_name)
+    sagemaker_role_arn = f"arn:aws:iam::{usecase['account_id']}:role/DDASageMakerExecutionRole"
+
+    logger.info(f"Creating detection training job {training_job_name} "
+                f"(image={training_image}, sourcedir={code_s3}, imgsz={params['imgsz']})")
+    training_response = sagemaker_usecase.create_training_job(
+        TrainingJobName=training_job_name,
+        HyperParameters=training_hyperparameters,
+        # train.py reads bare env names (MANIFEST_S3, IMGSZ, ...), not SM_HP_*.
+        Environment=job_env,
+        AlgorithmSpecification={
+            'TrainingImage': training_image,
+            'TrainingInputMode': 'File',
+            'MetricDefinitions': DETECTION_METRIC_DEFINITIONS,
+        },
+        RoleArn=sagemaker_role_arn,
+        # No InputDataConfig at all: the entry point pulls the whole manifest
+        # + images itself so it can build data.yaml, and a per-record
+        # streaming channel is the wrong shape. The key is optional on
+        # CreateTrainingJob but boto3 rejects an EMPTY list ("valid min
+        # length: 1"), so it must be omitted rather than passed as [].
+        OutputDataConfig={'S3OutputPath': training_output_path},
+        ResourceConfig={
+            'InstanceType': instance_type,
+            'InstanceCount': 1,
+            'VolumeSizeInGB': DETECTION_VOLUME_SIZE_GB,
+        },
+        StoppingCondition={'MaxRuntimeInSeconds': max_runtime},
+        # The container pip-installs requirements.txt (ultralytics) and
+        # downloads pretrained weights at start-up.
+        EnableNetworkIsolation=False,
+        Tags=[
+            {'Key': 'UseCase', 'Value': usecase_id},
+            {'Key': 'ModelName', 'Value': model_name},
+            {'Key': 'ModelVersion', 'Value': model_version},
+            {'Key': 'CreatedBy', 'Value': user_id},
+        ],
+    )
+    training_job_arn = training_response['TrainingJobArn']
+
+    # 6. Record — LFV base fields + Detection_Record_Fields.
+    table = dynamodb.Table(TRAINING_JOBS_TABLE)
+    timestamp = int(datetime.utcnow().timestamp() * 1000)
+    training_item = {
+        'training_id': training_id,
+        'usecase_id': usecase_id,
+        'model_name': model_name,
+        'model_version': model_version,
+        'model_type': MODEL_TYPE_OBJECT_DETECTION,
+        'dataset_manifest_s3': dataset_manifest_s3,
+        'algorithm_uri': training_image,
+        'hyperparameters': training_hyperparameters,
+        'instance_type': instance_type,
+        'training_job_name': training_job_name,
+        'training_job_arn': training_job_arn,
+        'status': 'InProgress',
+        'progress': 10,
+        'created_by': user['email'],
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'auto_compile': auto_compile,
+        'compilation_targets': compilation_targets,
+        # Downstream predicates (compilation / packaging / CompilationTab)
+        # key off model_type + runtime; no `source` so models.py keeps
+        # defaulting it to 'trained'.
+        'runtime': 'onnx',
+        'detection': {
+            'detection_arch': DETECTION_ARCH,
+            'network_input_width': params['imgsz'],
+            'network_input_height': params['imgsz'],
+            'class_names': class_names,
+            'num_classes': len(class_names),
+            'score_threshold': _to_dynamo_number(params['score_threshold']),
+            'iou_threshold': _to_dynamo_number(params['iou_threshold']),
+            # train.py fine-tunes letterboxed (rect=False); the device MUST
+            # letterbox too or confidence silently drops (gap doc §7).
+            'preserve_aspect': True,
+            'imgsz': params['imgsz'],
+            'epochs': params['epochs'],
+            'batch': params['batch'],
+            'base_weights': params['base_weights'],
+            'patience': params['patience'],
+            'onnx_opset': params['onnx_opset'],
+            'sourcedir_s3': code_s3,
+        },
+    }
+    if generation_session_id:
+        training_item['generation_session_id'] = generation_session_id
+    table.put_item(Item=training_item)
+
+    log_audit_event(
+        user_id=user_id,
+        action='create_training_job',
+        resource_type='training_job',
+        resource_id=training_id,
+        result='success',
+        details={
+            'model_name': model_name,
+            'model_version': model_version,
+            'model_type': MODEL_TYPE_OBJECT_DETECTION,
+            'training_job_name': training_job_name,
+            'training_image': training_image,
+            'imgsz': params['imgsz'],
+            'class_names': class_names,
+        },
+    )
+    logger.info(f"Detection training job created successfully: {training_id}")
+    return create_response(201, {
+        'training_id': training_id,
+        'training_job_name': training_job_name,
+        'training_job_arn': training_job_arn,
+        'status': 'InProgress',
+        'message': 'Training job created successfully',
+    })
+
+
 def create_training_job(event: Dict, context: Any) -> Dict:
     """
     Create a new SageMaker training job
@@ -325,7 +651,8 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         generation_session_id = body.get('generation_session_id')
         
         # Validate model type
-        valid_model_types = ['classification', 'segmentation', 'classification-robust', 'segmentation-robust']
+        valid_model_types = ['classification', 'segmentation', 'classification-robust', 'segmentation-robust',
+                             MODEL_TYPE_OBJECT_DETECTION]
         if model_type not in valid_model_types:
             return create_response(400, {
                 'error': f"Invalid model_type. Must be one of: {', '.join(valid_model_types)}"
@@ -337,6 +664,23 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         
         # Get use case details
         usecase = get_usecase(usecase_id)
+
+        # Object Detection (YOLO): script-mode training job, not the
+        # marketplace algorithm. Branches here so everything below stays the
+        # untouched LFV path (portal-detection-training Req 1.2).
+        if model_type == MODEL_TYPE_OBJECT_DETECTION:
+            return _create_detection_training_job(
+                user=user,
+                body=body,
+                usecase=usecase,
+                usecase_id=usecase_id,
+                model_name=model_name,
+                model_version=model_version,
+                dataset_manifest_s3=dataset_manifest_s3,
+                auto_compile=auto_compile,
+                compilation_targets=compilation_targets,
+                generation_session_id=generation_session_id,
+            )
         
         # Validate manifest format for marketplace model
         if model_source == 'marketplace':
@@ -696,6 +1040,26 @@ def get_training_job(event: Dict, context: Any) -> Dict:
                 
                 status = sm_response['TrainingJobStatus']
                 timestamp = int(datetime.utcnow().timestamp() * 1000)
+
+                # Object Detection jobs declare MetricDefinitions, so their
+                # test mAP / precision / recall arrive in FinalMetricDataList.
+                # Hydrate `metrics` once, independent of the status-changed
+                # block below: training_events.py may already have recorded
+                # Completed, in which case that block never runs. LFV records
+                # are never touched here (portal-detection-training Req 4.2/4.3).
+                if (is_trained_detection_record(job) and status == 'Completed'
+                        and not job.get('metrics')):
+                    metrics = decode_final_metrics(sm_response.get('FinalMetricDataList'))
+                    if metrics:
+                        dynamo_metrics = {k: Decimal(str(v)) for k, v in metrics.items()}
+                        # `metrics` is a DynamoDB reserved word.
+                        table.update_item(
+                            Key={'training_id': training_id},
+                            UpdateExpression='SET #metrics = :m',
+                            ExpressionAttributeNames={'#metrics': 'metrics'},
+                            ExpressionAttributeValues={':m': dynamo_metrics},
+                        )
+                        job['metrics'] = dynamo_metrics
                 
                 # Update DynamoDB if status changed
                 if status != job.get('status'):
