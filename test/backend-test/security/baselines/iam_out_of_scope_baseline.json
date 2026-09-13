@@ -7,7 +7,7 @@
   "sibling_spec_files": {
     "edge-cv-portal/backend/functions/components.py": "1edaa4877553c9bd9bbd7c03c13659c7fe66abfb57f5312fc5f4ba62113101af",
     "edge-cv-portal/backend/functions/jwt_authorizer.py": "a6346ca76c243e2c9978ee757d770f0cf2a180756a05bfc99f8abf58dceef876",
-    "edge-cv-portal/backend/functions/model_converter.py": "1acab7c119908377dc6d315685126492075be0165c8dea51b5594762b2dc2738",
+    "edge-cv-portal/backend/functions/model_converter.py": "cbb7f7d3cda43a5a1cc5d9f8534d5aec96ef1ddab72d8e1eedc1c00eac00a314",
     "edge-cv-portal/backend/functions/packaging.py": "f7a420314bd7f1779adaf3a75d8cf5499fcf81ad0339678eceb771031b9c67ec",
     "src/backend/app.py": "2438d59b36d58b2d1fd89af83aa298cbb4c2fb784b4d963bfd7599b5a27e6654",
     "src/backend/snapshot/Snapshotter.py": "a99ffc761450606da95ccea51ddd2e78dbe300997673a556b419ca3fdd8ffd2b",
