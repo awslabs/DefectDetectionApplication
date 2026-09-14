@@ -92,7 +92,16 @@ def setup_logging(json_logs: bool = False, log_level: str = "INFO"):
     if json_logs:
         log_renderer = structlog.processors.JSONRenderer()
     else:
-        log_renderer = structlog.dev.ConsoleRenderer(colors=False)
+        # Force the plain (stdlib-style) traceback formatter. When `rich` is
+        # importable, ConsoleRenderer defaults to structlog.dev.rich_traceback,
+        # which renders every frame's locals into boxed tables. That rendering
+        # runs synchronously on the uvicorn event-loop thread inside the
+        # exception handlers and has been measured at ~45 s of GIL time per
+        # exception on Jetson: a burst of failing requests makes the whole
+        # backend unresponsive (see unhandled_exception_handler).
+        log_renderer = structlog.dev.ConsoleRenderer(
+            colors=False, exception_formatter=structlog.dev.plain_traceback
+        )
 
     formatter = structlog.stdlib.ProcessorFormatter(
         # These run ONLY on `logging` entries that do NOT originate within
