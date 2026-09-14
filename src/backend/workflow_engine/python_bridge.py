@@ -1607,7 +1607,18 @@ class DetectionsInjector:
         cache: Optional[dict] = None,
         poll_budget_sec: float = DETECTIONS_POLL_BUDGET_SEC,
         poll_interval_sec: float = DETECTIONS_POLL_INTERVAL_SEC,
+        trigger_context: Optional[dict] = None,
     ) -> None:
+        #: ADDITIVE: the run's Trigger_Context, handed to EVERY custom
+        #: node under metadata["trigger"] so a per-frame handler can reach
+        #: the payload that started the run — the same context (topic,
+        #: payload, payload_json, qos, timestamp) the custom_python_source
+        #: Frame_Producer already receives through produce_frame(context).
+        #: Without it a frames handler cannot resolve payload-carried
+        #: references (e.g. rendering the trigger's design image), because
+        #: the frame metadata carried only detections. ``None`` keeps the
+        #: dispatched metadata byte-identical to before.
+        self._trigger_context = trigger_context
         self._downstream_node_ids = frozenset(downstream_node_ids or ())
         self._output_dir = output_dir
         self._capture_id = capture_id
@@ -1629,6 +1640,10 @@ class DetectionsInjector:
         node — the empty dict, byte-identical to today's dispatch.
         """
         metadata: Dict[str, Any] = {}
+        if self._trigger_context:
+            # A shallow copy per dispatch: a handler mutating its metadata
+            # can never corrupt the run's context or another node's view.
+            metadata["trigger"] = dict(self._trigger_context)
         if node_id not in self._downstream_node_ids:
             return metadata
         deadline = time.monotonic() + self._poll_budget_sec

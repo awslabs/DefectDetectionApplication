@@ -1692,6 +1692,7 @@ class WorkflowExecutor:
                                 capture_id,
                                 graph_document,
                                 detections_cache,
+                                trigger_context,
                             ),
                         )
                     elif frame_data is not None:
@@ -2229,16 +2230,26 @@ class WorkflowExecutor:
         capture_id: str,
         graph_document: Optional[dict],
         cache: dict,
+        trigger_context: Optional[Dict[str, Any]] = None,
     ):
         """The bridged run's :class:`python_bridge.DetectionsInjector`,
         or None (detection-guided-bedrock-inspection Requirement 1.10).
 
-        None — the byte-identical pre-feature pump — when no custom node
-        is stream-downstream of ``model_inference``. ``cache`` is the
-        run-state detections cache the post-pipeline
-        ``detections.merge_detections`` call shares (design Property 1).
+        None — the byte-identical pre-feature pump — when there is nothing
+        to inject: no custom node stream-downstream of ``model_inference``
+        AND no Trigger_Context. ``cache`` is the run-state detections cache
+        the post-pipeline ``detections.merge_detections`` call shares
+        (design Property 1).
+
+        ``trigger_context`` (ADDITIVE) is handed to every custom node as
+        ``metadata["trigger"]``, giving a per-frame handler the same run
+        context ``produce_frame(context)`` already gets — a frames handler
+        otherwise cannot resolve anything carried by the trigger payload.
+        A node needing only the trigger is typically NOT downstream of
+        ``model_inference`` (it can hang straight off the camera), which is
+        why an injector is now built for the trigger alone.
         """
-        if not downstream_ids:
+        if not downstream_ids and not trigger_context:
             return None
         return python_bridge.DetectionsInjector(
             downstream_ids,
@@ -2246,6 +2257,7 @@ class WorkflowExecutor:
             capture_id,
             graph_document=graph_document,
             cache=cache,
+            trigger_context=trigger_context,
         )
 
     def _preflight_pipeline_factories(
