@@ -1092,6 +1092,121 @@ class WorkflowExecutor:
                 )
 
     @staticmethod
+    def _ensure_writable_inference_branch(document: dict) -> int:
+        """Give an ``emltriton`` branch its own buffer when the frame tee
+        fans out, and return the number of branches fixed.
+
+        ``emltriton`` attaches its correlation-id payload to the frame with
+        ``gst_buffer_add_meta``, which requires a WRITABLE buffer. A ``tee``
+        with a single src pad forwards the buffer unshared, so that holds --
+        but the moment a second branch exists (a ``custom_python_preprocess``
+        node's ``appsink``, a second model, an extra capture branch) every
+        branch sees a shared buffer, and the meta add fails:
+
+            gst_buffer_add_meta: assertion 'gst_buffer_is_writable (buffer)'
+            [meta.cpp:104] [CHECKNULL meta]
+            [emltriton.cpp:413] [CHECKFAIL SetBufferCorrelationId(...)]
+
+        emltriton turns that into GST_FLOW_ERROR, which surfaces from the
+        upstream queue as the misleading "Internal data stream error ...
+        streaming stopped, reason error (-5)" and fails the whole run,
+        naming no node -- with nothing wrong in any node.
+
+        Fix: convert away from the branch's pinned format and back again
+        immediately before the ``emltriton``. A format-changing
+        ``videoconvert`` is not in passthrough, so it allocates a fresh
+        output buffer (refcount 1, writable) instead of forwarding the
+        shared one. The round trip is between RGB and BGR only -- a lossless
+        channel swap, so the pixels reaching the model are bit-identical.
+
+        Applied ONLY when the branch's tee actually fans out AND the branch
+        pins RGB/BGR: single-branch documents (every pre-existing workflow)
+        and branches pinned to another format render byte-identically, so
+        no existing pipeline changes shape or cost.
+        """
+        segments = document.get("segments") or []
+        # How many branches hang off each tee.
+        fanout: Dict[str, int] = {}
+        for segment in segments:
+            source = segment.get("from")
+            if source:
+                fanout[str(source)] = fanout.get(str(source), 0) + 1
+
+        swap = {"RGB": "BGR", "BGR": "RGB"}
+        fixed = 0
+        for segment in segments:
+            source = segment.get("from")
+            if not source or fanout.get(str(source), 0) < 2:
+                continue
+            elements = segment.get("elements")
+            if not isinstance(elements, list):
+                continue
+            index = next(
+                (
+                    i
+                    for i, element in enumerate(elements)
+                    if isinstance(element, dict)
+                    and element.get("factory") == "emltriton"
+                ),
+                None,
+            )
+            if index is None:
+                continue
+
+            # The format pinned upstream of the emltriton in this branch.
+            pinned = None
+            for element in elements[:index]:
+                if (
+                    isinstance(element, dict)
+                    and element.get("factory") == "capsfilter"
+                ):
+                    caps = str((element.get("args") or {}).get("caps") or "")
+                    match = re.search(
+                        r"format=(?:\(string\))?([A-Za-z0-9]+)", caps
+                    )
+                    if match:
+                        pinned = match.group(1)
+            other = swap.get(str(pinned))
+            if not other:
+                logger.warning(
+                    "Inference branch off tee '%s' shares buffers with %d "
+                    "other branch(es) but pins format %r, which has no "
+                    "lossless swap; leaving it unchanged (emltriton may "
+                    "fail to attach buffer metadata)",
+                    source,
+                    fanout[str(source)] - 1,
+                    pinned,
+                )
+                continue
+
+            node_id = elements[index].get("nodeId")
+            elements[index:index] = [
+                {"factory": "videoconvert", "nodeId": node_id, "args": {}},
+                {
+                    "factory": "capsfilter",
+                    "nodeId": node_id,
+                    "args": {"caps": "video/x-raw,format={0}".format(other)},
+                },
+                {"factory": "videoconvert", "nodeId": node_id, "args": {}},
+                {
+                    "factory": "capsfilter",
+                    "nodeId": node_id,
+                    "args": {"caps": "video/x-raw,format={0}".format(pinned)},
+                },
+            ]
+            fixed += 1
+            logger.info(
+                "Inference branch off tee '%s' shares buffers with %d other "
+                "branch(es); inserted a %s<->%s copy so emltriton can attach "
+                "buffer metadata to a writable buffer",
+                source,
+                fanout[str(source)] - 1,
+                pinned,
+                other,
+            )
+        return fixed
+
+    @staticmethod
     def _inject_inference_metadata(
         document: dict,
         workflow_id: str,
@@ -1590,6 +1705,11 @@ class WorkflowExecutor:
             # emltriton/emlcapture src pad left unlinked fails the run with
             # GST_FLOW_NOT_LINKED right after inference.
             self._ensure_terminal_sink(document)
+
+            # A fanned-out frame tee hands every branch a SHARED buffer, which
+            # emltriton cannot attach its correlation-id meta to; without this
+            # the run dies as "Internal data stream error" naming no node.
+            self._ensure_writable_inference_branch(document)
 
             launch_string = rendering.render_launch_string(document)
             if not launch_string:
