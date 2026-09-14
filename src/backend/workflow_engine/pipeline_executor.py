@@ -533,11 +533,90 @@ def load_trigger_context(raw: Optional[str]) -> Dict[str, Any]:
     context = dict(parsed)
     payload = context.get("payload")
     if isinstance(payload, str):
-        try:
-            context["payload_json"] = json.loads(payload)
-        except (ValueError, TypeError):
-            context["payload_json"] = None
+        context["payload_json"] = parse_trigger_payload(payload)
     return context
+
+
+#: Unicode space separators a publisher can emit where JSON only permits
+#: SPACE/TAB/CR/LF. A payload indented with these is rejected by
+#: ``json.loads`` even though it is the JSON the operator intended: the
+#: non-breaking space (U+00A0) is what browser consoles and rich-text
+#: editors substitute when JSON is pasted, and it silently cost a whole
+#: on-device debugging session (payload_json None -> every
+#: reference_payload_path binding recorded "the run has no trigger
+#: payload_json to resolve it against").
+_JSON_HOSTILE_SPACES = (
+    "\u00a0"  # NO-BREAK SPACE (browser/console paste)
+    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009"
+    "\u200a"  # OGHAM SPACE MARK + the EN/EM/THIN/HAIR space family
+    "\u202f"  # NARROW NO-BREAK SPACE
+    "\u205f"  # MEDIUM MATHEMATICAL SPACE
+    "\u3000"  # IDEOGRAPHIC SPACE (CJK input methods)
+    "\ufeff"  # ZERO WIDTH NO-BREAK SPACE / BOM
+)
+
+_JSON_SPACE_TRANSLATION = {ord(ch): " " for ch in _JSON_HOSTILE_SPACES}
+
+
+def parse_trigger_payload(payload: str) -> Any:
+    """The trigger payload parsed as JSON, or ``None`` when it is not JSON.
+
+    Strict parsing is tried first, so a well-formed payload is parsed
+    byte-identically to before. Only if that fails are Unicode space
+    separators outside string literals folded to ordinary spaces and the
+    parse retried: JSON permits just SPACE/TAB/CR/LF as whitespace, so a
+    payload indented with non-breaking spaces (what a browser console
+    paste produces) is otherwise unusable even though its content is
+    valid. Characters inside string literals are never touched, so URLs,
+    prompts and any deliberate NBSP in a value survive intact.
+
+    Never raises: an unparseable payload still yields ``None``
+    (Requirements 2.3, 2.4).
+    """
+    try:
+        return json.loads(payload)
+    except (ValueError, TypeError):
+        pass
+    try:
+        normalized = _fold_spaces_outside_strings(payload)
+    except Exception:  # noqa: BLE001 - normalization is best-effort
+        return None
+    if normalized == payload:
+        return None
+    try:
+        parsed = json.loads(normalized)
+    except (ValueError, TypeError):
+        return None
+    logger.warning(
+        "Trigger payload parsed only after folding Unicode space separators "
+        "(e.g. non-breaking spaces) to ordinary spaces; the publisher should "
+        "emit plain JSON whitespace")
+    return parsed
+
+
+def _fold_spaces_outside_strings(payload: str) -> str:
+    """``payload`` with Unicode space separators replaced by ordinary
+    spaces, skipping the contents of JSON string literals (escapes
+    honored)."""
+    out = []
+    in_string = False
+    escaped = False
+    for ch in payload:
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            continue
+        out.append(_JSON_SPACE_TRANSLATION.get(ord(ch), ch))
+    return "".join(out)
 
 
 EXECUTION_STATUS_PENDING = "pending"

@@ -2093,6 +2093,23 @@ class BedrockInferenceProcessor:
             else None
         )
         if payload_json is None:
+            # Distinguish "no trigger payload at all" from "the payload
+            # arrived but is not parseable JSON" — the latter is what a
+            # publisher emitting Unicode whitespace (e.g. non-breaking
+            # spaces from a console paste) produces, and the generic
+            # message sent a debugging session down the wrong path.
+            raw_payload = (
+                trigger.get("payload") if isinstance(trigger, dict) else None
+            )
+            if isinstance(raw_payload, str) and raw_payload.strip():
+                return (
+                    "Bedrock inference node '{0}' requested "
+                    "reference_payload_path '{1}' but the trigger payload "
+                    "is not parseable JSON (payload_json is None); check the "
+                    "publisher's JSON — JSON allows only space, tab, CR and "
+                    "LF as whitespace, so indentation made of non-breaking "
+                    "spaces is rejected".format(node_id, dotted_path),
+                    None)
             return (
                 "Bedrock inference node '{0}' requested "
                 "reference_payload_path '{1}' but the run has no trigger "
