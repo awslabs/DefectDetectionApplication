@@ -516,4 +516,39 @@ describe('static-image pin infrastructure (cloud-static-camera-provisioning task
       JSON.stringify((customResources[0] as any).Properties.Update ?? '')
     ).toContain('putBucketLifecycleConfiguration');
   });
+
+  test('a browser CORS rule for the presigned pin upload is applied to the component bucket', () => {
+    // The pin flow PUTs the image from the portal origin straight to a
+    // presigned staging key, so the (non-CDK-managed) component bucket
+    // needs a CORS rule; like the lifecycle rule it lands through an
+    // AwsCustomResource PutBucketCors call.
+    const customResources = Object.values(
+      computeTemplate.findResources('Custom::AWS')
+    ).filter((resource: any) =>
+      JSON.stringify(resource.Properties.Create ?? '').includes('putBucketCors')
+    );
+    expect(customResources).toHaveLength(1);
+    const create = JSON.stringify(
+      (customResources[0] as any).Properties.Create
+    );
+    expect(create).toContain('dda-component-');
+    expect(create).toContain('\\"AllowedMethods\\":[\\"PUT\\",\\"GET\\",\\"HEAD\\"]');
+    expect(create).toContain('\\"AllowedHeaders\\":[\\"*\\"]');
+    expect(create).toContain('\\"ExposeHeaders\\":[\\"ETag\\"]');
+    // No cloudFrontDomain context in this fixture -> any origin.
+    expect(create).toContain('\\"AllowedOrigins\\":[\\"*\\"]');
+    expect(
+      JSON.stringify((customResources[0] as any).Properties.Update ?? '')
+    ).toContain('putBucketCors');
+    // The custom resource may only touch CORS on that one bucket.
+    const policies = Object.values(computeTemplate.findResources('AWS::IAM::Policy'));
+    const corsStatements = policies.flatMap((policy: any) =>
+      (policy.Properties.PolicyDocument.Statement as any[]).filter((s: any) =>
+        JSON.stringify(s.Action).includes('s3:PutBucketCORS')
+      )
+    );
+    expect(corsStatements).toHaveLength(1);
+    expect(JSON.stringify(corsStatements[0].Resource)).toContain('dda-component-');
+    expect(JSON.stringify(corsStatements[0].Resource)).not.toContain('/*');
+  });
 });

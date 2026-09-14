@@ -59,6 +59,7 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from shared_utils import (
@@ -810,6 +811,17 @@ def refresh_cameras(device_id: str, user: Dict, event: Dict,
 _pin_s3_client = None
 
 
+#: Presigned staging PUTs must be SigV4. Without an explicit signature
+#: version, botocore presigns S3 URLs in us-east-1 with legacy SigV2, whose
+#: StringToSign includes the Content-Type header: the upload-url route
+#: presigns with no content type while the browser's ``fetch(url, {method:
+#: 'PUT', body: file})`` sends the File's ``image/*`` type, so S3 answered
+#: every pin upload with 403 SignatureDoesNotMatch (2026-09-14). A SigV4
+#: query-string presign signs only ``host``, so the browser-chosen header
+#: cannot invalidate it.
+PIN_S3_CLIENT_CONFIG = Config(signature_version='s3v4')
+
+
 def pin_s3_client():
     """Lazy S3 client for the Image_Transport (component bucket).
 
@@ -818,7 +830,7 @@ def pin_s3_client():
     """
     global _pin_s3_client
     if _pin_s3_client is None:
-        _pin_s3_client = boto3.client('s3')
+        _pin_s3_client = boto3.client('s3', config=PIN_S3_CLIENT_CONFIG)
     return _pin_s3_client
 
 

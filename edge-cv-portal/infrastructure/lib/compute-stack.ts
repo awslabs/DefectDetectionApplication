@@ -1684,6 +1684,52 @@ export class ComputeStack extends cdk.Stack {
       ]),
     });
 
+    // Browser CORS for the pin upload path (design Decision 2): the pin
+    // flow PUTs the image bytes straight from the portal origin to a
+    // presigned staging key on this bucket, and a cross-origin PUT with an
+    // image Content-Type is preflighted. Without a CORS rule S3 rejects
+    // the preflight and the browser reports a bare NetworkError (seen on
+    // 2026-09-14). The bucket is not CDK-managed (see above), so the rule
+    // is applied through a custom resource that mirrors the declarative
+    // rule on PortalArtifactsBucket (storage-stack.ts): the CloudFront
+    // origin when known, any origin before the first frontend deployment
+    // — access is still gated by the presigned URLs themselves. This PUT
+    // owns the bucket's whole CORS configuration (no other rule exists).
+    const pinUploadCorsRule = {
+      AllowedOrigins: props.cloudFrontDomain
+        ? [`https://${props.cloudFrontDomain}`]
+        : ['*'],
+      AllowedMethods: ['PUT', 'GET', 'HEAD'],
+      AllowedHeaders: ['*'],
+      ExposeHeaders: ['ETag'],
+      MaxAgeSeconds: 3600,
+    };
+    const pinUploadCorsCall = {
+      service: 'S3',
+      action: 'putBucketCors',
+      parameters: {
+        Bucket: componentBucketNameForPins,
+        CORSConfiguration: { CORSRules: [pinUploadCorsRule] },
+      },
+      // The origin is part of the physical id so a domain change
+      // re-applies the rule instead of being treated as a no-op update.
+      physicalResourceId: cr.PhysicalResourceId.of(
+        `${componentBucketNameForPins}/static-image-pin-cors/${pinUploadCorsRule.AllowedOrigins[0]}`,
+      ),
+    };
+    new cr.AwsCustomResource(this, 'StaticImagePinUploadCors', {
+      onCreate: pinUploadCorsCall,
+      onUpdate: pinUploadCorsCall,
+      // No onDelete, for the same reason as the lifecycle rule above.
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['s3:PutBucketCORS'],
+          resources: [`arn:aws:s3:::${componentBucketNameForPins}`],
+        }),
+      ]),
+    });
+
     // Deploy-time Camera_Binding delivery: deployments.py writes
     // desired.bindings["{workflowId}/{version}"] into each target thing's
     // dda-camera-bindings named shadow at deployment submission. IAM scopes
