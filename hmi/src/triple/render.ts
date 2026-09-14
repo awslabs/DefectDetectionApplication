@@ -85,6 +85,12 @@ export const TRIPLE_MESSAGES = {
   inspectionDataUnavailable: "Inspection data unavailable",
   /** A failed run carries no Inspection images at all (Requirement 5.9). */
   failedRunSlot: "No inspection images for a failed run",
+  /**
+   * Panel label when the left panel is showing the Reference_Image because
+   * the Inspection produced no Annotated_Image
+   * (hmi-payload-reference-visibility).
+   */
+  referenceLabel: "REFERENCE (COMPARED AGAINST)",
   /** The Inspection has no `annotated` entry (Requirement 4.10). */
   noAnnotatedImage: "No annotated image available",
   /** The Inspection has no `original` entry either. */
@@ -235,6 +241,8 @@ interface PanelView {
   handle: ImagePanelHandle;
   /** The (executionId, nodeId, port) triple currently loaded, if any. */
   key: string | null;
+  /** The panel's caption, retargeted when the panel shows the Reference_Image. */
+  label: HTMLElement;
 }
 
 function buildPanel(labelText: string): PanelView {
@@ -245,7 +253,8 @@ function buildPanel(labelText: string): PanelView {
   const placeholder = el("div", "image-placeholder");
   frame.append(img, placeholder);
   // The label identifies which panel is annotated and which is original (5.2).
-  root.append(frame, el("div", "image-label", labelText));
+  const label = el("div", "image-label", labelText);
+  root.append(frame, label);
 
   const handle: ImagePanelHandle = {
     img,
@@ -260,7 +269,19 @@ function buildPanel(labelText: string): PanelView {
     },
   };
   handle.showPlaceholder("");
-  return { root, handle, key: null };
+  return { root, handle, key: null, label };
+}
+
+/**
+ * Sets a panel's caption (and its `<img alt>`), so the left panel can state
+ * whether it is showing the Annotated_Image or the Reference_Image
+ * (hmi-payload-reference-visibility). The label always describes what is
+ * actually on screen — a Reference_Image is never captioned "ANNOTATED".
+ */
+function setPanelLabel(panel: PanelView, text: string): void {
+  if (panel.label.textContent === text) return;
+  panel.label.textContent = text;
+  panel.handle.img.alt = text;
 }
 
 /** One Inspection_Slot's elements. */
@@ -445,6 +466,8 @@ export function createTripleRenderer(
   function placeholderSlot(view: SlotView, note: string, panelText: string): void {
     setVerdict(view.verdict, null);
     setNote(view.note, note);
+    // No run content means nothing is on screen to relabel.
+    setPanelLabel(view.annotated, TRIPLE_MESSAGES.annotatedLabel);
     updatePanel(view.annotated, "", undefined, panelText);
     updatePanel(view.original, "", undefined, panelText);
   }
@@ -497,11 +520,22 @@ export function createTripleRenderer(
     setNote(view.note, "");
 
     const executionId = run.execution.executionId;
-    // The annotated panel has no fallback image of any kind (4.10).
+    // The annotated panel still has no *substitute* annotation (4.10): when
+    // the Inspection produced no Annotated_Image the panel shows the
+    // Reference_Image it compared against, captioned as such, so the
+    // operator can see the comparison even for a "nothing found" answer
+    // (hmi-payload-reference-visibility). With neither image present the
+    // no-annotated-image placeholder is unchanged.
+    const showsReference =
+      inspection.annotated === undefined && inspection.reference !== undefined;
+    setPanelLabel(
+      view.annotated,
+      showsReference ? TRIPLE_MESSAGES.referenceLabel : TRIPLE_MESSAGES.annotatedLabel,
+    );
     updatePanel(
       view.annotated,
       executionId,
-      inspection.annotated,
+      showsReference ? inspection.reference : inspection.annotated,
       TRIPLE_MESSAGES.noAnnotatedImage,
     );
     updatePanel(

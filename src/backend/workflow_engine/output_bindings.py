@@ -1179,6 +1179,21 @@ ANNOTATED_FRAME_ARTIFACT_TEMPLATE = (
     "{capture_id}.node.{safe_node_id}.annotated.jpg"
 )
 
+#: ADDITIVE (hmi-payload-reference-visibility): run-artifact filename of
+#: an Inspection's Reference_Image — the image the Bedrock node compared
+#: the crop against, decoded from the trigger payload
+#: (``reference_payload_path``). Same port-generic node-frame naming, so
+#: the new ``reference`` port is listed by ``GET .../results`` and served
+#: by ``GET .../node-image`` with zero LocalServer changes.
+#:
+#: Only the PAYLOAD-sourced reference is written here. When the node's
+#: ``reference`` port is fed by a video source instead, the executor's
+#: ``_persist_node_frames`` already writes this very filename, so the two
+#: producers can never collide.
+REFERENCE_FRAME_ARTIFACT_TEMPLATE = (
+    "{capture_id}.node.{safe_node_id}.reference.jpg"
+)
+
 #: Filename-unsafe characters in a node id — the very same discipline
 #: ``PipelineExecutor._UNSAFE_NODE_ID_CHARS`` applies when it persists
 #: node frames, so the filenames written here always parse back to the
@@ -1895,6 +1910,12 @@ class BedrockInferenceProcessor:
                 return self._recorded_error(
                     node_id, reference_error, run_context)
             images.append(("Reference image", reference_bytes))
+            # ADDITIVE (hmi-payload-reference-visibility): persist what
+            # this Inspection compared against, so the HMI can show it
+            # even when the answer yields no Annotated_Image. Entirely
+            # best-effort; never affects the inference or the metadata.
+            self._persist_reference_frame(
+                run_context, node_id, reference_bytes)
         else:
             # The 'reference' frame is optional: the portal compiler
             # emits capturePaths.reference = None when the port is not
@@ -2317,6 +2338,82 @@ class BedrockInferenceProcessor:
             logger.warning(
                 "Bedrock inference node '%s': could not persist the "
                 "Inspection's Original_Image; the inspection outcome and "
+                "the run status are unaffected", node_id, exc_info=True)
+
+    @staticmethod
+    def _persist_reference_frame(
+        run_context: Optional[RunContext],
+        node_id: Optional[str],
+        reference_bytes: Optional[bytes],
+    ) -> None:
+        """ADDITIVE (hmi-payload-reference-visibility): persist the
+        payload-sourced Reference_Image as
+        ``{capture_id}.node.{sanitizedNodeId}.reference.jpg`` — the image
+        the Bedrock node compared the Detection_Crop against.
+
+        Called immediately after the reference bytes are resolved from
+        the trigger payload, so the artifact exists no matter what the
+        model answers: the HMI can then show the operator what was being
+        compared even when the answer carries no Defect_Objects and no
+        Annotated_Image is produced.
+
+        The bytes are re-encoded to JPEG so the artifact's content
+        matches the ``.jpg`` name the node-image route serves it under
+        (payload references are frequently PNG). A payload image that
+        cannot be decoded is skipped rather than written under a
+        misleading name.
+
+        Entirely best-effort in the ``_persist_annotated_frame``
+        containment style: a missing output_dir/capture_id, empty bytes,
+        an undecodable image, or any write failure is logged and
+        swallowed — the run status, the node outcome, and the recorded
+        metadata are untouched."""
+        try:
+            output_dir = run_context.output_dir if run_context else None
+            capture_id = run_context.capture_id if run_context else None
+            if not output_dir or not capture_id or not reference_bytes:
+                logger.debug(
+                    "Bedrock inference node '%s': no output_dir/capture_id "
+                    "or no reference bytes; the Inspection's "
+                    "Reference_Image was not persisted", node_id)
+                return
+
+            import cv2
+            import numpy as np
+
+            frame = cv2.imdecode(
+                np.frombuffer(reference_bytes, dtype=np.uint8),
+                cv2.IMREAD_COLOR)
+            if frame is None:
+                logger.warning(
+                    "Bedrock inference node '%s': could not decode the "
+                    "payload reference image; the Inspection's "
+                    "Reference_Image was not persisted", node_id)
+                return
+            ok, encoded = cv2.imencode(
+                ".jpg", frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), CROP_JPEG_QUALITY])
+            if not ok:
+                logger.warning(
+                    "Bedrock inference node '%s': could not encode the "
+                    "Inspection's Reference_Image", node_id)
+                return
+            path = os.path.join(
+                output_dir,
+                REFERENCE_FRAME_ARTIFACT_TEMPLATE.format(
+                    capture_id=capture_id,
+                    safe_node_id=sanitize_node_id_for_artifact(node_id),
+                ),
+            )
+            with open(path, "wb") as frame_file:
+                frame_file.write(bytes(encoded.tobytes()))
+            logger.debug(
+                "Bedrock inference node '%s': persisted the Inspection's "
+                "Reference_Image from the trigger payload", node_id)
+        except Exception:  # noqa: BLE001 - contained; never affects the run
+            logger.warning(
+                "Bedrock inference node '%s': could not persist the "
+                "Inspection's Reference_Image; the inspection outcome and "
                 "the run status are unaffected", node_id, exc_info=True)
 
     @staticmethod
