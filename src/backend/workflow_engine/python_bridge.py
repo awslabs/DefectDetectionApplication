@@ -380,16 +380,57 @@ def _check_allowed(source):
     )
 
 
+def _https_context():
+    """Verified TLS context for ``https://`` fetches.
+
+    This runtime's OpenSSL carries no default CA store
+    (``ssl.get_default_verify_paths()`` returns ``None, None``), so an
+    unassisted ``urlopen`` fails EVERY https fetch with
+    CERTIFICATE_VERIFY_FAILED even though certifi's bundle and the
+    system bundle are both present on disk. The bundle is therefore
+    named explicitly, preferring certifi and falling back to the
+    distribution bundles.
+
+    Verification and hostname checking stay ON in every branch: a fetch
+    whose certificate cannot be verified fails, and is never silently
+    trusted.
+    """
+    import ssl
+
+    try:
+        import certifi
+    except ImportError:
+        pass
+    else:
+        try:
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+    import os
+
+    for bundle in (
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ):
+        if os.path.exists(bundle):
+            try:
+                return ssl.create_default_context(cafile=bundle)
+            except Exception:
+                continue
+    return ssl.create_default_context()
+
+
 def _fetch_http(source):
     """HTTP(S) fetch with the bounded timeout (Requirement 4.4);
     non-success status, timeout, and connection failures raise
     ``ValueError`` naming the source (Requirement 4.5)."""
     import urllib.request
 
+    options = {"timeout": HTTP_TIMEOUT_SEC}
+    if source.startswith("https://"):
+        options["context"] = _https_context()
     try:
-        with urllib.request.urlopen(
-            source, timeout=HTTP_TIMEOUT_SEC
-        ) as response:
+        with urllib.request.urlopen(source, **options) as response:
             status = getattr(response, "status", None)
             if status is None:  # pragma: no cover - pre-3.9 fallback
                 status = response.getcode()
