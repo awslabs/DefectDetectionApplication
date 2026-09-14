@@ -53,13 +53,50 @@ helpers live in a subprocess source string and cannot be shared.
 """
 
 import base64
+import functools
 import logging
 import os
+import ssl
 import stat
 import urllib.request
 from typing import Any, Iterable, Optional, Sequence
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def https_ssl_context() -> ssl.SSLContext:
+    """The verifying SSL context used for ``https://`` reference fetches.
+
+    The LocalServer images carry no OS trust store that Python's ``ssl``
+    can find, so ``urlopen`` on a perfectly valid S3 presigned URL failed
+    with ``CERTIFICATE_VERIFY_FAILED: unable to get local issuer
+    certificate`` while the very same URL fetched fine from the device
+    host (observed on adlink-dlap-701 / JP7, 2026-09-14 — the http(s)
+    payload-reference path could never have worked there). AWS SDK calls
+    were unaffected because botocore verifies against the ``certifi``
+    bundle it ships rather than the system store.
+
+    So this context is built from ``certifi`` when it is importable (it
+    always is — botocore depends on it), falling back to the system
+    defaults otherwise. Verification and hostname checking stay ON in
+    every case: the reference URI comes from an untrusted MQTT payload,
+    so an unverified TLS fetch is not an acceptable degradation.
+    """
+    try:
+        import certifi
+
+        context = ssl.create_default_context(cafile=certifi.where())
+        logger.debug(
+            "payload reference https fetches verify against the certifi CA "
+            "bundle at %s", certifi.where())
+        return context
+    except Exception:  # noqa: BLE001 - fall back to the system store
+        logger.warning(
+            "certifi is unavailable; payload reference https fetches will "
+            "verify against the system trust store, which some LocalServer "
+            "images do not provide", exc_info=True)
+        return ssl.create_default_context()
 
 #: Upper bound on accepted reference-image bytes, applied to every
 #: source (URI fetches while streaming, base64 after decoding), so an
@@ -254,10 +291,15 @@ def _check_allowed(
 def _fetch_http(source: str) -> bytes:
     """HTTP(S) fetch with the bounded timeout (Requirement 3.7);
     non-success status, timeout, and connection failures raise
-    :class:`PayloadReferenceError` naming the source."""
+    :class:`PayloadReferenceError` naming the source.
+
+    ``https://`` fetches verify against :func:`https_ssl_context` — the
+    images lack an OS trust store, so relying on Python's default would
+    fail every presigned-URL fetch (see that function)."""
+    context = https_ssl_context() if source.lower().startswith("https://") else None
     try:
         with urllib.request.urlopen(
-            source, timeout=REFERENCE_FETCH_TIMEOUT_SEC
+            source, timeout=REFERENCE_FETCH_TIMEOUT_SEC, context=context
         ) as response:
             status = getattr(response, "status", None)
             if status is None:  # pragma: no cover - pre-3.9 fallback
