@@ -1,5 +1,27 @@
 # Implementation Plan
 
+## Companion feature shipped in the same branch/build (mqtt-iot-endpoint)
+
+Added 2026-09-13 at the user's request, without its own spec ("run required tasks
+only"): an optional `iot_endpoint` string parameter (`depends_on="aws_iot"`,
+`min_length 1`, default `None`) on BOTH `mqtt_publish` and `mqtt_subscribe`, so a
+workflow can publish to / subscribe from AWS IoT Core in another account or
+region with a thing certificate from that account. Investigation first showed the
+capability already existed — `broker_host` is passed to paho as the endpoint on the
+aws_iot path — so the gap was naming/UX, not transport. Edge: on the aws_iot path
+the host is `iot_endpoint` when non-blank (trimmed) else `broker_host` unchanged
+(`output_bindings.aws_iot_endpoint`, `trigger_runtime.AwsIotTlsSubscriber._aws_iot_host`);
+neither set raises a named `ValueError` on both sides. Greengrass and plain-broker
+paths ignore it. Frontend label "AWS IoT endpoint". Tests:
+`test/backend-test/workflow_engine/test_mqtt_iot_endpoint.py`,
+`test_catalog_content.py::test_mqtt_iot_endpoint_parameterization`, NodeConfigPanel
+tests. Baselines refreshed for it: `catalog_baseline.json` mqtt_subscribe entry
+(byte-pinned; mqtt_publish entry still untouched), `golden_zero_trigger_compilation.json`
+(six `"iot_endpoint": null`), `test_unified_input_descriptor.py` name list,
+`_MQTT_CONNECTION_PARAMS` in `test_property_descriptor_mirroring.py` (mirror enforced
+for it), frontend `types.ts` MQTT_SUBSCRIBE_DESCRIPTOR fixture. Not done (by choice):
+no V6/V8 validator change (aws_iot alone still satisfies the target rule, as before).
+
 ## Notes
 
 - Every existing publish must stay byte-identical. The Publisher_Call preservation
@@ -91,20 +113,20 @@
   - [x] 4.3 Run `test/backend-test/security/` (audit + preservation) on the host; if a touched file is preservation-tracked, rebaseline its sha256 in the same change and note it in the commit; confirm `iot:RetainPublish` never appears on `"Resource": "*"`.
     - _Requirements: 7.5, 10.5_
 
-- [ ] 5. Gates
-  - [ ] 5.1 `test_vendored_catalog_mirror.py` green; `diff -r` vendored vs portal layer shows only `catalog/nodes.py`.
+- [x] 5. Gates
+  - [x] 5.1 `test_vendored_catalog_mirror.py` green; `diff -r` vendored vs portal layer shows only `catalog/nodes.py`.
     - _Requirements: 1.5, 10.3_
-  - [ ] 5.2 Security preservation suite green (including the IAM out-of-scope guard); `edge-cv-portal/infrastructure/cdk.out` moved aside if present.
+  - [x] 5.2 Security preservation suite green (including the IAM out-of-scope guard); `edge-cv-portal/infrastructure/cdk.out` moved aside if present.
     - _Requirements: 10.5_
-  - [ ] 5.3 Frontend `npm run build` green; portal-layer and portal-functions suites green.
+  - [x] 5.3 Frontend `npm run build` green; portal-layer and portal-functions suites green.
     - _Requirements: 10.2, 10.4_
 
 - [ ] 6. Build and deploy
-  - [ ] 6.1 Commit the change set to a new branch (only the intended files; the working tree is shared) and push it.
+  - [x] 6.1 Commit the change set to a new branch (only the intended files; the working tree is shared) and push it.
     - _Requirements: 10.7_
-  - [ ] 6.2 Confirm no build is running (pgrep on the dedicated JP7 server via SSM, build-jobs table has no non-terminal job), then submit a portal build job for JP7 (dedicated server `srv-af3e3e08`) from the branch; wait for `succeeded` and record `published_version` in design.md §Compatibility.
+  - [x] 6.2 Confirm no build is running (pgrep on the dedicated JP7 server via SSM, build-jobs table has no non-terminal job), then submit a portal build job for JP7 (dedicated server `srv-af3e3e08`) from the branch; wait for `succeeded` and record `published_version` in design.md §Compatibility.
     - _Requirements: 9.3, 10.6_
-  - [ ] 6.3 Deploy the portal (backend Lambdas incl. the workflow_core layer, frontend) with `-c deployGroundedSamWorker=false` after the build has finished (never during); hard-refresh the browser.
+  - [x] 6.3 Deploy the portal (backend Lambdas incl. the workflow_core layer, frontend) with `-c deployGroundedSamWorker=false` after the build has finished (never during); hard-refresh the browser.
     - _Requirements: 2.1, 3.1_
   - [ ] 6.4 In the workflow manager, add to a test workflow two MQTT Publish nodes on the Greengrass path: `dda/test/retain-on` with Retain message checked and `dda/test/retain-off` unchecked; publish the workflow and revise the DLAP deployment to the new LocalServer version and workflow version (keep every other component and configuration).
     - _Requirements: 10.6_
