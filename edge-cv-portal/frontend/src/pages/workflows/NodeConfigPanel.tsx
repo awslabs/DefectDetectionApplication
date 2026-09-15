@@ -250,10 +250,14 @@ export function parseNumericInput(raw: string): JsonValue | null {
  */
 const PARAMETER_DISPLAY_LABELS: Record<string, string> = {
   aws_iot: 'AWS IoT support',
+  // mqtt-iot-endpoint: explicit IoT Core data endpoint (any account/region)
+  iot_endpoint: 'AWS IoT endpoint',
   iot_thing_name: 'IoT thing name',
   iot_ca_cert_path: 'Root CA certificate path (on device)',
   iot_client_cert_path: 'Client certificate path (on device)',
   iot_private_key_path: 'Private key path (on device)',
+  // mqtt_publish retain bit (mqtt-retained-publish Requirement 2.2)
+  retain: 'Retain message',
   // Metadata node (workflow-manager-gaps Requirement 6.2)
   mappings: 'Metadata mappings',
   static_json: 'Static JSON',

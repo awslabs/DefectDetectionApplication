@@ -249,6 +249,24 @@ export interface TrainingJob {
   packaged_components?: PackagedComponent[];
   greengrass_components?: GreengrassComponent[];
   published_components?: PublishedComponent[];
+  /** 'classification' | 'segmentation' | '*-robust' | 'object_detection' | 'vllm' ... */
+  model_type?: string;
+  /** Absent for SageMaker-trained records (defaults to 'trained'); 'imported' | 'vllm' otherwise. */
+  source?: 'trained' | 'imported' | 'vllm' | string;
+  /** 'onnx' for portal-trained Object Detection jobs (no Neo compilation). */
+  runtime?: string;
+  /** Detection_Record_Fields written by training.py for object_detection jobs. */
+  detection?: {
+    detection_arch?: string;
+    network_input_width?: number;
+    network_input_height?: number;
+    class_names?: string[];
+    num_classes?: number;
+    score_threshold?: number;
+    iou_threshold?: number;
+    preserve_aspect?: boolean;
+    [key: string]: unknown;
+  };
 }
 
 export interface LabelingJob {

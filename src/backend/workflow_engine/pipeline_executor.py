@@ -533,11 +533,90 @@ def load_trigger_context(raw: Optional[str]) -> Dict[str, Any]:
     context = dict(parsed)
     payload = context.get("payload")
     if isinstance(payload, str):
-        try:
-            context["payload_json"] = json.loads(payload)
-        except (ValueError, TypeError):
-            context["payload_json"] = None
+        context["payload_json"] = parse_trigger_payload(payload)
     return context
+
+
+#: Unicode space separators a publisher can emit where JSON only permits
+#: SPACE/TAB/CR/LF. A payload indented with these is rejected by
+#: ``json.loads`` even though it is the JSON the operator intended: the
+#: non-breaking space (U+00A0) is what browser consoles and rich-text
+#: editors substitute when JSON is pasted, and it silently cost a whole
+#: on-device debugging session (payload_json None -> every
+#: reference_payload_path binding recorded "the run has no trigger
+#: payload_json to resolve it against").
+_JSON_HOSTILE_SPACES = (
+    "\u00a0"  # NO-BREAK SPACE (browser/console paste)
+    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009"
+    "\u200a"  # OGHAM SPACE MARK + the EN/EM/THIN/HAIR space family
+    "\u202f"  # NARROW NO-BREAK SPACE
+    "\u205f"  # MEDIUM MATHEMATICAL SPACE
+    "\u3000"  # IDEOGRAPHIC SPACE (CJK input methods)
+    "\ufeff"  # ZERO WIDTH NO-BREAK SPACE / BOM
+)
+
+_JSON_SPACE_TRANSLATION = {ord(ch): " " for ch in _JSON_HOSTILE_SPACES}
+
+
+def parse_trigger_payload(payload: str) -> Any:
+    """The trigger payload parsed as JSON, or ``None`` when it is not JSON.
+
+    Strict parsing is tried first, so a well-formed payload is parsed
+    byte-identically to before. Only if that fails are Unicode space
+    separators outside string literals folded to ordinary spaces and the
+    parse retried: JSON permits just SPACE/TAB/CR/LF as whitespace, so a
+    payload indented with non-breaking spaces (what a browser console
+    paste produces) is otherwise unusable even though its content is
+    valid. Characters inside string literals are never touched, so URLs,
+    prompts and any deliberate NBSP in a value survive intact.
+
+    Never raises: an unparseable payload still yields ``None``
+    (Requirements 2.3, 2.4).
+    """
+    try:
+        return json.loads(payload)
+    except (ValueError, TypeError):
+        pass
+    try:
+        normalized = _fold_spaces_outside_strings(payload)
+    except Exception:  # noqa: BLE001 - normalization is best-effort
+        return None
+    if normalized == payload:
+        return None
+    try:
+        parsed = json.loads(normalized)
+    except (ValueError, TypeError):
+        return None
+    logger.warning(
+        "Trigger payload parsed only after folding Unicode space separators "
+        "(e.g. non-breaking spaces) to ordinary spaces; the publisher should "
+        "emit plain JSON whitespace")
+    return parsed
+
+
+def _fold_spaces_outside_strings(payload: str) -> str:
+    """``payload`` with Unicode space separators replaced by ordinary
+    spaces, skipping the contents of JSON string literals (escapes
+    honored)."""
+    out = []
+    in_string = False
+    escaped = False
+    for ch in payload:
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            continue
+        out.append(_JSON_SPACE_TRANSLATION.get(ord(ch), ch))
+    return "".join(out)
 
 
 EXECUTION_STATUS_PENDING = "pending"
@@ -1011,6 +1090,121 @@ class WorkflowExecutor:
                         "args": {},
                     }
                 )
+
+    @staticmethod
+    def _ensure_writable_inference_branch(document: dict) -> int:
+        """Give an ``emltriton`` branch its own buffer when the frame tee
+        fans out, and return the number of branches fixed.
+
+        ``emltriton`` attaches its correlation-id payload to the frame with
+        ``gst_buffer_add_meta``, which requires a WRITABLE buffer. A ``tee``
+        with a single src pad forwards the buffer unshared, so that holds --
+        but the moment a second branch exists (a ``custom_python_preprocess``
+        node's ``appsink``, a second model, an extra capture branch) every
+        branch sees a shared buffer, and the meta add fails:
+
+            gst_buffer_add_meta: assertion 'gst_buffer_is_writable (buffer)'
+            [meta.cpp:104] [CHECKNULL meta]
+            [emltriton.cpp:413] [CHECKFAIL SetBufferCorrelationId(...)]
+
+        emltriton turns that into GST_FLOW_ERROR, which surfaces from the
+        upstream queue as the misleading "Internal data stream error ...
+        streaming stopped, reason error (-5)" and fails the whole run,
+        naming no node -- with nothing wrong in any node.
+
+        Fix: convert away from the branch's pinned format and back again
+        immediately before the ``emltriton``. A format-changing
+        ``videoconvert`` is not in passthrough, so it allocates a fresh
+        output buffer (refcount 1, writable) instead of forwarding the
+        shared one. The round trip is between RGB and BGR only -- a lossless
+        channel swap, so the pixels reaching the model are bit-identical.
+
+        Applied ONLY when the branch's tee actually fans out AND the branch
+        pins RGB/BGR: single-branch documents (every pre-existing workflow)
+        and branches pinned to another format render byte-identically, so
+        no existing pipeline changes shape or cost.
+        """
+        segments = document.get("segments") or []
+        # How many branches hang off each tee.
+        fanout: Dict[str, int] = {}
+        for segment in segments:
+            source = segment.get("from")
+            if source:
+                fanout[str(source)] = fanout.get(str(source), 0) + 1
+
+        swap = {"RGB": "BGR", "BGR": "RGB"}
+        fixed = 0
+        for segment in segments:
+            source = segment.get("from")
+            if not source or fanout.get(str(source), 0) < 2:
+                continue
+            elements = segment.get("elements")
+            if not isinstance(elements, list):
+                continue
+            index = next(
+                (
+                    i
+                    for i, element in enumerate(elements)
+                    if isinstance(element, dict)
+                    and element.get("factory") == "emltriton"
+                ),
+                None,
+            )
+            if index is None:
+                continue
+
+            # The format pinned upstream of the emltriton in this branch.
+            pinned = None
+            for element in elements[:index]:
+                if (
+                    isinstance(element, dict)
+                    and element.get("factory") == "capsfilter"
+                ):
+                    caps = str((element.get("args") or {}).get("caps") or "")
+                    match = re.search(
+                        r"format=(?:\(string\))?([A-Za-z0-9]+)", caps
+                    )
+                    if match:
+                        pinned = match.group(1)
+            other = swap.get(str(pinned))
+            if not other:
+                logger.warning(
+                    "Inference branch off tee '%s' shares buffers with %d "
+                    "other branch(es) but pins format %r, which has no "
+                    "lossless swap; leaving it unchanged (emltriton may "
+                    "fail to attach buffer metadata)",
+                    source,
+                    fanout[str(source)] - 1,
+                    pinned,
+                )
+                continue
+
+            node_id = elements[index].get("nodeId")
+            elements[index:index] = [
+                {"factory": "videoconvert", "nodeId": node_id, "args": {}},
+                {
+                    "factory": "capsfilter",
+                    "nodeId": node_id,
+                    "args": {"caps": "video/x-raw,format={0}".format(other)},
+                },
+                {"factory": "videoconvert", "nodeId": node_id, "args": {}},
+                {
+                    "factory": "capsfilter",
+                    "nodeId": node_id,
+                    "args": {"caps": "video/x-raw,format={0}".format(pinned)},
+                },
+            ]
+            fixed += 1
+            logger.info(
+                "Inference branch off tee '%s' shares buffers with %d other "
+                "branch(es); inserted a %s<->%s copy so emltriton can attach "
+                "buffer metadata to a writable buffer",
+                source,
+                fanout[str(source)] - 1,
+                pinned,
+                other,
+            )
+        return fixed
 
     @staticmethod
     def _inject_inference_metadata(
@@ -1512,6 +1706,11 @@ class WorkflowExecutor:
             # GST_FLOW_NOT_LINKED right after inference.
             self._ensure_terminal_sink(document)
 
+            # A fanned-out frame tee hands every branch a SHARED buffer, which
+            # emltriton cannot attach its correlation-id meta to; without this
+            # the run dies as "Internal data stream error" naming no node.
+            self._ensure_writable_inference_branch(document)
+
             launch_string = rendering.render_launch_string(document)
             if not launch_string:
                 self._finish_failed(
@@ -1613,6 +1812,7 @@ class WorkflowExecutor:
                                 capture_id,
                                 graph_document,
                                 detections_cache,
+                                trigger_context,
                             ),
                         )
                     elif frame_data is not None:
@@ -2150,16 +2350,26 @@ class WorkflowExecutor:
         capture_id: str,
         graph_document: Optional[dict],
         cache: dict,
+        trigger_context: Optional[Dict[str, Any]] = None,
     ):
         """The bridged run's :class:`python_bridge.DetectionsInjector`,
         or None (detection-guided-bedrock-inspection Requirement 1.10).
 
-        None — the byte-identical pre-feature pump — when no custom node
-        is stream-downstream of ``model_inference``. ``cache`` is the
-        run-state detections cache the post-pipeline
-        ``detections.merge_detections`` call shares (design Property 1).
+        None — the byte-identical pre-feature pump — when there is nothing
+        to inject: no custom node stream-downstream of ``model_inference``
+        AND no Trigger_Context. ``cache`` is the run-state detections cache
+        the post-pipeline ``detections.merge_detections`` call shares
+        (design Property 1).
+
+        ``trigger_context`` (ADDITIVE) is handed to every custom node as
+        ``metadata["trigger"]``, giving a per-frame handler the same run
+        context ``produce_frame(context)`` already gets — a frames handler
+        otherwise cannot resolve anything carried by the trigger payload.
+        A node needing only the trigger is typically NOT downstream of
+        ``model_inference`` (it can hang straight off the camera), which is
+        why an injector is now built for the trigger alone.
         """
-        if not downstream_ids:
+        if not downstream_ids and not trigger_context:
             return None
         return python_bridge.DetectionsInjector(
             downstream_ids,
@@ -2167,6 +2377,7 @@ class WorkflowExecutor:
             capture_id,
             graph_document=graph_document,
             cache=cache,
+            trigger_context=trigger_context,
         )
 
     def _preflight_pipeline_factories(

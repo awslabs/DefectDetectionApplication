@@ -489,6 +489,23 @@ export const MQTT_SUBSCRIBE_DESCRIPTOR: NodeTypeDescriptor = {
       examples: [true],
     },
     {
+      // mqtt-iot-endpoint: explicit IoT Core data endpoint (any account/region).
+      name: 'iot_endpoint',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+      description:
+        'AWS IoT Core data endpoint to connect to, e.g. ' +
+        "a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com (from 'aws iot " +
+        "describe-endpoint --endpoint-type iot:Data-ATS' in the target account " +
+        'and region). Use it to reach IoT Core in a different account or region ' +
+        'with a thing certificate from that account. When set it takes precedence ' +
+        'over broker_host; when empty broker_host is used as the endpoint.',
+      examples: ['a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com'],
+    },
+    {
       name: 'iot_thing_name',
       paramType: 'string',
       required: false,

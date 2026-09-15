@@ -31,12 +31,21 @@ import logging
 logger = logging.getLogger(__name__)
 from panorama import mlops
 import json
+import threading
+import time
 from dda_triton.constants import TRITON_MODEL_DIR, TRITON_INSTALLATION_DIR
 import traceback
+
+# The native ListModels() binding is not safe to call concurrently: overlapping
+# calls (frontend polling + model-component Startup scripts after a restart)
+# make one of them return an empty string instead of the JSON index.
+_LIST_MODELS_ATTEMPTS = 3
+_LIST_MODELS_RETRY_DELAY_S = 0.2
 
 
 class TritonEdgeClient:
     _instance = None
+    _list_models_lock = threading.Lock()
 
     def __new__(cls, *args, **kwargs):
         if not cls._instance:
@@ -67,13 +76,40 @@ class TritonEdgeClient:
             logger.error(f"Failed to create triton_instance , error: {e}")
         return self.triton_instance
 
+    def _list_models_raw(self) -> str:
+        """Serialized, retried wrapper around the native ListModels() call.
+
+        Returns the raw JSON index string; raises RuntimeError if Triton keeps
+        answering with an empty payload after the retries.
+        """
+        for attempt in range(1, _LIST_MODELS_ATTEMPTS + 1):
+            with self._list_models_lock:
+                raw = self.triton_instance.list_models()
+            if raw and raw.strip():
+                return raw
+            logger.warning(
+                "Triton list_models() returned an empty response (attempt %d/%d)",
+                attempt,
+                _LIST_MODELS_ATTEMPTS,
+            )
+            if attempt < _LIST_MODELS_ATTEMPTS:
+                time.sleep(_LIST_MODELS_RETRY_DELAY_S)
+        raise RuntimeError(
+            "Triton returned an empty model index after "
+            f"{_LIST_MODELS_ATTEMPTS} attempts; model listing temporarily unavailable"
+        )
+
     def list_triton_models(self):
         models = []
         try:
-            models_list_response = json.loads(self.triton_instance.list_models())
+            models_list_response = json.loads(self._list_models_raw())
             logger.info(f"Triton models(including base and marshal): {models_list_response}")
             for model, state in models_list_response.items():
                 __model_dict = {"model_component": model, "status": state.get("state", "UNKNOWN")}
+                # The edgemlsdk wrapper records why a load failed (Triton's own
+                # index also carries `reason` for UNAVAILABLE models).
+                if state.get("reason"):
+                    __model_dict["reason"] = state["reason"]
                 models.append(__model_dict)
             return models
         except Exception as e:

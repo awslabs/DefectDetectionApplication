@@ -441,10 +441,12 @@
               "greengrass": true,
               "iot_ca_cert_path": null,
               "iot_client_cert_path": null,
+              "iot_endpoint": null,
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
               "qos": 0,
+              "retain": false,
               "topic": "factory/line1/inspection"
             },
             "upstreamNodeIds": [
@@ -513,10 +515,12 @@
               "greengrass": true,
               "iot_ca_cert_path": null,
               "iot_client_cert_path": null,
+              "iot_endpoint": null,
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
               "qos": 0,
+              "retain": false,
               "topic": "factory/line1/inspection"
             },
             "upstreamNodeIds": [
@@ -585,10 +589,12 @@
               "greengrass": true,
               "iot_ca_cert_path": null,
               "iot_client_cert_path": null,
+              "iot_endpoint": null,
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
               "qos": 0,
+              "retain": false,
               "topic": "factory/line1/inspection"
             },
             "upstreamNodeIds": [
@@ -657,10 +663,12 @@
               "greengrass": true,
               "iot_ca_cert_path": null,
               "iot_client_cert_path": null,
+              "iot_endpoint": null,
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
               "qos": 0,
+              "retain": false,
               "topic": "factory/line1/inspection"
             },
             "upstreamNodeIds": [
@@ -729,10 +737,12 @@
               "greengrass": true,
               "iot_ca_cert_path": null,
               "iot_client_cert_path": null,
+              "iot_endpoint": null,
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
               "qos": 0,
+              "retain": false,
               "topic": "factory/line1/inspection"
             },
             "upstreamNodeIds": [
@@ -801,10 +811,12 @@
               "greengrass": true,
               "iot_ca_cert_path": null,
               "iot_client_cert_path": null,
+              "iot_endpoint": null,
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
               "qos": 0,
+              "retain": false,
               "topic": "factory/line1/inspection"
             },
             "upstreamNodeIds": [

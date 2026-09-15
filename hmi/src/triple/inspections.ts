@@ -21,8 +21,11 @@
  *      `original`-port entry, falling back to its `in`-port entry (a run that
  *      predates the additive executor artifacts still shows what the camera
  *      saw); `annotated` is the group's `annotated`-port entry with **no
- *      fallback of any kind** — its absence renders the no-annotated-image
- *      placeholder rather than any substitute image (Requirement 4.10).
+ *      substitute annotation of any kind** (Requirement 4.10); `reference`
+ *      is the group's `reference`-port entry — what the Inspection compared
+ *      against — which the renderer displays in place of a missing
+ *      Annotated_Image under its own caption, never as an annotation
+ *      (hmi-payload-reference-visibility).
  *
  * Slot assignment (Requirements 4.3, 4.6, 4.7, 5.4): slots 1..3 take the first
  * three Inspections in derivation order, so a given `nodeId` keeps the same
@@ -55,6 +58,15 @@ export const ORIGINAL_FALLBACK_PORT = "in";
 /** Node-image port holding an Inspection's Annotated_Image (no fallback). */
 export const ANNOTATED_PORT = "annotated";
 
+/**
+ * Node-image port holding an Inspection's Reference_Image: the image the
+ * node compared the crop against, decoded from the trigger payload
+ * (hmi-payload-reference-visibility). Never a substitute for the
+ * Annotated_Image — it is surfaced under its own label so the operator can
+ * see what was compared when the answer produced no annotation.
+ */
+export const REFERENCE_PORT = "reference";
+
 /** The Triple_HMI's fixed number of Inspection_Slots. */
 export const SLOT_COUNT = 3;
 
@@ -75,6 +87,12 @@ export interface Inspection {
   original?: ImageRef;
   /** `annotated` port only — no fallback (Requirement 4.10). */
   annotated?: ImageRef;
+  /**
+   * `reference` port: what this Inspection compared against. Displayed
+   * under its own label only when `annotated` is absent, so it is never
+   * mistaken for an annotation (hmi-payload-reference-visibility).
+   */
+  reference?: ImageRef;
 }
 
 /** Slot identifier displayed beside each Inspection (Requirement 5.4). */
@@ -142,6 +160,7 @@ function buildInspection(
     firstEntryWithPort(sorted, ORIGINAL_PORT) ??
     firstEntryWithPort(sorted, ORIGINAL_FALLBACK_PORT);
   const annotatedEntry = firstEntryWithPort(sorted, ANNOTATED_PORT);
+  const referenceEntry = firstEntryWithPort(sorted, REFERENCE_PORT);
 
   const inspection: Inspection = { nodeId };
   if (originalEntry !== undefined) {
@@ -149,6 +168,9 @@ function buildInspection(
   }
   if (annotatedEntry !== undefined) {
     inspection.annotated = toImageRef(nodeId, annotatedEntry);
+  }
+  if (referenceEntry !== undefined) {
+    inspection.reference = toImageRef(nodeId, referenceEntry);
   }
   return inspection;
 }

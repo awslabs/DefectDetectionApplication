@@ -246,12 +246,28 @@ export default function TrainingDetail() {
         </Container>
 
         <Container>
-          <Box variant="awsui-key-label">Validation Accuracy</Box>
-          <Box variant="h3">
-            {job.metrics && job.metrics['validation:accuracy']
-              ? `${(job.metrics['validation:accuracy'] * 100).toFixed(1)}%`
-              : 'N/A'}
-          </Box>
+          {job.model_type === 'object_detection' ? (
+            <>
+              {/* Detection jobs report the leakage-safe test split's mAP@50
+                  (captured from train.py's TEST METRICS line via SageMaker
+                  MetricDefinitions), not a validation accuracy. */}
+              <Box variant="awsui-key-label">Test mAP@50</Box>
+              <Box variant="h3">
+                {job.metrics && job.metrics['test:mAP50'] !== undefined
+                  ? `${(job.metrics['test:mAP50'] * 100).toFixed(1)}%`
+                  : 'N/A'}
+              </Box>
+            </>
+          ) : (
+            <>
+              <Box variant="awsui-key-label">Validation Accuracy</Box>
+              <Box variant="h3">
+                {job.metrics && job.metrics['validation:accuracy']
+                  ? `${(job.metrics['validation:accuracy'] * 100).toFixed(1)}%`
+                  : 'N/A'}
+              </Box>
+            </>
+          )}
         </Container>
       </ColumnLayout>
 
@@ -275,6 +291,14 @@ export default function TrainingDetail() {
                         { label: 'Version', value: job.model_version },
                         { label: 'Use Case', value: job.usecase_id },
                         { label: 'Source', value: job.source === 'imported' ? 'Imported Model (BYOM)' : 'SageMaker Training' },
+                        ...(job.model_type
+                          ? [{
+                              label: 'Model Type',
+                              value: job.model_type === 'object_detection'
+                                ? 'Object Detection (YOLO, ONNX)'
+                                : job.model_type,
+                            }]
+                          : []),
                       ]}
                     />
                     <KeyValuePairs

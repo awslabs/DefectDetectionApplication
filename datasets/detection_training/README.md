@@ -59,6 +59,11 @@ boto3.client('sagemaker', region_name='us-east-1').create_training_job(
 manifest to build `data.yaml`, so it pulls from S3 itself via `MANIFEST_S3` /
 `IMAGES_S3` rather than taking a per-record streaming channel.
 
+`IMAGES_S3` is optional. When it is unset — which is how the portal launches
+this job — the entry point downloads exactly the images named by the
+manifest's `source-ref` URIs instead of listing a prefix. Set it only to
+override that with a whole prefix (the original manual-launch behaviour).
+
 **One job at a time.** The account quota for `ml.g4dn.xlarge` training usage is
 **1 instance**. A second concurrent submission fails immediately with
 `ResourceLimitExceeded` — the sourcedir uploads fine and no job is created,
@@ -103,8 +108,17 @@ ops and silently returns empty results. CUDA EP is numerically faithful.
 
 ## Portal integration
 
-This path writes **no** `dda-portal-training-jobs` record, so a run launched
-this way does not appear in the portal and the packaging / publish flow cannot
-see it. `docs/detection-training-gap.md` §4–§6 lists what has to change in
-`training.py`, `CreateTraining.tsx`, and `compilation.py` to make Object
-Detection a first-class portal model type.
+The portal launches this exact entry point when a training job is created with
+`model_type: object_detection` (`edge-cv-portal/backend/functions/training.py`).
+At deploy time the CDK `TrainingHandler` asset bundles these four files into a
+`detection_training/` directory; at job creation the Lambda tars them flat into
+`s3://{usecase-bucket}/models/detection-training/{job}/sourcedir.tar.gz` and
+passes `MANIFEST_S3` plus the user's `IMGSZ` / `EPOCHS` / `BATCH` /
+`BASE_WEIGHTS` / `PATIENCE` as the job environment. The finished `model.onnx`
+is packaged straight into a Greengrass model component with
+`preserve_aspect: true` — no SageMaker Neo step. See
+`.kiro/specs/portal-detection-training/` for the wiring and
+`docs/detection-training-gap.md` for the original analysis.
+
+Launching by hand (above) still works and remains useful for experiments, but
+such a run writes no portal training record.

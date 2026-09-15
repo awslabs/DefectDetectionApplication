@@ -471,6 +471,50 @@ aws iot create-policy-version --policy-name GreengrassV2IoTThingPolicy \
 The policy variable scopes each device to its own thing's shadows. No device
 restart is needed; the change takes effect on the next sync attempt.
 
+### Retained MQTT Publish Denied (Workflow "Retain message")
+
+**Symptom:** a workflow whose MQTT Publish node has **Retain message** checked
+(Greengrass or AWS IoT path) fails with a run error naming
+`iot:RetainPublish`, or the publish is silently dropped and `greengrass.log`
+shows the nucleus's IoT Core connection dropping and reconnecting right after
+the publish (with MQTT 3.1.1 AWS IoT Core disconnects a client that publishes
+without authorization — on the Greengrass path that connection is the
+nucleus's, so every cloud message on the device pauses until it reconnects).
+
+**Cause:** AWS IoT Core authorizes the MQTT retain bit as its own action,
+`iot:RetainPublish`, separately from `iot:Publish`. Neither the installer's
+`GreengrassV2IoTThingPolicy` nor a policy that grants only `iot:Publish`
+allows a retained publish.
+
+**Solution:** required only if a workflow's MQTT Publish node has Retain
+message enabled; add it to an existing core device's IoT policy by hand as a
+new policy version. Grant it on the **same topic resources** as `iot:Publish`
+for the topics your workflows retain on — never on `"Resource": "*"`:
+```bash
+aws iot create-policy-version --policy-name GreengrassV2IoTThingPolicy \
+  --set-as-default --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      { "Effect": "Allow",
+        "Action": ["iot:Connect", "iot:Publish", "iot:Subscribe", "iot:Receive", "greengrass:*"],
+        "Resource": "*" },
+      { "Effect": "Allow",
+        "Action": ["iot:GetThingShadow", "iot:UpdateThingShadow", "iot:DeleteThingShadow"],
+        "Resource": "arn:aws:iot:*:*:thing/${iot:Connection.Thing.ThingName}" },
+      { "Effect": "Allow",
+        "Action": ["iot:Publish", "iot:RetainPublish"],
+        "Resource": ["arn:aws:iot:*:*:topic/quality/*", "arn:aws:iot:*:*:topic/dda/*"] }
+    ]
+  }'
+```
+Replace the `quality/*` / `dda/*` topic ARNs with the topic prefixes your
+workflows publish retained messages to. Devices provisioned through the portal
+already carry `iot:RetainPublish` next to `iot:Publish` in their default
+policy. Do not retain on a topic that is also an MQTT trigger of a workflow:
+the broker replays a retained message to every new subscription, so the
+workflow would re-run itself on every LocalServer restart or reconnect. Verify
+with `aws iot-data get-retained-message --topic <topic>`.
+
 ### Can't Connect to Device
 
 ```bash

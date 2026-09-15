@@ -263,7 +263,11 @@ def create_default_policy(policy_name):
             {
                 "Effect": "Allow",
                 "Action": [
-                    "iot:Publish"
+                    "iot:Publish",
+                    # mqtt-retained-publish: AWS IoT Core evaluates the
+                    # retain bit as a separate action. Same resources as
+                    # iot:Publish, never "*".
+                    "iot:RetainPublish"
                 ],
                 "Resource": [
                     "arn:aws:iot:*:*:topicfilter/$aws/things/${iot:Connection.Thing.ThingName}/*"

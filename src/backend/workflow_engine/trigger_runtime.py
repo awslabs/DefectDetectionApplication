@@ -2245,7 +2245,9 @@ class AwsIotTlsSubscriber(_PahoMqttSubscriber):
     """MQTT subscribe transport to AWS IoT Core over mutual TLS
     (Requirement 6.4 — design C5, task 7.2), mirroring
     ``_run_mqtt_publish``'s aws_iot connection configuration exactly:
-    ``broker_host`` is the AWS IoT endpoint, a ``broker_port`` left at
+    ``iot_endpoint`` when set (an IoT Core data endpoint in any
+    account/region — mqtt-iot-endpoint) else ``broker_host`` is the AWS
+    IoT endpoint, a ``broker_port`` left at
     the plain-MQTT default (1883) switches to the standard mutual-TLS
     port (8883), ``iot_thing_name`` becomes the MQTT client id, the
     device-local certificate paths go to ``tls_set(ca_certs, certfile,
@@ -2274,11 +2276,14 @@ class AwsIotTlsSubscriber(_PahoMqttSubscriber):
             raise ValueError(
                 "AWS IoT subscribing requires {0}".format(", ".join(missing))
             )
-        if not str(self.parameters.get("broker_host") or "").strip():
+        # mqtt-iot-endpoint: the endpoint is ``iot_endpoint`` when set (an
+        # IoT Core data endpoint in any account/region), else broker_host
+        # exactly as before; one of the two must be present.
+        if not self._aws_iot_host().strip():
             raise ValueError(
-                "AWS IoT subscribing requires broker_host (the AWS IoT "
-                "Core endpoint, e.g. xxxxxxxx-ats.iot.<region>."
-                "amazonaws.com), exactly as mqtt_publish does"
+                "AWS IoT subscribing requires iot_endpoint or broker_host "
+                "(the AWS IoT Core endpoint, e.g. xxxxxxxx-ats.iot."
+                "<region>.amazonaws.com), exactly as mqtt_publish does"
             )
 
     @property
@@ -2295,8 +2300,19 @@ class AwsIotTlsSubscriber(_PahoMqttSubscriber):
             keyfile=str(self.parameters["iot_private_key_path"]),
         )
 
+    def _aws_iot_host(self) -> str:
+        """``iot_endpoint`` (trimmed) when non-blank, else ``broker_host``
+        exactly as the pre-feature transport used it — mirroring
+        ``output_bindings.aws_iot_endpoint`` so the subscribe and publish
+        paths resolve the same host for the same parameters. Empty string
+        when neither is set."""
+        endpoint = self.parameters.get("iot_endpoint")
+        if isinstance(endpoint, str) and endpoint.strip():
+            return endpoint.strip()
+        return str(self.parameters.get("broker_host") or "")
+
     def _connect_target(self) -> Tuple[str, int]:
-        host = str(self.parameters["broker_host"])
+        host = self._aws_iot_host()
         port = _coerce_int(
             self.parameters.get("broker_port"), DEFAULT_MQTT_PORT
         )

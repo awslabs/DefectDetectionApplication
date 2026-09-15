@@ -455,11 +455,20 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   // SageMaker Neo compilation. So the compilation-centric gating (empty-state
   // "Start Compilation", and Component Actions gated on completed compilations)
   // must not hide packaging/publish for them.
+  //
+  // Portal-trained Object Detection (YOLO) jobs are the same case: their
+  // training job already exported model.onnx and training.py records
+  // `runtime: 'onnx'` / `model_type: 'object_detection'` (the backend compile
+  // endpoint bypasses Neo for them — portal-detection-training Req 7.1).
   const tj: any = trainingJob;
+  // `runtime: 'onnx'` alone is the signal (matching the backend predicate
+  // detection_training.is_trained_detection_record): an `object_detection`
+  // record WITHOUT it is a TorchScript detector that still goes through Neo.
   const isOnnxModel =
     String(tj?.metadata?.framework || '').toUpperCase() === 'ONNX' ||
     String(tj?.validation_result?.metadata?.framework || '').toUpperCase() === 'ONNX' ||
-    String(tj?.metadata?.model_file || tj?.metadata?.pt_file || '').toLowerCase().endsWith('.onnx');
+    String(tj?.metadata?.model_file || tj?.metadata?.pt_file || '').toLowerCase().endsWith('.onnx') ||
+    String(tj?.runtime || '').toLowerCase() === 'onnx';
 
   if (compilationJobs.length === 0 && !isOnnxModel) {
     return (

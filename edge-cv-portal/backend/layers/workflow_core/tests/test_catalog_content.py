@@ -822,6 +822,51 @@ class TestOutputNodeTypes:
         assert set(params["qos"].constraints["values"]) == {0, 1, 2}
         assert descriptor.hardware_dependent is True
 
+    def test_mqtt_iot_endpoint_parameterization(self):
+        # mqtt-iot-endpoint: an optional, aws_iot-gated IoT Core data
+        # endpoint on BOTH mqtt nodes so a workflow can publish to / subscribe
+        # from IoT Core in another account or region. Field-for-field
+        # identical on the two nodes (the mirroring property enforces it).
+        for type_id in ("mqtt_publish", "mqtt_subscribe"):
+            descriptor = get_node_type(type_id)
+            names = [p.name for p in descriptor.parameters]
+            endpoint = next(p for p in descriptor.parameters if p.name == "iot_endpoint")
+            assert endpoint.param_type == "string"
+            assert endpoint.required is False
+            assert endpoint.default is None
+            assert endpoint.depends_on == "aws_iot"
+            assert endpoint.constraints == {"min_length": 1}
+            assert "describe-endpoint" in endpoint.description
+            assert "account" in endpoint.description and "region" in endpoint.description
+            assert "precedence over broker_host" in endpoint.description
+            # Shown directly under the aws_iot toggle, before the thing name.
+            assert names.index("iot_endpoint") == names.index("aws_iot") + 1
+            assert names.index("iot_endpoint") == names.index("iot_thing_name") - 1
+
+    def test_mqtt_publish_retain_parameterization(self):
+        # mqtt-retained-publish Requirements 1.1, 1.2, 6.3, 8.2: an opt-in,
+        # off-by-default bool that maps to the MQTT RETAIN bit on every
+        # publish path (so it is not gated on greengrass/aws_iot), declared
+        # right after qos, whose description names the IoT policy action a
+        # retained publish to AWS IoT Core needs and the trigger-topic
+        # replay hazard.
+        # Validates: Requirements 1.1, 1.2, 6.3, 8.2
+        descriptor = get_node_type("mqtt_publish")
+        params = _params_by_name(descriptor)
+        retain = params["retain"]
+        assert retain.param_type == "bool"
+        assert retain.required is False
+        assert retain.default is False
+        assert retain.constraints == {}
+        assert retain.depends_on is None
+        assert retain.examples == [True]
+        names = [p.name for p in descriptor.parameters]
+        assert names.index("retain") == names.index("qos") + 1
+        assert "iot:RetainPublish" in retain.description
+        assert "trigger" in retain.description
+        # Publish-only: the subscribe trigger never grows a retain option.
+        assert "retain" not in _params_by_name(get_node_type("mqtt_subscribe"))
+
     def test_mqtt_publish_aws_iot_parameterization(self):
         # AWS IoT Core support: an opt-in checkbox plus the thing name
         # and device-local certificate file paths, all optional and

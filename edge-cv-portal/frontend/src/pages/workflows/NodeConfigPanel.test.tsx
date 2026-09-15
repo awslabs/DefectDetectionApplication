@@ -96,6 +96,17 @@ const MQTT_PUBLISH: NodeTypeDescriptor = {
       constraints: {},
     },
     { name: 'aws_iot', paramType: 'bool', required: false, default: false, constraints: {} },
+    // mqtt-iot-endpoint: gated on aws_iot like the iot_* credentials.
+    {
+      name: 'iot_endpoint',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+      description:
+        'AWS IoT Core data endpoint to connect to, e.g. a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com.',
+    },
     {
       name: 'iot_thing_name',
       paramType: 'string',
@@ -128,12 +139,25 @@ const MQTT_PUBLISH: NodeTypeDescriptor = {
       constraints: { minLength: 1 },
       dependsOn: 'aws_iot',
     },
+    // mqtt-retained-publish: placed AFTER the aws_iot family on purpose so
+    // the `findCheckbox()` (first checkbox) assertions above keep resolving
+    // to aws_iot. The retain tests select their checkbox by label.
+    {
+      name: 'retain',
+      paramType: 'bool',
+      required: false,
+      default: false,
+      constraints: {},
+      description:
+        'Publish with the MQTT retain flag so the broker keeps the last message on the topic.',
+    },
   ],
   mappings: [],
   hardwareDependent: true,
 };
 
 const IOT_PARAMETER_NAMES = [
+  'iot_endpoint',
   'iot_thing_name',
   'iot_ca_cert_path',
   'iot_client_cert_path',
@@ -442,6 +466,39 @@ describe('NodeConfigPanel', () => {
       expect(screen.getByText('Root CA certificate path (on device)')).toBeInTheDocument();
       expect(screen.getByText('Client certificate path (on device)')).toBeInTheDocument();
       expect(screen.getByText('Private key path (on device)')).toBeInTheDocument();
+      // mqtt-iot-endpoint: the endpoint field rides the same aws_iot gate,
+      // labelled for what it is, with its catalog description shown.
+      expect(screen.getByText('AWS IoT endpoint')).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          'AWS IoT Core data endpoint to connect to, e.g. a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com.'
+        )
+      ).toBeInTheDocument();
+    });
+
+    it('hides the "AWS IoT endpoint" field while aws_iot is unchecked', () => {
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(MQTT_PUBLISH)} onParametersChange={vi.fn()} />
+      );
+      expect(container.querySelector('input[aria-label="iot_endpoint"]')).toBeNull();
+      expect(screen.queryByText('AWS IoT endpoint')).toBeNull();
+    });
+
+    it('propagates a typed endpoint as iot_endpoint', () => {
+      const onParametersChange = vi.fn();
+      const { container } = render(
+        <NodeConfigPanel
+          node={builderNode(MQTT_PUBLISH, { aws_iot: true })}
+          onParametersChange={onParametersChange}
+        />
+      );
+      const input = container.querySelector('input[aria-label="iot_endpoint"]') as HTMLInputElement;
+      expect(input).not.toBeNull();
+      fireEvent.change(input, { target: { value: 'z9y8x7-ats.iot.eu-west-1.amazonaws.com' } });
+      expect(onParametersChange).toHaveBeenLastCalledWith('mqtt_publish_1', {
+        aws_iot: true,
+        iot_endpoint: 'z9y8x7-ats.iot.eu-west-1.amazonaws.com',
+      });
     });
 
     it('propagates checking the checkbox as aws_iot: true', () => {
@@ -452,6 +509,72 @@ describe('NodeConfigPanel', () => {
       const checkbox = createWrapper(container).findCheckbox()!;
       fireEvent.click(checkbox.findNativeInput().getElement());
       expect(onParametersChange).toHaveBeenCalledWith('mqtt_publish_1', { aws_iot: true });
+    });
+  });
+
+  // mqtt-retained-publish (Requirements 2.1-2.6, 10.4): the `retain` bool
+  // renders as a plain checkbox labeled "Retain message" through the generic
+  // bool control; no mqtt_publish-specific UI code is involved.
+  describe('mqtt_publish "Retain message" checkbox', () => {
+    const findRetainCheckbox = (container: HTMLElement) =>
+      createWrapper(container)
+        .findAllCheckboxes()
+        .find((checkbox) => checkbox.findLabel().getElement().textContent === 'Retain message');
+
+    it('renders the "Retain message" checkbox unchecked with no explicit value', () => {
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(MQTT_PUBLISH)} onParametersChange={vi.fn()} />
+      );
+      expect(screen.getByText('Retain message')).toBeInTheDocument();
+      const checkbox = findRetainCheckbox(container);
+      expect(checkbox).toBeDefined();
+      expect(checkbox!.findNativeInput().getElement()).not.toBeChecked();
+      // The catalog description renders below the checkbox.
+      const description = screen.getByText(
+        'Publish with the MQTT retain flag so the broker keeps the last message on the topic.'
+      );
+      expect(
+        checkbox!.findNativeInput().getElement().compareDocumentPosition(description) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+    });
+
+    it('renders checked when the node already has retain: true', () => {
+      const { container } = render(
+        <NodeConfigPanel
+          node={builderNode(MQTT_PUBLISH, { retain: true })}
+          onParametersChange={vi.fn()}
+        />
+      );
+      expect(findRetainCheckbox(container)!.findNativeInput().getElement()).toBeChecked();
+    });
+
+    it('propagates checking as retain: true and unchecking as retain: false', () => {
+      const onParametersChange = vi.fn();
+      const { container, rerender } = render(
+        <NodeConfigPanel node={builderNode(MQTT_PUBLISH)} onParametersChange={onParametersChange} />
+      );
+      fireEvent.click(findRetainCheckbox(container)!.findNativeInput().getElement());
+      expect(onParametersChange).toHaveBeenLastCalledWith('mqtt_publish_1', { retain: true });
+
+      rerender(
+        <NodeConfigPanel
+          node={builderNode(MQTT_PUBLISH, { retain: true })}
+          onParametersChange={onParametersChange}
+        />
+      );
+      fireEvent.click(findRetainCheckbox(container)!.findNativeInput().getElement());
+      expect(onParametersChange).toHaveBeenLastCalledWith('mqtt_publish_1', { retain: false });
+    });
+
+    it('is independent of aws_iot: the first checkbox is still "AWS IoT support"', () => {
+      const { container } = render(
+        <NodeConfigPanel node={builderNode(MQTT_PUBLISH)} onParametersChange={vi.fn()} />
+      );
+      const first = createWrapper(container).findCheckbox()!;
+      expect(first.findLabel().getElement().textContent).toBe('AWS IoT support');
+      // Retain is not gated on aws_iot: it renders while aws_iot is unchecked.
+      expect(findRetainCheckbox(container)).toBeDefined();
     });
   });
 

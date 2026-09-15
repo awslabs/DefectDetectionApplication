@@ -1190,17 +1190,89 @@ export class ComputeStack extends cdk.Stack {
     });
 
     // Training Lambda Handler
+    // ---------------------------------------------------------------------
+    // Object Detection (YOLO) training — portal-detection-training Req 8.1–8.3.
+    //
+    // training.py launches datasets/detection_training/train.py as a
+    // SageMaker script-mode job. At job creation it tars the entry point and
+    // its three sibling files FLAT into sourcedir.tar.gz (train.py resolves the
+    // dataset converter as a sibling; SageMaker extracts the archive flat), so
+    // the Lambda asset must carry them. They live in datasets/ (outside
+    // backend/), so the TrainingHandler asset is bundled: functions/ plus a
+    // detection_training/ subdir holding exactly these four files. The
+    // bundler runs locally (plain file copies); the Docker image is only the
+    // fallback CDK requires when no local shell is available.
+    // ---------------------------------------------------------------------
+    const functionsDir = path.join(__dirname, '../../backend/functions');
+    const datasetsDir = path.join(__dirname, '../../../datasets');
+    const detectionTrainingFiles = [
+      'detection_training/train.py',
+      'detection_training/requirements.txt',
+      'manifest_to_detector_dataset.py',
+      'dedupe_frames.py',
+    ];
+    for (const rel of detectionTrainingFiles) {
+      const abs = path.join(datasetsDir, rel);
+      if (!fs.existsSync(abs)) {
+        throw new Error(
+          `Detection training entry-point file missing: ${abs}. ` +
+            'training.py bundles datasets/detection_training/* into the TrainingHandler asset.'
+        );
+      }
+    }
+    // The DLC image is resolved per use-case region in the backend
+    // (detection_training.resolve_detection_training_image); this context key
+    // only overrides it, e.g. -c detectionTrainingImage=<uri>.
+    const detectionTrainingImageContext = this.node.tryGetContext('detectionTrainingImage');
+    const detectionTrainingImage =
+      typeof detectionTrainingImageContext === 'string' ? detectionTrainingImageContext.trim() : '';
+
+    const trainingHandlerCode = lambda.Code.fromAsset(functionsDir, {
+      bundling: {
+        image: cdk.DockerImage.fromRegistry('public.ecr.aws/amazonlinux/amazonlinux:2023'),
+        volumes: [{ hostPath: datasetsDir, containerPath: '/datasets' }],
+        command: [
+          'bash',
+          '-c',
+          'cp -r /asset-input/. /asset-output/ && mkdir -p /asset-output/detection_training && ' +
+            detectionTrainingFiles
+              .map(rel => `cp /datasets/${rel} /asset-output/detection_training/`)
+              .join(' && '),
+        ],
+        local: {
+          tryBundle(outputDir: string): boolean {
+            try {
+              fs.cpSync(functionsDir, outputDir, { recursive: true });
+              const target = path.join(outputDir, 'detection_training');
+              fs.mkdirSync(target, { recursive: true });
+              for (const rel of detectionTrainingFiles) {
+                fs.copyFileSync(path.join(datasetsDir, rel), path.join(target, path.basename(rel)));
+              }
+              return true;
+            } catch (err) {
+              // Fall back to the Docker bundling above.
+              return false;
+            }
+          },
+        },
+      },
+    });
+
     const trainingHandler = new lambda.Function(this, 'TrainingHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'training.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      code: trainingHandlerCode,
       role: createLambdaRole('Training'),
       environment: {
         ...lambdaEnvironment,
-        CODE_VERSION: '2024-12-08-v1', // Force update - fixed job name validation
+        CODE_VERSION: '2026-09-13-v1', // Force update - object detection (YOLO) training path
+        DETECTION_TRAINING_IMAGE: detectionTrainingImage,
       },
       layers: [sharedLayer],
-      timeout: cdk.Duration.seconds(60), // Longer timeout for SageMaker API calls
+      // Detection jobs tar + upload the entry point before the SageMaker call;
+      // 512 MB / 120 s leaves ample headroom over the previous 128 MB / 60 s.
+      memorySize: 512,
+      timeout: cdk.Duration.seconds(120),
     });
 
     // Compilation Lambda Handler
@@ -1607,6 +1679,52 @@ export class ComputeStack extends cdk.Stack {
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
           actions: ['s3:PutLifecycleConfiguration'],
+          resources: [`arn:aws:s3:::${componentBucketNameForPins}`],
+        }),
+      ]),
+    });
+
+    // Browser CORS for the pin upload path (design Decision 2): the pin
+    // flow PUTs the image bytes straight from the portal origin to a
+    // presigned staging key on this bucket, and a cross-origin PUT with an
+    // image Content-Type is preflighted. Without a CORS rule S3 rejects
+    // the preflight and the browser reports a bare NetworkError (seen on
+    // 2026-09-14). The bucket is not CDK-managed (see above), so the rule
+    // is applied through a custom resource that mirrors the declarative
+    // rule on PortalArtifactsBucket (storage-stack.ts): the CloudFront
+    // origin when known, any origin before the first frontend deployment
+    // — access is still gated by the presigned URLs themselves. This PUT
+    // owns the bucket's whole CORS configuration (no other rule exists).
+    const pinUploadCorsRule = {
+      AllowedOrigins: props.cloudFrontDomain
+        ? [`https://${props.cloudFrontDomain}`]
+        : ['*'],
+      AllowedMethods: ['PUT', 'GET', 'HEAD'],
+      AllowedHeaders: ['*'],
+      ExposeHeaders: ['ETag'],
+      MaxAgeSeconds: 3600,
+    };
+    const pinUploadCorsCall = {
+      service: 'S3',
+      action: 'putBucketCors',
+      parameters: {
+        Bucket: componentBucketNameForPins,
+        CORSConfiguration: { CORSRules: [pinUploadCorsRule] },
+      },
+      // The origin is part of the physical id so a domain change
+      // re-applies the rule instead of being treated as a no-op update.
+      physicalResourceId: cr.PhysicalResourceId.of(
+        `${componentBucketNameForPins}/static-image-pin-cors/${pinUploadCorsRule.AllowedOrigins[0]}`,
+      ),
+    };
+    new cr.AwsCustomResource(this, 'StaticImagePinUploadCors', {
+      onCreate: pinUploadCorsCall,
+      onUpdate: pinUploadCorsCall,
+      // No onDelete, for the same reason as the lifecycle rule above.
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['s3:PutBucketCORS'],
           resources: [`arn:aws:s3:::${componentBucketNameForPins}`],
         }),
       ]),

@@ -4230,6 +4230,21 @@
         },
         "default": null,
         "depends_on": "aws_iot",
+        "description": "AWS IoT Core data endpoint to connect to, e.g. a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com (from 'aws iot describe-endpoint --endpoint-type iot:Data-ATS' in the target account and region). Use it to reach IoT Core in a different account or region with a thing certificate from that account. When set it takes precedence over broker_host; when empty broker_host is used as the endpoint.",
+        "examples": [
+          "a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com"
+        ],
+        "multiline": false,
+        "name": "iot_endpoint",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
         "description": "AWS IoT thing name used as the MQTT client id, e.g. dda-edge-device-01.",
         "examples": [
           "dda-edge-device-01"
