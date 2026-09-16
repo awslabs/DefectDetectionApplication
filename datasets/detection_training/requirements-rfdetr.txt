@@ -1,0 +1,9 @@
+# rfdetr 1.10.1 extras (pyproject [project.optional-dependencies]):
+#   train -> pytorch_lightning, torchmetrics[detection], faster-coco-eval,
+#            pycocotools, scipy, torch-hungarian, peft, roboflow (.train()/.evaluate())
+#   onnx  -> onnx, onnxsim, onnx_graphsurgeon, onnxruntime, polygraphy (.export())
+# There is no `onnxexport` extra in this version.
+rfdetr[train,onnx]==1.10.1
+onnx==1.17.0
+onnxruntime==1.19.2
+numpy<2

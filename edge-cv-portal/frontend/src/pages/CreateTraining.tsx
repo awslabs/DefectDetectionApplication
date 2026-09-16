@@ -20,6 +20,7 @@ import {
   StatusIndicator,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import type { BaseModelRef, DetectionArch, DetectionBaseModels } from '../services/api';
 import { useUsecase } from '../contexts/UsecaseContext';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 import {
@@ -31,36 +32,45 @@ import {
   ALL_MODEL_TYPE_OPTIONS,
   LFV_MODEL_TYPE_OPTIONS,
   MODEL_SOURCE_OPTIONS,
+  MODEL_SOURCE_RF_DETR,
   MODEL_SOURCE_YOLO,
+  detectionArchForSource,
   labelingJobCoversFolder,
   modelSourceForLabelingTask,
   modelSourceForType,
   modelTypeOptionsForSource,
   normalizeS3Folder,
 } from '../utils/trainingSources';
+import {
+  DetectionFormParams,
+  RFDETR_SIZES,
+  RFDETR_SIZE_ORDER,
+  YOLO_PARAM_DEFAULTS,
+  applyRfDetrSize,
+  baseModelClassNames,
+  baseModelSelectOptions,
+  buildDetectionSubmitFields,
+  classListsDiffer,
+  classMismatchWarning,
+  classNamesFromManifestEntry,
+  defaultDetectionInstanceType,
+  detectionParamDefaults,
+  findBaseModelOption,
+  findBaseModelRecord,
+  groupDetectionBaseModels,
+  isRfDetrSize,
+  parseBaseModelOptionValue,
+  parseClassNamesInput,
+  paramsFromBaseRecord,
+  publishedBaseModelRef,
+  rfdetrNativeResolution,
+  validateDetectionParams,
+} from '../utils/detectionBaseModels';
 
-// Object Detection (YOLO) training settings forwarded to the script-mode
-// entry point (datasets/detection_training/train.py) as `hyperparameters`.
-// Defaults mirror the backend's DETECTION_DEFAULTS (detection_training.py).
-interface DetectionParams {
-  imgsz: string;
-  epochs: string;
-  batch: string;
-  baseWeights: string;
-  patience: string;
-  scoreThreshold: string;
-  iouThreshold: string;
-}
-
-const DETECTION_PARAM_DEFAULTS: DetectionParams = {
-  imgsz: '1280',
-  epochs: '100',
-  batch: '4',
-  baseWeights: 'yolo11s.pt',
-  patience: '30',
-  scoreThreshold: '0.25',
-  iouThreshold: '0.45',
-};
+// Object Detection training settings are forwarded to the arch's script-mode
+// entry point (datasets/detection_training/train.py / train_rfdetr.py) as
+// `hyperparameters`. Defaults, bounds and the submit payload live in
+// utils/detectionBaseModels.ts and mirror the backend's detection_training.py.
 
 const DETECTION_IMGSZ_OPTIONS: SelectProps.Option[] = [
   { label: '640 (fast; small objects may be missed)', value: '640' },
@@ -69,11 +79,13 @@ const DETECTION_IMGSZ_OPTIONS: SelectProps.Option[] = [
   { label: '1600 (slow; large-memory GPU)', value: '1600' },
 ];
 
-const DETECTION_BASE_WEIGHTS_OPTIONS: SelectProps.Option[] = [
-  { label: 'yolo11n.pt (nano — fastest on device)', value: 'yolo11n.pt' },
-  { label: 'yolo11s.pt (small — recommended)', value: 'yolo11s.pt' },
-  { label: 'yolo11m.pt (medium — more accurate, slower)', value: 'yolo11m.pt' },
-];
+const RFDETR_SIZE_OPTIONS: SelectProps.Option[] = RFDETR_SIZE_ORDER.map(size => ({
+  label: `${size} (native ${RFDETR_SIZES[size]}px)${size === 'small' ? ' — recommended' : ''}`,
+  value: size,
+  description: size === 'medium' || size === 'large'
+    ? 'Larger backbone; ml.g5.xlarge recommended.'
+    : 'Fits the documented ml.g4dn.xlarge (T4) configuration.',
+}));
 
 // Detection jobs run on a plain SageMaker PyTorch GPU DLC, so any GPU instance
 // works (the marketplace list below is constrained by the LFV algorithm).
@@ -83,8 +95,12 @@ const DETECTION_INSTANCE_TYPE_OPTIONS: SelectProps.Option[] = [
   { label: 'ml.g5.xlarge (GPU - A10G)', value: 'ml.g5.xlarge' },
   { label: 'ml.g5.2xlarge (GPU - A10G, more compute)', value: 'ml.g5.2xlarge' },
 ];
-const DETECTION_DEFAULT_INSTANCE = DETECTION_INSTANCE_TYPE_OPTIONS[0];
 const DETECTION_DEFAULT_MAX_RUNTIME = '10800';
+
+/** The instance option for a type name (falls back to a bare option so the value is still sent). */
+function detectionInstanceOption(value: string): SelectProps.Option {
+  return DETECTION_INSTANCE_TYPE_OPTIONS.find(o => o.value === value) ?? { label: value, value };
+}
 
 export default function CreateTraining() {
   const navigate = useNavigate();
@@ -122,7 +138,22 @@ export default function CreateTraining() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [manifestFormat, setManifestFormat] = useState<ManifestFormat | null>(null);
-  const [detectionParams, setDetectionParams] = useState<DetectionParams>(DETECTION_PARAM_DEFAULTS);
+  const [detectionParams, setDetectionParams] = useState<DetectionFormParams>(YOLO_PARAM_DEFAULTS);
+  // Base model (Req 6): null = "the published checkpoint the form names"
+  // (YOLO base weights / RF-DETR size); otherwise a prior training job or an
+  // imported fine-tunable checkpoint in this use case.
+  const [baseModel, setBaseModel] = useState<BaseModelRef | null>(null);
+  const [baseModelGroups, setBaseModelGroups] = useState<DetectionBaseModels | null>(null);
+  const [baseModelsLoading, setBaseModelsLoading] = useState(false);
+  // Optional class-name override (comma-separated). Empty = the manifest's
+  // class-map; picking a base model prefills its classes when empty.
+  const [classNamesInput, setClassNamesInput] = useState('');
+  // Class names read from the selected manifest's class-map (for the
+  // base-model mismatch warning).
+  const [manifestClassNames, setManifestClassNames] = useState<string[]>([]);
+  // True once the user picked an instance type themselves; the per-arch
+  // default nudges (g4dn.xlarge / g5.xlarge for RF-DETR medium+) stop then.
+  const instanceTouched = useRef(false);
   const [checkingManifestFormat, setCheckingManifestFormat] = useState(false);
   const [showTransformModal, setShowTransformModal] = useState(false);
   const [transforming, setTransforming] = useState(false);
@@ -152,6 +183,10 @@ export default function CreateTraining() {
 
   const isDetection = isDetectionModelType(modelType.value);
   const activeInstanceTypeOptions = isDetection ? DETECTION_INSTANCE_TYPE_OPTIONS : instanceTypeOptions;
+  // Detector family the selected source trains; only meaningful when
+  // isDetection (both detection sources force model_type=object_detection).
+  const detectionArch: DetectionArch = detectionArchForSource(modelSource.value) ?? 'yolo';
+  const isRfDetr = isDetection && detectionArch === 'rf_detr';
 
   /**
    * Select a model type and apply the defaults that go with it: max runtime,
@@ -159,7 +194,7 @@ export default function CreateTraining() {
    * algorithm and the detection DLC accept different instance lists — the
    * instance type when crossing the detection boundary.
    */
-  const applyModelType = (option: SelectProps.Option) => {
+  const applyModelType = (option: SelectProps.Option, arch: DetectionArch = detectionArch) => {
     const nextValue = option.value as string | undefined;
     const wasDetection = isDetection;
     const nextIsDetection = isDetectionModelType(nextValue);
@@ -172,19 +207,94 @@ export default function CreateTraining() {
     );
     if (!isSegmentation) setSegheadOnly(false);
     if (nextIsDetection && !wasDetection) {
-      setInstanceType(DETECTION_DEFAULT_INSTANCE);
+      instanceTouched.current = false;
+      setInstanceType(detectionInstanceOption(defaultDetectionInstanceType(arch, detectionParams.rfdetrSize)));
     } else if (!nextIsDetection && wasDetection) {
+      instanceTouched.current = false;
       setInstanceType(instanceTypeOptions[0]);
     }
   };
 
-  /** Select a model source and move Model Type to that source's first option. */
+  /**
+   * Select a model source and move Model Type to that source's first option.
+   * Crossing between the two detector families resets Detection Settings to
+   * that arch's defaults and drops the base model (a YOLO checkpoint cannot
+   * seed an RF-DETR run, and vice versa).
+   */
   const applyModelSource = (option: SelectProps.Option) => {
     setModelSource(option);
+    const nextArch = detectionArchForSource(option.value);
+    if (nextArch && nextArch !== detectionArchForSource(modelSource.value)) {
+      setDetectionParams(detectionParamDefaults(nextArch));
+      setBaseModel(null);
+    }
     const allowed = modelTypeOptionsForSource(option.value);
     if (!allowed.some(o => o.value === modelType.value)) {
-      applyModelType(allowed[0]);
+      applyModelType(allowed[0], nextArch ?? 'yolo');
     }
+  };
+
+  // Base model choices for this use case + arch (Req 6.1). Reloading drops
+  // any selection: a ref from another use case / arch would be a 400.
+  useEffect(() => {
+    setBaseModel(null);
+    if (!useCaseId?.value || !isDetection) {
+      setBaseModelGroups(null);
+      return;
+    }
+    let cancelled = false;
+    setBaseModelsLoading(true);
+    apiService.listDetectionBaseModels(useCaseId.value as string, detectionArch)
+      .then(groups => { if (!cancelled) setBaseModelGroups(groups); })
+      .catch(err => {
+        console.error('Failed to list base models:', err);
+        // Published checkpoints are static; still offer them.
+        if (!cancelled) setBaseModelGroups(groupDetectionBaseModels([], detectionArch));
+      })
+      .finally(() => { if (!cancelled) setBaseModelsLoading(false); });
+    return () => { cancelled = true; };
+  }, [useCaseId?.value, isDetection, detectionArch]);
+
+  // Instance default nudge (Req 3.5): ml.g4dn.xlarge for YOLO and RF-DETR
+  // nano/small; ml.g5.xlarge for RF-DETR medium/large — until the user picks
+  // an instance type themselves.
+  useEffect(() => {
+    if (!isDetection || instanceTouched.current) return;
+    const wanted = defaultDetectionInstanceType(detectionArch, detectionParams.rfdetrSize);
+    setInstanceType(prev => (prev.value === wanted ? prev : detectionInstanceOption(wanted)));
+  }, [isDetection, detectionArch, detectionParams.rfdetrSize]);
+
+  const baseModelOptions = baseModelGroups
+    ? baseModelSelectOptions(baseModelGroups)
+    : baseModelSelectOptions(groupDetectionBaseModels([], detectionArch));
+  const effectiveBaseModel: BaseModelRef = baseModel ?? publishedBaseModelRef(detectionArch, detectionParams);
+  const selectedBaseModelOption = findBaseModelOption(baseModelOptions, effectiveBaseModel);
+  const baseRecord = findBaseModelRecord(baseModelGroups, baseModel);
+  const baseClasses = baseModelClassNames(baseRecord);
+  // The run's class list: the override when given, else the manifest's class-map.
+  const overrideClassNames = parseClassNamesInput(classNamesInput);
+  const runClassNames = overrideClassNames.length > 0 ? overrideClassNames : manifestClassNames;
+  const classMismatch = !!baseClasses && runClassNames.length > 0 && classListsDiffer(runClassNames, baseClasses);
+
+  /** Base model picked: published -> drives base weights / size; otherwise a record (Req 6.2). */
+  const handleBaseModelChange = (option: SelectProps.Option) => {
+    const ref = parseBaseModelOptionValue(option.value);
+    if (!ref) return;
+    if (ref.kind === 'published') {
+      setBaseModel(null);
+      setDetectionParams(p =>
+        detectionArch === 'rf_detr'
+          ? (isRfDetrSize(ref.ref) ? applyRfDetrSize(p, ref.ref) : p)
+          : { ...p, baseWeights: ref.ref }
+      );
+      return;
+    }
+    setBaseModel(ref);
+    const record = findBaseModelRecord(baseModelGroups, ref);
+    // Default the network input (and RF-DETR size) to what the base was trained at.
+    setDetectionParams(p => paramsFromBaseRecord(detectionArch, p, record));
+    const classes = baseModelClassNames(record);
+    if (classes && !classNamesInput.trim()) setClassNamesInput(classes.join(', '));
   };
 
   // Populate form from cloned job
@@ -194,22 +304,26 @@ export default function CreateTraining() {
       setModelName(cloneFrom.model_name ? `${cloneFrom.model_name}-clone` : '');
       
       // Set model source + type (the source is derived from the type: a
-      // detection job clones onto YOLO, anything else onto the marketplace).
+      // detection job clones onto its arch's source — YOLO or RF-DETR —
+      // anything else onto the marketplace).
       if (cloneFrom.model_type) {
         const typeOption = ALL_MODEL_TYPE_OPTIONS.find(opt => opt.value === cloneFrom.model_type);
         if (typeOption) {
           const sourceOption = MODEL_SOURCE_OPTIONS.find(
-            opt => opt.value === modelSourceForType(cloneFrom.model_type)
+            opt => opt.value === modelSourceForType(cloneFrom.model_type, cloneFrom.detection_arch)
           );
           if (sourceOption) setModelSource(sourceOption);
           setModelType(typeOption);
+          const clonedArch = detectionArchForSource(sourceOption?.value);
+          if (clonedArch) setDetectionParams(detectionParamDefaults(clonedArch));
         }
       }
       
-      // Set instance type
+      // Set instance type (an explicit choice: the per-arch nudge must not override it)
       if (cloneFrom.instance_type) {
         const instanceOption = flatInstanceOptions.find(opt => opt.value === cloneFrom.instance_type);
         if (instanceOption) {
+          instanceTouched.current = true;
           setInstanceType(instanceOption);
         }
       }
@@ -284,9 +398,11 @@ export default function CreateTraining() {
         console.log('No sample entries found in validation response');
       }
       setManifestFormat(classifyManifestFormat(sampleEntry));
+      setManifestClassNames(classNamesFromManifestEntry(sampleEntry));
     } catch (err) {
       console.error('Failed to check manifest format:', err);
       setManifestFormat('unknown');
+      setManifestClassNames([]);
     } finally {
       setCheckingManifestFormat(false);
     }
@@ -295,6 +411,7 @@ export default function CreateTraining() {
   const handleLabelingJobSelect = async (option: SelectProps.Option | null) => {
     setSelectedLabelingJob(option);
     setManifestFormat(null);
+    setManifestClassNames([]);
     setTransformedManifestUri(null);
     
     if (option?.value) {
@@ -305,6 +422,7 @@ export default function CreateTraining() {
   const handlePreLabeledDatasetSelect = async (option: SelectProps.Option | null) => {
     setSelectedPreLabeledDataset(option);
     setManifestFormat(null);
+    setManifestClassNames([]);
     setTransformedManifestUri(null);
     
     if (option?.value) {
@@ -447,19 +565,15 @@ export default function CreateTraining() {
       setSubmitting(true);
       setError(null);
 
-      // Detection sends its YOLO settings as `hyperparameters` (validated by
-      // the backend); LFV sends only the seghead flag when toggled. The two
-      // never mix (the seghead toggle is hidden for detection).
-      const hyperparameters = isDetection
-        ? {
-            imgsz: parseInt(detectionParams.imgsz, 10),
-            epochs: parseInt(detectionParams.epochs, 10),
-            batch: parseInt(detectionParams.batch, 10),
-            base_weights: detectionParams.baseWeights,
-            patience: parseInt(detectionParams.patience, 10),
-            score_threshold: parseFloat(detectionParams.scoreThreshold),
-            iou_threshold: parseFloat(detectionParams.iouThreshold),
-          }
+      // Detection sends its arch's settings as `hyperparameters` (validated by
+      // the backend) plus `detection_arch` and `base_model` (Req 3.2, 6.3);
+      // LFV sends only the seghead flag when toggled. The two never mix (the
+      // seghead toggle is hidden for detection).
+      const detectionFields = isDetection
+        ? buildDetectionSubmitFields(detectionArch, detectionParams, baseModel, overrideClassNames)
+        : null;
+      const hyperparameters = detectionFields
+        ? detectionFields.hyperparameters
         : segheadOnly
           ? { classification_logic: 'seg_head' }
           : undefined;
@@ -474,6 +588,11 @@ export default function CreateTraining() {
         instance_type: instanceType.value as string,
         max_runtime_seconds: parseInt(maxRuntime),
         ...(hyperparameters && { hyperparameters }),
+        ...(detectionFields && {
+          detection_arch: detectionFields.detection_arch,
+          base_model: detectionFields.base_model,
+          ...(detectionFields.class_names && { class_names: detectionFields.class_names }),
+        }),
       });
 
       navigate('/training');
@@ -517,21 +636,15 @@ export default function CreateTraining() {
       errors.push('Object Detection requires a bounding-box manifest (this manifest has classification/segmentation labels)');
     }
     if (!isDetection && manifestFormat === 'detection') {
-      errors.push('This is a bounding-box manifest — select the Object Detection (YOLO) model type');
+      errors.push('This is a bounding-box manifest — select the YOLO or RF-DETR model source to train from it');
     }
     if (isDetection) {
-      const imgsz = parseInt(detectionParams.imgsz, 10);
-      const epochs = parseInt(detectionParams.epochs, 10);
-      const batch = parseInt(detectionParams.batch, 10);
-      const patience = parseInt(detectionParams.patience, 10);
-      const score = parseFloat(detectionParams.scoreThreshold);
-      const iou = parseFloat(detectionParams.iouThreshold);
-      if (!(imgsz >= 320 && imgsz <= 2048 && imgsz % 32 === 0)) errors.push('Image size must be a multiple of 32 between 320 and 2048');
-      if (!(epochs >= 1 && epochs <= 1000)) errors.push('Epochs must be between 1 and 1000');
-      if (!(batch >= 1 && batch <= 64)) errors.push('Batch size must be between 1 and 64');
-      if (!(patience >= 0 && patience <= 1000)) errors.push('Patience must be between 0 and 1000');
-      if (!(score > 0 && score < 1)) errors.push('Score threshold must be strictly between 0 and 1');
-      if (!(iou > 0 && iou < 1)) errors.push('IoU threshold must be strictly between 0 and 1');
+      errors.push(...validateDetectionParams(detectionArch, detectionParams));
+      // A non-published base must still be on offer (the list reloads per
+      // use case / arch); otherwise the API would answer 400.
+      if (baseModel && baseModelGroups && !baseRecord) {
+        errors.push('The selected base model is not available for this use case and model source');
+      }
     }
     return errors;
   };
@@ -582,9 +695,20 @@ export default function CreateTraining() {
 
             {isDetection ? (
               <Alert type="info">
-                Object Detection fine-tunes a YOLO detector on a bounding-box manifest (the output of a
-                bounding-box labeling job) and exports ONNX for the DDA edge runtime. The model is served
-                letterboxed exactly as it was trained, and needs no compilation step.
+                {isRfDetr ? (
+                  <>
+                    Object Detection fine-tunes an RF-DETR detector (DINOv2 backbone, NMS-free) on a
+                    bounding-box manifest (the output of a bounding-box labeling job) and exports ONNX for
+                    the DDA edge runtime. The model trains on a square resize with ImageNet normalisation
+                    and is served exactly the same way; it needs no compilation step.
+                  </>
+                ) : (
+                  <>
+                    Object Detection fine-tunes a YOLO detector on a bounding-box manifest (the output of a
+                    bounding-box labeling job) and exports ONNX for the DDA edge runtime. The model is served
+                    letterboxed exactly as it was trained, and needs no compilation step.
+                  </>
+                )}
               </Alert>
             ) : (
               <Alert type="info">
@@ -688,7 +812,9 @@ export default function CreateTraining() {
               description={
                 modelSource.value === MODEL_SOURCE_YOLO
                   ? 'YOLO trains bounding-box object detectors'
-                  : 'Choose between classification or segmentation'
+                  : modelSource.value === MODEL_SOURCE_RF_DETR
+                    ? 'RF-DETR trains bounding-box object detectors'
+                    : 'Choose between classification or segmentation'
               }
               stretch
             >
@@ -703,39 +829,84 @@ export default function CreateTraining() {
             {isDetection && (
               <Container header={<Header variant="h3">Detection Settings</Header>}>
                 <SpaceBetween size="m">
+                  <FormField
+                    label="Base model"
+                    description={
+                      isRfDetr
+                        ? 'Weights the run starts from: a published RF-DETR COCO checkpoint, one of your completed RF-DETR detectors in this use case, or an imported fine-tunable checkpoint.'
+                        : 'Weights the run starts from: a published YOLO COCO checkpoint, one of your completed YOLO detectors in this use case, or an imported fine-tunable checkpoint.'
+                    }
+                    stretch
+                  >
+                    <Select
+                      selectedOption={selectedBaseModelOption}
+                      onChange={({ detail }) => handleBaseModelChange(detail.selectedOption)}
+                      options={baseModelOptions}
+                      statusType={baseModelsLoading ? 'loading' : 'finished'}
+                      loadingText="Loading your detectors"
+                      placeholder="Select a base model"
+                      selectedAriaLabel="Selected"
+                      filteringType="auto"
+                    />
+                  </FormField>
+                  {classMismatch && baseClasses && (
+                    <Alert type="warning">{classMismatchWarning(baseClasses)}</Alert>
+                  )}
                   <ColumnLayout columns={2}>
-                    <FormField
-                      label="Network input size"
-                      description="Square letterboxed input the detector trains and exports at. The device letterboxes identically."
-                    >
-                      <Select
-                        selectedOption={
-                          DETECTION_IMGSZ_OPTIONS.find(o => o.value === detectionParams.imgsz) ??
-                          { label: detectionParams.imgsz, value: detectionParams.imgsz }
-                        }
-                        onChange={({ detail }) =>
-                          setDetectionParams(p => ({ ...p, imgsz: detail.selectedOption.value as string }))
-                        }
-                        options={DETECTION_IMGSZ_OPTIONS}
-                        selectedAriaLabel="Selected"
-                      />
-                    </FormField>
-                    <FormField
-                      label="Base weights"
-                      description="Pretrained YOLO checkpoint to fine-tune from."
-                    >
-                      <Select
-                        selectedOption={
-                          DETECTION_BASE_WEIGHTS_OPTIONS.find(o => o.value === detectionParams.baseWeights) ??
-                          { label: detectionParams.baseWeights, value: detectionParams.baseWeights }
-                        }
-                        onChange={({ detail }) =>
-                          setDetectionParams(p => ({ ...p, baseWeights: detail.selectedOption.value as string }))
-                        }
-                        options={DETECTION_BASE_WEIGHTS_OPTIONS}
-                        selectedAriaLabel="Selected"
-                      />
-                    </FormField>
+                    {isRfDetr ? (
+                      <>
+                        <FormField
+                          label="Size"
+                          description={
+                            baseModel
+                              ? 'Fixed by the selected base model (its checkpoint is this size).'
+                              : 'RF-DETR checkpoint family. Larger sizes are more accurate and slower on device.'
+                          }
+                        >
+                          <Select
+                            selectedOption={
+                              RFDETR_SIZE_OPTIONS.find(o => o.value === detectionParams.rfdetrSize) ??
+                              { label: detectionParams.rfdetrSize, value: detectionParams.rfdetrSize }
+                            }
+                            onChange={({ detail }) => {
+                              const size = detail.selectedOption.value;
+                              if (isRfDetrSize(size)) setDetectionParams(p => applyRfDetrSize(p, size));
+                            }}
+                            options={RFDETR_SIZE_OPTIONS}
+                            disabled={!!baseModel}
+                            selectedAriaLabel="Selected"
+                          />
+                        </FormField>
+                        <FormField
+                          label="Resolution"
+                          description={`Square input the detector trains and exports at; multiple of 32, 224–1120. Native for ${detectionParams.rfdetrSize}: ${rfdetrNativeResolution(detectionParams.rfdetrSize)}.`}
+                        >
+                          <Input
+                            type="number"
+                            step={32}
+                            value={detectionParams.resolution}
+                            onChange={({ detail }) => setDetectionParams(p => ({ ...p, resolution: detail.value }))}
+                          />
+                        </FormField>
+                      </>
+                    ) : (
+                      <FormField
+                        label="Network input size"
+                        description="Square letterboxed input the detector trains and exports at. The device letterboxes identically."
+                      >
+                        <Select
+                          selectedOption={
+                            DETECTION_IMGSZ_OPTIONS.find(o => o.value === detectionParams.imgsz) ??
+                            { label: detectionParams.imgsz, value: detectionParams.imgsz }
+                          }
+                          onChange={({ detail }) =>
+                            setDetectionParams(p => ({ ...p, imgsz: detail.selectedOption.value as string }))
+                          }
+                          options={DETECTION_IMGSZ_OPTIONS}
+                          selectedAriaLabel="Selected"
+                        />
+                      </FormField>
+                    )}
                     <FormField label="Epochs" description="Fine-tuning epochs (early stopping applies).">
                       <Input
                         type="number"
@@ -750,6 +921,28 @@ export default function CreateTraining() {
                         onChange={({ detail }) => setDetectionParams(p => ({ ...p, batch: detail.value }))}
                       />
                     </FormField>
+                    {isRfDetr && (
+                      <>
+                        <FormField
+                          label="Gradient accumulation"
+                          description="Steps accumulated before each optimizer update (effective batch = batch × this)."
+                        >
+                          <Input
+                            type="number"
+                            value={detectionParams.gradAccum}
+                            onChange={({ detail }) => setDetectionParams(p => ({ ...p, gradAccum: detail.value }))}
+                          />
+                        </FormField>
+                        <FormField label="Learning rate" description="Optimizer learning rate (0–1).">
+                          <Input
+                            type="number"
+                            step={0.00005}
+                            value={detectionParams.lr}
+                            onChange={({ detail }) => setDetectionParams(p => ({ ...p, lr: detail.value }))}
+                          />
+                        </FormField>
+                      </>
+                    )}
                     <FormField label="Patience" description="Epochs without improvement before early stopping.">
                       <Input
                         type="number"
@@ -765,18 +958,32 @@ export default function CreateTraining() {
                         onChange={({ detail }) => setDetectionParams(p => ({ ...p, scoreThreshold: detail.value }))}
                       />
                     </FormField>
-                    <FormField label="IoU threshold" description="Non-max-suppression overlap threshold (0–1).">
-                      <Input
-                        type="number"
-                        step={0.05}
-                        value={detectionParams.iouThreshold}
-                        onChange={({ detail }) => setDetectionParams(p => ({ ...p, iouThreshold: detail.value }))}
-                      />
-                    </FormField>
+                    {!isRfDetr && (
+                      <FormField label="IoU threshold" description="Non-max-suppression overlap threshold (0–1).">
+                        <Input
+                          type="number"
+                          step={0.05}
+                          value={detectionParams.iouThreshold}
+                          onChange={({ detail }) => setDetectionParams(p => ({ ...p, iouThreshold: detail.value }))}
+                        />
+                      </FormField>
+                    )}
                   </ColumnLayout>
+                  <FormField
+                    label="Class names"
+                    description="Optional, comma-separated, in class-id order. Leave empty to use the manifest's class-map; choosing a trained base model prefills its classes."
+                    stretch
+                  >
+                    <Input
+                      value={classNamesInput}
+                      onChange={({ detail }) => setClassNamesInput(detail.value)}
+                      placeholder={manifestClassNames.length > 0 ? manifestClassNames.join(', ') : 'e.g., plate, luggage'}
+                    />
+                  </FormField>
                   <Box variant="small" color="text-status-inactive">
-                    Class names are read from the manifest's class-map. The trained model is served with
-                    aspect-preserving (letterbox) preprocessing to match training.
+                    {isRfDetr
+                      ? 'The trained model is served with a square resize and ImageNet normalisation to match training; decoding is set-based (top-k, no NMS).'
+                      : 'The trained model is served with aspect-preserving (letterbox) preprocessing to match training.'}
                   </Box>
                 </SpaceBetween>
               </Container>
@@ -818,13 +1025,15 @@ export default function CreateTraining() {
               </FormField>
             )}
 
-            {dataPath && dataPathMatch === 'matched' && (
+            {/* `!!`: an empty dataPath would otherwise become a '' child that
+                SpaceBetween wraps in an (unkeyed) empty spacer div. */}
+            {!!dataPath && dataPathMatch === 'matched' && (
               <Alert type="success" dismissible onDismiss={() => setDataPathMatch(null)}>
                 Using the labeling job that labeled <code>{dataPath}</code>. Model Source was set to
                 match its labels; change it if you meant something else.
               </Alert>
             )}
-            {dataPath && dataPathMatch === 'none' && (
+            {!!dataPath && dataPathMatch === 'none' && (
               <Alert type="warning" dismissible onDismiss={() => setDataPathMatch(null)}>
                 <Box variant="p">
                   You arrived from <code>{dataPath}</code>, but training needs labels and no completed
@@ -940,8 +1149,8 @@ export default function CreateTraining() {
             {manifestFormat === 'detection' && (
               <Alert type={isDetection ? 'success' : 'error'} dismissible onDismiss={() => setManifestFormat(null)}>
                 {isDetection
-                  ? '✓ Bounding-box manifest detected — ready for Object Detection training (no transform needed)'
-                  : 'This is a bounding-box manifest. Select the Object Detection (YOLO) model type to train from it.'}
+                  ? `✓ Bounding-box manifest detected — ready for Object Detection training (no transform needed)${manifestClassNames.length > 0 ? `. Classes: ${manifestClassNames.join(', ')}` : ''}`
+                  : 'This is a bounding-box manifest. Select the YOLO or RF-DETR model source to train from it.'}
               </Alert>
             )}
           </SpaceBetween>
@@ -956,7 +1165,10 @@ export default function CreateTraining() {
             >
               <Select
                 selectedOption={instanceType}
-                onChange={({ detail }) => setInstanceType(detail.selectedOption)}
+                onChange={({ detail }) => {
+                  instanceTouched.current = true;
+                  setInstanceType(detail.selectedOption);
+                }}
                 options={activeInstanceTypeOptions}
                 selectedAriaLabel="Selected"
               />
@@ -1027,6 +1239,12 @@ export default function CreateTraining() {
                 <Box variant="awsui-key-label">Type</Box>
                 <Box>{modelType.label}</Box>
               </Box>
+              {isDetection && (
+                <Box>
+                  <Box variant="awsui-key-label">Base model</Box>
+                  <Box>{selectedBaseModelOption?.label ?? effectiveBaseModel.ref}</Box>
+                </Box>
+              )}
               <Box>
                 <Box variant="awsui-key-label">Instance</Box>
                 <Box>{instanceType.label}</Box>

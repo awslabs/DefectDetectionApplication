@@ -640,3 +640,526 @@ def test_detection_get_without_final_metrics_leaves_metrics_absent(env):
     status, job = get(env, body["training_id"])
     assert status == 200 and job["status"] == "Completed"
     assert "metrics" not in job
+
+
+# ---------------------------------------------------------------------------
+# 3. RF-DETR arch smoke (rfdetr-training-and-transfer-learning task 5.1).
+#    The full RF-DETR / base-model matrix lands in task 5.2.
+# ---------------------------------------------------------------------------
+
+def test_rfdetr_request_reaches_sagemaker_with_rfdetr_entry_point(env, monkeypatch):
+    """`detection_arch='rf_detr'` launches train_rfdetr.py with the RF-DETR env
+    and persists the RF-DETR record fields (top_k, no iou_threshold) plus the
+    default published Base_Model_Descriptor. The entry point itself is task
+    4.2, so the code dir is staged with stubs here."""
+    svc = fresh_service()
+    code_dir = tempfile.mkdtemp(prefix="dda-rfdetr-code-")
+    try:
+        for rel in ("datasets/manifest_to_detector_dataset.py", "datasets/dedupe_frames.py"):
+            shutil.copy(os.path.join(_REPO_ROOT, rel), code_dir)
+        with open(os.path.join(code_dir, "train_rfdetr.py"), "w") as fh:
+            fh.write("# stub entry point (task 4.2)\n")
+        with open(os.path.join(code_dir, "requirements-rfdetr.txt"), "w") as fh:
+            fh.write("rfdetr\n")
+        monkeypatch.setenv("DETECTION_TRAINING_CODE_DIR", code_dir)
+
+        status, body = create(env, detection_body(env, detection_arch="rf_detr"))
+        assert status == 201, body
+        kw = svc.create_training_calls[0]
+        assert kw["HyperParameters"]["sagemaker_program"] == "train_rfdetr.py"
+        assert kw["Environment"] == {
+            "MANIFEST_S3": f"s3://{USECASE_BUCKET}/{DETECTION_MANIFEST_KEY}",
+            "RFDETR_SIZE": "small", "RESOLUTION": "512", "EPOCHS": "100", "BATCH": "4",
+            "GRAD_ACCUM": "4", "LR": "0.0001", "PATIENCE": "10", "ONNX_OPSET": "17",
+        }
+        assert "BASE_WEIGHTS_S3" not in kw["Environment"]
+
+        det = env.training_jobs.get_item(Key={"training_id": body["training_id"]})["Item"]["detection"]
+        assert det["detection_arch"] == "rf_detr"
+        assert det["network_input_width"] == 512 and det["network_input_height"] == 512
+        assert det["preserve_aspect"] is False and det["top_k"] == 300
+        assert "iou_threshold" not in det
+        assert det["rfdetr_size"] == "small" and det["resolution"] == 512
+        assert det["grad_accum"] == 4 and det["lr"] == Decimal("0.0001")
+        assert det["base_model"]["kind"] == "published" and det["base_model"]["ref"] == "small"
+        assert det["base_model"]["weights_s3"] is None
+    finally:
+        shutil.rmtree(code_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# 4. RF-DETR request shape + base-model resolution matrix
+#    (rfdetr-training-and-transfer-learning task 5.2).
+#    Req 3.2 / 3.3 (RF-DETR launch + record), Req 6.3–6.6 (base model ->
+#    BASE_WEIGHTS_S3 / BASE_WEIGHTS_MEMBER, every rejection a 400 with no S3
+#    write and no SageMaker call), Req 8.1 / 8.2 (YOLO shape unchanged).
+# ---------------------------------------------------------------------------
+
+# Exactly what the RF-DETR entry point reads (design §Shared layer): no
+# SCORE_THRESHOLD, no IOU — thresholds only shape the device manifest.
+RFDETR_ENV_KEYS = {"MANIFEST_S3", "RFDETR_SIZE", "RESOLUTION", "EPOCHS", "BATCH",
+                   "GRAD_ACCUM", "LR", "PATIENCE", "ONNX_OPSET"}
+
+# The YOLO env test_detection_request_launches_script_mode_job pins for a
+# request that names neither detection_arch nor base_model.
+YOLO_DEFAULT_ENV = {
+    "MANIFEST_S3": f"s3://{USECASE_BUCKET}/{DETECTION_MANIFEST_KEY}",
+    "IMGSZ": "1280", "EPOCHS": "100", "BATCH": "4",
+    "BASE_WEIGHTS": "yolo11s.pt", "PATIENCE": "30", "ONNX_OPSET": "17",
+}
+YOLO_SOURCEDIR_MEMBERS = ["dedupe_frames.py", "manifest_to_detector_dataset.py",
+                          "requirements.txt", "train.py"]
+# The pre-change YOLO Detection_Record_Fields (portal-detection-training Req 4.1).
+YOLO_RECORD_KEYS = {
+    "detection_arch", "network_input_width", "network_input_height", "class_names",
+    "num_classes", "score_threshold", "iou_threshold", "preserve_aspect", "imgsz",
+    "epochs", "batch", "base_weights", "patience", "onnx_opset", "sourcedir_s3",
+}
+CREATE_TRAINING_JOB_KWARGS = {
+    "TrainingJobName", "HyperParameters", "Environment", "AlgorithmSpecification",
+    "RoleArn", "OutputDataConfig", "ResourceConfig", "StoppingCondition",
+    "EnableNetworkIsolation", "Tags",
+}
+
+RFDETR_STUB_ENTRY_POINT = "# stub RF-DETR entry point (task 4.2)\n"
+RFDETR_STUB_REQUIREMENTS = "rfdetr[onnxexport]==1.2.1\nonnxruntime\nnumpy<2\n"
+
+
+@pytest.fixture
+def both_arch_code_dir(env, monkeypatch):
+    """Stage a code dir holding BOTH entry points flat, the way the CDK bundler
+    will after task 8.1. `train_rfdetr.py` / `requirements-rfdetr.txt` are
+    task 4.2: the real files are copied when they exist on disk, otherwise
+    stubbed (the handler only tars them — nothing here executes them). No
+    `_common.py`, so the YOLO tarball keeps its pinned four members."""
+    code_dir = tempfile.mkdtemp(prefix="dda-both-arch-code-")
+    for rel in ("datasets/detection_training/train.py",
+                "datasets/detection_training/requirements.txt",
+                "datasets/manifest_to_detector_dataset.py",
+                "datasets/dedupe_frames.py"):
+        shutil.copy(os.path.join(_REPO_ROOT, rel), code_dir)
+    for rel, stub in (("datasets/detection_training/train_rfdetr.py", RFDETR_STUB_ENTRY_POINT),
+                      ("datasets/detection_training/requirements-rfdetr.txt", RFDETR_STUB_REQUIREMENTS)):
+        src = os.path.join(_REPO_ROOT, rel)
+        if os.path.isfile(src):
+            shutil.copy(src, code_dir)
+        else:
+            with open(os.path.join(code_dir, os.path.basename(rel)), "w") as fh:
+                fh.write(stub)
+    monkeypatch.setenv("DETECTION_TRAINING_CODE_DIR", code_dir)
+    yield code_dir
+    shutil.rmtree(code_dir, ignore_errors=True)
+
+
+class _RecordingS3:
+    """Wraps the moto S3 client the handler gets from get_usecase_client and
+    records every WRITE, so a 400 can prove the handler staged nothing in the
+    use-case bucket (Req 6.4). Reads pass straight through."""
+    WRITE_METHODS = ("put_object", "upload_file", "upload_fileobj", "copy_object", "copy",
+                     "delete_object", "delete_objects")
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.writes = []
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name in self.WRITE_METHODS and callable(attr):
+            def _record(*args, **kwargs):
+                self.writes.append((name, args, kwargs))
+                return attr(*args, **kwargs)
+            return _record
+        return attr
+
+
+@pytest.fixture
+def s3_spy(env, monkeypatch):
+    import boto3
+    spy = _RecordingS3(boto3.client("s3", region_name=REGION))
+    original = env.training.get_usecase_client
+
+    def _dispatch(service_name, usecase, session_name=None, region=None):
+        if service_name == "s3":
+            return spy
+        return original(service_name, usecase, session_name=session_name, region=region)
+
+    monkeypatch.setattr(env.training, "get_usecase_client", _dispatch)
+    return spy
+
+
+def _sourcedir_members(env, kw):
+    """(member names, {name: bytes}) of the sourcedir.tar.gz a call staged."""
+    import io, tarfile
+    code_s3 = kw["HyperParameters"]["sagemaker_submit_directory"]
+    key = code_s3.split(f"s3://{USECASE_BUCKET}/", 1)[1]
+    obj = env.s3.get_object(Bucket=USECASE_BUCKET, Key=key)
+    contents = {}
+    with tarfile.open(fileobj=io.BytesIO(obj["Body"].read()), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            contents[member.name] = tar.extractfile(member).read()
+    return sorted(contents), contents
+
+
+def _completed_base_job(env, svc, arch="yolo"):
+    """Create a detection job through the handler, mark it Completed in the
+    fake SageMaker and GET it so training.py persists artifact_s3 — the exact
+    record a later run's `base_model = {kind: 'training_job'}` resolves
+    against. Returns (training_id, artifact_s3)."""
+    body = detection_body(env, model_name=f"base-{arch.replace('_', '-')}", model_version="1.0.0")
+    if arch == "rf_detr":
+        body["detection_arch"] = "rf_detr"
+    status, created = create(env, body)
+    assert status == 201, created
+    _complete(svc, created["training_job_name"])
+    status, job = get(env, created["training_id"])
+    assert status == 200 and job["status"] == "Completed", job
+    assert job["artifact_s3"].endswith("/output/model.tar.gz")
+    return created["training_id"], job["artifact_s3"]
+
+
+def _published_descriptor(arch, ref):
+    return {"kind": "published", "ref": ref, "weights_s3": None, "member": None,
+            "detection_arch": arch, "class_names": None}
+
+
+def _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_records_before, expected_calls=0):
+    assert status == 400, body
+    assert len(svc.create_training_calls) == expected_calls
+    assert s3_spy.writes == [], [w[0] for w in s3_spy.writes]
+    assert env.training_jobs.scan(Select="COUNT")["Count"] == n_records_before
+    return body["error"]
+
+
+# --- (1) RF-DETR request shape --------------------------------------------
+
+def test_rfdetr_request_shape_env_sourcedir_and_record(env, both_arch_code_dir):
+    """Req 3.2 / 3.3: the RF-DETR entry point, ITS env (no IOU, no score),
+    a sourcedir whose requirements.txt IS requirements-rfdetr.txt, and the
+    RF-DETR Detection_Record_Fields (top_k, no iou_threshold, published
+    Base_Model_Descriptor)."""
+    svc = fresh_service()
+    status, body = create(env, detection_body(
+        env, detection_arch="rf_detr",
+        hyperparameters={"rfdetr_size": "medium", "resolution": 640, "epochs": 50, "batch": 2,
+                         "grad_accum": 8, "lr": 0.0002, "patience": 5, "score_threshold": 0.4},
+    ))
+    assert status == 201, body
+    # The 201 body is the LFV shape (training_id / job name / arn / status /
+    # message); arch and base model live on the record, asserted below.
+    assert set(body) == {"training_id", "training_job_name", "training_job_arn", "status", "message"}
+    assert len(svc.create_training_calls) == 1
+    kw = svc.create_training_calls[0]
+    assert set(kw) == CREATE_TRAINING_JOB_KWARGS
+
+    # Entry point + env (passed both as HyperParameters and Environment).
+    assert kw["HyperParameters"]["sagemaker_program"] == "train_rfdetr.py"
+    env_vars = kw["Environment"]
+    assert env_vars == {
+        "MANIFEST_S3": f"s3://{USECASE_BUCKET}/{DETECTION_MANIFEST_KEY}",
+        "RFDETR_SIZE": "medium", "RESOLUTION": "640", "EPOCHS": "50", "BATCH": "2",
+        "GRAD_ACCUM": "8", "LR": "0.0002", "PATIENCE": "5", "ONNX_OPSET": "17",
+    }
+    assert set(env_vars) == RFDETR_ENV_KEYS
+    assert not any("IOU" in k or "SCORE" in k or "IMGSZ" in k for k in env_vars)
+    assert "BASE_WEIGHTS_S3" not in env_vars and "BASE_WEIGHTS_MEMBER" not in env_vars
+    for k, v in env_vars.items():
+        assert kw["HyperParameters"][k] == v
+    assert kw["EnableNetworkIsolation"] is False
+    assert kw["ResourceConfig"]["InstanceType"] == "ml.g4dn.xlarge"
+    assert "InputDataConfig" not in kw
+    assert {m["Name"] for m in kw["AlgorithmSpecification"]["MetricDefinitions"]} == \
+        {"test:mAP50", "test:mAP50-95", "test:precision", "test:recall"}
+
+    # Sourcedir: the RF-DETR entry point + ITS requirements renamed to
+    # requirements.txt; the YOLO entry point is NOT bundled (Req 3.4).
+    members, contents = _sourcedir_members(env, kw)
+    assert members == ["dedupe_frames.py", "manifest_to_detector_dataset.py",
+                       "requirements.txt", "train_rfdetr.py"]
+    with open(os.path.join(both_arch_code_dir, "requirements-rfdetr.txt"), "rb") as fh:
+        assert contents["requirements.txt"] == fh.read()
+    with open(os.path.join(both_arch_code_dir, "train_rfdetr.py"), "rb") as fh:
+        assert contents["train_rfdetr.py"] == fh.read()
+
+    # Record.
+    item = env.training_jobs.get_item(Key={"training_id": body["training_id"]})["Item"]
+    assert set(item.keys()) == LFV_ITEM_KEYS | {"runtime", "detection"}
+    assert item["model_type"] == "object_detection" and item["runtime"] == "onnx"
+    det = item["detection"]
+    assert det["detection_arch"] == "rf_detr"
+    assert det["rfdetr_size"] == "medium"
+    assert det["resolution"] == 640
+    assert det["network_input_width"] == 640 and det["network_input_height"] == 640
+    assert det["grad_accum"] == 8 and det["lr"] == Decimal("0.0002")
+    assert det["epochs"] == 50 and det["batch"] == 2 and det["patience"] == 5
+    assert det["top_k"] == 300
+    assert det["preserve_aspect"] is False
+    assert det["score_threshold"] == Decimal("0.4")
+    assert det["class_names"] == ["blue_plate"] and det["num_classes"] == 1
+    assert det["sourcedir_s3"] == kw["HyperParameters"]["sagemaker_submit_directory"]
+    assert "iou_threshold" not in det
+    assert "imgsz" not in det and "base_weights" not in det
+    assert det["base_model"] == _published_descriptor("rf_detr", "medium")
+
+
+def test_rfdetr_resolution_defaults_to_the_size_native_value(env, both_arch_code_dir):
+    svc = fresh_service()
+    status, body = create(env, detection_body(
+        env, detection_arch="rf_detr", hyperparameters={"rfdetr_size": "large"}))
+    assert status == 201, body
+    assert svc.create_training_calls[0]["Environment"]["RESOLUTION"] == "704"
+    det = env.training_jobs.get_item(Key={"training_id": body["training_id"]})["Item"]["detection"]
+    assert det["resolution"] == 704 and det["network_input_width"] == 704
+
+
+# --- (2) resolution 500 -> 400, nothing staged ----------------------------
+
+def test_rfdetr_resolution_not_multiple_of_32_is_400_with_no_side_effects(env, both_arch_code_dir, s3_spy):
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, detection_body(
+        env, detection_arch="rf_detr", hyperparameters={"resolution": 500}))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == ("Invalid hyperparameter 'resolution': must be a multiple of 32 "
+                     "between 224 and 1120")
+
+
+@pytest.mark.parametrize("hp,field", [
+    ({"rfdetr_size": "xlarge"}, "rfdetr_size"),
+    ({"grad_accum": 0}, "grad_accum"),
+    ({"lr": 1.0}, "lr"),
+    ({"imgsz": 640}, "imgsz"),              # YOLO-only knob on an RF-DETR request
+    ({"iou_threshold": 0.5}, "iou_threshold"),
+])
+def test_rfdetr_bad_hyperparameter_is_400_with_no_side_effects(env, both_arch_code_dir, s3_spy, hp, field):
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, detection_body(env, detection_arch="rf_detr", hyperparameters=hp))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert field in error
+
+
+# --- (8) unknown arch -> 400 ----------------------------------------------
+
+@pytest.mark.parametrize("arch", ["detr", "yolov8", "RF-DETR"])
+def test_unknown_detection_arch_is_400_with_no_side_effects(env, s3_spy, arch):
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, detection_body(env, detection_arch=arch))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert "detection_arch" in error and arch in error
+    assert "yolo" in error and "rf_detr" in error
+
+
+# --- (3) base model from a completed job -> BASE_WEIGHTS_S3 + member ------
+
+def test_base_model_from_completed_yolo_job_sets_base_weights_env(env, both_arch_code_dir):
+    """Req 6.3 / 6.5 / 6.6: the env carries the base job's Detection_Artifact
+    (the tarball — the entry point extracts best.pt itself) and the record
+    persists the resolved Base_Model_Descriptor. Everything else about the
+    YOLO request is unchanged."""
+    svc = fresh_service()
+    base_id, artifact_s3 = _completed_base_job(env, svc, arch="yolo")
+
+    status, body = create(env, detection_body(
+        env, base_model={"kind": "training_job", "ref": base_id}))
+    assert status == 201, body
+    assert len(svc.create_training_calls) == 2
+    kw = svc.create_training_calls[1]
+    assert kw["HyperParameters"]["sagemaker_program"] == "train.py"
+    assert kw["Environment"] == {
+        **YOLO_DEFAULT_ENV,
+        "BASE_WEIGHTS_S3": artifact_s3,
+        "BASE_WEIGHTS_MEMBER": "best.pt",
+    }
+    assert kw["HyperParameters"]["BASE_WEIGHTS_S3"] == artifact_s3
+    assert kw["HyperParameters"]["BASE_WEIGHTS_MEMBER"] == "best.pt"
+    assert artifact_s3.startswith(f"s3://{USECASE_BUCKET}/models/training/base-yolo-")
+
+    det = env.training_jobs.get_item(Key={"training_id": body["training_id"]})["Item"]["detection"]
+    assert det["base_model"] == {
+        "kind": "training_job", "ref": base_id, "weights_s3": artifact_s3,
+        "member": "best.pt", "detection_arch": "yolo", "class_names": ["blue_plate"],
+    }
+    # The rest of the YOLO record is what it always was.
+    assert set(det) == YOLO_RECORD_KEYS | {"base_model"}
+    assert det["detection_arch"] == "yolo" and det["base_weights"] == "yolo11s.pt"
+    assert det["iou_threshold"] == Decimal("0.45") and det["preserve_aspect"] is True
+
+
+def test_base_model_from_completed_rfdetr_job_uses_the_rfdetr_checkpoint_member(env, both_arch_code_dir):
+    svc = fresh_service()
+    base_id, artifact_s3 = _completed_base_job(env, svc, arch="rf_detr")
+
+    status, body = create(env, detection_body(
+        env, detection_arch="rf_detr", base_model={"kind": "training_job", "ref": base_id}))
+    assert status == 201, body
+    kw = svc.create_training_calls[1]
+    assert kw["HyperParameters"]["sagemaker_program"] == "train_rfdetr.py"
+    assert kw["Environment"]["BASE_WEIGHTS_S3"] == artifact_s3
+    assert kw["Environment"]["BASE_WEIGHTS_MEMBER"] == "checkpoint_best_total.pth"
+    assert set(kw["Environment"]) == RFDETR_ENV_KEYS | {"BASE_WEIGHTS_S3", "BASE_WEIGHTS_MEMBER"}
+    det = env.training_jobs.get_item(Key={"training_id": body["training_id"]})["Item"]["detection"]
+    assert det["base_model"]["kind"] == "training_job" and det["base_model"]["ref"] == base_id
+    assert det["base_model"]["weights_s3"] == artifact_s3
+    assert det["base_model"]["member"] == "checkpoint_best_total.pth"
+    assert det["base_model"]["detection_arch"] == "rf_detr"
+
+
+# --- (4) arch mismatch -> 400 ---------------------------------------------
+
+@pytest.mark.parametrize("base_arch,request_arch,expected", [
+    ("yolo", "rf_detr", "is a yolo detector; cannot start an rf_detr run from it"),
+    ("rf_detr", "yolo", "is a rf_detr detector; cannot start a yolo run from it"),
+])
+def test_base_model_arch_mismatch_is_400_with_no_side_effects(
+        env, both_arch_code_dir, s3_spy, base_arch, request_arch, expected):
+    svc = fresh_service()
+    base_id, _artifact = _completed_base_job(env, svc, arch=base_arch)
+    s3_spy.writes.clear()          # the base job legitimately staged its own sourcedir
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+
+    status, body = create(env, detection_body(
+        env, detection_arch=request_arch, base_model={"kind": "training_job", "ref": base_id}))
+    error = _assert_rejected_without_side_effects(
+        env, svc, s3_spy, status, body, n_before, expected_calls=1)
+    assert f"base-{base_arch.replace('_', '-')} v1.0.0" in error
+    assert expected in error
+
+
+# --- (5) InProgress base -> 400 -------------------------------------------
+
+def test_base_model_not_completed_is_400_with_no_side_effects(env, s3_spy):
+    svc = fresh_service()
+    status, created = create(env, detection_body(env, model_name="base-yolo", model_version="1.0.0"))
+    assert status == 201, created            # InProgress, no artifact yet
+    s3_spy.writes.clear()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+
+    status, body = create(env, detection_body(
+        env, base_model={"kind": "training_job", "ref": created["training_id"]}))
+    error = _assert_rejected_without_side_effects(
+        env, svc, s3_spy, status, body, n_before, expected_calls=1)
+    assert "base-yolo v1.0.0" in error
+    assert "is not Completed (status: InProgress)" in error
+
+
+# --- (6) other use case / unknown ref -> 400 (one message, no leak) -------
+
+@pytest.mark.parametrize("where", ["other-usecase", "unknown"])
+def test_base_model_outside_this_usecase_is_400_with_no_side_effects(env, s3_spy, where):
+    svc = fresh_service()
+    ref = str(uuid.uuid4())
+    if where == "other-usecase":
+        # A perfectly good Completed YOLO detector — in someone else's use case.
+        env.training_jobs.put_item(Item={
+            "training_id": ref, "usecase_id": f"uc-other-{uuid.uuid4()}",
+            "model_name": "their-plates", "model_version": "3.0.0",
+            "model_type": "object_detection", "runtime": "onnx", "status": "Completed",
+            "artifact_s3": f"s3://their-bucket/models/training/their-plates-x/output/model.tar.gz",
+            "detection": {"detection_arch": "yolo", "class_names": ["plate"], "num_classes": 1},
+        })
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+
+    status, body = create(env, detection_body(
+        env, base_model={"kind": "training_job", "ref": ref}))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert error == f"Base model training job '{ref}' was not found in this use case"
+    assert "their-plates" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("base_model,expected", [
+    ({"kind": "checkpoint", "ref": "x"}, "Invalid base_model.kind 'checkpoint'"),
+    ({"kind": "training_job"}, "base_model.ref is required when base_model.kind is 'training_job'"),
+    ("yolo11s.pt", "base_model must be an object of the form {kind, ref}"),
+])
+def test_malformed_base_model_is_400_with_no_side_effects(env, s3_spy, base_model, expected):
+    svc = fresh_service()
+    n_before = env.training_jobs.scan(Select="COUNT")["Count"]
+    status, body = create(env, detection_body(env, base_model=base_model))
+    error = _assert_rejected_without_side_effects(env, svc, s3_spy, status, body, n_before)
+    assert expected in error
+
+
+# --- (7) published / omitted -> no BASE_WEIGHTS_* -------------------------
+
+@pytest.mark.parametrize("arch,base_model,expected_ref", [
+    ("yolo", None, "yolo11s.pt"),                                    # omitted
+    ("yolo", {"kind": "published"}, "yolo11s.pt"),                  # kind only
+    ("yolo", {"kind": "published", "ref": "yolo11s.pt"}, "yolo11s.pt"),
+    ("rf_detr", None, "small"),
+    ("rf_detr", {"kind": "published", "ref": "small"}, "small"),
+])
+def test_published_base_model_adds_no_base_weights_env(env, both_arch_code_dir, arch, base_model, expected_ref):
+    svc = fresh_service()
+    overrides = {"detection_arch": arch}
+    if base_model is not None:
+        overrides["base_model"] = base_model
+    status, body = create(env, detection_body(env, **overrides))
+    assert status == 201, body
+    env_vars = svc.create_training_calls[0]["Environment"]
+    assert "BASE_WEIGHTS_S3" not in env_vars and "BASE_WEIGHTS_MEMBER" not in env_vars
+    assert "BASE_WEIGHTS_S3" not in svc.create_training_calls[0]["HyperParameters"]
+    if arch == "yolo":
+        assert env_vars == YOLO_DEFAULT_ENV
+    else:
+        assert set(env_vars) == RFDETR_ENV_KEYS
+    det = env.training_jobs.get_item(Key={"training_id": body["training_id"]})["Item"]["detection"]
+    assert det["base_model"] == _published_descriptor(arch, expected_ref)
+
+
+# --- (9) YOLO without detection_arch / base_model: unchanged -------------
+
+def test_yolo_request_without_arch_or_base_model_is_unchanged(env):
+    """Req 8.1: a caller that predates this spec gets the exact
+    create_training_job kwargs test_detection_request_launches_script_mode_job
+    pinned before the arch/base-model plumbing landed, and the same record —
+    plus the one additive `detection.base_model` key Req 6.6 mandates
+    (published yolo11s.pt, no weights). Uses the module code dir (no
+    RF-DETR files staged), exactly as the pinned test does."""
+    svc = fresh_service()
+    status, body = create(env, detection_body(env))
+    assert status == 201, body
+    kw = svc.create_training_calls[0]
+    job_name = kw["TrainingJobName"]
+    code_s3 = f"s3://{USECASE_BUCKET}/models/detection-training/{job_name}/sourcedir.tar.gz"
+
+    assert set(kw) == CREATE_TRAINING_JOB_KWARGS
+    assert kw["HyperParameters"] == {
+        "sagemaker_program": "train.py",
+        "sagemaker_submit_directory": code_s3,
+        **YOLO_DEFAULT_ENV,
+    }
+    assert kw["Environment"] == YOLO_DEFAULT_ENV
+    assert kw["AlgorithmSpecification"] == {
+        "TrainingImage": (f"763104351884.dkr.ecr.{REGION}.amazonaws.com/"
+                          "pytorch-training:2.5.1-gpu-py311-cu124-ubuntu22.04-sagemaker"),
+        "TrainingInputMode": "File",
+        "MetricDefinitions": env.training.DETECTION_METRIC_DEFINITIONS,
+    }
+    assert kw["ResourceConfig"] == {
+        "InstanceType": "ml.g4dn.xlarge", "InstanceCount": 1, "VolumeSizeInGB": 60}
+    assert kw["StoppingCondition"] == {"MaxRuntimeInSeconds": 10800}
+    assert kw["EnableNetworkIsolation"] is False
+    assert kw["RoleArn"] == f"arn:aws:iam::{ACCOUNT_ID}:role/DDASageMakerExecutionRole"
+    assert kw["OutputDataConfig"] == {"S3OutputPath": f"s3://{USECASE_BUCKET}/models/training/{job_name}"}
+    assert [t["Key"] for t in kw["Tags"]] == ["UseCase", "ModelName", "ModelVersion", "CreatedBy"]
+    members, _contents = _sourcedir_members(env, kw)
+    assert members == YOLO_SOURCEDIR_MEMBERS
+
+    item = env.training_jobs.get_item(Key={"training_id": body["training_id"]})["Item"]
+    assert set(item.keys()) == LFV_ITEM_KEYS | {"runtime", "detection"}
+    assert item["runtime"] == "onnx" and "source" not in item
+    det = item["detection"]
+    assert set(det) == YOLO_RECORD_KEYS | {"base_model"}
+    assert {k: det[k] for k in YOLO_RECORD_KEYS} == {
+        "detection_arch": "yolo",
+        "network_input_width": 1280, "network_input_height": 1280,
+        "class_names": ["blue_plate"], "num_classes": 1,
+        "score_threshold": Decimal("0.25"), "iou_threshold": Decimal("0.45"),
+        "preserve_aspect": True,
+        "imgsz": 1280, "epochs": 100, "batch": 4, "base_weights": "yolo11s.pt",
+        "patience": 30, "onnx_opset": 17,
+        "sourcedir_s3": code_s3,
+    }
+    assert det["base_model"] == _published_descriptor("yolo", "yolo11s.pt")
+    assert "top_k" not in det and "rfdetr_size" not in det and "resolution" not in det

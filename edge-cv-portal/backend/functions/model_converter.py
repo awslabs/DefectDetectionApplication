@@ -24,6 +24,10 @@ from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields
 )
+# Envelope-only checkpoint classifier (stdlib, never raises, no torch import).
+# Smart Import keeps a fine-tunable .pt/.pth as a sidecar so it can later be a
+# base model (rfdetr-training-and-transfer-learning Requirement 7).
+from checkpoint_probe import classify_checkpoint
 
 # Configure logging
 logger = logging.getLogger()
@@ -872,11 +876,38 @@ def convert_model(event: Dict, context: Any) -> Dict:
             logger.info(f"Downloading model from {model_s3_uri}")
             s3_client.download_file(source_bucket, source_key, local_model)
 
+            safe_model_name = model_name.replace(' ', '_').replace('-', '_').lower()
+            # One hex suffix shared by the package key and the checkpoint
+            # sidecar key so the two objects are visibly paired in S3.
+            hex8 = uuid.uuid4().hex[:8]
+
             # Inspect the model (PyTorch only; ONNX is opaque to the torch
             # inspector and doesn't need it).
+            fine_tunable = None
             if is_onnx:
                 model_info = {'type': 'onnx', 'architecture_hints': ['ONNX model']}
             else:
+                # Requirement 7: a .pt/.pth Smart Import is packaged verbatim
+                # (no ONNX conversion happens here), so the only thing that
+                # makes it usable as a base model later is keeping the
+                # UNMODIFIED source bytes as a bare sidecar object next to the
+                # package. classify_checkpoint is envelope-only and never
+                # raises; anything it does not recognise as an ultralytics or
+                # RF-DETR checkpoint is simply not fine-tunable.
+                probe = classify_checkpoint(local_model)
+                if probe.get('fine_tunable'):
+                    source_ext = os.path.splitext(source_key)[1].lstrip('.').lower() or 'pt'
+                    checkpoint_key = f"converted-models/{safe_model_name}-{hex8}/checkpoint.{source_ext}"
+                    checkpoint_s3 = f"s3://{usecase['s3_bucket']}/{checkpoint_key}"
+                    logger.info(f"Keeping fine-tunable {probe.get('kind')} checkpoint at {checkpoint_s3}")
+                    s3_client.upload_file(local_model, usecase['s3_bucket'], checkpoint_key)
+                    fine_tunable = {
+                        'arch': probe.get('arch'),
+                        'kind': probe.get('kind'),
+                        'checkpoint_s3': checkpoint_s3,
+                        'class_names': probe.get('class_names'),
+                        'num_classes': probe.get('num_classes'),
+                    }
                 logger.info("Inspecting model...")
                 # trusted_source is True here (non-allowlisted sources were
                 # rejected above), enabling the full-checkpoint fallback.
@@ -884,7 +915,6 @@ def convert_model(event: Dict, context: Any) -> Dict:
             
             # Generate DDA package
             logger.info("Generating DDA-compatible package...")
-            safe_model_name = model_name.replace(' ', '_').replace('-', '_').lower()
             output_tar = os.path.join(temp_dir, f"{safe_model_name}.tar.gz")
             
             generate_dda_package(
@@ -904,7 +934,7 @@ def convert_model(event: Dict, context: Any) -> Dict:
             )
             
             # Upload converted package to S3
-            output_key = f"converted-models/{safe_model_name}-{uuid.uuid4().hex[:8]}.tar.gz"
+            output_key = f"converted-models/{safe_model_name}-{hex8}.tar.gz"
             output_s3_uri = f"s3://{usecase['s3_bucket']}/{output_key}"
             
             logger.info(f"Uploading converted model to {output_s3_uri}")
@@ -934,6 +964,7 @@ def convert_model(event: Dict, context: Any) -> Dict:
                 'model_type': model_type,
                 'input_shape': [1, 3, image_height, image_width],
                 'model_info': model_info,
+                'fine_tunable': fine_tunable,
                 'message': 'Model converted successfully'
             }
             
@@ -952,7 +983,8 @@ def convert_model(event: Dict, context: Any) -> Dict:
                             'model_name': model_name,
                             'model_version': '1.0.0',
                             'model_s3_uri': output_s3_uri,
-                            'description': f'Auto-converted from {model_s3_uri}'
+                            'description': f'Auto-converted from {model_s3_uri}',
+                            'fine_tunable': fine_tunable,
                         }),
                         'requestContext': {
                             'authorizer': {

@@ -33,6 +33,11 @@ Semantics under test:
   and inflates held-out metrics.
 * **YOLO geometry.** Absolute pixel left/top/width/height -> normalized
   centre-format cx/cy/w/h.
+* **COCO layouts differ only in paths.** `--coco-layout rfdetr` puts images
+  beside `<split>/_annotations.coco.json` and names the validation split
+  `valid` (what RF-DETR's loader reads); the annotation JSON itself is
+  byte-identical to the default `nested` layout, and omitting the flag is
+  `nested`.
 
 The converter is pure Python + numpy/Pillow with no AWS calls, so no moto
 fixtures are needed; conftest.py already places the shared layer on sys.path
@@ -332,3 +337,313 @@ def test_full_pipeline_from_portal_manifest_to_yolo_dataset(tmp_path):
             stem = Path(rec["file_name"]).stem
             assert (out / "images" / split / rec["file_name"]).is_file()
             assert (out / "labels" / split / f"{stem}.txt").is_file()
+
+
+# ---------------------------------------------------------------------------
+# COCO writer: `nested` vs `rfdetr` layout
+# ---------------------------------------------------------------------------
+
+ANN = "_annotations.coco.json"
+
+#: Pinned independently of `conv.COCO_SPLIT_DIRS` so a drift in the module
+#: constant fails here rather than being silently mirrored by the test.
+RFDETR_DIRS = {"train": "train", "val": "valid", "test": "test"}
+NESTED_DIRS = {"train": "train", "val": "val", "test": "test"}
+
+
+def _coco_assigned():
+    """Three non-empty splits: a positive, a negative, a two-box positive."""
+    return {
+        "train": [_rec("a.jpg", [(0, 100, 200, 300, 400)]),
+                  _rec("neg.jpg", [])],
+        "val": [_rec("b.jpg", [(0, 0, 0, 10, 10), (0, 500, 400, 100, 100)])],
+        "test": [_rec("c.jpg", [(0, 1, 1, 5, 5)])],
+    }
+
+
+def _touch_images(tmp_path, assigned):
+    """Placeholder image files: the COCO writer only copies, never decodes."""
+    images = tmp_path / "frames"
+    images.mkdir()
+    for recs in assigned.values():
+        for rec in recs:
+            (images / rec["file_name"]).write_bytes(b"jpeg-bytes")
+    return images
+
+
+def _tree(root):
+    """{relative posix path: bytes} for every file under `root`."""
+    root = Path(root)
+    return {p.relative_to(root).as_posix(): p.read_bytes()
+            for p in root.rglob("*") if p.is_file()}
+
+
+def test_rfdetr_layout_places_images_beside_annotations(tmp_path):
+    """RF-DETR joins `dataset_dir/<split>/<file_name>`: no `images/` level."""
+    assigned = _coco_assigned()
+    images = _touch_images(tmp_path, assigned)
+    out = tmp_path / "ds"
+
+    conv.write_coco(assigned, LABEL_SET, images, out, link=False,
+                    layout="rfdetr")
+
+    for split, recs in assigned.items():
+        split_dir = out / RFDETR_DIRS[split]
+        assert (split_dir / ANN).is_file(), f"{split}: annotation JSON missing"
+        assert not (split_dir / "images").exists(), (
+            f"{split}: rfdetr layout must not nest an images/ directory")
+        for rec in recs:
+            assert (split_dir / rec["file_name"]).is_file(), (
+                f"{split}: {rec['file_name']} not beside {ANN}")
+
+
+@pytest.mark.parametrize("layout, dirs", [("nested", NESTED_DIRS),
+                                          ("rfdetr", RFDETR_DIRS)])
+def test_coco_split_directory_names_per_layout(tmp_path, layout, dirs):
+    """Only the validation directory is renamed, and only by `rfdetr`."""
+    assigned = _coco_assigned()
+    images = _touch_images(tmp_path, assigned)
+    out = tmp_path / "ds"
+
+    conv.write_coco(assigned, LABEL_SET, images, out, link=False,
+                    layout=layout)
+
+    assert {p.name for p in out.iterdir()} == set(dirs.values())
+    assert conv.COCO_SPLIT_DIRS[layout] == dirs
+
+
+def test_rfdetr_layout_skips_empty_splits(tmp_path):
+    """An empty test split gets no `test/` directory, as in `nested`."""
+    assigned = _coco_assigned()
+    assigned["test"] = []
+    images = _touch_images(tmp_path, assigned)
+    out = tmp_path / "ds"
+
+    conv.write_coco(assigned, LABEL_SET, images, out, link=False,
+                    layout="rfdetr")
+
+    assert {p.name for p in out.iterdir()} == {"train", "valid"}
+
+
+def test_rfdetr_annotation_json_is_byte_identical_to_nested(tmp_path):
+    """Same assignment -> same `_annotations.coco.json` bytes per split.
+
+    Two classes so category ordering is observable: `categories` follow
+    `class_names` order with 1-based ids, and a zero-based class id `k`
+    becomes `category_id k + 1`.
+    """
+    class_names = ["blue_plate", "red_plate"]
+    assigned = _coco_assigned()
+    assigned["train"].append(_rec("d.jpg", [(1, 20, 30, 40, 50)]))
+    images = _touch_images(tmp_path, assigned)
+    nested_out, rfdetr_out = tmp_path / "nested", tmp_path / "rfdetr"
+
+    conv.write_coco(assigned, class_names, images, nested_out, link=False,
+                    layout="nested")
+    conv.write_coco(assigned, class_names, images, rfdetr_out, link=False,
+                    layout="rfdetr")
+
+    for split in ("train", "val", "test"):
+        nested_bytes = (nested_out / NESTED_DIRS[split] / ANN).read_bytes()
+        rfdetr_bytes = (rfdetr_out / RFDETR_DIRS[split] / ANN).read_bytes()
+        assert nested_bytes == rfdetr_bytes, f"{split}: JSON differs by layout"
+
+        coco = json.loads(rfdetr_bytes)
+        # Logical split name survives the directory rename.
+        assert coco["info"]["split"] == split
+        assert coco["categories"] == [{"id": 1, "name": "blue_plate"},
+                                      {"id": 2, "name": "red_plate"}]
+        # Bare basenames in both layouts; the loader supplies the split dir.
+        assert all("/" not in img["file_name"] for img in coco["images"])
+        assert all(ann["category_id"] in (1, 2)
+                   for ann in coco["annotations"])
+
+    train = json.loads((rfdetr_out / "train" / ANN).read_bytes())
+    by_image = {img["id"]: img["file_name"] for img in train["images"]}
+    red = [a for a in train["annotations"] if by_image[a["image_id"]] == "d.jpg"]
+    assert [a["category_id"] for a in red] == [2]
+    assert red[0]["bbox"] == [20, 30, 40, 50]
+
+
+def test_omitted_layout_is_nested(tmp_path):
+    """No `layout` argument reproduces the pre-flag tree exactly."""
+    assigned = _coco_assigned()
+    images = _touch_images(tmp_path, assigned)
+    default_out, nested_out = tmp_path / "default", tmp_path / "nested"
+
+    conv.write_coco(assigned, LABEL_SET, images, default_out, link=False)
+    conv.write_coco(assigned, LABEL_SET, images, nested_out, link=False,
+                    layout="nested")
+
+    assert conv.DEFAULT_COCO_LAYOUT == "nested"
+    default_tree = _tree(default_out)
+    assert default_tree == _tree(nested_out)
+    # And that tree is the historical one: images nested under <split>/images.
+    assert set(default_tree) == {
+        "train/_annotations.coco.json", "train/images/a.jpg",
+        "train/images/neg.jpg",
+        "val/_annotations.coco.json", "val/images/b.jpg",
+        "test/_annotations.coco.json", "test/images/c.jpg",
+    }
+
+
+def test_unknown_coco_layout_is_rejected(tmp_path):
+    """`write_coco` fails loudly before writing anything."""
+    assigned = _coco_assigned()
+    images = _touch_images(tmp_path, assigned)
+    out = tmp_path / "ds"
+
+    with pytest.raises(ValueError, match="unknown COCO layout 'bogus'"):
+        conv.write_coco(assigned, LABEL_SET, images, out, link=False,
+                        layout="bogus")
+
+    assert not out.exists()
+
+
+def test_cli_rejects_unknown_coco_layout(tmp_path, monkeypatch):
+    """argparse `choices` gate the flag; exit code 2 is its usage error."""
+    monkeypatch.setattr(sys, "argv", [
+        "manifest_to_detector_dataset.py",
+        "--manifest", str(tmp_path / "output.manifest"),
+        "--images-dir", str(tmp_path), "--out", str(tmp_path / "ds"),
+        "--format", "coco", "--coco-layout", "bogus",
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        conv.main()
+
+    assert exc.value.code == 2
+
+
+def test_full_pipeline_layouts_agree_on_split_membership(tmp_path):
+    """Grouping, stratification and fractions are shared; only the writer
+    differs. Driving the whole path from one portal manifest through both
+    layouts must give the same images per split and the same JSON."""
+    pytest.importorskip("numpy", reason="numpy needed for signatures")
+    images = tmp_path / "frames"
+    portal_records = []
+    for scene, base_gray in enumerate((40, 160)):
+        for frame in range(3):
+            name = f"p{scene}f{frame}.jpg"
+            _write_image(images / name, base_gray + frame)
+            portal_records.append(
+                _record(name, [(10, 10, 40, 40)], width=128, height=96))
+    # A negative scene of its own, so val gets background via stratification.
+    _write_image(images / "bg.jpg", 250)
+    portal_records.append(_record("bg.jpg", [], width=128, height=96))
+    manifest = _manifest_file(tmp_path, portal_records)
+
+    parsed, class_names, _ = conv.parse_entries(
+        conv.load_manifest_lines(manifest))
+    groups, _n = conv.group_by_similarity(parsed, images,
+                                          conv.DEFAULT_GROUP_THRESHOLD)
+    assigned = conv.split_groups(parsed, groups, 0.5, 0.0)
+    assert assigned["train"] and assigned["val"] and not assigned["test"]
+
+    nested_out, rfdetr_out = tmp_path / "nested", tmp_path / "rfdetr"
+    conv.write_coco(assigned, class_names, images, nested_out, link=False,
+                    layout="nested")
+    conv.write_coco(assigned, class_names, images, rfdetr_out, link=False,
+                    layout="rfdetr")
+
+    for split in ("train", "val"):
+        n_dir = nested_out / NESTED_DIRS[split]
+        r_dir = rfdetr_out / RFDETR_DIRS[split]
+        assert (n_dir / ANN).read_bytes() == (r_dir / ANN).read_bytes()
+        nested_files = {p.name for p in (n_dir / "images").iterdir()}
+        rfdetr_files = {p.name for p in r_dir.iterdir()} - {ANN}
+        assert nested_files == rfdetr_files
+        assert nested_files == {r["file_name"] for r in assigned[split]}
+    assert not (rfdetr_out / "test").exists()
+
+
+# ---------------------------------------------------------------------------
+# Property: the layout flag changes paths, never content
+# ---------------------------------------------------------------------------
+
+def _assignments():
+    """Arbitrary split assignments over a small, well-formed record set.
+
+    Up to three classes so category order and the ``k -> k + 1`` id shift are
+    exercised; records carry 0..3 in-bounds boxes (0 boxes = a negative);
+    every record lands in exactly one of train/val/test, and any split may
+    come out empty (the writer must skip it identically in both layouts).
+    """
+    from hypothesis import strategies as st
+
+    def build(n_classes, dims, split_picks):
+        class_names = [f"class_{i}" for i in range(n_classes)]
+        assigned = {"train": [], "val": [], "test": []}
+        for idx, ((width, height, raw_boxes), split) in enumerate(
+                zip(dims, split_picks)):
+            boxes = []
+            for cid_seed, l_seed, t_seed, w_seed, h_seed in raw_boxes:
+                left, top = l_seed % width, t_seed % height
+                bw = 1 + w_seed % (width - left)
+                bh = 1 + h_seed % (height - top)
+                boxes.append((cid_seed % n_classes, left, top, bw, bh))
+            assigned[split].append(
+                _rec(f"img{idx}.jpg", boxes, width=width, height=height))
+        return class_names, assigned
+
+    n_records = st.integers(min_value=1, max_value=6)
+    seed = st.integers(min_value=0, max_value=10_000)
+    box = st.tuples(seed, seed, seed, seed, seed)
+    dim = st.tuples(st.integers(min_value=8, max_value=512),
+                    st.integers(min_value=8, max_value=512),
+                    st.lists(box, max_size=3))
+    return n_records.flatmap(lambda n: st.builds(
+        build,
+        st.integers(min_value=1, max_value=3),
+        st.lists(dim, min_size=n, max_size=n),
+        st.lists(st.sampled_from(("train", "val", "test")),
+                 min_size=n, max_size=n),
+    ))
+
+
+def test_property_layout_never_changes_annotation_content_or_image_set():
+    """For any assignment and class list, `rfdetr` and `nested` write the
+    same `_annotations.coco.json` bytes per split and place the same image
+    files, differing only in where those images sit and what the validation
+    directory is called.
+
+    **Validates: Requirements 2.3, 2.4**
+    """
+    import tempfile
+
+    from hypothesis import given, settings
+
+    @given(_assignments())
+    @settings(deadline=None)
+    def check(case):
+        class_names, assigned = case
+        with tempfile.TemporaryDirectory(prefix="coco-layout-") as tmp:
+            tmp = Path(tmp)
+            images = _touch_images(tmp, assigned)
+            nested_out, rfdetr_out = tmp / "nested", tmp / "rfdetr"
+            conv.write_coco(assigned, class_names, images, nested_out,
+                            link=False, layout="nested")
+            conv.write_coco(assigned, class_names, images, rfdetr_out,
+                            link=False, layout="rfdetr")
+
+            present = [s for s, recs in assigned.items() if recs]
+            assert {p.name for p in nested_out.iterdir()} == {
+                NESTED_DIRS[s] for s in present}
+            assert {p.name for p in rfdetr_out.iterdir()} == {
+                RFDETR_DIRS[s] for s in present}
+            for split in present:
+                n_dir = nested_out / NESTED_DIRS[split]
+                r_dir = rfdetr_out / RFDETR_DIRS[split]
+                n_bytes = (n_dir / ANN).read_bytes()
+                assert n_bytes == (r_dir / ANN).read_bytes(), split
+                coco = json.loads(n_bytes)
+                assert coco["info"]["split"] == split
+                assert coco["categories"] == [
+                    {"id": i + 1, "name": n}
+                    for i, n in enumerate(class_names)]
+                expected = {r["file_name"] for r in assigned[split]}
+                assert {p.name for p in (n_dir / "images").iterdir()} == expected
+                assert {p.name for p in r_dir.iterdir()} - {ANN} == expected
+                assert not (r_dir / "images").exists()
+
+    check()

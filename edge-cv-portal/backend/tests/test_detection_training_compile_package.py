@@ -393,3 +393,182 @@ def test_package_lfv_record_requires_compilation_jobs(env):
     status, body = package(env, training_id)
     assert status == 400
     assert "No compilation jobs found" in body["error"]
+
+
+# ---------------------------------------------------------------------------
+# RF-DETR (rfdetr-training-and-transfer-learning Req 4.2, 4.3)
+# ---------------------------------------------------------------------------
+# Validates: Requirements 4.1, 4.2, 4.3
+
+RFDETR_STAGE_DIR = "rf_detr_object_detection"
+
+
+def _rfdetr_artifact(resolution, num_classes, top_k=300, class_names=None,
+                     detection_arch="rf_detr"):
+    """The FLAT artifact train_rfdetr.py writes (Req 1.7): model.onnx +
+    checkpoint_best_total.pth + training_metadata.json with the two-output
+    shapes recorded under `onnx_output_shapes`."""
+    class_names = class_names or [f"c{i}" for i in range(num_classes)]
+    meta = {
+        "detection_arch": detection_arch, "rfdetr_size": "small",
+        "resolution": resolution, "num_classes": num_classes, "class_names": class_names,
+        "epochs": 100, "opset": 17, "onnx_opset": 17,
+        "onnx_input_shape": [1, 3, resolution, resolution],
+        "onnx_output_shapes": [[1, top_k, 4], [1, top_k, num_classes]],
+        "top_k": top_k, "normalize": True, "preserve_aspect": False,
+        "metrics": {"test_map50": 0.9}, "base_model": None,
+        "manifest_s3": "s3://x/labeled/output.manifest", "images_s3": None,
+        "device_manifest_hints": {"layout": "rf_detr", "network_input": resolution,
+                                  "preserve_aspect": False, "normalize": True,
+                                  "score_threshold": 0.5, "top_k": top_k},
+    }
+    return _tar({
+        "model.onnx": ONNX_BYTES,
+        "checkpoint_best_total.pth": b"pth",
+        "training_metadata.json": json.dumps(meta).encode(),
+    })
+
+
+def _seed_rfdetr_artifact(env, **kwargs):
+    key = f"models/training/rfdetr-{uuid.uuid4()}/output/model.tar.gz"
+    env.s3.put_object(Bucket=USECASE_BUCKET, Key=key, Body=_rfdetr_artifact(**kwargs))
+    return key
+
+
+def _rfdetr_detection_fields(resolution=512, class_names=("scratch", "dent"), **overrides):
+    """Detection_Record_Fields training.py persists for an RF-DETR job
+    (Req 3.3): top_k instead of iou_threshold, preserve_aspect False."""
+    fields = {
+        "detection_arch": "rf_detr",
+        "network_input_width": resolution, "network_input_height": resolution,
+        "class_names": list(class_names), "num_classes": len(class_names),
+        "score_threshold": Decimal("0.5"), "top_k": 300, "preserve_aspect": False,
+        "rfdetr_size": "small", "resolution": resolution, "epochs": 100, "batch": 4,
+        "grad_accum": 4, "lr": Decimal("0.0001"), "patience": 10, "onnx_opset": 17,
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _read_zip_members(env, s3_uri):
+    """Like _read_zip but arch-agnostic: (sorted names, manifest, {name: bytes})."""
+    bucket, key = s3_uri[len("s3://"):].split("/", 1)
+    data = env.s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = sorted(zf.namelist())
+        members = {n: zf.read(n) for n in names}
+    return names, json.loads(members["manifest.json"]), members
+
+
+def test_package_rfdetr_builds_component_zip(env):
+    """Req 4.2: an RF-DETR artifact becomes a component with the
+    rf_detr_object_detection stage, ImageNet normalisation, square resize,
+    top_k and NO iou_threshold; model.onnx nests under the RF-DETR stage dir
+    and the checkpoint does not ship."""
+    key = _seed_rfdetr_artifact(env, resolution=512, num_classes=2, top_k=300,
+                                class_names=["scratch", "dent"])
+    training_id = seed_detection_record(
+        env, artifact_key=key, detection=_rfdetr_detection_fields(512))
+    status, body = package(env, training_id)
+    assert status == 200, body
+    pcs = body["packaged_components"]
+    assert [c["target"] for c in pcs] == [
+        "jetson-xavier-jp5", "jetson-xavier-jp6", "jetson-xavier-jp7", "x86_64-cpu"]
+    assert len({c["component_package_s3"] for c in pcs}) == 1
+
+    names, manifest, members = _read_zip_members(env, pcs[0]["component_package_s3"])
+    assert names == ["manifest.json", f"{RFDETR_STAGE_DIR}/model.onnx"]
+    assert members[f"{RFDETR_STAGE_DIR}/model.onnx"] == ONNX_BYTES
+    assert not any(n.endswith(".pth") or n.endswith(".pt") for n in names)
+
+    assert manifest["runtime"] == "onnx" and manifest["runtime_artifact"] == "model.onnx"
+    assert manifest["task"] == "object_detection"
+    stage = manifest["model_graph"]["stages"][0]
+    assert stage["type"] == RFDETR_STAGE_DIR
+    assert stage["input_shape"] == [1, 3, 512, 512]
+    assert stage["normalize"] is True and stage["image_range_scale"] is True
+    assert stage["image_width"] == 512 and stage["image_height"] == 512
+    assert stage["threshold"] == 0.5 and stage["num_classes"] == 2
+    # Real two-output shape from training_metadata.json: the single
+    # `output_shape` slot carries the logits tensor, both are kept alongside.
+    assert stage["output_shape"] == [1, 300, 2]
+    assert stage["output_shapes"] == [[1, 300, 4], [1, 300, 2]]
+    assert manifest["input_shape"] == [1, 3, 512, 512]
+    assert manifest["preprocessing"] == {"resize": [512, 512], "channel_order": "RGB"}
+    assert manifest["dataset"] == {"image_width": 512, "image_height": 512}
+    assert manifest["detection"] == {
+        "layout": "rf_detr", "num_classes": 2, "score_threshold": 0.5,
+        "network_input": 512, "preserve_aspect": False, "top_k": 300,
+        "class_names": ["scratch", "dent"],
+    }
+    assert "iou_threshold" not in json.dumps(manifest)
+
+
+def test_package_rfdetr_artifact_resolution_and_top_k_win_over_record(env):
+    """The graph was exported at 576 with Q=300 even though the record says
+    512 / top_k 100: training_metadata.json's `resolution` and `top_k`
+    describe the real graph and win."""
+    key = _seed_rfdetr_artifact(env, resolution=576, num_classes=1, top_k=300,
+                                class_names=["blue_plate"])
+    training_id = seed_detection_record(
+        env, artifact_key=key,
+        detection=_rfdetr_detection_fields(512, class_names=("blue_plate",), top_k=100))
+    status, body = package(env, training_id)
+    assert status == 200, body
+    _names, manifest, _ = _read_zip_members(env, body["packaged_components"][0]["component_package_s3"])
+    stage = manifest["model_graph"]["stages"][0]
+    assert stage["type"] == RFDETR_STAGE_DIR
+    assert stage["input_shape"] == [1, 3, 576, 576]
+    assert stage["output_shape"] == [1, 300, 1]
+    assert stage["output_shapes"] == [[1, 300, 4], [1, 300, 1]]
+    assert manifest["detection"]["network_input"] == 576
+    assert manifest["detection"]["top_k"] == 300
+    assert manifest["preprocessing"]["resize"] == [576, 576]
+    assert manifest["dataset"] == {"image_width": 576, "image_height": 576}
+
+
+def test_package_rfdetr_arch_falls_back_to_training_metadata(env):
+    """Arch resolution order is record -> training_metadata.json -> yolo: a
+    record whose detection block never got `detection_arch` still packages as
+    RF-DETR when the artifact says so."""
+    key = _seed_rfdetr_artifact(env, resolution=384, num_classes=1, top_k=300,
+                                class_names=["blue_plate"])
+    fields = _rfdetr_detection_fields(384, class_names=("blue_plate",))
+    del fields["detection_arch"]
+    training_id = seed_detection_record(env, artifact_key=key, detection=fields)
+    status, body = package(env, training_id)
+    assert status == 200, body
+    names, manifest, _ = _read_zip_members(env, body["packaged_components"][0]["component_package_s3"])
+    assert names == ["manifest.json", f"{RFDETR_STAGE_DIR}/model.onnx"]
+    stage = manifest["model_graph"]["stages"][0]
+    assert stage["type"] == RFDETR_STAGE_DIR and stage["normalize"] is True
+    assert manifest["detection"]["layout"] == "rf_detr"
+    assert manifest["detection"]["preserve_aspect"] is False
+    assert manifest["detection"]["top_k"] == 300
+    assert "iou_threshold" not in manifest["detection"]
+
+
+def test_package_legacy_yolo_record_without_arch_packages_as_yolo(env):
+    """Req 4.3: a portal-detection-training record (no `detection_arch` on the
+    record, none in its training_metadata.json) takes the YOLO path exactly
+    as before."""
+    training_id = seed_detection_record(env, detection={
+        "network_input_width": 1280, "network_input_height": 1280,
+        "class_names": ["blue_plate"], "num_classes": 1,
+        "score_threshold": Decimal("0.25"), "iou_threshold": Decimal("0.45"),
+        "preserve_aspect": True,
+    })
+    status, body = package(env, training_id)
+    assert status == 200, body
+    names, manifest, onnx = _read_zip(env, body["packaged_components"][0]["component_package_s3"])
+    assert names == ["manifest.json", "yolo_object_detection/model.onnx"]
+    assert onnx == ONNX_BYTES
+    stage = manifest["model_graph"]["stages"][0]
+    assert stage["type"] == "yolo_object_detection" and stage["normalize"] is False
+    assert stage["output_shape"] == [1, 5, 33600]
+    assert "output_shapes" not in stage
+    assert manifest["detection"] == {
+        "layout": "yolo", "num_classes": 1, "score_threshold": 0.25,
+        "network_input": 1280, "preserve_aspect": True, "iou_threshold": 0.45,
+        "class_names": ["blue_plate"],
+    }

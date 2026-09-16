@@ -1191,23 +1191,29 @@ export class ComputeStack extends cdk.Stack {
 
     // Training Lambda Handler
     // ---------------------------------------------------------------------
-    // Object Detection (YOLO) training — portal-detection-training Req 8.1–8.3.
+    // Object Detection training — portal-detection-training Req 8.1–8.3 and
+    // rfdetr-training-and-transfer-learning Req 3.4.
     //
-    // training.py launches datasets/detection_training/train.py as a
-    // SageMaker script-mode job. At job creation it tars the entry point and
-    // its three sibling files FLAT into sourcedir.tar.gz (train.py resolves the
-    // dataset converter as a sibling; SageMaker extracts the archive flat), so
-    // the Lambda asset must carry them. They live in datasets/ (outside
-    // backend/), so the TrainingHandler asset is bundled: functions/ plus a
-    // detection_training/ subdir holding exactly these four files. The
-    // bundler runs locally (plain file copies); the Docker image is only the
-    // fallback CDK requires when no local shell is available.
+    // training.py launches datasets/detection_training/train.py (YOLO) or
+    // train_rfdetr.py (RF-DETR) as a SageMaker script-mode job. At job
+    // creation it tars the chosen entry point, ITS requirements file (renamed
+    // to requirements.txt), the shared _common.py and the two converter files
+    // FLAT into sourcedir.tar.gz (train*.py resolve their siblings by name;
+    // SageMaker extracts the archive flat), so the Lambda asset must carry all
+    // of them. They live in datasets/ (outside backend/), so the
+    // TrainingHandler asset is bundled: functions/ plus a detection_training/
+    // subdir holding exactly these seven files. The bundler runs locally
+    // (plain file copies); the Docker image is only the fallback CDK requires
+    // when no local shell is available. Both paths copy this one list.
     // ---------------------------------------------------------------------
     const functionsDir = path.join(__dirname, '../../backend/functions');
     const datasetsDir = path.join(__dirname, '../../../datasets');
     const detectionTrainingFiles = [
       'detection_training/train.py',
+      'detection_training/train_rfdetr.py',
+      'detection_training/_common.py',
       'detection_training/requirements.txt',
+      'detection_training/requirements-rfdetr.txt',
       'manifest_to_detector_dataset.py',
       'dedupe_frames.py',
     ];

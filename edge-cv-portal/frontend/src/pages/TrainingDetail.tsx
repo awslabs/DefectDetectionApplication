@@ -13,15 +13,39 @@ import {
   Textarea,
   ProgressBar,
   Alert,
+  Link,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
+import type { BaseModelDescriptor, DetectionRecordFields } from '../services/api';
 import CompilationTab from '../components/CompilationTab';
+
+/** Human label for a record's detector family (records without one are YOLO). */
+export function detectionArchLabel(detection: DetectionRecordFields | null | undefined): string {
+  return detection?.detection_arch === 'rf_detr' ? 'RF-DETR' : 'YOLO';
+}
+
+/** "Object Detection · YOLO (ONNX)" / "Object Detection · RF-DETR (ONNX)". */
+export function modelTypeLabel(modelType: string, detection: DetectionRecordFields | null | undefined): string {
+  return modelType === 'object_detection'
+    ? `Object Detection · ${detectionArchLabel(detection)} (ONNX)`
+    : modelType;
+}
+
+/** The base a run was fine-tuned from, or null when it started from a published checkpoint. */
+export function fineTunedFrom(detection: DetectionRecordFields | null | undefined): BaseModelDescriptor | null {
+  const base = detection?.base_model;
+  if (!base || base.kind === 'published' || !base.ref) return null;
+  return base;
+}
 
 export default function TrainingDetail() {
   const { trainingId } = useParams<{ trainingId: string }>();
   const navigate = useNavigate();
   const [activeTabId, setActiveTabId] = useState('overview');
   const [job, setJob] = useState<any>(null);
+  // The base record a fine-tuned detector started from (name + version for
+  // the "Fine-tuned from" row); null until loaded or when there is none.
+  const [baseJob, setBaseJob] = useState<any>(null);
   const [logs, setLogs] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [logsLoading, setLogsLoading] = useState(false);
@@ -56,6 +80,19 @@ export default function TrainingDetail() {
 
     return () => clearInterval(interval);
   }, [trainingId]);
+
+  // Resolve the base model's name/version for "Fine-tuned from" (Req 6.6).
+  // Both kinds (training_job / imported) are TrainingJobs records.
+  const baseRef = fineTunedFrom(job?.detection)?.ref ?? null;
+  useEffect(() => {
+    setBaseJob(null);
+    if (!baseRef) return;
+    let cancelled = false;
+    apiService.getTrainingJob(baseRef)
+      .then(record => { if (!cancelled) setBaseJob(record); })
+      .catch(err => console.error('Failed to fetch base model record:', err));
+    return () => { cancelled = true; };
+  }, [baseRef]);
 
   // Fetch logs when logs tab is active
   useEffect(() => {
@@ -191,6 +228,7 @@ export default function TrainingDetail() {
                     cloneFrom: {
                       model_name: job.model_name,
                       model_type: job.model_type,
+                      detection_arch: job.detection?.detection_arch,
                       dataset_manifest_s3: job.dataset_manifest_s3,
                       instance_type: job.instance_type,
                       hyperparameters: job.hyperparameters,
@@ -294,9 +332,32 @@ export default function TrainingDetail() {
                         ...(job.model_type
                           ? [{
                               label: 'Model Type',
-                              value: job.model_type === 'object_detection'
-                                ? 'Object Detection (YOLO, ONNX)'
-                                : job.model_type,
+                              value: modelTypeLabel(job.model_type, job.detection),
+                            }]
+                          : []),
+                        // Base model this detector was fine-tuned from (Req 6.6);
+                        // published-checkpoint runs show no row.
+                        ...(fineTunedFrom(job.detection)
+                          ? [{
+                              label: 'Fine-tuned from',
+                              value: (() => {
+                                const base = fineTunedFrom(job.detection)!;
+                                const name = baseJob?.model_name
+                                  ? `${baseJob.model_name}${baseJob.model_version ? ` v${baseJob.model_version}` : ''}`
+                                  : base.ref;
+                                const kind = base.kind === 'imported' ? 'imported checkpoint' : 'previous training job';
+                                return (
+                                  <span>
+                                    <Link
+                                      href={`/training/${base.ref}`}
+                                      onFollow={e => { e.preventDefault(); navigate(`/training/${base.ref}`); }}
+                                    >
+                                      {name}
+                                    </Link>
+                                    {` (${kind})`}
+                                  </span>
+                                );
+                              })(),
                             }]
                           : []),
                       ]}
@@ -354,6 +415,46 @@ export default function TrainingDetail() {
                         { label: 'Dataset Manifest', value: job.dataset_manifest_s3 },
                       ]}
                     />
+                  </Container>
+                )}
+
+                {/* Detection_Record_Fields: what the device manifest is built
+                    from. YOLO shows imgsz + IoU (NMS); RF-DETR shows size,
+                    resolution and top_k (set-based decoding, no IoU). */}
+                {job.model_type === 'object_detection' && job.detection && (
+                  <Container header={<Header variant="h2">Detection</Header>}>
+                    <ColumnLayout columns={2} variant="text-grid">
+                      <KeyValuePairs
+                        columns={1}
+                        items={[
+                          { label: 'Architecture', value: detectionArchLabel(job.detection) },
+                          ...(job.detection.detection_arch === 'rf_detr'
+                            ? [
+                                { label: 'Size', value: String(job.detection.rfdetr_size ?? '—') },
+                                { label: 'Resolution', value: String(job.detection.resolution ?? job.detection.network_input_width ?? '—') },
+                                { label: 'Top-k', value: String(job.detection.top_k ?? '—') },
+                              ]
+                            : [
+                                { label: 'Network input (imgsz)', value: String(job.detection.imgsz ?? job.detection.network_input_width ?? '—') },
+                                { label: 'Base weights', value: String(job.detection.base_weights ?? '—') },
+                                { label: 'IoU threshold', value: String(job.detection.iou_threshold ?? '—') },
+                              ]),
+                        ]}
+                      />
+                      <KeyValuePairs
+                        columns={1}
+                        items={[
+                          { label: 'Score threshold', value: String(job.detection.score_threshold ?? '—') },
+                          { label: 'Preserve aspect (letterbox)', value: job.detection.preserve_aspect ? 'Yes' : 'No (square resize)' },
+                          {
+                            label: 'Classes',
+                            value: Array.isArray(job.detection.class_names) && job.detection.class_names.length > 0
+                              ? job.detection.class_names.join(', ')
+                              : String(job.detection.num_classes ?? '—'),
+                          },
+                        ]}
+                      />
+                    </ColumnLayout>
                   </Container>
                 )}
 
