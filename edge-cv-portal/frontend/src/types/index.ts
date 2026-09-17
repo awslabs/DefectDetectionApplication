@@ -267,6 +267,27 @@ export interface TrainingJob {
     preserve_aspect?: boolean;
     [key: string]: unknown;
   };
+  /**
+   * Imported records (Smart Import / Model Import): the validator's metadata
+   * (`framework` 'PYTORCH' | 'ONNX', `pt_file` / `model_file`, input shape)
+   * plus `fine_tunable` (rfdetr-training-and-transfer-learning Req 7): the
+   * kept training checkpoint when the import was an ultralytics `.pt` or an
+   * RF-DETR `.pth`, `null` for ONNX / TorchScript / state_dict imports.
+   */
+  metadata?: {
+    framework?: string;
+    pt_file?: string;
+    model_file?: string;
+    model_type?: string;
+    fine_tunable?: {
+      arch: 'yolo' | 'rf_detr' | string;
+      kind?: string;
+      checkpoint_s3?: string;
+      class_names?: string[] | null;
+      num_classes?: number | null;
+    } | null;
+    [key: string]: unknown;
+  };
 }
 
 export interface LabelingJob {

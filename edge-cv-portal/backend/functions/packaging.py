@@ -39,12 +39,15 @@ from shared_utils import (
 # (vllm-model-name-mismatch Requirement 2.2).
 from model_naming import safe_model_name
 
-# Portal-trained Object Detection (YOLO): record predicate + the device
-# manifest builder shared with training.py (portal-detection-training).
+# Portal-trained Object Detection (YOLO / RF-DETR): record predicate + the
+# device manifest builder shared with training.py (portal-detection-training,
+# rfdetr-training-and-transfer-learning).
 from detection_training import (
-    DETECTION_STAGE_TYPE,
+    RFDETR_TOP_K,
+    STAGE_TYPE_FOR_ARCH,
     build_detection_device_manifest,
     is_trained_detection_record,
+    normalize_detection_arch,
 )
 
 # Configure logging
@@ -341,24 +344,37 @@ def _decimal_plain(value, default):
     return value
 
 
+def _is_3d_int_shape(shape) -> bool:
+    """True for a trainer-recorded ONNX tensor shape like [1, 5, 33600]."""
+    return isinstance(shape, list) and len(shape) == 3 \
+        and all(isinstance(d, int) for d in shape)
+
+
 def package_trained_detection_component(trained_model_s3: str, training_job: Dict,
                                         s3_client, usecase: Dict) -> str:
     """Build the Greengrass model-component ZIP for a portal-trained Object
-    Detection (YOLO) job — no Neo, one architecture-agnostic artifact.
+    Detection (YOLO or RF-DETR) job — no Neo, one architecture-agnostic
+    artifact.
 
-    The training job (datasets/detection_training/train.py) writes a FLAT
-    artifact: model.onnx + best.pt + training_metadata.json at the tar root,
-    with no manifest of its own. The device manifest is therefore synthesized
-    here from the Detection_Record_Fields training.py persisted on the record
-    (`detection.{network_input_width, class_names, num_classes,
-    score_threshold, iou_threshold, preserve_aspect}`), through the same
-    builder Smart Import's manifest is pinned to
-    (detection_training.build_detection_device_manifest), and laid out exactly
-    like package_onnx_component's payload: manifest.json at the ZIP root and
-    model.onnx NESTED under the stage_type dir (yolo_object_detection/).
+    The training job (datasets/detection_training/train.py or
+    train_rfdetr.py) writes a FLAT artifact: model.onnx + the fine-tunable
+    checkpoint (best.pt / checkpoint_best_total.pth) + training_metadata.json
+    at the tar root, with no manifest of its own. The device manifest is
+    therefore synthesized here from the Detection_Record_Fields training.py
+    persisted on the record (`detection.{detection_arch, network_input_width,
+    class_names, num_classes, score_threshold, iou_threshold | top_k,
+    preserve_aspect}`), through the same builder Smart Import's manifest is
+    pinned to (detection_training.build_detection_device_manifest), and laid
+    out exactly like package_onnx_component's payload: manifest.json at the
+    ZIP root and model.onnx NESTED under the stage_type dir
+    (yolo_object_detection/ or rf_detr_object_detection/). Only model.onnx
+    ships; the checkpoint stays in the training artifact.
 
-    training_metadata.json's `imgsz` is the size the ONNX graph was actually
-    exported at, so it wins over the record when both exist (Req 5.5).
+    `detection_arch` comes from the record, falling back to
+    training_metadata.json, then 'yolo' (legacy records predate the field).
+    training_metadata.json's `imgsz` (YOLO) / `resolution` (RF-DETR) is the
+    size the ONNX graph was actually exported at, so it wins over the record
+    when both exist (portal-detection-training Req 5.5).
     """
     temp_dir = None
     try:
@@ -398,8 +414,18 @@ def package_trained_detection_component(trained_model_s3: str, training_job: Dic
                 logger.warning(f"training_metadata.json unreadable, using record fields only: {e}")
 
         det = training_job.get('detection') or {}
+        # Arch: record -> training_metadata.json -> 'yolo' (legacy records).
+        detection_arch = normalize_detection_arch(
+            det.get('detection_arch') or meta.get('detection_arch') or 'yolo')
+        is_rf_detr = detection_arch == 'rf_detr'
+
         record_input = _decimal_plain(det.get('network_input_width'), None)
-        artifact_input = meta.get('imgsz')
+        # train_rfdetr.py records the export size as `resolution`; train.py as
+        # `imgsz`. Either wins over the record (it is what the graph was
+        # exported at); fall back to the other key for robustness.
+        artifact_input = meta.get('resolution') if is_rf_detr else meta.get('imgsz')
+        if artifact_input is None:
+            artifact_input = meta.get('imgsz') if is_rf_detr else meta.get('resolution')
         if artifact_input is not None and record_input is not None \
                 and int(artifact_input) != int(record_input):
             logger.warning(
@@ -412,28 +438,65 @@ def package_trained_detection_component(trained_model_s3: str, training_job: Dic
         hints = meta.get('device_manifest_hints') or {}
         score_threshold = float(_decimal_plain(
             det.get('score_threshold'), hints.get('score_threshold', 0.25)))
-        iou_threshold = float(_decimal_plain(
-            det.get('iou_threshold'), hints.get('iou_threshold', 0.45)))
-        preserve_aspect = det.get('preserve_aspect', hints.get('preserve_aspect', True))
+        # preserve_aspect: record -> hints -> arch default (YOLO letterboxes,
+        # RF-DETR square-resizes — see build_detection_device_manifest).
+        preserve_aspect = det.get('preserve_aspect', hints.get('preserve_aspect', not is_rf_detr))
 
-        manifest = build_detection_device_manifest(
-            image_width=network_input,
-            image_height=network_input,
-            num_classes=num_classes,
-            class_names=class_names or None,
-            score_threshold=score_threshold,
-            iou_threshold=iou_threshold,
-            preserve_aspect=bool(preserve_aspect),
-        )
-        # The exported graph's real output shape (e.g. [1, 5, 33600] at 1280)
-        # replaces the nominal 8400 anchors when the trainer recorded it.
-        real_shape = meta.get('onnx_output_shape')
-        if isinstance(real_shape, list) and len(real_shape) == 3 \
-                and all(isinstance(d, int) for d in real_shape):
-            manifest['model_graph']['stages'][0]['output_shape'] = real_shape
+        if is_rf_detr:
+            # NMS-free decoding: `top_k` query slots, no iou_threshold. The
+            # trainer's recorded Q is the graph's real query count and wins.
+            top_k = int(_decimal_plain(
+                meta.get('top_k', det.get('top_k')), hints.get('top_k', RFDETR_TOP_K)))
+            manifest = build_detection_device_manifest(
+                image_width=network_input,
+                image_height=network_input,
+                num_classes=num_classes,
+                class_names=class_names or None,
+                score_threshold=score_threshold,
+                preserve_aspect=bool(preserve_aspect),
+                detection_arch=detection_arch,
+                top_k=top_k,
+            )
+        else:
+            iou_threshold = float(_decimal_plain(
+                det.get('iou_threshold'), hints.get('iou_threshold', 0.45)))
+            manifest = build_detection_device_manifest(
+                image_width=network_input,
+                image_height=network_input,
+                num_classes=num_classes,
+                class_names=class_names or None,
+                score_threshold=score_threshold,
+                iou_threshold=iou_threshold,
+                preserve_aspect=bool(preserve_aspect),
+            )
+        # The exported graph's real output shape replaces the nominal
+        # [1, C+4, 8400] the builder emits (parity with generate_dda_package)
+        # when the trainer recorded it. The device never reads it (the
+        # RF-DETR postprocessor identifies boxes/logits by runtime tensor
+        # shape and ModelConfig ignores unknown stage keys), so it is
+        # informational:
+        #  - yolo:    `onnx_output_shape` [1, C+4, N] (e.g. [1, 5, 33600] at 1280).
+        #  - rf_detr: `onnx_output_shapes` [[1, Q, 4], [1, Q, C]] — the manifest
+        #    schema carries ONE `output_shape`, so it gets the logits tensor
+        #    [1, Q, C] (encodes both Q and C) and both tensors are kept under
+        #    `output_shapes` for anyone inspecting the package.
+        stage0 = manifest['model_graph']['stages'][0]
+        if is_rf_detr:
+            real_shapes = meta.get('onnx_output_shapes')
+            if isinstance(real_shapes, list) and len(real_shapes) == 2 \
+                    and all(_is_3d_int_shape(s) for s in real_shapes):
+                logits_shape = next(
+                    (s for s in real_shapes if s[-1] == num_classes),
+                    next((s for s in real_shapes if s[-1] != 4), real_shapes[-1]))
+                stage0['output_shape'] = list(logits_shape)
+                stage0['output_shapes'] = [list(s) for s in real_shapes]
+        else:
+            real_shape = meta.get('onnx_output_shape')
+            if _is_3d_int_shape(real_shape):
+                stage0['output_shape'] = real_shape
 
         payload_dir = os.path.join(temp_dir, 'payload')
-        stage_dir = os.path.join(payload_dir, DETECTION_STAGE_TYPE)
+        stage_dir = os.path.join(payload_dir, STAGE_TYPE_FOR_ARCH[detection_arch])
         os.makedirs(stage_dir, exist_ok=True)
         with open(os.path.join(payload_dir, 'manifest.json'), 'w') as f:
             json.dump(manifest, f, indent=2)
@@ -451,7 +514,7 @@ def package_trained_detection_component(trained_model_s3: str, training_job: Dic
         s3_key = f"model_artifacts/model-{component_uuid}/{zip_filename}"
         s3_uri = f"s3://{usecase['s3_bucket']}/{s3_key}"
         logger.info(f"Uploading trained detection component package to {s3_uri} "
-                    f"(input {network_input}, classes {class_names}, "
+                    f"(arch {detection_arch}, input {network_input}, classes {class_names}, "
                     f"preserve_aspect={bool(preserve_aspect)})")
         s3_client.upload_file(zip_path, usecase['s3_bucket'], s3_key)
         return s3_uri

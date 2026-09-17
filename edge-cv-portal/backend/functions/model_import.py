@@ -32,6 +32,10 @@ from shared_utils import (
 # Preflight Fit_Check (pure sizing module bundled in this functions dir)
 from vllm_fit_check import estimate_weights, evaluate_fit
 
+# Vocabulary of the fine-tunable checkpoint kinds Smart Import may declare
+# (rfdetr-training-and-transfer-learning Requirement 7).
+from checkpoint_probe import FINE_TUNABLE_KINDS
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -1212,6 +1216,66 @@ def validate_model(event: Dict, context: Any) -> Dict:
         return create_response(500, {'error': 'Internal server error'})
 
 
+# Arch each fine-tunable checkpoint kind belongs to (mirrors checkpoint_probe).
+FINE_TUNABLE_ARCHES = ('yolo', 'rf_detr')
+
+
+def validate_fine_tunable(raw: Any, usecase_bucket: str) -> Tuple[Any, str]:
+    """Validate the optional ``fine_tunable`` field of an import body.
+
+    Smart Import (model_converter.convert_model) sends it when it kept the
+    original ``.pt``/``.pth`` as a sidecar object; a direct POST never does.
+    Returns ``(value, error)``: ``(None, '')`` when the field is absent/null,
+    ``(dict, '')`` for a well-formed descriptor, else ``(None, <reason>)``.
+
+    The record is what later feeds ``resolve_base_model('imported', ...)`` and
+    therefore ``BASE_WEIGHTS_S3`` for a SageMaker job, so ``checkpoint_s3`` is
+    pinned to THIS use case's bucket under the converter's prefix — a caller
+    cannot point a base model at an arbitrary object.
+    """
+    if raw is None:
+        return None, ''
+    if not isinstance(raw, dict):
+        return None, 'fine_tunable must be an object or null'
+
+    arch = raw.get('arch')
+    if arch not in FINE_TUNABLE_ARCHES:
+        return None, (
+            f"fine_tunable.arch must be one of: {', '.join(FINE_TUNABLE_ARCHES)}")
+
+    kind = raw.get('kind')
+    if kind not in FINE_TUNABLE_KINDS:
+        return None, (
+            f"fine_tunable.kind must be one of: {', '.join(FINE_TUNABLE_KINDS)}")
+
+    checkpoint_s3 = raw.get('checkpoint_s3')
+    expected_prefix = f"s3://{usecase_bucket}/converted-models/"
+    if (not isinstance(checkpoint_s3, str)
+            or not checkpoint_s3.startswith(expected_prefix)
+            or len(checkpoint_s3) <= len(expected_prefix)):
+        return None, (
+            f"fine_tunable.checkpoint_s3 must be an S3 URI under {expected_prefix}")
+
+    class_names = raw.get('class_names')
+    if class_names is not None and (
+            not isinstance(class_names, list)
+            or not all(isinstance(n, str) for n in class_names)):
+        return None, 'fine_tunable.class_names must be a list of strings or null'
+
+    num_classes = raw.get('num_classes')
+    if num_classes is not None and (
+            isinstance(num_classes, bool) or not isinstance(num_classes, int)):
+        return None, 'fine_tunable.num_classes must be an integer or null'
+
+    return {
+        'arch': arch,
+        'kind': kind,
+        'checkpoint_s3': checkpoint_s3,
+        'class_names': class_names,
+        'num_classes': num_classes,
+    }, ''
+
+
 def import_model(event: Dict, context: Any) -> Dict:
     """
     Import a pre-trained model (BYOM)
@@ -1225,7 +1289,14 @@ def import_model(event: Dict, context: Any) -> Dict:
         "model_s3_uri": "s3://bucket/path/model.tar.gz",
         "description": "string",  // optional
         "auto_compile": true,  // optional, default false
-        "compilation_targets": ["x86_64-cpu", "jetson-xavier"]  // optional
+        "compilation_targets": ["x86_64-cpu", "jetson-xavier"],  // optional
+        "fine_tunable": {  // optional; set by Smart Import when it kept the checkpoint
+            "arch": "yolo" | "rf_detr",
+            "kind": "ultralytics_checkpoint" | "rfdetr_checkpoint",
+            "checkpoint_s3": "s3://<usecase bucket>/converted-models/.../checkpoint.pt",
+            "class_names": ["..."] | null,
+            "num_classes": 1 | null
+        }
     }
     """
     try:
@@ -1249,6 +1320,7 @@ def import_model(event: Dict, context: Any) -> Dict:
         description = body.get('description', '')
         auto_compile = body.get('auto_compile', False)
         compilation_targets = body.get('compilation_targets', [])
+        raw_fine_tunable = body.get('fine_tunable')
         
         # Check user access (DataScientist role required)
         if not check_user_access(user_id, usecase_id, 'DataScientist'):
@@ -1267,6 +1339,13 @@ def import_model(event: Dict, context: Any) -> Dict:
         
         # Get use case details
         usecase = get_usecase_details(usecase_id)
+
+        # Optional fine-tunable checkpoint descriptor (Requirement 7). Checked
+        # before any S3 work so a malformed descriptor costs nothing.
+        fine_tunable, ft_error = validate_fine_tunable(
+            raw_fine_tunable, usecase.get('s3_bucket', ''))
+        if ft_error:
+            return create_response(400, {'error': ft_error})
         
         # Assume cross-account role
         credentials = assume_usecase_role(
@@ -1289,8 +1368,13 @@ def import_model(event: Dict, context: Any) -> Dict:
         training_id = str(uuid.uuid4())
         
         # Determine model type from validation
-        metadata = validation_result['metadata']
+        # Shallow copy so validation_result (also persisted and echoed in the
+        # response) keeps its original shape.
+        metadata = dict(validation_result['metadata'])
         model_type = metadata.get('model_type', 'imported')
+        # Always explicit (null when Smart Import kept nothing / direct import)
+        # so Model Detail and resolve_base_model never have to guess.
+        metadata['fine_tunable'] = fine_tunable
         
         # Map model type to standard types if possible
         model_type_mapping = {

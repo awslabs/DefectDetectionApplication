@@ -25,6 +25,12 @@ import re
 import tarfile
 from typing import Any, Dict, List, Optional
 
+# Re-export (rfdetr-training-and-transfer-learning task 7.1): the checkpoint
+# classifier lives in its own shared-layer module (stdlib only, ~1,150 lines)
+# and is reachable from here so callers have one import for everything
+# detection-training. Sibling import, flat layer layout (/opt/python).
+from checkpoint_probe import classify_checkpoint, FINE_TUNABLE_KINDS  # noqa: F401
+
 # ---------------------------------------------------------------------------
 # Vocabulary
 # ---------------------------------------------------------------------------

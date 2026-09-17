@@ -27,6 +27,7 @@ export class StorageStack extends cdk.Stack {
   public readonly deviceRegistrationsTable: dynamodb.Table;
   public readonly labelingTeamsTable: dynamodb.Table;
   public readonly labelingTasksTable: dynamodb.Table;
+  public readonly workflowTuningTable: dynamodb.Table;
   public readonly portalArtifactsBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -725,6 +726,41 @@ export class StorageStack extends cdk.Stack {
       },
     });
 
+    // WorkflowTuning Table - VLM/LLM Anomaly Tuning state (quality-prompt-tuning,
+    // task 5.2). Single table, generic `pk`/`sk` keys, holding everything a
+    // Tuning_Session owns:
+    //   pk `SESSION#{sessionId}` / sk `META`                 — the session
+    //   pk `SESSION#{sessionId}` / sk `SAMPLE#{sampleId}`    — indexed Tuning_Samples
+    //                                                          (sidecar fields + Label;
+    //                                                          NEVER image bytes, Req 9.5)
+    //   pk `SESSION#{sessionId}` / sk `CAND#{candidateId}`   — Candidates
+    //   pk `SESSION#{sessionId}` / sk `RUN#{runId}`          — Score_Runs
+    //   pk `SESSION#{sessionId}` / sk `RUNLOCK`              — the one-run-in-progress lock (Req 6.10)
+    //   pk `WF#{workflowId}`     / sk `NODE#{nodeId}`        — session uniqueness per
+    //                                                          (workflow, node) (Req 10.2)
+    //   pk `RUN#{runId}`         / sk `OUT#{sampleId}#{repeat}` — Sample_Outcomes
+    // Sample_Outcome items carry a 90-day `ttl`; every other item type is
+    // retained until the session is deleted, so TTL is cleanup only and never
+    // decides correctness. No secondary index: every access path is a query on
+    // one partition (a session's items, or a run's outcomes).
+    this.workflowTuningTable = new dynamodb.Table(this, 'WorkflowTuningTable', {
+      tableName: 'dda-portal-workflow-tuning',
+      partitionKey: {
+        name: 'pk',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'sk',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     // Portal Artifacts Bucket - stores shared component artifacts (dda-LocalServer)
     // Note: For cross-account Greengrass component access, we use the GDK component bucket
     // (dda-component-{region}-{account}) which is configured with cross-account access
@@ -888,6 +924,11 @@ export class StorageStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'LabelingTasksTableName', {
       value: this.labelingTasksTable.tableName,
       description: 'LabelingTasks DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'WorkflowTuningTableName', {
+      value: this.workflowTuningTable.tableName,
+      description: 'WorkflowTuning (VLM/LLM Anomaly Tuning) DynamoDB Table Name',
     });
 
     new cdk.CfnOutput(this, 'PortalArtifactsBucketName', {

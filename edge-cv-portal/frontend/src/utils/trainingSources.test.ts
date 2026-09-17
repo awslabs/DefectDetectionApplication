@@ -2,13 +2,15 @@ import { describe, expect, it } from 'vitest';
 import {
   ALL_MODEL_TYPE_OPTIONS,
   LFV_MODEL_TYPE_OPTIONS,
-  MODEL_SOURCE_BYOM,
   MODEL_SOURCE_MARKETPLACE,
   MODEL_SOURCE_OPTIONS,
   MODEL_SOURCE_RF_DETR,
   MODEL_SOURCE_YOLO,
+  RF_DETR_MODEL_TYPE_OPTIONS,
   YOLO_MODEL_TYPE_OPTIONS,
+  detectionArchForSource,
   labelingJobCoversFolder,
+  modelSourceForDetectionArch,
   modelSourceForLabelingTask,
   modelSourceForType,
   modelTypeOptionsForSource,
@@ -16,23 +18,29 @@ import {
 } from './trainingSources';
 
 describe('Model Source options', () => {
-  it('offers marketplace, YOLO, RF-DETR and BYOM in that order', () => {
+  it('offers marketplace, YOLO and RF-DETR in that order — and no BYOM source (Req 6.7)', () => {
     expect(MODEL_SOURCE_OPTIONS.map(o => o.value)).toEqual([
       MODEL_SOURCE_MARKETPLACE,
       MODEL_SOURCE_YOLO,
       MODEL_SOURCE_RF_DETR,
-      MODEL_SOURCE_BYOM,
     ]);
+    expect(MODEL_SOURCE_OPTIONS.some(o => o.value === 'byom')).toBe(false);
+    expect(MODEL_SOURCE_OPTIONS.some(o => /BYOM|Imported Model/i.test(o.label ?? ''))).toBe(false);
   });
 
-  it('enables exactly the two sources that have a training path today', () => {
-    const enabled = MODEL_SOURCE_OPTIONS.filter(o => !o.disabled).map(o => o.value);
-    expect(enabled).toEqual([MODEL_SOURCE_MARKETPLACE, MODEL_SOURCE_YOLO]);
-    // The disabled ones say so and point at Smart Import instead of dead-ending.
-    for (const o of MODEL_SOURCE_OPTIONS.filter(o => o.disabled)) {
-      expect(o.description).toMatch(/Coming soon/i);
-      expect(o.description).toMatch(/Models → Import/);
+  it('enables every source: all three have a training path (Req 3.1)', () => {
+    expect(MODEL_SOURCE_OPTIONS.filter(o => o.disabled)).toEqual([]);
+    for (const o of MODEL_SOURCE_OPTIONS) {
+      expect(o.description).not.toMatch(/Coming soon/i);
     }
+  });
+
+  it('labels RF-DETR as Roboflow object detection with an ONNX tag', () => {
+    const rf = MODEL_SOURCE_OPTIONS.find(o => o.value === MODEL_SOURCE_RF_DETR)!;
+    expect(rf.label).toMatch(/RF-DETR/);
+    expect(rf.label).toMatch(/Roboflow/);
+    expect(rf.label).toMatch(/Object Detection/);
+    expect(rf.tags).toEqual(['ONNX']);
   });
 });
 
@@ -40,22 +48,60 @@ describe('modelTypeOptionsForSource', () => {
   it('filters model types by source', () => {
     expect(modelTypeOptionsForSource(MODEL_SOURCE_MARKETPLACE)).toBe(LFV_MODEL_TYPE_OPTIONS);
     expect(modelTypeOptionsForSource(MODEL_SOURCE_YOLO)).toBe(YOLO_MODEL_TYPE_OPTIONS);
+    expect(modelTypeOptionsForSource(MODEL_SOURCE_RF_DETR)).toBe(RF_DETR_MODEL_TYPE_OPTIONS);
     expect(modelTypeOptionsForSource(undefined)).toBe(LFV_MODEL_TYPE_OPTIONS);
+    expect(modelTypeOptionsForSource('byom')).toBe(LFV_MODEL_TYPE_OPTIONS);
   });
 
-  it('YOLO trains object_detection only; marketplace never does', () => {
+  it('YOLO and RF-DETR train object_detection only; marketplace never does', () => {
     expect(YOLO_MODEL_TYPE_OPTIONS.map(o => o.value)).toEqual(['object_detection']);
+    expect(RF_DETR_MODEL_TYPE_OPTIONS.map(o => o.value)).toEqual(['object_detection']);
     expect(LFV_MODEL_TYPE_OPTIONS.map(o => o.value)).toEqual([
       'classification', 'classification-robust', 'segmentation', 'segmentation-robust',
     ]);
+    // One entry per model_type value (the two detection sources share one).
     expect(ALL_MODEL_TYPE_OPTIONS.length).toBe(5);
+    expect(new Set(ALL_MODEL_TYPE_OPTIONS.map(o => o.value)).size).toBe(5);
+  });
+
+  it('RF-DETR describes its own geometry contract (square resize, no NMS), not letterboxing', () => {
+    expect(RF_DETR_MODEL_TYPE_OPTIONS[0].description).toMatch(/square resize/i);
+    expect(RF_DETR_MODEL_TYPE_OPTIONS[0].description).not.toMatch(/letterbox/i);
+    expect(YOLO_MODEL_TYPE_OPTIONS[0].description).toMatch(/letterbox/i);
+  });
+});
+
+describe('detectionArchForSource', () => {
+  it.each([
+    [MODEL_SOURCE_YOLO, 'yolo'],
+    [MODEL_SOURCE_RF_DETR, 'rf_detr'],
+    [MODEL_SOURCE_MARKETPLACE, null],
+    ['byom', null],
+    [undefined, null],
+    [null, null],
+    ['', null],
+    ['YOLO', null],
+  ] as const)('%s → %s', (source, arch) => {
+    expect(detectionArchForSource(source)).toBe(arch);
+  });
+
+  it('round-trips through modelSourceForDetectionArch', () => {
+    for (const source of [MODEL_SOURCE_YOLO, MODEL_SOURCE_RF_DETR]) {
+      expect(modelSourceForDetectionArch(detectionArchForSource(source))).toBe(source);
+    }
+    // Records written before RF-DETR existed carry no arch and are YOLO.
+    expect(modelSourceForDetectionArch(undefined)).toBe(MODEL_SOURCE_YOLO);
+    expect(modelSourceForDetectionArch(null)).toBe(MODEL_SOURCE_YOLO);
   });
 });
 
 describe('modelSourceForType / modelSourceForLabelingTask', () => {
   it('maps a cloned model type back to its source', () => {
     expect(modelSourceForType('object_detection')).toBe(MODEL_SOURCE_YOLO);
+    expect(modelSourceForType('object_detection', 'yolo')).toBe(MODEL_SOURCE_YOLO);
+    expect(modelSourceForType('object_detection', 'rf_detr')).toBe(MODEL_SOURCE_RF_DETR);
     expect(modelSourceForType('classification')).toBe(MODEL_SOURCE_MARKETPLACE);
+    expect(modelSourceForType('classification', 'rf_detr')).toBe(MODEL_SOURCE_MARKETPLACE);
     expect(modelSourceForType('segmentation-robust')).toBe(MODEL_SOURCE_MARKETPLACE);
   });
 

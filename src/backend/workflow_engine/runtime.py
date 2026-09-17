@@ -83,6 +83,49 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
                 "Camera-binding re-resolution hooks could not be wired; "
                 "invalid registrations re-resolve on the watch cycle only"
             )
+        # Tuning Sample_Export wiring (quality-prompt-tuning Requirements
+        # 2.1, 2.6, 11.3). Contained in its OWN block: without it — and
+        # on every device whose Use_Case has not enabled tuning sample
+        # export — no exporter is installed, the executor's export call
+        # sites are no-ops, and LocalServer behaves exactly as before
+        # the feature.
+        exporter = None
+        try:
+            exporter = _configure_sample_export()
+        except Exception:  # noqa: BLE001 - feature isolation (11.3)
+            logger.exception(
+                "Tuning sample export could not be configured; workflow "
+                "runs proceed without exporting tuning samples"
+            )
+        # One-shot backfill of the samples derivable from the runs this
+        # device has already performed (Requirement 2.7). Its own
+        # contained block, on a daemon thread so startup never waits for
+        # it; a no-op without a configured exporter and after the marker
+        # file records that it ran once.
+        try:
+            if exporter is not None:
+                from workflow_engine.tuning.backfill import start_backfill
+
+                start_backfill(exporter)
+        except Exception:  # noqa: BLE001 - feature isolation (11.3)
+            logger.exception(
+                "Tuning sample backfill could not start; live sample export "
+                "and workflow runs are unaffected"
+            )
+        # Device_Score_Job runner (Requirements 6.4, 6.9, 6.15). Its own
+        # contained block: with tuning unconfigured no runner is
+        # installed, no shadow is subscribed and no S3 client is created,
+        # so LocalServer behaves exactly as before the feature. Job
+        # replay runs on the runner's own worker, never on an executor
+        # thread.
+        try:
+            if exporter is not None:
+                _start_job_runner(exporter)
+        except Exception:  # noqa: BLE001 - feature isolation (11.3)
+            logger.exception(
+                "Tuning job runner could not start; workflow runs and sample "
+                "export are unaffected"
+            )
         # Register the pipeline executor so triggered runs execute instead
         # of staying pending. Contained separately: a broken executor still
         # leaves discovery/registration/status reporting functional.
@@ -141,6 +184,80 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
                 "workflows will not activate"
             )
     return _watcher
+
+
+def _configure_sample_export():
+    """Read the ``workflowTuning`` LocalServer component configuration
+    once at startup and install the tuning Sample_Exporter it describes
+    (quality-prompt-tuning Requirements 2.1, 2.6, 11.3).
+
+    Returns the exporter, or ``None`` when export is disabled or
+    unconfigured — the state in which no queue is allocated, no S3
+    client is created and no S3 request is ever issued. Imports are
+    deferred: the IPC configuration reader only exists on-device, so
+    everywhere else this raises and the caller degrades to no exporter.
+    """
+    from defect_detection_config.defect_detection_config import (
+        DefectDetectionConfig,
+    )
+    from utils.ipc_client import get_ipc_client
+    from workflow_engine.tuning.sample_export import (
+        configure_sample_exporter,
+    )
+
+    reader = DefectDetectionConfig(get_ipc_client())
+    configuration = reader.get_component_config(
+        reader.get_local_server_component_name())
+    return configure_sample_exporter(configuration)
+
+
+def _start_job_runner(exporter):
+    """Install the Device_Score_Job runner and subscribe to the
+    ``dda-workflow-tuning`` shadow delta (quality-prompt-tuning
+    Requirements 6.4, 6.9, 6.15).
+
+    Follows the camera-bindings wiring exactly: the runner reads the
+    shadow through the device's existing ``IoTShadowAccessor`` and the
+    delta arrives on the MQTT ``SubscriptionHandler`` pattern, whose
+    blocking ``subscribe()`` gets its own daemon thread. Imports are
+    deferred: ``utils.server_setup`` connects Greengrass IPC at import
+    time, which only exists on-device — everywhere else this raises and
+    the caller degrades to no job runner.
+    """
+    from utils import server_setup
+    from workflow_engine.tuning.job_runner import (
+        make_tuning_shadow_handler,
+        start_job_runner,
+        tuning_delta_topic_prefix,
+    )
+
+    runner = start_job_runner(
+        exporter, shadow_accessor=server_setup.iot_shadow_accessor)
+    if runner is None:
+        return None
+
+    from mqtt.SubscriptionHandler import SubscriptionHandler
+
+    subscription = SubscriptionHandler(
+        tuning_delta_topic_prefix(runner.thing_name, runner.shadow_name),
+        make_tuning_shadow_handler(runner),
+        server_setup.publish_handler,
+    )
+
+    def _subscribe():
+        try:
+            subscription.subscribe()
+        except Exception:  # noqa: BLE001 - subscription isolation (11.2)
+            logger.exception(
+                "Workflow-tuning shadow subscription failed; Device_Score_"
+                "Jobs are picked up on the next LocalServer restart"
+            )
+
+    threading.Thread(
+        target=_subscribe, name="workflow-tuning-shadow-subscription",
+        daemon=True,
+    ).start()
+    return runner
 
 
 def _camera_binding_dependencies():

@@ -28,21 +28,25 @@ from manifest_transformer import (
     transform_manifest_entry,
     transform_manifest_lines
 )
-# Object Detection (YOLO) training: shared vocabulary + pure helpers
-# (.kiro/specs/portal-detection-training/). Same layer as manifest_transformer.
+# Object Detection (YOLO / RF-DETR) training: shared vocabulary + pure helpers
+# (.kiro/specs/portal-detection-training/,
+# .kiro/specs/rfdetr-training-and-transfer-learning/). Same layer as
+# manifest_transformer.
 from detection_training import (
     MODEL_TYPE_OBJECT_DETECTION,
-    DETECTION_ARCH,
     DETECTION_DEFAULT_INSTANCE_TYPE,
     DETECTION_DEFAULT_MAX_RUNTIME_SECONDS,
-    DETECTION_ENTRY_POINT,
     DETECTION_METRIC_DEFINITIONS,
     DETECTION_VOLUME_SIZE_GB,
+    ENTRY_POINT_FOR_ARCH,
+    RFDETR_TOP_K,
     build_sourcedir_tarball,
     decode_final_metrics,
     detection_job_environment,
     is_trained_detection_record,
+    normalize_detection_arch,
     parse_detection_hyperparameters,
+    resolve_base_model,
     resolve_detection_training_image,
     validate_detection_manifest_entry,
 )
@@ -400,20 +404,59 @@ def _create_detection_training_job(
     compilation_targets: list,
     generation_session_id: Optional[str],
 ) -> Dict:
-    """Launch datasets/detection_training/train.py as a SageMaker script-mode
-    job and persist the Detection_Record_Fields. Called from
-    create_training_job after the shared validation/access checks; raises
-    ClientError into the caller's shared error mapping."""
+    """Launch the arch's entry point (datasets/detection_training/train.py for
+    YOLO, train_rfdetr.py for RF-DETR) as a SageMaker script-mode job and
+    persist the Detection_Record_Fields. Called from create_training_job
+    after the shared validation/access checks; raises ClientError into the
+    caller's shared error mapping.
+
+    Every 400 below (arch, hyperparameters, base model, manifest) returns
+    BEFORE the sourcedir upload and the SageMaker call, so a rejected request
+    leaves nothing behind in the use-case bucket (Req 6.4).
+    """
     user_id = user['user_id']
 
-    # 1. Hyperparameters (validated at the boundary; 400 names the field).
+    # 1. Arch (default yolo so existing callers are unchanged; Req 3.2) and
+    #    its hyperparameter schema (validated at the boundary; 400 names the
+    #    field).
     try:
-        params = parse_detection_hyperparameters(body.get('hyperparameters') or {})
+        detection_arch = normalize_detection_arch(body.get('detection_arch'))
+        params = parse_detection_hyperparameters(
+            body.get('hyperparameters') or {}, detection_arch)
     except ValueError as e:
         return create_response(400, {'error': str(e)})
+    entry_point = ENTRY_POINT_FOR_ARCH[detection_arch]
+    # Square network input the ONNX is exported at (YOLO: imgsz; RF-DETR:
+    # resolution) — what packaging reads back as network_input_width.
+    network_input = params['resolution'] if detection_arch == 'rf_detr' else params['imgsz']
+    # The arch's published checkpoint name; the base model the run starts
+    # from when the request names none.
+    published_ref = params['rfdetr_size'] if detection_arch == 'rf_detr' else params['base_weights']
 
     instance_type = body.get('instance_type') or DETECTION_DEFAULT_INSTANCE_TYPE
     max_runtime = int(body.get('max_runtime_seconds') or DETECTION_DEFAULT_MAX_RUNTIME_SECONDS)
+
+    # 1b. Base model (Req 6.3 / 6.4): `base_model = {kind, ref}` -> descriptor.
+    #     One DynamoDB get_item at most; every rejection (bad kind, unknown /
+    #     other-use-case ref, not Completed, arch mismatch, no checkpoint) is
+    #     a 400 here, before any S3 write or SageMaker call.
+    base_model_request = body.get('base_model')
+    if base_model_request is None:
+        base_model_request = {}
+    if not isinstance(base_model_request, dict):
+        return create_response(400, {
+            'error': "base_model must be an object of the form {kind, ref}"})
+    base_kind = base_model_request.get('kind') or 'published'
+    base_ref = base_model_request.get('ref')
+    if str(base_kind).strip().lower() == 'published' and \
+            (base_ref is None or not str(base_ref).strip()):
+        base_ref = published_ref
+    table = dynamodb.Table(TRAINING_JOBS_TABLE)
+    try:
+        base_model = resolve_base_model(
+            base_kind, base_ref, detection_arch, usecase_id, table)
+    except ValueError as e:
+        return create_response(400, {'error': str(e)})
 
     # 2. Manifest must be a bounding-box manifest.
     logger.info("Validating manifest as an Object Detection manifest")
@@ -461,17 +504,22 @@ def _create_detection_training_job(
     code_dir = _detection_code_dir()
     with tempfile.TemporaryDirectory() as td:
         source_tar = os.path.join(td, 'sourcedir.tar.gz')
-        bundled = build_sourcedir_tarball(code_dir, source_tar)
-        logger.info(f"Bundled detection entry point from {code_dir}: {bundled}")
+        bundled = build_sourcedir_tarball(code_dir, source_tar, entry_point)
+        logger.info(f"Bundled detection entry point {entry_point} from {code_dir}: {bundled}")
         s3_usecase.upload_file(source_tar, bucket, code_key)
     code_s3 = f"s3://{bucket}/{code_key}"
 
-    # 5. Image + job environment.
+    # 5. Image + job environment. BASE_WEIGHTS_S3 (+ BASE_WEIGHTS_MEMBER when
+    #    the URI is a tarball) appear only when the base model resolved to
+    #    real weights; the published-checkpoint env is unchanged (Req 6.5).
     training_image = resolve_detection_training_image(
         usecase_region, os.environ.get('DETECTION_TRAINING_IMAGE'))
-    job_env = detection_job_environment(dataset_manifest_s3, params)
+    job_env = detection_job_environment(
+        dataset_manifest_s3, params, detection_arch,
+        base_weights_s3=base_model['weights_s3'],
+        base_weights_member=base_model['member'])
     training_hyperparameters = {
-        'sagemaker_program': DETECTION_ENTRY_POINT,
+        'sagemaker_program': entry_point,
         'sagemaker_submit_directory': code_s3,
         **job_env,
     }
@@ -481,11 +529,12 @@ def _create_detection_training_job(
     sagemaker_role_arn = f"arn:aws:iam::{usecase['account_id']}:role/DDASageMakerExecutionRole"
 
     logger.info(f"Creating detection training job {training_job_name} "
-                f"(image={training_image}, sourcedir={code_s3}, imgsz={params['imgsz']})")
+                f"(arch={detection_arch}, image={training_image}, sourcedir={code_s3}, "
+                f"network_input={network_input}, base_model={base_model['kind']}:{base_model['ref']})")
     training_response = sagemaker_usecase.create_training_job(
         TrainingJobName=training_job_name,
         HyperParameters=training_hyperparameters,
-        # train.py reads bare env names (MANIFEST_S3, IMGSZ, ...), not SM_HP_*.
+        # The entry points read bare env names (MANIFEST_S3, IMGSZ, ...), not SM_HP_*.
         Environment=job_env,
         AlgorithmSpecification={
             'TrainingImage': training_image,
@@ -505,8 +554,8 @@ def _create_detection_training_job(
             'VolumeSizeInGB': DETECTION_VOLUME_SIZE_GB,
         },
         StoppingCondition={'MaxRuntimeInSeconds': max_runtime},
-        # The container pip-installs requirements.txt (ultralytics) and
-        # downloads pretrained weights at start-up.
+        # The container pip-installs requirements.txt (ultralytics / rfdetr)
+        # and downloads pretrained weights at start-up.
         EnableNetworkIsolation=False,
         Tags=[
             {'Key': 'UseCase', 'Value': usecase_id},
@@ -517,8 +566,59 @@ def _create_detection_training_job(
     )
     training_job_arn = training_response['TrainingJobArn']
 
-    # 6. Record — LFV base fields + Detection_Record_Fields.
-    table = dynamodb.Table(TRAINING_JOBS_TABLE)
+    # 6. Record — LFV base fields + Detection_Record_Fields (per arch).
+    if detection_arch == 'rf_detr':
+        detection_record = {
+            'detection_arch': detection_arch,
+            'network_input_width': params['resolution'],
+            'network_input_height': params['resolution'],
+            'class_names': class_names,
+            'num_classes': len(class_names),
+            'score_threshold': _to_dynamo_number(params['score_threshold']),
+            # DETR-family decoding is set-based (no NMS): the device keeps the
+            # top_k detections above score_threshold. No iou_threshold.
+            'top_k': RFDETR_TOP_K,
+            # train_rfdetr.py trains on an aspect-destroying square resize
+            # with ImageNet normalisation; letterboxing on the device would
+            # be the YOLO geometry mismatch in the other direction (Req 1.9).
+            'preserve_aspect': False,
+            'rfdetr_size': params['rfdetr_size'],
+            'resolution': params['resolution'],
+            'epochs': params['epochs'],
+            'batch': params['batch'],
+            'grad_accum': params['grad_accum'],
+            'lr': _to_dynamo_number(params['lr']),
+            'patience': params['patience'],
+            'onnx_opset': params['onnx_opset'],
+            'sourcedir_s3': code_s3,
+        }
+    else:
+        detection_record = {
+            'detection_arch': detection_arch,
+            'network_input_width': params['imgsz'],
+            'network_input_height': params['imgsz'],
+            'class_names': class_names,
+            'num_classes': len(class_names),
+            'score_threshold': _to_dynamo_number(params['score_threshold']),
+            'iou_threshold': _to_dynamo_number(params['iou_threshold']),
+            # train.py fine-tunes letterboxed (rect=False); the device MUST
+            # letterbox too or confidence silently drops (gap doc §7).
+            'preserve_aspect': True,
+            'imgsz': params['imgsz'],
+            'epochs': params['epochs'],
+            'batch': params['batch'],
+            'base_weights': params['base_weights'],
+            'patience': params['patience'],
+            'onnx_opset': params['onnx_opset'],
+            'sourcedir_s3': code_s3,
+        }
+    # Base_Model_Descriptor (Req 6.6): Training Detail shows "Fine-tuned from
+    # <name> v<version>" and a chain of retrains stays traceable. When the
+    # base's class_names differ from the manifest's, both are kept as-is —
+    # the entry point re-initialises the class head (Req 7.4), the frontend
+    # warns; nothing to reject here.
+    detection_record['base_model'] = dict(base_model)
+
     timestamp = int(datetime.utcnow().timestamp() * 1000)
     training_item = {
         'training_id': training_id,
@@ -543,25 +643,7 @@ def _create_detection_training_job(
         # key off model_type + runtime; no `source` so models.py keeps
         # defaulting it to 'trained'.
         'runtime': 'onnx',
-        'detection': {
-            'detection_arch': DETECTION_ARCH,
-            'network_input_width': params['imgsz'],
-            'network_input_height': params['imgsz'],
-            'class_names': class_names,
-            'num_classes': len(class_names),
-            'score_threshold': _to_dynamo_number(params['score_threshold']),
-            'iou_threshold': _to_dynamo_number(params['iou_threshold']),
-            # train.py fine-tunes letterboxed (rect=False); the device MUST
-            # letterbox too or confidence silently drops (gap doc §7).
-            'preserve_aspect': True,
-            'imgsz': params['imgsz'],
-            'epochs': params['epochs'],
-            'batch': params['batch'],
-            'base_weights': params['base_weights'],
-            'patience': params['patience'],
-            'onnx_opset': params['onnx_opset'],
-            'sourcedir_s3': code_s3,
-        },
+        'detection': detection_record,
     }
     if generation_session_id:
         training_item['generation_session_id'] = generation_session_id
@@ -579,8 +661,10 @@ def _create_detection_training_job(
             'model_type': MODEL_TYPE_OBJECT_DETECTION,
             'training_job_name': training_job_name,
             'training_image': training_image,
-            'imgsz': params['imgsz'],
+            'detection_arch': detection_arch,
+            'imgsz': network_input,
             'class_names': class_names,
+            'base_model': {'kind': base_model['kind'], 'ref': base_model['ref']},
         },
     )
     logger.info(f"Detection training job created successfully: {training_id}")
@@ -609,7 +693,10 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         "max_runtime_seconds": 7200,
         "hyperparameters": {},  // optional
         "auto_compile": true,  // optional, default false
-        "compilation_targets": ["x86_64", "aarch64", "jetson"]  // optional, required if auto_compile is true
+        "compilation_targets": ["x86_64", "aarch64", "jetson"],  // optional, required if auto_compile is true
+        // object_detection only:
+        "detection_arch": "yolo" | "rf_detr",  // optional, default "yolo"
+        "base_model": {"kind": "published" | "training_job" | "imported", "ref": "..."}  // optional
     }
     """
     try:

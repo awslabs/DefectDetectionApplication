@@ -13,8 +13,24 @@ bundles the entry point into the training Lambda. The remaining steps are the
 portal deploy and the on-device check (tasks 9–10 of that spec). The sections
 below are kept as the record of what was missing and why.
 
+**RF-DETR update (2026-09-14).** RF-DETR (nano / small / medium / large) is now
+a second detection architecture alongside YOLO, built under
+`.kiro/specs/rfdetr-training-and-transfer-learning/`: the entry point is
+`datasets/detection_training/train_rfdetr.py` (rfdetr 1.10.1, fed the COCO
+`rfdetr` layout via `manifest_to_detector_dataset.py --coco-layout rfdetr`),
+and its `model.onnx` is packaged under the `rf_detr_object_detection` stage
+with `normalize: true`, `preserve_aspect: false` and `top_k` — no NMS and no
+`iou_threshold`, the opposite geometry contract from the YOLO letterbox path
+in §7. Any detection run (either arch) can now start from a base model: the
+published checkpoint, or a completed portal job's own checkpoint delivered to
+the entry point as `BASE_WEIGHTS_S3` + `BASE_WEIGHTS_MEMBER` (`best.pt` /
+`checkpoint_best_total.pth`). Fine-tuning from an *imported* model is gated on
+the findings in `docs/transfer-learning-spike.md` (Requirement 7 of that spec)
+and is not wired yet. On-device verification of an RF-DETR component and of a
+fine-tuned YOLO (spec task 11) is still pending.
+
 Written 2026-09-12 from a working session on the `blue_plate` use case;
-status updated 2026-09-13.
+status updated 2026-09-13 and 2026-09-14.
 
 ---
 

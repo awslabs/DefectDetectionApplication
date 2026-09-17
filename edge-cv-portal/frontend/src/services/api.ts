@@ -48,6 +48,7 @@ import type {
   SyntheticSessionDetailResponse,
   SyntheticSessionSummary,
 } from '../pages/synthetic/types';
+import { groupDetectionBaseModels } from '../utils/detectionBaseModels';
 import { beginRequest, endRequest } from './loadingBus';
 
 /**
@@ -949,6 +950,153 @@ export interface WorkflowGenerationJobSucceeded extends WorkflowGenerationResult
 export type WorkflowGenerationJobStatus =
   | WorkflowGenerationJobInProgress
   | WorkflowGenerationJobSucceeded;
+
+// Detection training types (portal-detection-training +
+// rfdetr-training-and-transfer-learning). The backend's shapes live in
+// detection_training.py / training.py; these mirror them field-for-field.
+
+/** Detector family: single-tensor + NMS (yolo) or two-tensor top-k (rf_detr). */
+export type DetectionArch = 'yolo' | 'rf_detr';
+
+/** RF-DETR Apache-2.0 checkpoints (xlarge/2xlarge are PML-licensed, excluded). */
+export type RfDetrSize = 'nano' | 'small' | 'medium' | 'large';
+
+/** Where a detection run's starting weights come from (Req 6). */
+export type BaseModelKind = 'published' | 'training_job' | 'imported';
+
+/**
+ * `POST /training` `base_model`: `ref` is the published checkpoint name /
+ * RF-DETR size for `published`, otherwise the training_id of the base
+ * record in the same use case.
+ */
+export interface BaseModelRef {
+  kind: BaseModelKind;
+  ref: string;
+}
+
+/** Base_Model_Descriptor persisted as `detection.base_model` (Req 6.6). */
+export interface BaseModelDescriptor {
+  kind: BaseModelKind;
+  ref: string | null;
+  weights_s3?: string | null;
+  member?: string | null;
+  detection_arch: DetectionArch;
+  class_names?: string[] | null;
+}
+
+/** YOLO `hyperparameters` (datasets/detection_training/train.py). */
+export interface YoloHyperparameters {
+  imgsz: number;
+  base_weights: string;
+  epochs: number;
+  batch: number;
+  patience: number;
+  score_threshold: number;
+  iou_threshold: number;
+}
+
+/** RF-DETR `hyperparameters` (train_rfdetr.py) — no imgsz, no IoU (NMS-free). */
+export interface RfDetrHyperparameters {
+  rfdetr_size: RfDetrSize;
+  resolution: number;
+  epochs: number;
+  batch: number;
+  grad_accum: number;
+  lr: number;
+  patience: number;
+  score_threshold: number;
+}
+
+export type DetectionHyperparameters = YoloHyperparameters | RfDetrHyperparameters;
+
+/**
+ * `metadata.fine_tunable` on an imported record (Req 7); null when the import
+ * was ONNX / TorchScript / a bare state_dict. `class_names` is null for
+ * checkpoints that carry no names (published RF-DETR COCO files), in which
+ * case only `num_classes` (the head width) is known.
+ */
+export interface FineTunableCheckpoint {
+  arch: DetectionArch;
+  kind?: string;
+  checkpoint_s3: string;
+  class_names?: string[] | null;
+  num_classes?: number | null;
+}
+
+/**
+ * Detection_Record_Fields (`TrainingJobs.detection`) written by
+ * training.py for an object_detection job. YOLO records carry
+ * imgsz/base_weights/iou_threshold; RF-DETR records carry
+ * rfdetr_size/resolution/grad_accum/lr/top_k. Records written before
+ * RF-DETR existed carry no `detection_arch` and are YOLO.
+ */
+export interface DetectionRecordFields {
+  detection_arch?: DetectionArch;
+  network_input_width: number;
+  network_input_height: number;
+  class_names: string[];
+  num_classes: number;
+  score_threshold: number;
+  preserve_aspect: boolean;
+  epochs?: number;
+  batch?: number;
+  patience?: number;
+  onnx_opset?: number;
+  sourcedir_s3?: string;
+  base_model?: BaseModelDescriptor;
+  // YOLO
+  imgsz?: number;
+  base_weights?: string;
+  iou_threshold?: number;
+  // RF-DETR
+  rfdetr_size?: RfDetrSize;
+  resolution?: number;
+  grad_accum?: number;
+  lr?: number;
+  top_k?: number;
+}
+
+/** A `TrainingJobs` record as returned by `GET /training` (fields the portal reads). */
+export interface TrainingJobRecord {
+  training_id: string;
+  usecase_id: string;
+  model_name: string;
+  model_version?: string;
+  model_type?: string;
+  status: string;
+  /** 'imported' for Smart Import / Model Import records; absent for trained ones. */
+  source?: string;
+  /** 'onnx' for portal-trained detectors (no Neo step). */
+  runtime?: string;
+  artifact_s3?: string;
+  instance_type?: string;
+  dataset_manifest_s3?: string;
+  hyperparameters?: Record<string, unknown>;
+  metrics?: Record<string, number>;
+  detection?: DetectionRecordFields;
+  metadata?: { fine_tunable?: FineTunableCheckpoint | null; [key: string]: unknown };
+  created_at: number;
+  [key: string]: unknown;
+}
+
+/** One published (COCO) checkpoint the arch's entry point can start from. */
+export interface PublishedCheckpoint {
+  /** `base_model.ref` / YOLO `base_weights` / RF-DETR `rfdetr_size`. */
+  ref: string;
+  label: string;
+  /** RF-DETR: the size's native square resolution. */
+  native_resolution?: number;
+}
+
+/** What the Base model control offers for one arch (Req 6.1). */
+export interface DetectionBaseModels {
+  arch: DetectionArch;
+  published: PublishedCheckpoint[];
+  /** Completed portal-trained detectors of the same arch, newest first. */
+  trainedDetectors: TrainingJobRecord[];
+  /** Imported records whose `metadata.fine_tunable.arch` matches. */
+  fineTunableImports: TrainingJobRecord[];
+}
 
 class ApiService {
   private get baseUrl(): string {
@@ -2549,14 +2697,35 @@ class ApiService {
     dataset_manifest_s3: string;
     instance_type: string;
     max_runtime_seconds?: number;
-    hyperparameters?: Record<string, any>;
+    hyperparameters?: Record<string, any> | DetectionHyperparameters;
     auto_compile?: boolean;
     compilation_targets?: string[];
+    // object_detection only (rfdetr-training-and-transfer-learning Req 3.2 / 6.3):
+    /** Detector family; the backend defaults a missing value to 'yolo'. */
+    detection_arch?: DetectionArch;
+    /** Starting weights; omitted = the arch's published checkpoint. */
+    base_model?: BaseModelRef;
+    /** Optional override of the manifest's class-map order (base-model prefill). */
+    class_names?: string[];
   }): Promise<{ training_job_id: string; message: string }> {
     return this.request<{ training_job_id: string; message: string }>('/training', {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  /**
+   * What the Create Training "Base model" control offers for one detector
+   * family (Req 6.1): the arch's published checkpoints, the use case's
+   * Completed portal-trained detectors of that arch, and its imported
+   * records marked fine-tunable for that arch. A thin client-side filter
+   * over `GET /training` — imported models are `TrainingJobs` records too
+   * (`source='imported'`), and `resolve_base_model` looks every non-published
+   * `ref` up in that table, so no other list is needed and no new Lambda.
+   */
+  async listDetectionBaseModels(usecaseId: string, arch: DetectionArch): Promise<DetectionBaseModels> {
+    const { jobs } = await this.listTrainingJobs(usecaseId);
+    return groupDetectionBaseModels((jobs || []) as TrainingJobRecord[], arch);
   }
 
   async getTrainingLogs(id: string, nextToken?: string): Promise<{ 

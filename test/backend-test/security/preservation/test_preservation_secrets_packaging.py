@@ -56,6 +56,14 @@ MODEL_NAMING_REL = "edge-cv-portal/backend/functions/model_naming.py"
 DETECTION_TRAINING_REL = (
     "edge-cv-portal/backend/layers/shared/python/detection_training.py"
 )
+# Sibling shared-layer module (stdlib only). detection_training.py does
+# ``from checkpoint_probe import (...)`` (rfdetr-training-and-transfer-learning
+# task 7.1) — a flat layer import that the isolated loader cannot resolve on
+# its own, so the REAL module is loaded first and injected when
+# detection_training is loaded.
+CHECKPOINT_PROBE_REL = (
+    "edge-cv-portal/backend/layers/shared/python/checkpoint_probe.py"
+)
 
 
 def _shared_utils_stub():
@@ -101,9 +109,15 @@ def _make_stubs(lambda_client):
             "model_naming_preservation", MODEL_NAMING_REL
         ),
         # REAL shared-layer module — resolves packaging.py's
-        # ``from detection_training import (...)``.
+        # ``from detection_training import (...)``. Its own sibling import
+        # (``from checkpoint_probe import ...``) is resolved the same way.
         "detection_training": load_module_from_path(
-            "detection_training_preservation", DETECTION_TRAINING_REL
+            "detection_training_preservation", DETECTION_TRAINING_REL,
+            injected_modules={
+                "checkpoint_probe": load_module_from_path(
+                    "checkpoint_probe_preservation", CHECKPOINT_PROBE_REL
+                ),
+            },
         ),
     }
 

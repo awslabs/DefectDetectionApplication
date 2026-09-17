@@ -34,6 +34,12 @@ import CompilationTab from '../components/CompilationTab';
 import VllmPackagePublishSection from '../components/vllm-publish/VllmPackagePublishSection';
 import { engineDisplayValue, toEngineJsonValue } from './RegisterLlm';
 import { TrainingJob } from '../types';
+import {
+  fineTunableBadgeLabel,
+  fineTunableClassSummary,
+  fineTunableOf,
+  notFineTunableExplanation,
+} from '../utils/importedFineTunable';
 
 interface Model {
   model_id: string;
@@ -532,6 +538,47 @@ export default function ModelDetail() {
           ]} />
         </ColumnLayout>
       </Container>
+
+      {model.source === 'imported' && trainingJob && (
+        <Container
+          header={
+            <Header
+              variant="h2"
+              description="Whether this import can be continued as a Base model in Create Training (rfdetr-training-and-transfer-learning, Req 7)"
+            >
+              Fine-tuning
+            </Header>
+          }
+        >
+          {(() => {
+            // The kept checkpoint (ultralytics .pt / RF-DETR .pth) is on the
+            // training-job record's metadata; ONNX / TorchScript / state_dict
+            // imports carry fine_tunable = null and get the per-kind text.
+            const fineTunable = fineTunableOf(trainingJob);
+            if (fineTunable) {
+              const classes = fineTunableClassSummary(fineTunable);
+              return (
+                <SpaceBetween size="xs">
+                  <Badge color="green">{fineTunableBadgeLabel(fineTunable)}</Badge>
+                  <Box data-testid="fine-tunable-classes">
+                    {classes ? `Classes: ${classes}` : 'Classes: (not stored in the checkpoint)'}
+                  </Box>
+                  {fineTunable.checkpoint_s3 && (
+                    <Box fontSize="body-s" color="text-status-inactive">
+                      <span style={{ fontFamily: 'monospace' }}>{fineTunable.checkpoint_s3}</span>
+                    </Box>
+                  )}
+                </SpaceBetween>
+              );
+            }
+            return (
+              <Box color="text-status-inactive" data-testid="not-fine-tunable">
+                {notFineTunableExplanation(trainingJob)}
+              </Box>
+            );
+          })()}
+        </Container>
+      )}
 
       {isVllmModel(model) && (
         <Container

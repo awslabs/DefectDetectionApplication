@@ -11,6 +11,11 @@
         "executionId": "f39c55a8-3f58-48c7-a02d-25858838773f",
         "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
         "timestamp": 1789307966012
+      },
+      {
+        "executionId": "e28b1c1e-ade3-4fc3-8098-79c27eef371c",
+        "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
+        "timestamp": 1789317288891
       }
     ],
     "1.2 Prototype `classify_checkpoint(path)` as a pure function (zip/pickle envelope + protobuf header sniffing; no torch import) in `datasets/detection_training/_checkpoint_probe.py`; run it over the 1.1 set and record precision/recall per kind and the recovered `num_classes` / `class_names` where available (ultralytics stores `names` in the checkpoint; RF-DETR stores `args.class_names` or the COCO categories).": [
@@ -18,6 +23,11 @@
         "executionId": "f39c55a8-3f58-48c7-a02d-25858838773f",
         "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
         "timestamp": 1789307937902
+      },
+      {
+        "executionId": "e28b1c1e-ade3-4fc3-8098-79c27eef371c",
+        "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
+        "timestamp": 1789317311431
       }
     ],
     "1.3 Two real fine-tunes on the blue-plate manifest via the manual launch path (README): (a) YOLO from blue-plate v2 `best.pt` (`BASE_WEIGHTS` pointing at a downloaded copy); (b) RF-DETR small from published weights (baseline) then from its own `checkpoint_best_total.pth`. Record mAP@50, mAP@50-95, wall-clock, and whether either trainer re-initialises the class head when `nc` differs (test by fine-tuning a 1-class checkpoint onto a 2-class manifest).": [
@@ -44,6 +54,11 @@
         "executionId": "f39c55a8-3f58-48c7-a02d-25858838773f",
         "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
         "timestamp": 1789308005451
+      },
+      {
+        "executionId": "e28b1c1e-ade3-4fc3-8098-79c27eef371c",
+        "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
+        "timestamp": 1789317291313
       }
     ],
     "2.2 Extend `edge-cv-portal/backend/tests/test_manifest_to_detector_dataset.py`: `rfdetr` layout file placement, split names, annotation JSON identical to `nested` for the same input; existing cases untouched.": [
@@ -51,6 +66,11 @@
         "executionId": "f39c55a8-3f58-48c7-a02d-25858838773f",
         "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
         "timestamp": 1789307938615
+      },
+      {
+        "executionId": "e28b1c1e-ade3-4fc3-8098-79c27eef371c",
+        "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
+        "timestamp": 1789317313383
       }
     ],
     "3.1 `detection_training.py`: `DETECTION_ARCHES`, `ENTRY_POINT_FOR_ARCH`, `REQUIREMENTS_FOR_ARCH`, `RFDETR_SIZES` (native resolutions), per-arch `parse_detection_hyperparameters(raw, arch)`, per-arch `detection_job_environment(..., arch, base_weights_s3, base_weights_member)`, `build_sourcedir_tarball(code_dir, out, entry_point)` (entry point + its requirements renamed to `requirements.txt` + `_common.py` + converters), `build_detection_device_manifest(..., detection_arch, top_k)` with the RF-DETR branch (stage type, `normalize`, `[1,300,C]`, `top_k`, no `iou_threshold`).": [
@@ -63,6 +83,11 @@
         "executionId": "f39c55a8-3f58-48c7-a02d-25858838773f",
         "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
         "timestamp": 1789308013899
+      },
+      {
+        "executionId": "e28b1c1e-ade3-4fc3-8098-79c27eef371c",
+        "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
+        "timestamp": 1789317294963
       }
     ],
     "3.2 Tests in `tests/test_detection_training_shared.py`: RF-DETR schema (each bound, resolution multiple-of-56, size→native default), per-arch env names, per-arch tarball contents, RF-DETR manifest shape; extend `tests/test_detection_manifest_parity.py` with `detection_arch='rf_detr'` against `generate_dda_package`. YOLO cases unchanged.": [
@@ -70,6 +95,11 @@
         "executionId": "f39c55a8-3f58-48c7-a02d-25858838773f",
         "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
         "timestamp": 1789307938966
+      },
+      {
+        "executionId": "e28b1c1e-ade3-4fc3-8098-79c27eef371c",
+        "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
+        "timestamp": 1789317315907
       }
     ],
     "4.1 Create `datasets/detection_training/_common.py` by lifting `stage_data`'s manifest/source-ref/IMAGES_S3 download, the converter invocation, `hp()` env parsing, a `fetch_base_weights(BASE_WEIGHTS_S3, BASE_WEIGHTS_MEMBER)` (downloads the tarball and extracts the member, or downloads a bare file), and `write_metadata()`. Refactor `train.py` to use it (behaviour byte-identical; it gains base-weights loading only).": [
@@ -77,6 +107,11 @@
         "executionId": "f39c55a8-3f58-48c7-a02d-25858838773f",
         "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
         "timestamp": 1789307939169
+      },
+      {
+        "executionId": "e28b1c1e-ade3-4fc3-8098-79c27eef371c",
+        "chatSessionId": "sess_8b80d30c-b87f-4461-ac2e-e402fd00b013",
+        "timestamp": 1789317318720
       }
     ],
     "4.2 Create `train_rfdetr.py` per design (size map, resolution check, converter with `--coco-layout rfdetr`, split assertion, `pretrain_weights`, `.train(...)`, `TEST METRICS` line from the test split, ONNX export from `checkpoint_best_total.pth`, two-output shape verification, metadata with `detection_arch: 'rf_detr'` and RF-DETR device hints, copy of the checkpoint). Create `requirements-rfdetr.txt` (pin `rfdetr[onnxexport]`, `onnxruntime`, `numpy<2`). Pin the exact `export()` kwargs and the resolution rule against the installed version during the 1.3 baseline run.": [

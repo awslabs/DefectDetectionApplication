@@ -91,12 +91,21 @@ def _load_model_converter():
     exc.ClientError = ClientError
     botocore.exceptions = exc
 
+    # Shared-layer checkpoint classifier imported by convert_model since
+    # rfdetr-training-and-transfer-learning task 7.2 (Smart Import keeps a
+    # fine-tunable .pt/.pth as a sidecar). Stubbed like shared_utils: it is
+    # not on sys.path here and none of the #8 sites under test reach it.
+    cp = types.ModuleType("checkpoint_probe")
+    cp.classify_checkpoint = lambda *a, **k: {"kind": "unknown", "fine_tunable": False}
+    cp.FINE_TUNABLE_KINDS = ("ultralytics_checkpoint", "rfdetr_checkpoint")
+
     return load_module_from_path(
         "model_converter_preservation",
         "edge-cv-portal/backend/functions/model_converter.py",
         injected_modules={
             "shared_utils": su, "boto3": boto3,
             "botocore": botocore, "botocore.exceptions": exc,
+            "checkpoint_probe": cp,
         },
     )
 

@@ -53,7 +53,6 @@ Pipeline_Configuration path (Requirement 13.7). Hardware/network clients
 are imported lazily so this module stays importable everywhere.
 """
 
-import base64
 import inspect
 import json
 import logging
@@ -77,6 +76,40 @@ from workflow_engine.payload_fetch import (
     describe_reference_source,
     fetch_reference_bytes,
     resolve_payload_path,
+)
+# Sample_Export (quality-prompt-tuning Requirement 2.2): after every
+# Anomaly_Mode invocation that returned an answer, the exact bytes sent
+# plus the recorded answer are handed to the device's tuning side
+# channel. Both helpers are inert unless the LocalServer component
+# configuration enables export and are totally contained, so an
+# Execution's outcome, artifacts and Run_Metadata are identical to a run
+# with export disabled (Requirements 11.1, 11.2, 11.3).
+from workflow_engine.tuning.sample_export import (
+    ExportContext,
+    export_bedrock_sample,
+    export_llm_sample,
+)
+# The shared Invocation_Builder (quality-prompt-tuning Requirements 6.1,
+# 6.2, 11.1): the request construction and the verdict parser this module
+# used to carry inline now live in the vendored ``workflow_core``
+# package, so the executor, the Portal's Bedrock_Scorer and the device's
+# Device_Score_Job runner build byte-identical requests from one
+# implementation. Everything else — image resolution, ``render_prompt``,
+# the fail-closed rules, artifact persistence, metadata assembly and the
+# transports themselves — stays here.
+from workflow_engine.vendor.workflow_core.anomaly_invocation import (
+    BEDROCK_DEFAULT_MODEL,
+    BEDROCK_JSON_INSTRUCTION,
+    BEDROCK_READ_TIMEOUT_SEC,
+    DEFAULT_MAX_TOKENS,
+    LLM_GENERATION_PARAMETERS,
+    BedrockInvocation,
+    LlmInvocation,
+    build_bedrock_invocation,
+    build_llm_invocation,
+    parse_verdict,
+    resolve_max_image_dimension,
+    resolve_output_token_budget,
 )
 
 logger = logging.getLogger(__name__)
@@ -989,20 +1022,19 @@ def _default_modbus_writer(
 # and nothing else (other bindings, other pipelines) is touched.
 # ---------------------------------------------------------------------------
 
-#: Fixed client-side read timeout for Bedrock runtime invocations.
-BEDROCK_READ_TIMEOUT_SEC = 30
-
-#: Default model when the binding parameter is absent (mirrors the
-#: catalog default).
-BEDROCK_DEFAULT_MODEL = "us.amazon.nova-lite-v1:0"
-
-#: Canonical JSON-format instruction the executor appends to every
-#: anomaly-mode prompt (single source of truth for the verdict answer
-#: contract): a user-customized prompt can no longer break
-#: ``parse_bedrock_answer`` by omitting the JSON shape.
-BEDROCK_JSON_INSTRUCTION = (
-    'Respond with JSON: {"is_anomalous": true|false, "confidence": 0..1}.'
-)
+# Bedrock request constants now live in the shared Invocation_Builder and
+# are imported above, so ``from workflow_engine.output_bindings import
+# BEDROCK_JSON_INSTRUCTION`` (and friends) keeps resolving unchanged:
+# - BEDROCK_READ_TIMEOUT_SEC: the fixed client-side read timeout of a
+#   Bedrock runtime invocation, shared so the executor and the Portal's
+#   Bedrock_Scorer configure the same timeout (quality-prompt-tuning
+#   Requirement 6.3);
+# - BEDROCK_DEFAULT_MODEL: the catalog default model when the binding
+#   parameter is absent;
+# - BEDROCK_JSON_INSTRUCTION: the Verdict_Instruction the shared builder
+#   appends to every anomaly-mode USER prompt — the single source of
+#   truth for the verdict answer contract, so a user-customized prompt
+#   can no longer break the Verdict_Parser by omitting the JSON shape.
 
 
 class BedrockInferenceError(Exception):
@@ -1015,41 +1047,17 @@ class BedrockInferenceError(Exception):
         self.node_id = node_id
 
 
+#: Fenced-code-block extraction used by :func:`extract_defect_objects`
+#: below (the shared Verdict_Parser carries its own copy).
 _FENCED_BLOCK = re.compile(r"```[A-Za-z0-9_-]*\s*(.*?)```", re.DOTALL)
 
-
-def parse_bedrock_answer(text: str) -> Dict[str, Any]:
-    """Parse the model's answer into ``{is_anomalous, confidence}``.
-
-    Tolerates fenced code blocks (``` / ```json) and surrounding prose:
-    the first JSON object found is used. Raises ``ValueError`` when no
-    JSON object with the expected fields can be extracted.
-    """
-    candidates = [match.group(1) for match in _FENCED_BLOCK.finditer(text or "")]
-    candidates.append(text or "")
-    for candidate in candidates:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start < 0 or end <= start:
-            continue
-        try:
-            parsed = json.loads(candidate[start:end + 1])
-        except ValueError:
-            continue
-        if not isinstance(parsed, dict) or "is_anomalous" not in parsed:
-            continue
-        is_anomalous = _coerce(parsed.get("is_anomalous"))
-        confidence = _coerce(parsed.get("confidence", 0.0))
-        if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
-            confidence = 0.0
-        return {
-            "is_anomalous": bool(is_anomalous),
-            "confidence": float(confidence),
-        }
-    raise ValueError(
-        "Bedrock response did not contain the expected JSON object "
-        "{{\"is_anomalous\": ..., \"confidence\": ...}}: {0!r}".format(
-            (text or "")[:200]))
+#: The Verdict_Parser, moved verbatim to
+#: ``workflow_core.anomaly_invocation.parse_verdict`` (quality-prompt-
+#: tuning Requirement 6.2) and kept here under its historical name so
+#: every existing importer — and every caller in this module — keeps
+#: working unchanged. Same function object, same ``ValueError`` shape
+#: with the answer excerpt.
+parse_bedrock_answer = parse_verdict
 
 
 def _default_bedrock_invoker(
@@ -1063,7 +1071,15 @@ def _default_bedrock_invoker(
     absent/empty the converse kwargs are byte-identical to the
     pre-feature invocation (json-trigger-metadata-pipeline Requirements
     7.2, 7.3). boto3 is imported lazily so this module stays importable
-    everywhere (Requirement 13.7)."""
+    everywhere (Requirement 13.7).
+
+    The kwargs themselves come from
+    :meth:`BedrockInvocation.converse_kwargs` — the shared
+    Invocation_Builder (quality-prompt-tuning Requirements 6.2, 6.3) —
+    so this transport and the Portal's Bedrock_Scorer send the identical
+    request for the identical invocation. The transport keeps owning the
+    client construction (region, read timeout, no retries) and the
+    answer extraction."""
     import boto3
     from botocore.config import Config as BotoConfig
 
@@ -1075,20 +1091,15 @@ def _default_bedrock_invoker(
             retries={"max_attempts": 1},
         ),
     )
-    content = [{"text": prompt}]
-    for label, data in images:
-        content.append({"text": "{0}:".format(label)})
-        content.append(
-            {"image": {"format": converse_image_format(data),
-                       "source": {"bytes": data}}})
-    kwargs = dict(
-        modelId=model,
-        messages=[{"role": "user", "content": content}],
-        inferenceConfig={"maxTokens": int(max_tokens)},
+    invocation = BedrockInvocation(
+        model=model,
+        prompt=prompt,
+        images=tuple((label, data) for label, data in images),
+        region=region,
+        max_tokens=max_tokens,
+        system_prompt=system_prompt,
     )
-    if system_prompt:
-        kwargs["system"] = [{"text": system_prompt}]
-    response = client.converse(**kwargs)
+    response = client.converse(**invocation.converse_kwargs())
     parts = (response.get("output", {}).get("message", {}).get("content", []))
     return "".join(part.get("text", "") for part in parts
                    if isinstance(part, dict))
@@ -1594,6 +1605,7 @@ class BedrockInferenceProcessor:
         duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
         run_context: Optional[RunContext] = None,
         detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
+        export_context: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         """Run every bedrock_inference binding and return the run's
         inference metadata with the parsed fields merged in. Raises
@@ -1618,6 +1630,11 @@ class BedrockInferenceProcessor:
         :meth:`OutputBindingProcessor.process_subset` and never consulted
         on the sequential legacy path.
 
+        ``export_context`` (optional; default None → no Sample_Export,
+        byte-identical to today) is the run identity every exported
+        tuning sample is attributed to (quality-prompt-tuning
+        Requirement 2.2).
+
         With no ``output_processor`` configured (every pre-feature
         caller), the bindings run sequentially in ``executorBindings``
         order — the legacy path, byte-identical to today. With one, the
@@ -1629,10 +1646,11 @@ class BedrockInferenceProcessor:
         bindings = self.bindings(document)
         if self._output_processor is None:
             return self._process_sequential(
-                bindings, tag_values, work_dir, duration_sink, run_context)
+                bindings, tag_values, work_dir, duration_sink, run_context,
+                export_context)
         return self._process_concurrent(
             document, bindings, tag_values, work_dir, duration_sink,
-            detail_sink, run_context)
+            detail_sink, run_context, export_context)
 
     def _process_sequential(
         self,
@@ -1641,6 +1659,7 @@ class BedrockInferenceProcessor:
         work_dir: Optional[str],
         duration_sink: Optional[Callable[[Optional[str], float], None]],
         run_context: Optional[RunContext],
+        export_context: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         """The pre-feature sequential path, verbatim: bindings run one
         after another in ``executorBindings`` order and the first raise
@@ -1654,7 +1673,8 @@ class BedrockInferenceProcessor:
                 started = time.monotonic()
                 try:
                     result = self._run_one(
-                        binding, work_dir, run_context=run_context)
+                        binding, work_dir, run_context=run_context,
+                        export_context=export_context)
                 finally:
                     _emit_duration(
                         duration_sink, node_id,
@@ -1695,6 +1715,7 @@ class BedrockInferenceProcessor:
         duration_sink: Optional[Callable[[Optional[str], float], None]],
         detail_sink: Optional[Callable[[Optional[str], str], None]],
         run_context: Optional[RunContext],
+        export_context: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         """Fan the bindings out to a thread pool with per-completion
         merge + branch publishing (detection-guided-bedrock-inspection
@@ -1747,7 +1768,8 @@ class BedrockInferenceProcessor:
                 started = time.monotonic()
                 try:
                     result = self._run_one(
-                        binding, work_dir, run_context=run_context)
+                        binding, work_dir, run_context=run_context,
+                        export_context=export_context)
                 finally:
                     # Elapsed time is measured here (error-terminated
                     # invocations are timed too, exactly as the
@@ -1875,15 +1897,19 @@ class BedrockInferenceProcessor:
         binding: dict,
         work_dir: Optional[str],
         run_context: Optional[RunContext] = None,
+        export_context: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         # ``run_context`` (default None → byte-identical legacy path)
         # carries the run state the detection-crop path resolves against
         # (detection-guided-bedrock-inspection Requirement 7.1); the
         # payload-reference path lands separately.
+        #
+        # ``export_context`` (default None → no export at all) is the
+        # run identity Sample_Export attributes an exported sample to
+        # (quality-prompt-tuning Requirement 2.2).
         node_id = binding.get("nodeId")
         parameters = dict(binding.get("parameters") or {})
         capture_paths = binding.get("capturePaths") or {}
-        images = []
 
         # Detection crop (Requirement 2): a binding carrying
         # ``crop_detection_index`` sends the Detection_Crop as its
@@ -1901,13 +1927,19 @@ class BedrockInferenceProcessor:
         # answer arrives. None on the legacy whole-frame path — no
         # per-inspection artifacts are produced there.
         crop_bytes: Optional[bytes] = None
+        # The resolved "Input image" bytes (the Detection_Crop on the
+        # crop path, the captured 'in' frame otherwise) and the optional
+        # "Reference image" bytes — the two inputs the shared
+        # Invocation_Builder attaches, in that order.
+        input_image: Optional[bytes] = None
+        reference_image: Optional[bytes] = None
         crop_raw = parameters.get("crop_detection_index")
         if crop_raw is not None and str(crop_raw).strip() != "":
             crop_error, detection_id, crop_bytes = self._detection_crop(
                 node_id, parameters, capture_paths, work_dir, run_context)
             if crop_error is not None:
                 return self._recorded_error(node_id, crop_error, run_context)
-            images.append(("Input image", crop_bytes))
+            input_image = crop_bytes
         else:
             # The 'in' (primary) frame is required: a missing path or an
             # unreadable file fails the node with the existing surfacing.
@@ -1923,7 +1955,7 @@ class BedrockInferenceProcessor:
                 path = path.replace("{work_dir}", work_dir)
             try:
                 with open(path, "rb") as f:
-                    images.append(("Input image", f.read()))
+                    input_image = f.read()
             except OSError as e:
                 raise BedrockInferenceError(
                     node_id,
@@ -1948,7 +1980,7 @@ class BedrockInferenceProcessor:
             if reference_error is not None:
                 return self._recorded_error(
                     node_id, reference_error, run_context)
-            images.append(("Reference image", reference_bytes))
+            reference_image = reference_bytes
             # ADDITIVE (hmi-payload-reference-visibility): persist what
             # this Inspection compared against, so the HMI can show it
             # even when the answer yields no Annotated_Image. Entirely
@@ -1973,7 +2005,7 @@ class BedrockInferenceProcessor:
                         "{work_dir}", work_dir)
                 try:
                     with open(reference_path, "rb") as f:
-                        images.append(("Reference image", f.read()))
+                        reference_image = f.read()
                 except OSError as e:
                     logger.warning(
                         "Bedrock inference node '%s': could not read the "
@@ -1981,44 +2013,34 @@ class BedrockInferenceProcessor:
                         "performing single-image inference",
                         node_id, reference_path, e)
 
-        # Response mode: anomaly (default — absent/None) demands the JSON
-        # verdict and gets the canonical instruction appended; freeform
-        # (anomaly_mode: false) sends the prompt as-is and records the
-        # raw answer text (no parsing, answer format never fails).
-        # Anomaly mode ALSO records the raw answer text under the same
-        # keys freeform uses (bedrock-response-mode Requirement 5), so
-        # prompts asking for notes alongside the verdict don't silently
-        # lose that text from the run metadata.
-        anomaly_mode = _coerce(parameters.get("anomaly_mode"))
-        anomaly_mode = True if anomaly_mode is None else bool(anomaly_mode)
-
-        prompt = str(parameters.get("prompt") or "")
-        if anomaly_mode:
-            # Anomaly mode appends the instruction to the USER prompt
-            # only; the system prompt is never touched
-            # (json-trigger-metadata-pipeline Requirement 7.4).
-            prompt = prompt + "\n\n" + BEDROCK_JSON_INSTRUCTION
-
-        # Optional system prompt: absent/empty/whitespace-only is
-        # normalized to None; a non-empty value is passed VERBATIM (not
-        # stripped) so the operator's text reaches the model unmodified
-        # (json-trigger-metadata-pipeline Requirements 7.2, 7.3).
-        raw_system = parameters.get("system_prompt")
-        system_prompt = (
-            str(raw_system)
-            if raw_system is not None and str(raw_system).strip()
-            else None
-        )
+        # Request construction, delegated to the shared
+        # Invocation_Builder (quality-prompt-tuning Requirements 6.2,
+        # 11.1). It applies the rules that used to be inline here,
+        # unchanged: the response mode — anomaly (default: absent/None)
+        # demands the JSON verdict and gets the Verdict_Instruction
+        # appended to the USER prompt only, freeform (anomaly_mode:
+        # false) sends the prompt as-is and records the raw answer text
+        # (no parsing, answer format never fails); the optional system
+        # prompt normalized to None when absent/empty/whitespace-only and
+        # otherwise passed VERBATIM; the model/region/max_tokens
+        # fallbacks; and the two images in the "Input image", "Reference
+        # image" order. Anomaly mode ALSO records the raw answer text
+        # under the same keys freeform uses (bedrock-response-mode
+        # Requirement 5), so prompts asking for notes alongside the
+        # verdict don't silently lose that text from the run metadata.
+        invocation = build_bedrock_invocation(
+            parameters, input_image, reference_image)
+        anomaly_mode = invocation.anomaly_mode
 
         invoker_args = (
-            str(parameters.get("model") or BEDROCK_DEFAULT_MODEL),
-            prompt,
-            images,
-            str(parameters.get("region") or "us-east-1"),
-            int(parameters.get("max_tokens") or 256),
+            invocation.model,
+            invocation.prompt,
+            [(label, data) for label, data in invocation.images],
+            invocation.region,
+            invocation.max_tokens,
         )
-        if system_prompt is not None:
-            answer = self._invoker(*invoker_args, system_prompt)
+        if invocation.system_prompt is not None:
+            answer = self._invoker(*invoker_args, invocation.system_prompt)
         else:
             # Pre-feature arity: injected fakes that predate the
             # system_prompt parameter keep working (Requirement 7.3).
@@ -2039,7 +2061,30 @@ class BedrockInferenceProcessor:
             # An unparseable answer raises here — the existing
             # BedrockInferenceError path — before any text is recorded
             # (Requirement 5.3: the error message carries the excerpt).
-            verdict = parse_bedrock_answer(answer)
+            #
+            # Sample_Export (quality-prompt-tuning Requirements 2.2,
+            # 11.1, 11.2): the invocation returned an answer, so the
+            # pair it judged is exported — with the parsed verdict, or
+            # with the parse failure when the answer is unparseable
+            # (the raise below is re-raised unchanged, so the run and
+            # the recorded error stay byte-identical). Entirely
+            # contained and inert unless a device has export
+            # configured; freeform invocations export nothing.
+            try:
+                verdict = parse_bedrock_answer(answer)
+            except Exception as parse_error:
+                export_bedrock_sample(
+                    export_context, node_id, invocation,
+                    binding.get("parameters") or {}, answer,
+                    parse_error=str(parse_error),
+                    detection_id=detection_id,
+                )
+                raise
+            export_bedrock_sample(
+                export_context, node_id, invocation,
+                binding.get("parameters") or {}, answer, verdict=verdict,
+                detection_id=detection_id,
+            )
             verdict["bedrock_text"] = answer
             # Nested per-node verdict keys (Requirement 4.1): the
             # anomaly verdict ALSO lands under
@@ -2611,71 +2656,25 @@ LLM_LOADING_POLL_INTERVAL_SEC = 5
 LLM_LOADING_BUDGET_SEC = 240
 
 #: Generation parameters forwarded from the compiled binding to the API.
-_LLM_GENERATION_PARAMETERS = ("max_tokens", "temperature", "top_p")
+#: The shared Invocation_Builder owns the order the request body carries
+#: them in (``LLM_GENERATION_PARAMETERS``); this alias keeps the module's
+#: historical name resolving for existing importers.
+_LLM_GENERATION_PARAMETERS = LLM_GENERATION_PARAMETERS
 
 #: Documented default Output_Token_Budget applied by the LLM_Binding when
 #: the node's ``max_tokens`` parameter is absent or invalid
-#: (vllm-workflow-latency-optimization Requirements 3.3, 3.4).
-DEFAULT_OUTPUT_TOKEN_BUDGET = 256
+#: (vllm-workflow-latency-optimization Requirements 3.3, 3.4). The shared
+#: Invocation_Builder's :data:`DEFAULT_MAX_TOKENS`, under this module's
+#: historical name.
+DEFAULT_OUTPUT_TOKEN_BUDGET = DEFAULT_MAX_TOKENS
 
-
-def resolve_output_token_budget(raw: Any) -> Tuple[int, Optional[str]]:
-    """Resolve a configured ``max_tokens`` value into the effective
-    Output_Token_Budget: ``(budget, substitution_notice)``.
-
-    Valid = an integral number >= 1 (bool excluded; integral floats
-    accepted as their int value) -> ``(value, None)``. Absent (``None``)
-    -> ``(DEFAULT_OUTPUT_TOKEN_BUDGET, None)``. Anything else
-    (non-numeric, non-positive, non-integral) ->
-    ``(DEFAULT_OUTPUT_TOKEN_BUDGET, notice)`` with the notice naming the
-    rejected value (vllm-workflow-latency-optimization Requirements 3.1,
-    3.3, 3.4)."""
-    if raw is None:
-        return DEFAULT_OUTPUT_TOKEN_BUDGET, None
-    if not isinstance(raw, bool):
-        if isinstance(raw, int) and raw >= 1:
-            return raw, None
-        # ``is_integer()`` is False for inf/nan, so ``int(raw)`` below
-        # never overflows.
-        if isinstance(raw, float) and raw.is_integer() and raw >= 1:
-            return int(raw), None
-    notice = (
-        "invalid max_tokens value {0!r} (expected an integral number "
-        ">= 1); substituting the default Output_Token_Budget of "
-        "{1} tokens".format(raw, DEFAULT_OUTPUT_TOKEN_BUDGET)
-    )
-    return DEFAULT_OUTPUT_TOKEN_BUDGET, notice
-
-
-def resolve_max_image_dimension(
-    raw: Any,
-) -> Tuple[Optional[int], Optional[str]]:
-    """Resolve a configured ``max_image_dimension`` value into the
-    effective downscaling bound: ``(max_dim, invalid_notice)``.
-
-    Absent (``None``) -> ``(None, None)`` — unconfigured, silent.
-    Valid = an integral number >= 1 (bool excluded; integral floats
-    accepted as their int value, the same acceptance convention as
-    :func:`resolve_output_token_budget`) -> ``(value, None)``. Anything
-    else (non-numeric, non-positive, non-integral) -> ``(None, notice)``
-    naming the rejected value — treated as unconfigured, with the caller
-    emitting the notice as a run-log warning
-    (vllm-workflow-latency-optimization Requirement 5.8)."""
-    if raw is None:
-        return None, None
-    if not isinstance(raw, bool):
-        if isinstance(raw, int) and raw >= 1:
-            return raw, None
-        # ``is_integer()`` is False for inf/nan, so ``int(raw)`` below
-        # never overflows.
-        if isinstance(raw, float) and raw.is_integer() and raw >= 1:
-            return int(raw), None
-    notice = (
-        "invalid max_image_dimension value {0!r} (expected an integral "
-        "number >= 1); treating the image downscaling option as "
-        "unconfigured and sending captured frames unmodified".format(raw)
-    )
-    return None, notice
+# The Output_Token_Budget and image-downscaling-bound resolution rules
+# moved verbatim to the shared Invocation_Builder (quality-prompt-tuning
+# Requirement 6.2) — which :func:`build_llm_invocation` applies — and are
+# imported above under their historical names
+# (``resolve_output_token_budget``, ``resolve_max_image_dimension``), so
+# this module's callers and every existing importer keep working
+# unchanged.
 
 
 def downscale_image_bytes(data: bytes, max_dim: int) -> bytes:
@@ -2870,19 +2869,26 @@ def _default_llm_invoker(
     wins. A 409 with any other state, any other non-200, or budget
     exhaustion raises the existing RuntimeError shape (the last state
     payload included). The 200-first-attempt path stays a single POST
-    with the original URL, body, and timeout."""
+    with the original URL, body, and timeout.
+
+    The body itself comes from :meth:`LlmInvocation.request_body` — the
+    shared Invocation_Builder (quality-prompt-tuning Requirement 6.2) —
+    so this transport and the device's Device_Score_Job runner send the
+    identical body for the identical invocation. The transport keeps
+    owning the URL, the timeout, the loading-wait policy and the
+    generated-text/metrics extraction."""
     import requests
 
-    body: Dict[str, Any] = {"prompt": prompt}
-    for key in _LLM_GENERATION_PARAMETERS:
-        if parameters.get(key) is not None:
-            body[key] = parameters[key]
-    if image_b64 is not None:
-        body["image"] = image_b64
-    if reference_b64 is not None:
-        body["reference_image"] = reference_b64
-    if system_prompt:
-        body["system_prompt"] = system_prompt
+    body = LlmInvocation(
+        model_name=model_name,
+        prompt=prompt,
+        generation={
+            key: parameters.get(key) for key in LLM_GENERATION_PARAMETERS
+        },
+        image_b64=image_b64,
+        reference_b64=reference_b64,
+        system_prompt=system_prompt,
+    ).request_body()
     url = TEXT_GENERATION_URL.format(model_name=model_name)
     deadline = time.monotonic() + LLM_LOADING_BUDGET_SEC
     while True:
@@ -2952,6 +2958,7 @@ class LlmInferenceProcessor:
         tag_values: dict,
         work_dir: Optional[str] = None,
         duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
+        export_context: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         """Run every llm_inference binding and return the run's inference
         metadata with each node's outcome merged under
@@ -2981,7 +2988,12 @@ class LlmInferenceProcessor:
         ``duration_sink`` (optional; default None → behavior byte-identical
         to today) receives ``(node_id, elapsed_ms)`` for every invocation,
         measured with the monotonic clock and reported in a ``try/finally``
-        (node-execution-timing Requirements 1.3, 1.7)."""
+        (node-execution-timing Requirements 1.3, 1.7).
+
+        ``export_context`` (optional; default None → no Sample_Export,
+        byte-identical to today) is the run identity every exported
+        tuning sample is attributed to (quality-prompt-tuning
+        Requirement 2.2)."""
         metadata = dict(tag_values or {})
         bindings = self.bindings(document)
         if not bindings:
@@ -2991,7 +3003,9 @@ class LlmInferenceProcessor:
             node_id = binding.get("nodeId")
             started = time.monotonic()
             try:
-                outcome = self._run_one(binding, metadata, work_dir)
+                outcome = self._run_one(
+                    binding, metadata, work_dir,
+                    export_context=export_context)
             finally:
                 _emit_duration(
                     duration_sink, node_id,
@@ -3008,11 +3022,12 @@ class LlmInferenceProcessor:
         binding: dict,
         metadata: Dict[str, Any],
         work_dir: Optional[str] = None,
+        export_context: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         node_id = binding.get("nodeId")
         parameters = dict(binding.get("parameters") or {})
         try:
-            prompt = render_prompt(
+            rendered_prompt = render_prompt(
                 str(parameters.get("prompt_template") or ""), metadata
             )
         except UnresolvedPlaceholderError as e:
@@ -3023,36 +3038,24 @@ class LlmInferenceProcessor:
             )
             return {"error": "unresolved placeholder {0}".format(e.name)}
         # Anomaly-mode parity with Bedrock (vlm-parity-run-results
-        # Requirement 1): a truthy ``anomaly_mode`` appends the
-        # canonical JSON instruction to the RENDERED prompt and parses
-        # the answer with the shared verdict parser. Unlike Bedrock's
-        # default-True, absent/None/false stays today's freeform path
-        # byte-identical (Requirement 1.4).
-        anomaly_mode = bool(_coerce(parameters.get("anomaly_mode")))
-        if anomaly_mode:
-            prompt = prompt + "\n\n" + BEDROCK_JSON_INSTRUCTION
-        # Optional system prompt, normalized like Bedrock's:
-        # absent/empty/whitespace-only ⇒ None; otherwise the raw
-        # configured text verbatim (never rendered, never stripped) so
-        # the operator's text reaches the model unmodified. Anomaly
-        # mode above touches the rendered user prompt only — the system
-        # prompt is never modified (json-trigger-metadata-pipeline
-        # Requirements 8.2, 8.5, 8.9).
-        raw_system = parameters.get("system_prompt")
-        system_prompt = (
-            str(raw_system)
-            if raw_system is not None and str(raw_system).strip()
-            else None
-        )
+        # Requirement 1), the optional system prompt, the image
+        # downscaling and the Output_Token_Budget are all applied by the
+        # shared Invocation_Builder below (quality-prompt-tuning
+        # Requirements 6.2, 11.1); what stays here is the prompt
+        # rendering above, the capturePaths reads with their fail-closed
+        # rules, the invoker arities and the metrics handling.
+        #
         # Image downscaling option (vllm-workflow-latency-optimization
-        # Requirements 5.3-5.8), resolved once per binding. Unconfigured
-        # (absent/None) ⇒ the downscaling code path below is skipped
-        # entirely, so the encoded bytes and request body stay
-        # byte-identical to pre-feature behavior (R5.6). An invalid
-        # configured value (non-positive, non-numeric, bool,
-        # non-integral) is treated as unconfigured with one run-log
-        # WARNING naming the rejected value (R5.8). No captured image ⇒
-        # no downscaling attempt (R5.5).
+        # Requirements 5.3-5.8) is resolved once per binding HERE too,
+        # only to emit the invalid-value WARNING at exactly the point in
+        # the run log it has always appeared (before the frame reads);
+        # the builder re-applies the same pure rule when it encodes.
+        # Unconfigured (absent/None) ⇒ no downscaling is attempted, so
+        # the encoded bytes and request body stay byte-identical to
+        # pre-feature behavior (R5.6, R5.5). An invalid configured value
+        # (non-positive, non-numeric, bool, non-integral) is treated as
+        # unconfigured with one run-log WARNING naming the rejected
+        # value (R5.8).
         max_image_dimension, dimension_notice = resolve_max_image_dimension(
             parameters.get("max_image_dimension"))
         if dimension_notice is not None:
@@ -3067,7 +3070,7 @@ class LlmInferenceProcessor:
         # - 'in' maps to a path but the file cannot be read → contained
         #   node error naming node/port/path, invoker never called —
         #   silently answering without the image is the bug being fixed.
-        image_b64: Optional[str] = None
+        input_frame: Optional[bytes] = None
         capture_paths = binding.get("capturePaths") or {}
         port = "in"
         path = capture_paths.get(port)
@@ -3076,7 +3079,7 @@ class LlmInferenceProcessor:
                 path = path.replace("{work_dir}", work_dir)
             try:
                 with open(path, "rb") as f:
-                    frame_bytes = f.read()
+                    input_frame = f.read()
             except OSError as e:
                 logger.error(
                     "LLM inference node %s failed: could not read the "
@@ -3090,13 +3093,6 @@ class LlmInferenceProcessor:
                             node_id, port, path, e)
                     )
                 }
-            if max_image_dimension is not None:
-                # Downscale after the read, before base64 encoding
-                # (R5.3); a failure logs a WARNING and sends the
-                # original bytes (R5.4).
-                frame_bytes = _downscale_frame_or_original(
-                    frame_bytes, max_image_dimension, node_id, port)
-            image_b64 = base64.b64encode(frame_bytes).decode("ascii")
         # Reference-frame attachment (vlm-bedrock-parity Requirements
         # 3.1, 3.2, 3.3). Three shapes, and the FED-but-unreadable case
         # FAILS CLOSED — this supersedes vlm-anomaly-reference-parity
@@ -3112,7 +3108,7 @@ class LlmInferenceProcessor:
         #   the model never saw.
         # Bedrock keeps degrading (Requirement 6.4) — only this node
         # type moves.
-        reference_b64: Optional[str] = None
+        reference_frame: Optional[bytes] = None
         reference_path = capture_paths.get("reference")
         if not reference_path:
             logger.warning(
@@ -3144,20 +3140,50 @@ class LlmInferenceProcessor:
                     )
                 }
             else:
-                if max_image_dimension is not None:
-                    # Same downscaling treatment as the 'in' frame
-                    # (R5.3, R5.4): both captured images the request
-                    # sends contribute image tokens to prefill.
-                    reference_bytes = _downscale_frame_or_original(
-                        reference_bytes, max_image_dimension, node_id,
-                        "reference")
-                reference_b64 = base64.b64encode(
-                    reference_bytes).decode("ascii")
+                reference_frame = reference_bytes
+        # Request construction, delegated to the shared
+        # Invocation_Builder (quality-prompt-tuning Requirements 6.2,
+        # 11.1). It applies the rules that used to be inline here,
+        # unchanged: a truthy ``anomaly_mode`` appends the
+        # Verdict_Instruction to the RENDERED prompt (unlike Bedrock's
+        # default-True, absent/None/false stays today's freeform path
+        # byte-identical — vlm-parity-run-results Requirement 1.4); the
+        # optional system prompt is normalized like Bedrock's
+        # (absent/empty/whitespace-only ⇒ None, otherwise the configured
+        # text verbatim, never rendered, never stripped — json-trigger-
+        # metadata-pipeline Requirements 8.2, 8.5, 8.9) and never touched
+        # by the anomaly append; both captured frames are downscaled
+        # (R5.3, R5.4 containment through the executor's own helper, both
+        # frames the request sends contributing image tokens to prefill)
+        # BEFORE base64 encoding; and a reference only ever rides beside
+        # an input image, the API's reference-requires-image rule the
+        # 3-argument invocation below expresses.
+        invocation = build_llm_invocation(
+            parameters,
+            rendered_prompt,
+            input_frame,
+            reference_frame,
+            downscaler=(
+                lambda data, max_dim, frame_port: (
+                    _downscale_frame_or_original(
+                        data, max_dim, node_id, frame_port))
+            ),
+        )
+        prompt = invocation.prompt
+        system_prompt = invocation.system_prompt
+        image_b64 = invocation.image_b64
+        reference_b64 = invocation.reference_b64
+        anomaly_mode = invocation.anomaly_mode
         # Output_Token_Budget resolution (vllm-workflow-latency-
         # optimization Requirements 3.1, 3.3, 3.4): every LLM_Binding
         # invocation carries an explicit ``max_tokens`` — the configured
         # value when valid, the documented 256-token default otherwise.
-        # A substitution is logged at WARNING (run-log capture is active
+        # The builder above resolved the same budget for its own
+        # ``generation``; it is resolved here as well so the WARNING
+        # keeps its run-log position and so ``parameters`` — the invoker's
+        # third positional argument, from which the transport reads the
+        # generation parameters — carries the effective value. A
+        # substitution is logged at WARNING (run-log capture is active
         # during binding processing) naming the rejected value, so a
         # previously-invalid configured value no longer fails the node —
         # it generates with the documented default.
@@ -3238,6 +3264,12 @@ class LlmInferenceProcessor:
                     "emission failed; ignored", node_id, exc_info=True,
                 )
         if anomaly_mode:
+            # Sample_Export (quality-prompt-tuning Requirements 2.2,
+            # 11.1, 11.2): the invocation returned an answer, so the
+            # pair it judged is exported — with the parsed verdict, or
+            # with the parse failure when the answer is unparseable.
+            # Entirely contained and inert unless a device has export
+            # configured; freeform invocations export nothing.
             try:
                 verdict = parse_bedrock_answer(text)
             except ValueError as e:
@@ -3249,9 +3281,19 @@ class LlmInferenceProcessor:
                     "LLM inference node %s failed: %s; other bindings "
                     "are unaffected", node_id, e,
                 )
+                export_llm_sample(
+                    export_context, node_id, invocation,
+                    binding.get("parameters") or {}, text, metadata,
+                    parse_error=str(e),
+                )
                 return _merge_generation_metrics(
                     {"error": str(e), "generated_text": text},
                     generation_metrics, node_id)
+            export_llm_sample(
+                export_context, node_id, invocation,
+                binding.get("parameters") or {}, text, metadata,
+                verdict=verdict,
+            )
             logger.info("LLM inference binding (node %s) processed", node_id)
             outcome = {"generated_text": text}
             outcome.update(verdict)
