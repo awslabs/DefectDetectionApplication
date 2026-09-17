@@ -1085,6 +1085,10 @@
    [
     "cap-preservation.node.{node_id}.original.jpg",
     "{detection_crop_bytes}"
+   ],
+   [
+    "cap-preservation.node.{node_id}.reference.jpg",
+    "<derived image 4x4>"
    ]
   ],
   "durations": [
@@ -2610,7 +2614,12 @@
   "raised": null
  },
  "answer=verdict|image=whole_frame|margin=absent|mode=anomaly_default|node=bedrock|reference=payload_base64|system=absent": {
-  "artifacts": [],
+  "artifacts": [
+   [
+    "cap-preservation.node.{node_id}.reference.jpg",
+    "<derived image 4x4>"
+   ]
+  ],
   "durations": [
    "{node_id}"
   ],

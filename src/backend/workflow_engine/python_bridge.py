@@ -380,16 +380,57 @@ def _check_allowed(source):
     )
 
 
+def _https_context():
+    """Verified TLS context for ``https://`` fetches.
+
+    This runtime's OpenSSL carries no default CA store
+    (``ssl.get_default_verify_paths()`` returns ``None, None``), so an
+    unassisted ``urlopen`` fails EVERY https fetch with
+    CERTIFICATE_VERIFY_FAILED even though certifi's bundle and the
+    system bundle are both present on disk. The bundle is therefore
+    named explicitly, preferring certifi and falling back to the
+    distribution bundles.
+
+    Verification and hostname checking stay ON in every branch: a fetch
+    whose certificate cannot be verified fails, and is never silently
+    trusted.
+    """
+    import ssl
+
+    try:
+        import certifi
+    except ImportError:
+        pass
+    else:
+        try:
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+    import os
+
+    for bundle in (
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ):
+        if os.path.exists(bundle):
+            try:
+                return ssl.create_default_context(cafile=bundle)
+            except Exception:
+                continue
+    return ssl.create_default_context()
+
+
 def _fetch_http(source):
     """HTTP(S) fetch with the bounded timeout (Requirement 4.4);
     non-success status, timeout, and connection failures raise
     ``ValueError`` naming the source (Requirement 4.5)."""
     import urllib.request
 
+    options = {"timeout": HTTP_TIMEOUT_SEC}
+    if source.startswith("https://"):
+        options["context"] = _https_context()
     try:
-        with urllib.request.urlopen(
-            source, timeout=HTTP_TIMEOUT_SEC
-        ) as response:
+        with urllib.request.urlopen(source, **options) as response:
             status = getattr(response, "status", None)
             if status is None:  # pragma: no cover - pre-3.9 fallback
                 status = response.getcode()
@@ -1607,7 +1648,18 @@ class DetectionsInjector:
         cache: Optional[dict] = None,
         poll_budget_sec: float = DETECTIONS_POLL_BUDGET_SEC,
         poll_interval_sec: float = DETECTIONS_POLL_INTERVAL_SEC,
+        trigger_context: Optional[dict] = None,
     ) -> None:
+        #: ADDITIVE: the run's Trigger_Context, handed to EVERY custom
+        #: node under metadata["trigger"] so a per-frame handler can reach
+        #: the payload that started the run — the same context (topic,
+        #: payload, payload_json, qos, timestamp) the custom_python_source
+        #: Frame_Producer already receives through produce_frame(context).
+        #: Without it a frames handler cannot resolve payload-carried
+        #: references (e.g. rendering the trigger's design image), because
+        #: the frame metadata carried only detections. ``None`` keeps the
+        #: dispatched metadata byte-identical to before.
+        self._trigger_context = trigger_context
         self._downstream_node_ids = frozenset(downstream_node_ids or ())
         self._output_dir = output_dir
         self._capture_id = capture_id
@@ -1629,6 +1681,10 @@ class DetectionsInjector:
         node — the empty dict, byte-identical to today's dispatch.
         """
         metadata: Dict[str, Any] = {}
+        if self._trigger_context:
+            # A shallow copy per dispatch: a handler mutating its metadata
+            # can never corrupt the run's context or another node's view.
+            metadata["trigger"] = dict(self._trigger_context)
         if node_id not in self._downstream_node_ids:
             return metadata
         deadline = time.monotonic() + self._poll_budget_sec

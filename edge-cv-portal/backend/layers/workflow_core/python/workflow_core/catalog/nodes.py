@@ -1265,6 +1265,57 @@ MQTT_PUBLISH = NodeTypeDescriptor(
                                         "2 (exactly once; AWS IoT Core "
                                         "supports up to 1).",
                             examples=[0, 1]),
+        # MQTT retain bit (mqtt-retained-publish). Off by default so every
+        # existing workflow compiles to retain=False and publishes
+        # byte-identically. Not gated on greengrass/aws_iot: the bit means
+        # the same thing on every path. AWS IoT Core (the greengrass and
+        # aws_iot paths) additionally requires iot:RetainPublish in the
+        # device's IoT policy, and a retained topic must not double as a
+        # workflow trigger topic (the broker replays it on every
+        # subscribe/reconnect).
+        ParameterDescriptor("retain", "bool", required=False, default=False,
+                            constraints={},
+                            description="Publish with the MQTT retain flag "
+                                        "so the broker (or AWS IoT Core) "
+                                        "keeps the last message on the topic "
+                                        "and delivers it to new subscribers. "
+                                        "For AWS IoT Core (Greengrass and "
+                                        "AWS IoT paths) the device's IoT "
+                                        "policy must also allow "
+                                        "iot:RetainPublish on the topic. Do "
+                                        "not retain on a topic that is also "
+                                        "an MQTT trigger of a workflow: the "
+                                        "retained message re-fires the "
+                                        "trigger on every reconnect.",
+                            examples=[True]),
+        # Output phase (capture-phase-outputs). "completion" (the default)
+        # is today's behaviour: the message goes out after inference and
+        # every upstream gate. "capture" publishes as soon as the run's
+        # camera frame has been grabbed — before the pipeline, model or
+        # Bedrock/LLM steps run — so a cell controller (AMR, PLC) can be
+        # released the moment the picture is safely taken instead of
+        # waiting seconds for the verdict. A capture-phase node never
+        # sees inference results: its payload renders against the
+        # trigger context and capture identifiers only, and upstream
+        # filters/conditionals do not gate it.
+        ParameterDescriptor("phase", "enum", required=False,
+                            default="completion",
+                            constraints={"values": ["completion", "capture"]},
+                            description="When the message is published: "
+                                        "completion (default) after "
+                                        "inference and all upstream gates, "
+                                        "or capture immediately after the "
+                                        "camera frame is grabbed, before "
+                                        "inference starts. A capture-phase "
+                                        "publish has no inference results; "
+                                        "its payload_template can use "
+                                        "{capture_id}, {execution_id}, "
+                                        "{workflow_id}, {timestamp} (capture "
+                                        "time, epoch seconds), "
+                                        "{trigger.timestamp} / "
+                                        "{trigger.payload} and "
+                                        "{inference_json} (that map as JSON).",
+                            examples=["completion", "capture"]),
         # Zero-config publishing through the device's Greengrass-managed
         # MQTT: the Greengrass nucleus already holds the AWS IoT Core
         # connection, so only the topic is needed — no broker host/port
@@ -1293,6 +1344,32 @@ MQTT_PUBLISH = NodeTypeDescriptor(
                                         "broker; enables the IoT thing name "
                                         "and certificate path fields.",
                             examples=[True]),
+        # Explicit AWS IoT Core data endpoint (mqtt-iot-endpoint). Lets an
+        # aws_iot node target IoT Core in ANOTHER account or region: the
+        # edge connects paho to this host (port 8883 unless broker_port is
+        # set) with the iot_* credentials, which must be a thing
+        # certificate issued by THAT account. Optional so every existing
+        # aws_iot workflow (which carries the endpoint in broker_host) is
+        # untouched; when set it takes precedence over broker_host on the
+        # AWS IoT path only. Mirrored field-for-field on mqtt_subscribe.
+        ParameterDescriptor("iot_endpoint", "string", required=False,
+                            default=None, constraints={"min_length": 1},
+                            depends_on="aws_iot",
+                            description="AWS IoT Core data endpoint to "
+                                        "connect to, e.g. "
+                                        "a1b2c3d4e5f6-ats.iot.eu-west-1."
+                                        "amazonaws.com (from 'aws iot "
+                                        "describe-endpoint --endpoint-type "
+                                        "iot:Data-ATS' in the target account "
+                                        "and region). Use it to reach IoT "
+                                        "Core in a different account or "
+                                        "region with a thing certificate "
+                                        "from that account. When set it "
+                                        "takes precedence over broker_host; "
+                                        "when empty broker_host is used as "
+                                        "the endpoint.",
+                            examples=["a1b2c3d4e5f6-ats.iot.eu-west-1."
+                                      "amazonaws.com"]),
         ParameterDescriptor("iot_thing_name", "string", required=False,
                             default=None, constraints={"min_length": 1},
                             depends_on="aws_iot",
@@ -1683,6 +1760,27 @@ MQTT_SUBSCRIBE = NodeTypeDescriptor(
                                         "broker; enables the IoT thing name "
                                         "and certificate path fields.",
                             examples=[True]),
+        # Explicit AWS IoT Core data endpoint (mqtt-iot-endpoint), mirrored
+        # field-for-field from mqtt_publish: an aws_iot trigger can
+        # subscribe to IoT Core in another account or region.
+        ParameterDescriptor("iot_endpoint", "string", required=False,
+                            default=None, constraints={"min_length": 1},
+                            depends_on="aws_iot",
+                            description="AWS IoT Core data endpoint to "
+                                        "connect to, e.g. "
+                                        "a1b2c3d4e5f6-ats.iot.eu-west-1."
+                                        "amazonaws.com (from 'aws iot "
+                                        "describe-endpoint --endpoint-type "
+                                        "iot:Data-ATS' in the target account "
+                                        "and region). Use it to reach IoT "
+                                        "Core in a different account or "
+                                        "region with a thing certificate "
+                                        "from that account. When set it "
+                                        "takes precedence over broker_host; "
+                                        "when empty broker_host is used as "
+                                        "the endpoint.",
+                            examples=["a1b2c3d4e5f6-ats.iot.eu-west-1."
+                                      "amazonaws.com"]),
         ParameterDescriptor("iot_thing_name", "string", required=False,
                             default=None, constraints={"min_length": 1},
                             depends_on="aws_iot",
@@ -1920,6 +2018,28 @@ MODBUS_WRITE = NodeTypeDescriptor(
                                         "milliseconds, then writes the "
                                         "inverse coil value, e.g. 250.",
                             examples=[0, 250]),
+        # Output phase (capture-phase-outputs), mirrored from mqtt_publish:
+        # "capture" writes the coil/register as soon as the run's camera
+        # frame has been grabbed, before inference, so a PLC can release
+        # the part carrier immediately. A capture-phase write has no
+        # inference results, so pair it with a literal value_template
+        # (e.g. "true" or "1"); "completion" (default) is today's
+        # after-inference write.
+        ParameterDescriptor("phase", "enum", required=False,
+                            default="completion",
+                            constraints={"values": ["completion", "capture"]},
+                            description="When the write happens: completion "
+                                        "(default) after inference and all "
+                                        "upstream gates, or capture "
+                                        "immediately after the camera frame "
+                                        "is grabbed, before inference "
+                                        "starts. A capture-phase write has "
+                                        "no inference results, so use a "
+                                        "literal value_template such as "
+                                        "true or 1 (a pulse_ms coil pulse "
+                                        "makes a clean 'picture taken' "
+                                        "signal).",
+                            examples=["completion", "capture"]),
     ],
     # Executor-level Modbus TCP client write (stdlib socket exchange; no
     # packaged plugin dependency). Simulation: recording binding, no PLC

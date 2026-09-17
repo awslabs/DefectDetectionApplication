@@ -479,6 +479,19 @@ sudo tail -f /greengrass/v2/logs/<mode-name>.log
 - Verify IAM permissions for Greengrass service role
 - Check S3 bucket policies and access permissions
 
+**Retained MQTT publish denied** (workflow MQTT Publish node with "Retain message" checked):
+- AWS IoT Core authorizes the MQTT retain bit as a separate action, `iot:RetainPublish`. It
+  belongs in the core device's **IoT policy** (the policy attached to the Greengrass core
+  certificate, e.g. `GreengrassV2IoTThingPolicy`), next to `iot:Publish` on the same topic
+  resources — never on `"Resource": "*"`. It is not an IAM role permission, so the
+  `dda-greengrass-policy` above is unchanged.
+- Required only if a workflow's MQTT Publish node has Retain message enabled; devices provisioned
+  through the portal already get it, an already-provisioned core device needs it added by hand.
+  See `station_install/README.md`, "Retained MQTT Publish Denied", for the policy snippet.
+- Do not retain on a topic that is also an MQTT trigger of a workflow: the broker replays the
+  retained message on every new subscription, so the workflow re-runs itself on every
+  LocalServer restart or reconnect.
+
 **Frontend not accessible**:
 ```bash
 # Check port forwarding for remote access

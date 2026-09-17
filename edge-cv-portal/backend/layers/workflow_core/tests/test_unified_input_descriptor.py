@@ -163,8 +163,8 @@ class TestOutputDescriptorsUnchanged:
         assert descriptor.outputs == []
         assert [p.name for p in descriptor.parameters] == [
             "broker_host", "broker_port", "topic", "payload_template",
-            "qos", "greengrass", "aws_iot", "iot_thing_name",
-            "iot_ca_cert_path", "iot_client_cert_path",
+            "qos", "retain", "phase", "greengrass", "aws_iot", "iot_endpoint",
+            "iot_thing_name", "iot_ca_cert_path", "iot_client_cert_path",
             "iot_private_key_path"]
 
     def test_opcua_write_category_ports_and_parameter_names(self):

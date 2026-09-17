@@ -3600,6 +3600,25 @@
         "name": "pulse_ms",
         "param_type": "int",
         "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "completion",
+            "capture"
+          ]
+        },
+        "default": "completion",
+        "depends_on": null,
+        "description": "When the write happens: completion (default) after inference and all upstream gates, or capture immediately after the camera frame is grabbed, before inference starts. A capture-phase write has no inference results, so use a literal value_template such as true or 1 (a pulse_ms coil pulse makes a clean 'picture taken' signal).",
+        "examples": [
+          "completion",
+          "capture"
+        ],
+        "multiline": false,
+        "name": "phase",
+        "param_type": "enum",
+        "required": false
       }
     ],
     "type_id": "modbus_write"
@@ -4222,6 +4241,21 @@
         "multiline": false,
         "name": "aws_iot",
         "param_type": "bool",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "AWS IoT Core data endpoint to connect to, e.g. a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com (from 'aws iot describe-endpoint --endpoint-type iot:Data-ATS' in the target account and region). Use it to reach IoT Core in a different account or region with a thing certificate from that account. When set it takes precedence over broker_host; when empty broker_host is used as the endpoint.",
+        "examples": [
+          "a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com"
+        ],
+        "multiline": false,
+        "name": "iot_endpoint",
+        "param_type": "string",
         "required": false
       },
       {

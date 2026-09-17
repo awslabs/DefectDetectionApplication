@@ -147,8 +147,48 @@ REFERENCE_IMAGE_LABEL = "Reference image"
 #: (Requirement 6.3).
 BEDROCK_READ_TIMEOUT_SEC = 30
 
-#: Image format of every attached content block.
+#: Image format declared for an attached content block whose bytes are not
+#: recognized by :func:`converse_image_format` (the historical default,
+#: since every captured frame and Detection_Crop is JPEG-encoded).
 BEDROCK_IMAGE_FORMAT = "jpeg"
+#: Magic-byte signatures of the image formats the Bedrock Converse API
+#: accepts, mapped to the ``format`` string it expects.
+_IMAGE_MAGIC = (
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+)
+
+
+def converse_image_format(data: bytes) -> str:
+    """The Converse ``format`` string for ``data``, sniffed from its
+    magic bytes and defaulting to :data:`BEDROCK_IMAGE_FORMAT`.
+
+    Every image the binding sends used to be declared ``jpeg`` because
+    every image WAS a JPEG — the captured frames and the Detection_Crop
+    are encoded by the executor. A Payload_Reference, however, is
+    whatever the publisher's URI serves: the IMTS design references are
+    PNG, and Bedrock rejected the whole request with "The detected file
+    MIME type image/png does not match the expected type image/jpeg"
+    (observed on adlink-dlap-701, 2026-09-14). Declaring the true format
+    keeps the reference bytes intact — re-encoding a reference to JPEG
+    would add a lossy generation to the very image the model compares
+    against. Living here, the sniff is shared by the executor's transport
+    and the Portal's Bedrock_Scorer, so both declare the same format for
+    the same bytes (quality-prompt-tuning Requirement 6.3).
+
+    Unrecognized bytes keep the historical ``jpeg`` declaration, so a
+    JPEG variant this table does not cover behaves exactly as before.
+    """
+    prefix = bytes(data[:12]) if data else b""
+    for magic, fmt in _IMAGE_MAGIC:
+        if prefix.startswith(magic):
+            return fmt
+    # RIFF....WEBP
+    if len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WEBP":
+        return "webp"
+    return BEDROCK_IMAGE_FORMAT
 
 
 @dataclass(frozen=True)
@@ -185,7 +225,7 @@ class BedrockInvocation:
             content.append({"text": "{0}:".format(label)})
             content.append({
                 "image": {
-                    "format": BEDROCK_IMAGE_FORMAT,
+                    "format": converse_image_format(data),
                     "source": {"bytes": data},
                 },
             })

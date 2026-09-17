@@ -489,6 +489,23 @@ export const MQTT_SUBSCRIBE_DESCRIPTOR: NodeTypeDescriptor = {
       examples: [true],
     },
     {
+      // mqtt-iot-endpoint: explicit IoT Core data endpoint (any account/region).
+      name: 'iot_endpoint',
+      paramType: 'string',
+      required: false,
+      default: null,
+      constraints: { minLength: 1 },
+      dependsOn: 'aws_iot',
+      description:
+        'AWS IoT Core data endpoint to connect to, e.g. ' +
+        "a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com (from 'aws iot " +
+        "describe-endpoint --endpoint-type iot:Data-ATS' in the target account " +
+        'and region). Use it to reach IoT Core in a different account or region ' +
+        'with a thing certificate from that account. When set it takes precedence ' +
+        'over broker_host; when empty broker_host is used as the endpoint.',
+      examples: ['a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com'],
+    },
+    {
       name: 'iot_thing_name',
       paramType: 'string',
       required: false,
@@ -832,6 +849,21 @@ export const MODBUS_WRITE_DESCRIPTOR: NodeTypeDescriptor = {
         'rendered value, waits pulse_ms milliseconds, then writes the ' +
         'inverse coil value, e.g. 250.',
       examples: [0, 250],
+    },
+    // capture-phase-outputs: mirrors the backend `phase` enum.
+    {
+      name: 'phase',
+      paramType: 'enum',
+      required: false,
+      default: 'completion',
+      constraints: { values: ['completion', 'capture'] },
+      description:
+        'When the write happens: completion (default) after inference and ' +
+        'all upstream gates, or capture immediately after the camera frame ' +
+        'is grabbed, before inference starts. A capture-phase write has no ' +
+        'inference results, so use a literal value_template such as true ' +
+        "or 1 (a pulse_ms coil pulse makes a clean 'picture taken' signal).",
+      examples: ['completion', 'capture'],
     },
   ],
   mappings: [

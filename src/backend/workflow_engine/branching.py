@@ -64,6 +64,63 @@ BINDING_BEDROCK_INFERENCE = "bedrock_inference"
 BINDING_LLM_INFERENCE = "llm_inference"
 BINDING_METADATA = "metadata"
 
+# ---------------------------------------------------------------------------
+# Capture-phase outputs (capture-phase-outputs)
+#
+# An ``mqtt_publish`` / ``modbus_write`` binding whose ``phase`` parameter
+# is ``"capture"`` runs ONCE, immediately after the run's camera frame has
+# been grabbed and BEFORE the pipeline / model / Bedrock / LLM steps —
+# the "picture taken, you may go" signal for a cell controller. Such a
+# binding is therefore never a post-run binding and never a Bedrock
+# branch member; the executor runs it through ``process_subset`` with the
+# capture-time metadata and excludes it from every later pass. Bindings
+# without the parameter, or with ``"completion"`` (the catalog default),
+# are untouched — the exact pre-feature behaviour.
+# ---------------------------------------------------------------------------
+
+#: The output-binding parameter selecting the run phase.
+PHASE_PARAMETER = "phase"
+#: ``phase`` value: publish/write right after the frame grab.
+PHASE_CAPTURE = "capture"
+#: ``phase`` value (and the catalog default): today's post-run behaviour.
+PHASE_COMPLETION = "completion"
+#: The binding kinds that honour ``phase`` (the catalog declares it on
+#: exactly these two node types).
+CAPTURE_PHASE_BINDING_KINDS = frozenset({"mqtt_publish", "modbus_write"})
+
+
+def is_capture_phase_binding(binding: Any) -> bool:
+    """True when ``binding`` is an executor binding of a kind that honours
+    ``phase`` and its ``phase`` parameter is ``"capture"``.
+
+    Total: a non-dict, a binding of another kind, a missing/None
+    ``parameters`` map, or any other ``phase`` value answers False, so
+    every pre-feature document (no ``phase`` key at all) is entirely
+    completion-phase.
+    """
+    if not isinstance(binding, dict):
+        return False
+    if binding.get("binding") not in CAPTURE_PHASE_BINDING_KINDS:
+        return False
+    parameters = binding.get("parameters")
+    if not isinstance(parameters, dict):
+        return False
+    return parameters.get(PHASE_PARAMETER) == PHASE_CAPTURE
+
+
+def capture_phase_binding_ids(document: Any) -> List[Any]:
+    """The ``nodeId`` values of the document's capture-phase bindings, in
+    ``executorBindings`` emission order (the order ``process_subset``
+    visits them). Empty for a document without ``executorBindings`` or
+    without any ``phase: capture`` binding."""
+    bindings = (document or {}).get("executorBindings") if isinstance(
+        document, dict) else None
+    return [
+        binding.get("nodeId")
+        for binding in (bindings or [])
+        if is_capture_phase_binding(binding)
+    ]
+
 
 @dataclass
 class BranchPlan:
@@ -177,6 +234,11 @@ def bedrock_branches(document: dict) -> Dict[Any, BranchPlan]:
     for binding in bindings:
         kind = binding.get("binding")
         if kind in (BINDING_BEDROCK_INFERENCE, BINDING_LLM_INFERENCE):
+            continue
+        # A capture-phase output already ran right after the frame grab
+        # (capture-phase-outputs); it never joins a branch, so a branch
+        # completion can never publish it a second time.
+        if is_capture_phase_binding(binding):
             continue
         node_id = binding.get("nodeId")
         reached = closures.get(node_id) or frozenset()

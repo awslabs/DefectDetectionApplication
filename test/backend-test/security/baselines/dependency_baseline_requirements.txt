@@ -46,3 +46,9 @@ scikit-learn>=1.1.3,<1.2
 # Required at runtime by _default_opcua_writer for the opcua_write output binding.
 # Transitive deps (cryptography, python-dateutil, pytz, aiofiles, lxml) resolve on-device.
 opcua==0.98.13
+# paho-mqtt serves the mqtt_publish / mqtt_subscribe plain-broker and aws_iot paths
+# (_default_mqtt_publisher, AwsIotTlsSubscriber, PlainBrokerSubscriber); the Greengrass
+# path uses awsiotsdk instead. It was never installed in the image, so those paths failed
+# on device with ModuleNotFoundError (found verifying iot_endpoint on JP7 1.0.32). Pure
+# Python; 2.x needs CallbackAPIVersion, which trigger_runtime already handles.
+paho-mqtt==2.1.0
