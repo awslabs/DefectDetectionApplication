@@ -54,9 +54,13 @@ the test file, SHA-256s the bytes of each mirrored file, and asserts
 byte-equality, reporting both digests and the offending relative paths on
 failure.
 
-**Current scope**: the guard covers `catalog/nodes.py` and `catalog/models.py`
-only (the `MIRRORED_FILENAMES` tuple in that module). A tree-wide walk over
-every `workflow_core/**/*.py` — specified as Property 11 in
+**Current scope**: the guard covers `catalog/nodes.py`, `catalog/models.py`
+(the `MIRRORED_FILENAMES` tuple in that module) and the package-root
+`anomaly_invocation.py` (`MIRRORED_PACKAGE_FILENAMES` — the shared
+Invocation_Builder the executor, the Portal's Bedrock scorer and the device
+job runner all build requests through, so drift there would silently break
+faithful replay). A tree-wide walk over every `workflow_core/**/*.py` —
+specified as Property 11 in
 `.kiro/specs/vlm-bedrock-parity/` (Requirements 5.1, 5.2) — is **not yet
 implemented**. Until it lands, drift in the compiler, validator or serializer
 is not caught automatically; run the `diff -r` above after any change to the

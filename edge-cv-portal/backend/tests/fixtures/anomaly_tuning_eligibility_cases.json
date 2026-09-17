@@ -1,0 +1,3511 @@
+{
+  "feature": "quality-prompt-tuning",
+  "property": 1,
+  "propertyText": "Tunable classification is one function used everywhere",
+  "validates": [
+    "1.5"
+  ],
+  "generatedBy": "edge-cv-portal/backend/tests/test_property_anomaly_invocation_eligibility.py",
+  "regenerateWith": "DDA_WRITE_ELIGIBILITY_FIXTURE=1 python -m pytest tests/test_property_anomaly_invocation_eligibility.py",
+  "consumedBy": [
+    "edge-cv-portal/backend/tests/test_property_anomaly_invocation_eligibility.py",
+    "edge-cv-portal/frontend/src/pages/workflow-tuning/eligibility.property.test.ts"
+  ],
+  "inspectionNodeTypes": [
+    "bedrock_inference",
+    "llm_inference"
+  ],
+  "coercionContract": [
+    "A node is a Tunable_Node exactly when it is an Inspection_Node (node type 'bedrock_inference' or 'llm_inference', matched exactly, no trimming or case folding) in Anomaly_Mode (Requirement 1.5).",
+    "Anomaly_Mode for 'bedrock_inference': the coerced anomaly_mode value, where an absent parameter and a stored null both mean 'absent' and default to Anomaly_Mode; any other value is taken for its truth.",
+    "Anomaly_Mode for 'llm_inference': the coerced anomaly_mode value taken for its truth — absent, null and false all keep the freeform path.",
+    "Coercion of a string value (the executor's _coerce): trim and lowercase; 'true' means boolean true, 'false' means boolean false; otherwise, if the string matches /^[+-]?[0-9]+$/ read it as an integer, else if it contains '.' and matches /^[+-]?([0-9]+\\.[0-9]*|\\.[0-9]+)$/ read it as a decimal number; otherwise keep the string unchanged. Non-string values are never coerced.",
+    "Truth of a coerced value: booleans as themselves; the numbers 0, -0 and 0.0 are false and every other number is true; the empty string is false and every other string — including a whitespace-only string — is true."
+  ],
+  "notes": [
+    "anomalyModePresent false means the anomaly_mode parameter is absent from the node's parameters; anomalyMode is then null and carries no meaning.",
+    "Values whose coercion differs between Python and JavaScript (underscored, hex or exponent numeric strings, unicode digits, arrays, objects) are intentionally absent from this table; they are covered by the Python property test only."
+  ],
+  "cases": [
+    {
+      "id": "bedrock_inference#absent",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#null",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#true",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#false",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference#str-true",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-false",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference#str-True",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-FALSE",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference#str-TrUe",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-pad-true",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-pad-false",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference#str-1",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-0",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference#str-minus-1",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-0.0",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference#str-1.5",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-empty",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference#str-space",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-yes",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-no",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-off",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-null",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#str-None",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#int-0",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference#int-1",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#int-minus-1",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#float-0.0",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference#float-1.0",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": true
+    },
+    {
+      "id": "bedrock_inference#float-0.5",
+      "nodeType": "bedrock_inference",
+      "nodeTypeNote": "the Bedrock Inspection_Node",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#absent",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#null",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#true",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#false",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#str-true",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-false",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#str-True",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-FALSE",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#str-TrUe",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-pad-true",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-pad-false",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#str-1",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-0",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#str-minus-1",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-0.0",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#str-1.5",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-empty",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#str-space",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-yes",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-no",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-off",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-null",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#str-None",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#int-0",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#int-1",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#int-minus-1",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#float-0.0",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "llm_inference#float-1.0",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": true
+    },
+    {
+      "id": "llm_inference#float-0.5",
+      "nodeType": "llm_inference",
+      "nodeTypeNote": "the VLM/LLM Inspection_Node",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": true
+    },
+    {
+      "id": "model_inference#absent",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#null",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#true",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#false",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-true",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-false",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-True",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-FALSE",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-TrUe",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-pad-true",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-pad-false",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-1",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-0",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-minus-1",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-0.0",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-1.5",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-empty",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-space",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-yes",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-no",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-off",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-null",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#str-None",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#int-0",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#int-1",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#int-minus-1",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#float-0.0",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#float-1.0",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "model_inference#float-0.5",
+      "nodeType": "model_inference",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#absent",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#null",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#true",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#false",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-true",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-false",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-True",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-FALSE",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-TrUe",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-pad-true",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-pad-false",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-1",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-0",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-minus-1",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-0.0",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-1.5",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-empty",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-space",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-yes",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-no",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-off",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-null",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#str-None",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#int-0",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#int-1",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#int-minus-1",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#float-0.0",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#float-1.0",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "inference_filter#float-0.5",
+      "nodeType": "inference_filter",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#absent",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#null",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#true",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#false",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-true",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-false",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-True",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-FALSE",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-TrUe",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-pad-true",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-pad-false",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-1",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-0",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-minus-1",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-0.0",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-1.5",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-empty",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-space",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-yes",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-no",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-off",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-null",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#str-None",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#int-0",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#int-1",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#int-minus-1",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#float-0.0",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#float-1.0",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "conditional#float-0.5",
+      "nodeType": "conditional",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#absent",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#null",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#true",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#false",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-true",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-false",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-True",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-FALSE",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-TrUe",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-pad-true",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-pad-false",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-1",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-0",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-minus-1",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-0.0",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-1.5",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-empty",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-space",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-yes",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-no",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-off",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-null",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#str-None",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#int-0",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#int-1",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#int-minus-1",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#float-0.0",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#float-1.0",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "custom_python#float-0.5",
+      "nodeType": "custom_python",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#absent",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#null",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#true",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#false",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-true",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-false",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-True",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-FALSE",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-TrUe",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-pad-true",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-pad-false",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-1",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-0",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-minus-1",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-0.0",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-1.5",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-empty",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-space",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-yes",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-no",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-off",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-null",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#str-None",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#int-0",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#int-1",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#int-minus-1",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#float-0.0",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#float-1.0",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "capture#float-0.5",
+      "nodeType": "capture",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#absent",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#null",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#true",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#false",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-true",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-false",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-True",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-FALSE",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-TrUe",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-pad-true",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-pad-false",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-1",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-0",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-minus-1",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-0.0",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-1.5",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-empty",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-space",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-yes",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-no",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-off",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-null",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#str-None",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#int-0",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#int-1",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#int-minus-1",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#float-0.0",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#float-1.0",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "mqtt_publish#float-0.5",
+      "nodeType": "mqtt_publish",
+      "nodeTypeNote": "catalog node type, not an Inspection_Node",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#absent",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#null",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#true",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#false",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-true",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-false",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-True",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-FALSE",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-TrUe",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-pad-true",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-pad-false",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-1",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-0",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-minus-1",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-0.0",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-1.5",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-empty",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-space",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-yes",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-no",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-off",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-null",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#str-None",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#int-0",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#int-1",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#int-minus-1",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#float-0.0",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#float-1.0",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "Bedrock_Inference#float-0.5",
+      "nodeType": "Bedrock_Inference",
+      "nodeTypeNote": "wrong case: node types are matched exactly",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #absent",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #null",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #true",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #false",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-true",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-false",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-True",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-FALSE",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-TrUe",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-pad-true",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-pad-false",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-1",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-0",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-minus-1",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-0.0",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-1.5",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-empty",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-space",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-yes",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-no",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-off",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-null",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #str-None",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #int-0",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #int-1",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #int-minus-1",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #float-0.0",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #float-1.0",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "bedrock_inference #float-0.5",
+      "nodeType": "bedrock_inference ",
+      "nodeTypeNote": "trailing space: node types are not trimmed",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#absent",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#null",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#true",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#false",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-true",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-false",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-True",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-FALSE",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-TrUe",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-pad-true",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-pad-false",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-1",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-0",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-minus-1",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-0.0",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-1.5",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-empty",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-space",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-yes",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-no",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-off",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-null",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#str-None",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#int-0",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#int-1",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#int-minus-1",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#float-0.0",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#float-1.0",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "<empty>#float-0.5",
+      "nodeType": "",
+      "nodeTypeNote": "empty node type",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#absent",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "anomalyModeNote": "parameter not present",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#null",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "anomalyModeNote": "stored null",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#true",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "anomalyModeNote": "boolean true",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#false",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "anomalyModeNote": "boolean false",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-true",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "anomalyModeNote": "string 'true'",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-false",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "anomalyModeNote": "string 'false'",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-True",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "anomalyModeNote": "string 'True'",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-FALSE",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "anomalyModeNote": "string 'FALSE'",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-TrUe",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "anomalyModeNote": "mixed-case 'TrUe'",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-pad-true",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "anomalyModeNote": "'true' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-pad-false",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "anomalyModeNote": "'false' with surrounding whitespace",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-1",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "anomalyModeNote": "numeric string 1 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-0",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "anomalyModeNote": "numeric string 0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-minus-1",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "anomalyModeNote": "negative numeric string (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-0.0",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "anomalyModeNote": "decimal string 0.0 (falsy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-1.5",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "anomalyModeNote": "decimal string 1.5 (truthy number)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-empty",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "anomalyModeNote": "empty string (falsy string)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-space",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "anomalyModeNote": "whitespace-only string (non-numeric, truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-yes",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-no",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-off",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as false)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-null",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "anomalyModeNote": "non-numeric string (truthy — NOT read as null)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#str-None",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "anomalyModeNote": "non-numeric string (truthy)",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#int-0",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "anomalyModeNote": "number 0",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#int-1",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "anomalyModeNote": "number 1",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#int-minus-1",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "anomalyModeNote": "number -1",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#float-0.0",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "anomalyModeNote": "number 0.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#float-1.0",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "anomalyModeNote": "number 1.0",
+      "expectedTunable": false
+    },
+    {
+      "id": "not_a_node_type#float-0.5",
+      "nodeType": "not_a_node_type",
+      "nodeTypeNote": "unknown node type",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "anomalyModeNote": "number 0.5",
+      "expectedTunable": false
+    }
+  ]
+}

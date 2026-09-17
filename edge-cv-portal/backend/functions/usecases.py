@@ -15,6 +15,11 @@ from shared_utils import (
     rbac_manager, Role, Permission, require_permission, require_super_user,
     validate_usecase_access
 )
+# Use_Case settings for VLM/LLM Anomaly Tuning Sample_Export (spec:
+# quality-prompt-tuning, Requirements 2.1, 2.9). Pure module, shared with
+# deployments.py (which delivers the configuration and the device grant)
+# so the accepted values and the delivered ones can never diverge.
+import tuning_settings
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -1117,6 +1122,13 @@ def create_usecase(event, user):
         validation_error = validate_required_fields(body, required_fields)
         if validation_error:
             return create_response(400, {'error': validation_error})
+
+        # Workflow tuning Sample_Export settings (spec:
+        # quality-prompt-tuning, Requirements 2.1, 2.9): optional at
+        # creation, validated with exactly the same rules as an update.
+        settings_error = tuning_settings.validate_settings(body)
+        if settings_error:
+            return create_response(400, {'error': settings_error})
         
         table = dynamodb.Table(USECASES_TABLE)
         usecase_id = str(uuid.uuid4())
@@ -1194,7 +1206,15 @@ def create_usecase(event, user):
         
         if body.get('data_s3_bucket'):
             item['data_s3_bucket'] = body['data_s3_bucket']
-        
+
+        # Sample_Export settings, stored only when the caller set them, so a
+        # Use_Case created without them is byte-identical to pre-feature
+        # (Requirement 11.3).
+        for field in (tuning_settings.SAMPLE_EXPORT_FIELD,
+                      tuning_settings.SAMPLE_RETENTION_FIELD):
+            if field in body:
+                item[field] = body[field]
+
         table.put_item(Item=item)
         
         # Auto-assign creator as UseCaseAdmin
@@ -1517,7 +1537,24 @@ def update_usecase(usecase_id, event, user):
         
         body = json.loads(event.get('body', '{}'))
         table = dynamodb.Table(USECASES_TABLE)
-        
+
+        # Workflow tuning Sample_Export settings (spec:
+        # quality-prompt-tuning, Requirements 2.1, 2.9). Validated and
+        # normalized before anything is written: an invalid value is a 400
+        # rather than a Use_Case whose devices export to nowhere.
+        # deployments.py turns tuning_sample_export into the LocalServer
+        # `workflowTuning` component configuration plus the device role
+        # grant; tuning_sample_retention_days drives the Sample_Store
+        # lifecycle expiry.
+        settings_error = tuning_settings.validate_settings(body)
+        if settings_error:
+            log_audit_event(
+                user['user_id'], 'update_usecase', 'usecase', usecase_id,
+                'failure', {'reason': 'invalid_setting',
+                            'error': settings_error}
+            )
+            return create_response(400, {'error': settings_error})
+
         # Build update expression with expression attribute names for reserved keywords
         update_expr = "SET updated_at = :updated_at"
         expr_values = {':updated_at': int(datetime.utcnow().timestamp() * 1000)}
@@ -1528,7 +1565,11 @@ def update_usecase(usecase_id, event, user):
             'cross_account_role_arn', 'account_id',
             # Data Account fields
             'data_account_id', 'data_account_role_arn', 'data_account_external_id',
-            'data_s3_bucket'
+            'data_s3_bucket',
+            # Workflow tuning Sample_Export settings (quality-prompt-tuning
+            # 2.1, 2.9) — validated above
+            tuning_settings.SAMPLE_EXPORT_FIELD,
+            tuning_settings.SAMPLE_RETENTION_FIELD
         ]
         for field in updatable_fields:
             if field in body:

@@ -107,6 +107,11 @@ from workflow_engine.discovery import (
     STATUS_REGISTERED,
     WORKFLOW_FILE,
 )
+# The run identity Sample_Export attributes exported tuning samples to
+# (quality-prompt-tuning Requirement 2.2). Passed to the Bedrock / LLM
+# processors only when their ``process`` accepts it, so injected doubles
+# and every pre-feature call shape are unchanged.
+from workflow_engine.tuning.sample_export import ExportContext
 from workflow_engine import gst_plugins
 from workflow_engine.gst_plugins import workflow_plugin_path
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
@@ -1782,7 +1787,8 @@ class WorkflowExecutor:
                     tag_values = self._bedrock_processor.process(
                         document, tag_values, work_dir,
                         **self._bedrock_process_kwargs(
-                            collector, run_context
+                            collector, run_context,
+                            self._export_context(registration, execution_id),
                         ),
                     )
                 except Exception as e:  # noqa: BLE001 - contained per 13.7
@@ -1827,6 +1833,10 @@ class WorkflowExecutor:
                     document, tag_values, work_dir,
                     **self._duration_sink_kwargs(
                         self._llm_processor, collector
+                    ),
+                    **self._export_context_kwargs(
+                        self._llm_processor,
+                        self._export_context(registration, execution_id),
                     ),
                 )
                 # Truthful per-node outcomes for the llm bindings: a
@@ -2070,18 +2080,20 @@ class WorkflowExecutor:
         self,
         collector: Optional[NodeStatusCollector],
         run_context: RunContext,
+        export_context: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         """The keyword arguments for the Bedrock processor's
         ``process(...)`` call (detection-guided-bedrock-inspection
         Requirement 7.1).
 
         Extends :meth:`_duration_sink_kwargs` with ``run_context`` (the
-        crop / payload-reference / nested-verdict paths) and
+        crop / payload-reference / nested-verdict paths),
         ``detail_sink`` (branch publishes record their sent-message
-        details on the concurrent path). Each keyword is passed only
-        when the processor's ``process`` signature accepts it, so
-        injected test doubles predating them keep working unchanged —
-        the no-keyword call is byte-identical to today."""
+        details on the concurrent path) and ``export_context`` (the run
+        identity Sample_Export attributes samples to). Each keyword is
+        passed only when the processor's ``process`` signature accepts
+        it, so injected test doubles predating them keep working
+        unchanged — the no-keyword call is byte-identical to today."""
         kwargs = self._duration_sink_kwargs(self._bedrock_processor, collector)
         process = getattr(self._bedrock_processor, "process", None)
         if process is None:
@@ -2092,7 +2104,54 @@ class WorkflowExecutor:
             process, "detail_sink"
         ):
             kwargs["detail_sink"] = collector.set_detail
+        kwargs.update(self._export_context_kwargs(
+            self._bedrock_processor, export_context))
         return kwargs
+
+    def _export_context_kwargs(
+        self, processor, export_context: Optional[ExportContext]
+    ) -> Dict[str, Any]:
+        """The ``export_context=`` keyword for a directly-held
+        processor's ``process(...)`` call, or ``{}``
+        (quality-prompt-tuning Requirements 2.2, 11.1).
+
+        Empty when there is no context (nothing to attribute samples to)
+        or when the processor's ``process`` signature does not accept the
+        keyword — injected test doubles without it keep working
+        unchanged, and the no-keyword call is byte-identical to today."""
+        if export_context is None:
+            return {}
+        process = getattr(processor, "process", None)
+        if process is None or not self._handler_accepts_keyword(
+            process, "export_context"
+        ):
+            return {}
+        return {"export_context": export_context}
+
+    @staticmethod
+    def _export_context(
+        registration: WorkflowRegistration, execution_id: str
+    ) -> Optional[ExportContext]:
+        """The run's :class:`ExportContext`, or ``None`` (best-effort).
+
+        Built unconditionally — the export call sites themselves are
+        inert unless a device has tuning sample export configured, so no
+        configuration lookup happens on the run path. Any failure yields
+        ``None``, which disables export for the run and changes nothing
+        else."""
+        try:
+            return ExportContext(
+                workflow_id=str(registration.workflow_id),
+                version=registration.version,
+                execution_id=str(execution_id),
+            )
+        except Exception:  # noqa: BLE001 - contained; export is optional
+            logger.debug(
+                "Could not build the tuning export context for execution "
+                "%s; tuning sample export is skipped for this run",
+                execution_id, exc_info=True,
+            )
+            return None
 
     def _branch_scoped_binding_ids(self, document: dict) -> set:
         """The binding node ids the post-run handler must skip because
