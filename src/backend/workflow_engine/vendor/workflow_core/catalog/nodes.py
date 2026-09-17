@@ -1288,6 +1288,34 @@ MQTT_PUBLISH = NodeTypeDescriptor(
                                         "retained message re-fires the "
                                         "trigger on every reconnect.",
                             examples=[True]),
+        # Output phase (capture-phase-outputs). "completion" (the default)
+        # is today's behaviour: the message goes out after inference and
+        # every upstream gate. "capture" publishes as soon as the run's
+        # camera frame has been grabbed — before the pipeline, model or
+        # Bedrock/LLM steps run — so a cell controller (AMR, PLC) can be
+        # released the moment the picture is safely taken instead of
+        # waiting seconds for the verdict. A capture-phase node never
+        # sees inference results: its payload renders against the
+        # trigger context and capture identifiers only, and upstream
+        # filters/conditionals do not gate it.
+        ParameterDescriptor("phase", "enum", required=False,
+                            default="completion",
+                            constraints={"values": ["completion", "capture"]},
+                            description="When the message is published: "
+                                        "completion (default) after "
+                                        "inference and all upstream gates, "
+                                        "or capture immediately after the "
+                                        "camera frame is grabbed, before "
+                                        "inference starts. A capture-phase "
+                                        "publish has no inference results; "
+                                        "its payload_template can use "
+                                        "{capture_id}, {execution_id}, "
+                                        "{workflow_id}, {timestamp} (capture "
+                                        "time, epoch seconds), "
+                                        "{trigger.timestamp} / "
+                                        "{trigger.payload} and "
+                                        "{inference_json} (that map as JSON).",
+                            examples=["completion", "capture"]),
         # Zero-config publishing through the device's Greengrass-managed
         # MQTT: the Greengrass nucleus already holds the AWS IoT Core
         # connection, so only the topic is needed — no broker host/port
@@ -1990,6 +2018,28 @@ MODBUS_WRITE = NodeTypeDescriptor(
                                         "milliseconds, then writes the "
                                         "inverse coil value, e.g. 250.",
                             examples=[0, 250]),
+        # Output phase (capture-phase-outputs), mirrored from mqtt_publish:
+        # "capture" writes the coil/register as soon as the run's camera
+        # frame has been grabbed, before inference, so a PLC can release
+        # the part carrier immediately. A capture-phase write has no
+        # inference results, so pair it with a literal value_template
+        # (e.g. "true" or "1"); "completion" (default) is today's
+        # after-inference write.
+        ParameterDescriptor("phase", "enum", required=False,
+                            default="completion",
+                            constraints={"values": ["completion", "capture"]},
+                            description="When the write happens: completion "
+                                        "(default) after inference and all "
+                                        "upstream gates, or capture "
+                                        "immediately after the camera frame "
+                                        "is grabbed, before inference "
+                                        "starts. A capture-phase write has "
+                                        "no inference results, so use a "
+                                        "literal value_template such as "
+                                        "true or 1 (a pulse_ms coil pulse "
+                                        "makes a clean 'picture taken' "
+                                        "signal).",
+                            examples=["completion", "capture"]),
     ],
     # Executor-level Modbus TCP client write (stdlib socket exchange; no
     # packaged plugin dependency). Simulation: recording binding, no PLC

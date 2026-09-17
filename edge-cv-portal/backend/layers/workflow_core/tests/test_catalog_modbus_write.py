@@ -64,7 +64,7 @@ class TestModbusWriteParameters:
         descriptor = _descriptor()
         assert [p.name for p in descriptor.parameters] == [
             "host", "port", "unit_id", "register_type", "address",
-            "value_template", "pulse_ms",
+            "value_template", "pulse_ms", "phase",
         ]
 
     def test_host(self):
@@ -128,6 +128,19 @@ class TestModbusWriteParameters:
         for param in _descriptor().parameters:
             if param.name != "pulse_ms":
                 assert param.depends_on is None, param.name
+
+    def test_phase(self):
+        """capture-phase-outputs: an optional enum defaulting to today's
+        after-inference behaviour, so every existing workflow compiles to
+        phase=completion and writes exactly as before."""
+        param = _params_by_name(_descriptor())["phase"]
+        assert param.param_type == "enum"
+        assert param.required is False
+        assert param.default == "completion"
+        assert param.constraints == {"values": ["completion", "capture"]}
+        assert param.depends_on is None
+        for token in ("capture", "completion", "before inference"):
+            assert token in param.description, token
 
 
 class TestModbusWriteMappings:

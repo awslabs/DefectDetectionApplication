@@ -3600,6 +3600,25 @@
         "name": "pulse_ms",
         "param_type": "int",
         "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "completion",
+            "capture"
+          ]
+        },
+        "default": "completion",
+        "depends_on": null,
+        "description": "When the write happens: completion (default) after inference and all upstream gates, or capture immediately after the camera frame is grabbed, before inference starts. A capture-phase write has no inference results, so use a literal value_template such as true or 1 (a pulse_ms coil pulse makes a clean 'picture taken' signal).",
+        "examples": [
+          "completion",
+          "capture"
+        ],
+        "multiline": false,
+        "name": "phase",
+        "param_type": "enum",
+        "required": false
       }
     ],
     "type_id": "modbus_write"

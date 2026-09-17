@@ -1538,6 +1538,34 @@ class WorkflowExecutor:
             if python_frame_data is not None:
                 frame_data = python_frame_data
 
+            # Capture-phase outputs (capture-phase-outputs): the run's
+            # frame is now in hand (Aravis grab or Custom Python
+            # Produced_Frame), so every ``phase: capture`` mqtt_publish /
+            # modbus_write binding fires NOW — before the bridges, the
+            # pipeline, the model and the Bedrock/LLM steps — with the
+            # capture-time metadata (trigger context + capture ids). The
+            # outcomes are buffered and replayed into the node-status
+            # collector once it exists; the ids are excluded from the
+            # post-run pass and from Bedrock branch plans so they never
+            # run twice. A document without capture-phase bindings takes
+            # the exact pre-feature path (no call at all).
+            capture_phase_ids = branching.capture_phase_binding_ids(document)
+            capture_phase_outcome = None
+            if capture_phase_ids:
+                capture_phase_outcome = self._run_capture_phase_bindings(
+                    document,
+                    capture_phase_ids,
+                    self._capture_phase_metadata(
+                        registration, execution_id, trigger_context
+                    ),
+                    execution_id,
+                )
+                if capture_phase_outcome is None:
+                    # The handler cannot run a binding subset, so nothing
+                    # ran early — and nothing may be excluded later: the
+                    # bindings run with the completion-phase outputs.
+                    capture_phase_ids = []
+
             # Custom_Python_Node bridges (Requirement 9.8): replace each
             # emlpython element with the executor-managed appsink/appsrc
             # pair before rendering; the pair keeps the node's id so
@@ -1744,6 +1772,13 @@ class WorkflowExecutor:
                         "NodeStatusCollector.mark_running_all ignored an error",
                         exc_info=True,
                     )
+            # Capture-phase outputs already ran (before the collector
+            # existed): land their details, durations and terminal
+            # statuses now so the run view shows them done — or failed —
+            # while the pipeline is still running.
+            self._replay_capture_phase_outcome(
+                collector, capture_phase_outcome
+            )
             logger.info(
                 "Workflow execution %s (%s v%s) starting pipeline: %s",
                 execution_id,
@@ -2055,6 +2090,8 @@ class WorkflowExecutor:
             # non-branch bindings keep today's post-run ordering
             # (detection-guided-bedrock-inspection Requirement 5.7) —
             # the exclusion set is empty on every non-concurrent run.
+            # Capture-phase outputs (capture-phase-outputs) already ran
+            # right after the frame grab and are excluded the same way.
             try:
                 self._run_post_run_handler(
                     registration, document, tag_values,
@@ -2062,8 +2099,9 @@ class WorkflowExecutor:
                         collector.set_detail if collector is not None else None
                     ),
                     duration_sink=self._duration_sink(collector),
-                    exclude_node_ids=self._branch_scoped_binding_ids(
-                        document
+                    exclude_node_ids=(
+                        self._branch_scoped_binding_ids(document)
+                        | set(capture_phase_ids)
                     ),
                 )
                 # Mid-run node-status snapshot after the post-run handler
@@ -2319,6 +2357,138 @@ class WorkflowExecutor:
         for plan in plans.values():
             excluded.update(plan.binding_ids)
         return excluded
+
+    # ------------------------------------------------------------------
+    # Capture-phase outputs (capture-phase-outputs)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _capture_phase_metadata(
+        registration: WorkflowRegistration,
+        execution_id: str,
+        trigger_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """The metadata map a ``phase: capture`` output renders against.
+
+        Deliberately small: no inference result exists yet, so the map
+        carries exactly what is known the instant the frame is grabbed —
+        the run's Trigger_Context under ``trigger`` (the same key the
+        post-run metadata seeds, so ``{trigger.timestamp}`` /
+        ``{trigger.payload}`` render identically in both phases), the run
+        identifiers, and ``timestamp`` (the capture time, epoch seconds).
+        ``capture_id`` is the same ``{workflow_id}-{execution_id}`` string
+        the run's artifacts carry, so a controller can correlate the
+        capture signal with the later result messages."""
+        workflow_id = registration.workflow_id
+        return {
+            "trigger": dict(trigger_context or {}),
+            "capture_id": "{0}-{1}".format(workflow_id, execution_id),
+            "execution_id": execution_id,
+            "workflow_id": workflow_id,
+            "workflow_version": registration.version,
+            "phase": branching.PHASE_CAPTURE,
+            "timestamp": time.time(),
+        }
+
+    def _run_capture_phase_bindings(
+        self,
+        document: dict,
+        binding_ids: List[Any],
+        metadata: Dict[str, Any],
+        execution_id: str,
+    ) -> Optional[dict]:
+        """Run the document's capture-phase output bindings NOW, through
+        the post-run handler's ``process_subset`` (same rendering,
+        condition and runner code paths as every other output).
+
+        Returns the buffered outcome — ``{"ran": [node_id, ...],
+        "details": [(node_id, detail)], "durations": [(node_id, ms)],
+        "failures": {node_id: message}}`` —
+        for :meth:`_replay_capture_phase_outcome` to land in the
+        node-status collector once it exists (the collector is built only
+        after the pipeline is rendered). Contained: a failing capture
+        output is recorded as that node's failure and logged, and the run
+        CONTINUES — the inspection result is still worth producing (and
+        the completion-phase outputs still publish); a handler without
+        ``process_subset`` logs and skips (nothing runs early, nothing is
+        excluded later — the bindings then run post-run exactly as
+        before)."""
+        outcome: dict = {
+            "ran": list(binding_ids),
+            "details": [],
+            "durations": [],
+            "failures": {},
+        }
+        handler_subset = getattr(
+            self._post_run_handler, "process_subset", None
+        )
+        if not callable(handler_subset):
+            logger.warning(
+                "Workflow execution %s has %d capture-phase output(s) but "
+                "the output handler cannot run a binding subset; they will "
+                "run with the completion-phase outputs instead",
+                execution_id, len(binding_ids),
+            )
+            return None
+        logger.info(
+            "Workflow execution %s running %d capture-phase output(s) "
+            "before the pipeline: %s",
+            execution_id, len(binding_ids), ", ".join(map(str, binding_ids)),
+        )
+        try:
+            handler_subset(
+                document, metadata, list(binding_ids),
+                detail_sink=lambda node_id, detail: outcome["details"].append(
+                    (node_id, detail)),
+                duration_sink=lambda node_id, ms: outcome["durations"].append(
+                    (node_id, ms)),
+            )
+        except OutputBindingError as e:
+            logger.error(
+                "Workflow execution %s: capture-phase output(s) failed "
+                "(node %s): %s; the run continues",
+                execution_id, getattr(e, "node_id", None) or "unidentified", e,
+            )
+            for node_id in getattr(e, "node_ids", None) or []:
+                outcome["failures"][node_id] = str(e)
+        except Exception:  # noqa: BLE001 - contained per 13.7
+            logger.exception(
+                "Workflow execution %s: capture-phase outputs raised "
+                "unexpectedly; the run continues", execution_id,
+            )
+            for node_id in binding_ids:
+                outcome["failures"].setdefault(
+                    node_id, "capture-phase output handler failed; see logs")
+        return outcome
+
+    @staticmethod
+    def _replay_capture_phase_outcome(
+        collector: Optional[NodeStatusCollector], outcome: Optional[dict]
+    ) -> None:
+        """Land a buffered capture-phase outcome in the collector: details
+        and invocation durations as the bindings would have recorded them
+        live, failed nodes as ``failure`` (with the error detail), and the
+        rest as ``success`` right away — they are done, not "running"
+        alongside the pipeline. Contained and total: no collector / no
+        outcome is a no-op, and a collector error never affects the run."""
+        if collector is None or not outcome:
+            return
+        try:
+            failures = outcome.get("failures") or {}
+            for node_id, detail in outcome.get("details") or []:
+                collector.set_detail(node_id, detail)
+            for node_id, duration_ms in outcome.get("durations") or []:
+                collector.record_invocation_duration(node_id, duration_ms)
+            for node_id, message in failures.items():
+                collector.mark_failure(node_id, message)
+            for node_id in outcome.get("ran") or []:
+                if node_id not in failures:
+                    collector.mark_success(node_id)
+        except Exception:  # noqa: BLE001 - contained per R8.5
+            logger.debug(
+                "Capture-phase node-status replay ignored an error",
+                exc_info=True,
+            )
 
     @staticmethod
     def _load_graph_document(
@@ -3322,7 +3492,13 @@ class WorkflowExecutor:
         ``process_subset`` — the handler runs the REMAINING bindings
         through ``process_subset`` (same code paths, ``executorBindings``
         order preserved) so branch outputs never publish twice.
-        None/empty keeps the exact pre-feature handler invocation."""
+        None/empty keeps the exact pre-feature handler invocation.
+
+        Capture-phase output ids (capture-phase-outputs) join the same
+        exclusion set — and, like the branch ids, they are only ever
+        non-empty when the handler has ``process_subset`` (the executor
+        runs nothing early otherwise), so a plain-callable handler keeps
+        receiving the full document exactly as before."""
         if self._post_run_handler is None:
             return
         try:

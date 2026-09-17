@@ -850,6 +850,21 @@ export const MODBUS_WRITE_DESCRIPTOR: NodeTypeDescriptor = {
         'inverse coil value, e.g. 250.',
       examples: [0, 250],
     },
+    // capture-phase-outputs: mirrors the backend `phase` enum.
+    {
+      name: 'phase',
+      paramType: 'enum',
+      required: false,
+      default: 'completion',
+      constraints: { values: ['completion', 'capture'] },
+      description:
+        'When the write happens: completion (default) after inference and ' +
+        'all upstream gates, or capture immediately after the camera frame ' +
+        'is grabbed, before inference starts. A capture-phase write has no ' +
+        'inference results, so use a literal value_template such as true ' +
+        "or 1 (a pulse_ms coil pulse makes a clean 'picture taken' signal).",
+      examples: ['completion', 'capture'],
+    },
   ],
   mappings: [
     ...sameOnDeviceArchs('modbus_write', []),

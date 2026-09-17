@@ -252,6 +252,28 @@ class NodeStatusCollector:
                 exc_info=True,
             )
 
+    def mark_success(self, node_id: Optional[str]) -> None:
+        """Mark ONE tracked node ``success`` (capture-phase-outputs: an
+        output that already ran before the pipeline is done, not
+        "running" alongside it).
+
+        Same rules as :meth:`mark_success_all` applied to a single node:
+        only a non-terminal (``pending``/``running``) node advances, so a
+        ``warning`` keeps its detail and a ``failure`` is never
+        overridden. A None/untracked node id marks nothing. Fully
+        contained so a status error can never fail a run (R8.5)."""
+        try:
+            if node_id is None:
+                return
+            with self._lock:
+                if self._statuses.get(node_id) in _NON_TERMINAL_STATES:
+                    self._set_status(node_id, STATUS_SUCCESS)
+        except Exception:  # noqa: BLE001 - collector is best-effort (R8.5)
+            logger.debug(
+                "NodeStatusCollector.mark_success ignored an error",
+                exc_info=True,
+            )
+
     def mark_failure(self, node_id: Optional[str], detail: Optional[str] = None) -> None:
         """Mark ``node_id`` as ``failure`` and retain its error ``detail``.
 

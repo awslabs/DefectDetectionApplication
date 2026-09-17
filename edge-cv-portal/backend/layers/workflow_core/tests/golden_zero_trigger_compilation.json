@@ -445,6 +445,7 @@
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
+              "phase": "completion",
               "qos": 0,
               "retain": false,
               "topic": "factory/line1/inspection"
@@ -519,6 +520,7 @@
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
+              "phase": "completion",
               "qos": 0,
               "retain": false,
               "topic": "factory/line1/inspection"
@@ -593,6 +595,7 @@
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
+              "phase": "completion",
               "qos": 0,
               "retain": false,
               "topic": "factory/line1/inspection"
@@ -667,6 +670,7 @@
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
+              "phase": "completion",
               "qos": 0,
               "retain": false,
               "topic": "factory/line1/inspection"
@@ -741,6 +745,7 @@
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
+              "phase": "completion",
               "qos": 0,
               "retain": false,
               "topic": "factory/line1/inspection"
@@ -815,6 +820,7 @@
               "iot_private_key_path": null,
               "iot_thing_name": null,
               "payload_template": "{inference_json}",
+              "phase": "completion",
               "qos": 0,
               "retain": false,
               "topic": "factory/line1/inspection"

@@ -73,7 +73,7 @@ describe('modbus_write descriptor identity (Requirement 3.1)', () => {
     expect(MODBUS_WRITE_DESCRIPTOR.hardwareDependent).toBe(true);
   });
 
-  it('declares exactly the seven backend parameters in backend order', () => {
+  it('declares exactly the eight backend parameters in backend order', () => {
     expect(MODBUS_WRITE_DESCRIPTOR.parameters.map((p) => p.name)).toEqual([
       'host',
       'port',
@@ -82,7 +82,17 @@ describe('modbus_write descriptor identity (Requirement 3.1)', () => {
       'address',
       'value_template',
       'pulse_ms',
+      'phase',
     ]);
+  });
+
+  it('mirrors the capture-phase-outputs `phase` enum (optional, defaults to completion)', () => {
+    const phase = parameter(MODBUS_WRITE_DESCRIPTOR, 'phase');
+    expect(phase.paramType).toBe('enum');
+    expect(phase.required).toBe(false);
+    expect(phase.default).toBe('completion');
+    expect(phase.constraints).toEqual({ values: ['completion', 'capture'] });
+    expect(phase.dependsOn).toBeUndefined();
   });
 });
 
