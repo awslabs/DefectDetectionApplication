@@ -70,6 +70,7 @@ Run:
     python3 -m pytest test/backend-test/security/preservation/test_preservation_iam_cdk_synth.py \
         -p no:cacheprovider --noconftest -v
 """
+import collections
 import json
 import os
 import re
@@ -188,6 +189,27 @@ def _i_changes():
         return json.load(fh)
 
 
+def _approved_additions(stack):
+    """Return a Counter of the statements this stack is REVIEWED to synthesize on
+    top of its fixed baseline.
+
+    Features merged after the I1–I4 rewrite legitimately add IAM statements. Those
+    are recorded here — not folded into ``iam_baseline_cdk_i_changes.json``, which
+    must keep describing only the I1–I4 rewrite so that
+    ``test_baseline_drift_confined_to_I1_I4`` keeps proving that confinement, and
+    not merged into the fixed baseline template, which stays the reviewed F'(X)
+    capture. Anything the tree synthesizes that is neither in the baseline nor in
+    this allowlist still fails the gate, and removals still fail unconditionally.
+    """
+    path = os.path.join(BASELINES, "iam_post_fix_approved_additions.json")
+    if not os.path.exists(path):
+        return collections.Counter()
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    entry = (data.get("stacks") or {}).get(stack) or {}
+    return collections.Counter(entry.get("approved_additions") or [])
+
+
 # --------------------------------------------------------------------------- #
 # Synth mode (I1–I4) — live synth vs the committed FIXED baseline (identity)
 # --------------------------------------------------------------------------- #
@@ -208,10 +230,40 @@ def test_synth_iam_statements_match_fixed_baseline(stack):
         )
     fresh_ms = iam_statements_multiset(fresh)
     baseline_ms = iam_statements_multiset(_load_baseline_template(fixed_file))
-    assert fresh_ms == baseline_ms, (
-        f"{stack}: live-synthesized IAM statements drifted from the committed "
-        f"fixed baseline (F'(X)). Re-inspect and regenerate the baseline only "
-        f"after confirming the drift is confined to I1–I4."
+    approved_ms = _approved_additions(stack)
+
+    # Removals are never acceptable: a statement disappearing means a grant the
+    # baseline recorded is gone, which the allowlist must not be able to excuse.
+    removed = baseline_ms - fresh_ms
+    assert not removed, (
+        f"{stack}: statements recorded in the fixed baseline (F'(X)) are NO LONGER "
+        f"synthesized. This is a regression, not growth, and cannot be approved "
+        f"via iam_post_fix_approved_additions.json.\n"
+        f"missing: {sorted(removed)[:5]}"
+    )
+
+    unreviewed = fresh_ms - baseline_ms - approved_ms
+    assert not unreviewed, (
+        f"{stack}: the live tree synthesizes IAM statements that are in neither the "
+        f"fixed baseline (F'(X)) nor the reviewed additions allowlist. Inspect them, "
+        f"then either fix the grant or add it to "
+        f"iam_post_fix_approved_additions.json with its attribution. Do NOT "
+        f"regenerate the fixed baseline: that would fold the change into the "
+        f"recorded I1–I4 rewrite.\n"
+        f"unreviewed ({sum(unreviewed.values())}): {sorted(unreviewed)[:5]}"
+    )
+
+    # The allowlist must not rot: every approved statement has to still be real.
+    stale = approved_ms - fresh_ms
+    assert not stale, (
+        f"{stack}: iam_post_fix_approved_additions.json approves statements the tree "
+        f"no longer synthesizes; drop them so the allowlist keeps describing reality.\n"
+        f"stale: {sorted(stale)[:5]}"
+    )
+
+    assert fresh_ms == baseline_ms + approved_ms, (
+        f"{stack}: live-synthesized IAM statements do not equal the fixed baseline "
+        f"plus the reviewed additions."
     )
 
 
