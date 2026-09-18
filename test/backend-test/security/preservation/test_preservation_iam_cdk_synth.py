@@ -140,12 +140,25 @@ def _synth_template(stack, app):
         # any assertion.
         for key in (
             "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-            "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE",
-            "AWS_CONFIG_FILE", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
             "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE",
             "AWS_ROLE_ARN",
         ):
             env.pop(key, None)
+        # The shared-config files are REDIRECTED, not unset: unsetting
+        # AWS_SHARED_CREDENTIALS_FILE / AWS_CONFIG_FILE makes the SDK fall back
+        # to its DEFAULTS (~/.aws/credentials, ~/.aws/config), so on any
+        # developer box with a configured default profile the CLI still
+        # resolves a caller account and clobbers the fixture value — the very
+        # leak this block exists to prevent (observed here: the fixture
+        # portalAccountId synthesized as 111111111111 while every
+        # `this.account` statement carried the real account, producing false
+        # drift in DDAPortalUseCaseAccountStack). Point them at paths that
+        # cannot exist instead.
+        env["AWS_SHARED_CREDENTIALS_FILE"] = os.path.join(
+            outdir, "no-such-credentials")
+        env["AWS_CONFIG_FILE"] = os.path.join(outdir, "no-such-config")
         env["AWS_EC2_METADATA_DISABLED"] = "true"
         try:
             subprocess.run(
