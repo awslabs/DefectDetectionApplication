@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Container,
@@ -11,6 +11,7 @@ import {
   Link,
 } from '@cloudscape-design/components';
 import { useAuth } from '../contexts/AuthContext';
+import { takeAttemptedLocation } from '../services/sessionRedirect';
 
 type LoginView = 'login' | 'new-password' | 'forgot' | 'reset-code';
 
@@ -23,7 +24,8 @@ export default function Login() {
 
   // DataLabeler-only users land on the labeler workspace instead of the
   // dashboard (dda-data-labeling Req 2.2); every other role keeps the
-  // historical /dashboard landing (Req 2.8).
+  // historical /dashboard landing (Req 2.8). This stays the fallback for when
+  // there is no remembered location to return to.
   const postLoginLanding = user?.role === 'DataLabeler' ? '/labeler' : '/dashboard';
 
   const [view, setView] = useState<LoginView>('login');
@@ -37,9 +39,33 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
 
+  // The remembered Attempted_Location, consumed at most once per mount.
+  // `undefined` means "not consumed yet"; `null` means "nothing usable was
+  // remembered". Both post-sign-in navigations (the `isAuthenticated` effect
+  // and the new-password handler) go through `resolveDestination`, so whichever
+  // fires first they agree on one destination and cannot navigate to two
+  // different places (design Decision 5).
+  const rememberedRef = useRef<string | null | undefined>(undefined);
+
+  const resolveDestination = useCallback(() => {
+    if (rememberedRef.current === undefined) {
+      // Read + clear + validate in one operation: a later ordinary sign-in
+      // cannot resurrect a stale page and a role-guard bounce cannot
+      // re-restore one (Requirements 2.4, 2.5). Unsafe or over-long values are
+      // discarded by the validator, falling back to the landing page
+      // (Requirement 3.2).
+      rememberedRef.current = takeAttemptedLocation();
+    }
+    return rememberedRef.current ?? postLoginLanding;
+  }, [postLoginLanding]);
+
   useEffect(() => {
-    if (isAuthenticated) navigate(postLoginLanding);
-  }, [isAuthenticated, postLoginLanding, navigate]);
+    // Return the user to where the session ended when a valid location was
+    // remembered by a Session_Exit; otherwise the historical landing page
+    // (Requirements 2.1, 2.3). An already-authenticated visit to /login still
+    // redirects immediately, exactly as today (Requirement 2.6).
+    if (isAuthenticated) navigate(resolveDestination());
+  }, [isAuthenticated, resolveDestination, navigate]);
 
   useEffect(() => {
     if (needsNewPassword) setView('new-password');
@@ -65,7 +91,8 @@ export default function Login() {
       if (newPassword.length < 8) { setError('Password must be at least 8 characters'); return; }
       if (!givenName.trim()) { setError('Please enter your name'); return; }
       await completeNewPassword(newPassword, { given_name: givenName.trim() });
-      navigate(postLoginLanding);
+      // Same restoration through the new-password challenge (Requirement 2.2).
+      navigate(resolveDestination());
     } catch (err: any) { setError(err.message || 'Failed to set password.'); }
     finally { setLoading(false); }
   };

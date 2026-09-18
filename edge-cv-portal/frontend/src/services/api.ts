@@ -77,6 +77,8 @@ import type {
 } from '../pages/workflow-tuning/types';
 import { groupDetectionBaseModels } from '../utils/detectionBaseModels';
 import { beginRequest, endRequest } from './loadingBus';
+import { fetchAuthSession } from 'aws-amplify/auth';
+import { redirectToLogin } from './sessionRedirect';
 
 /**
  * Error thrown for API failures. Workflow Manager endpoints use the
@@ -1125,6 +1127,95 @@ export interface DetectionBaseModels {
   fineTunableImports: TrainingJobRecord[];
 }
 
+/**
+ * Silent_Refresh state — Feature: portal-session-expiry-return-to-page.
+ *
+ * The ID token the client sends is a copy in `localStorage` that `AuthContext`
+ * writes once per page load, so it ages out (Cognito default 1 hour) while
+ * Amplify still holds a renewable session. A 401 therefore usually means
+ * "stale mirror", not "session over" — refresh it and retry rather than
+ * bouncing the user to the login screen (bugfix.md defect B, Requirement 5.1).
+ *
+ * A module-level promise collapses concurrent refreshes: one expiry commonly
+ * 401s several parallel requests at once, and all of them must share a single
+ * refresh (Requirement 5.3, design Decision 6).
+ */
+let refreshInFlight: Promise<string | null> | null = null;
+
+/**
+ * Force Amplify to renew the session and re-mirror the ID token.
+ *
+ * At most one refresh is in flight at a time; concurrent callers await the
+ * same promise and see the same result (Requirement 5.3).
+ *
+ * @returns the fresh ID token, or `null` when the session cannot be refreshed.
+ */
+async function refreshIdToken(): Promise<string | null> {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const session = await fetchAuthSession({ forceRefresh: true });
+        const idToken = session.tokens?.idToken?.toString();
+        if (!idToken) return null;
+        // Keep the existing mirror contract that `AuthContext` also writes.
+        localStorage.setItem('idToken', idToken);
+        return idToken;
+      } catch {
+        // Refresh failure is not an application error — the caller redirects.
+        return null;
+      }
+    })().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+/**
+ * The session is over: drop the stale mirror, record where the user was and
+ * send them to `/login` (Requirements 1.1, 5.2).
+ *
+ * `redirectToLogin` owns the save and skips the navigation when the user is
+ * already on `/login`, which is the guard the two 401 handlers used to spell
+ * out inline.
+ */
+function abandonSession(): void {
+  console.error('Authentication failed - token may be expired');
+  localStorage.removeItem('idToken');
+  redirectToLogin();
+}
+
+/**
+ * The shared 401 handler for every portal API client (Requirement 1.3,
+ * design Decisions 6 and 7).
+ *
+ * Performs a Silent_Refresh and, when it succeeds, re-issues the original
+ * request exactly once with the fresh token. `reissue` is invoked at most
+ * once and its response is never fed back through here, so a single retry is
+ * structurally the maximum and no retry loop is possible (Requirement 5.4).
+ *
+ * @param reissue re-runs the original request with a fresh bearer token.
+ * @returns the retried response, or `null` when the refresh failed — in which
+ *          case the Attempted_Location has been recorded and the browser is
+ *          already heading for `/login`.
+ */
+export async function handleUnauthorized(
+  reissue: (freshToken: string) => Promise<Response>
+): Promise<Response | null> {
+  const freshToken = await refreshIdToken();
+  if (freshToken === null) {
+    abandonSession();
+    return null;
+  }
+
+  const retried = await reissue(freshToken);
+  if (retried.status === 401) {
+    // A freshly refreshed token was rejected too: this really is over.
+    abandonSession();
+  }
+  return retried;
+}
+
 class ApiService {
   private get baseUrl(): string {
     return getConfig().apiUrl;
@@ -1156,15 +1247,19 @@ class ApiService {
         headers,
       });
 
-      if (!response.ok) {
-        // If 401, token might be expired - redirect to login
-        if (response.status === 401) {
-          console.error('Authentication failed - token may be expired');
-          localStorage.removeItem('idToken');
-          // Redirect to login page
-          if (window.location.pathname !== '/login') {
-            window.location.href = '/login';
-          }
+      // A 401 is usually a stale token mirror, not an ended session: refresh
+      // once, retry once, and only redirect to /login when that fails
+      // (Requirements 5.1-5.6). `handleUnauthorized` is reached only from the
+      // first attempt, so at most one retry can happen.
+      if (response.status === 401) {
+        const retried = await handleUnauthorized((freshToken) =>
+          fetch(url, {
+            ...options,
+            headers: { ...headers, Authorization: `Bearer ${freshToken}` },
+          })
+        );
+        if (retried) {
+          response = retried;
         }
       }
 

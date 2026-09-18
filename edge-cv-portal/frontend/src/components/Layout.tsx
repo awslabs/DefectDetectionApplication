@@ -20,6 +20,7 @@ import { getConfig, getBuildInfo } from '../config';
 import { canAccessBuilds } from '../utils/buildsAccess';
 import { canAccessSyntheticData } from '../utils/syntheticAccess';
 import { canAccessWorkflowTuning } from '../utils/workflowTuningAccess';
+import { clearAttemptedLocation } from '../services/sessionRedirect';
 
 /**
  * Builds the items for the top-navigation settings dropdown based on the
@@ -226,6 +227,15 @@ export default function Layout() {
             onItemClick: async ({ detail }) => {
               if (detail.id === 'logout') {
                 await logout();
+                // Deliberate sign-out is a clean start: forget any remembered
+                // Attempted_Location before going to /login, so signing back
+                // in lands on the default landing page
+                // (portal-session-expiry-return-to-page Requirements 4.1,
+                // 4.2). This runs *after* `logout()` on purpose — clearing
+                // it first would let the re-render that `logout()` triggers
+                // (isAuthenticated flips false while still on the protected
+                // route) have `ProtectedRoute` record the location again.
+                clearAttemptedLocation();
                 navigate('/login');
               } else if (detail.id === 'settings') {
                 navigate('/settings');

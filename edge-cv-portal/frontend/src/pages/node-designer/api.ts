@@ -7,9 +7,12 @@
  * bus, and the structured error envelope {error: {code, message,
  * details}} surfaced as ApiError so views can act on error codes (e.g.
  * INVALID_DECLARATION identifying the failing input, Requirement 1.7).
+ * The 401 path is delegated to `services/api.handleUnauthorized` so there is
+ * exactly one Silent_Refresh + return-to-page implementation across the
+ * portal's clients (portal-session-expiry-return-to-page Requirement 1.3).
  */
 import { getConfig } from '../../config';
-import { ApiError } from '../../services/api';
+import { ApiError, handleUnauthorized } from '../../services/api';
 import { beginRequest, endRequest } from '../../services/loadingBus';
 import type { GstPropertiesResponse } from './scan';
 import type {
@@ -46,18 +49,31 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
   beginRequest();
   try {
-    const response = await fetch(`${getConfig().apiUrl}${endpoint}`, {
+    const url = `${getConfig().apiUrl}${endpoint}`;
+    let response = await fetch(url, {
       ...options,
       headers,
     });
 
-    if (!response.ok) {
-      if (response.status === 401) {
-        localStorage.removeItem('idToken');
-        if (window.location.pathname !== '/login') {
-          window.location.href = '/login';
-        }
+    // A 401 is shared with the main client rather than handled here: one
+    // Silent_Refresh + one retry, and only then the location-preserving
+    // redirect to /login (Requirement 1.3, design Decision 7). This used to
+    // be a verbatim copy of the main client's 401 block; `handleUnauthorized`
+    // is now the single implementation, and it is reached only from this
+    // first attempt so at most one retry can happen.
+    if (response.status === 401) {
+      const retried = await handleUnauthorized((freshToken) =>
+        fetch(url, {
+          ...options,
+          headers: { ...headers, Authorization: `Bearer ${freshToken}` },
+        })
+      );
+      if (retried) {
+        response = retried;
       }
+    }
+
+    if (!response.ok) {
       const error = await response.json().catch(() => ({ error: 'Request failed' }));
       if (error.error && typeof error.error === 'object') {
         throw new ApiError(
