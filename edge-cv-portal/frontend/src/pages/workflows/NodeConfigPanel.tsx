@@ -53,6 +53,13 @@
  * rule-expression syntax and worked examples for the
  * inference_filter/conditional `condition` parameters and
  * mqtt_publish's `payload_template` placeholders.
+ *
+ * Prompt tuning entry point (quality-prompt-tuning Requirement 1.4): for a
+ * selected Tunable_Node of a saved workflow, and for the roles that may use
+ * the Workflow Tuning section, the panel shows a "Prompt tuning" link to the
+ * node's Tuning_Session together with its latest applied Tuning_Result
+ * summary (`PromptTuningNodeEntry`). Every other node type, an unsaved
+ * canvas, and a role without access see nothing new.
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -69,6 +76,9 @@ import Textarea from '@cloudscape-design/components/textarea';
 import { apiService, type CodeAssistContract } from '../../services/api';
 import { useUsecase } from '../../contexts/UsecaseContext';
 import CodeAssistPanel from '../../components/code-assist/CodeAssistPanel';
+import PromptTuningNodeEntry from '../workflow-tuning/PromptTuningNodeEntry';
+import { isTunableWorkflowNode } from '../workflow-tuning/eligibility';
+import { canAccessWorkflowTuning } from '../../utils/workflowTuningAccess';
 import type { Device, UserRole } from '../../types';
 import type { BuilderNode } from './builderGraph';
 import {
@@ -1632,6 +1642,14 @@ export interface NodeConfigPanelProps {
    * absent role) see no assistant entry point.
    */
   role?: UserRole | null;
+  /**
+   * The loaded workflow's id, or null/undefined while the canvas is
+   * unsaved. A Tunable_Node's Tuning_Session is keyed by
+   * `(workflowId, nodeId)`, so the "Prompt tuning" entry point
+   * (quality-prompt-tuning Requirement 1.4) is offered only once the
+   * workflow has been saved and its id is known.
+   */
+  workflowId?: string | null;
 }
 
 export default function NodeConfigPanel({
@@ -1640,6 +1658,7 @@ export default function NodeConfigPanel({
   onCameraSelection,
   onClose,
   role,
+  workflowId,
 }: NodeConfigPanelProps) {
   const needsModels =
     node?.data.descriptor.parameters.some((parameter) => parameter.paramType === 'model_ref') ??
@@ -1677,6 +1696,15 @@ export default function NodeConfigPanel({
   // source_kind expands to (Requirement 5.3); null for every other node
   // type, leaving their dependsOn-based visibility unchanged.
   const unifiedVisibleNames = unifiedVisibleParameterNames(node, nodeCatalog);
+
+  // Requirement 1.4's entry point: a Tunable_Node (the shared Requirement
+  // 1.5 rule, read off the canvas node) of a SAVED workflow, for a role that
+  // may use the Workflow Tuning section.
+  const showPromptTuning =
+    typeof workflowId === 'string' &&
+    workflowId !== '' &&
+    canAccessWorkflowTuning(role) &&
+    isTunableWorkflowNode({ id: node.id, type: descriptor.typeId, parameters });
 
   return (
     <aside
@@ -1718,6 +1746,14 @@ export default function NodeConfigPanel({
             />
           )}
         </div>
+        {showPromptTuning && (
+          <PromptTuningNodeEntry
+            key={`${workflowId}:${node.id}`}
+            workflowId={workflowId as string}
+            nodeId={node.id}
+            usecaseId={selectedUsecaseId}
+          />
+        )}
         {descriptor.parameters.length === 0 ? (
           <Box color="text-body-secondary">This node has no configurable parameters.</Box>
         ) : (

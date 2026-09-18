@@ -461,6 +461,7 @@ function BuilderCanvas({
         onCameraSelection={onNodeCameraSelection}
         onClose={closeConfigPanel}
         role={user?.role}
+        workflowId={workflow?.workflowId ?? null}
       />
       {/* Generate/Test side drawer. Both panels stay mounted (hidden via
           display:none) so their state survives collapsing and tab switches. */}

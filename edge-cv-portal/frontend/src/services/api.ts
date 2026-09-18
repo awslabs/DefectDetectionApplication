@@ -48,6 +48,33 @@ import type {
   SyntheticSessionDetailResponse,
   SyntheticSessionSummary,
 } from '../pages/synthetic/types';
+import type {
+  ApplyCandidateBody,
+  ApplyCandidateResponse,
+  CancelScoreRunResponse,
+  CandidatePreviewResponse,
+  CreateTuningSessionBody,
+  CreateTuningSessionResponse,
+  DeleteTuningCandidateResponse,
+  DeleteTuningSessionResponse,
+  ListScoreRunOutcomesParams,
+  ListTuningSamplesParams,
+  ListTuningSamplesResponse,
+  RefreshTuningSessionResponse,
+  ScoreRunDiffResponse,
+  ScoreRunOutcomesResponse,
+  ScoreRunResponse,
+  SetSelectionResponse,
+  SetTuningLabelsBody,
+  SetTuningLabelsResponse,
+  StartScoreRunBody,
+  StartScoreRunResponse,
+  SyntheticNegativesResponse,
+  TuningCandidateBody,
+  TuningCandidateResponse,
+  TuningOverviewResponse,
+  TuningSessionResponse,
+} from '../pages/workflow-tuning/types';
 import { groupDetectionBaseModels } from '../utils/detectionBaseModels';
 import { beginRequest, endRequest } from './loadingBus';
 
@@ -1119,10 +1146,12 @@ class ApiService {
     }
 
     // Track this request globally so the app-wide activity bar shows while any
-    // API call is in flight.
+    // API call is in flight. The retry below happens inside this same
+    // begin/end span, so the accounting stays balanced (Requirement 5.5).
     beginRequest();
     try {
-      const response = await fetch(`${this.baseUrl}${endpoint}`, {
+      const url = `${this.baseUrl}${endpoint}`;
+      let response = await fetch(url, {
         ...options,
         headers,
       });
@@ -1137,7 +1166,9 @@ class ApiService {
             window.location.href = '/login';
           }
         }
-        
+      }
+
+      if (!response.ok) {
         const error = await response.json().catch(() => ({ error: 'Request failed' }));
         // Structured error envelope: {error: {code, message, details}}
         if (error.error && typeof error.error === 'object') {
@@ -4642,6 +4673,296 @@ class ApiService {
   ): Promise<{ training_job_id: string; message: string }> {
     return this.request(
       `/synthetic/sessions/${encodeURIComponent(sessionId)}/retrain`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  // Workflow Tuning — VLM/LLM Anomaly Tuning endpoints
+  // (quality-prompt-tuning, workflow_tuning.py). Every route resolves the
+  // workflow and calls authorize_workflow_access first: `workflow:read` for
+  // GETs, `workflow:edit` for mutations, `workflow:save` for apply
+  // (Requirements 9.1, 9.2). A caller without read access receives the
+  // uniform 404, so hiding the section in the UI is convenience only.
+
+  /**
+   * Workflows of the Use_Case with at least one Tunable_Node in their
+   * latest version, each node's type, model and Sample_Store count, plus
+   * `sampleExportEnabled` so the overview can explain an empty store
+   * (Requirements 1.2, 1.6). `workflowId` narrows the listing to one
+   * workflow (the designer toolbar's preselection, Requirement 1.3).
+   */
+  async listTuningWorkflows(
+    usecaseId: string,
+    workflowId?: string
+  ): Promise<TuningOverviewResponse> {
+    const query = new URLSearchParams({ usecase_id: usecaseId });
+    if (workflowId) {
+      query.set('workflow_id', workflowId);
+    }
+    return this.request<TuningOverviewResponse>(
+      `/workflow-tuning/anomaly/workflows?${query.toString()}`
+    );
+  }
+
+  /**
+   * Create-or-get the Tuning_Session of a `(workflowId, nodeId)` pair: at
+   * most one exists per pair (Requirement 10.2). A new session snapshots
+   * the Baseline_Candidate from the latest version (Requirement 5.1) and
+   * indexes the Sample_Store once (Requirement 3.1); `created` says which
+   * happened. A node that is not a Tunable_Node in the latest version is a
+   * 400 `NODE_NOT_TUNABLE`.
+   */
+  async createTuningSession(
+    body: CreateTuningSessionBody
+  ): Promise<CreateTuningSessionResponse> {
+    return this.request<CreateTuningSessionResponse>(
+      '/workflow-tuning/anomaly/sessions',
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * The session with its Candidates (each carrying its latest Score_Run),
+   * Label counts, baseline version and last refresh summary.
+   */
+  async getTuningSession(sessionId: string): Promise<TuningSessionResponse> {
+    return this.request<TuningSessionResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}`
+    );
+  }
+
+  /**
+   * Additive re-index of the Sample_Store: new samples are added, existing
+   * samples and their Labels are left untouched (Requirement 3.4).
+   */
+  async refreshTuningSession(
+    sessionId: string
+  ): Promise<RefreshTuningSessionResponse> {
+    return this.request<RefreshTuningSessionResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/refresh`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Delete the session and everything it owns, including its Score_Run
+   * outcome objects; the exported Tuning_Samples stay in the Sample_Store
+   * (Requirements 10.2, 10.5).
+   */
+  async deleteTuningSession(
+    sessionId: string
+  ): Promise<DeleteTuningSessionResponse> {
+    return this.request<DeleteTuningSessionResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * A filtered page of Tuning_Samples with presigned image URLs valid for
+   * `expiresInSeconds` (at most 30 minutes — Requirements 4.4, 4.8).
+   * Booleans are sent only when set, so an unset filter never narrows the
+   * page.
+   */
+  async listTuningSamples(
+    sessionId: string,
+    params: ListTuningSamplesParams = {}
+  ): Promise<ListTuningSamplesResponse> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null || value === '') {
+        continue;
+      }
+      query.set(key, typeof value === 'boolean' ? String(value) : `${value}`);
+    }
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return this.request<ListTuningSamplesResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/samples${suffix}`
+    );
+  }
+
+  /**
+   * Set (or, with `label: null`, clear) the Label of one or many samples;
+   * each change is persisted immediately (Requirements 4.2, 4.3).
+   */
+  async setTuningSampleLabels(
+    sessionId: string,
+    body: SetTuningLabelsBody
+  ): Promise<SetTuningLabelsResponse> {
+    return this.request<SetTuningLabelsResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/samples/labels`,
+      { method: 'PUT', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Toggle Synthetic_Negatives: enabling creates one NOK sample per
+   * (OK-labelled sample × sibling node with a Reference_Image of the same
+   * execution), disabling removes them and leaves every indexed sample and
+   * Label unchanged (Requirements 4.5, 4.6).
+   */
+  async setTuningSyntheticNegatives(
+    sessionId: string,
+    enabled: boolean
+  ): Promise<SyntheticNegativesResponse> {
+    return this.request<SyntheticNegativesResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/synthetic-negatives`,
+      { method: 'PUT', body: JSON.stringify({ enabled }) }
+    );
+  }
+
+  /** Create a Candidate; duplication is this call with the source's
+   *  Prompt_Set (Requirement 5.2). */
+  async createTuningCandidate(
+    sessionId: string,
+    body: TuningCandidateBody
+  ): Promise<TuningCandidateResponse> {
+    return this.request<TuningCandidateResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/candidates`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Edit a Candidate. The Baseline_Candidate is read-only: a 409
+   *  `BASELINE_READ_ONLY` (Requirements 5.1, 5.2). */
+  async updateTuningCandidate(
+    sessionId: string,
+    candidateId: string,
+    body: TuningCandidateBody
+  ): Promise<TuningCandidateResponse> {
+    return this.request<TuningCandidateResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}`
+      + `/candidates/${encodeURIComponent(candidateId)}`,
+      { method: 'PUT', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Delete a Candidate and its Score_Runs, leaving every other Candidate,
+   *  Score_Run, sample and Label unchanged (Requirement 5.7). */
+  async deleteTuningCandidate(
+    sessionId: string,
+    candidateId: string
+  ): Promise<DeleteTuningCandidateResponse> {
+    return this.request<DeleteTuningCandidateResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}`
+      + `/candidates/${encodeURIComponent(candidateId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * The exact user message (prompt plus the appended Verdict_Instruction)
+   * and system text the Invocation_Builder will send for a Candidate, with
+   * the non-blocking parser-hostile-settings warnings (Requirements
+   * 5.3-5.5). The route carries no session in its path, so the session is
+   * named explicitly.
+   */
+  async getTuningCandidatePreview(
+    candidateId: string,
+    sessionId: string
+  ): Promise<CandidatePreviewResponse> {
+    const query = new URLSearchParams({ session_id: sessionId });
+    return this.request<CandidatePreviewResponse>(
+      `/workflow-tuning/anomaly/candidates/${encodeURIComponent(candidateId)}`
+      + `/preview?${query.toString()}`
+    );
+  }
+
+  /**
+   * Start a Score_Run for a Candidate: 202 with the invocation count it
+   * will issue. A second run in the session is a 409 naming the
+   * in-progress one; repeats outside 1..3 and more than 600 planned
+   * invocations are 400s; a VLM run needs an eligible device
+   * (Requirements 6.6, 6.9, 6.10, 6.13).
+   */
+  async startTuningScoreRun(
+    sessionId: string,
+    body: StartScoreRunBody
+  ): Promise<StartScoreRunResponse> {
+    return this.request<StartScoreRunResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/score-runs`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** A Score_Run's progress and running Score_Summary (Requirement 6.8). */
+  async getTuningScoreRun(runId: string): Promise<ScoreRunResponse> {
+    return this.request<ScoreRunResponse>(
+      `/workflow-tuning/anomaly/score-runs/${encodeURIComponent(runId)}`
+    );
+  }
+
+  /**
+   * A page of Sample_Outcomes with their samples, filterable by category
+   * and sortable by confidence, each carrying the raw answer and the parse
+   * failure reason (Requirements 7.2, 7.4).
+   */
+  async listTuningScoreRunOutcomes(
+    runId: string,
+    params: ListScoreRunOutcomesParams = {}
+  ): Promise<ScoreRunOutcomesResponse> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null || value === '') {
+        continue;
+      }
+      query.set(key, `${value}`);
+    }
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return this.request<ScoreRunOutcomesResponse>(
+      `/workflow-tuning/anomaly/score-runs/${encodeURIComponent(runId)}/outcomes${suffix}`
+    );
+  }
+
+  /** Cancel a running Score_Run, keeping every outcome it already produced
+   *  (Requirement 6.11). */
+  async cancelTuningScoreRun(runId: string): Promise<CancelScoreRunResponse> {
+    return this.request<CancelScoreRunResponse>(
+      `/workflow-tuning/anomaly/score-runs/${encodeURIComponent(runId)}/cancel`,
+      { method: 'POST' }
+    );
+  }
+
+  /** The samples on which two Score_Runs of the same session produced
+   *  different categories (Requirement 7.3). */
+  async diffTuningScoreRuns(
+    runId: string,
+    otherRunId: string
+  ): Promise<ScoreRunDiffResponse> {
+    return this.request<ScoreRunDiffResponse>(
+      `/workflow-tuning/anomaly/score-runs/${encodeURIComponent(runId)}`
+      + `/diff/${encodeURIComponent(otherRunId)}`
+    );
+  }
+
+  /**
+   * Select the Candidate to apply (`null` clears the selection); the
+   * response carries the selection's latest run and its false-pass count
+   * so the UI can show it prominently (Requirements 7.5, 7.6).
+   */
+  async setTuningSelection(
+    sessionId: string,
+    candidateId: string | null
+  ): Promise<SetSelectionResponse> {
+    return this.request<SetSelectionResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/selection`,
+      { method: 'PUT', body: JSON.stringify({ candidateId }) }
+    );
+  }
+
+  /**
+   * Apply the selected Candidate as a new Workflow_Definition version,
+   * changing exactly the three Prompt_Set parameters through the designer
+   * save path (`workflow:save`, Requirement 8). Requires a completed
+   * Score_Run on the selection (409 otherwise); nothing is validated,
+   * packaged or deployed.
+   */
+  async applyTuningCandidate(
+    sessionId: string,
+    body: ApplyCandidateBody = {}
+  ): Promise<ApplyCandidateResponse> {
+    return this.request<ApplyCandidateResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/apply`,
       { method: 'POST', body: JSON.stringify(body) }
     );
   }

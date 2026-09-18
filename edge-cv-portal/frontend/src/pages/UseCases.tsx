@@ -16,6 +16,7 @@ import {
   Container,
   StatusIndicator,
   ColumnLayout,
+  Toggle,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { UseCase } from '../types';
@@ -35,6 +36,29 @@ interface FormDataType {
   data_account_external_id: string;
   data_s3_bucket: string;
   data_s3_prefix: string;
+  // VLM/LLM Anomaly Tuning Sample_Export (spec: quality-prompt-tuning,
+  // Requirements 2.1, 2.9)
+  tuning_sample_export: boolean;
+  tuning_sample_retention_days: string;
+}
+
+// Sample_Export retention bounds, mirroring the backend
+// (functions/tuning_settings.py, Requirement 2.9).
+export const TUNING_RETENTION_DEFAULT_DAYS = 30;
+export const TUNING_RETENTION_MIN_DAYS = 7;
+export const TUNING_RETENTION_MAX_DAYS = 365;
+
+export function validateTuningRetentionDays(value: string): string | undefined {
+  const text = (value ?? '').trim();
+  if (!text) return undefined; // empty ⇒ the backend default applies
+  if (!/^\d+$/.test(text)) {
+    return 'Retention must be a whole number of days';
+  }
+  const days = Number(text);
+  if (days < TUNING_RETENTION_MIN_DAYS || days > TUNING_RETENTION_MAX_DAYS) {
+    return `Retention must be between ${TUNING_RETENTION_MIN_DAYS} and ${TUNING_RETENTION_MAX_DAYS} days`;
+  }
+  return undefined;
 }
 
 export default function UseCases() {
@@ -58,6 +82,8 @@ export default function UseCases() {
     data_account_external_id: '',
     data_s3_bucket: '',
     data_s3_prefix: '',
+    tuning_sample_export: false,
+    tuning_sample_retention_days: '',
   });
 
   const resetForm = () => {
@@ -72,6 +98,8 @@ export default function UseCases() {
       data_account_external_id: '',
       data_s3_bucket: '',
       data_s3_prefix: '',
+      tuning_sample_export: false,
+      tuning_sample_retention_days: '',
     });
   };
 
@@ -190,6 +218,12 @@ export default function UseCases() {
       data_account_external_id: useCase.data_account_external_id || '',
       data_s3_bucket: useCase.data_s3_bucket || '',
       data_s3_prefix: useCase.data_s3_prefix || '',
+      tuning_sample_export: useCase.tuning_sample_export === true,
+      tuning_sample_retention_days:
+        useCase.tuning_sample_retention_days !== undefined &&
+        useCase.tuning_sample_retention_days !== null
+          ? String(useCase.tuning_sample_retention_days)
+          : '',
     });
     setShowEditModal(true);
   };
@@ -200,7 +234,22 @@ export default function UseCases() {
       setError('Name and S3 Bucket are required');
       return;
     }
-    updateMutation.mutate({ id: selectedUseCase.usecase_id, data: formData });
+    const retentionError = validateTuningRetentionDays(
+      formData.tuning_sample_retention_days
+    );
+    if (retentionError) {
+      setError(retentionError);
+      return;
+    }
+    // Tuning sample export travels as the typed setting pair the backend
+    // validates (quality-prompt-tuning 2.1, 2.9); an empty retention field
+    // leaves the stored value (or the 30-day default) alone.
+    const { tuning_sample_retention_days: retentionDays, ...rest } = formData;
+    const data: Partial<UseCase> = { ...rest };
+    if (retentionDays.trim()) {
+      data.tuning_sample_retention_days = Number(retentionDays.trim());
+    }
+    updateMutation.mutate({ id: selectedUseCase.usecase_id, data });
   };
 
   const handleDeleteClick = (useCase: UseCase) => {
@@ -486,6 +535,48 @@ export default function UseCases() {
               value={formData.s3_bucket}
               onChange={({ detail }) => setFormData({ ...formData, s3_bucket: detail.value })}
               placeholder="my-usecase-bucket"
+            />
+          </FormField>
+
+          {/* VLM/LLM Anomaly Tuning Sample_Export (spec:
+              quality-prompt-tuning, Requirements 2.1, 2.9). Devices export
+              nothing until this is enabled AND the devices are redeployed. */}
+          <Header variant="h3">Workflow Tuning</Header>
+
+          <FormField
+            label="Tuning sample export"
+            description="Let devices upload the exact images and verdicts of every anomaly-mode Bedrock/VLM inspection to workflow-tuning/samples/ in this use case's inference results bucket, for prompt tuning. Takes effect the next time the devices are deployed to."
+            stretch
+          >
+            <Toggle
+              checked={formData.tuning_sample_export}
+              onChange={({ detail }) =>
+                setFormData({ ...formData, tuning_sample_export: detail.checked })
+              }
+            >
+              {formData.tuning_sample_export
+                ? 'Enabled — devices export tuning samples'
+                : 'Disabled — devices export nothing'}
+            </Toggle>
+          </FormField>
+
+          <FormField
+            label="Tuning sample retention (days)"
+            description={`How long exported tuning samples are kept before S3 expires them (${TUNING_RETENTION_MIN_DAYS}-${TUNING_RETENTION_MAX_DAYS}; default ${TUNING_RETENTION_DEFAULT_DAYS}).`}
+            errorText={validateTuningRetentionDays(formData.tuning_sample_retention_days)}
+            stretch
+          >
+            <Input
+              type="number"
+              inputMode="numeric"
+              value={formData.tuning_sample_retention_days}
+              onChange={({ detail }) =>
+                setFormData({
+                  ...formData,
+                  tuning_sample_retention_days: detail.value,
+                })
+              }
+              placeholder={String(TUNING_RETENTION_DEFAULT_DAYS)}
             />
           </FormField>
 

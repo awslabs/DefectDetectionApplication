@@ -26,6 +26,11 @@
  *     message is shown and the previous name is kept.
  *   - Delete: confirm dialog, then DELETE /workflows/{id}; a rejection
  *     for active deployments identifies the referencing deployments (5.6).
+ *   - Tune anomaly prompts (quality-prompt-tuning Requirement 1.3): shown
+ *     only while the loaded definition has at least one Tunable_Node, for
+ *     the roles that may use the Workflow Tuning section; opens
+ *     /workflow-tuning/anomaly with this workflow preselected. It reads
+ *     nothing and changes nothing here — it is navigation.
  *
  * Role gating (11.1, 11.3): Save/Validate/Duplicate/Delete require a
  * workflow create/edit role (DataScientist, UseCaseAdmin, PortalAdmin)
@@ -46,6 +51,9 @@ import Multiselect, { type MultiselectProps } from '@cloudscape-design/component
 import Select, { type SelectProps } from '@cloudscape-design/components/select';
 import SpaceBetween from '@cloudscape-design/components/space-between';
 import { ApiError, apiService } from '../../services/api';
+import { canAccessWorkflowTuning } from '../../utils/workflowTuningAccess';
+import { definitionHasTunableNode } from '../workflow-tuning/eligibility';
+import { anomalyTuningHref } from '../workflow-tuning/PromptTuningNodeEntry';
 import type { UserRole } from '../../types';
 import type { WorkflowDefinition, WorkflowValidationRun } from './types';
 
@@ -582,6 +590,14 @@ export default function WorkflowToolbar({
   const needsSaveReason =
     canEdit && workflow === null ? 'Save the workflow first' : undefined;
 
+  // "Tune anomaly prompts" (quality-prompt-tuning Requirement 1.3): offered
+  // while the canvas definition carries at least one Tunable_Node — the
+  // shared Requirement 1.5 rule — and the role may use the Workflow Tuning
+  // section. A Tuning_Session is keyed by the workflow id, so an unsaved
+  // canvas leaves the action disabled with the reason rather than hidden.
+  const showTuneAction =
+    canAccessWorkflowTuning(role) && definitionHasTunableNode(getDefinition());
+
   return (
     <div role="toolbar" aria-label="Workflow actions">
       <SpaceBetween size="xs">
@@ -640,6 +656,20 @@ export default function WorkflowToolbar({
           >
             Delete
           </Button>
+          {showTuneAction && (
+            <Button
+              iconName="gen-ai"
+              onClick={() =>
+                workflow !== null && navigate(anomalyTuningHref(workflow.workflowId))
+              }
+              disabled={busy || workflow === null}
+              disabledReason={
+                workflow === null ? 'Save the workflow first' : undefined
+              }
+            >
+              Tune anomaly prompts
+            </Button>
+          )}
           <Box color="text-body-secondary" fontSize="body-s">
             {workflow === null
               ? 'Unsaved workflow'

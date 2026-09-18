@@ -26,6 +26,7 @@ import { UserAdminApiStack } from './user-admin-api-stack';
 import { QuickSetupApiStack } from './quick-setup-api-stack';
 import { DdaLabelingApiStack } from './dda-labeling-api-stack';
 import { WorkflowManagerGapsApiStack } from './workflow-manager-gaps-api-stack';
+import { WorkflowTuningApiStack } from './workflow-tuning-api-stack';
 import { groundedSamWorkerEnabled } from './context-helpers';
 
 export interface ComputeStackProps extends cdk.StackProps {
@@ -287,6 +288,23 @@ export class ComputeStack extends cdk.Stack {
     }
     // quickSetupBundleDeployment is referenced below via addDependency so the
     // QuickSetup Lambda is only reachable after the bundle is uploaded.
+
+    // Data-plane S3 bucket scope shared by the base Lambda role's object grant
+    // (createLambdaRole below) and the per-feature object grants that must
+    // stay inside that same bucket set (the workflow-tuning prefix grant).
+    // Resolve it from the optional allowlist: each entry may be a bare bucket
+    // name or a full `arn:aws:s3:::name` ARN; normalize to the canonical
+    // bucket ARN. Empty/unset -> all buckets (see the data-plane rationale in
+    // createLambdaRole).
+    const dataBucketAllowlist = (props.dataBucketAllowlist ?? []).filter((b) => b.length > 0);
+    const dataBucketArns: string[] =
+      dataBucketAllowlist.length > 0
+        ? dataBucketAllowlist.map((b) =>
+            b.startsWith('arn:aws:s3:::')
+              ? b.replace(/\/\*?$/, '')
+              : `arn:aws:s3:::${b}`
+          )
+        : ['arn:aws:s3:::*'];
 
     // Base IAM Role for Lambda functions
     const createLambdaRole = (name: string) => {
@@ -575,20 +593,10 @@ export class ComputeStack extends cdk.Stack {
       // ACLs, DeleteBucket, PutBucketTagging, etc.) are granted here, and
       // cross-account data access is still gated by the assumed
       // DDAPortalAccessRole in the UseCase account.
-      // Resolve the data-plane bucket scope from the optional allowlist. Each
-      // allowlist entry may be a bare bucket name or a full `arn:aws:s3:::name`
-      // ARN; normalize to the canonical bucket ARN. Empty/unset -> all buckets.
-      const allowlist = (props.dataBucketAllowlist ?? []).filter((b) => b.length > 0);
-      const bucketArns: string[] =
-        allowlist.length > 0
-          ? allowlist.map((b) =>
-              b.startsWith('arn:aws:s3:::')
-                ? b.replace(/\/\*?$/, '')
-                : `arn:aws:s3:::${b}`
-            )
-          : ['arn:aws:s3:::*'];
-      const bucketLevelResources = bucketArns;
-      const objectLevelResources = bucketArns.map((arn) => `${arn}/*`);
+      // The data-plane bucket scope (dataBucketArns) is resolved once at stack
+      // scope from the optional allowlist; empty/unset -> all buckets.
+      const bucketLevelResources = dataBucketArns;
+      const objectLevelResources = dataBucketArns.map((arn) => `${arn}/*`);
 
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -1895,11 +1903,14 @@ export class ComputeStack extends cdk.Stack {
     // Cognito account management behind /admin/* (routes attached by the
     // UserAdminApiStack below). Separate function so the cognito-idp
     // admin and SES grants stay scoped to it alone (design D1).
+    // Held in a local so the out-of-band-administration detection rule below
+    // can exclude exactly this role's CloudTrail sessions (Req 6.3).
+    const userAdminRole = createLambdaRole('UserAdmin');
     const userAdminHandler = new lambda.Function(this, 'UserAdminHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'user_admin.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
-      role: createLambdaRole('UserAdmin'),
+      role: userAdminRole,
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2026-02-06-user-admin',
@@ -2706,6 +2717,165 @@ export class ComputeStack extends cdk.Stack {
       props.testRunStateMachine.grantRead(workflowTestingHandler);
     }
 
+    // ------------------------------------------------------------------
+    // VLM/LLM Anomaly Tuning (quality-prompt-tuning, task 5.2)
+    //
+    // workflow_tuning.py serves every /workflow-tuning/anomaly/** route
+    // (registered by WorkflowTuningApiStack below), runs the Bedrock_Scorer
+    // in chunked self-invoked steps and dispatches/polls Device_Score_Jobs
+    // through each device's dda-workflow-tuning named shadow.
+    //
+    // The Tuning_Session store (dda-portal-workflow-tuning) is created by
+    // the StorageStack. It is referenced here by its FIXED physical name
+    // rather than as a ComputeStack prop — the same fixed-name pattern this
+    // stack already uses for the Node_Designer tables — so the table can be
+    // added without changing the constructor signature every existing
+    // infrastructure test enumerates.
+    // ------------------------------------------------------------------
+    const WORKFLOW_TUNING_TABLE_NAME = 'dda-portal-workflow-tuning';
+    const workflowTuningTableArn =
+      `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}` +
+      `:table/${WORKFLOW_TUNING_TABLE_NAME}`;
+    const workflowTuningHandler = new lambda.Function(this, 'WorkflowTuningHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_tuning.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowTuning'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-09-16-workflow-tuning',
+        WORKFLOW_TUNING_TABLE: WORKFLOW_TUNING_TABLE_NAME,
+      },
+      // workflow_core.anomaly_invocation (the shared Invocation_Builder the
+      // executor, the Bedrock_Scorer and the device job runner all build
+      // through) lives in the workflow_core layer.
+      layers: [sharedLayer, workflowCoreLayer],
+      // 900 s is a cap, not a reservation: the HTTP routes answer in well
+      // under a second, but the same function also runs the self-invoked
+      // Bedrock_Scorer steps (up to 100 Converse invocations at 4 threads,
+      // Req 6.8) and the Device_Score_Job poll steps.
+      timeout: cdk.Duration.seconds(900),
+      // Score_Run steps hold a bounded set of sample images in memory while
+      // 4 threads invoke Bedrock; the images never touch DynamoDB (Req 9.5).
+      memorySize: 1024,
+    });
+
+    // The Tuning_Session store. Granted to THIS function only (no other
+    // handler reads or writes tuning state).
+    workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:BatchGetItem',
+        'dynamodb:Query',
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+        'dynamodb:DeleteItem',
+        'dynamodb:BatchWriteItem',
+        'dynamodb:ConditionCheckItem',
+      ],
+      resources: [workflowTuningTableArn, `${workflowTuningTableArn}/index/*`],
+    }));
+
+    // Bedrock_Scorer replay (Req 6.1, 6.3): the same foundation-model +
+    // inference-profile grant shape the other Bedrock callers use — the
+    // model id is the Tunable_Node's `model` parameter, i.e. request
+    // configuration rather than a fixed ARN.
+    workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        'arn:aws:bedrock:*::foundation-model/*',
+        `arn:aws:bedrock:*:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
+
+    // Chunked execution (Req 6.8, 10.4) and Device_Score_Job polling
+    // (Req 6.12): POST .../score-runs returns 202 and Event-invokes THIS
+    // function with {action: 'execute_score_run'|'poll_score_job'} so the
+    // work runs past API Gateway's 29 s integration bound; each step
+    // re-invokes itself with the next cursor.
+    //
+    // The self-invoke grant CANNOT go through grantInvoke: that statement
+    // lands in a policy owned by the role construct, and the Lambda
+    // function depends on its role's whole subtree, so a policy referencing
+    // the function's ARN closes a dependency cycle (policy -> function ->
+    // policy). A standalone policy attached to the same role is a sibling
+    // of the function instead of a child of the role, so the only edge left
+    // is policy -> function (the DdaLabelingSelfInvokePolicy /
+    // NodeGeneratorSelfInvokePolicy pattern).
+    new iam.Policy(this, 'WorkflowTuningSelfInvokePolicy', {
+      roles: [workflowTuningHandler.role!],
+      statements: [
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['lambda:InvokeFunction'],
+          resources: [
+            workflowTuningHandler.functionArn,
+            `${workflowTuningHandler.functionArn}:*`,
+          ],
+        }),
+      ],
+    });
+
+    // Device_Score_Job delivery (Req 6.9): desired.jobs[jobId] is written
+    // into the target device's dda-workflow-tuning named shadow and
+    // reported.jobs[jobId] read back, through the Use_Case's assumed-role
+    // iot-data client (the deliver_camera_bindings path). IAM scopes shadow
+    // actions to the thing ARN — named shadows share the thing resource —
+    // and this explicit grant keeps the tuning shadow working
+    // independently of the base-role IoT statement.
+    workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iot:GetThingShadow',
+        'iot:UpdateThingShadow',
+      ],
+      resources: ['arn:aws:iot:*:*:thing/*'],
+    }));
+
+    // Sample_Store objects (Req 9.4): sample bytes and job manifests are
+    // read, job manifests and outcome batches written, and a deleted
+    // session's run objects removed — all strictly inside the
+    // `workflow-tuning/` prefix of the Use_Case's bucket, which is what
+    // bounds this function's object access (cross-account access still
+    // goes through the assumed DDAPortalAccessRole in the UseCase account).
+    // The base Lambda role's data-plane grant covers Get/PutObject on the
+    // configured buckets; DeleteObject is granted here and ONLY under the
+    // tuning prefix, on the same allowlist-scoped bucket set as that base
+    // grant (dataBucketArns) — never on a bare bucket-name wildcard.
+    workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:GetObject',
+        's3:PutObject',
+        's3:DeleteObject',
+      ],
+      resources: dataBucketArns.map((arn) => `${arn}/workflow-tuning/*`),
+    }));
+
+    // Sample_Store retention (Req 2.9): deployments.py applies this
+    // feature's lifecycle rules (samples at the Use_Case retention, job and
+    // session artifacts at 30 days) to the Use_Case's inference results
+    // bucket when it delivers the export configuration. The bucket is
+    // created outside these stacks (and may live in another account), so
+    // the rules cannot be declared in infrastructure; this is the one
+    // control-plane S3 action the deployment path needs, scoped to the
+    // inference-results bucket family. The application is best-effort — a
+    // deployment never fails on it — so an operator who withholds this
+    // permission only loses automatic expiry.
+    deploymentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:GetLifecycleConfiguration',
+        's3:PutLifecycleConfiguration',
+      ],
+      resources: ['arn:aws:s3:::dda-inference-results-*'],
+    }));
+
     // Grant SharedComponents Lambda permission to update the GDK component bucket policy
     // This is needed to add new usecase accounts to the bucket policy during onboarding
     const componentBucketName = `dda-component-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}`;
@@ -3122,6 +3292,33 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     workflowManagerGapsApiStack.addDependency(userAdminApiStack);
     workflowManagerGapsApiStack.addDependency(quickSetupApiStack);
     workflowManagerGapsApiStack.addDependency(ddaLabelingApiStack);
+
+    // VLM/LLM Anomaly Tuning routes (quality-prompt-tuning, task 5.2) in
+    // their own nested stack for the same 500-resource-limit reason. The
+    // whole /workflow-tuning/anomaly/** tree attaches at the imported API
+    // root and is served by workflow_tuning.py; requests are JWT-authorized
+    // at the gateway and the per-operation workflow permission is enforced
+    // in the handler (Requirements 9.1, 9.2).
+    const workflowTuningApiStack = new WorkflowTuningApiStack(
+      this,
+      'WorkflowTuningApi',
+      {
+        restApiId: apiGatewayStack.api.restApiId,
+        restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+        // Must match ApiGatewayStack deployOptions.stageName.
+        stageName: 'v1',
+        userPool: props.userPool,
+        workflowTuningHandler,
+      },
+    );
+    workflowTuningApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (all nested API stacks
+    // deploy against the same 'v1' stage).
+    workflowTuningApiStack.addDependency(cameraRegistryApiStack);
+    workflowTuningApiStack.addDependency(userAdminApiStack);
+    workflowTuningApiStack.addDependency(quickSetupApiStack);
+    workflowTuningApiStack.addDependency(ddaLabelingApiStack);
+    workflowTuningApiStack.addDependency(workflowManagerGapsApiStack);
 
     // Custom Resource to update UseCases Lambda environment variable with API Gateway ID
     // This avoids circular dependency by updating the Lambda AFTER both resources are created

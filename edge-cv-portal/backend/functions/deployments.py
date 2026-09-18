@@ -27,6 +27,11 @@ import workflow_guards
 # LAST pre-submit gate on both submit paths. Pure over injected callables and
 # free of any dependency on this module, so it imports cleanly here.
 import deployment_preflight
+# Use_Case Sample_Export settings for VLM/LLM Anomaly Tuning (spec:
+# quality-prompt-tuning, Requirements 2.1, 2.8, 11.3). Pure module shared
+# with usecases.py (which validates the settings), so what the Portal
+# accepts and what deployments deliver can never diverge.
+import tuning_settings
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -1359,6 +1364,19 @@ def create_deployment(body, user):
             logger.info(f"Auto-included aws.edgeml.dda.InferenceUploader with S3 bucket {s3_bucket}, interval {upload_interval}s")
         elif not enable_inference_uploader:
             logger.info("InferenceUploader not included - disabled in UseCase configuration")
+
+        # Workflow tuning Sample_Export (spec: quality-prompt-tuning,
+        # Requirements 2.1, 2.8, 11.3): WHERE the Use_Case enables
+        # `tuning_sample_export`, the LocalServer entry carries the
+        # Sample_Store location as component configuration and the devices'
+        # token-exchange role is granted put/get under
+        # `workflow-tuning/*` of that bucket. A Use_Case with the setting
+        # off (every pre-feature Use_Case) reaches neither: no
+        # configuration key, no IAM call, nothing added to the deployment.
+        deliver_workflow_tuning(
+            components_map, usecase, account_id, region=region,
+            session_name=f"tuning-{user['user_id'][:20]}-"
+                         f"{int(datetime.utcnow().timestamp())}"[:64])
         
         # Ensure ShadowManager carries the portal synchronization config for
         # the camera-registry-sync named shadows. ShadowManager is already an
@@ -2765,6 +2783,227 @@ def apply_subscribe_access_control(components_map):
     return []
 
 
+def apply_workflow_tuning_configuration(components_map, usecase,
+                                        account_id=None):
+    """Deep-merge the ``workflowTuning`` Sample_Export configuration for the
+    Use_Case into the LocalServer entry's ``configurationUpdate.merge``
+    (spec: quality-prompt-tuning, Requirements 2.1, 11.3).
+
+    WHERE the Use_Case has ``tuning_sample_export`` enabled, every
+    deployment of its devices carries
+    ``{"enabled": true, "bucket": ..., "prefix": "workflow-tuning/samples/"}``
+    so LocalServer knows the Sample_Store location; the device disables
+    export for any other shape. The merge is non-destructive (Greengrass
+    deep-merges configuration maps by key), so the recipe defaults, a
+    caller-supplied merge and the subscribe accessControl policies are
+    untouched.
+
+    WHILE export is disabled the deployment delivers NO tuning
+    configuration: nothing at all is written when none is present (so a
+    Use_Case that never opted in is byte-identical to pre-feature), and a
+    ``workflowTuning`` key carried over from a revision of a formerly
+    enabled Use_Case is dropped from the merge AND reset on the device, so
+    disabling actually stops the export instead of leaving the device's
+    last-applied configuration in force.
+
+    Returns the delivered configuration, or None when nothing was
+    delivered. ``components_map`` is mutated in place."""
+    config = tuning_settings.component_configuration(usecase, account_id)
+
+    local_server_name = next(
+        (name for name in sorted(components_map or {})
+         if name.startswith(LOCAL_SERVER_COMPONENT_PREFIX)), None)
+    if not local_server_name:
+        if config:
+            # Model/plugin-only deployments carry no LocalServer entry; the
+            # configuration has nowhere to attach and is delivered by the
+            # next deployment that includes LocalServer.
+            logger.info(
+                "Sample_Export is enabled for this Use_Case but the "
+                "deployment includes no LocalServer component, so the "
+                "workflowTuning configuration was not attached")
+        return None
+
+    entry = components_map[local_server_name]
+    existing_update = entry.get('configurationUpdate') or {}
+    existing_merge = existing_update.get('merge')
+    merge_doc = {}
+    if existing_merge:
+        try:
+            merge_doc = json.loads(existing_merge)
+        except (TypeError, ValueError) as e:
+            # Never clobber a merge we cannot parse.
+            logger.warning(
+                f"Could not parse existing configurationUpdate.merge on "
+                f"{local_server_name}; skipping the workflowTuning merge: "
+                f"{e}")
+            return None
+    if not isinstance(merge_doc, dict):
+        merge_doc = {}
+
+    key = tuning_settings.COMPONENT_CONFIG_KEY
+    if config is None:
+        if key not in merge_doc:
+            return None
+        merge_doc.pop(key)
+        config_update = entry.setdefault('configurationUpdate', {})
+        config_update['merge'] = json.dumps(merge_doc)
+        reset = list(config_update.get('reset') or [])
+        pointer = f"/{key}"
+        if pointer not in reset:
+            reset.append(pointer)
+        config_update['reset'] = reset
+        logger.info(
+            f"Sample_Export is disabled for this Use_Case; withdrew the "
+            f"workflowTuning configuration from {local_server_name}")
+        return None
+
+    merge_doc[key] = config
+    config_update = entry.setdefault('configurationUpdate', {})
+    config_update['merge'] = json.dumps(merge_doc)
+    reset = config_update.get('reset')
+    if reset:
+        # A previous disable added the withdrawal pointer; re-enabling must
+        # not reset the configuration it is delivering in the same update.
+        remaining = [pointer for pointer in reset if pointer != f"/{key}"]
+        if remaining:
+            config_update['reset'] = remaining
+        else:
+            config_update.pop('reset')
+    logger.info(
+        f"Merged workflowTuning Sample_Export configuration "
+        f"(bucket {config['bucket']}, prefix {config['prefix']}) into "
+        f"{local_server_name}")
+    return config
+
+
+def grant_workflow_tuning_device_access(usecase, bucket, region=None,
+                                        session_name=None):
+    """Grant the devices' token-exchange role put/get on the Use_Case
+    bucket's ``workflow-tuning/*`` objects and nothing else (spec:
+    quality-prompt-tuning, Requirement 2.8).
+
+    Written as an inline policy this feature owns exclusively
+    (``DDAWorkflowTuningSampleAccess``) so it adds no other permission and
+    can never disturb the device role's other policies. Idempotent: the
+    existing document is read first and rewritten only when it differs.
+
+    Best-effort by design — a deployment must not fail because the Portal
+    could not write the grant (the operator can add it by hand), so every
+    failure is logged and reported in the returned status:
+    ``granted`` | ``unchanged`` | ``failed``."""
+    role_name = tuning_settings.DEVICE_ROLE_NAME
+    policy_name = tuning_settings.DEVICE_POLICY_NAME
+    document = tuning_settings.device_policy_document(bucket)
+    try:
+        iam_client = get_usecase_client(
+            'iam', usecase, session_name=session_name, region=region)
+        try:
+            existing = iam_client.get_role_policy(
+                RoleName=role_name, PolicyName=policy_name)
+            current = existing.get('PolicyDocument')
+            if isinstance(current, str):
+                current = json.loads(current)
+            if current == document:
+                return {'status': 'unchanged', 'role_name': role_name,
+                        'policy_name': policy_name}
+        except (ClientError, TypeError, ValueError):
+            # No such policy (or an unreadable one): write ours below.
+            pass
+        iam_client.put_role_policy(
+            RoleName=role_name, PolicyName=policy_name,
+            PolicyDocument=json.dumps(document))
+        logger.info(
+            f"Granted {policy_name} (s3:PutObject/s3:GetObject on "
+            f"{bucket}/{tuning_settings.TUNING_ROOT_PREFIX}*) to {role_name}")
+        return {'status': 'granted', 'role_name': role_name,
+                'policy_name': policy_name}
+    except Exception as e:
+        logger.warning(
+            f"Could not grant {policy_name} on {role_name} for the tuning "
+            f"Sample_Store ({bucket}/{tuning_settings.TUNING_ROOT_PREFIX}*): "
+            f"{e}")
+        return {'status': 'failed', 'role_name': role_name,
+                'policy_name': policy_name, 'error': str(e)}
+
+
+def apply_workflow_tuning_lifecycle(usecase, bucket, region=None,
+                                    session_name=None):
+    """Put this feature's S3 lifecycle rules on the Use_Case's Sample_Store
+    bucket (spec: quality-prompt-tuning, Requirement 2.9).
+
+    ``workflow-tuning/samples/`` expires after the Use_Case's configured
+    retention (default 30 days, 7..365); ``workflow-tuning/jobs/`` and
+    ``workflow-tuning/sessions/`` after 30 days. The bucket is the
+    Use_Case's inference results bucket — created outside the portal's CDK
+    stacks, possibly in another account — so the rules are applied here at
+    delivery time rather than declared in infrastructure, through the same
+    cross-account client the rest of the delivery uses.
+
+    Every foreign rule the bucket already carries is preserved verbatim;
+    only the three rule ids this feature owns are written. Idempotent: the
+    configuration is read first and rewritten only when it differs.
+
+    Best-effort by design, exactly like the device grant — a deployment
+    must not fail because the Portal could not write a retention rule
+    (S3 lifecycle is a control-plane action an operator may withhold), so
+    every failure is logged and reported in the returned status:
+    ``applied`` | ``unchanged`` | ``failed``."""
+    try:
+        s3_client = get_usecase_client(
+            's3', usecase, session_name=session_name, region=region)
+        existing = []
+        try:
+            current = s3_client.get_bucket_lifecycle_configuration(
+                Bucket=bucket)
+            existing = list(current.get('Rules') or [])
+        except ClientError as e:
+            code = e.response.get('Error', {}).get('Code', '')
+            if code not in ('NoSuchLifecycleConfiguration',
+                            'NoSuchBucketLifecycleConfiguration'):
+                raise
+            # No lifecycle configuration yet: ours becomes the whole one.
+        rules, changed = tuning_settings.merge_lifecycle_rules(
+            existing, tuning_settings.sample_retention_days(usecase))
+        if not changed:
+            return {'status': 'unchanged', 'bucket': bucket, 'rules': rules}
+        s3_client.put_bucket_lifecycle_configuration(
+            Bucket=bucket, LifecycleConfiguration={'Rules': rules})
+        logger.info(
+            f"Applied the workflow-tuning lifecycle rules to {bucket} "
+            f"(samples expire after "
+            f"{tuning_settings.sample_retention_days(usecase)} days, job and "
+            f"session artifacts after "
+            f"{tuning_settings.RUN_ARTIFACT_RETENTION_DAYS})")
+        return {'status': 'applied', 'bucket': bucket, 'rules': rules}
+    except Exception as e:
+        logger.warning(
+            f"Could not apply the workflow-tuning lifecycle rules to "
+            f"{bucket}: {e}")
+        return {'status': 'failed', 'bucket': bucket, 'error': str(e)}
+
+
+def deliver_workflow_tuning(components_map, usecase, account_id=None,
+                            region=None, session_name=None):
+    """Deliver the Sample_Export configuration and grant for a deployment:
+    the ``workflowTuning`` LocalServer configuration merge (Requirement 2.1),
+    and, when something was delivered, the device role's Sample_Store grant
+    (Requirement 2.8) and the Sample_Store lifecycle rules (Requirement 2.9).
+    A Use_Case with export disabled reaches neither IAM nor S3 nor the
+    component configuration (Requirement 11.3).
+
+    Returns the delivered configuration or None."""
+    config = apply_workflow_tuning_configuration(
+        components_map, usecase, account_id)
+    if not config:
+        return None
+    grant_workflow_tuning_device_access(
+        usecase, config['bucket'], region=region, session_name=session_name)
+    apply_workflow_tuning_lifecycle(
+        usecase, config['bucket'], region=region, session_name=session_name)
+    return config
+
+
 def resolve_target_thing_names(iot_client, target_devices, target_thing_group):
     """
     The individual device thing names a deployment targets: the explicit
@@ -3940,6 +4179,16 @@ def create_workflow_deployment(body, user):
         # entries alike, superseding the subscribe-merge design's
         # "{workflow_version}.0.0 by construction" note.
         deployment_warnings = apply_subscribe_access_control(components_map)
+
+        # Workflow tuning Sample_Export (spec: quality-prompt-tuning,
+        # Requirements 2.1, 2.8, 11.3): same delivery as create_deployment,
+        # applied to the FINAL merged component set (the target's
+        # carried-over components plus this workflow entry), so a workflow
+        # deployment keeps the Sample_Store configuration on the device's
+        # LocalServer entry rather than dropping it on the next revision.
+        deliver_workflow_tuning(
+            components_map, usecase, account_id, region=region,
+            session_name=session_name)
 
         if not deployment_name:
             if is_revision and existing_deployment.get('deploymentName'):

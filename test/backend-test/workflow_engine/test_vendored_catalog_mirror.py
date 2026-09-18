@@ -41,6 +41,22 @@ VENDORED_CATALOG_RELATIVE = Path(
 # data model: CATEGORY_TRIGGER, PORT_TYPE_EVENT_SIGNAL, trigger port wiring).
 MIRRORED_FILENAMES = ("nodes.py", "models.py")
 
+PORTAL_PACKAGE_RELATIVE = Path(
+    "edge-cv-portal/backend/layers/workflow_core/python/workflow_core"
+)
+VENDORED_PACKAGE_RELATIVE = Path(
+    "src/backend/workflow_engine/vendor/workflow_core"
+)
+
+# Package-root modules that must stay byte-identical too.
+# ``anomaly_invocation.py`` is the shared Invocation_Builder
+# (quality-prompt-tuning Requirements 6.1, 6.2): the executor, the Portal's
+# Bedrock_Scorer and the device's Device_Score_Job runner must build the
+# same request, which only holds while the vendored copy is an exact mirror
+# — so a hand edit under ``vendor/`` (or a forgotten ``re_vendor.sh``) has
+# to fail the suite.
+MIRRORED_PACKAGE_FILENAMES = ("anomaly_invocation.py",)
+
 
 def _repo_root() -> Path:
     """Walk up from this file until both catalog copies are present."""
@@ -79,4 +95,34 @@ def test_vendored_catalog_file_is_byte_identical_to_portal_copy(filename):
         f"  vendored sha256={vendored_sha} ({vendored_relative})\n"
         "Re-sync with: cp "
         f"{portal_relative} {vendored_relative}"
+    )
+
+
+# Feature: quality-prompt-tuning, Property 6: Executor, Bedrock_Scorer and
+# Device_Score_Job build identical invocations (the vendoring precondition)
+@pytest.mark.parametrize("filename", MIRRORED_PACKAGE_FILENAMES)
+def test_vendored_package_module_is_byte_identical_to_portal_copy(filename):
+    root = _repo_root()
+    portal_relative = PORTAL_PACKAGE_RELATIVE / filename
+    vendored_relative = VENDORED_PACKAGE_RELATIVE / filename
+
+    portal_path = root / portal_relative
+    vendored_path = root / vendored_relative
+    assert portal_path.is_file(), portal_path
+    assert vendored_path.is_file(), (
+        f"{vendored_relative} is missing — run "
+        "src/backend/workflow_engine/vendor/re_vendor.sh"
+    )
+
+    portal_bytes = portal_path.read_bytes()
+    vendored_bytes = vendored_path.read_bytes()
+
+    portal_sha = hashlib.sha256(portal_bytes).hexdigest()
+    vendored_sha = hashlib.sha256(vendored_bytes).hexdigest()
+
+    assert portal_bytes == vendored_bytes, (
+        "Vendored workflow_core module is out of sync with the portal layer "
+        f"copy.\n  portal   sha256={portal_sha} ({portal_relative})\n"
+        f"  vendored sha256={vendored_sha} ({vendored_relative})\n"
+        "Re-sync with: src/backend/workflow_engine/vendor/re_vendor.sh"
     )
