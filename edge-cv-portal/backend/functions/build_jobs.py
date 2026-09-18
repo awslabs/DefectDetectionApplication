@@ -60,7 +60,7 @@ from botocore.exceptions import ClientError
 import sys
 sys.path.append('/opt/python')
 from shared_utils import (
-    create_response, get_user_from_event, log_audit_event
+    create_response, get_user_from_event, log_audit_event, attribution_from
 )
 from rbac_middleware import (
     require_builds_submit, require_builds_cancel, require_builds_read
@@ -452,6 +452,17 @@ def submit_build(event: Dict, context: Any) -> Dict:
         config_snapshot=config,
     )
 
+    # Durable attribution for this submission, captured from the request
+    # itself (portal-jwt-role-privilege-escalation Req 4.1, 4.2, 4.5): the
+    # Build_Job keeps `requested_by` (the Cognito sub) and additionally
+    # names a human, so the artifact a build publishes stays attributable
+    # after the requester's Cognito user is deleted — the recorded
+    # incident's job carried only a sub that resolves to nothing.
+    attribution = attribution_from(event, user)
+    for job in jobs:
+        job['requested_by_username'] = attribution['username']
+        job['requested_by_email'] = attribution['email']
+
     stored_jobs = [put_new_job(job) for job in jobs]
 
     # One build_requested Audit_Log entry per created Build_Job with the
@@ -475,7 +486,8 @@ def submit_build(event: Dict, context: Any) -> Dict:
                 # (build-source-selection Req 1.6, 2.5).
                 'repository': config['repository'],
                 'source_ref': config.get('source_ref'),
-            })
+            },
+            identity=attribution)
 
     invoke_dispatcher(job_ids)
 
@@ -936,6 +948,8 @@ def cancel_build(event: Dict, context: Any) -> Dict:
                               'Build job not found')
 
     user = get_user_from_event(event)
+    # Durable attribution for the cancellation's audit entries (Req 4.1).
+    attribution = attribution_from(event, user)
     status = job.get('status')
 
     # --- Queued: immediate cancellation + queue removal (Req 4.5) ---
@@ -952,7 +966,8 @@ def cancel_build(event: Dict, context: Any) -> Dict:
                 resource_id=build_job_id,
                 result='success',
                 details={'status_at_request': status,
-                         'removed_from_queue': decision.remove_from_queue})
+                         'removed_from_queue': decision.remove_from_queue},
+                identity=attribution)
             return create_response(200, {'job': get_job(build_job_id)})
         # Raced with a dispatch/transition: re-read and reject on the
         # job's current status.
@@ -998,7 +1013,8 @@ def cancel_build(event: Dict, context: Any) -> Dict:
                 result='success',
                 details={'status_at_request': status,
                          'server': server_name,
-                         'stop_confirmed': True})
+                         'stop_confirmed': True},
+                identity=attribution)
             return create_response(200, {'job': get_job(build_job_id)})
 
         # Stop not confirmed within the window (or the conditional update
@@ -1014,7 +1030,8 @@ def cancel_build(event: Dict, context: Any) -> Dict:
             details={'status_at_request': status,
                      'server': server_name,
                      'stop_confirmed': stop_confirmed,
-                     'errors': [dict(e) for e in decision.errors]})
+                     'errors': [dict(e) for e in decision.errors]},
+            identity=attribution)
         errors = decision.errors or ({'rule': 'cancel_conflict',
                                       'message': 'The Build_Job changed '
                                                  'status during the '
@@ -1063,6 +1080,11 @@ def retry_build(event: Dict, context: Any) -> Dict:
         return error_response(409, 'RETRY_NOT_AVAILABLE', str(e),
                               {'status': source.get('status')})
 
+    # The retry names its own human requester alongside the sub (Req 4.5).
+    attribution = attribution_from(event, user)
+    job['requested_by_username'] = attribution['username']
+    job['requested_by_email'] = attribution['email']
+
     stored = put_new_job(job)
 
     log_audit_event(
@@ -1077,7 +1099,8 @@ def retry_build(event: Dict, context: Any) -> Dict:
             'server_id': stored.get('server_id'),
             'retry_of': build_job_id,
             'submitted_at': stored['created_at'],
-        })
+        },
+        identity=attribution)
 
     invoke_dispatcher([stored['build_job_id']])
 

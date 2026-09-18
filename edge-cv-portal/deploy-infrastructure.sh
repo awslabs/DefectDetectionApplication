@@ -45,6 +45,22 @@ if [ -n "$CLOUDFRONT_URL" ] && [ "$CLOUDFRONT_URL" != "None" ]; then
   CDK_CONTEXT_ARGS="-c cloudFrontDomain=$CLOUDFRONT_URL"
 fi
 
+# Portal_Identity registry enforcement (portal-jwt-role-privilege-escalation
+# Req 2.4). Off unless the operator asks for it, matching the CDK helper's
+# default-OFF resolution: with enforcement on and a registry row missing, the
+# portal denies that principal everything, including the bootstrap `admin`.
+# Flip it only AFTER backfill_portal_registry.py has been applied and the
+# accounts verified:
+#
+#   PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh
+#
+# Any value the shared layer accepts as true (1/true/yes/on/enabled) is passed
+# through; anything else (including unset) deploys with enforcement off.
+if [ -n "$PORTAL_REGISTRY_ENFORCED" ]; then
+  echo "🔐 Portal_Identity enforcement requested: PORTAL_REGISTRY_ENFORCED=$PORTAL_REGISTRY_ENFORCED"
+  CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c portalRegistryEnforced=$PORTAL_REGISTRY_ENFORCED"
+fi
+
 cdk deploy --all --require-approval never --force $CDK_CONTEXT_ARGS
 
 echo "✅ Deployment completed successfully!"

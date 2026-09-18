@@ -20,6 +20,41 @@ export function groundedSamWorkerEnabled(contextValue: unknown): boolean {
 }
 
 /**
+ * Default-OFF resolution for the `portalRegistryEnforced` CDK context flag
+ * (portal-jwt-role-privilege-escalation Req 2.4, design Decision 4). The
+ * returned string is what lands in every portal handler's
+ * `PORTAL_REGISTRY_ENFORCED` environment variable, where
+ * `shared_utils.registry_enforcement_enabled()` reads it.
+ *
+ * Off is the safe default and must stay the default until the registry has
+ * been backfilled from the pool (task 5.2): with the flag on and a row
+ * missing, the portal denies that principal everything — including the
+ * bootstrap `admin`. Only an explicit affirmative turns it on: boolean
+ * `true`, or a string that is one of '1'/'true'/'yes'/'on'/'enabled' after
+ * trimming, case-insensitively — exactly the truthy set
+ * `shared_utils._ENFORCEMENT_TRUE_VALUES` accepts, so a value that reads as
+ * "on" in CDK context can never deploy as "off" in the Lambda (or the
+ * reverse). Absent and every unrecognized value ('0', 'no', 'maybe', typos)
+ * resolve to 'false'.
+ *
+ * The value is normalized to the canonical 'true'/'false' rather than passed
+ * through, so the deployed environment is unambiguous when read from the
+ * console or a CloudFormation template.
+ */
+export function portalRegistryEnforced(contextValue: unknown): string {
+  if (contextValue === true) return 'true';
+  if (
+    typeof contextValue === 'string' &&
+    ['1', 'true', 'yes', 'on', 'enabled'].includes(
+      contextValue.trim().toLowerCase(),
+    )
+  ) {
+    return 'true';
+  }
+  return 'false';
+}
+
+/**
  * Normalizes the `cloudFrontDomain` CDK context value to the bare domain
  * (portal-deploy-flag-hardening Req 3). Consumers prepend the scheme
  * themselves (storage-stack CORS `https://${…}`, backend link/CORS

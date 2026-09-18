@@ -5,6 +5,7 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
+import { portalRegistryEnforced } from './context-helpers';
 import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import * as path from 'path';
@@ -400,6 +401,15 @@ export class SyntheticDataStack extends cdk.Stack {
         // matching the ComputeStack lambdaEnvironment names).
         USECASES_TABLE: props.useCasesTable.tableName,
         USER_ROLES_TABLE: props.userRolesTable.tableName,
+        // Enforcement flag of portal-jwt-role-privilege-escalation (Req 2.4),
+        // resolved default-OFF from the same `portalRegistryEnforced` CDK
+        // context value the ComputeStack handlers read: this handler
+        // authorizes through the same shared_utils read path, so it must see
+        // the same flag or it would keep granting privilege from the
+        // `custom:role` token claim after the flip.
+        PORTAL_REGISTRY_ENFORCED: portalRegistryEnforced(
+          this.node.tryGetContext('portalRegistryEnforced'),
+        ),
         AUDIT_LOG_TABLE: props.auditLogTable.tableName,
         SETTINGS_TABLE: props.settingsTable.tableName,
         PORTAL_ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
