@@ -148,13 +148,19 @@ function PRE_FIX_NAV_ORACLE(role: UserRole | undefined): NavItem[] {
  * - "Synthetic Data" (synthetic-defect-data-generation, role-gated to
  *   DataScientist/UseCaseAdmin/PortalAdmin; covered by its own
  *   `syntheticNavVisibility.property.test.tsx`).
+ * - "Workflow Tuning" (quality-prompt-tuning Req 1.1, the expandable link
+ *   group between "Workflows" and "Node Designer", role-gated to
+ *   DataScientist/UseCaseAdmin/PortalAdmin; covered by its own
+ *   `pages/workflow-tuning/entryPoints.property.test.tsx`).
  */
 function withoutBuildsEntry(items: readonly NavItem[]): NavItem[] {
   return items.filter(
     (item) =>
       !(
         item.type === 'link' &&
-        (item.text === 'Builds' || item.text === 'Synthetic Data')
+        (item.text === 'Builds' ||
+          item.text === 'Synthetic Data' ||
+          item.text === 'Workflow Tuning')
       )
   );
 }

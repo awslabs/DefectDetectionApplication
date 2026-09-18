@@ -41,6 +41,11 @@ export interface UseCase {
   data_account_external_id?: string;
   data_s3_bucket?: string;
   data_s3_prefix?: string;
+  // VLM/LLM Anomaly Tuning Sample_Export settings (spec:
+  // quality-prompt-tuning, Requirements 2.1, 2.9). Absent ⇒ export
+  // disabled / the 30-day default retention.
+  tuning_sample_export?: boolean;
+  tuning_sample_retention_days?: number;
   // Shared components provisioning
   shared_components_provisioned?: boolean;
   shared_components?: {

@@ -43,6 +43,9 @@ import BuildsPage from './pages/builds/BuildsPage';
 import BuildDetail from './pages/builds/BuildDetail';
 import SyntheticData from './pages/synthetic/SyntheticData';
 import SyntheticSessionDetail from './pages/synthetic/SyntheticSessionDetail';
+import WorkflowTuningLanding from './pages/workflow-tuning/WorkflowTuningLanding';
+import AnomalyTuningOverview from './pages/workflow-tuning/AnomalyTuningOverview';
+import AnomalyTuningSession from './pages/workflow-tuning/AnomalyTuningSession';
 import Settings from './pages/Settings';
 import AuditLogs from './pages/AuditLogs';
 import UserManager from './pages/admin/UserManager';
@@ -55,6 +58,7 @@ import DataLabelerRedirect from './components/DataLabelerRedirect';
 import GlobalLoadingBar from './components/GlobalLoadingBar';
 import { BUILDS_ACCESS_ROLES } from './utils/buildsAccess';
 import { SYNTHETIC_ACCESS_ROLES } from './utils/syntheticAccess';
+import { WORKFLOW_TUNING_ACCESS_ROLES } from './utils/workflowTuningAccess';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -190,6 +194,34 @@ function App() {
                   element={
                     <RequireRole roles={SYNTHETIC_ACCESS_ROLES}>
                       <SyntheticSessionDetail />
+                    </RequireRole>
+                  }
+                />
+                {/* Workflow Tuning section — limited to the roles that may
+                    edit workflows (quality-prompt-tuning Req 1.1); every
+                    /workflow-tuning/anomaly/** API route independently
+                    authorizes the workflow and audits denials (Req 9.1, 9.2). */}
+                <Route
+                  path="workflow-tuning"
+                  element={
+                    <RequireRole roles={WORKFLOW_TUNING_ACCESS_ROLES}>
+                      <WorkflowTuningLanding />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="workflow-tuning/anomaly"
+                  element={
+                    <RequireRole roles={WORKFLOW_TUNING_ACCESS_ROLES}>
+                      <AnomalyTuningOverview />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="workflow-tuning/anomaly/sessions/:sessionId"
+                  element={
+                    <RequireRole roles={WORKFLOW_TUNING_ACCESS_ROLES}>
+                      <AnomalyTuningSession />
                     </RequireRole>
                   }
                 />

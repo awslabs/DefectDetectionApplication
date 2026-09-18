@@ -19,6 +19,7 @@ import { UserRole } from '../types';
 import { getConfig, getBuildInfo } from '../config';
 import { canAccessBuilds } from '../utils/buildsAccess';
 import { canAccessSyntheticData } from '../utils/syntheticAccess';
+import { canAccessWorkflowTuning } from '../utils/workflowTuningAccess';
 
 /**
  * Builds the items for the top-navigation settings dropdown based on the
@@ -115,6 +116,27 @@ export function buildNavigationItems(
     { type: 'link' as const, text: 'Models', href: '/models' },
     { type: 'divider' as const },
     { type: 'link' as const, text: 'Workflows', href: '/workflows/builder' },
+    // Workflow Tuning: a group of workflow-analysis tools, of which
+    // VLM/LLM Anomaly Tuning is the first (quality-prompt-tuning Req 1.1).
+    // Sits between "Workflows" and "Node Designer" and is limited to the
+    // roles that may edit workflows, following the Builds nav gating
+    // pattern below.
+    ...(canAccessWorkflowTuning(role)
+      ? [
+          {
+            type: 'expandable-link-group' as const,
+            text: 'Workflow Tuning',
+            href: '/workflow-tuning',
+            items: [
+              {
+                type: 'link' as const,
+                text: 'VLM/LLM Anomaly Tuning',
+                href: '/workflow-tuning/anomaly',
+              },
+            ],
+          },
+        ]
+      : []),
     { type: 'link' as const, text: 'Node Designer', href: '/node-designer' },
     { type: 'link' as const, text: 'Components', href: '/components' },
     // The builds surface is limited to the roles holding `builds:*`

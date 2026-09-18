@@ -1949,11 +1949,14 @@ export class ComputeStack extends cdk.Stack {
     // Cognito account management behind /admin/* (routes attached by the
     // UserAdminApiStack below). Separate function so the cognito-idp
     // admin and SES grants stay scoped to it alone (design D1).
+    // Held in a local so the out-of-band-administration detection rule below
+    // can exclude exactly this role's CloudTrail sessions (Req 6.3).
+    const userAdminRole = createLambdaRole('UserAdmin');
     const userAdminHandler = new lambda.Function(this, 'UserAdminHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'user_admin.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
-      role: createLambdaRole('UserAdmin'),
+      role: userAdminRole,
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2026-02-06-user-admin',
