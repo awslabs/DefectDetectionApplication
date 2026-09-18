@@ -27,7 +27,7 @@ import { QuickSetupApiStack } from './quick-setup-api-stack';
 import { DdaLabelingApiStack } from './dda-labeling-api-stack';
 import { WorkflowManagerGapsApiStack } from './workflow-manager-gaps-api-stack';
 import { WorkflowTuningApiStack } from './workflow-tuning-api-stack';
-import { groundedSamWorkerEnabled } from './context-helpers';
+import { groundedSamWorkerEnabled, portalRegistryEnforced } from './context-helpers';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
@@ -317,6 +317,18 @@ export class ComputeStack extends cdk.Stack {
 
       // Grant DynamoDB permissions
       props.useCasesTable.grantReadWriteData(role);
+      // dda-portal-user-roles is the Portal_Identity registry
+      // (portal-jwt-role-privilege-escalation): the User Manager
+      // (UserAdminHandler, user_admin.py) is its writer and needs
+      // GetItem/Query/Scan/PutItem/UpdateItem/DeleteItem here — Query for the
+      // per-Use_Case row sweep on delete, Scan for the last-PortalAdmin count
+      // once enforcement is on, the writes for create / role change /
+      // disable-enable / delete. grantReadWriteData covers all of them, so no
+      // extra statement is added for that handler. Narrowing the other
+      // handlers to read-only is deliberately NOT done here (out of scope:
+      // user_management.py and the Team Management routes also write role
+      // rows); the registry's authority comes from the read path in
+      // shared_utils, not from IAM.
       props.userRolesTable.grantReadWriteData(role);
       props.devicesTable.grantReadWriteData(role);
       props.auditLogTable.grantWriteData(role);
@@ -637,9 +649,27 @@ export class ComputeStack extends cdk.Stack {
     };
 
     // Environment variables for Lambda functions
+    //
+    // PORTAL_REGISTRY_ENFORCED is the single enforcement flag of
+    // portal-jwt-role-privilege-escalation (Req 2.4, design Decision 4),
+    // resolved default-OFF from the `portalRegistryEnforced` CDK context
+    // value (`-c portalRegistryEnforced=true`). It rides in
+    // lambdaEnvironment, which every handler in this stack spreads or uses
+    // directly, so one context value moves the whole portal at once: a
+    // handler left without the variable would keep resolving privilege from
+    // the `custom:role` token claim after the flip, which is the escalation
+    // being fixed. Deploys stay behaviour-preserving until the registry has
+    // been backfilled (task 5.2); while it is off the shared layer also logs
+    // a `would_deny` WARNING naming every request enforcement would have
+    // denied, which is how the backfill's completeness is measured on real
+    // traffic before flipping.
+    const registryEnforced = portalRegistryEnforced(
+      this.node.tryGetContext('portalRegistryEnforced'),
+    );
     const lambdaEnvironment = {
       USECASES_TABLE: props.useCasesTable.tableName,
       USER_ROLES_TABLE: props.userRolesTable.tableName,
+      PORTAL_REGISTRY_ENFORCED: registryEnforced,
       DEVICES_TABLE: props.devicesTable.tableName,
       AUDIT_LOG_TABLE: props.auditLogTable.tableName,
       TRAINING_JOBS_TABLE: props.trainingJobsTable.tableName,
@@ -1970,6 +2000,132 @@ export class ComputeStack extends cdk.Stack {
         `arn:aws:ses:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:identity/*`,
       ],
     }));
+
+    // ------------------------------------------------------------------
+    // Detection: Cognito administration performed OUTSIDE the portal
+    // (portal-jwt-role-privilege-escalation Requirement 6, design
+    // Decision 8).
+    //
+    // The verified incident was a pool user created, used to submit a build,
+    // and deleted within 6 seconds through the Cognito admin APIs directly —
+    // no portal route involved, so nothing in the portal's own audit trail
+    // recorded the provisioning. This rule makes that visible.
+    //
+    // DETECTION ONLY. It prevents nothing: an actor holding
+    // cognito-idp:Admin* can still make these calls (and one holding
+    // events:DisableRule/DeleteRule can silence the signal). The actual
+    // control is the Portal_Identity registry enforced in the shared RBAC
+    // layer (PORTAL_REGISTRY_ENFORCED) — an out-of-band Cognito user has no
+    // registry row and is therefore denied. Restricting cognito-idp:Admin*
+    // by SCP or permission boundary is the complementary preventive control
+    // and lives outside this repo (see ADMIN_GUIDE.md, task 6.4).
+    //
+    // PREREQUISITE: "AWS API Call via CloudTrail" events only reach
+    // EventBridge in a region where a CloudTrail trail (or an
+    // organization trail) is logging management events. This stack does
+    // NOT create a trail: portal accounts typically already have an
+    // account/organization trail, and creating a second one would duplicate
+    // both the delivery and its cost. Verifying the trail exists is an
+    // operator step in the runbook.
+    // ------------------------------------------------------------------
+
+    // The pool mutations that can hand out portal access or erase its
+    // attribution (Req 6.1). AdminCreateUser + AdminSetUserPassword mint a
+    // usable account; AdminUpdateUserAttributes writes custom:role (the
+    // claim the incident abused); AdminAddUserToGroup is the group-based
+    // variant; AdminEnableUser/AdminDisableUser flip usability;
+    // AdminDeleteUser is what made the incident's actor unidentifiable.
+    const outOfBandCognitoAdminEvents = [
+      'AdminCreateUser',
+      'AdminSetUserPassword',
+      'AdminUpdateUserAttributes',
+      'AdminAddUserToGroup',
+      'AdminEnableUser',
+      'AdminDisableUser',
+      'AdminDeleteUser',
+    ];
+
+    // Subscriptions (email/chat/ticketing) are managed out of band, as for
+    // the build fleet's alert topic — the portal does not own who is paged.
+    const cognitoAdminActivityTopic = new sns.Topic(this, 'CognitoAdminActivityTopic', {
+      topicName: 'dda-portal-cognito-admin-alerts',
+      displayName: 'DDA portal: Cognito pool administration outside the portal',
+    });
+
+    const cognitoAdminActivityRule = new events.Rule(this, 'CognitoAdminActivityRule', {
+      ruleName: 'dda-portal-cognito-admin-activity',
+      description:
+        'Raises a detection signal when the DDA portal user pool is ' +
+        'administered by any principal other than the portal User Manager ' +
+        'Lambda role (portal-jwt-role-privilege-escalation Req 6)',
+      eventPattern: {
+        source: ['aws.cognito-idp'],
+        detailType: ['AWS API Call via CloudTrail'],
+        detail: {
+          eventSource: ['cognito-idp.amazonaws.com'],
+          eventName: outOfBandCognitoAdminEvents,
+          // Scoped to THIS portal pool: other pools in the account (there
+          // are several) are not this spec's concern and would be noise.
+          requestParameters: {
+            userPoolId: [props.userPool.userPoolId],
+          },
+          // Exclusion of the portal's own User Manager (Req 6.3). The
+          // handler calls Cognito with its Lambda execution role, so
+          // CloudTrail records userIdentity.type='AssumedRole' with
+          // sessionContext.sessionIssuer.arn = that role's ARN.
+          //
+          // The two arms are an OR because "anything-but" only matches when
+          // the field is PRESENT: a caller that is not an assumed role (IAM
+          // user, root, federated) has no sessionContext.sessionIssuer, so
+          // a lone anything-but on the issuer ARN would silently ignore
+          // exactly the direct-IAM-user case. userIdentity.type is always
+          // present in a CloudTrail record, so arm 1 catches every
+          // non-assumed-role caller and arm 2 catches every assumed role
+          // that is not the User Manager.
+          $or: [
+            { userIdentity: { type: [{ 'anything-but': ['AssumedRole'] }] } },
+            {
+              userIdentity: {
+                sessionContext: {
+                  sessionIssuer: {
+                    arn: [{ 'anything-but': [userAdminRole.roleArn] }],
+                  },
+                },
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    // The signal carries the event name, caller ARN, source IP, user agent
+    // and event time (Req 6.2) — the same attribution the audit rows now
+    // record, so an out-of-band mutation can be correlated with whatever
+    // the resulting principal did in the portal. eventId/userPoolId are
+    // included so a responder can pull the full record with
+    // `aws cloudtrail lookup-events`.
+    cognitoAdminActivityRule.addTarget(new targets.SnsTopic(cognitoAdminActivityTopic, {
+      message: events.RuleTargetInput.fromObject({
+        alert: 'Cognito administration outside the DDA portal User Manager',
+        eventName: events.EventField.fromPath('$.detail.eventName'),
+        callerArn: events.EventField.fromPath('$.detail.userIdentity.arn'),
+        callerType: events.EventField.fromPath('$.detail.userIdentity.type'),
+        sourceIp: events.EventField.fromPath('$.detail.sourceIPAddress'),
+        userAgent: events.EventField.fromPath('$.detail.userAgent'),
+        eventTime: events.EventField.fromPath('$.detail.eventTime'),
+        userPoolId: events.EventField.fromPath('$.detail.requestParameters.userPoolId'),
+        eventId: events.EventField.fromPath('$.detail.eventID'),
+        awsRegion: events.EventField.fromPath('$.detail.awsRegion'),
+      }),
+    }));
+
+    new cdk.CfnOutput(this, 'CognitoAdminActivityTopicArn', {
+      value: cognitoAdminActivityTopic.topicArn,
+      description:
+        'SNS topic for out-of-band Cognito pool administration alerts. ' +
+        'Subscribe operators to it; requires a CloudTrail trail logging ' +
+        'management events in this region for the rule to fire.',
+    });
 
     // ------------------------------------------------------------------
     // DDA Data Labeling (dda-data-labeling, task 14.1)

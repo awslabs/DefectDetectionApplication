@@ -89,10 +89,26 @@ export class AuthStack extends cdk.Stack {
     this.userPoolClient = new cognito.UserPoolClient(this, 'DDAPortalUserPoolClient', {
       userPool: this.userPool,
       userPoolClientName: 'dda-portal-client',
+      // SRP only (plus the refresh-token flow CDK always adds). The
+      // password-based flows are deliberately absent:
+      //   userPassword       -> ALLOW_USER_PASSWORD_AUTH
+      //   adminUserPassword  -> ALLOW_ADMIN_USER_PASSWORD_AUTH ("ADMIN_NO_SRP")
+      // Both let a password issued out of band (AdminSetUserPassword) be
+      // exchanged for portal tokens without SRP, which is the path the
+      // JWT-role privilege-escalation incident took. Removing them is
+      // DEFENSE IN DEPTH ONLY -- an actor holding
+      // cognito-idp:UpdateUserPoolClient can put them back. The actual
+      // control is the Portal_Identity registry enforced in the shared RBAC
+      // layer (PORTAL_REGISTRY_ENFORCED); see
+      // .kiro/specs/portal-jwt-role-privilege-escalation (Requirement 5,
+      // design.md Decision 8), documented for operators in
+      // edge-cv-portal/ADMIN_GUIDE.md.
+      // Browser sign-in is unaffected: Amplify v6 signIn() defaults to
+      // USER_SRP_AUTH (AuthContext.tsx pins no authFlowType), the
+      // NEW_PASSWORD_REQUIRED challenge and forgot-password both run on top
+      // of it, and the portal's own token refresh uses REFRESH_TOKEN_AUTH.
       authFlows: {
-        userPassword: true,
         userSrp: true,
-        adminUserPassword: true,  // Enable ADMIN_NO_SRP_AUTH for testing
       },
       oAuth: {
         flows: {

@@ -17,6 +17,7 @@ import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import { NodeDesignerApiStack } from './node-designer-api-stack';
+import { portalRegistryEnforced } from './context-helpers';
 
 /**
  * The five plugin Target_Architectures (custom-node-designer requirements
@@ -594,6 +595,17 @@ export class NodeDesignerStack extends cdk.Stack {
       NODE_GEN_SESSIONS_TABLE: this.nodeGenSessionsTable.tableName,
       USECASES_TABLE: props.useCasesTable.tableName,
       USER_ROLES_TABLE: props.userRolesTable.tableName,
+      // Enforcement flag of portal-jwt-role-privilege-escalation (Req 2.4),
+      // resolved default-OFF from the same `portalRegistryEnforced` CDK
+      // context value the ComputeStack and BuildFleetStack handlers read.
+      // These handlers resolve roles through the same shared_utils read path,
+      // so without the variable they would keep granting privilege from the
+      // `custom:role` token claim after the flip — the flag has to reach
+      // every handler that can authorize, not just the two stacks named in
+      // the spec's task list.
+      PORTAL_REGISTRY_ENFORCED: portalRegistryEnforced(
+        this.node.tryGetContext('portalRegistryEnforced'),
+      ),
       AUDIT_LOG_TABLE: props.auditLogTable.tableName,
       SETTINGS_TABLE: props.settingsTable.tableName,
       WORKFLOWS_TABLE: props.workflowsTable.tableName,

@@ -10,6 +10,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import { Construct } from 'constructs';
+import { portalRegistryEnforced } from './context-helpers';
 import * as crypto from 'crypto';
 import * as path from 'path';
 
@@ -421,11 +422,22 @@ export class BuildFleetStack extends cdk.Stack {
 
     // Environment contract of the handlers ("Environment variables
     // (build-fleet-stack.ts lambdaEnvironment)" in each module).
+    //
+    // PORTAL_REGISTRY_ENFORCED: the enforcement flag of
+    // portal-jwt-role-privilege-escalation (Req 2.4), resolved default-OFF
+    // from the same `portalRegistryEnforced` CDK context value the
+    // ComputeStack handlers read, so one context value moves the whole portal
+    // — POST /builds is the route the incident was exploited through
+    // (bugfix.md), and a build handler left without the variable would keep
+    // granting builds:submit from the `custom:role` token claim.
     const lambdaEnvironment: { [key: string]: string } = {
       BUILD_JOBS_TABLE: this.buildJobsTable.tableName,
       BUILD_SERVERS_TABLE: this.buildServersTable.tableName,
       SETTINGS_TABLE: props.settingsTable.tableName,
       USER_ROLES_TABLE: props.userRolesTable.tableName,
+      PORTAL_REGISTRY_ENFORCED: portalRegistryEnforced(
+        this.node.tryGetContext('portalRegistryEnforced'),
+      ),
       AUDIT_LOG_TABLE: props.auditLogTable.tableName,
       BUILD_LOG_GROUP: BUILD_LOG_GROUP_NAME,
       BUILD_EVENT_BUS,

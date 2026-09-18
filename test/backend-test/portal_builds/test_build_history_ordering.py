@@ -100,6 +100,25 @@ def _fake_shared_utils():
     module.create_response = create_response
     module.get_user_from_event = lambda event: dict(_TEST_USER)
     module.log_audit_event = lambda *args, **kwargs: None
+
+    def attribution_from(event=None, user=None, usecase_id=None,
+                         identity_source=None):
+        """The layer's Attribution_Fields helper, stubbed
+        (portal-jwt-role-privilege-escalation task 2.2): build_jobs reads
+        it to stamp a durable human actor on the Build_Job and its audit
+        entries. Faithful to the real contract — five string fields,
+        'unknown' for anything the request does not carry."""
+        identity = ((event or {}).get("requestContext") or {}).get(
+            "identity") or {}
+        return {
+            "username": (user or {}).get("username") or "unknown",
+            "email": (user or {}).get("email") or "unknown",
+            "source_ip": identity.get("sourceIp") or "unknown",
+            "user_agent": identity.get("userAgent") or "unknown",
+            "identity_source": identity_source or "unknown",
+        }
+
+    module.attribution_from = attribution_from
     return module
 
 

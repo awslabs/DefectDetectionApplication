@@ -187,12 +187,38 @@ describe('Property 2: preservation — sibling layers and handler wiring (Requir
     expect(handler.Properties.Timeout).toBe(900);
 
     // Environment variable set unchanged.
+    //
+    // REPOINTED (portal-jwt-role-privilege-escalation task 5.1): the handler
+    // gained PORTAL_REGISTRY_ENFORCED, the single enforcement flag of that
+    // spec (Req 2.4). This handler authorizes through the same shared
+    // shared_utils read path as the ComputeStack handlers, so it must carry
+    // the same flag or it would keep resolving privilege from the
+    // `custom:role` token claim after the flip. Exactly that one key is
+    // added; the assertion still forbids any other addition or removal.
+    // SUPERSEDED expectation, recorded verbatim:
+    //
+    //     expect(
+    //       Object.keys(handler.Properties.Environment.Variables).sort()
+    //     ).toEqual(
+    //       [
+    //         'AUDIT_LOG_TABLE',
+    //         'PORTAL_ACCOUNT_ID',
+    //         'PROMPT_TEMPLATES_TABLE',
+    //         'SETTINGS_TABLE',
+    //         'SYNTHETIC_DATA_FUNCTION_NAME',
+    //         'SYNTHETIC_SESSIONS_TABLE',
+    //         'TRAINING_JOBS_TABLE',
+    //         'USECASES_TABLE',
+    //         'USER_ROLES_TABLE',
+    //       ].sort()
+    //     );
     expect(
       Object.keys(handler.Properties.Environment.Variables).sort()
     ).toEqual(
       [
         'AUDIT_LOG_TABLE',
         'PORTAL_ACCOUNT_ID',
+        'PORTAL_REGISTRY_ENFORCED',
         'PROMPT_TEMPLATES_TABLE',
         'SETTINGS_TABLE',
         'SYNTHETIC_DATA_FUNCTION_NAME',

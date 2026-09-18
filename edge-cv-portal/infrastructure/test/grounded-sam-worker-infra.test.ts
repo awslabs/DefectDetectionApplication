@@ -254,6 +254,15 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
     // GROUNDED_SAM_WORKER_FUNCTION_NAME. No other key added, none removed:
     // the grounded-sam family's prompt inputs ride the job record, not the
     // environment.
+    //
+    // REPOINTED (portal-jwt-role-privilege-escalation task 5.1): the shared
+    // lambdaEnvironment gained PORTAL_REGISTRY_ENFORCED, the single
+    // enforcement flag of that spec (Req 2.4), which by design rides the
+    // shared environment so that every handler resolving portal privilege
+    // sees the same value. This exact-key oracle therefore gains that one
+    // key; the assertion is otherwise unchanged and still forbids any other
+    // addition or removal. SUPERSEDED expectation, recorded verbatim: the
+    // list below without 'PORTAL_REGISTRY_ENFORCED'.
     expect(Object.keys(env).sort()).toEqual(
       [
         'AUDIT_LOG_TABLE',
@@ -273,6 +282,7 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
         'MODELS_TABLE',
         'PORTAL_ACCOUNT_ID',
         'PORTAL_ARTIFACTS_BUCKET',
+        'PORTAL_REGISTRY_ENFORCED',
         'PRE_LABELED_DATASETS_TABLE',
         'SETTINGS_TABLE',
         'SHARED_COMPONENTS_TABLE',

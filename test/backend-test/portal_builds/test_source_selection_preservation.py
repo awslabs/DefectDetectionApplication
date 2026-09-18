@@ -318,6 +318,27 @@ JOB_RECORD_KEYS = {
     "log", "ttl",
 }
 
+#: Key set of a Build_Job created through the `POST /builds` HANDLER.
+#: RECORDED REPOINT (portal-jwt-role-privilege-escalation task 2.2,
+#: Requirement 4.5): `build_jobs.submit_build` / `retry_build` now stamp
+#: two ADDITIVE attribution keys, `requested_by_username` and
+#: `requested_by_email`, alongside `requested_by` (the Cognito `sub`), so
+#: the artifact a build publishes still names a human after the
+#: requester's Cognito user is deleted — the recorded incident's job
+#: carried only a sub that resolves to nothing in any of the account's
+#: user pools.
+#:
+#: The submission assertion below used `JOB_RECORD_KEYS` verbatim:
+#:     assert set(job) == JOB_RECORD_KEYS, observed
+#: Its intent is preserved exactly (no recorded key may be lost and no
+#: unexpected key may appear); only the two named additive keys are
+#: admitted, and `JOB_RECORD_KEYS` itself stays untouched — the pure
+#: `build_domain.create_build_jobs` record it pins is unchanged, which is
+#: what the Req 7.3 null-index-key tests below keep asserting.
+SUBMITTED_JOB_RECORD_KEYS = JOB_RECORD_KEYS | {
+    "requested_by_username", "requested_by_email",
+}
+
 #: `config_snapshot` key set with the recorded default value and value
 #: type of each key (Req 7.5). `source_ref: None` is the existing
 #: "None -> the repo default branch" key that Increment B reuses.
@@ -763,7 +784,7 @@ class TestNoSelectionSubmissionBaseline:
         assert request_ids == {body["request_id"]}, observed
 
         for order, job in enumerate(jobs):
-            assert set(job) == JOB_RECORD_KEYS, observed
+            assert set(job) == SUBMITTED_JOB_RECORD_KEYS, observed
             assert job["status"] == build_domain.STATUS_QUEUED, observed
             assert job["request_order"] == order, observed
             assert job["execution_mode"] == execution_mode, observed

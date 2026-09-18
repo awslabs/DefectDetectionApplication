@@ -98,7 +98,17 @@ def _display_identity(email: Optional[str], username: Optional[str], user_id: Op
 
 
 def get_user_from_event(event: Dict) -> Dict[str, str]:
-    """Extract user information from API Gateway event"""
+    """Extract user information from API Gateway event
+
+    The returned `role` is the **Claimed_Role**: the token's
+    `custom:role` attribute (or the Lambda authorizer's `role` context
+    value). It is descriptive metadata about what the caller claims to
+    be — it is NOT authoritative and grants nothing once
+    PORTAL_REGISTRY_ENFORCED is on; privilege comes from the
+    Portal_Identity registry (see RBACManager). The shape is unchanged so
+    every existing caller keeps working
+    (portal-jwt-role-privilege-escalation, design.md Decision 2).
+    """
     try:
         authorizer = event.get('requestContext', {}).get('authorizer', {})
         
@@ -145,9 +155,190 @@ def get_user_from_event(event: Dict) -> Dict[str, str]:
         }
 
 
+# ---------------------------------------------------------------------------
+# Durable audit attribution (portal-jwt-role-privilege-escalation,
+# Requirement 4, design.md Decision 7)
+# ---------------------------------------------------------------------------
+# The recorded incident deleted its Cognito user 2 seconds after acting, so
+# the surviving audit row named a `sub` that resolves to nothing in any of
+# the account's user pools. Attribution is therefore captured FROM THE
+# REQUEST at write time and never resolved from Cognito later — resolving
+# later is exactly what the incident made impossible.
+#
+# The five Attribution_Fields are TOP-LEVEL audit attributes (not `details`
+# entries), so they are additive to the existing schema, cannot collide
+# with the `details` denylist, and cannot be redacted by it.
+
+# Recorded when a value is not present in the request. Never fabricated,
+# never resolved from elsewhere (Requirement 4.3).
+UNKNOWN_ATTRIBUTION = 'unknown'
+
+# The Attribution_Fields, in the order they are documented (design.md
+# Glossary; Requirement 4.1).
+ATTRIBUTION_FIELDS = ('username', 'email', 'source_ip', 'user_agent',
+                      'identity_source')
+
+
+def _identifying_value(*candidates) -> str:
+    """First candidate that actually identifies something, else 'unknown'.
+
+    The literal 'unknown' a claim-less token produces (see
+    `get_user_from_event`) is not an identity, so it never wins over a
+    later candidate (Requirement 4.3).
+    """
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        text = str(candidate).strip()
+        if text and text.lower() != UNKNOWN_ATTRIBUTION:
+            return text
+    return UNKNOWN_ATTRIBUTION
+
+
+def _authorizer_identity_inputs(event: Optional[Dict]) -> tuple:
+    """(claims, authorizer_context, requestContext.identity) of an event.
+
+    All three default to {} so a non-proxy / partially shaped invocation
+    records 'unknown' instead of failing the request.
+    """
+    request_context = (event or {}).get('requestContext') or {}
+    authorizer = request_context.get('authorizer') or {}
+    claims = authorizer.get('claims') or {}
+    identity = request_context.get('identity') or {}
+    return claims, authorizer, identity
+
+
+def _claimed_email(user: Optional[Dict]) -> Optional[str]:
+    """The email of a `get_user_from_event` dict, or None.
+
+    `get_user_from_event` substitutes the username and then the `sub` when
+    a token carries no `email` claim (`_display_identity`, so records never
+    read "Created By: unknown"). Attribution must not repeat that
+    substitution as if it were an email address, so a value equal to the
+    username or the sub is treated as absent.
+    """
+    email = (user or {}).get('email')
+    if not email:
+        return None
+    if email in ((user or {}).get('username'), (user or {}).get('user_id')):
+        return None
+    return email
+
+
+def _identity_source_for(user_id: Optional[str],
+                         usecase_id: Optional[str] = None) -> str:
+    """The Identity_Source to record: 'registry' when the caller holds a
+    Portal_Identity that decides this scope, 'absent' when it does not.
+
+    'unknown' is recorded when the registry itself could not be read: an
+    availability failure decided no role, so claiming either 'registry' or
+    'absent' would be a fabricated statement about the request
+    (Requirement 4.1 names the two deciding values; 4.3 is the convention
+    for a value the request cannot supply). Never raises — attribution
+    must never be the reason an audit entry is lost.
+    """
+    try:
+        identity = _lookup_identity(user_id, usecase_id)
+    except RegistryUnavailable as error:
+        logger.warning(f"Identity_Source undetermined for user {user_id} / "
+                       f"scope {usecase_id!r}: {error}")
+        return UNKNOWN_ATTRIBUTION
+    except Exception as error:  # noqa: BLE001 - attribution never fails a write
+        logger.warning(f"Identity_Source lookup failed for user {user_id} / "
+                       f"scope {usecase_id!r}: {error}")
+        return UNKNOWN_ATTRIBUTION
+    return (IDENTITY_SOURCE_REGISTRY if identity is not None
+            else IDENTITY_SOURCE_ABSENT)
+
+
+def attribution_from(event: Optional[Dict], user: Optional[Dict] = None,
+                     usecase_id: Optional[str] = None,
+                     identity_source: Optional[str] = None) -> Dict[str, str]:
+    """The Attribution_Fields for a request, taken from the request itself.
+
+    This is the ONE place that reads `requestContext.identity.sourceIp` /
+    `.userAgent` (the precedent being `quick_setup.py:_source_ip`), so the
+    shape of that read is fixed in a single spot.
+
+    Args:
+        event: the API Gateway event being audited (claims + identity)
+        user: the `get_user_from_event` dict, when the caller already has
+            it; derived from the event otherwise
+        usecase_id: scope of the authorization decision, so the recorded
+            Identity_Source reflects the row that decided it
+        identity_source: pass explicitly to record a known value without a
+            registry read (e.g. a decision already resolved)
+
+    Returns:
+        dict with exactly the five Attribution_Fields, every value a
+        non-empty string ('unknown' where the request carries nothing).
+        Never raises: losing attribution must not fail a request, and a
+        write with 'unknown' fields is still an attributable-by-`sub`
+        record (Requirement 4.3).
+    """
+    try:
+        claims, authorizer, identity_block = _authorizer_identity_inputs(event)
+        if user is None:
+            user = get_user_from_event(event) if event is not None else {}
+
+        user_id = (user or {}).get('user_id')
+        username = _identifying_value(
+            (user or {}).get('username'),
+            claims.get('cognito:username'), claims.get('username'),
+            authorizer.get('username'))
+        email = _identifying_value(
+            claims.get('email'), authorizer.get('email'),
+            _claimed_email(user))
+        source_ip = _identifying_value(identity_block.get('sourceIp'))
+        user_agent = _identifying_value(identity_block.get('userAgent'))
+
+        if identity_source is None:
+            identity_source = _identity_source_for(user_id, usecase_id)
+
+        return {
+            'username': username,
+            'email': email,
+            'source_ip': source_ip,
+            'user_agent': user_agent,
+            'identity_source': _identifying_value(identity_source),
+        }
+    except Exception as error:  # noqa: BLE001 - attribution never raises
+        logger.error(f"Error building audit attribution: {error}")
+        return {field: UNKNOWN_ATTRIBUTION for field in ATTRIBUTION_FIELDS}
+
+
+def _attribution_attributes(identity: Optional[Dict] = None,
+                            event: Optional[Dict] = None,
+                            usecase_id: Optional[str] = None) -> Dict[str, str]:
+    """The five top-level attribution attributes of an audit item.
+
+    Every audit entry carries all five (Requirement 4.1): an explicit
+    `identity` mapping wins, an `event` is read through
+    `attribution_from`, and anything neither supplies records 'unknown'.
+    """
+    if identity is None and event is not None:
+        identity = attribution_from(event, usecase_id=usecase_id)
+    identity = identity or {}
+    return {field: _identifying_value(identity.get(field))
+            for field in ATTRIBUTION_FIELDS}
+
+
 def log_audit_event(user_id: str, action: str, resource_type: str, 
-                   resource_id: str, result: str, details: Optional[Dict] = None):
-    """Log audit event to DynamoDB"""
+                   resource_id: str, result: str, details: Optional[Dict] = None,
+                   identity: Optional[Dict] = None,
+                   event: Optional[Dict] = None):
+    """Log audit event to DynamoDB.
+
+    `identity` carries the Attribution_Fields (build it with
+    `attribution_from`), or pass the raw `event` to have them derived.
+    They are written as top-level attributes alongside today's nine keys,
+    which keep their meaning — including `event_id`'s
+    f"{user_id}_{timestamp}" shape, which both audit GSIs and existing
+    readers depend on (design.md Decision 7). Missing values record
+    'unknown' and the entry is still written (Requirement 4.3).
+
+    Failures are still swallowed: audit loss must not fail a request.
+    """
     try:
         table = dynamodb.Table(AUDIT_LOG_TABLE)
         timestamp = int(datetime.utcnow().timestamp() * 1000)
@@ -163,6 +354,7 @@ def log_audit_event(user_id: str, action: str, resource_type: str,
             'details': details or {},
             'ttl': timestamp + (90 * 24 * 60 * 60 * 1000)  # 90 days retention
         }
+        item.update(_attribution_attributes(identity, event))
         
         table.put_item(Item=item)
         logger.info(f"Audit event logged: {action} on {resource_type}/{resource_id}")
@@ -229,13 +421,19 @@ def sanitize_audit_details(details: Optional[Dict]) -> Dict:
 
 def record_audit_event_strict(user_id: str, action: str, resource_type: str,
                               resource_id: str, result: str = AUDIT_RESULT_PENDING,
-                              details: Optional[Dict] = None) -> str:
+                              details: Optional[Dict] = None,
+                              identity: Optional[Dict] = None,
+                              event: Optional[Dict] = None) -> str:
     """Write an audit entry and RAISE on failure (strict variant of
     log_audit_event).
 
     First phase of the audit-before-effect protocol: call with
     result='pending' BEFORE performing the guarded operation; if this
     raises, the caller must abort the operation (Req 6.4, 6.5).
+
+    `identity` / `event` carry the Attribution_Fields exactly as for
+    log_audit_event, written as top-level attributes so the actor stays
+    named after the Cognito user is deleted (Requirement 4.1, 4.2).
 
     Returns the event_id used to finalize_audit_event() afterwards.
     """
@@ -258,6 +456,7 @@ def record_audit_event_strict(user_id: str, action: str, resource_type: str,
         'details': sanitize_audit_details(details),
         'ttl': timestamp + (90 * 24 * 60 * 60 * 1000)  # 90 days retention
     }
+    item.update(_attribution_attributes(identity, event))
 
     table.put_item(Item=item)
     logger.info(f"Strict audit event recorded ({result}): "
@@ -266,10 +465,16 @@ def record_audit_event_strict(user_id: str, action: str, resource_type: str,
 
 
 def finalize_audit_event(event_id: str, result: str,
-                         details: Optional[Dict] = None):
+                         details: Optional[Dict] = None,
+                         identity: Optional[Dict] = None,
+                         event: Optional[Dict] = None):
     """Second phase of the audit-before-effect protocol: move a pending
     entry to its terminal result ('success' | 'failure' | 'rejected'),
     merging sanitized details and stamping the completion time (Req 6.1).
+
+    `identity` / `event` may supply the Attribution_Fields when the
+    pending phase could not (they are only written when supplied here, so
+    a finalize without them leaves the recorded attribution alone).
 
     Raises on lookup/update failure so callers can surface the problem.
     """
@@ -293,16 +498,26 @@ def finalize_audit_event(event_id: str, result: str,
     merged_details = dict(entry.get('details') or {})
     merged_details.update(sanitize_audit_details(details))
 
+    update_expression = ('SET #result = :result, #details = :details, '
+                        'completed_at = :completed_at')
+    names = {'#result': 'result', '#details': 'details'}
+    values = {
+        ':result': result,
+        ':details': merged_details,
+        ':completed_at': completed_at,
+    }
+
+    if identity is not None or event is not None:
+        for field, value in _attribution_attributes(identity, event).items():
+            update_expression += f", #{field} = :{field}"
+            names[f"#{field}"] = field
+            values[f":{field}"] = value
+
     table.update_item(
         Key={'event_id': event_id, 'timestamp': entry['timestamp']},
-        UpdateExpression='SET #result = :result, #details = :details, '
-                         'completed_at = :completed_at',
-        ExpressionAttributeNames={'#result': 'result', '#details': 'details'},
-        ExpressionAttributeValues={
-            ':result': result,
-            ':details': merged_details,
-            ':completed_at': completed_at,
-        },
+        UpdateExpression=update_expression,
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
     )
     logger.info(f"Audit event finalized ({result}): {event_id}")
 
@@ -412,16 +627,188 @@ class Permission(Enum):
     SYSTEM_ADMIN = "system_admin"
 
 
+# ---------------------------------------------------------------------------
+# Portal_Identity registry (portal-jwt-role-privilege-escalation)
+#
+# Portal privilege comes from a row in USER_ROLES_TABLE
+# (dda-portal-user-roles) keyed (user_id = Cognito sub, usecase_id), which
+# only the portal's own User Manager writes. `usecase_id='global'` is the
+# account-level entry; any other value is a Use_Case assignment. The
+# `custom:role` token claim (Claimed_Role) is descriptive metadata only:
+# a single cognito-idp:AdminCreateUser call must not mint a privileged
+# portal principal (bugfix.md Bug Condition C1, Requirement 1).
+#
+# Enforcement is gated by PORTAL_REGISTRY_ENFORCED, which defaults to
+# FALSE: until the registry has been backfilled from the pool
+# (Requirement 2), turning it on would lock every user out, including the
+# bootstrap `admin`. With the flag off, resolution is byte-for-byte
+# today's order plus a `would_deny` WARNING naming every request
+# enforcement would have denied — a dry run that quantifies the
+# backfill's completeness against real traffic (design.md Decision 4).
+# ---------------------------------------------------------------------------
+
+# The account-level registry scope (the 'global' sort key).
+GLOBAL_SCOPE = 'global'
+
+# Which input decided the Effective_Role, recorded on audit entries
+# (Identity_Source, Requirement 4.1).
+IDENTITY_SOURCE_REGISTRY = 'registry'
+IDENTITY_SOURCE_ABSENT = 'absent'
+
+# Portal_Identity.status (design.md Decision 1). Rows written before this
+# spec (Team Management grants) carry no `status` at all and are treated
+# as enabled; anything other than 'enabled' denies, so an unrecognized
+# value fails closed (Requirement 1.6).
+REGISTRY_STATUS_ENABLED = 'enabled'
+REGISTRY_STATUS_DISABLED = 'disabled'
+
+# The single enforcement switch (design.md Decision 4). Read from the
+# environment on every call, not cached at import, so a redeploy or a
+# test can flip it without re-importing the layer.
+PORTAL_REGISTRY_ENFORCED_ENV = 'PORTAL_REGISTRY_ENFORCED'
+_ENFORCEMENT_TRUE_VALUES = ('1', 'true', 'yes', 'on', 'enabled')
+
+
+class RegistryUnavailable(Exception):
+    """The Portal_Identity registry could not be read.
+
+    Distinct from "this principal has no registry row" (which is a
+    permission decision, answered 403): a failed lookup is an
+    availability problem and must surface as HTTP 500 with an audited
+    `result='failure'`, never as a permission denial and never as a
+    silent downgrade to Viewer (Requirement 1.5, design.md Decision 3).
+    A DynamoDB outage must not be recorded as thousands of privilege
+    decisions.
+    """
+
+
+def registry_enforcement_enabled() -> bool:
+    """True when the Portal_Identity registry is authoritative.
+
+    Defaults to False (Requirement 2.4): enforcement is a single
+    explicit configuration value and stays off until the backfill has
+    run.
+    """
+    raw = os.environ.get(PORTAL_REGISTRY_ENFORCED_ENV)
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in _ENFORCEMENT_TRUE_VALUES
+
+
+def _identity_is_enabled(identity: Optional[Dict]) -> bool:
+    """True when a Portal_Identity row exists and is not disabled.
+
+    A missing `status` means enabled: rows written before this spec
+    (Team Management's per-Use_Case grants) do not carry one. Any other
+    value than 'enabled' is treated as disabled, so an unexpected value
+    denies rather than grants (Requirement 1.6).
+    """
+    if not identity:
+        return False
+    status = identity.get('status')
+    if status is None:
+        return True
+    return str(status).strip().lower() == REGISTRY_STATUS_ENABLED
+
+
+def _identity_role(identity: Optional[Dict]) -> Optional[Role]:
+    """The `Role` a Portal_Identity row names, or None when the row is
+    absent or names a value that is not a Role (corrupt data must not
+    grant anything)."""
+    if not identity:
+        return None
+    role_str = identity.get('role')
+    try:
+        return Role(role_str)
+    except ValueError:
+        logger.warning(
+            f"Portal_Identity row for user {identity.get('user_id')} / "
+            f"usecase {identity.get('usecase_id')} names an unknown role "
+            f"{role_str!r}; treating the row as carrying no role")
+        return None
+
+
+def _lookup_identity(user_id: str,
+                     usecase_id: Optional[str] = None) -> Optional[Dict]:
+    """Read the Portal_Identity that decides this request, or None.
+
+    Reads the caller's global row and, when `usecase_id` names a
+    Use_Case (anything other than 'global'), that Use_Case row too, then
+    applies the precedence rules of design.md's Expected Behavior table:
+
+    1. no enabled global row -> None. The caller is an
+       Unprovisioned_Principal and is denied (Requirement 1.1). The
+       global row is the account's provisioning record: it is what the
+       User Manager writes at create time and what the backfill
+       populates, so requiring it is what makes "created directly in
+       Cognito" resolve to nothing.
+    2. an enabled Use_Case row naming a valid role, when the request is
+       scoped to that Use_Case -> that row (it overrides the global row,
+       today's step-3 precedence, Requirement 1.3).
+    3. otherwise -> the global row.
+
+    A disabled (or role-less) Use_Case row is treated exactly as an
+    absent one and falls back to the global row; a disabled global row
+    denies exactly as an absent one (Requirement 1.6).
+
+    Raises:
+        RegistryUnavailable: the lookup itself failed. NOT swallowed —
+            the caller must answer 500, not 403 (Requirement 1.5).
+    """
+    if not user_id or user_id == 'unknown':
+        # Nothing to look up: an unidentifiable caller can hold no
+        # Portal_Identity, and this is not an availability failure.
+        return None
+
+    try:
+        user_roles_table = dynamodb.Table(USER_ROLES_TABLE)
+        global_identity = user_roles_table.get_item(
+            Key={'user_id': user_id, 'usecase_id': GLOBAL_SCOPE}
+        ).get('Item')
+
+        usecase_identity = None
+        if usecase_id and usecase_id != GLOBAL_SCOPE:
+            usecase_identity = user_roles_table.get_item(
+                Key={'user_id': user_id, 'usecase_id': usecase_id}
+            ).get('Item')
+    except ClientError as error:
+        raise RegistryUnavailable(
+            f"Portal_Identity lookup failed for user {user_id} / usecase "
+            f"{usecase_id}: {error}") from error
+    except Exception as error:  # noqa: BLE001 - fail closed, never silent
+        raise RegistryUnavailable(
+            f"Portal_Identity lookup failed for user {user_id} / usecase "
+            f"{usecase_id}: {error}") from error
+
+    if not _identity_is_enabled(global_identity):
+        return None
+
+    if (_identity_is_enabled(usecase_identity)
+            and _identity_role(usecase_identity) is not None):
+        return usecase_identity
+
+    return global_identity
+
+
 class RBACManager:
     """Role-Based Access Control Manager
-    
-    Uses IDP (Identity Provider) as the single source of truth for user roles.
-    Roles come from JWT claims (custom:role or custom:groups).
-    
-    Supported role sources:
-    - Cognito User Pools: custom:role attribute
-    - SAML/OIDC IdP: mapped to custom:role or custom:groups
-    - Lambda authorizer: role in context
+
+    The **Portal_Identity registry** (USER_ROLES_TABLE, written only by
+    the portal's own User Manager) is the source of truth for portal
+    privilege — not the IdP. The `custom:role` claim a token carries is
+    Claimed_Role: descriptive metadata, recorded in audit details, never
+    granted (portal-jwt-role-privilege-escalation, design.md Decision 2).
+
+    Enforcement of that rule is gated by PORTAL_REGISTRY_ENFORCED, which
+    defaults to off until the registry has been backfilled from the pool;
+    with it off, roles resolve exactly as they did before the fix (the
+    IdP-as-truth order documented on `_resolve_role_legacy`) and every
+    request enforcement would have denied is logged as `would_deny`.
+
+    Role sources, in the order they are consulted under enforcement:
+    - enabled global Portal_Identity row (the account's role)
+    - enabled Use_Case Portal_Identity row (overrides it for that
+      Use_Case; written by Team Management)
     """
     
     def __init__(self):
@@ -599,22 +986,104 @@ class RBACManager:
         }
     
     def get_user_role(self, user_id: str, usecase_id: str, user_info: Optional[Dict] = None) -> Optional[Role]:
-        """Get user's role for a specific usecase
-        
+        """Get the user's Effective_Role for a scope.
+
+        Two modes, selected by PORTAL_REGISTRY_ENFORCED (default off,
+        design.md Decision 4):
+
+        **Enforcement on** — the Portal_Identity registry is the only
+        source of privilege (design.md Expected Behavior):
+
+        1. enabled global registry row -> that row's role
+        2. enabled Use_Case row, when the scope is that Use_Case ->
+           that row's role (overrides 1)
+        3. no enabled row -> None (the caller is denied 403 with
+           Identity_Source 'absent')
+        4. the lookup raised -> `RegistryUnavailable` propagates, so the
+           decorator answers 500 and audits a failure
+
+        The `custom:role` claim in `user_info['role']` (Claimed_Role)
+        grants nothing in this mode; it is recorded in audit details only
+        (Requirements 1.1-1.6, design.md Decision 2).
+
+        **Enforcement off (default)** — today's resolution order,
+        unchanged, so nothing moves before the registry is backfilled;
+        additionally a `would_deny` WARNING is logged for every request
+        enforcement would have denied, which is how the backfill's
+        completeness is measured against real traffic (Requirement 2.4).
+
+        Args:
+            user_id: Cognito `sub` of the caller
+            usecase_id: scope of the decision ('global' or a Use_Case id)
+            user_info: dict from get_user_from_event(); its 'role' is the
+                Claimed_Role, no longer authoritative
+
+        Returns:
+            Role, or None when the caller holds no role (denied)
+
+        Raises:
+            RegistryUnavailable: enforcement mode only — the registry
+                lookup failed (never downgraded to Viewer).
+        """
+        if registry_enforcement_enabled():
+            return self._resolve_role_from_registry(user_id, usecase_id,
+                                                    user_info)
+        return self._resolve_role_legacy(user_id, usecase_id, user_info)
+
+    def _resolve_role_from_registry(self, user_id: str, usecase_id: str,
+                                    user_info: Optional[Dict] = None) -> Optional[Role]:
+        """Resolve the Effective_Role from the Portal_Identity registry.
+
+        `RegistryUnavailable` is deliberately NOT caught here: an
+        availability failure must not be answered as a permission
+        decision and must not fall back to Viewer (Requirement 1.5).
+        """
+        identity = _lookup_identity(user_id, usecase_id)
+
+        if identity is None:
+            logger.info(
+                f"Registry denial: user {user_id} has no enabled "
+                f"Portal_Identity for scope {usecase_id!r} "
+                f"(identity_source={IDENTITY_SOURCE_ABSENT}, claimed_role="
+                f"{(user_info or {}).get('role', 'unknown')!r})")
+            return None
+
+        role = _identity_role(identity)
+        if role is None:
+            # The deciding row exists but names no usable role: deny
+            # rather than guess (corrupt data must not grant).
+            logger.warning(
+                f"Registry denial: Portal_Identity for user {user_id} / "
+                f"scope {usecase_id!r} names no usable role "
+                f"({identity.get('role')!r})")
+            return None
+
+        logger.info(
+            f"User {user_id} resolved role {role.value} for scope "
+            f"{usecase_id!r} from the Portal_Identity registry "
+            f"(row usecase_id={identity.get('usecase_id')!r})")
+        return role
+
+    def _resolve_role_legacy(self, user_id: str, usecase_id: str,
+                             user_info: Optional[Dict] = None) -> Optional[Role]:
+        """Today's resolution order, unchanged (enforcement off).
+
+        Kept verbatim so nothing moves before the backfill has run; the
+        only addition is the `would_deny` dry-run WARNING.
+
         Role resolution order:
         1. PortalAdmin from JWT claims (global admin access)
         2. UseCase-specific role from DynamoDB (assigned via Team Management)
         3. Default role from JWT claims (Cognito custom:role attribute)
         4. Default to Viewer if nothing found
-        
-        Args:
-            user_id: User ID (for logging/fallback)
-            usecase_id: Use case ID for usecase-specific role lookup
-            user_info: User info dict from get_user_from_event() containing role from JWT
-            
-        Returns:
-            Role enum or None
         """
+        role = self._legacy_role(user_id, usecase_id, user_info)
+        self._log_would_deny(user_id, usecase_id, user_info, role)
+        return role
+
+    def _legacy_role(self, user_id: str, usecase_id: str,
+                     user_info: Optional[Dict] = None) -> Optional[Role]:
+        """The pre-fix resolution order (see _resolve_role_legacy)."""
         try:
             jwt_role = user_info.get('role') if user_info else None
             
@@ -663,9 +1132,54 @@ class RBACManager:
         except Exception as e:
             logger.error(f"Error getting user role: {str(e)}")
             return Role.VIEWER
+
+    def _log_would_deny(self, user_id: str, usecase_id: str,
+                        user_info: Optional[Dict],
+                        legacy_role: Optional[Role]) -> None:
+        """Dry run of enforcement: WARN about requests the registry would
+        deny (Requirement 2.4, design.md Decision 4).
+
+        Read from the deployed logs before the flag is flipped: every
+        `would_deny` line names a principal the backfill has not covered
+        yet. Never raises and never changes the decision — including when
+        the registry itself is unavailable (that is a `would_deny` we
+        cannot determine, logged and dropped).
+
+        Cost: one or two extra `get_item` calls per role resolution while
+        the flag is off. That is deliberate and temporary — the dry run
+        only has to survive until enforcement is enabled (design.md
+        Decision 4 retires the flag afterwards).
+        """
+        try:
+            if _lookup_identity(user_id, usecase_id) is not None:
+                return
+            logger.warning(
+                f"would_deny: user {user_id} would be denied scope "
+                f"{usecase_id!r} under PORTAL_REGISTRY_ENFORCED — no enabled "
+                f"Portal_Identity registry row "
+                f"(identity_source={IDENTITY_SOURCE_ABSENT}, claimed_role="
+                f"{(user_info or {}).get('role', 'unknown')!r}, "
+                f"claimed_username={(user_info or {}).get('username', 'unknown')!r}, "
+                f"legacy_role={legacy_role.value if legacy_role else 'none'}) "
+                f"— backfill this user before enabling enforcement")
+        except RegistryUnavailable as error:
+            logger.warning(
+                f"would_deny undetermined for user {user_id} / scope "
+                f"{usecase_id!r}: {error}")
+        except Exception as error:  # noqa: BLE001 - dry run must never fail
+            logger.warning(
+                f"would_deny dry run failed for user {user_id} / scope "
+                f"{usecase_id!r}: {error}")
     
     def get_user_permissions(self, user_id: str, usecase_id: str, user_info: Optional[Dict] = None) -> Set[Permission]:
-        """Get all permissions for a user based on their IDP role"""
+        """Get all permissions for a user's Effective_Role.
+
+        No role (an Unprovisioned_Principal under enforcement) means no
+        permissions — the None from get_user_role propagates as an empty
+        set, which the decorators answer 403 for. `RegistryUnavailable`
+        is deliberately not caught: it escapes to the decorator, which
+        answers 500 and audits a failure (Requirement 1.5).
+        """
         role = self.get_user_role(user_id, usecase_id, user_info)
         if not role:
             return set()
@@ -673,7 +1187,11 @@ class RBACManager:
         return self.role_permissions.get(role, set())
     
     def has_permission(self, user_id: str, usecase_id: str, permission: Permission, user_info: Optional[Dict] = None) -> bool:
-        """Check if user has a specific permission based on IDP role"""
+        """Check whether the user's Effective_Role carries a permission.
+
+        False for a caller with no role; `RegistryUnavailable` escapes to
+        the decorator rather than being reported as a denial.
+        """
         user_permissions = self.get_user_permissions(user_id, usecase_id, user_info)
         return permission in user_permissions
     
@@ -742,7 +1260,11 @@ class RBACManager:
             return False
     
     def is_portal_admin(self, user_id: str, user_info: Optional[Dict] = None) -> bool:
-        """Check if user is a PortalAdmin based on IDP role"""
+        """Check whether the user's global Effective_Role is PortalAdmin.
+
+        `RegistryUnavailable` escapes (the caller answers 500), so an
+        unreadable registry is never reported as "not an admin".
+        """
         role = self.get_user_role(user_id, 'global', user_info)
         return role == Role.PORTAL_ADMIN
     
