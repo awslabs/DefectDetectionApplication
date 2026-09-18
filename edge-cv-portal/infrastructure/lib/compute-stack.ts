@@ -28,6 +28,7 @@ import { DdaLabelingApiStack } from './dda-labeling-api-stack';
 import { WorkflowManagerGapsApiStack } from './workflow-manager-gaps-api-stack';
 import { WorkflowTuningApiStack } from './workflow-tuning-api-stack';
 import { groundedSamWorkerEnabled, portalRegistryEnforced } from './context-helpers';
+import { PYTHON_CONTAINER_ASSET_EXCLUDES } from './container-asset-excludes';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
@@ -2531,6 +2532,10 @@ export class ComputeStack extends cdk.Stack {
         code: lambda.DockerImageCode.fromImageAsset(
           path.join(__dirname, '../../backend/sam-worker'),
           {
+            // Untracked Python bytecode in the build context would otherwise
+            // change this asset's hash and turn a configuration deploy into a
+            // multi-gigabyte image rebuild — see container-asset-excludes.ts.
+            exclude: PYTHON_CONTAINER_ASSET_EXCLUDES,
             platform: ecrAssets.Platform.LINUX_AMD64,
             ...(samModelArchiveUrl
               ? { buildArgs: { SAM_MODEL_ARCHIVE_URL: samModelArchiveUrl } }
@@ -2618,6 +2623,12 @@ export class ComputeStack extends cdk.Stack {
           code: lambda.DockerImageCode.fromImageAsset(
             path.join(__dirname, '../../backend/grounded-sam-worker'),
             {
+              // Two stray __pycache__/*.pyc files in this context moved the
+              // asset hash and sent two portal deploys into a multi-hour
+              // rebuild of the Grounding DINO + SAM image that was already
+              // published. Excluding them keeps the hash stable — see
+              // container-asset-excludes.ts for the measured hashes.
+              exclude: PYTHON_CONTAINER_ASSET_EXCLUDES,
               platform: ecrAssets.Platform.LINUX_AMD64,
               buildArgs: {
                 ...(dinoModelUrl
