@@ -401,9 +401,12 @@ def test_http_fetch_passes_bounded_timeout(monkeypatch):
         def read(self, n=-1):
             return PNG_BYTES
 
-    def fake_urlopen(url, timeout=None):
+    # ``context`` is always passed by _fetch_http (the CA-bundle fix):
+    # a verifying SSLContext for https://, None for plain http.
+    def fake_urlopen(url, timeout=None, context=None):
         captured["url"] = url
         captured["timeout"] = timeout
+        captured["context"] = context
         return _FakeResponse()
 
     monkeypatch.setattr(
@@ -413,10 +416,12 @@ def test_http_fetch_passes_bounded_timeout(monkeypatch):
     assert data == PNG_BYTES
     assert captured["url"] == "http://example.invalid/ref.png"
     assert captured["timeout"] == REFERENCE_FETCH_TIMEOUT_SEC
+    # A plain-http fetch needs no trust store, so no context is built.
+    assert captured["context"] is None
 
 
 def test_http_timeout_error_names_source(monkeypatch):
-    def fake_urlopen(url, timeout=None):
+    def fake_urlopen(url, timeout=None, context=None):
         raise TimeoutError("timed out")
 
     monkeypatch.setattr(
