@@ -31,7 +31,7 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, assume_cross_account_role,
-    create_boto3_client, get_usecase_region
+    create_boto3_client, get_usecase_region, caller_is_portal_admin
 )
 
 logger = logging.getLogger()
@@ -1034,8 +1034,10 @@ def get_update_status(event: Dict, user: Dict) -> Dict:
     Portal admin only - shows which usecases need updates.
     """
     try:
-        # Check if user is portal admin
-        if user.get('role') != 'PortalAdmin':
+        # Effective_Role from the Portal_Identity registry, not the token's
+        # Claimed_Role (portal-jwt-role-privilege-escalation Req 1.5,
+        # design.md Decision 2). RegistryUnavailable -> 500 below, never 403.
+        if not caller_is_portal_admin(user):
             return create_response(403, {'error': 'Portal admin access required'})
         
         # Get latest version per component name for version comparison
@@ -1112,8 +1114,10 @@ def update_all_usecases(event: Dict, user: Dict) -> Dict:
     Portal admin only.
     """
     try:
-        # Check if user is portal admin
-        if user.get('role') != 'PortalAdmin':
+        # Effective_Role from the Portal_Identity registry, not the token's
+        # Claimed_Role (portal-jwt-role-privilege-escalation Req 1.5,
+        # design.md Decision 2). RegistryUnavailable -> 500 below, never 403.
+        if not caller_is_portal_admin(user):
             return create_response(403, {'error': 'Portal admin access required'})
         
         body = json.loads(event.get('body', '{}'))

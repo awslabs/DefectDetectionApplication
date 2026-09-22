@@ -38,13 +38,20 @@ from shared_utils import (
     REGISTRY_STATUS_DISABLED,
     REGISTRY_STATUS_ENABLED,
     USER_ACCOUNT_RESOURCE_TYPE,
+    RegistryUnavailable,
     attribution_from,
+    caller_is_portal_admin,
     create_response,
     finalize_audit_event,
     get_user_from_event,
+    log_audit_event,
     record_audit_event_strict,
     registry_enforcement_enabled,
 )
+# The canonical audit action for a request that could not be authorized
+# because the Portal_Identity registry was unreadable. Shared with
+# rbac_check so an outage looks the same whichever gate saw it.
+from rbac_middleware import AUTHORIZATION_UNAVAILABLE_ACTION
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -444,16 +451,78 @@ def _count_registry_portal_admins() -> int:
 
 def require_portal_admin(func):
     """
-    Decorator asserting the caller's validated JWT role is PortalAdmin.
-    Returns 403 without performing the operation otherwise (Requirement 1.5).
+    Decorator asserting the caller's **Effective_Role** is PortalAdmin.
+
+    Returns 403 without performing the operation otherwise (Requirement
+    1.5). The decision comes from `caller_is_portal_admin`, i.e. from the
+    Portal_Identity registry through `RBACManager` — NOT from the token's
+    `custom:role` claim, which is Claimed_Role only and grants nothing
+    (design.md Decision 2).
+
+    This gate used to compare `get_user_from_event(event)['role']`
+    directly, which made every route below it claim-driven and left the
+    escalation open on the whole user-administration surface even with
+    PORTAL_REGISTRY_ENFORCED on (measured on account 164152369890,
+    2026-09-22: a claim-only account with no registry row read
+    `GET /admin/users` in full while the enforced `rbac_check` path
+    correctly denied it `POST /builds`).
+
+    An unreadable registry answers 500, never 403: an availability failure
+    is not a privilege decision (design.md Decision 3).
     """
     @wraps(func)
     def wrapper(event, *args, **kwargs):
         user = get_user_from_event(event)
-        if user.get('role') != 'PortalAdmin':
+        user_id = user.get('user_id', 'unknown')
+        try:
+            is_admin = caller_is_portal_admin(user)
+        except RegistryUnavailable as error:
+            logger.error(
+                f"Portal_Identity registry unavailable during the "
+                f"PortalAdmin gate: {str(error)}", exc_info=True)
+            log_audit_event(
+                user_id=user_id,
+                action=AUTHORIZATION_UNAVAILABLE_ACTION,
+                resource_type='api_endpoint',
+                resource_id=event.get('resource', 'unknown'),
+                result='failure',
+                details={
+                    'required_role': 'PortalAdmin',
+                    'usecase_id': GLOBAL_SCOPE,
+                    'method': event.get('httpMethod'),
+                    'path': event.get('path'),
+                    'claimed_role': user.get('role', 'unknown'),
+                    'error': str(error),
+                },
+                identity=attribution_from(event, user,
+                                          usecase_id=GLOBAL_SCOPE)
+            )
+            return create_response(500, {'error': 'Authorization check failed'})
+
+        if not is_admin:
+            # Attributable after the Cognito account is deleted, and the
+            # Claimed_Role is kept as metadata: a claim of PortalAdmin on a
+            # denied request is the escalation attempt's signature
+            # (Requirements 4.1, 4.2, 4.4).
             logger.warning(
-                f"PortalAdmin gate rejected user {user.get('user_id')} "
-                f"with role {user.get('role')}"
+                f"PortalAdmin gate rejected user {user_id} "
+                f"(claimed_role={user.get('role')})"
+            )
+            log_audit_event(
+                user_id=user_id,
+                action='unauthorized_access',
+                resource_type='api_endpoint',
+                resource_id=event.get('resource', 'unknown'),
+                result='denied',
+                details={
+                    'required_role': 'PortalAdmin',
+                    'usecase_id': GLOBAL_SCOPE,
+                    'method': event.get('httpMethod'),
+                    'path': event.get('path'),
+                    'claimed_role': user.get('role', 'unknown'),
+                },
+                identity=attribution_from(event, user,
+                                          usecase_id=GLOBAL_SCOPE)
             )
             return create_response(403, {
                 'error': 'Access denied',

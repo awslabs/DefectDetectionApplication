@@ -479,6 +479,22 @@ class TestProperty5EveryAuditEntryCarriesDurableAttribution:
                       username=shape["username"])
 
         identity_source = ("registry" if shape["provisioned"] else "absent")
+        if path == "allow_user_manager":
+            # The only ACCEPTED User Manager path here, and it now needs a
+            # caller the PortalAdmin gate allows: since task 5.2's follow-up
+            # that gate resolves the Effective_Role from the registry
+            # instead of the `custom:role` claim, so a claim-only actor is
+            # denied 403 before the route runs. Provisioning the actor as
+            # PortalAdmin (overwriting the Viewer row above when the shape
+            # asked for one) makes its Identity_Source 'registry' whatever
+            # the generated shape says — which is the honest value: a row is
+            # what decided the role. The property under test is unchanged:
+            # the accepted entry must still carry all five attribution
+            # fields, and every deny/unavailable path still runs on the
+            # shape's own provisioning.
+            provision(registry, sub, role="PortalAdmin",
+                      username=shape["username"])
+            identity_source = "registry"
         if path == "unavailable":
             # The registry could not be read, so nothing decided the
             # role: 'unknown' rather than a fabricated 'registry' /

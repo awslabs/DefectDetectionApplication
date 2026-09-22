@@ -2126,3 +2126,41 @@ def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str 
     
     credentials = assume_usecase_role(role_arn, external_id, session_name)
     return create_boto3_client('s3', credentials)
+
+
+# ---------------------------------------------------------------------------
+# PortalAdmin gate (portal-jwt-role-privilege-escalation, Requirement 1.5)
+#
+# `get_user_from_event(event)['role']` is the Claimed_Role — what the token
+# asserted — and grants nothing (design.md Decision 2). Several handlers
+# nonetheless gated PortalAdmin-only routes on `user.get('role') ==
+# 'PortalAdmin'`, a second authorization path that never reached
+# `RBACManager` and so stayed claim-driven after PORTAL_REGISTRY_ENFORCED
+# was turned on: verified on account 164152369890 on 2026-09-22, where a
+# pool account carrying only `custom:role=PortalAdmin` and no registry row
+# was correctly denied `POST /builds` (the enforced `rbac_check` path) yet
+# still read the whole user directory through `GET /admin/users`. The
+# reverse also held: a registry PortalAdmin with no claim was denied.
+#
+# `caller_is_portal_admin` is the single helper those gates now share. It
+# resolves the caller's global Effective_Role through `rbac_manager`, so
+# enforcement, the legacy fallback while the flag is off, and
+# `RegistryUnavailable` all behave exactly as they do for `rbac_check`.
+# ---------------------------------------------------------------------------
+
+def caller_is_portal_admin(user: Optional[Dict]) -> bool:
+    """True when the caller's global Effective_Role is PortalAdmin.
+
+    `user` is the `get_user_from_event(event)` dict; it is threaded through
+    as `user_info` so the Claimed_Role still feeds the legacy resolution
+    order while PORTAL_REGISTRY_ENFORCED is off, and is recorded as
+    descriptive metadata once it is on.
+
+    Raises:
+        RegistryUnavailable: the Portal_Identity lookup failed. Deliberately
+            NOT caught — the caller must answer 500, never 403, so a
+            DynamoDB outage is never reported as a privilege decision
+            (Requirement 1.5, design.md Decision 3).
+    """
+    user_id = (user or {}).get('user_id') or 'unknown'
+    return rbac_manager.is_portal_admin(user_id, user_info=user)

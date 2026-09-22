@@ -38,7 +38,7 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     validate_required_fields, assume_cross_account_role as assume_role,
-    require_super_user, rbac_manager, Permission
+    require_super_user, rbac_manager, Permission, caller_is_portal_admin
 )
 # Model_Image_Limit resolution (llm-autolabel-prompt-tuning Requirement 7.1).
 # The same shared-layer function the Preview_API and the Auto_Labeler use, so
@@ -139,8 +139,16 @@ _model_token_limits_cache: Optional[tuple] = None
 
 
 def is_portal_admin(user: Dict) -> bool:
-    """Check if user is a PortalAdmin"""
-    return user.get('role') == 'PortalAdmin' or 'PortalAdmin' in user.get('groups', [])
+    """True when the caller's Effective_Role is PortalAdmin.
+
+    Resolved from the Portal_Identity registry through `RBACManager`, not
+    from the token's `custom:role` claim / `groups`, both of which are
+    caller-asserted and grant nothing
+    (portal-jwt-role-privilege-escalation Req 1.5, design.md Decision 2).
+    `RegistryUnavailable` propagates so the handler answers 500 rather than
+    reporting an outage as "not an admin".
+    """
+    return caller_is_portal_admin(user)
 
 
 def test_data_account_connection(

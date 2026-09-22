@@ -228,20 +228,42 @@ def user_manager(aws_stack):
     return user_admin
 
 
+#: The acting administrator's `sub`. It holds a real Portal_Identity row
+#: (see the `registry` fixture): `require_portal_admin` resolves the caller's
+#: Effective_Role from the registry, so a claim-only actor is denied 403
+#: before any route runs.
+ACTING_ADMIN_SUB = "acting-admin"
+
+
 @pytest.fixture(scope="module")
 def registry(aws_stack):
-    return aws_stack.tables.user_roles
+    """The registry table, with the acting administrator provisioned.
+
+    The row is written once per module and never targeted by the generated
+    operations (they act on `acct-*` usernames), so it plays the same role
+    as the untargeted second PortalAdmin this suite already keeps: the
+    last-PortalAdmin guard never fires on it.
+    """
+    table = aws_stack.tables.user_roles
+    table.put_item(Item={
+        "user_id": ACTING_ADMIN_SUB, "usecase_id": "global",
+        "role": "PortalAdmin", "status": "enabled",
+        "username": "portal-admin", "assigned_by": "test-acting-admin",
+        "assigned_at": 1,
+    })
+    return table
 
 
 # ---------------------------------------------------------------- helpers
 
 def admin_event(method, path, username=None, body=None,
-                acting_sub="acting-admin"):
+                acting_sub=ACTING_ADMIN_SUB):
     """A PortalAdmin request to a User Manager route.
 
-    `require_portal_admin` gates /admin/* on the `custom:role` claim (not
-    on the registry — task 2.3 recorded that as a separate gap for task
-    5), so the acting administrator's claim is what gets it through.
+    The acting administrator's privilege comes from its Portal_Identity row;
+    the `custom:role` claim below is Claimed_Role metadata and grants
+    nothing (the gate stopped trusting it when task 5.2 found the flag alone
+    did not reach it).
     """
     return {
         "httpMethod": method,

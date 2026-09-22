@@ -332,12 +332,33 @@ ACTING_IP = "203.0.113.7"
 ACTING_AGENT = "unit-test/1.0"
 
 
+def acting_admin(registry, sub=None):
+    """A fresh acting administrator, provisioned in the registry.
+
+    `require_portal_admin` used to gate /admin/* on the `custom:role`
+    claim — the separate gap task 2.3 recorded and handed to task 5. Task
+    5.2 found the flag alone did not close it (the gate never reached
+    `RBACManager`), so the gate now resolves the caller's Effective_Role
+    from the Portal_Identity registry like every other route. The acting
+    administrator therefore needs a real row: a claim-only actor is denied
+    403 before the route under test runs. The claim `admin_event` still
+    sends is Claimed_Role metadata only.
+    """
+    sub = sub or str(uuid.uuid4())
+    registry.put_item(Item={
+        "user_id": sub, "usecase_id": "global", "role": "PortalAdmin",
+        "status": "enabled", "username": "portal-admin",
+        "assigned_by": "test-acting-admin", "assigned_at": 1,
+    })
+    return sub
+
+
 def admin_event(method, path, username=None, body=None, acting_sub=None):
     """A PortalAdmin request to a User Manager route.
 
-    `require_portal_admin` gates /admin/* on the `custom:role` claim (task
-    2.3 recorded that as a separate gap, owned by task 5), so the acting
-    administrator's claim is what gets it through.
+    The acting administrator's privilege comes from its Portal_Identity row
+    (see `acting_admin`); the `custom:role` claim below is descriptive
+    metadata and grants nothing.
     """
     return {
         "httpMethod": method,
@@ -428,7 +449,7 @@ class TestCreateWritesTheGlobalRow:
     def test_created_account_is_provisioned_with_every_attribute(
             self, user_admin, registry, pool, audit_table):
         fake = pool()
-        acting = str(uuid.uuid4())
+        acting = acting_admin(registry)
 
         status, body = create(user_admin, "new-scientist",
                               role="DataScientist",
@@ -451,7 +472,7 @@ class TestCreateWritesTheGlobalRow:
     def test_audit_entry_records_the_registry_write_and_the_request(
             self, user_admin, registry, pool, audit_table):
         fake = pool()
-        acting = str(uuid.uuid4())
+        acting = acting_admin(registry)
         create(user_admin, "audited-account", role="Operator",
                acting_sub=acting)
 
@@ -475,7 +496,7 @@ class TestCreateWritesTheGlobalRow:
         because an absent registry entry is denied (Requirement 1.1)."""
         fake = pool()
         error = break_registry_writes()
-        acting = str(uuid.uuid4())
+        acting = acting_admin(registry)
 
         status, body = create(user_admin, "half-created", role="PortalAdmin",
                               acting_sub=acting)
@@ -500,12 +521,15 @@ class TestCreateWritesTheGlobalRow:
         because the read path looks rows up by the token's `sub` (task 2.3
         decision (b))."""
         fake = pool(report_sub=False)
-        acting = str(uuid.uuid4())
+        acting = acting_admin(registry)
 
         status, body = create(user_admin, "no-sub-account", role="Viewer",
                               acting_sub=acting)
         assert status == 201, body
-        assert registry.scan().get("Items", []) == []
+        # No row for the created account. The acting administrator's own row
+        # is expected: it is what gets the request past require_portal_admin.
+        assert [item for item in registry.scan().get("Items", [])
+                if item["user_id"] != acting] == []
 
         entry = audit_rows(audit_table, acting, "account_create")[0]
         assert entry["details"]["registry_entry"].startswith("skipped")
@@ -531,7 +555,7 @@ class TestRoleChangeUpdatesTheGlobalRow:
         fake = pool()
         sub = fake.seed("scientist", role="Viewer")
         put_row(registry, sub, role="Viewer")
-        acting = str(uuid.uuid4())
+        acting = acting_admin(registry)
 
         status, body = change_role(user_admin, "scientist", "DataScientist",
                                    acting_sub=acting)
@@ -584,7 +608,7 @@ class TestRoleChangeUpdatesTheGlobalRow:
         sub = fake.seed("stuck", role="Viewer")
         put_row(registry, sub, role="Viewer")
         break_registry_writes()
-        acting = str(uuid.uuid4())
+        acting = acting_admin(registry)
 
         status, body = change_role(user_admin, "stuck", "PortalAdmin",
                                    acting_sub=acting)
@@ -618,7 +642,7 @@ class TestDisableAndEnableSetTheRegistryStatus:
         fake = pool()
         sub = fake.seed("to-disable", role="DataScientist")
         put_row(registry, sub, role="DataScientist")
-        acting = str(uuid.uuid4())
+        acting = acting_admin(registry)
 
         status, body = set_enabled(user_admin, "to-disable", False,
                                    acting_sub=acting)
@@ -650,11 +674,14 @@ class TestDisableAndEnableSetTheRegistryStatus:
                  "role": "DataScientist"}
         assert shared.rbac_manager.get_user_role(sub, "global", claim) == \
             shared.Role.DATA_SCIENTIST
+        acting = acting_admin(registry)
 
-        assert set_enabled(user_admin, "token-holder", False)[0] == 200
+        assert set_enabled(user_admin, "token-holder", False,
+                           acting_sub=acting)[0] == 200
         assert shared.rbac_manager.get_user_role(sub, "global", claim) is None
 
-        assert set_enabled(user_admin, "token-holder", True)[0] == 200
+        assert set_enabled(user_admin, "token-holder", True,
+                           acting_sub=acting)[0] == 200
         assert shared.rbac_manager.get_user_role(sub, "global", claim) == \
             shared.Role.DATA_SCIENTIST
 
@@ -683,7 +710,7 @@ class TestDisableAndEnableSetTheRegistryStatus:
         put_row(registry, sub, role="Viewer",
                 status="disabled" if target_enabled else "enabled")
         break_registry_writes()
-        acting = str(uuid.uuid4())
+        acting = acting_admin(registry)
 
         status, body = set_enabled(user_admin, "flaky", target_enabled,
                                    acting_sub=acting)
@@ -742,11 +769,11 @@ class TestDeleteRemovesTheRegistryRows:
         fake = pool()
         sub = fake.seed("deleted-actor", role="PortalAdmin")
         put_row(registry, sub, role="PortalAdmin")
-        put_row(registry, str(uuid.uuid4()), role="PortalAdmin")  # keeper
+        keeper = acting_admin(registry)  # keeps an admin, and does the delete
         claim = {"user_id": sub, "username": "deleted-actor",
                  "email": "deleted-actor@example.com", "role": "PortalAdmin"}
 
-        assert delete(user_admin, "deleted-actor")[0] == 200
+        assert delete(user_admin, "deleted-actor", acting_sub=keeper)[0] == 200
         assert shared.rbac_manager.get_user_role(sub, "global", claim) is None
         assert shared.rbac_manager.is_portal_admin(sub, claim) is False
 
@@ -757,7 +784,7 @@ class TestDeleteRemovesTheRegistryRows:
         sub = fake.seed("stubborn", role="Viewer")
         put_row(registry, sub, role="Viewer")
         break_registry_writes()
-        acting = str(uuid.uuid4())
+        acting = acting_admin(registry)
 
         status, body = delete(user_admin, "stubborn", acting_sub=acting)
         assert status == 502
@@ -871,8 +898,11 @@ class TestLastPortalAdminGuardUsesTheCount:
     def test_demoting_the_last_registry_admin_is_rejected(
             self, user_admin, registry, pool, audit_table, enforcement_on):
         fake = pool()
-        self._seed_admin(fake, registry)
-        acting = str(uuid.uuid4())
+        # The solo admin acts on itself. Now that require_portal_admin
+        # resolves the caller from the registry, any *other* acting admin
+        # would need its own enabled row and this account would no longer be
+        # the last one — self-demotion is the real shape of this guard.
+        acting = self._seed_admin(fake, registry)
 
         status, body = change_role(user_admin, "solo-admin", "Viewer",
                                    acting_sub=acting)
@@ -889,8 +919,9 @@ class TestLastPortalAdminGuardUsesTheCount:
     def test_disabling_the_last_registry_admin_is_rejected(
             self, user_admin, registry, pool, enforcement_on):
         fake = pool()
-        self._seed_admin(fake, registry)
-        status, body = set_enabled(user_admin, "solo-admin", False)
+        acting = self._seed_admin(fake, registry)
+        status, body = set_enabled(user_admin, "solo-admin", False,
+                                   acting_sub=acting)
         assert status == 409 and body["error"] == "Disable rejected"
         assert global_row(registry, fake.sub_of("solo-admin"))["status"] == \
             "enabled"
@@ -899,7 +930,7 @@ class TestLastPortalAdminGuardUsesTheCount:
             self, user_admin, registry, pool, enforcement_on):
         fake = pool()
         sub = self._seed_admin(fake, registry)
-        status, body = delete(user_admin, "solo-admin")
+        status, body = delete(user_admin, "solo-admin", acting_sub=sub)
         assert status == 409 and body["error"] == "Deletion rejected"
         assert "solo-admin" in fake.users
         assert global_row(registry, sub) is not None
@@ -911,7 +942,9 @@ class TestLastPortalAdminGuardUsesTheCount:
         second = fake.seed("second-admin", role="PortalAdmin")
         put_row(registry, second, role="PortalAdmin")
 
-        status, body = change_role(user_admin, "solo-admin", "Viewer")
+        # The second admin does the demoting, so one enabled admin remains.
+        status, body = change_role(user_admin, "solo-admin", "Viewer",
+                                   acting_sub=second)
         assert status == 200, body
         assert global_row(registry, sub)["role"] == "Viewer"
 

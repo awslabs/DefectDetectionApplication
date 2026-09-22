@@ -674,7 +674,7 @@ preservation rebaseline is owed.
     answering: every red line is either on the pre-existing list or the
     intended flag-off state.
 
-- [ ] 5. Enable enforcement (the actual fix goes live)
+- [x] 5. Enable enforcement (the actual fix goes live)
   - [x] 5.1 Wire the flag and deploy with it off
     - `PORTAL_REGISTRY_ENFORCED` on every handler environment in
       `compute-stack.ts` and `build-fleet-stack.ts`; the User Manager role's
@@ -750,7 +750,7 @@ preservation rebaseline is owed.
       (they name the user, scope, Claimed_Role and legacy role) to size the
       backfill gap before task 5.2 applies the backfill and flips.
 
-  - [ ] 5.2 Run the backfill against the portal account, then flip the flag
+  - [x] 5.2 Run the backfill against the portal account, then flip the flag
     - Dry-run, review the plan against the 6 known accounts, apply, verify
       each account resolves its expected role, set the flag true, redeploy,
       re-verify — including that the bootstrap `admin` can still reach
@@ -760,6 +760,99 @@ preservation rebaseline is owed.
       token to `POST /builds`, expect 403, then delete it and confirm the
       denial's audit row names it
     - _Requirements: 1.1, 2.3, 7.1, 7.2, 7.3_
+    - **OUTCOME (2026-09-22, account 164152369890): enforcement is ON, and
+      closing it exposed a second claim-trusting gate that this task also
+      fixed.**
+    - Backfill: `backfill_portal_registry.py` dry-run then `--apply` against
+      pool `us-east-1_2r9jpbWIe` was a **no-op — 0 rows created, 6 already
+      present, 0 errors**. All 6 accounts (`admin`, `demoadmin`,
+      `demoViewer`, `ryan-labeler`, `ryan-labeler2`, `demoDataScientist`)
+      already held a global row whose role **equals** the `custom:role` it
+      would have resolved from, so the flip changed nobody's access. Task
+      5.1's deferred prerequisite was completed first: all **55** handlers
+      were confirmed deployed at `PORTAL_REGISTRY_ENFORCED=false`, and a
+      CloudWatch Insights query over **91,248 records from 49 handler log
+      groups** since the 2026-09-18 deploy returned **zero `would_deny`
+      warnings** (the literal string `logger.warning` emits was verified in
+      `shared_utils`, so zero means no gap rather than a wrong search).
+    - Flip: `PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh -c
+      deployGroundedSamWorker=false` deployed all 8 stacks; the flag then
+      read `true` on all **55** handlers (Compute 41, NodeDesigner 7,
+      BuildFleet 5, synthetic-data 2).
+    - First verification pass — **the incident call is closed**: a throwaway
+      pool account carrying only `custom:role=PortalAdmin`, with no registry
+      row, got **403 on `POST /builds`**, the exact call the 14:26:06
+      incident had accepted. No legitimate access broke (`GET /builds`,
+      `GET /usecases` 200 for a registry-backed principal).
+    - **But the same token read the entire user directory from
+      `GET /admin/users` with 200.** `user_admin.require_portal_admin`
+      compared `get_user_from_event(event)['role']` — the Claimed_Role that
+      `get_user_from_event`'s own docstring says "is NOT an authorization
+      decision" — so it never reached `RBACManager` and enforcement did not
+      apply to it. The mirror failed too: a registry PortalAdmin with no
+      claim was **denied**. Requirement 1.5 was therefore not met on that
+      surface despite tasks 1–4 being complete. Not a regression (before the
+      flip *both* paths trusted the claim), so no rollback was needed.
+    - Fix, in this change: new `shared_utils.caller_is_portal_admin(user)`
+      resolves the caller's **global Effective_Role** through
+      `rbac_manager.is_portal_admin`, so enforcement, the legacy
+      flag-off order and `RegistryUnavailable` behave exactly as they do for
+      `rbac_check`. Four authorization sites now use it —
+      `user_admin.require_portal_admin` (gating **10** routes:
+      `list_accounts`, `create_account`, `set_password`, `forgot_password`,
+      `change_role`, `disable_account`, `enable_account`, `delete_account`,
+      `list_sync_devices`, `sync_device`), `shared_components.
+      get_update_status` and `update_all_usecases`, and
+      `data_accounts.is_portal_admin` (which had also accepted a
+      caller-asserted `groups` list, gating 2 more call sites). The gate now
+      audits its denials with the Claimed_Role via `log_audit_event` +
+      `attribution_from`, and answers **500** (never 403) on
+      `RegistryUnavailable`, matching design.md Decision 3. Left alone
+      deliberately: the four places that read the **target** account's
+      `custom:role` as data (last-PortalAdmin protection and admin
+      counting), which are not caller authorization.
+    - Tests: new `tests/test_portal_admin_gate_registry.py` (9 tests) pins
+      both directions — claim-only denied and not executed, denial audited
+      with `claimed_role`, registry Viewer beating a PortalAdmin claim, a
+      disabled row denying, registry-PortalAdmin-without-a-claim allowed,
+      outage → 500, the flag-off legacy path unchanged, all 10 routes still
+      wrapped, and a repo-wide grep guard against reintroducing the
+      comparison. Confirmed to discriminate: **7 of the 9 fail against the
+      pre-fix gate**, the guard naming `user_admin.py:453`. Three existing
+      suites had been relying on the bug (the `admin_event` docstring in
+      `test_user_manager_registry_units.py` even recorded the gate as
+      claim-driven and handed the gap to task 5): their acting
+      administrators are now provisioned in the registry, and in the
+      last-PortalAdmin class the actor is the seeded solo admin itself
+      (self-demotion), which is the guard's real shape now that any *other*
+      acting admin would need its own row. Auth/registry group **266 passed,
+      0 failed** (was 249 passed / 8 failed); `data_accounts` +
+      `shared_components` suites **172 passed**; preservation suite at
+      baseline (host 140/7, flask-app container 132/8) with no rebaseline
+      owed — none of the four changed files is pinned in
+      `test/backend-test/security/baselines/`.
+    - Second verification pass, after redeploying the fix (SharedLayer
+      **v82**; the deployed `user_admin.py` was confirmed to contain
+      `caller_is_portal_admin(user)` and no longer contain the claim
+      comparison): the claim-only principal now gets **403 on
+      `GET /admin/users`** and 403 on `POST /builds`, while a registry
+      PortalAdmin **with no claim at all** gets **200** on `/admin/users`,
+      `/usecases` and `/builds`. Both directions correct in production.
+      `POST /admin/users` is separately IAM-authorized at the API Gateway
+      method (a Bearer token draws a SigV4 parse error), so it is not
+      evidence about this gate either way; no account was created.
+    - Cleanup: all four throwaway principals and their registry rows were
+      deleted and the deletions verified (`UserNotFoundException`, row count
+      0); the pool is back to its 6 accounts.
+    - **Still owed by a human**: the bootstrap `admin` account itself was
+      never authenticated as (its password is not held here), so "admin can
+      still reach `/admin/users`" is verified only through its registry row
+      (`role=PortalAdmin`, enabled, confirmed by the backfill scan) plus the
+      equivalent PortalAdmin path proven end to end with a provisioned test
+      principal. A real browser sign-in as `admin` is worth doing. Likewise
+      `POST /builds` was proven to *deny* correctly but was never driven to
+      a successful submission, deliberately: that would launch a real ~1–2 h
+      component build.
 
 - [x] 6. Defense in depth and detection
   - [x] 6.1 Remove the non-SRP auth flows from the portal app client
