@@ -1,6 +1,7 @@
 # Detection (YOLO) training in the DDA portal — implementation gap
 
-Status: **implemented (cloud side), awaiting deploy + on-device verification.**
+Status: **implemented and verified on device** (YOLO, YOLO transfer learning and
+RF-DETR; see §"On-device verification (2026-09-22)").
 Everything from capture through labeling works, everything from ONNX packaging
 through device deployment works, and as of 2026-09-13 the portal wiring in
 §4–§8 is built under `.kiro/specs/portal-detection-training/`: `training.py`
@@ -24,13 +25,17 @@ with `normalize: true`, `preserve_aspect: false` and `top_k` — no NMS and no
 in §7. Any detection run (either arch) can now start from a base model: the
 published checkpoint, or a completed portal job's own checkpoint delivered to
 the entry point as `BASE_WEIGHTS_S3` + `BASE_WEIGHTS_MEMBER` (`best.pt` /
-`checkpoint_best_total.pth`). Fine-tuning from an *imported* model is gated on
-the findings in `docs/transfer-learning-spike.md` (Requirement 7 of that spec)
-and is not wired yet. On-device verification of an RF-DETR component and of a
-fine-tuned YOLO (spec task 11) is still pending.
+`checkpoint_best_total.pth`). Fine-tuning from an *imported* model follows the
+findings in `docs/transfer-learning-spike.md` (Requirement 7 of that spec):
+Smart Import keeps an ultralytics `.pt` / RF-DETR `.pth` checkpoint as a
+sidecar and records `metadata.fine_tunable`, so such imports appear in the
+Base model select; ONNX, TorchScript and bare `state_dict` imports are not
+fine-tunable and Model Detail says why. All of this was deployed to the portal
+on 2026-09-18 and **verified on device on 2026-09-22** (see
+§"On-device verification (2026-09-22)" at the end of this document).
 
 Written 2026-09-12 from a working session on the `blue_plate` use case;
-status updated 2026-09-13 and 2026-09-14.
+status updated 2026-09-13, 2026-09-14 and 2026-09-22.
 
 ---
 
@@ -322,3 +327,99 @@ detections and a healthy backend for a sustained period.
   job to `Completed`; the browser's next task fetch then 409s with "Labeling
   job is not in progress". Work is already saved — verify via `submitted_count`
   and the task rows rather than trusting the banner.
+
+---
+
+## On-device verification (2026-09-22)
+
+Spec task 11 of `.kiro/specs/rfdetr-training-and-transfer-learning/`. Run on
+**`jetson-thor1`** (JP7 Orin, `R39 rev 2.0`) rather than the JP7 DLAP, which had
+been off IoT Core since 2026-09-19 (`MQTT_KEEP_ALIVE_TIMEOUT`). thor1 was
+refreshed from LocalServer `arm64JP7` **1.0.25 → 1.0.43** in the same revision
+that added the model, with all 13 pre-existing components and their
+`configurationUpdate` merges preserved verbatim.
+
+Every cloud step went through the deployed portal API (`POST /training`,
+`/training/{id}/package`, `/training/{id}/publish`, `POST /workflows`,
+`/workflows/{id}/validate`, `/workflows/{id}/package`, `POST /deployments`), so
+this also exercises the 2026-09-18 portal deploy end to end.
+
+**Fixture.** A labeled frame from the training manifest
+(`u724uckx-8e87e714…jpg`, 2001×2352, three `blue_plate` boxes) pinned to the
+device's Static_Image_Camera through the portal pin API, so every run sees
+byte-identical input and results are directly comparable.
+
+### (a) RF-DETR small — PASS
+
+| | |
+|---|---|
+| Portal job | `be389241-5105-4ea1-bd14-b1f3513d409e` / `blue-plate-rfdetr-small-20260922-145600` |
+| Request shape | `sagemaker_program=train_rfdetr.py`, env `RFDETR_SIZE=small`, `RESOLUTION=512`, `GRAD_ACCUM=4`, `LR=1e-4`, **no `IOU`** |
+| Training | 1134 s on `ml.g4dn.xlarge`; **test mAP@50 1.0, mAP@50-95 0.958**, P 1.0, R 1.0 (spike baseline was 0.953) |
+| Artifact | `model.onnx` (114 MB, `dets [1,300,4]` + `labels [1,300,2]`), `checkpoint_best_total.pth`, `training_metadata.json` (`top_k 300`, `logits_slots 2`, `background_slot 1`) |
+| Device manifest | stage `rf_detr_object_detection`, **`normalize: true`**, **`preserve_aspect: false`**, **`top_k: 300`**, `output_shapes [[1,300,4],[1,300,2]]`, no `iou_threshold` |
+| Component | `model-blue-plate-rfdetr-small-jetson-xavier-jp7` 1.0.0 |
+
+Triton loaded the model and reported `READY`. Across **12 triggered workflow
+runs, 11 succeeded**, each returning exactly **3 `blue_plate` detections at
+0.951 / 0.940 / 0.939** — bit-identical run to run, as expected for a fixed
+frame. Boxes landed within ~10–45 px of the labeled ground truth *in the
+original 2001×2352 pixel space*, which is the real proof of the geometry
+contract: the device un-normalised RF-DETR's `[0,1]` output and mapped it back
+through a squash (non-letterbox) resize correctly. The backend stayed healthy
+for ~30 min across those runs with no restart and no crash-loop.
+
+### (b) YOLO fine-tuned from a prior portal job — PASS
+
+| | |
+|---|---|
+| Portal job | `99f9c131-7a49-4be7-9ce3-ba98f57366a7` / `blue-plate-yolo-ft-v3-20260922-172408` |
+| Base model | `{kind: 'training_job', ref: '53e37a74…'}` = `imts-blue-plates-detector-v3` → env `BASE_WEIGHTS_S3` = v3's `model.tar.gz`, `BASE_WEIGHTS_MEMBER=best.pt`; both echoed into `training_metadata.json` alongside `num_classes` / `class_names` |
+| Training | 627 s; **test mAP@50 0.995, mAP@50-95 0.8564**, P 0.998, R 1.0 |
+| vs v3 base | v3 was mAP@50 0.9918, mAP@50-95 0.8201, P 0.9804, R 0.9710 — fine-tuning improved every metric in 627 s versus v3's original 100-epoch run |
+| Device manifest | stage `yolo_object_detection`, **`preserve_aspect: true`**, **`iou_threshold: 0.45`**, `normalize: false`, `[1,5,33600]` |
+| Component | `model-blue-plate-yolo-ft-v3-jetson-xavier-jp7` 1.0.0 |
+
+The two manifests together are the byte-level proof of the per-arch packaging
+branch: same code path, opposite geometry contracts (RF-DETR squash + normalise
++ top-k, YOLO letterbox + NMS).
+
+**On-device confidence, identical frame, all three models deployed side by side**
+(top / middle / bottom plate):
+
+| Model | Confidences | Mean | Plates found |
+|---|---|---|---|
+| RF-DETR small | 0.940 / 0.940 / 0.951 | **0.943** | 3/3 |
+| YOLO fine-tuned from v3 | 0.769 / 0.932 / 0.915 | **0.872** | 3/3 |
+| YOLO v3 (base) | 0.789 / 0.817 / 0.835 | **0.814** | 3/3 |
+
+Fine-tuning lifted on-device confidence on two of three plates (+0.115, +0.080)
+and dipped slightly on the third (−0.020), mean **+0.058** — consistent with the
+cloud mAP@50-95 gain. RF-DETR was both highest and most uniform.
+
+### Two pre-existing device bugs surfaced (neither RF-DETR-specific)
+
+1. **The workflow engine cannot see the Static_Image_Camera.**
+   `camera_sync/agent.py:932` calls `build_inventory(..., static_image_pinned=…)`,
+   but the workflow engine's provider at `workflow_engine/runtime.py:292` calls
+   `build_inventory(image_sources, snapshot)` with the flag defaulted to
+   `False`. Since `build_inventory` only appends the virtual
+   `static-image-camera` entry when that flag is true, any workflow camera node
+   bound to `cameraSourceId: "static-image-camera"` is permanently rejected with
+   `missing camera source static-image-camera` and the artifact set is marked
+   invalid — even though the pin exists, `/cameras` lists the camera and the
+   `dda-camera-registry` shadow reports it. Portal-side binding validation
+   passes, so this only appears on hardware. Worked around here by binding to an
+   Image_Source that wraps the camera (`cfg-my6j3zx1`, `cameraId:
+   static-image-camera`), which resolves normally.
+2. **First workflow run after a backend restart loses a Triton readiness race.**
+   The one failed run of twelve died with `emltriton.cpp:196 … Model is not
+   ready for inference` → `Failed to initialize underlying triton server` →
+   GStreamer never reaching `PLAYING`. Later runs are fine. Affects any model,
+   not just RF-DETR; related to the `UNAVAILABLE`-on-failed-load work in
+   `7812407`. Mitigation while it stands: discard the first execution after a
+   restart, or wait for the model's `READY` before triggering.
+
+Also observed, and benign: the backend's restart during deployment exits
+gracefully (code 0) but can take ~2 minutes, because the shutdown waits for the
+staged 16 GiB `qwen3-vl-8b-instruct` vLLM reload to finish first.
