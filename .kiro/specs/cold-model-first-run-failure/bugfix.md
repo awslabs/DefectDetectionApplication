@@ -200,6 +200,78 @@ loading right now", and "broken"
 the system records no signal linking the failure to the model's state at
 failure time, in either the error payload or the run artifacts
 
+**Defect 4 — the same failure class on the deployed-workflow engine path
+(second hardware sighting, 2026-09-22, `jetson-thor1`, LocalServer `arm64JP7`
+1.0.43)**
+
+Recorded while verifying task 11 of
+`.kiro/specs/rfdetr-training-and-transfer-learning/`: of twelve triggered
+executions of one workflow, **eleven succeeded and exactly one failed — the
+first one after a backend container restart**. Device log for the failing run,
+all inside one second:
+
+```
+17:50:36 Resolved workflow model 'blue-plate-rfdetr-small' to deployed Triton model 'model-blue-plate-rfdetr-small-jetson-xavier-jp7'
+17:50:36 Scanned workflow plugin directory /usr/lib/panoramagst (registry changed: True)
+17:50:36 Setting pipeline to PLAYING state
+17:50:36 [emltriton.cpp:196] [CHECKIF status != "READY"]: Model is not ready for inference, wait till it is in READY state ...
+17:50:36 [emltriton.cpp:31]  [CHECKHR CheckModelLoaded() (Unknown error)]
+17:50:36 [emltriton.cpp:435] Failed to initialize underlying triton server
+17:50:36 Pipeline failed to change state to PLAYING, check logs above this.
+```
+
+A later, successful run logged the contrast: `[triton_server.cpp:137] Model
+... is already loaded` then `[triton_server.cpp:389] Model ... status is READY`.
+
+1.13 WHEN the workflow engine resolves a `model_inference` node's model name
+THEN the system consults **only the filesystem** —
+`_loaded_ensemble_models()` lists `_TRITON_MODEL_REPO`
+(`workflow_engine/pipeline_executor.py:124-146`, resolution at `:219-244`,
+logged at `:1391-1396`) — and its own docstring states this is deliberate, so
+"resolution never stalls on server state". A directory exists from the moment
+the model component staged its artifacts, so **the "Resolved workflow model"
+log line carries no readiness information whatsoever**
+
+1.14 WHEN the engine starts the pipeline THEN the system performs no model
+readiness check of any kind: `_preflight` checks only that the registration
+exists and is registered (`pipeline_executor.py:3441-3453`), and
+`_preflight_pipeline_factories` checks only GStreamer element-factory presence
+(`:2612-2660`); `run_pipeline` is then called directly (`:1866`, `:1874`)
+
+1.15 WHEN the pipeline transitions `NULL → READY` THEN the system's only
+readiness check is native and synchronous with **zero wait**: `emltriton`'s
+`Initialize()` calls `_server->LoadModel()` — which merely *enqueues*
+(`edgemlsdk .../triton_server.cpp:128-184`) — and then `CheckModelLoaded()` on
+the very next line (`emltriton.cpp:29-30`, check at `:193-198`), so a model
+whose asynchronous load is still in flight fails instantly and
+`change_state` returns `GST_STATE_CHANGE_FAILURE` (`emltriton.cpp:424-441`)
+
+1.16 WHEN the backend container restarts THEN the system loses all in-process
+Triton load state — the state map lives only in the backend process — while the
+model components' `model_convertor.py` loads are asynchronous and in flight, so
+**every backend restart re-opens the cold window** for every model. This is the
+engine-path instance of Defect 1.10
+
+1.17 WHEN that run fails THEN the system records it once and never retries:
+`_finish_failed` sets `status='failed'` with the error and the failing node
+(`pipeline_executor.py:3483-3496`) and nothing re-dispatches, so a transient
+not-ready condition is indistinguishable from a real pipeline defect in the run
+history
+
+1.18 WHEN an operator reads the failure THEN the system's message is
+`"Pipeline failed to change state to PLAYING, check logs above this."` — naming
+neither the model nor its state — because `emltriton` failed the state change
+without posting a bus ERROR for `gst_pipeline.py`'s drain to enrich
+(`gstreamer/gst_pipeline.py:210-243`). This is Defect 1.3's message on a
+different path
+
+**Correlating signal, not a cause.** The failing run logged `registry changed:
+True` and successful runs `False`. That flag comes from
+`workflow_engine/gst_plugins.py:_scan_registry` (`:278-307`) and means only
+that this process had not yet scanned the workflow plugin directory — i.e. it is
+a reliable fingerprint for "first execution of this backend process" and is
+unrelated to Triton loading.
+
 ### Expected Behavior (Correct)
 
 **Fix 1 — a run against a cold model has a defined, honest outcome**
@@ -274,6 +346,54 @@ portal state lifecycle per 2.8, and (d) warm runs are unchanged per 3.1 — on
 JP7 (`jetson-thor1`, ONNX) and on at least one of JP5/JP6 (DLR) if the shared
 run path is touched
 
+2.11 WHEN the deployed-workflow engine is about to start a pipeline containing
+an `emltriton` element THEN the system SHALL consult the referenced model's
+state before the pipeline is started, and SHALL either wait a bounded time for
+`READY` or fail the execution with an error naming the model and its state —
+the same choice 2.1 offers the classic path, applied to the engine path
+(Defect 4, promoting Requirement 3.11)
+
+2.12 WHEN the engine gates on model state THEN the system SHALL read it through
+the in-process API rather than inferring it from the filesystem:
+`TritonEdgeClient.get_instance().get_model_status(resolved_name)`
+(`dda_triton/triton_edge_client.py:142`) returns one of `UNKNOWN`, `LOADING`,
+`READY`, `UNLOADING`, `UNAVAILABLE`. The design SHALL account for three
+properties of that vocabulary: `UNKNOWN` means "this process has never been
+asked to load it" and so never converges without a load being kicked;
+`UNAVAILABLE` carries a `reason` and is terminal (added by commit `7812407`,
+`triton_server.cpp:186-206`); and the existing `start_model` route **403s**
+unless the state is `UNKNOWN` or `UNAVAILABLE`, so a `LOADING` model must not
+be re-started (`utils/feature_configs_utils.py:279-300`)
+
+2.13 WHEN the engine waits for a model THEN the wait SHALL be bounded and the
+execution row SHALL remain `running` for its duration. Two in-repo precedents
+SHALL be followed rather than inventing a third: the LLM output binding's
+poll on `409 {"state": "loading"}` (`workflow_engine/output_bindings.py:2646-2660`,
+5 s interval, 240 s budget) and `model_convertor.py`'s
+`_wait_for_model_ready` (`:86-107`, 3 s interval, `START_MODEL_READY_TIMEOUT_S`
+budget, short-circuiting on `UNAVAILABLE`/`FAILED`). Retrying the whole
+execution has **no** precedent and SHALL NOT be introduced by this spec
+
+2.14 WHEN the LocalServer backend starts THEN the design SHALL consider
+shrinking the cold window itself rather than only tolerating it, by mirroring
+the implemented pattern in
+`.kiro/specs/vllm-model-reload-after-backend-restart/`: a boot-time reconciler
+(`vllm_runtime/reconciler.py`, started from `app.py:341-342`) that re-drives
+each staged model's load **through the same endpoint the component Startup
+uses**, with bounded per-model retries, per-model failure isolation, an
+unload tombstone so explicit unloads stay honored, and truthful statuses
+instead of an eternal `LOADING`. The Triton analogue re-drives the `model-*`
+directories found in `/aws_dda/dda_triton/triton_model_repo`. A gate (2.11) and
+a reconciler (2.14) address different halves — the gate makes the cold window
+honest, the reconciler makes it short — and the design SHALL state which it
+delivers, and why, rather than silently choosing one
+
+2.15 WHEN the empty-repo case is reached THEN any new readiness call SHALL
+reuse the existing `feature_configs_utils.triton_repo_has_models()` guard,
+because `TritonEdgeClient.get_instance()` creates the native server if absent
+and standing Triton up against an empty repository has a documented hang
+(consistent with Requirement 3.12)
+
 ### Unchanged Behavior (Regression Prevention)
 
 3.1 WHEN a workflow run references a model that IS READY (warm model) THEN
@@ -325,11 +445,13 @@ changes for ONNX SHALL NOT slow down or destabilize the DLR path
 manager, `VllmModel` feature-config entries) THEN the system SHALL CONTINUE
 TO behave identically — the vLLM path is out of scope
 
-3.11 WHEN the deployed-workflow engine (`workflow_engine/python_bridge.py`)
-runs a pipeline THEN its existing behavior SHALL CONTINUE unchanged unless
-the design explicitly extends the model-state gate to it — the reported
-defect and the primary fix target the classic workflow-run path; the engine
-path shares the failure class and MAY be covered, but never regressed
+3.11 WHEN the deployed-workflow engine runs a pipeline THEN its existing
+behavior SHALL CONTINUE unchanged **except** for the model-state gate this
+spec now requires on that path as well — see Defect 4 and Requirements 2.11
+to 2.14 below. This criterion originally deferred the engine path ("MAY be
+covered, but never regressed"); the 2026-09-22 hardware evidence promoted it
+to in-scope, because the engine path is where the failure was next observed
+and it is now the primary deployed run path
 
 3.12 WHEN the LocalServer boots with an empty Triton model repository THEN
 the system SHALL CONTINUE TO skip Triton server creation on
@@ -387,10 +509,83 @@ FOR ALL X WHERE NOT isBugCondition(X) DO
 END FOR
 ```
 
+#### Engine-path condition — the first run of a backend process
+
+The 2026-09-22 sighting gives the bug condition a sharper, reproducible form on
+the engine path: it is not "a freshly deployed model" but **"the first
+execution after the backend process started"**, for any model whose load is
+still in flight.
+
+```pascal
+FUNCTION isEngineBugCondition(E)
+  INPUT: E of type WorkflowExecution
+  OUTPUT: boolean
+
+  RETURN hasTritonElement(documentOf(E))
+     AND modelState(modelOf(E)) ≠ READY
+     AND loadable(modelOf(E))
+END FUNCTION
+```
+
+```pascal
+// Property 3: Fix Checking - engine executions against a not-yet-ready model
+// have a defined, honest outcome, and no run is silently lost
+FOR ALL E WHERE isEngineBugCondition(E) DO
+  result ← execute'(E)
+  ASSERT (result IS Success AND modelState'(modelOf(E)) = READY)      // 2.11(a)
+      OR (result IS ColdModelError
+          AND result.error NAMES modelOf(E)
+          AND result.error NAMES modelState(modelOf(E))
+          AND result.error ≠ "Pipeline failed to change state to PLAYING")  // 2.11(b), 1.18
+  ASSERT waitDuration(result) ≤ configuredBudget                       // 2.13
+  ASSERT executionRow'(E).status ∈ {running, succeeded, failed}        // 2.13
+END FOR
+```
+
+```pascal
+// Property 4: Preservation - warm engine runs are byte-identical
+FOR ALL E WHERE NOT isEngineBugCondition(E) DO
+  ASSERT runPipelineCalls'(E) = runPipelineCalls(E)   // same launch string, same args
+  ASSERT executionOutcome'(E) = executionOutcome(E)
+  ASSERT artifactLayout'(E) = artifactLayout(E)
+END FOR
+```
+
+`runPipelineCalls` is observable through the existing `FakePipelineManager`
+doubles injected via `_pipeline_manager_factory`
+(`test/backend-test/output_bindings_fixes/executor_harness.py:89-101`,
+`test/backend-test/workflow_engine/test_workflow_aravis_executor.py:121-131`),
+which also make "the gate ran before `run_pipeline`" and "`run_pipeline` was
+never called" directly assertable. No existing test fakes Triton readiness on
+the workflow path — `get_model_status` appears in no executor test — so a new
+fake is required; the closest models to copy are the vLLM reload fakes at
+`test/backend-test/vllm_model_reload/fakes.py`.
+
 **Note on exploration order (bugfix methodology).** The exploration test for
 Property 1 MUST be written and run against UNFIXED code first — it is
 expected to FAIL, confirming the bug and pinning the exact failure point
-(the `emltriton` cold-start interaction is hypothesis-flagged above).
-Preservation tests for Property 2 MUST be written observation-first against
-UNFIXED code and PASS before any fix lands. Final validation of both
-properties is on real hardware per 2.10.
+(the `emltriton` cold-start interaction was hypothesis-flagged above and is now
+confirmed: `Initialize()` enqueues the load and checks readiness on the next
+line, `emltriton.cpp:29-30`). Property 3's exploration test likewise MUST fail
+against unfixed code. Preservation tests for Properties 2 and 4 MUST be written
+observation-first against UNFIXED code and PASS before any fix lands. Final
+validation of all four properties is on real hardware per 2.10 — and for the
+engine path the reproduction is cheap and deterministic: restart the backend
+container, trigger the workflow once, observe the failure; today that is
+`1 of 12` runs, and after the fix it must be `0 of 12`.
+
+---
+
+## Revision history
+
+- **2026-08-14** — original report, classic workflow-run path
+  (`POST /workflows/{id}/run`), `jetson-thor1`, three models.
+- **2026-09-22** — second hardware sighting on the **deployed-workflow engine**
+  path during task 11 of `.kiro/specs/rfdetr-training-and-transfer-learning/`
+  (1 of 12 executions failed, the first after a backend container restart).
+  Added Defect 4 (1.13-1.18), Requirements 2.11-2.15, Properties 3 and 4, and
+  promoted Requirement 3.11 from "MAY be covered" to in-scope. The root cause
+  is now confirmed rather than inferred. Full record in
+  `docs/detection-training-gap.md` §"On-device verification (2026-09-22)".
+  Still requirements-only: no design.md and no tasks.md exist, so **nothing in
+  this spec is implemented**.

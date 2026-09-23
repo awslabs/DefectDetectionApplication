@@ -412,6 +412,12 @@ cloud mAP@50-95 gain. RF-DETR was both highest and most uniform.
    passes, so this only appears on hardware. Worked around here by binding to an
    Image_Source that wraps the camera (`cfg-my6j3zx1`, `cameraId:
    static-image-camera`), which resolves normally.
+   Specced as `.kiro/specs/static-camera-workflow-binding-invisible/`, which
+   also covers a second-order defect found while writing it up: fixing only the
+   missing argument makes the workflow register but every run then fails with
+   `no camera id`, because the virtual entry's `params` is empty by design and
+   the device never reads the identity from `capabilities.staticImage` — the
+   device-side mirror of a Portal defect already fixed frontend-only.
 2. **First workflow run after a backend restart loses a Triton readiness race.**
    The one failed run of twelve died with `emltriton.cpp:196 … Model is not
    ready for inference` → `Failed to initialize underlying triton server` →
@@ -419,6 +425,13 @@ cloud mAP@50-95 gain. RF-DETR was both highest and most uniform.
    not just RF-DETR; related to the `UNAVAILABLE`-on-failed-load work in
    `7812407`. Mitigation while it stands: discard the first execution after a
    restart, or wait for the model's `READY` before triggering.
+   This is the same defect class as the existing
+   `.kiro/specs/cold-model-first-run-failure/` spec, which was filed from the
+   classic run path on 2026-08-14 and had deferred the engine path in its
+   Requirement 3.11. That spec has been extended with this sighting (Defect 4,
+   Requirements 2.11-2.15) rather than duplicated, and its root cause is now
+   confirmed: `emltriton`'s `Initialize()` enqueues the load and checks
+   readiness on the very next line, so a load still in flight fails instantly.
 
 Also observed, and benign: the backend's restart during deployment exits
 gracefully (code 0) but can take ~2 minutes, because the shutdown waits for the
