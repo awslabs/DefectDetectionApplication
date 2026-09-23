@@ -38,7 +38,7 @@ Image_Source — delivered by portal deployment
 
 ## (b) Repeated runs, real inference, backend healthy
 
-10 engine-path executions between 03:43:41Z and 04:18:04Z, **all `completed`,
+11 engine-path executions between 03:43:41Z and 04:29:20Z, **all `completed`,
 0 failed** (`workflow_executions` query, `started_at >= 1790135021`). Durations
 0–2 s. Every run produced the same three detections:
 
@@ -50,9 +50,15 @@ Byte-identical to the pre-fix workaround path (the wrapping Image_Source), i.e.
 the fix changes how the camera is found, not what is inferred.
 
 Container at the end of the session: `Status=running`, `Health=healthy`,
-`RestartCount=0`, `OOMKilled=false`. Three backend restarts happened during the
-session and all were deliberate (`docker restart`, for the cold-model spec's
-reproduction); none was a crash.
+`RestartCount=0`, `OOMKilled=false`, up continuously since 04:16:50Z — checked
+again at 04:23:56Z and 04:29:04Z, both healthy with all 8 registrations
+`registered`. The longest unbroken window was 03:47:03Z→04:16:48Z (~30 min, 9
+runs). Three backend restarts happened during the session and all were deliberate
+(`docker restart`, for the cold-model spec's reproduction); none was a crash.
+
+A last run at 04:29:20Z, after ~12 minutes idle, completed with the same three
+detections and logged no readiness line at all (warm path, see the cold-model
+spec's §(c)).
 
 ## (c) Unpinned behaviour matches design.md Decision 3
 

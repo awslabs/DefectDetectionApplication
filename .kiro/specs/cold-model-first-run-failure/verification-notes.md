@@ -29,7 +29,7 @@ In every cycle `Setting pipeline to PLAYING state` follows the gate's success,
 and the string `Pipeline failed to change state to PLAYING` does **not** appear
 anywhere in the post-fix log.
 
-**Run tally.** 10 engine executions between 03:43:41Z and 04:18:04Z, all
+**Run tally.** 11 engine executions between 03:43:41Z and 04:29:20Z, all
 `completed`, **0 failed** — three of them the first trigger after a restart, the
 exact case that failed before. Pre-fix baseline on this device: 1 of 12
 executions failed on 2026-09-22 (`failed` at 18:20:26Z, error
@@ -69,20 +69,24 @@ generic error plus a relocated input.
 
 ## (c) Warm behaviour unchanged
 
-The 7 warm engine runs in the session logged **no** `dda_triton.model_readiness`
+The 8 warm engine runs in the session logged **no** `dda_triton.model_readiness`
 line at all — the gate saw `READY` and returned immediately. Its only trace on
 the warm path is one native
 `[triton_server.cpp:389] Model ... status is READY` line from the status read,
 emitted 0.3 ms after `Resolved workflow model ...` and 19 ms before
 `Setting pipeline to PLAYING state`. Warm run durations stayed at 0–1 s, matching
-pre-fix runs.
+pre-fix runs. The last of them (`a9410c8d`, 04:29:20Z) came after ~12 minutes
+idle and behaved the same — a per-process load state that is still `READY` costs
+nothing.
 
 ## (d) Backend health across the session
 
 `RestartCount=0`, `Status=running`, `Health=healthy`, `OOMKilled=false`,
-`ExitCode=0` at the end. All three restarts were deliberate; there was no crash,
-no crash-loop and no automatic restart across 3 restarts and 11 runs (10 engine +
-1 classic) spanning ~35 minutes.
+`ExitCode=0` at the end, up continuously since 04:16:50Z and re-checked healthy
+at 04:23:56Z and 04:29:04Z. All three restarts were deliberate; there was no
+crash, no crash-loop and no automatic restart across 3 restarts and 12 runs (11
+engine + 1 classic) spanning ~46 minutes. Longest unbroken window:
+03:47:03Z→04:16:48Z (~30 min, 9 runs).
 
 ## (e) Observed cold-window durations — input to the deferred reconciler decision
 
