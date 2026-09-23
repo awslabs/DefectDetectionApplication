@@ -15,20 +15,27 @@ import type { SideNavigationProps } from '@cloudscape-design/components';
 import { buildNavigationItems } from './Layout';
 import type { UserRole } from '../types';
 
-/** Texts of the link items, in order (dividers dropped). */
+/** Top-level entries with their own href: plain links and expandable link
+ *  groups (Node Designer became a group when Git connections landed). */
+type TopLevelEntry = SideNavigationProps.Link | SideNavigationProps.ExpandableLinkGroup;
+
+function topLevelEntries(items: SideNavigationProps.Item[]): TopLevelEntry[] {
+  return items.filter(
+    (item): item is TopLevelEntry =>
+      item.type === 'link' || item.type === 'expandable-link-group'
+  );
+}
+
+/** Texts of the top-level entries, in order (dividers dropped). */
 function linkTexts(items: SideNavigationProps.Item[]): string[] {
-  return items
-    .filter((item): item is SideNavigationProps.Link => item.type === 'link')
-    .map((item) => item.text);
+  return topLevelEntries(items).map((item) => item.text);
 }
 
 function hrefFor(
   items: SideNavigationProps.Item[],
   text: string
 ): string | undefined {
-  return items
-    .filter((item): item is SideNavigationProps.Link => item.type === 'link')
-    .find((item) => item.text === text)?.href;
+  return topLevelEntries(items).find((item) => item.text === text)?.href;
 }
 
 const ADMIN_GROUP_ITEMS = ['Plugin Review', 'Build Fleet', 'Settings'];

@@ -17,7 +17,17 @@ import { beginRequest, endRequest } from '../../services/loadingBus';
 import type { GstPropertiesResponse } from './scan';
 import type {
   AdjustRevisionResponse,
+  CreateGitConnectionRequest,
   GenerationTurnState,
+  GitConnection,
+  GitLink,
+  NewVersionRequest,
+  PullMode,
+  SaveSourceRequest,
+  SaveSourceResponse,
+  SourceTreeResponse,
+  SyncOperation,
+  UpdateGitConnectionRequest,
   NodeTypeDetail,
   NodeTypeSummary,
   NodeTypeRegistrationDeclaration,
@@ -158,9 +168,21 @@ export const nodeDesignerApi = {
   },
 
   /**
+   * GET .../source?all=true — the Source_Editor's bulk read: every text
+   * file's content in one response, binary/oversize files listed without
+   * content (custom-node-source-lifecycle 1.1, 1.2).
+   */
+  getSourceTree(pluginId: string, version: number): Promise<SourceTreeResponse> {
+    return request(
+      `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/source?all=true`
+    );
+  },
+
+  /**
    * PUT .../source — persist the complete (original or edited) scaffold
    * file map ahead of a build (Requirement 1.6). Non-buildable source
-   * is rejected with 422 SCAFFOLD_INVALID listing every defect.
+   * is rejected with 422 SCAFFOLD_INVALID listing every defect. Without
+   * a mode the map replaces the whole tree (the wizards' contract).
    */
   putVersionSource(
     pluginId: string,
@@ -170,6 +192,38 @@ export const nodeDesignerApi = {
     return request(
       `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/source`,
       { method: 'PUT', body: JSON.stringify({ files }) }
+    );
+  },
+
+  /**
+   * PUT .../source with the Source_Editor's save request: merge or
+   * replace mode, deletions, and the optimistic Source_Revision check
+   * (custom-node-source-lifecycle 1.3-1.5, 1.8). 409 SOURCE_LOCKED on
+   * non-dev versions, 409 SOURCE_REVISION_CONFLICT on a stale revision.
+   */
+  saveSource(
+    pluginId: string,
+    version: number,
+    body: SaveSourceRequest
+  ): Promise<SaveSourceResponse> {
+    return request(
+      `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/source`,
+      { method: 'PUT', body: JSON.stringify(body) }
+    );
+  },
+
+  /**
+   * POST .../new-version — save as new version: copy the version's tree
+   * to latest+1 with the edits applied (custom-node-source-lifecycle 1.6).
+   */
+  createNewVersion(
+    pluginId: string,
+    version: number,
+    body: NewVersionRequest = {}
+  ): Promise<{ plugin: PluginVersionDetail; source_revision: number }> {
+    return request(
+      `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/new-version`,
+      { method: 'POST', body: JSON.stringify(body) }
     );
   },
 
@@ -193,6 +247,117 @@ export const nodeDesignerApi = {
     return request(
       `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/builds`
     );
+  },
+
+  /**
+   * POST .../architectures — Architecture_Addition: append Target_
+   * Architectures to the version and build only those
+   * (custom-node-source-lifecycle 6.1-6.4).
+   */
+  addArchitectures(
+    pluginId: string,
+    version: number,
+    architectures: string[]
+  ): Promise<PluginBuildsView> {
+    return request(
+      `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/architectures`,
+      { method: 'POST', body: JSON.stringify({ architectures }) }
+    );
+  },
+
+  // --------------------------------------------------------- Git sync
+  // (git_sync.py, custom-node-source-lifecycle Requirements 2-4)
+
+  listGitConnections(usecaseId: string): Promise<{ connections: GitConnection[]; count: number }> {
+    return request(`/git-connections?usecase_id=${encodeURIComponent(usecaseId)}`);
+  },
+
+  /** 202: the connection starts `verifying`; poll the returned operation. */
+  createGitConnection(
+    body: CreateGitConnectionRequest
+  ): Promise<{ connection: GitConnection; operation: SyncOperation }> {
+    return request('/git-connections', { method: 'POST', body: JSON.stringify(body) });
+  },
+
+  getGitConnection(connectionId: string): Promise<{ connection: GitConnection }> {
+    return request(`/git-connections/${encodeURIComponent(connectionId)}`);
+  },
+
+  /** 200 for metadata-only changes; 202 with an operation when the URL,
+   * provider, or token changed (re-verification). */
+  updateGitConnection(
+    connectionId: string,
+    body: UpdateGitConnectionRequest
+  ): Promise<{ connection: GitConnection; operation?: SyncOperation }> {
+    return request(`/git-connections/${encodeURIComponent(connectionId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  },
+
+  deleteGitConnection(connectionId: string): Promise<{ deleted: boolean; connection_id: string }> {
+    return request(`/git-connections/${encodeURIComponent(connectionId)}`, { method: 'DELETE' });
+  },
+
+  verifyGitConnection(
+    connectionId: string
+  ): Promise<{ connection: GitConnection; operation: SyncOperation }> {
+    return request(`/git-connections/${encodeURIComponent(connectionId)}/verify`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  setGitLink(
+    pluginId: string,
+    version: number,
+    body: { connection_id: string; branch?: string; path?: string }
+  ): Promise<{ git: GitLink }> {
+    return request(`/plugins/${encodeURIComponent(pluginId)}/versions/${version}/git`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  },
+
+  removeGitLink(pluginId: string, version: number): Promise<{ git: null }> {
+    return request(`/plugins/${encodeURIComponent(pluginId)}/versions/${version}/git`, {
+      method: 'DELETE',
+    });
+  },
+
+  pushGit(
+    pluginId: string,
+    version: number,
+    body: { message?: string; force?: boolean } = {}
+  ): Promise<{ operation: SyncOperation }> {
+    return request(`/plugins/${encodeURIComponent(pluginId)}/versions/${version}/git/push`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  pullGit(
+    pluginId: string,
+    version: number,
+    body: { ref?: string; mode: PullMode }
+  ): Promise<{ operation: SyncOperation }> {
+    return request(`/plugins/${encodeURIComponent(pluginId)}/versions/${version}/git/pull`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  },
+
+  listSyncOperations(
+    pluginId: string,
+    version: number
+  ): Promise<{ operations: SyncOperation[]; count: number }> {
+    return request(
+      `/plugins/${encodeURIComponent(pluginId)}/versions/${version}/git/operations`
+    );
+  },
+
+  getSyncOperation(operationId: string): Promise<{ operation: SyncOperation }> {
+    return request(`/git-sync-operations/${encodeURIComponent(operationId)}`);
   },
 
   /**

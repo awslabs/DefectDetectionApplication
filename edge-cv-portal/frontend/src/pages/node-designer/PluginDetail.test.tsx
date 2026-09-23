@@ -15,24 +15,45 @@ const {
   getPlugin,
   getBuilds,
   getVersionSource,
+  getSourceTree,
   deletePlugin,
   listNodeTypes,
   promoteVersion,
   demoteVersion,
+  listGitConnections,
+  listSyncOperations,
+  authRole,
 } = vi.hoisted(() => ({
   navigateMock: vi.fn(),
   getPlugin: vi.fn(),
   getBuilds: vi.fn(),
   getVersionSource: vi.fn(),
+  getSourceTree: vi.fn(),
   deletePlugin: vi.fn(),
   listNodeTypes: vi.fn(),
   promoteVersion: vi.fn(),
   demoteVersion: vi.fn(),
+  listGitConnections: vi.fn(),
+  listSyncOperations: vi.fn(),
+  authRole: { value: 'UseCaseAdmin' as string },
+}));
+
+vi.mock('../../contexts/AuthContext', () => ({
+  useAuth: () => ({
+    user: {
+      user_id: 'u-1',
+      email: 'user@example.com',
+      username: 'user',
+      role: authRole.value,
+      is_super_user: false,
+    },
+  }),
 }));
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => navigateMock,
   useParams: () => ({ pluginId: 'p-1' }),
+  useLocation: () => ({ state: null, pathname: '/node-designer/plugins/p-1' }),
 }));
 
 vi.mock('./api', () => ({
@@ -40,10 +61,13 @@ vi.mock('./api', () => ({
     getPlugin,
     getBuilds,
     getVersionSource,
+    getSourceTree,
     deletePlugin,
     listNodeTypes,
     promoteVersion,
     demoteVersion,
+    listGitConnections,
+    listSyncOperations,
   },
 }));
 
@@ -64,6 +88,8 @@ function importedDetail(
     artifacts: {},
     component: {},
     source_s3_prefix: 'plugin-sources/uc-1/p-1/1/',
+    source_revision: 1,
+    stale_architectures: [],
     created_by: 'user-1',
     created_at: 1,
     updated_at: 1,
@@ -86,8 +112,12 @@ async function renderDetail(plugin: PluginVersionDetail) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  authRole.value = 'UseCaseAdmin';
   getBuilds.mockResolvedValue(null);
   getVersionSource.mockResolvedValue({ files: [] });
+  getSourceTree.mockResolvedValue({ source_revision: 1, files: [], count: 0, truncated: false });
+  listGitConnections.mockResolvedValue({ connections: [], count: 0 });
+  listSyncOperations.mockResolvedValue({ operations: [], count: 0 });
   listNodeTypes.mockResolvedValue({ nodeTypes: [], count: 0 });
 });
 
@@ -685,7 +715,7 @@ describe('PluginDetail record deletion', () => {
     // Scope to the confirmation dialog: the modal's confirm button
     // reads "Delete" like other buttons on the page.
     const dialog = (await screen.findByText(modalMessage)).closest(
-      '[class*="awsui_dialog"]'
+      '[role="dialog"]'
     ) as HTMLElement;
     expect(dialog).not.toBeNull();
     return dialog;
@@ -707,10 +737,9 @@ describe('PluginDetail record deletion', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
 
     // Cloudscape keeps the closed modal mounted (marked hidden), so
-    // closed means the dialog carries the awsui hidden marker again.
-    await waitFor(() =>
-      expect(screen.getByRole('dialog').className).toContain('hidden')
-    );
+    // closed means this dialog carries the awsui hidden marker again
+    // (the page holds other, unrelated confirmation modals).
+    await waitFor(() => expect(dialog.className).toContain('hidden'));
     expect(deletePlugin).not.toHaveBeenCalled();
     expect(navigateMock).not.toHaveBeenCalled();
   });

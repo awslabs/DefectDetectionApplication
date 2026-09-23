@@ -39,6 +39,7 @@ import RegistrationWizard from './pages/node-designer/RegistrationWizard';
 import ReviewQueue from './pages/node-designer/ReviewQueue';
 import SimulatorView from './pages/node-designer/SimulatorView';
 import ImportView from './pages/node-designer/ImportView';
+import GitConnections from './pages/node-designer/GitConnections';
 import BuildsPage from './pages/builds/BuildsPage';
 import BuildDetail from './pages/builds/BuildDetail';
 import SyntheticData from './pages/synthetic/SyntheticData';
@@ -151,6 +152,7 @@ function App() {
                 <Route path="node-designer/create" element={<CreateWizard />} />
                 <Route path="node-designer/generate" element={<GeneratePanel />} />
                 <Route path="node-designer/import" element={<ImportView />} />
+                <Route path="node-designer/git-connections" element={<GitConnections />} />
                 <Route path="node-designer/plugins/:pluginId" element={<PluginDetail />} />
                 <Route path="node-designer/plugins/:pluginId/register" element={<RegistrationWizard />} />
                 <Route path="node-designer/review" element={<ReviewQueue />} />

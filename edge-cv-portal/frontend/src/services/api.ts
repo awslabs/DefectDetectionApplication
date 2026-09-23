@@ -100,12 +100,27 @@ export class ApiError extends Error {
 
 // Code_Assistant API types (custom-node-code-assist).
 
-/** Runtime entry-point contract of the node type being edited. */
+/**
+ * Runtime entry-point contract of the node type being edited. `plugin_source`
+ * (custom-node-source-lifecycle 5.9) covers the non-Python files of a
+ * Plugin_Scaffold: the complete replacement content of one file.
+ */
 export type CodeAssistContract =
   | 'process_frame'
   | 'process_frame_or_handle'
   | 'frame_hook'
-  | 'produce_frame';
+  | 'produce_frame'
+  | 'plugin_source';
+
+/** Error material attached to a code-assist request (custom-node-source-lifecycle 5). */
+export interface CodeAssistDiagnostics {
+  kind: 'build' | 'simulation' | 'user';
+  /** The failing Target_Architecture for build diagnostics. */
+  architecture?: string;
+  /** At most 16 KiB; the panel keeps the tail and flags truncation. */
+  text: string;
+  truncated?: boolean;
+}
 
 /** One `POST /code-assist` request body. */
 export interface CodeAssistRequest {
@@ -119,7 +134,13 @@ export interface CodeAssistRequest {
   context?: {
     nodeType?: string;
     parameters?: { name: string; param_type: string; description?: string }[];
+    /** Source_Editor multi-file context (custom-node-source-lifecycle 5.6). */
+    active_file?: string;
+    files?: Record<string, string>;
+    file_paths?: string[];
+    kind?: 'scaffold' | 'generated' | 'imported';
   };
+  diagnostics?: CodeAssistDiagnostics;
 }
 
 /** Successful code-assist result; nothing is persisted server-side. */
@@ -128,6 +149,8 @@ export interface CodeAssistResponse {
   notes: string;
   model_id: string;
   contract: CodeAssistContract;
+  /** The Source_Tree file the code applies to (node-designer surface, 5.7). */
+  target_file?: string;
 }
 
 // User admin types (portal-user-manager).

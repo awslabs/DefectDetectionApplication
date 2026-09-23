@@ -511,7 +511,32 @@ export default function SimulatorView() {
             {/* Failure/timeout display (7.6, 7.7): the partial results the
                 harness flushed before termination stay rendered below. */}
             {failure && (
-              <Alert type="error" header={failure.header}>
+              <Alert
+                type="error"
+                header={failure.header}
+                action={
+                  // "Fix with AI" (custom-node-source-lifecycle 5.2): hand
+                  // the captured error output (or the failure message when
+                  // the harness flushed none) to the Detail_Page's
+                  // Code_Assistant as a simulation Diagnostic_Context.
+                  !failure.timeout && plugin ? (
+                    <Button
+                      onClick={() =>
+                        navigate(`/node-designer/plugins/${plugin.plugin_id}`, {
+                          state: {
+                            assistDiagnostics: {
+                              kind: 'simulation',
+                              text: failure.errorOutput ?? failure.message,
+                            },
+                          },
+                        })
+                      }
+                    >
+                      Fix with AI
+                    </Button>
+                  ) : undefined
+                }
+              >
                 <SpaceBetween size="xs">
                   <div>{failure.message}</div>
                   {failure.errorOutput && (

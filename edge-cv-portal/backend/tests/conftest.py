@@ -82,6 +82,12 @@ TEST_ENV = {
     }),
     # PLUGIN_SIGNING_KEY_ARN is set inside the aws_stack fixture (the
     # moto KMS key only exists once the mock is active).
+    # git_sync.py (custom-node-source-lifecycle)
+    "GIT_CONNECTIONS_TABLE": "test-git-connections",
+    "GIT_SYNC_OPERATIONS_TABLE": "test-git-sync-operations",
+    "GIT_SYNC_PROJECT_NAME": "dda-plugin-git-sync",
+    "GIT_SECRET_PREFIX": "dda-portal/git-connections",
+    "PLUGIN_GIT_SYNC_PREFIX": "plugin-git-sync",
     # dda_labeling.py (dda-data-labeling)
     "LABELING_TEAMS_TABLE": "test-labeling-teams",
     "LABELING_JOBS_TABLE": "test-labeling-jobs",
@@ -102,6 +108,44 @@ for _path in (_SHARED_LAYER, _FUNCTIONS_DIR):
 # shadow the host interpreter's own packages during local test runs.
 if _WORKFLOW_CORE_LAYER not in sys.path:
     sys.path.append(_WORKFLOW_CORE_LAYER)
+
+
+class FullScanTable:
+    """
+    Test handle on a session-shared table whose `scan()` pages to the end.
+
+    The audit log is written by every module of the directory run, so it
+    grows past DynamoDB's 1 MB scan page (moto enforces the same limit).
+    Tests assert on `tables.audit_log.scan()["Items"]` in dozens of places;
+    a single-page scan silently drops the entries written last and turns
+    them into order-dependent failures. Auto-pagination applies only when
+    the caller asked for the whole table (no `Limit` / `ExclusiveStartKey`).
+    Every other attribute is the underlying boto3 Table's.
+    """
+
+    def __init__(self, table):
+        self._table = table
+
+    def __getattr__(self, name):
+        return getattr(self._table, name)
+
+    def scan(self, **kwargs):
+        if "Limit" in kwargs or "ExclusiveStartKey" in kwargs:
+            return self._table.scan(**kwargs)
+        response = self._table.scan(**kwargs)
+        items = list(response.get("Items", []))
+        count = response.get("Count", len(items))
+        scanned = response.get("ScannedCount", count)
+        while response.get("LastEvaluatedKey"):
+            response = self._table.scan(
+                ExclusiveStartKey=response["LastEvaluatedKey"], **kwargs)
+            items.extend(response.get("Items", []))
+            count += response.get("Count", 0)
+            scanned += response.get("ScannedCount", 0)
+        merged = dict(response)
+        merged.pop("LastEvaluatedKey", None)
+        merged.update(Items=items, Count=count, ScannedCount=scanned)
+        return merged
 
 
 def _create_tables(dynamodb):
@@ -344,6 +388,42 @@ def _create_tables(dynamodb):
     )
 
 
+def _create_git_sync_tables(dynamodb):
+    """git_sync.py tables (custom-node-source-lifecycle design data model)."""
+    dynamodb.create_table(
+        TableName=TEST_ENV["GIT_CONNECTIONS_TABLE"],
+        KeySchema=[{"AttributeName": "connection_id", "KeyType": "HASH"}],
+        AttributeDefinitions=[
+            {"AttributeName": "connection_id", "AttributeType": "S"},
+            {"AttributeName": "usecase_id", "AttributeType": "S"},
+        ],
+        GlobalSecondaryIndexes=[{
+            "IndexName": "usecase-connections-index",
+            "KeySchema": [{"AttributeName": "usecase_id", "KeyType": "HASH"}],
+            "Projection": {"ProjectionType": "ALL"},
+        }],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    dynamodb.create_table(
+        TableName=TEST_ENV["GIT_SYNC_OPERATIONS_TABLE"],
+        KeySchema=[{"AttributeName": "operation_id", "KeyType": "HASH"}],
+        AttributeDefinitions=[
+            {"AttributeName": "operation_id", "AttributeType": "S"},
+            {"AttributeName": "plugin_id", "AttributeType": "S"},
+            {"AttributeName": "started_at", "AttributeType": "N"},
+        ],
+        GlobalSecondaryIndexes=[{
+            "IndexName": "plugin-operations-index",
+            "KeySchema": [
+                {"AttributeName": "plugin_id", "KeyType": "HASH"},
+                {"AttributeName": "started_at", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        }],
+        BillingMode="PAY_PER_REQUEST",
+    )
+
+
 @pytest.fixture(scope="session")
 def aws_stack():
     """moto-backed AWS with the workflow tables, bucket, and real modules."""
@@ -355,6 +435,7 @@ def aws_stack():
         dynamodb = boto3.client("dynamodb", region_name=REGION)
         s3 = boto3.client("s3", region_name=REGION)
         _create_tables(dynamodb)
+        _create_git_sync_tables(dynamodb)
         s3.create_bucket(Bucket=TEST_ENV["PORTAL_ARTIFACTS_BUCKET"])
 
         # plugin_builds.py: the asymmetric portal signing key (ECDSA
@@ -371,6 +452,8 @@ def aws_stack():
         # lightweight repository-fetch project (async import StartBuild).
         project_names = list(json.loads(TEST_ENV["BUILD_PROJECTS_JSON"]).values())
         project_names.append(TEST_ENV["FETCH_PROJECT_NAME"])
+        # git_sync.py's verify/push/pull runner project.
+        project_names.append(TEST_ENV["GIT_SYNC_PROJECT_NAME"])
         for project_name in project_names:
             codebuild.create_project(
                 name=project_name,
@@ -409,7 +492,7 @@ def aws_stack():
                             "plugin_builds", "plugin_simulator",
                             "custom_node_types", "plugin_components",
                             "workflow_packaging", "node_catalog_resolution",
-                            "shared_utils"):
+                            "git_sync", "shared_utils"):
             sys.modules.pop(module_name, None)
         import workflows  # noqa: F401
         import plugin_records  # noqa: F401
@@ -417,6 +500,7 @@ def aws_stack():
         import plugin_builds  # noqa: F401
         import plugin_simulator  # noqa: F401
         import custom_node_types  # noqa: F401
+        import git_sync  # noqa: F401
 
         resource = boto3.resource("dynamodb", region_name=REGION)
         yield SimpleNamespace(
@@ -426,6 +510,7 @@ def aws_stack():
             plugin_builds=plugin_builds,
             plugin_simulator=plugin_simulator,
             custom_node_types=custom_node_types,
+            git_sync=git_sync,
             s3=s3,
             kms=kms,
             codebuild=codebuild,
@@ -442,7 +527,9 @@ def aws_stack():
                 module_index_cache=resource.Table(TEST_ENV["MODULE_INDEX_CACHE_TABLE"]),
                 simulation_runs=resource.Table(TEST_ENV["SIMULATION_RUNS_TABLE"]),
                 test_datasets=resource.Table(TEST_ENV["TEST_DATASETS_TABLE"]),
-                audit_log=resource.Table(TEST_ENV["AUDIT_LOG_TABLE"]),
+                git_connections=resource.Table(TEST_ENV["GIT_CONNECTIONS_TABLE"]),
+                git_sync_operations=resource.Table(TEST_ENV["GIT_SYNC_OPERATIONS_TABLE"]),
+                audit_log=FullScanTable(resource.Table(TEST_ENV["AUDIT_LOG_TABLE"])),
                 labeling_teams=resource.Table(TEST_ENV["LABELING_TEAMS_TABLE"]),
                 labeling_jobs=resource.Table(TEST_ENV["LABELING_JOBS_TABLE"]),
                 labeling_tasks=resource.Table(TEST_ENV["LABELING_TASKS_TABLE"]),

@@ -138,7 +138,23 @@ export function buildNavigationItems(
           },
         ]
       : []),
-    { type: 'link' as const, text: 'Node Designer', href: '/node-designer' },
+    // Node Designer: the plugin library plus the Use_Case Git connections
+    // that plugin source is pushed to / pulled from
+    // (custom-node-source-lifecycle Requirement 2.9: every role with
+    // node-designer read may view connections; mutations are gated on
+    // the page itself).
+    {
+      type: 'expandable-link-group' as const,
+      text: 'Node Designer',
+      href: '/node-designer',
+      items: [
+        {
+          type: 'link' as const,
+          text: 'Git connections',
+          href: '/node-designer/git-connections',
+        },
+      ],
+    },
     { type: 'link' as const, text: 'Components', href: '/components' },
     // The builds surface is limited to the roles holding `builds:*`
     // (DataScientist, UseCaseAdmin, PortalAdmin) — Req 2.5, 2.6.

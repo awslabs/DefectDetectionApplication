@@ -1,13 +1,17 @@
 /**
- * Plugin_Record detail (custom-node-designer, Requirements 3.5, 10.2).
+ * Plugin_Record detail (custom-node-designer, Requirements 3.5, 10.2;
+ * custom-node-source-lifecycle Requirements 1, 3-6, 8.3, 9.2).
  *
  * One record's latest version: lifecycle and classification badges,
- * per-arch build status with the failing build's log excerpt, version
- * history, provenance, and source file inspection.
+ * per-arch build status with the failing build's log excerpt (stale
+ * markers, "Fix with AI", retry), the Source_Editor with save / save-as-
+ * new-version / rebuild, the Add-architectures action, the Plugin_Component
+ * summary, the Git sync panel, version history, and provenance.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import {
   Alert,
+  Badge,
   Box,
   Button,
   ColumnLayout,
@@ -16,15 +20,17 @@ import {
   Header,
   Input,
   Multiselect,
-  Select,
-  SelectProps,
   SpaceBetween,
   Spinner,
   StatusIndicator,
   Table,
 } from '@cloudscape-design/components';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import ConfirmationModal from '../../components/ConfirmationModal';
+import type { CodeAssistDiagnosticsState } from '../../components/code-assist/codeAssistState';
+import { useAuth } from '../../contexts/AuthContext';
+import { ApiError } from '../../services/api';
+import { canManageNodeDesigner } from '../../utils/nodeDesignerAccess';
 import { nodeDesignerApi } from './api';
 import {
   ARCHITECTURE_LABELS,
@@ -33,8 +39,11 @@ import {
   PluginBuildsView,
   PluginRecordSummary,
   PluginVersionDetail,
+  SyncOperation,
 } from './types';
 import { BuildStatusIndicator, ClassificationBadge, LifecycleBadge, logExcerpt } from './badges';
+import { pickFileForDiagnostics } from './diagnosticsFile';
+import GitSyncPanel from './GitSyncPanel';
 import {
   adjustRevisionError,
   archRevisionLabel,
@@ -43,9 +52,38 @@ import {
   platformWarningMessage,
 } from './importFlow';
 import RegistrationPrompt from './RegistrationPrompt';
+import SourceEditor from './SourceEditor';
+import {
+  emptyEditorState,
+  fromSourceTree,
+  isDirty,
+  sourceEditorReducer,
+  toSaveRequest,
+} from './sourceEditorState';
 
 /** Poll builds every 10 s while any requested build is still running. */
 const BUILD_POLL_MS = 10_000;
+
+/** Declared element parameters of a scaffold record (for the hook contract). */
+function scaffoldParameters(
+  plugin: PluginVersionDetail
+): { name: string; param_type: string; description?: string }[] | undefined {
+  const raw = plugin.provenance?.scaffoldDeclaration;
+  if (typeof raw !== 'string') return undefined;
+  try {
+    const parameters = JSON.parse(raw)?.parameters;
+    if (!Array.isArray(parameters)) return undefined;
+    return parameters
+      .filter((p: any) => p && typeof p.name === 'string')
+      .map((p: any) => ({
+        name: p.name,
+        param_type: typeof p.paramType === 'string' ? p.paramType : 'unknown',
+        ...(typeof p.description === 'string' ? { description: p.description } : {}),
+      }));
+  } catch {
+    return undefined;
+  }
+}
 
 export default function PluginDetail() {
   const navigate = useNavigate();
@@ -53,10 +91,31 @@ export default function PluginDetail() {
   const [plugin, setPlugin] = useState<PluginVersionDetail | null>(null);
   const [versions, setVersions] = useState<PluginRecordSummary[]>([]);
   const [builds, setBuilds] = useState<PluginBuildsView | null>(null);
-  const [sourceFiles, setSourceFiles] = useState<Array<{ file: string; size: number }>>([]);
-  const [selectedFile, setSelectedFile] = useState<SelectProps.Option | null>(null);
-  const [fileContent, setFileContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Source_Editor (custom-node-source-lifecycle 1): the editable tree,
+  // the active tab, load truncation, save state, and the post-save
+  // rebuild offer with the stale architectures the save reported.
+  const { user } = useAuth();
+  const location = useLocation();
+  const canManage = canManageNodeDesigner(user?.role);
+  const [editor, dispatchEditor] = useReducer(sourceEditorReducer, undefined, emptyEditorState);
+  const [activeFile, setActiveFile] = useState<string | null>(null);
+  const [sourceTruncated, setSourceTruncated] = useState(false);
+  const [sourceLoadError, setSourceLoadError] = useState<string | null>(null);
+  const [saving, setSaving] = useState<'save' | 'new-version' | null>(null);
+  const [saveError, setSaveError] = useState<{ header: string; message: string; locked?: boolean; conflict?: boolean } | null>(null);
+  const [saveNotice, setSaveNotice] = useState<{ staleArchitectures: string[] } | null>(null);
+  const [showLeaveModal, setShowLeaveModal] = useState(false);
+  // "Fix with AI" (5.1, 5.2): the Diagnostic_Context seeded into the
+  // assistant of the picked source tab.
+  const [assistDiagnostics, setAssistDiagnostics] = useState<CodeAssistDiagnosticsState | null>(null);
+  const editorRef = useRef<HTMLDivElement | null>(null);
+  // Architecture_Addition (6): the picker of not-yet-requested registry
+  // architectures and its in-flight/error state.
+  const [addArchOpen, setAddArchOpen] = useState(false);
+  const [addArchs, setAddArchs] = useState<string[]>([]);
+  const [addSubmitting, setAddSubmitting] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Architectures with an in-flight retry request (per-arch buttons and
   // the retry-all action share this so double submission is blocked).
@@ -97,11 +156,27 @@ export default function PluginDetail() {
       const [buildsView, source] = await Promise.all([
         nodeDesignerApi.getBuilds(pluginId, response.plugin.version).catch(() => null),
         nodeDesignerApi
-          .getVersionSource(pluginId, response.plugin.version)
-          .catch(() => null),
+          .getSourceTree(pluginId, response.plugin.version)
+          .catch((err: any) => {
+            setSourceLoadError(err?.message || 'The source tree could not be loaded');
+            return null;
+          }),
       ]);
       setBuilds(buildsView);
-      setSourceFiles(source?.files || []);
+      if (source) {
+        setSourceLoadError(null);
+        const next = fromSourceTree(source.files, source.source_revision);
+        dispatchEditor({
+          type: 'reset',
+          files: next.files,
+          binary: next.binary,
+          sourceRevision: next.sourceRevision,
+        });
+        setSourceTruncated(Boolean(source.truncated));
+        setActiveFile((current) =>
+          current && current in next.files ? current : Object.keys(next.files).sort()[0] ?? null
+        );
+      }
     } catch (err: any) {
       setError(err.message || 'Failed to load the plugin record');
     } finally {
@@ -128,21 +203,132 @@ export default function PluginDetail() {
     return () => clearInterval(timer);
   }, [pluginId, plugin, builds]);
 
-  const showFile = async (option: SelectProps.Option) => {
-    setSelectedFile(option);
-    setFileContent(null);
-    if (!pluginId || !plugin || !option.value) return;
+  const editorDirty = isDirty(editor);
+
+  // Unsaved edits: ask before the browser unloads the page (1.11).
+  useEffect(() => {
+    if (!editorDirty) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [editorDirty]);
+
+  // A simulator failure routed here carries its Diagnostic_Context in the
+  // navigation state (5.2).
+  useEffect(() => {
+    const seeded = (location.state as { assistDiagnostics?: CodeAssistDiagnosticsState } | null)?.assistDiagnostics;
+    if (seeded) setAssistDiagnostics(seeded);
+  }, [location.state]);
+
+  const leavePage = () => {
+    if (editorDirty) {
+      setShowLeaveModal(true);
+      return;
+    }
+    navigate('/node-designer');
+  };
+
+  // Save in place (dev versions): PUT the reduced request; SOURCE_LOCKED
+  // and SOURCE_REVISION_CONFLICT are surfaced with their recovery paths;
+  // success rebaselines the editor and offers a rebuild of the stale
+  // architectures (1.4, 1.5, 1.8, 1.10, 1.12).
+  const saveInPlace = async () => {
+    if (!pluginId || !plugin) return;
+    const request = toSaveRequest(editor);
+    if (!request) return;
+    setSaving('save');
+    setSaveError(null);
+    setSaveNotice(null);
     try {
-      const response = await nodeDesignerApi.getVersionSource(
-        pluginId,
-        plugin.version,
-        option.value
-      );
-      setFileContent(response.content ?? '');
+      const response = await nodeDesignerApi.saveSource(pluginId, plugin.version, request);
+      dispatchEditor({ type: 'save-succeeded', sourceRevision: response.source_revision });
+      setSaveNotice({ staleArchitectures: response.stale_architectures });
+      setPlugin({
+        ...plugin,
+        source_revision: response.source_revision,
+        stale_architectures: response.stale_architectures,
+      });
+      const view = await nodeDesignerApi.getBuilds(pluginId, plugin.version).catch(() => null);
+      if (view) setBuilds(view);
     } catch (err: any) {
-      setFileContent(`Failed to load file: ${err.message}`);
+      dispatchEditor({ type: 'save-failed' });
+      const code = err instanceof ApiError ? err.code : undefined;
+      if (code === 'SOURCE_LOCKED') {
+        setSaveError({
+          header: `This ${plugin.lifecycle_state} version cannot be edited in place`,
+          message: 'Save your edits as a new version instead; the new version starts in dev with a pending security review.',
+          locked: true,
+        });
+      } else if (code === 'SOURCE_REVISION_CONFLICT') {
+        setSaveError({
+          header: 'The source changed since you loaded it',
+          message: 'Someone else saved or a pull completed. Reload to see the current source; your edits stay in the editor until you do.',
+          conflict: true,
+        });
+      } else if (code === 'SCAFFOLD_INVALID') {
+        const defects = (err.details?.defects as string[] | undefined) ?? [];
+        setSaveError({
+          header: 'The source does not form a buildable plugin',
+          message: defects.length ? defects.join('; ') : err.message,
+        });
+      } else {
+        setSaveError({ header: 'Save failed', message: err?.message || 'The source could not be saved' });
+      }
+    } finally {
+      setSaving(null);
     }
   };
+
+  // Save as new version (any lifecycle state): the tree of this version
+  // plus the edits becomes latest+1 in dev (1.6).
+  const saveAsNewVersion = async () => {
+    if (!pluginId || !plugin) return;
+    setSaving('new-version');
+    setSaveError(null);
+    setSaveNotice(null);
+    try {
+      const changed: Record<string, string> = {};
+      for (const [path, content] of Object.entries(editor.files)) {
+        if (!(path in editor.baseline) || editor.baseline[path] !== content) changed[path] = content;
+      }
+      const response = await nodeDesignerApi.createNewVersion(pluginId, plugin.version, {
+        files: changed,
+        delete: editor.deleted,
+      });
+      dispatchEditor({ type: 'save-succeeded', sourceRevision: editor.sourceRevision });
+      setPlugin(response.plugin);
+      await load();
+    } catch (err: any) {
+      const defects = err instanceof ApiError && err.code === 'SCAFFOLD_INVALID'
+        ? ((err.details?.defects as string[] | undefined) ?? [])
+        : [];
+      setSaveError({
+        header: 'New version not created',
+        message: defects.length ? defects.join('; ') : err?.message || 'The new version could not be created',
+      });
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  // "Fix with AI" on a failed architecture (5.1): pick the most likely
+  // file, seed the assistant, and scroll the editor into view.
+  const fixWithAi = (arch: string, logTail: string) => {
+    const picked = pickFileForDiagnostics(logTail, Object.keys(editor.files), arch);
+    if (picked) setActiveFile(picked);
+    setAssistDiagnostics({ kind: 'build', architecture: arch, text: logTail });
+    editorRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  };
+
+  const onSyncSettled = useCallback(
+    (_operation: SyncOperation) => {
+      load();
+    },
+    [load]
+  );
 
   if (loading) {
     return (
@@ -166,6 +352,14 @@ export default function PluginDetail() {
   const failedArchs = Object.keys(buildEntries)
     .filter((arch) => (buildEntries[arch] || {}).buildStatus === 'failed')
     .sort();
+  // Stale_Artifacts (1.8): architectures built from an older Source_Revision.
+  const staleArchs = builds?.stale_architectures ?? plugin.stale_architectures ?? [];
+  const requestedArchs = builds?.requested_architectures ?? Object.keys(buildEntries);
+  // The Build_Target_Registry (6.7): only architectures with a build
+  // project are offered anywhere on this page.
+  const registry: string[] = builds?.buildable_architectures
+    ?? [...DEVICE_ARCHITECTURES].filter((arch) => arch !== 'arm64_jp7');
+  const componentSummary = builds?.component ?? null;
 
   // Re-submit failed architectures to the Plugin_Build_Service (the
   // build endpoint re-StartBuilds any architecture list; per-arch
@@ -188,12 +382,44 @@ export default function PluginDetail() {
     }
   };
 
-  // Architectures the Build panel may target: DeepStream-flagged
-  // records are restricted to the JetPack builds (the backend enforces
-  // the same rule, Requirement 5.1).
-  const buildableArchitectures: string[] = plugin.deepstream
-    ? [...DEEPSTREAM_ARCHITECTURES]
-    : [...DEVICE_ARCHITECTURES];
+  // Architectures the Build panel may target: the Build_Target_Registry,
+  // restricted to the JetPack builds for DeepStream-flagged records (the
+  // backend enforces the same rules, Requirements 5.1 and 6.7/6.8).
+  const buildableArchitectures: string[] = registry.filter((arch) =>
+    plugin.deepstream ? (DEEPSTREAM_ARCHITECTURES as readonly string[]).includes(arch) : true
+  );
+  // Architecture_Addition candidates (6.6): registry minus requested.
+  const addableArchitectures = buildableArchitectures.filter((arch) => !requestedArchs.includes(arch));
+
+  const openAddArchPanel = () => {
+    setAddArchs([]);
+    setAddError(null);
+    setAddArchOpen(true);
+  };
+
+  const submitAddArchitectures = async () => {
+    if (!pluginId || !plugin || addArchs.length === 0) return;
+    setAddSubmitting(true);
+    setAddError(null);
+    try {
+      const view = await nodeDesignerApi.addArchitectures(pluginId, plugin.version, addArchs);
+      setBuilds(view);
+      setAddArchOpen(false);
+      if (view.source_revision !== plugin.source_revision) {
+        // A scaffold gained a build configuration: reload the source tree.
+        await load();
+      }
+    } catch (err: any) {
+      const rejected = err instanceof ApiError ? (err.details?.rejected as Record<string, string> | undefined) : undefined;
+      setAddError(
+        rejected && Object.keys(rejected).length
+          ? Object.entries(rejected).map(([arch, reason]) => `${arch}: ${reason.replace(/_/g, ' ')}`).join('; ')
+          : err?.message || 'The architectures could not be added'
+      );
+    } finally {
+      setAddSubmitting(false);
+    }
+  };
 
   // Default architecture selection for a new build round: the last
   // round's requested architectures when one exists, else the
@@ -351,7 +577,27 @@ export default function PluginDetail() {
         actions={
           <SpaceBetween direction="horizontal" size="xs">
             <Button iconName="refresh" ariaLabel="Refresh" onClick={load} />
-            <Button onClick={() => navigate('/node-designer')}>Back to library</Button>
+            <Button onClick={leavePage}>Back to library</Button>
+            {canManage && plugin.lifecycle_state === 'dev' && (
+              <Button
+                loading={saving === 'save'}
+                disabled={!editorDirty || saving !== null}
+                disabledReason={!editorDirty ? 'No unsaved changes.' : undefined}
+                onClick={saveInPlace}
+              >
+                Save
+              </Button>
+            )}
+            {canManage && (
+              <Button
+                variant={plugin.lifecycle_state === 'dev' ? 'normal' : 'primary'}
+                loading={saving === 'new-version'}
+                disabled={saving !== null}
+                onClick={saveAsNewVersion}
+              >
+                Save as new version
+              </Button>
+            )}
             {(plugin.lifecycle_state === 'test' ||
               plugin.lifecycle_state === 'prod') && (
               <Button
@@ -408,6 +654,66 @@ export default function PluginDetail() {
           {lifecycleError}
         </Alert>
       )}
+
+      {saveError && (
+        <Alert
+          type={saveError.locked ? 'warning' : 'error'}
+          header={saveError.header}
+          dismissible
+          onDismiss={() => setSaveError(null)}
+          action={
+            saveError.locked ? (
+              <Button loading={saving === 'new-version'} onClick={saveAsNewVersion}>
+                Save as new version
+              </Button>
+            ) : saveError.conflict ? (
+              <Button onClick={load}>Reload</Button>
+            ) : undefined
+          }
+        >
+          {saveError.message}
+        </Alert>
+      )}
+
+      {saveNotice && (
+        <Alert
+          type="success"
+          header="Source saved"
+          dismissible
+          onDismiss={() => setSaveNotice(null)}
+          action={
+            saveNotice.staleArchitectures.length > 0 || failedArchs.length > 0 ? (
+              <Button
+                loading={retrying.length > 0}
+                onClick={() =>
+                  retryBuilds([...new Set([...saveNotice.staleArchitectures, ...failedArchs])].sort())
+                }
+              >
+                Rebuild
+              </Button>
+            ) : undefined
+          }
+        >
+          {saveNotice.staleArchitectures.length > 0
+            ? `${saveNotice.staleArchitectures.length} ${
+                saveNotice.staleArchitectures.length === 1 ? 'architecture needs' : 'architectures need'
+              } a rebuild: ${saveNotice.staleArchitectures.join(', ')}.`
+            : 'No built artifacts are affected.'}
+        </Alert>
+      )}
+
+      <ConfirmationModal
+        visible={showLeaveModal}
+        title="Unsaved changes"
+        message="You have unsaved source edits. Leave this page and discard them?"
+        confirmButtonText="Discard and leave"
+        variant="warning"
+        onConfirm={() => {
+          setShowLeaveModal(false);
+          navigate('/node-designer');
+        }}
+        onCancel={() => setShowLeaveModal(false)}
+      />
 
       <ConfirmationModal
         visible={showDeleteModal}
@@ -501,6 +807,19 @@ export default function PluginDetail() {
                     Retry failed builds
                   </Button>
                 )}
+                {canManage && addableArchitectures.length > 0 && (
+                  <Button
+                    disabled={addArchOpen || retrying.length > 0 || plugin.lifecycle_state === 'prod'}
+                    disabledReason={
+                      plugin.lifecycle_state === 'prod'
+                        ? 'Architectures cannot be added to a prod version; create a new version first.'
+                        : undefined
+                    }
+                    onClick={openAddArchPanel}
+                  >
+                    Add architectures
+                  </Button>
+                )}
                 <Button
                   variant="primary"
                   disabled={buildPanelOpen || retrying.length > 0}
@@ -510,12 +829,68 @@ export default function PluginDetail() {
                 </Button>
               </SpaceBetween>
             }
+            description={
+              componentSummary?.version
+                ? `Deployable component v${componentSummary.version} (${componentSummary.status ?? 'unknown'}): ${
+                    componentSummary.architectures.length
+                      ? componentSummary.architectures.join(', ')
+                      : 'no architectures'
+                  }`
+                : undefined
+            }
           >
             Builds
           </Header>
         }
       >
         <SpaceBetween size="m">
+        {addArchOpen && (
+          <SpaceBetween size="s">
+            {addError && (
+              <Alert type="error" dismissible onDismiss={() => setAddError(null)}>
+                {addError}
+              </Alert>
+            )}
+            <FormField
+              label="Architectures to add"
+              description="Only architectures not yet requested for this version and available as build targets are listed. Builds start for the added architectures only."
+            >
+              <Multiselect
+                selectedOptions={addArchs.map((arch) => ({
+                  label: ARCHITECTURE_LABELS[arch as keyof typeof ARCHITECTURE_LABELS] ?? arch,
+                  value: arch,
+                }))}
+                options={addableArchitectures.map((arch) => ({
+                  label: ARCHITECTURE_LABELS[arch as keyof typeof ARCHITECTURE_LABELS] ?? arch,
+                  value: arch,
+                }))}
+                onChange={({ detail }) =>
+                  setAddArchs(
+                    detail.selectedOptions
+                      .map((option) => option.value)
+                      .filter((value): value is string => Boolean(value))
+                  )
+                }
+                placeholder="Select architectures to add"
+                disabled={addSubmitting}
+                ariaLabel="Architectures to add"
+              />
+            </FormField>
+            <SpaceBetween direction="horizontal" size="xs">
+              <Button
+                variant="primary"
+                loading={addSubmitting}
+                disabled={addArchs.length === 0}
+                onClick={submitAddArchitectures}
+              >
+                Add and build
+              </Button>
+              <Button disabled={addSubmitting} onClick={() => setAddArchOpen(false)}>
+                Cancel
+              </Button>
+            </SpaceBetween>
+          </SpaceBetween>
+        )}
         {buildPanelOpen && (
           <SpaceBetween size="s">
             {buildError && (
@@ -610,6 +985,9 @@ export default function PluginDetail() {
                           revision {archRevision}
                         </Box>
                       )}
+                      {staleArchs.includes(arch) && (
+                        <Badge color="severity-medium">Rebuild required</Badge>
+                      )}
                       {entry.buildStatus === 'failed' && (
                         <Button
                           variant="inline-link"
@@ -618,6 +996,15 @@ export default function PluginDetail() {
                           onClick={() => retryBuilds([arch])}
                         >
                           Retry build
+                        </Button>
+                      )}
+                      {entry.buildStatus === 'failed' && canManage && entry.logTail && (
+                        <Button
+                          variant="inline-link"
+                          ariaLabel={`Fix ${arch} build with AI`}
+                          onClick={() => fixWithAi(arch, entry.logTail || '')}
+                        >
+                          Fix with AI
                         </Button>
                       )}
                     </SpaceBetween>
@@ -708,38 +1095,56 @@ export default function PluginDetail() {
         </SpaceBetween>
       </Container>
 
-      <Container
-        header={
-          <Header variant="h2" counter={`(${sourceFiles.length})`}>
-            Source
-          </Header>
-        }
-      >
-        <SpaceBetween size="m">
-          <Select
-            placeholder="Select a source file to inspect"
-            selectedOption={selectedFile}
-            options={sourceFiles.map((f) => ({ label: f.file, value: f.file }))}
-            onChange={({ detail }) => showFile(detail.selectedOption)}
-            empty="No source files"
-          />
-          {selectedFile && (
-            <pre
-              style={{
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                fontSize: '12px',
-                background: '#f2f3f3',
-                padding: '12px',
-                borderRadius: '4px',
-                maxHeight: '400px',
-                overflow: 'auto',
-              }}
+      <div ref={editorRef}>
+        <Container
+          header={
+            <Header
+              variant="h2"
+              counter={`(${Object.keys(editor.files).length + editor.binary.length})`}
+              description={
+                canManage
+                  ? plugin.lifecycle_state === 'dev'
+                    ? `Source revision ${editor.sourceRevision}. Edits are saved in place on this dev version.`
+                    : `Source revision ${editor.sourceRevision}. This ${plugin.lifecycle_state} version is locked; edits are saved as a new version.`
+                  : `Source revision ${editor.sourceRevision}. Read-only.`
+              }
             >
-              {fileContent === null ? 'Loading…' : fileContent}
-            </pre>
+              Source
+            </Header>
+          }
+        >
+          {sourceLoadError ? (
+            <Alert type="error">{sourceLoadError}</Alert>
+          ) : (
+            <SourceEditor
+              state={editor}
+              dispatch={dispatchEditor}
+              activeFile={activeFile}
+              onActiveFileChange={setActiveFile}
+              readOnly={!canManage}
+              truncated={sourceTruncated}
+              assist={
+                canManage
+                  ? {
+                      usecaseId: plugin.usecase_id,
+                      kind: plugin.kind,
+                      parameters: scaffoldParameters(plugin),
+                      diagnostics: assistDiagnostics,
+                    }
+                  : null
+              }
+            />
           )}
-        </SpaceBetween>
+        </Container>
+      </div>
+
+      <Container header={<Header variant="h2">Git repository</Header>}>
+        <GitSyncPanel
+          plugin={plugin}
+          editorDirty={editorDirty}
+          readOnly={!canManage}
+          onSettled={onSyncSettled}
+        />
       </Container>
 
       <Table<PluginRecordSummary>

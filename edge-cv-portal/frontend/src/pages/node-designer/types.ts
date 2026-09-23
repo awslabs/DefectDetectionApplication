@@ -129,6 +129,9 @@ export interface PluginRecordSummary {
   import_status?: ImportStatus | null;
   classification?: Classification | null;
   build_status: Record<string, BuildStatus | null>;
+  /** custom-node-source-lifecycle: Source_Revision and Git_Link presence. */
+  source_revision?: number;
+  git_linked?: boolean;
   updated_at: number;
   /** The recorded plugin selection of an imported record (absent when
    * no selection was recorded or for other origins), so the library
@@ -148,6 +151,169 @@ export interface PluginArtifactEntry {
   buildStatus?: BuildStatus | null;
   logTail?: string;
   prebuilt?: boolean;
+  /** Source_Revision the artifact was built from (custom-node-source-lifecycle 1.9). */
+  sourceRevision?: number;
+  /** True when built from a Source_Revision older than the version's current one (1.8). */
+  stale?: boolean;
+}
+
+// --------------------------------------------------------------------------
+// custom-node-source-lifecycle wire shapes
+// --------------------------------------------------------------------------
+
+/** One file of the bulk source read (GET .../source?all=true, 1.1, 1.2). */
+export interface SourceFileEntry {
+  file: string;
+  size: number;
+  /** Present for UTF-8 text files within the per-file cap. */
+  content?: string;
+  /** Oversize or non-UTF-8: listed read-only, no content. */
+  binary?: boolean;
+}
+
+export interface SourceTreeResponse {
+  source_revision: number;
+  files: SourceFileEntry[];
+  count: number;
+  truncated: boolean;
+}
+
+export type SourceSaveMode = 'merge' | 'replace';
+
+/** PUT .../source body (1.3, 1.4). */
+export interface SaveSourceRequest {
+  files: ScaffoldFiles;
+  delete?: string[];
+  mode?: SourceSaveMode;
+  expected_source_revision?: number;
+}
+
+export interface SaveSourceResponse {
+  files: string[];
+  deleted: string[];
+  count: number;
+  source_revision: number;
+  stale_architectures: string[];
+}
+
+/** POST .../new-version body (1.6). */
+export interface NewVersionRequest {
+  files?: ScaffoldFiles;
+  delete?: string[];
+  name?: string;
+  description?: string;
+}
+
+export type GitProvider = 'github' | 'gitlab';
+export type GitConnectionStatus = 'verifying' | 'verified' | 'failed';
+
+/** Git_Connection view (never carries the secret ARN or a token, 2.4). */
+export interface GitConnection {
+  connection_id: string;
+  usecase_id: string;
+  name: string;
+  provider: GitProvider;
+  repo_url: string;
+  default_branch: string;
+  status: GitConnectionStatus;
+  verification: {
+    at?: number;
+    category?: SyncFailureCategory;
+    message?: string;
+    default_branch_detected?: string | null;
+    operation_id?: string;
+  };
+  created_by: string;
+  created_at: number;
+  updated_by?: string;
+  updated_at: number;
+}
+
+export interface CreateGitConnectionRequest {
+  usecase_id: string;
+  name: string;
+  provider: GitProvider;
+  repo_url: string;
+  default_branch: string;
+  token: string;
+}
+
+export type UpdateGitConnectionRequest = Partial<Omit<CreateGitConnectionRequest, 'usecase_id'>>;
+
+export type SyncKind = 'verify' | 'push' | 'pull';
+export type SyncStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+export type SyncFailureCategory =
+  | 'authentication'
+  | 'not_found'
+  | 'unreachable'
+  | 'diverged'
+  | 'push_rejected'
+  | 'invalid_source'
+  | 'internal';
+export type PullMode = 'in_place' | 'new_version';
+
+/** Last successful push/pull recorded on a version's Git_Link (3.10, 4.9). */
+export interface GitLastSync {
+  kind: 'push' | 'pull';
+  commit: string;
+  branch: string;
+  path: string;
+  ref?: string;
+  source_revision?: number;
+  by: string;
+  at: number;
+  version?: number;
+}
+
+/** Git_Link of a Plugin_Version (3.1). */
+export interface GitLink {
+  connection_id: string;
+  branch: string;
+  path: string;
+  linked_by?: string;
+  linked_at?: number;
+  last_sync?: GitLastSync;
+}
+
+export interface SyncOperation {
+  operation_id: string;
+  usecase_id: string;
+  connection_id: string;
+  plugin_id?: string;
+  version?: number;
+  kind: SyncKind;
+  target: {
+    branch?: string;
+    path?: string;
+    ref?: string;
+    mode?: PullMode;
+    force?: boolean;
+    last_sync_commit?: string | null;
+  };
+  status: SyncStatus;
+  build_id?: string;
+  started_by: string;
+  started_at: number;
+  finished_at?: number;
+  result?: {
+    commit?: string;
+    files?: number;
+    no_changes?: boolean;
+    branch_created?: boolean;
+    version?: number;
+    mode?: PullMode;
+    ref?: string;
+    default_branch?: string | null;
+  } | null;
+  failure?: {
+    category: SyncFailureCategory;
+    message: string;
+    log_excerpt?: string;
+    changed_files?: string[];
+    defects?: string[];
+    limit?: string;
+    ref?: string;
+  } | null;
 }
 
 /** Full Plugin_Record version view (version_detail). */
@@ -165,6 +331,14 @@ export interface PluginVersionDetail {
   artifacts: Record<string, PluginArtifactEntry>;
   component: Record<string, unknown>;
   source_s3_prefix: string;
+  /** Source_Revision counter (custom-node-source-lifecycle; legacy items read as 1). */
+  source_revision: number;
+  /** Architectures whose artifacts predate the current Source_Revision (1.8). */
+  stale_architectures: string[];
+  /** Git_Link when the version is linked to a Git_Connection (3.1). */
+  git?: GitLink | null;
+  /** Single-flight sync lock: the running Sync_Operation id (3.12). */
+  active_sync_operation?: string | null;
   created_by: string;
   created_at: number;
   updated_at: number;
@@ -251,6 +425,17 @@ export interface PluginBuildsView {
   builds: Record<string, PluginArtifactEntry>;
   settled: boolean;
   component_packaging_triggered: boolean;
+  /** custom-node-source-lifecycle additions (1.8, 6.7, 8.3). */
+  source_revision: number;
+  stale_architectures: string[];
+  /** The Build_Target_Registry: architectures with a configured build project. */
+  buildable_architectures: string[];
+  component: {
+    version: string | null;
+    revision: number;
+    architectures: string[];
+    status: string | null;
+  };
 }
 
 /** Scaffold source file map {relative/path: content}. */

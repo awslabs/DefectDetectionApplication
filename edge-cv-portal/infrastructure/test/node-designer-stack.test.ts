@@ -100,13 +100,17 @@ const resourceText = (resource: any): string =>
   typeof resource === 'string' ? resource : JSON.stringify(resource);
 
 describe('plugin build CodeBuild projects (Requirements 3.1, 3.2)', () => {
-  test('all five per-architecture projects plus the fetch project exist', () => {
+  test('all six per-architecture projects plus the fetch and git-sync projects exist', () => {
     const names = Object.keys(projectsByName()).sort();
     const expected = [
       ...PLUGIN_BUILD_ARCHITECTURES.map((arch) => `dda-plugin-build-${arch}`),
       'dda-plugin-fetch',
+      // custom-node-source-lifecycle: the git verify/push/pull runner.
+      'dda-plugin-git-sync',
     ].sort();
     expect(names).toEqual(expected);
+    // Requirement 7.1: arm64_jp7 is a build target.
+    expect(names).toContain('dda-plugin-build-arm64_jp7');
   });
 
   test('no build project has a VpcConfig (no network path to portal internals)', () => {
@@ -118,10 +122,10 @@ describe('plugin build CodeBuild projects (Requirements 3.1, 3.2)', () => {
     }
   });
 
-  test('all five build projects stack snapshot', () => {
-    // Full definition snapshot of the six CodeBuild projects (five
-    // per-architecture builds + fetch): environment image, buildspec,
-    // source, timeout, and role wiring.
+  test('all build projects stack snapshot', () => {
+    // Full definition snapshot of the eight CodeBuild projects (six
+    // per-architecture builds + fetch + git-sync): environment image,
+    // buildspec, source, timeout, and role wiring.
     expect(projectsByName()).toMatchSnapshot();
   });
 });

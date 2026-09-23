@@ -94,7 +94,7 @@ describe('Property 13: Panel failure recovery preserves the prompt', () => {
               // A no-op except from idle with a submittable prompt (1.4/2.8
               // guard restated by this property).
               if (prev.phase === 'idle' && isSubmittablePrompt(prev.prompt)) {
-                expect(next).toEqual({ phase: 'submitting', prompt: prev.prompt });
+                expect(next).toEqual({ phase: 'submitting', prompt: prev.prompt, diagnostics: prev.diagnostics });
                 promptAtSubmission = prev.prompt;
               } else {
                 expect(next).toBe(prev);
@@ -133,7 +133,7 @@ describe('Property 13: Panel failure recovery preserves the prompt', () => {
                 // onAccept(prev.code) exactly on this transition, and the
                 // prompt is cleared.
                 expect(typeof prev.code).toBe('string');
-                expect(next).toEqual({ phase: 'idle', prompt: '', error: null });
+                expect(next).toEqual({ phase: 'idle', prompt: '', error: null, diagnostics: null });
               } else {
                 // From any other phase, accept changes nothing — there is no
                 // reviewed code, so no accept-callback effect can occur.
@@ -148,8 +148,10 @@ describe('Property 13: Panel failure recovery preserves the prompt', () => {
                 expect(next).toEqual({
                   phase: 'reviewing',
                   prompt: promptAtSubmission,
+                  diagnostics: prev.diagnostics,
                   code: event.code,
                   notes: event.notes,
+                  targetFile: null,
                 });
               } else {
                 expect(next).toBe(prev);
@@ -164,6 +166,7 @@ describe('Property 13: Panel failure recovery preserves the prompt', () => {
                   phase: 'idle',
                   prompt: event.value,
                   error: prev.error,
+                  diagnostics: prev.diagnostics,
                 });
               } else {
                 expect(next).toBe(prev);

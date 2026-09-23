@@ -66,6 +66,17 @@ function viewForCode(
     }
     case 'NO_CODE_RETURNED':
       return { header: 'No code produced', message: text };
+    case 'INVALID_TARGET_FILE': {
+      // The generator named a Target_File outside the Source_Tree
+      // (custom-node-source-lifecycle 5.8); prompt and diagnostics stay.
+      const target = details && typeof details.target_file === 'string' ? details.target_file : null;
+      return {
+        header: 'Proposed file is not part of this plugin',
+        message: target
+          ? `The assistant named "${target}", which is not a file of this plugin. Retry, or ask it to change the file you are editing.`
+          : text,
+      };
+    }
     default:
       // Unknown codes (422 validation defects, 4xx request errors,
       // anything new) keep the server's message under a generic header.

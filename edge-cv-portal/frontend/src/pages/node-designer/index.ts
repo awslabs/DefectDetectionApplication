@@ -25,5 +25,8 @@ export { default as ReviewQueue } from './ReviewQueue';
 export { default as RegistrationPrompt } from './RegistrationPrompt';
 export { default as SimulatorView } from './SimulatorView';
 export { default as ImportView } from './ImportView';
+export { default as GitConnections } from './GitConnections';
+export { default as GitSyncPanel } from './GitSyncPanel';
+export { default as SourceEditor } from './SourceEditor';
 export { nodeDesignerApi } from './api';
 export * from './types';

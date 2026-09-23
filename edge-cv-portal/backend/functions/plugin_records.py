@@ -25,8 +25,15 @@ Routes (API Gateway REST):
     GET    /plugins/{id}/versions/{v}                  Version detail: full provenance
                                                        incl. classification, per-arch
                                                        checksums/signatures            (10.2, 15.6)
-    GET    /plugins/{id}/versions/{v}/source           Source inspection: file listing
-                                                       or single-file content          (10.2)
+    GET    /plugins/{id}/versions/{v}/source           Source inspection: file listing,
+                                                       single-file content (10.2), or
+                                                       ?all=true bulk read of every text
+                                                       file for the Source_Editor
+                                                       (custom-node-source-lifecycle 1.1)
+    POST   /plugins/{id}/versions/{v}/new-version      Save as new version: copy the
+                                                       version's Source_Tree to latest+1
+                                                       with edits applied
+                                                       (custom-node-source-lifecycle 1.6)
     GET    /plugins/{id}/versions/{v}/gst-properties   Stored Introspection_Report with
                                                        derived per-element
                                                        Parameter_Suggestions, or a
@@ -75,6 +82,7 @@ return the standard authorization error envelope (13.4).
 import json
 import os
 import logging
+import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
@@ -148,6 +156,26 @@ BUILD_SUCCEEDED = 'succeeded'
 
 # Maximum size of a source file returned inline for inspection (10.2)
 MAX_SOURCE_FILE_BYTES = 512 * 1024
+
+# Source_Editor bulk read (custom-node-source-lifecycle 1.1, 1.2): total
+# inline content served by GET .../source?all=true before further files
+# are listed without content and `truncated` is set.
+MAX_SOURCE_TREE_INLINE_BYTES = 4 * 1024 * 1024
+
+# Source_Revision of a version item that predates the counter, and of an
+# artifact entry that predates revision stamping (custom-node-source-
+# lifecycle 10.1): existing records report no Stale_Artifacts.
+DEFAULT_SOURCE_REVISION = 1
+
+# PUT .../source write modes (custom-node-source-lifecycle 1.4):
+# `replace` (the default, and the contract the wizards have always relied
+# on) treats the submitted map as the complete Source_Tree and deletes
+# every other object; `merge` writes the submitted files and touches
+# nothing else (the Source_Editor's partial save).
+SOURCE_MODE_MERGE = 'merge'
+SOURCE_MODE_REPLACE = 'replace'
+SOURCE_MODES = (SOURCE_MODE_MERGE, SOURCE_MODE_REPLACE)
+SOURCE_MODE_DEFAULT = SOURCE_MODE_REPLACE
 
 # Property_Introspection runs on x86_64 only (gst-parameter-prepopulation
 # design: GObject property declarations are architecture-independent and
@@ -358,10 +386,45 @@ def new_version_item(plugin_id: str, version: int, usecase_id: str, name: str,
         'artifacts': {},
         'component': {},
         'source_s3_prefix': source_s3_prefix(usecase_id, plugin_id, version),
+        'source_revision': DEFAULT_SOURCE_REVISION,
         'created_by': user_id,
         'created_at': timestamp,
         'updated_at': timestamp,
     }
+
+
+def source_revision_of(item: Dict) -> int:
+    """The version's Source_Revision; items predating the counter read as
+    DEFAULT_SOURCE_REVISION (custom-node-source-lifecycle 10.1)."""
+    try:
+        return int(item.get('source_revision') or DEFAULT_SOURCE_REVISION)
+    except (TypeError, ValueError):
+        return DEFAULT_SOURCE_REVISION
+
+
+def artifact_source_revision(entry: Optional[Dict]) -> int:
+    """The Source_Revision a Plugin_Artifact was built from; entries
+    predating revision stamping read as DEFAULT_SOURCE_REVISION."""
+    try:
+        return int((entry or {}).get('sourceRevision')
+                   or DEFAULT_SOURCE_REVISION)
+    except (TypeError, ValueError):
+        return DEFAULT_SOURCE_REVISION
+
+
+def stale_architectures(item: Dict) -> List[str]:
+    """Architectures whose Plugin_Artifact is a Stale_Artifact: built from
+    a Source_Revision strictly lower than the version's current one
+    (custom-node-source-lifecycle 1.8, 1.9). Only settled or in-flight
+    entries count — an entry without any recorded build is not stale,
+    it is simply not built."""
+    current = source_revision_of(item)
+    artifacts = item.get('artifacts') or {}
+    return sorted(
+        arch for arch, entry in artifacts.items()
+        if isinstance(entry, dict) and entry.get('buildStatus')
+        and artifact_source_revision(entry) < current
+    )
 
 
 def successful_build_archs(item: Dict) -> List[str]:
@@ -471,6 +534,14 @@ def version_detail(item: Dict) -> Dict:
         'artifacts': item.get('artifacts', {}),
         'component': item.get('component', {}),
         'source_s3_prefix': item.get('source_s3_prefix'),
+        # Source_Editor model (custom-node-source-lifecycle): the
+        # Source_Revision counter (legacy items read as 1), the stale
+        # architectures derived from it, the Git_Link block when linked,
+        # and the single-flight sync lock when a Sync_Operation is running.
+        'source_revision': source_revision_of(item),
+        'stale_architectures': stale_architectures(item),
+        'git': item.get('git'),
+        'active_sync_operation': item.get('active_sync_operation'),
         'created_by': item.get('created_by'),
         'created_at': item.get('created_at'),
         'updated_at': item.get('updated_at'),
@@ -522,6 +593,8 @@ def record_summary(item: Dict) -> Dict:
             arch: (entry or {}).get('buildStatus')
             for arch, entry in artifacts.items()
         },
+        'source_revision': source_revision_of(item),
+        'git_linked': bool(item.get('git')),
         'updated_at': item.get('updated_at'),
     }
     if item.get('selected_plugins') is not None:
@@ -961,20 +1034,67 @@ def get_version_source(event: Dict, user: Dict, plugin_id: str, version: int) ->
         content = obj['Body'].read().decode('utf-8', errors='replace')
         return create_response(200, {'file': file_path, 'content': content})
 
+    files = list_source_objects(prefix)
+
+    if str(params.get('all', '')).lower() in ('true', '1', 'yes'):
+        # Source_Editor bulk read (custom-node-source-lifecycle 1.1, 1.2):
+        # inline UTF-8 content for every text file within the per-file
+        # cap; oversize or non-UTF-8 files are listed as binary (read-only
+        # in the editor); the total inline budget bounds the response.
+        payload = read_source_tree(prefix, files)
+        payload['source_revision'] = source_revision_of(item)
+        return create_response(200, payload)
+
+    return create_response(200, {'files': files, 'count': len(files)})
+
+
+def list_source_objects(prefix: str) -> List[Dict]:
+    """[{file, size}] of every object under one plugin-sources prefix."""
     files: List[Dict] = []
     kwargs = {'Bucket': PORTAL_ARTIFACTS_BUCKET, 'Prefix': prefix}
     while True:
         response = s3.list_objects_v2(**kwargs)
         for obj in response.get('Contents', []):
-            files.append({
-                'file': obj['Key'][len(prefix):],
-                'size': obj['Size'],
-            })
+            relative = obj['Key'][len(prefix):]
+            if not relative:
+                continue
+            files.append({'file': relative, 'size': obj['Size']})
         if not response.get('IsTruncated'):
             break
         kwargs['ContinuationToken'] = response['NextContinuationToken']
+    return files
 
-    return create_response(200, {'files': files, 'count': len(files)})
+
+def read_source_tree(prefix: str, files: List[Dict]) -> Dict:
+    """
+    Bulk Source_Tree read for the Source_Editor (custom-node-source-
+    lifecycle 1.1, 1.2): each listed file gains `content` when it is at
+    most MAX_SOURCE_FILE_BYTES and decodes as UTF-8, otherwise
+    `binary: true` and no content. Inline content stops after
+    MAX_SOURCE_TREE_INLINE_BYTES in total (further files are listed
+    without content and `truncated` is set). Files are visited in path
+    order so the result is deterministic.
+    """
+    entries: List[Dict] = []
+    inline_total = 0
+    truncated = False
+    for listed in sorted(files, key=lambda f: f['file']):
+        entry = {'file': listed['file'], 'size': listed['size']}
+        if listed['size'] > MAX_SOURCE_FILE_BYTES:
+            entry['binary'] = True
+        elif truncated or inline_total + listed['size'] > MAX_SOURCE_TREE_INLINE_BYTES:
+            truncated = True
+        else:
+            obj = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET,
+                                Key=prefix + listed['file'])
+            data = obj['Body'].read()
+            try:
+                entry['content'] = data.decode('utf-8')
+                inline_total += len(data)
+            except UnicodeDecodeError:
+                entry['binary'] = True
+        entries.append(entry)
+    return {'files': entries, 'count': len(entries), 'truncated': truncated}
 
 
 def _gst_unavailable(reason: str, message: Optional[str] = None) -> Dict:
@@ -1079,18 +1199,211 @@ def get_version_gst_properties(event: Dict, user: Dict, plugin_id: str,
     })
 
 
+# ------------------------------------------------ Source_Editor helpers
+
+# ASCII control characters (incl. DEL): rejected anywhere in a source path.
+_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def normalize_source_path(path: Any) -> Optional[str]:
+    """
+    Confine a client-supplied relative path to a version's Source_Tree
+    (custom-node-source-lifecycle 1.3, Property 2). Returns the
+    normalized relative path, or None when the path is not a string,
+    empty, `.`, absolute, or escapes the tree through a `..` segment.
+    """
+    if not isinstance(path, str) or not path.strip():
+        return None
+    stripped = path.strip()
+    if stripped.startswith('/') or stripped.startswith('\\'):
+        return None  # absolute paths never name a Source_Tree file
+    clean = os.path.normpath(stripped)
+    if clean in ('.', '') or clean.startswith('..'):
+        return None
+    segments = clean.split('/')
+    if any(segment == '..' for segment in segments):
+        return None
+    # Normalization must be a fixed point: a segment with leading or
+    # trailing whitespace (e.g. "0\r/" -> "0\r" -> "0") would normalize
+    # differently on the next pass, and control characters never belong
+    # in an S3 key or a repository file name.
+    if any(segment != segment.strip() for segment in segments):
+        return None
+    if _CONTROL_CHARS.search(clean):
+        return None
+    return clean
+
+
+def resulting_tree(listing: List[str], files: Dict[str, str],
+                   delete: List[str], mode: str) -> List[str]:
+    """
+    The Source_Tree paths that exist after a save (custom-node-source-
+    lifecycle Property 3): `merge` keeps every current path and adds the
+    submitted ones; `replace` keeps exactly the submitted ones; `delete`
+    removes paths in both modes.
+    """
+    if mode == SOURCE_MODE_REPLACE:
+        paths = set(files)
+    else:
+        paths = set(listing) | set(files)
+    return sorted(paths - set(delete))
+
+
+def _validate_source_body(body: Dict, allow_empty: bool = False
+                          ) -> Tuple[Optional[Tuple[Dict[str, str], List[str], str]],
+                                     Optional[Dict]]:
+    """
+    Validate the `files`, `delete`, and `mode` fields of a source write
+    body. Returns ((normalized_files, normalized_delete, mode), None) or
+    (None, error_response). `allow_empty` permits a body with neither
+    files nor deletions (the new-version route copies the tree as-is).
+    """
+    files = body.get('files')
+    if files is None:
+        files = {}
+    if (not isinstance(files, dict)
+            or not all(isinstance(k, str) and isinstance(v, str)
+                       for k, v in files.items())):
+        return None, error_response(400, 'INVALID_FILES',
+                                    'files must be an object mapping '
+                                    'relative paths to text content')
+
+    delete = body.get('delete')
+    if delete is None:
+        delete = []
+    if (not isinstance(delete, list)
+            or not all(isinstance(d, str) for d in delete)):
+        return None, error_response(400, 'INVALID_FILES',
+                                    'delete must be a list of relative paths')
+
+    mode = body.get('mode', SOURCE_MODE_DEFAULT)
+    if mode not in SOURCE_MODES:
+        return None, error_response(400, 'INVALID_MODE',
+                                    f"mode must be one of: {', '.join(SOURCE_MODES)}")
+
+    if not files and not delete and not allow_empty:
+        return None, error_response(400, 'INVALID_FILES',
+                                    'Provide files to write or paths to delete')
+
+    normalized: Dict[str, str] = {}
+    for path, content in files.items():
+        clean = normalize_source_path(path)
+        if clean is None:
+            return None, error_response(400, 'INVALID_FILE_PATH',
+                                        'Invalid file path', {'file': path})
+        normalized[clean] = content
+
+    normalized_delete: List[str] = []
+    for path in delete:
+        clean = normalize_source_path(path)
+        if clean is None:
+            return None, error_response(400, 'INVALID_FILE_PATH',
+                                        'Invalid file path', {'file': path})
+        if clean not in normalized:
+            normalized_delete.append(clean)
+    return (normalized, sorted(set(normalized_delete)), mode), None
+
+
+def scaffold_defects_for_tree(item: Dict, prefix: str, tree_paths: List[str],
+                              submitted: Dict[str, str]) -> List[str]:
+    """
+    Buildability defects of the Source_Tree that a write would produce
+    (custom-node-source-lifecycle 1.7): the scaffold validator needs
+    every path present plus the content of the files it inspects; content
+    comes from the submitted map when the file is being written, else
+    from the stored object. Non-scaffold records have no defects.
+    """
+    declaration_json = (item.get('provenance') or {}).get('scaffoldDeclaration')
+    if item.get('kind') != 'scaffold' or not declaration_json:
+        return []
+    files: Dict[str, str] = {}
+    for path in tree_paths:
+        if path in submitted:
+            files[path] = submitted[path]
+        else:
+            try:
+                obj = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET,
+                                    Key=prefix + path,
+                                    Range=f'bytes=0-{MAX_SOURCE_FILE_BYTES - 1}')
+                files[path] = obj['Body'].read().decode('utf-8', errors='replace')
+            except ClientError as e:
+                if e.response.get('Error', {}).get('Code') in ('NoSuchKey', '404'):
+                    continue
+                raise
+    return scaffold_defects(files, json.loads(declaration_json))
+
+
+def _scaffold_invalid_response(defects: List[str]) -> Dict:
+    return error_response(
+        422, 'SCAFFOLD_INVALID',
+        'The submitted source does not form a buildable '
+        'Plugin_Scaffold: ' + '; '.join(defects),
+        {'defects': defects})
+
+
+def _write_source_files(prefix: str, files: Dict[str, str]) -> None:
+    for path, content in sorted(files.items()):
+        s3.put_object(
+            Bucket=PORTAL_ARTIFACTS_BUCKET,
+            Key=prefix + path,
+            Body=content.encode('utf-8'),
+            ContentType='text/plain; charset=utf-8',
+        )
+
+
+def _delete_source_files(prefix: str, paths: List[str]) -> None:
+    keys = [prefix + p for p in sorted(set(paths))]
+    for start in range(0, len(keys), 1000):
+        s3.delete_objects(
+            Bucket=PORTAL_ARTIFACTS_BUCKET,
+            Delete={'Objects': [{'Key': k} for k in keys[start:start + 1000]],
+                    'Quiet': True},
+        )
+
+
+def bump_source_revision(plugin_id: str, version: int) -> int:
+    """
+    Increment the version's Source_Revision (custom-node-source-lifecycle
+    1.4, 1.8) — items predating the counter start from
+    DEFAULT_SOURCE_REVISION — and return the new value.
+    """
+    response = plugin_table().update_item(
+        Key={'plugin_id': plugin_id, 'version': version},
+        UpdateExpression=('SET source_revision = '
+                          'if_not_exists(source_revision, :base) + :inc, '
+                          'updated_at = :t'),
+        ExpressionAttributeValues={':base': DEFAULT_SOURCE_REVISION,
+                                   ':inc': 1, ':t': now_ms()},
+        ReturnValues='UPDATED_NEW',
+    )
+    return int(response['Attributes']['source_revision'])
+
+
 def put_version_source(event: Dict, user: Dict, plugin_id: str, version: int) -> Dict:
     """
     PUT /plugins/{id}/versions/{v}/source
-    Body: {files: {relative/path: content}}
+    Body: {files?: {relative/path: content}, delete?: [relative/path],
+           mode?: 'merge' | 'replace', expected_source_revision?: int}
 
     Persists user-submitted Plugin_Scaffold source (original or edited,
-    Requirement 1.6) under the version's plugin-sources prefix so a
-    subsequent build submission builds exactly what the user reviewed.
-    For scaffold-kind records the submitted map is the complete source
-    tree and is validated for buildability against the recorded
-    declaration (422 with every defect described) before anything is
-    written.
+    custom-node-designer 1.6) under the version's plugin-sources prefix
+    so a subsequent build submission builds exactly what the user
+    reviewed. `replace` (the default — the contract the wizards rely on)
+    treats the submitted map as the complete Source_Tree and deletes
+    every other object; `merge` writes the submitted files and touches
+    nothing else (the Source_Editor's partial save); `delete` removes
+    paths in both modes (custom-node-source-lifecycle 1.3, 1.4).
+
+    Guards (custom-node-source-lifecycle 1.5, 1.7): only `dev` versions
+    are editable in place (409 SOURCE_LOCKED otherwise); a stale
+    `expected_source_revision` is rejected (409 SOURCE_REVISION_CONFLICT)
+    so two editors or a concurrent Pull never overwrite each other; for
+    scaffold-kind records the RESULTING tree is validated for
+    buildability against the recorded declaration (422 with every
+    defect described) before anything is written.
+
+    A successful write increments the Source_Revision and reports the
+    architectures whose Plugin_Artifacts are now stale (1.8).
     """
     body, err = parse_body(event)
     if err:
@@ -1103,49 +1416,54 @@ def put_version_source(event: Dict, user: Dict, plugin_id: str, version: int) ->
     if err:
         return err
 
-    files = body.get('files')
-    if (not isinstance(files, dict) or not files
-            or not all(isinstance(k, str) and isinstance(v, str)
-                       for k, v in files.items())):
-        return error_response(400, 'INVALID_FILES',
-                              'files must be a non-empty object mapping '
-                              'relative paths to text content')
+    parsed, err = _validate_source_body(body)
+    if err:
+        return err
+    files, delete, mode = parsed
 
-    # Confine every key to the version's source prefix.
-    normalized: Dict[str, str] = {}
-    for path, content in files.items():
-        clean = os.path.normpath(path).lstrip('/')
-        if clean.startswith('..') or clean in ('.', ''):
-            return error_response(400, 'INVALID_FILE_PATH',
-                                  'Invalid file path', {'file': path})
-        normalized[clean] = content
+    if item.get('lifecycle_state') != STATE_DEV:
+        return error_response(
+            409, 'SOURCE_LOCKED',
+            f"Source of a '{item.get('lifecycle_state')}' version cannot be "
+            'edited in place; save the edits as a new version instead',
+            {'lifecycle_state': item.get('lifecycle_state'),
+             'hint': 'save as new version'})
+
+    expected = body.get('expected_source_revision')
+    if expected is not None:
+        try:
+            expected = int(expected)
+        except (TypeError, ValueError):
+            return error_response(400, 'INVALID_JSON',
+                                  'expected_source_revision must be an integer')
+        current = source_revision_of(item)
+        if expected != current:
+            return error_response(
+                409, 'SOURCE_REVISION_CONFLICT',
+                'The source changed since it was loaded; reload before saving',
+                {'current': current, 'expected': expected})
+
+    prefix = item['source_s3_prefix']
+    listing = [f['file'] for f in list_source_objects(prefix)]
+    tree = resulting_tree(listing, files, delete, mode)
 
     # Scaffold-kind records keep the buildability guarantee: reject
     # non-buildable source with every defect described (1.7, 2.6).
-    declaration_json = (item.get('provenance') or {}).get('scaffoldDeclaration')
-    if item.get('kind') == 'scaffold' and declaration_json:
-        defects = scaffold_defects(normalized, json.loads(declaration_json))
-        if defects:
-            return error_response(
-                422, 'SCAFFOLD_INVALID',
-                'The submitted source does not form a buildable '
-                'Plugin_Scaffold: ' + '; '.join(defects),
-                {'defects': defects})
+    defects = scaffold_defects_for_tree(item, prefix, tree, files)
+    if defects:
+        return _scaffold_invalid_response(defects)
 
-    prefix = item['source_s3_prefix']
-    for path, content in sorted(normalized.items()):
-        s3.put_object(
-            Bucket=PORTAL_ARTIFACTS_BUCKET,
-            Key=prefix + path,
-            Body=content.encode('utf-8'),
-            ContentType='text/plain; charset=utf-8',
-        )
+    # Objects removed by this save: explicit deletions plus, in replace
+    # mode, every current path absent from the submitted map.
+    removed = sorted(set(listing) - set(tree))
 
-    plugin_table().update_item(
-        Key={'plugin_id': plugin_id, 'version': version},
-        UpdateExpression='SET updated_at = :t',
-        ExpressionAttributeValues={':t': now_ms()},
-    )
+    _write_source_files(prefix, files)
+    if removed:
+        _delete_source_files(prefix, removed)
+
+    new_revision = bump_source_revision(plugin_id, version)
+    updated = get_version_item(plugin_id, version) or item
+    stale = stale_architectures(updated)
 
     log_audit_event(
         user_id=user['user_id'],
@@ -1154,11 +1472,171 @@ def put_version_source(event: Dict, user: Dict, plugin_id: str, version: int) ->
         resource_id=plugin_id,
         result='success',
         details={'usecase_id': item['usecase_id'], 'version': version,
-                 'files': sorted(normalized)}
+                 'files': sorted(files), 'deleted': removed, 'mode': mode,
+                 'source_revision': new_revision}
     )
 
-    return create_response(200, {'files': sorted(normalized),
-                                 'count': len(normalized)})
+    return create_response(200, {'files': sorted(files),
+                                 'deleted': removed,
+                                 'count': len(files),
+                                 'source_revision': new_revision,
+                                 'stale_architectures': stale})
+
+
+def copy_source_tree(source_prefix: str, target_prefix: str,
+                     paths: List[str]) -> List[str]:
+    """Server-side copy of `paths` from one plugin-sources prefix to
+    another; returns the target keys written (for rollback)."""
+    written: List[str] = []
+    for path in sorted(paths):
+        target_key = target_prefix + path
+        s3.copy_object(
+            Bucket=PORTAL_ARTIFACTS_BUCKET,
+            CopySource={'Bucket': PORTAL_ARTIFACTS_BUCKET,
+                        'Key': source_prefix + path},
+            Key=target_key,
+        )
+        written.append(target_key)
+    return written
+
+
+def create_version_from_source(item: Dict, user_id: str, files: Dict[str, str],
+                               delete: List[str], name: Optional[str] = None,
+                               description: Optional[str] = None,
+                               provenance_updates: Optional[Dict] = None,
+                               source_prefix: Optional[str] = None,
+                               source_paths: Optional[List[str]] = None
+                               ) -> Tuple[Optional[Dict], Optional[Dict]]:
+    """
+    Create Plugin_Version latest+1 of `item`'s record whose Source_Tree is
+    a copy of `source_prefix`'s tree (default: `item`'s own tree) minus
+    `delete`, overlaid with `files` (custom-node-source-lifecycle 1.6;
+    also the Pull new-version install, 4.8). The new version starts in
+    `dev` with the review pending, copies the Git_Link (without its last
+    sync), the requested architectures, and the DeepStream flag, and
+    records the originating version as provenance.forkedFrom.
+
+    Returns (item, None) on success or (None, error_response). Nothing is
+    written when the resulting tree fails scaffold validation; copied
+    objects are removed again when the version item cannot be created.
+    """
+    plugin_id = item['plugin_id']
+    from_prefix = source_prefix or item['source_s3_prefix']
+    listing = (source_paths if source_paths is not None
+               else [f['file'] for f in list_source_objects(from_prefix)])
+    tree = resulting_tree(listing, files, delete, SOURCE_MODE_MERGE)
+
+    defects = scaffold_defects_for_tree(item, from_prefix, tree, files)
+    if defects:
+        return None, _scaffold_invalid_response(defects)
+
+    latest = get_latest_version_item(plugin_id) or item
+    new_version = int(latest['version']) + 1
+    timestamp = now_ms()
+
+    provenance = dict(item.get('provenance') or {})
+    provenance.update(provenance_updates or {})
+    provenance['forkedFrom'] = int(item['version'])
+    provenance['createdBy'] = user_id
+    provenance['createdAt'] = timestamp
+
+    new_item = new_version_item(
+        plugin_id=plugin_id, version=new_version,
+        usecase_id=item['usecase_id'],
+        name=name if name is not None else item.get('name'),
+        kind=item.get('kind'), user_id=user_id, timestamp=timestamp,
+        description=(description if description is not None
+                     else item.get('description', '')),
+        deepstream=item.get('deepstream', False),
+        provenance=provenance,
+    )
+    if item.get('requested_architectures'):
+        new_item['requested_architectures'] = list(item['requested_architectures'])
+    git_link = item.get('git')
+    if isinstance(git_link, dict):
+        new_item['git'] = {k: v for k, v in git_link.items() if k != 'last_sync'}
+
+    target_prefix = new_item['source_s3_prefix']
+    copied = [p for p in tree if p not in files]
+    written = copy_source_tree(from_prefix, target_prefix, copied)
+    _write_source_files(target_prefix, files)
+    written += [target_prefix + p for p in files]
+
+    try:
+        plugin_table().put_item(
+            Item=new_item,
+            ConditionExpression='attribute_not_exists(version)'
+        )
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            for start in range(0, len(written), 1000):
+                s3.delete_objects(
+                    Bucket=PORTAL_ARTIFACTS_BUCKET,
+                    Delete={'Objects': [{'Key': k}
+                                        for k in written[start:start + 1000]],
+                            'Quiet': True})
+            return None, error_response(
+                409, 'VERSION_CONFLICT',
+                'A new version was created concurrently; retry',
+                {'version': new_version})
+        raise
+
+    log_audit_event(
+        user_id=user_id,
+        action='create_plugin_record_version',
+        resource_type='plugin_record',
+        resource_id=plugin_id,
+        result='success',
+        details={'usecase_id': item['usecase_id'], 'version': new_version,
+                 'forked_from': int(item['version']),
+                 'files': sorted(files), 'deleted': sorted(delete)}
+    )
+    return new_item, None
+
+
+def new_version_from_source(event: Dict, user: Dict, plugin_id: str,
+                            version: int) -> Dict:
+    """
+    POST /plugins/{id}/versions/{v}/new-version
+    Body: {files?: {relative/path: content}, delete?: [relative/path],
+           name?, description?}
+
+    "Save as new version" (custom-node-source-lifecycle 1.6): the
+    Source_Tree of version `v` — any Lifecycle_State — is copied to
+    latest+1 with the edits applied. The new version is `dev` with the
+    review pending; its Git_Link, requested architectures, and DeepStream
+    flag are copied; provenance.forkedFrom records `v`. Scaffold-kind
+    trees are validated before any write (1.7).
+    """
+    body, err = parse_body(event)
+    if err:
+        return err
+
+    item = get_version_item(plugin_id, version)
+    if not item:
+        return not_found_response()
+    err = authorize_record_access(user, event, item, manage=True)
+    if err:
+        return err
+
+    parsed, err = _validate_source_body(body, allow_empty=True)
+    if err:
+        return err
+    files, delete, _mode = parsed
+
+    for field in ('name', 'description'):
+        if field in body and not isinstance(body[field], str):
+            return error_response(400, 'INVALID_JSON',
+                                  f'{field} must be a string')
+
+    new_item, err = create_version_from_source(
+        item, user['user_id'], files, delete,
+        name=body.get('name'), description=body.get('description'))
+    if err:
+        return err
+
+    return create_response(201, {'plugin': version_detail(new_item),
+                                 'source_revision': DEFAULT_SOURCE_REVISION})
 
 
 def promote_version(event: Dict, user: Dict, plugin_id: str, version: int) -> Dict:
@@ -1353,6 +1831,9 @@ def handler(event: Dict, context: Any) -> Dict:
                     return get_version_source(event, user, plugin_id, version)
                 if http_method == 'PUT':
                     return put_version_source(event, user, plugin_id, version)
+            elif resource == '/plugins/{id}/versions/{v}/new-version':
+                if http_method == 'POST':
+                    return new_version_from_source(event, user, plugin_id, version)
             elif resource == '/plugins/{id}/versions/{v}/gst-properties':
                 if http_method == 'GET':
                     return get_version_gst_properties(event, user, plugin_id, version)

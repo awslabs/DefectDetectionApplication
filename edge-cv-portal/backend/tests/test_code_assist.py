@@ -34,7 +34,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from botocore.exceptions import ReadTimeoutError
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 from conftest import REGION
 
@@ -75,13 +75,20 @@ def ca(aws_stack):
     import boto3
 
     os.environ["SETTINGS_TABLE"] = SETTINGS_TABLE_NAME
-    boto3.client("dynamodb", region_name=REGION).create_table(
-        TableName=SETTINGS_TABLE_NAME,
-        KeySchema=[{"AttributeName": "setting_key", "KeyType": "HASH"}],
-        AttributeDefinitions=[{"AttributeName": "setting_key",
-                               "AttributeType": "S"}],
-        BillingMode="PAY_PER_REQUEST",
-    )
+    try:
+        boto3.client("dynamodb", region_name=REGION).create_table(
+            TableName=SETTINGS_TABLE_NAME,
+            KeySchema=[{"AttributeName": "setting_key", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "setting_key",
+                                   "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+    except ClientError as e:
+        # Sibling modules (test_code_assist_diagnostics.py,
+        # test_property_code_assist_context.py) share this table within
+        # the session; creation is idempotent across module order.
+        if e.response["Error"]["Code"] != "ResourceInUseException":
+            raise
 
     for module_name in ("workflow_generator", "workflow_validation",
                         "code_assist", "bedrock_common"):

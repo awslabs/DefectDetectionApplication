@@ -145,6 +145,51 @@ describe('SimulatorView', () => {
     });
   });
 
+  it('routes a failed run to the detail page as a simulation Diagnostic_Context (source-lifecycle 5.2)', async () => {
+    const failedRun = {
+      ...COMPLETED_RUN,
+      status: 'failed',
+      failure: { message: 'Plugin raised an exception', timeout: false },
+    };
+    startSimulation.mockResolvedValue({ simulation_run: failedRun });
+    const { container } = render(<SimulatorView />);
+    await screen.findByText('Simulate blur-regions v1');
+
+    const datasetSelect = createWrapper(container).findSelect()!;
+    datasetSelect.openDropdown();
+    datasetSelect.selectOptionByValue('d-1');
+    fireEvent.click(screen.getByRole('button', { name: 'Run simulation' }));
+
+    await screen.findByText('Simulation failed');
+    fireEvent.click(screen.getByRole('button', { name: 'Fix with AI' }));
+
+    expect(navigateMock).toHaveBeenCalledWith('/node-designer/plugins/p-1', {
+      state: {
+        assistDiagnostics: { kind: 'simulation', text: 'Plugin raised an exception' },
+      },
+    });
+  });
+
+  it('offers no "Fix with AI" for a timeout (no plugin error to diagnose)', async () => {
+    startSimulation.mockResolvedValue({
+      simulation_run: {
+        ...COMPLETED_RUN,
+        status: 'failed',
+        failure: { message: 'Run exceeded 300 s', timeout: true },
+      },
+    });
+    const { container } = render(<SimulatorView />);
+    await screen.findByText('Simulate blur-regions v1');
+
+    const datasetSelect = createWrapper(container).findSelect()!;
+    datasetSelect.openDropdown();
+    datasetSelect.selectOptionByValue('d-1');
+    fireEvent.click(screen.getByRole('button', { name: 'Run simulation' }));
+
+    await screen.findByText('Simulation timed out');
+    expect(screen.queryByRole('button', { name: 'Fix with AI' })).toBeNull();
+  });
+
   it('shows the refusal and disables the run when no successful x86_64 build exists (7.5)', async () => {
     getVersion.mockResolvedValue(pluginDetail({}));
     render(<SimulatorView />);

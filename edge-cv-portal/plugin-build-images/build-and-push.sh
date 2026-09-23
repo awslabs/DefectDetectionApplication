@@ -2,7 +2,7 @@
 # Build and push the per-architecture dda-plugin-build images (custom-node-designer).
 #
 # Usage:
-#   ./build-and-push.sh                 # build + push all five architectures
+#   ./build-and-push.sh                 # build + push all six architectures
 #   ./build-and-push.sh arm64_jp5       # build + push one architecture
 #
 # The image tag is the architecture name, matching the default tag the
@@ -11,7 +11,8 @@
 # TAG_SUFFIX=<suffix>).
 #
 # x86_64 images target linux/amd64 (emulated via qemu on an arm64 host);
-# the JetPack images are native linux/arm64 builds from NVIDIA L4T bases.
+# the JetPack images are native linux/arm64 builds from NVIDIA L4T bases
+# (arm64_jp7 from the CUDA 13 Ubuntu 24.04 base shared with Dockerfile.jp7).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -21,7 +22,7 @@ ECR_REPO="${ECR_REPO:-dda-plugin-build}"
 TAG_SUFFIX="${TAG_SUFFIX:-}"
 REPO_URI="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPO"
 
-ALL_ARCHES=(x86_64 x86_64_nvidia arm64_jp4 arm64_jp5 arm64_jp6)
+ALL_ARCHES=(x86_64 x86_64_nvidia arm64_jp4 arm64_jp5 arm64_jp6 arm64_jp7)
 
 platform_for() {
   case "$1" in

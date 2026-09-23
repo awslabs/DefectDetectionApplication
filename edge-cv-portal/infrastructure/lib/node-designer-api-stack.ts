@@ -20,6 +20,8 @@ export interface NodeDesignerApiStackProps extends cdk.NestedStackProps {
   pluginComponentsHandler: lambda.Function;
   pluginSimulatorHandler: lambda.Function;
   customNodeTypesHandler: lambda.Function;
+  /** git_sync.py (custom-node-source-lifecycle). */
+  gitSyncHandler: lambda.Function;
 }
 
 /**
@@ -50,6 +52,14 @@ export interface NodeDesignerApiStackProps extends cdk.NestedStackProps {
  * - custom_node_types.py: GET/POST /custom-node-types,
  *                         GET/PUT/DELETE /custom-node-types/{id},
  *                         POST .../deprecate
+ * - custom-node-source-lifecycle additions:
+ *   plugin_records.py:    POST /plugins/{id}/versions/{v}/new-version
+ *   plugin_builds.py:     POST /plugins/{id}/versions/{v}/architectures
+ *   git_sync.py:          GET/POST /git-connections, GET/PUT/DELETE
+ *                         /git-connections/{cid}, POST .../verify,
+ *                         PUT/DELETE /plugins/{id}/versions/{v}/git,
+ *                         POST .../git/push | .../git/pull, GET .../git/operations,
+ *                         GET /git-sync-operations/{opId}
  */
 export class NodeDesignerApiStack extends cdk.NestedStack {
   constructor(scope: Construct, id: string, props: NodeDesignerApiStackProps) {
@@ -93,6 +103,7 @@ export class NodeDesignerApiStack extends cdk.NestedStack {
     const componentsIntegration = new apigateway.LambdaIntegration(props.pluginComponentsHandler, { allowTestInvoke: false });
     const simulatorIntegration = new apigateway.LambdaIntegration(props.pluginSimulatorHandler, { allowTestInvoke: false });
     const nodeTypesIntegration = new apigateway.LambdaIntegration(props.customNodeTypesHandler, { allowTestInvoke: false });
+    const gitSyncIntegration = new apigateway.LambdaIntegration(props.gitSyncHandler, { allowTestInvoke: false });
 
     const methods: apigateway.Method[] = [];
     const addMethod = (
@@ -148,6 +159,10 @@ export class NodeDesignerApiStack extends cdk.NestedStack {
     addMethod(sourceResource, 'GET', recordsIntegration);
     addMethod(sourceResource, 'PUT', recordsIntegration);
 
+    // Save as new version: copy the version's Source_Tree to latest+1 with
+    // edits applied (custom-node-source-lifecycle 1.6) — plugin_records.py.
+    addMethod(versionResource.addResource('new-version'), 'POST', recordsIntegration);
+
     // Plugin-set import selection (plugin_importer.py): completes an import
     // awaiting selection (import status pending_selection) by recording the
     // chosen subset of the enumerated plugins and submitting the deferred
@@ -174,7 +189,19 @@ export class NodeDesignerApiStack extends cdk.NestedStack {
     // (plugin_components.py).
     addMethod(versionResource.addResource('build'), 'POST', buildsIntegration);
     addMethod(versionResource.addResource('builds'), 'GET', buildsIntegration);
+    // Architecture_Addition: append Target_Architectures to the version and
+    // build only those (custom-node-source-lifecycle 6) — plugin_builds.py.
+    addMethod(versionResource.addResource('architectures'), 'POST', buildsIntegration);
     addMethod(versionResource.addResource('component'), 'GET', componentsIntegration);
+
+    // Git_Link and Sync_Operations of one version (custom-node-source-
+    // lifecycle 3, 4) — git_sync.py.
+    const gitResource = versionResource.addResource('git');
+    addMethod(gitResource, 'PUT', gitSyncIntegration);
+    addMethod(gitResource, 'DELETE', gitSyncIntegration);
+    addMethod(gitResource.addResource('push'), 'POST', gitSyncIntegration);
+    addMethod(gitResource.addResource('pull'), 'POST', gitSyncIntegration);
+    addMethod(gitResource.addResource('operations'), 'GET', gitSyncIntegration);
 
     // Simulator run start (plugin_simulator.py).
     addMethod(versionResource.addResource('simulate'), 'POST', simulatorIntegration);
@@ -202,6 +229,25 @@ export class NodeDesignerApiStack extends cdk.NestedStack {
     addMethod(nodeTypeResource, 'PUT', nodeTypesIntegration);
     addMethod(nodeTypeResource, 'DELETE', nodeTypesIntegration);
     addMethod(nodeTypeResource.addResource('deprecate'), 'POST', nodeTypesIntegration);
+
+    // /git-connections — per-Use_Case Git_Connections (custom-node-source-
+    // lifecycle 2) — git_sync.py.
+    const gitConnectionsResource = api.root.addResource('git-connections', {
+      defaultCorsPreflightOptions: corsOptions,
+    });
+    addMethod(gitConnectionsResource, 'GET', gitSyncIntegration);
+    addMethod(gitConnectionsResource, 'POST', gitSyncIntegration);
+    const gitConnectionResource = gitConnectionsResource.addResource('{cid}');
+    addMethod(gitConnectionResource, 'GET', gitSyncIntegration);
+    addMethod(gitConnectionResource, 'PUT', gitSyncIntegration);
+    addMethod(gitConnectionResource, 'DELETE', gitSyncIntegration);
+    addMethod(gitConnectionResource.addResource('verify'), 'POST', gitSyncIntegration);
+
+    // /git-sync-operations/{opId} — Sync_Operation polling.
+    const gitSyncOperationsResource = api.root.addResource('git-sync-operations', {
+      defaultCorsPreflightOptions: corsOptions,
+    });
+    addMethod(gitSyncOperationsResource.addResource('{opId}'), 'GET', gitSyncIntegration);
 
     // ------------------------------------------------------------------
     // Deployment re-pointing the existing stage so the routes above go
@@ -234,5 +280,7 @@ export class NodeDesignerApiStack extends cdk.NestedStack {
     deployment.node.addDependency(pluginModulesResource);
     deployment.node.addDependency(simulationsResource);
     deployment.node.addDependency(nodeTypesResource);
+    deployment.node.addDependency(gitConnectionsResource);
+    deployment.node.addDependency(gitSyncOperationsResource);
   }
 }

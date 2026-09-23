@@ -12,6 +12,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { Construct } from 'constructs';
@@ -31,6 +32,10 @@ export const PLUGIN_BUILD_ARCHITECTURES = [
   'arm64_jp4',
   'arm64_jp5',
   'arm64_jp6',
+  // custom-node-source-lifecycle Requirement 7.1: Jetson Thor (JetPack 7,
+  // Ubuntu 24.04 + CUDA 13, GStreamer 1.24), same CUDA 13 base image as the
+  // JetPack 7 LocalServer (src/backend/Dockerfile.jp7).
+  'arm64_jp7',
 ] as const;
 
 export interface NodeDesignerStackProps extends cdk.StackProps {
@@ -116,6 +121,11 @@ export class NodeDesignerStack extends cdk.Stack {
   public readonly buildProjects: { [arch: string]: codebuild.Project };
   /** Lightweight repository-fetch project used by plugin_importer.py. */
   public readonly fetchProject: codebuild.Project;
+  /** Git verify/push/pull runner project used by git_sync.py (custom-node-source-lifecycle). */
+  public readonly gitSyncProject: codebuild.Project;
+  /** Git_Connections and Sync_Operations tables (custom-node-source-lifecycle). */
+  public readonly gitConnectionsTable: dynamodb.Table;
+  public readonly gitSyncOperationsTable: dynamodb.Table;
   /** Plugin_Simulator state machine (Guard -> Prepare -> RunSandbox -> Collect). */
   public readonly simulatorStateMachine: sfn.StateMachine;
 
@@ -127,6 +137,7 @@ export class NodeDesignerStack extends cdk.Stack {
   public readonly pluginComponentsHandler: lambda.Function;
   public readonly pluginSimulatorHandler: lambda.Function;
   public readonly customNodeTypesHandler: lambda.Function;
+  public readonly gitSyncHandler: lambda.Function;
 
   /**
    * Resolve availability zones at deploy time (Fn::GetAZs) instead of via a
@@ -162,6 +173,9 @@ export class NodeDesignerStack extends cdk.Stack {
     const PLUGIN_STAGING_PREFIX = 'plugin-staging';
     const PLUGIN_LIBRARY_CUSTOM_PREFIX = 'workflow-plugins/custom';
     const PLUGIN_SIMULATIONS_PREFIX = 'plugin-simulations';
+    // Git sync staging + runner results (custom-node-source-lifecycle design §5/§6).
+    const PLUGIN_GIT_SYNC_PREFIX = 'plugin-git-sync';
+    const GIT_SECRET_PREFIX = 'dda-portal/git-connections';
 
     // Fixed name of the Plugin_Simulator state machine so its ARN can be
     // composed for the plugin_simulator.py environment without a token
@@ -288,6 +302,40 @@ export class NodeDesignerStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: 'ttl',
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // ------------------------------------------------------------------
+    // Git sync tables (custom-node-source-lifecycle design data model).
+    // GitConnections: per-Use_Case repository + Secrets Manager token ARN
+    // (never the token). GitSyncOperations: verify/push/pull runs with a
+    // 180-day TTL, queryable per plugin newest-first.
+    // ------------------------------------------------------------------
+    this.gitConnectionsTable = new dynamodb.Table(this, 'GitConnectionsTable', {
+      tableName: 'dda-portal-git-connections',
+      partitionKey: { name: 'connection_id', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecovery: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    this.gitConnectionsTable.addGlobalSecondaryIndex({
+      indexName: 'usecase-connections-index',
+      partitionKey: { name: 'usecase_id', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    this.gitSyncOperationsTable = new dynamodb.Table(this, 'GitSyncOperationsTable', {
+      tableName: 'dda-portal-git-sync-operations',
+      partitionKey: { name: 'operation_id', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecovery: true,
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    this.gitSyncOperationsTable.addGlobalSecondaryIndex({
+      indexName: 'plugin-operations-index',
+      partitionKey: { name: 'plugin_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'started_at', type: dynamodb.AttributeType.NUMBER },
+      projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // ------------------------------------------------------------------
@@ -525,6 +573,106 @@ export class NodeDesignerStack extends cdk.Stack {
     });
 
     // ------------------------------------------------------------------
+    // Git sync runner project (custom-node-source-lifecycle Requirements
+    // 2.4, 3, 4, 9.5). The ONLY place in the portal with a git binary and
+    // outbound internet. Its role can read plugin sources, read/write the
+    // plugin-git-sync staging/result prefix, and read exactly the Git
+    // connection secrets - the Lambda that starts it never can. The token
+    // reaches the build as a SECRETS_MANAGER-typed environment variable
+    // (resolved by CodeBuild, masked in logs) and is used through
+    // GIT_ASKPASS, never embedded in a URL or command line.
+    // The runner script is a real file (unit-tested offline) delivered as
+    // the project's S3 source.
+    // ------------------------------------------------------------------
+    const gitSyncRunnerPrefix = `${PLUGIN_GIT_SYNC_PREFIX}/runner/`;
+    new s3deploy.BucketDeployment(this, 'GitSyncRunnerAsset', {
+      sources: [s3deploy.Source.asset(path.join(__dirname, '../../plugin-build-images/git-sync'), {
+        exclude: ['tests', 'tests/**'],
+      })],
+      destinationBucket: bucket,
+      destinationKeyPrefix: gitSyncRunnerPrefix,
+      prune: false,
+    });
+
+    const gitSyncRole = new iam.Role(this, 'GitSyncRunnerRole', {
+      assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
+      description:
+        'Git sync runner role: plugin-sources read, plugin-git-sync read/write, git connection secrets read',
+    });
+    gitSyncRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject', 's3:GetObjectVersion'],
+      resources: [
+        `${bucket.bucketArn}/${PLUGIN_SOURCES_PREFIX}/*`,
+        `${bucket.bucketArn}/${PLUGIN_GIT_SYNC_PREFIX}/*`,
+      ],
+    }));
+    gitSyncRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutObject', 's3:DeleteObject'],
+      resources: [`${bucket.bucketArn}/${PLUGIN_GIT_SYNC_PREFIX}/*`],
+    }));
+    gitSyncRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:ListBucket'],
+      resources: [bucket.bucketArn],
+      conditions: {
+        StringLike: { 's3:prefix': [`${PLUGIN_SOURCES_PREFIX}/*`, `${PLUGIN_GIT_SYNC_PREFIX}/*`] },
+      },
+    }));
+    const gitSecretArnPattern =
+      `arn:aws:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:${GIT_SECRET_PREFIX}/*`;
+    gitSyncRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [gitSecretArnPattern],
+    }));
+    gitSyncRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [
+        `arn:aws:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:log-group:/aws/codebuild/dda-plugin-git-sync`,
+        `arn:aws:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:log-group:/aws/codebuild/dda-plugin-git-sync:*`,
+      ],
+    }));
+
+    this.gitSyncProject = new codebuild.Project(this, 'GitSyncProject', {
+      projectName: 'dda-plugin-git-sync',
+      description:
+        'Verifies Git connections and pushes/pulls plugin source trees to/from GitHub or GitLab',
+      role: gitSyncRole.withoutPolicyUpdates(),
+      source: codebuild.Source.s3({
+        bucket,
+        path: gitSyncRunnerPrefix,
+      }),
+      environment: {
+        buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
+        computeType: codebuild.ComputeType.SMALL,
+      },
+      environmentVariables: {
+        ARTIFACTS_BUCKET: { value: bucket.bucketName },
+        // SYNC_KIND / REPO_URL / GIT_TOKEN (SECRETS_MANAGER) / ... arrive as
+        // StartBuild overrides from git_sync.py.
+        SYNC_KIND: { value: '' },
+        RESULT_KEY: { value: '' },
+      },
+      buildSpec: codebuild.BuildSpec.fromObject({
+        version: '0.2',
+        phases: {
+          build: {
+            commands: ['bash runner.sh'],
+          },
+          post_build: {
+            commands: [
+              'test -f /tmp/result.json && aws s3 cp /tmp/result.json "s3://$ARTIFACTS_BUCKET/$RESULT_KEY" || true',
+            ],
+          },
+        },
+      }),
+      timeout: cdk.Duration.minutes(15),
+    });
+
+    // ------------------------------------------------------------------
     // Lambda layers. This stack builds its own layer versions from the same
     // assets as the ComputeStack (the TestRunnerStack does the same for
     // workflow_core) so no reference back into the ComputeStack exists -
@@ -618,6 +766,12 @@ export class NodeDesignerStack extends cdk.Stack {
       PLUGIN_SIMULATIONS_PREFIX,
       PLUGIN_SIGNING_KEY_ARN: this.pluginSigningKey.keyArn,
       PORTAL_ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
+      // custom-node-source-lifecycle: git sync tables/project/prefixes.
+      GIT_CONNECTIONS_TABLE: this.gitConnectionsTable.tableName,
+      GIT_SYNC_OPERATIONS_TABLE: this.gitSyncOperationsTable.tableName,
+      GIT_SYNC_PROJECT_NAME: this.gitSyncProject.projectName,
+      GIT_SECRET_PREFIX,
+      PLUGIN_GIT_SYNC_PREFIX,
     };
 
     const buildProjectsJson = cdk.Stack.of(this).toJsonString(
@@ -1161,6 +1315,66 @@ export class NodeDesignerStack extends cdk.Stack {
     });
 
     // ------------------------------------------------------------------
+    // git_sync.py - Git_Connections, Git_Links, and Sync_Operations
+    // (custom-node-source-lifecycle). The role can create/rotate/delete the
+    // connection secrets but deliberately has NO secretsmanager:GetSecretValue
+    // (Requirement 2.4): only the git-sync CodeBuild role reads tokens.
+    // ------------------------------------------------------------------
+    const gitSyncHandlerRole = createHandlerRole('GitSync');
+    this.gitConnectionsTable.grantReadWriteData(gitSyncHandlerRole);
+    this.gitSyncOperationsTable.grantReadWriteData(gitSyncHandlerRole);
+    gitSyncHandlerRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'secretsmanager:CreateSecret',
+        'secretsmanager:PutSecretValue',
+        'secretsmanager:DeleteSecret',
+        'secretsmanager:DescribeSecret',
+        'secretsmanager:TagResource',
+      ],
+      resources: [gitSecretArnPattern],
+    }));
+    gitSyncHandlerRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['codebuild:StartBuild', 'codebuild:BatchGetBuilds'],
+      resources: [this.gitSyncProject.projectArn],
+    }));
+    gitSyncHandlerRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:GetLogEvents', 'logs:FilterLogEvents', 'logs:DescribeLogStreams'],
+      resources: [
+        `arn:aws:logs:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:log-group:/aws/codebuild/dda-plugin-git-sync*`,
+      ],
+    }));
+
+    this.gitSyncHandler = new lambda.Function(this, 'GitSyncHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'git_sync.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: gitSyncHandlerRole,
+      environment: lambdaEnvironment,
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(120),
+      memorySize: 512,
+    });
+
+    // Runner results reach git_sync.py through their own rule so the plugin
+    // build rule (and plugin_builds.py) stay untouched.
+    const gitSyncResultsRule = new events.Rule(this, 'GitSyncResultsRule', {
+      ruleName: 'dda-portal-git-sync-results',
+      description: 'Delivers git-sync runner results to git_sync.py',
+      eventPattern: {
+        source: ['aws.codebuild'],
+        detailType: ['CodeBuild Build State Change'],
+        detail: {
+          'build-status': ['SUCCEEDED', 'FAILED', 'FAULT', 'STOPPED', 'TIMED_OUT'],
+          'project-name': ['dda-plugin-git-sync'],
+        },
+      },
+    });
+    gitSyncResultsRule.addTarget(new targets.LambdaFunction(this.gitSyncHandler));
+
+    // ------------------------------------------------------------------
     // API Gateway routes: registered against the imported portal Rest API in
     // a nested stack (see class comment for the resource-limit rationale).
     // ------------------------------------------------------------------
@@ -1176,6 +1390,7 @@ export class NodeDesignerStack extends cdk.Stack {
       pluginComponentsHandler: this.pluginComponentsHandler,
       pluginSimulatorHandler: this.pluginSimulatorHandler,
       customNodeTypesHandler: this.customNodeTypesHandler,
+      gitSyncHandler: this.gitSyncHandler,
     });
 
     // ------------------------------------------------------------------
@@ -1196,6 +1411,10 @@ export class NodeDesignerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'PluginFetchProjectName', {
       value: this.fetchProject.projectName,
       description: 'Lightweight repository-fetch CodeBuild project name',
+    });
+    new cdk.CfnOutput(this, 'GitSyncProjectName', {
+      value: this.gitSyncProject.projectName,
+      description: 'Git verify/push/pull runner CodeBuild project name',
     });
     new cdk.CfnOutput(this, 'SimulatorStateMachineArn', {
       value: this.simulatorStateMachine.stateMachineArn,

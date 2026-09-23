@@ -48,17 +48,17 @@ describe('isSubmittablePrompt', () => {
 
 describe('codeAssistReducer', () => {
   it('starts idle with an empty prompt and no error', () => {
-    expect(INITIAL_CODE_ASSIST_STATE).toEqual({ phase: 'idle', prompt: '', error: null });
+    expect(INITIAL_CODE_ASSIST_STATE).toEqual({ phase: 'idle', prompt: '', error: null, diagnostics: null });
   });
 
   it('edits the prompt while idle and keeps the current error view', () => {
     const failed = codeAssistReducer(submittingWith('p'), { type: 'failed', error: ERROR });
     const edited = codeAssistReducer(failed, { type: 'edit-prompt', value: 'q' });
-    expect(edited).toEqual({ phase: 'idle', prompt: 'q', error: ERROR });
+    expect(edited).toEqual({ phase: 'idle', prompt: 'q', error: ERROR, diagnostics: null });
   });
 
   it('submit moves idle -> submitting with the same prompt', () => {
-    expect(submittingWith('sharpen')).toEqual({ phase: 'submitting', prompt: 'sharpen' });
+    expect(submittingWith('sharpen')).toEqual({ phase: 'submitting', prompt: 'sharpen', diagnostics: null });
   });
 
   it('submit is ignored on an unsubmittable prompt (Requirements 1.4, 2.8)', () => {
@@ -82,24 +82,26 @@ describe('codeAssistReducer', () => {
     expect(reviewingWith('p', 'def process_frame(f, m): ...', 'notes')).toEqual({
       phase: 'reviewing',
       prompt: 'p',
+      diagnostics: null,
       code: 'def process_frame(f, m): ...',
       notes: 'notes',
+      targetFile: null,
     });
   });
 
   it('failed returns to idle with the same prompt and the error view (Requirement 5.5)', () => {
     const failed = codeAssistReducer(submittingWith('p'), { type: 'failed', error: ERROR });
-    expect(failed).toEqual({ phase: 'idle', prompt: 'p', error: ERROR });
+    expect(failed).toEqual({ phase: 'idle', prompt: 'p', error: ERROR, diagnostics: null });
   });
 
   it('accept returns to idle with the prompt cleared', () => {
     const accepted = codeAssistReducer(reviewingWith('p', 'c', 'n'), { type: 'accept' });
-    expect(accepted).toEqual({ phase: 'idle', prompt: '', error: null });
+    expect(accepted).toEqual({ phase: 'idle', prompt: '', error: null, diagnostics: null });
   });
 
   it('reject returns to idle with the same prompt (Requirement 2.9)', () => {
     const rejected = codeAssistReducer(reviewingWith('p', 'c', 'n'), { type: 'reject' });
-    expect(rejected).toEqual({ phase: 'idle', prompt: 'p', error: null });
+    expect(rejected).toEqual({ phase: 'idle', prompt: 'p', error: null, diagnostics: null });
   });
 
   it('succeeded/failed outside submitting and accept/reject outside reviewing are no-ops', () => {

@@ -125,6 +125,11 @@ from workflow_core.catalog import (
     DEVICE_ARCHITECTURES,
     DEEPSTREAM_ARCHITECTURES,
     classify_plugin_set,
+    platform_gstreamer_versions,
+    platform_labels,
+)
+from workflow_core.catalog import (
+    PLATFORMS_WITH_SUBPROJECT_FALLBACK as SHARED_PLATFORMS_WITH_SUBPROJECT_FALLBACK,
 )
 
 # Reuse the Plugin_Record item shape, persistence helpers, and error
@@ -1226,42 +1231,34 @@ def submit_builds(architectures: List[str]) -> Dict[str, Dict]:
 
 #: GStreamer version each Target_Architecture's build platform ships,
 #: from the dda-plugin-build images
-#: (edge-cv-portal/plugin-build-images/Dockerfile.<arch>):
+#: (edge-cv-portal/plugin-build-images/Dockerfile.<arch>) — sourced from
+#: the shared workflow_core.catalog.platforms.BUILD_PLATFORMS table
+#: (custom-node-source-lifecycle 7.4), which also feeds the code
+#: assistant's build-platform description:
 #:   - x86_64:        Ubuntu 22.04                        -> GStreamer 1.20
 #:   - x86_64_nvidia: CUDA on Ubuntu 22.04                -> GStreamer 1.20
 #:   - arm64_jp4:     L4T r32 (JetPack 4, Ubuntu 18.04)   -> GStreamer 1.14
 #:   - arm64_jp5:     L4T r35 (JetPack 5, Ubuntu 20.04)   -> GStreamer 1.16
 #:   - arm64_jp6:     L4T r36 (JetPack 6, Ubuntu 22.04)   -> GStreamer 1.20
-PLATFORM_GSTREAMER_VERSIONS = {
-    'x86_64': '1.20',
-    'x86_64_nvidia': '1.20',
-    'arm64_jp4': '1.14',
-    'arm64_jp5': '1.16',
-    'arm64_jp6': '1.20',
-}
+#:   - arm64_jp7:     Ubuntu 24.04 + CUDA 13 (Thor)       -> GStreamer 1.24
+PLATFORM_GSTREAMER_VERSIONS = platform_gstreamer_versions()
 
-#: Platforms whose build image toolchain (Ubuntu 22.04: modern meson,
-#: glib, and headers) can build a newer GStreamer via meson's
+#: Platforms whose build image toolchain (Ubuntu 22.04 or newer: modern
+#: meson, glib, and headers) can build a newer GStreamer via meson's
 #: subproject fallback when the source requires more than the platform
 #: ships. Observed in production: gst-plugins-good main (requires
 #: GStreamer >= 1.24) builds fine on x86_64 / x86_64_nvidia /
 #: arm64_jp6 (which ship 1.20) via the fallback, while arm64_jp4
 #: (Ubuntu 18.04) and arm64_jp5 (Ubuntu 20.04) fail with an obscure
 #: meson subproject error — their toolchains are too old to build a
-#: current GStreamer from source.
-PLATFORMS_WITH_SUBPROJECT_FALLBACK = frozenset(
-    {'x86_64', 'x86_64_nvidia', 'arm64_jp6'})
+#: current GStreamer from source. arm64_jp7 (Ubuntu 24.04) has the
+#: fallback too. Shared with workflow_core.catalog.platforms.
+PLATFORMS_WITH_SUBPROJECT_FALLBACK = SHARED_PLATFORMS_WITH_SUBPROJECT_FALLBACK
 
 #: Human-readable platform names for compatibility reasons (kept in
 #: line with the frontend's ARCHITECTURE_LABELS in
 #: frontend/src/pages/node-designer/types.ts).
-PLATFORM_LABELS = {
-    'x86_64': 'x86_64',
-    'x86_64_nvidia': 'x86_64 (NVIDIA GPU)',
-    'arm64_jp4': 'arm64 JetPack 4',
-    'arm64_jp5': 'arm64 JetPack 5',
-    'arm64_jp6': 'arm64 JetPack 6',
-}
+PLATFORM_LABELS = platform_labels()
 
 # meson: gst_req = '>= 1.24' / gst_req = '>= 1.24.0' (literal form,
 # used by standalone plugin repositories).

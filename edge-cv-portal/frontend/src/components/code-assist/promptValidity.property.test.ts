@@ -108,7 +108,7 @@ describe('Property 1: Prompt validity predicate', () => {
 
     fc.assert(
       fc.property(rejectedPromptArb, errorArb, (prompt, error) => {
-        const state: CodeAssistState = { phase: 'idle', prompt, error };
+        const state: CodeAssistState = { phase: 'idle', prompt, error, diagnostics: null };
         const next = codeAssistReducer(state, { type: 'submit' });
 
         // No invocation: the state is returned unchanged and stays idle.

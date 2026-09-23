@@ -165,14 +165,81 @@ def component_name_for(plugin_id: str) -> str:
     return f"{PLUGIN_COMPONENT_PREFIX}{plugin_id}"
 
 
-def component_version_for(plugin_version: int) -> str:
-    """Component version derived from the Plugin_Record version (16.1)"""
-    return f"{int(plugin_version)}.0.0"
+def component_version_for(plugin_version: int, revision: int = 0) -> str:
+    """Component version derived from the Plugin_Record version (16.1) and
+    the Component_Revision (custom-node-source-lifecycle 8.1): the first
+    registration of a Plugin_Version is v.0.0; each republish after the
+    set of built Plugin_Artifacts changed is v.0.n+1."""
+    return f"{int(plugin_version)}.0.{int(revision or 0)}"
 
 
-def artifact_final_prefix(plugin_id: str, plugin_version: int, arch: str) -> str:
-    """Account-bucket prefix of one arch's Plugin_Component artifacts"""
-    return f"{COMPONENT_S3_PREFIX}/{plugin_id}/{plugin_version}/{arch}"
+def component_revision_of(component: Optional[Dict]) -> int:
+    """The Component_Revision recorded on a component pointer; legacy
+    pointers (published before revisions existed) read as 0 (10.2)."""
+    try:
+        return int((component or {}).get('revision') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def artifact_checksums(item: Dict) -> Dict[str, str]:
+    """{arch: checksum} of the successfully built Plugin_Artifacts — the
+    artifact set a Plugin_Component publish carries (8.1, 8.3)."""
+    artifacts = item.get('artifacts') or {}
+    return {
+        arch: str(entry['checksum'])
+        for arch, entry in sorted(artifacts.items())
+        if isinstance(entry, dict) and entry.get('buildStatus') == 'succeeded'
+        and entry.get('checksum')
+    }
+
+
+def needs_republish(item: Dict) -> bool:
+    """
+    Whether the version's built artifact set differs from what its
+    registered Plugin_Component carries (custom-node-source-lifecycle
+    8.1, 8.2, Property 8): anything but a registered pointer republishes;
+    a registered pointer with recorded per-arch checksums republishes iff
+    the checksum map changed; a legacy registered pointer (no checksums
+    recorded) is compared by architecture set only (10.2).
+    """
+    component = item.get('component') or {}
+    if component.get('status') != COMPONENT_REGISTERED:
+        return True
+    desired = artifact_checksums(item)
+    recorded = component.get('artifact_checksums')
+    if isinstance(recorded, dict):
+        return {k: str(v) for k, v in recorded.items()} != desired
+    return sorted(str(a) for a in component.get('architectures') or []) \
+        != sorted(desired)
+
+
+def next_component_revision(item: Dict) -> int:
+    """The Component_Revision the next publish uses: 0 for a version that
+    was never registered, else the registered revision + 1 (8.1)."""
+    component = item.get('component') or {}
+    if component.get('status') != COMPONENT_REGISTERED:
+        # A failed/packaging pointer may already name the revision it
+        # attempted; reuse it so a retry lands on the same version string.
+        return component_revision_of(component)
+    return component_revision_of(component) + 1
+
+
+def artifact_final_prefix(plugin_id: str, plugin_version: int, arch: str,
+                          revision: int = 0) -> str:
+    """Account-bucket prefix of one arch's Plugin_Component artifacts.
+    Revision 0 keeps the historical layout; republishes live under their
+    own r{n} segment so prior component versions stay intact (8.4)."""
+    return f"{component_artifact_root(plugin_id, plugin_version, revision)}{arch}"
+
+
+def component_artifact_root(plugin_id: str, plugin_version: int,
+                            revision: int = 0) -> str:
+    """Account-bucket root (trailing slash) of one component publish."""
+    root = f"{COMPONENT_S3_PREFIX}/{plugin_id}/{plugin_version}/"
+    if int(revision or 0) > 0:
+        root += f"r{int(revision)}/"
+    return root
 
 
 def device_install_dir(plugin_id: str, plugin_version: int, arch: str) -> str:
@@ -224,7 +291,8 @@ def platform_for(arch: str) -> Dict[str, str]:
 
 def build_plugin_recipe(plugin_id: str, plugin_version: int, bucket: str,
                         arch_so_names: Dict[str, str],
-                        include_hook: bool = False) -> Dict:
+                        include_hook: bool = False,
+                        revision: int = 0) -> Dict:
     """
     Install-only Greengrass recipe for a Plugin_Component (16.1): one
     platform manifest per successfully built Target_Architecture (the
@@ -244,7 +312,11 @@ def build_plugin_recipe(plugin_id: str, plugin_version: int, bucket: str,
     manifests = []
     for arch in manifest_arch_order(arch_so_names):
         so_name = arch_so_names[arch]
-        final_prefix = artifact_final_prefix(plugin_id, plugin_version, arch)
+        final_prefix = artifact_final_prefix(plugin_id, plugin_version, arch,
+                                             revision)
+        # The device install directory is revision-independent: a newer
+        # component revision installs over the same path the workflow
+        # manifest names, so devices end up with the newest binaries.
         install_dir = device_install_dir(plugin_id, plugin_version, arch)
         filenames = [so_name, PLUGIN_MANIFEST_FILENAME]
         if include_hook:
@@ -276,7 +348,7 @@ def build_plugin_recipe(plugin_id: str, plugin_version: int, bucket: str,
     return {
         'RecipeFormatVersion': '2020-01-25',
         'ComponentName': component_name_for(plugin_id),
-        'ComponentVersion': component_version_for(plugin_version),
+        'ComponentVersion': component_version_for(plugin_version, revision),
         'ComponentType': 'aws.greengrass.generic',
         'ComponentPublisher': COMPONENT_PUBLISHER,
         'ComponentConfiguration': {
@@ -301,11 +373,11 @@ def registry_tags(usecase_id: str, plugin_id: str, plugin_version: int) -> Dict[
 
 
 def component_version_arn(region: str, account_id: str, plugin_id: str,
-                          plugin_version: int) -> str:
+                          plugin_version: int, revision: int = 0) -> str:
     """ARN of one Plugin_Component version in a Use_Case account registry"""
     return (f"arn:aws:greengrass:{region}:{account_id}:components:"
             f"{component_name_for(plugin_id)}:versions:"
-            f"{component_version_for(plugin_version)}")
+            f"{component_version_for(plugin_version, revision)}")
 
 
 # ------------------------------------------------------------- persistence
@@ -367,7 +439,8 @@ def load_frame_processing_hook(item: Dict) -> Optional[bytes]:
 
 def stage_and_promote_artifacts(usecase_s3, bucket: str, plugin_id: str,
                                 plugin_version: int,
-                                arch_payloads: Dict[str, Dict[str, bytes]]
+                                arch_payloads: Dict[str, Dict[str, bytes]],
+                                revision: int = 0
                                 ) -> Tuple[str, Dict[str, List[str]]]:
     """
     Upload every arch's artifacts ({arch: {filename: bytes}}) to a
@@ -382,7 +455,8 @@ def stage_and_promote_artifacts(usecase_s3, bucket: str, plugin_id: str,
 
     staged: List[Tuple[str, str, str]] = []  # (label, stage_key, final_key)
     for arch in sorted(arch_payloads):
-        final_prefix = artifact_final_prefix(plugin_id, plugin_version, arch)
+        final_prefix = artifact_final_prefix(plugin_id, plugin_version, arch,
+                                             revision)
         for filename in sorted(arch_payloads[arch]):
             label = f"{arch}/{filename}"
             stage_key = f"{staging_root}/{label}"
@@ -416,7 +490,7 @@ def stage_and_promote_artifacts(usecase_s3, bucket: str, plugin_id: str,
 
 def register_plugin_component(greengrass, recipe: Dict, usecase: Dict,
                               usecase_id: str, plugin_id: str,
-                              plugin_version: int) -> str:
+                              plugin_version: int, revision: int = 0) -> str:
     """
     Register the Plugin_Component version in the Use_Case account
     Greengrass registry and wait until it is DEPLOYABLE. A freshly
@@ -445,7 +519,8 @@ def register_plugin_component(greengrass, recipe: Dict, usecase: Dict,
         region = getattr(getattr(greengrass, 'meta', None), 'region_name', None) \
             or os.environ.get('AWS_REGION', 'us-east-1')
         component_arn = component_version_arn(
-            region, str(usecase.get('account_id')), plugin_id, plugin_version)
+            region, str(usecase.get('account_id')), plugin_id, plugin_version,
+            revision)
 
     component_status = 'REQUESTED'
     status_message = ''
@@ -505,13 +580,19 @@ def package_plugin_component(payload: Dict) -> Dict:
         return {'packaged': False, 'reason': 'plugin record not found'}
 
     name = component_name_for(plugin_id)
-    comp_version = component_version_for(version)
-
-    # Idempotent retry on plugin id + version: registered short-circuits.
     existing = item.get('component') or {}
-    if existing.get('status') == COMPONENT_REGISTERED:
+
+    # Idempotent on the built artifact set (custom-node-source-lifecycle
+    # 8.1, 8.2): a registered component whose recorded {arch: checksum}
+    # set equals the version's successfully built artifacts
+    # short-circuits; a changed set (rebuild after an edit, an added
+    # architecture, a retry that added an arch) publishes the next
+    # Component_Revision v.0.n+1 and leaves prior versions untouched (8.4).
+    if not needs_republish(item):
+        comp_version = existing.get('version') or component_version_for(
+            version, component_revision_of(existing))
         logger.info(f"Plugin_Component {name} v{comp_version} already "
-                    f"registered; short-circuiting")
+                    f"registered with the same artifact set; short-circuiting")
         return {'packaged': True, 'short_circuited': True,
                 'component_name': name, 'component_version': comp_version,
                 'component_arn': existing.get('arn')}
@@ -522,29 +603,33 @@ def package_plugin_component(payload: Dict) -> Dict:
                      f"no successfully built Plugin_Artifact")
         return {'packaged': False, 'reason': 'no successful builds'}
 
+    revision = next_component_revision(item)
     usecase_id = item['usecase_id']
     try:
-        return _package(item, plugin_id, version, usecase_id, built)
+        return _package(item, plugin_id, version, usecase_id, built, revision)
     except PackagingError as e:
         _record_failure(plugin_id, version, usecase_id, built, e.message,
-                        failing_artifact=e.artifact)
+                        failing_artifact=e.artifact, revision=revision)
         return {'packaged': False, 'reason': e.message,
                 'failing_artifact': e.artifact}
     except Exception as e:  # never fails the build (16.1 trigger contract)
         logger.error(f"Plugin_Component packaging failed for {plugin_id} "
                      f"v{version}: {str(e)}", exc_info=True)
-        _record_failure(plugin_id, version, usecase_id, built, str(e))
+        _record_failure(plugin_id, version, usecase_id, built, str(e),
+                        revision=revision)
         return {'packaged': False, 'reason': str(e)}
 
 
 def _record_failure(plugin_id: str, version: int, usecase_id: str,
                     built: List[str], message: str,
-                    failing_artifact: Optional[str] = None) -> None:
+                    failing_artifact: Optional[str] = None,
+                    revision: int = 0) -> None:
     """Best-effort failure bookkeeping on the component pointer + audit"""
     try:
         set_component_pointer(plugin_id, version, {
             'name': component_name_for(plugin_id),
-            'version': component_version_for(version),
+            'version': component_version_for(version, revision),
+            'revision': int(revision),
             'arn': None,
             'architectures': built,
             'status': COMPONENT_FAILED,
@@ -567,10 +652,11 @@ def _record_failure(plugin_id: str, version: int, usecase_id: str,
 
 
 def _package(item: Dict, plugin_id: str, version: int, usecase_id: str,
-             built: List[str]) -> Dict:
+             built: List[str], revision: int = 0) -> Dict:
     """The stage -> promote -> register sequence; raises PackagingError."""
     name = component_name_for(plugin_id)
-    comp_version = component_version_for(version)
+    comp_version = component_version_for(version, revision)
+    checksums = artifact_checksums(item)
 
     try:
         usecase = get_usecase(usecase_id)
@@ -587,8 +673,10 @@ def _package(item: Dict, plugin_id: str, version: int, usecase_id: str,
     set_component_pointer(plugin_id, version, {
         'name': name,
         'version': comp_version,
+        'revision': int(revision),
         'arn': None,
         'architectures': built,
+        'artifact_checksums': checksums,
         'status': COMPONENT_PACKAGING,
         'packagedAt': None,
         'failure': None,
@@ -631,17 +719,22 @@ def _package(item: Dict, plugin_id: str, version: int, usecase_id: str,
                                     session_name=session_name)
 
     staging_root = f"{STAGING_S3_PREFIX}/{plugin_id}/{version}/"
-    final_root = f"{COMPONENT_S3_PREFIX}/{plugin_id}/{version}/"
+    # Only THIS publish's artifact root is cleaned on failure: republishes
+    # live under their own r{n} segment, so prior component versions and
+    # their artifacts stay byte-identical (8.4).
+    final_root = component_artifact_root(plugin_id, version, revision)
     component_arn = None
     try:
         stage_root, _final_keys = stage_and_promote_artifacts(
-            usecase_s3, bucket, plugin_id, version, arch_payloads)
+            usecase_s3, bucket, plugin_id, version, arch_payloads, revision)
 
         # Register only after every artifact promoted successfully.
         recipe = build_plugin_recipe(plugin_id, version, bucket, arch_so_names,
-                                     include_hook=hook_bytes is not None)
+                                     include_hook=hook_bytes is not None,
+                                     revision=revision)
         component_arn = register_plugin_component(
-            greengrass, recipe, usecase, usecase_id, plugin_id, version)
+            greengrass, recipe, usecase, usecase_id, plugin_id, version,
+            revision)
     except PackagingError:
         # All-or-nothing: delete the stage and any promoted artifacts of
         # this version; previously published component versions and their
@@ -656,8 +749,10 @@ def _package(item: Dict, plugin_id: str, version: int, usecase_id: str,
     set_component_pointer(plugin_id, version, {
         'name': name,
         'version': comp_version,
+        'revision': int(revision),
         'arn': component_arn,
         'architectures': built,
+        'artifact_checksums': checksums,
         'status': COMPONENT_REGISTERED,
         'packagedAt': now_ms(),
         'failure': None,
@@ -671,11 +766,12 @@ def _package(item: Dict, plugin_id: str, version: int, usecase_id: str,
         details={'usecase_id': usecase_id, 'version': version,
                  'architectures': built, 'component_name': name,
                  'component_version': comp_version,
+                 'component_revision': int(revision),
                  'component_arn': component_arn}
     )
     return {'packaged': True, 'component_name': name,
             'component_version': comp_version, 'component_arn': component_arn,
-            'architectures': built}
+            'component_revision': int(revision), 'architectures': built}
 
 
 # ------------------------------------------------------------- API route

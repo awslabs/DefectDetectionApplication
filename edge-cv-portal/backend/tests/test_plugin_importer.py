@@ -2302,8 +2302,11 @@ class TestPreservationPlainRetry:
                     f"dda-plugin-build-{arch}:")
             else:
                 assert after["artifacts"][arch] == before["artifacts"][arch]
-        # Today's write records the retried round's architectures.
-        assert after["requested_architectures"] == sorted(retried)
+        # The requested set is a monotonic union (custom-node-source-
+        # lifecycle 6.5): a retry of a subset keeps every previously
+        # requested architecture in the build status view and packaging.
+        assert after["requested_architectures"] == sorted(
+            set(before["requested_architectures"]) | set(retried))
 
 
 class TestPreservationImportFlow:

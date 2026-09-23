@@ -16,6 +16,20 @@
 export const PROMPT_MAX_LENGTH = 4_000;
 
 /**
+ * Longest Diagnostic_Context text sent to the generator, in characters
+ * (custom-node-source-lifecycle 5.4). Longer error output keeps its tail.
+ */
+export const DIAGNOSTICS_MAX_LENGTH = 16 * 1024;
+
+/** Keep the last DIAGNOSTICS_MAX_LENGTH characters; report truncation. */
+export function truncateDiagnostics(text: string): { text: string; truncated: boolean } {
+  if (text.length <= DIAGNOSTICS_MAX_LENGTH) {
+    return { text, truncated: false };
+  }
+  return { text: text.slice(text.length - DIAGNOSTICS_MAX_LENGTH), truncated: true };
+}
+
+/**
  * True when the prompt may be submitted: at least one non-whitespace
  * character and a total length of at most 4,000 characters
  * (Requirements 1.4, 2.8).
@@ -36,15 +50,41 @@ export interface CodeAssistErrorView {
   message: string;
 }
 
+/**
+ * Error output attached to the next submission (custom-node-source-
+ * lifecycle 5.1-5.4): seeded by "Fix with AI" (build/simulation) or pasted
+ * by the user. Carried through idle/submitting so a failure preserves it
+ * together with the prompt; cleared on accept.
+ */
+export interface CodeAssistDiagnosticsState {
+  kind: 'build' | 'simulation' | 'user';
+  architecture?: string;
+  text: string;
+}
+
 export type CodeAssistState =
-  | { phase: 'idle'; prompt: string; error: CodeAssistErrorView | null }
-  | { phase: 'submitting'; prompt: string }
-  | { phase: 'reviewing'; prompt: string; code: string; notes: string };
+  | {
+      phase: 'idle';
+      prompt: string;
+      error: CodeAssistErrorView | null;
+      diagnostics: CodeAssistDiagnosticsState | null;
+    }
+  | { phase: 'submitting'; prompt: string; diagnostics: CodeAssistDiagnosticsState | null }
+  | {
+      phase: 'reviewing';
+      prompt: string;
+      diagnostics: CodeAssistDiagnosticsState | null;
+      code: string;
+      notes: string;
+      /** Source_Tree file the code applies to; null = the active file (5.7). */
+      targetFile: string | null;
+    };
 
 export type CodeAssistEvent =
   | { type: 'edit-prompt'; value: string }
+  | { type: 'edit-diagnostics'; diagnostics: CodeAssistDiagnosticsState | null }
   | { type: 'submit' }
-  | { type: 'succeeded'; code: string; notes: string }
+  | { type: 'succeeded'; code: string; notes: string; targetFile?: string | null }
   | { type: 'failed'; error: CodeAssistErrorView }
   | { type: 'accept' }
   | { type: 'reject' };
@@ -54,7 +94,16 @@ export const INITIAL_CODE_ASSIST_STATE: CodeAssistState = {
   phase: 'idle',
   prompt: '',
   error: null,
+  diagnostics: null,
 };
+
+/** Normalize a diagnostics edit: blank text clears the attachment. */
+function normalizeDiagnostics(
+  diagnostics: CodeAssistDiagnosticsState | null
+): CodeAssistDiagnosticsState | null {
+  if (!diagnostics || !diagnostics.text.trim()) return null;
+  return diagnostics;
+}
 
 // --------------------------------------------------------------- reducer
 
@@ -81,12 +130,22 @@ export function codeAssistReducer(
       // The prompt is editable only while idle; during submission it is
       // frozen so a failure restores exactly what was submitted (5.5).
       return state.phase === 'idle'
-        ? { phase: 'idle', prompt: event.value, error: state.error }
+        ? { phase: 'idle', prompt: event.value, error: state.error, diagnostics: state.diagnostics }
+        : state;
+
+    case 'edit-diagnostics':
+      return state.phase === 'idle'
+        ? {
+            phase: 'idle',
+            prompt: state.prompt,
+            error: state.error,
+            diagnostics: normalizeDiagnostics(event.diagnostics),
+          }
         : state;
 
     case 'submit':
       return state.phase === 'idle' && isSubmittablePrompt(state.prompt)
-        ? { phase: 'submitting', prompt: state.prompt }
+        ? { phase: 'submitting', prompt: state.prompt, diagnostics: state.diagnostics }
         : state;
 
     case 'succeeded':
@@ -94,24 +153,31 @@ export function codeAssistReducer(
         ? {
             phase: 'reviewing',
             prompt: state.prompt,
+            diagnostics: state.diagnostics,
             code: event.code,
             notes: event.notes,
+            targetFile: event.targetFile ?? null,
           }
         : state;
 
     case 'failed':
       return state.phase === 'submitting'
-        ? { phase: 'idle', prompt: state.prompt, error: event.error }
+        ? {
+            phase: 'idle',
+            prompt: state.prompt,
+            error: event.error,
+            diagnostics: state.diagnostics,
+          }
         : state;
 
     case 'accept':
       return state.phase === 'reviewing'
-        ? { phase: 'idle', prompt: '', error: null }
+        ? { phase: 'idle', prompt: '', error: null, diagnostics: null }
         : state;
 
     case 'reject':
       return state.phase === 'reviewing'
-        ? { phase: 'idle', prompt: state.prompt, error: null }
+        ? { phase: 'idle', prompt: state.prompt, error: null, diagnostics: state.diagnostics }
         : state;
   }
 }

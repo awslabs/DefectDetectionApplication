@@ -274,6 +274,7 @@ describe('Property 6: Dependent-parameter gating semantics', () => {
             expectedVisible.add('poll_interval_ms');
           }
           if (descriptor === MQTT_SUBSCRIBE_DESCRIPTOR && awsIot === true) {
+            expectedVisible.add('iot_endpoint');
             expectedVisible.add('iot_thing_name');
             expectedVisible.add('iot_ca_cert_path');
             expectedVisible.add('iot_client_cert_path');
