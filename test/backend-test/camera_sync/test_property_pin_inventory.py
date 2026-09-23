@@ -294,3 +294,87 @@ def test_inventory_presence_tracks_pin_state(
             }
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+@settings(deadline=None)
+@given(
+    sources=_image_sources(),
+    cameras=_discovered_cameras(),
+    origin=_pin_origins,
+)
+def test_workflow_inventory_presence_tracks_pin_state_too(
+    sources, cameras, origin
+):
+    """The WORKFLOW-engine inventory tracks the pin state exactly as the
+    Edge_Sync_Agent's does.
+
+    Bugfix: `.kiro/specs/static-camera-workflow-binding-invisible/`, task
+    3.2. The property above pins the agent's call shape. The workflow engine
+    is the merge's other production caller
+    (`workflow_engine/runtime.py::inventory_provider`), and it omitted
+    `static_image_pinned` entirely — so the virtual entry was invisible to
+    camera-binding resolution and every workflow bound to the static camera
+    was permanently rejected on device, while the registry shadow this
+    property covers was correct all along (measured on jetson-thor1,
+    2026-09-22).
+
+    The two callers legitimately differ in ONE way: the workflow provider
+    does not pass `static_image_absent_since`, because the local resolver
+    never reads `absent`/`absentSince` and the value's meaning is
+    shadow-merge-specific (design.md Decision 3). So the invariant is about
+    PRESENCE, and it is asserted against the agent's own result on the same
+    inputs rather than restated independently.
+
+    _Requirements: 2.1, 2.6_
+    """
+    tmp_dir = tempfile.mkdtemp(prefix="workflow-pin-inventory-")
+    try:
+        store = _pin_store(tmp_dir, origin)
+        snapshot = DiscoveryResult(cameras=cameras)
+
+        pinned = store.is_pinned()
+        metadata = store.status()["metadata"]
+
+        # The agent's call: presence plus the absence lifecycle.
+        agent_entries = build_inventory(
+            sources,
+            snapshot,
+            static_image_pinned=pinned,
+            static_image_metadata=metadata,
+            static_image_absent_since=None,
+        )
+        # The workflow provider's call, as `inventory_provider` now makes it.
+        workflow_entries = build_inventory(
+            sources,
+            snapshot,
+            static_image_pinned=pinned,
+            static_image_metadata=metadata,
+        )
+
+        def static_of(entries):
+            return [
+                entry
+                for entry in entries
+                if entry.camera_source_id == STATIC_IMAGE_CAMERA_ID
+            ]
+
+        # Presence agrees with the agent, in both pin states.
+        assert len(static_of(workflow_entries)) == len(static_of(agent_entries))
+        assert bool(static_of(workflow_entries)) is pinned
+
+        if pinned:
+            entry = static_of(workflow_entries)[0]
+            _assert_fixed_identity(entry.capabilities["staticImage"])
+            # The shape the binding resolver depends on: identity lives in
+            # capabilities, NOT in params (Reqs 3.5/3.17 of the discoverability
+            # bugfix pin the empty params).
+            assert entry.params == {}
+            assert entry.absent is False
+
+        # Every non-static entry is identical to the agent's.
+        assert [e for e in workflow_entries
+                if e.camera_source_id != STATIC_IMAGE_CAMERA_ID] == \
+            [e for e in agent_entries
+             if e.camera_source_id != STATIC_IMAGE_CAMERA_ID]
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)

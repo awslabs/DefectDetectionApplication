@@ -1404,6 +1404,59 @@ class WorkflowExecutor:
                         loaded,
                     )
 
+    @staticmethod
+    def _await_model_readiness(document: dict) -> Optional[str]:
+        """Wait, bounded, for every Triton model this document uses to be
+        READY. Returns an operator-facing failure reason, or None to proceed.
+
+        One call per DISTINCT resolved model name, so a document with two
+        nodes on the same model waits once. Documents with no ``emltriton``
+        element never consult Triton at all, so non-Triton workflows pay
+        nothing (cold-model-first-run-failure Requirement 2.11).
+
+        Contained: any unexpected failure of the gate itself proceeds to the
+        pipeline, which then behaves exactly as it did before the gate
+        existed. The gate may make a cold run honest; it must never be the
+        sole reason a previously working run stops working.
+        """
+        models = []
+        for segment in document.get("segments", []):
+            for element in segment.get("elements", []):
+                if element.get("factory") != "emltriton":
+                    continue
+                args = element.get("args")
+                if not isinstance(args, dict):
+                    continue
+                model = args.get("model")
+                if model and model not in models:
+                    models.append(model)
+        if not models:
+            return None
+
+        try:
+            from dda_triton.model_readiness import ensure_model_ready
+        except Exception:  # noqa: BLE001 - gate plumbing must not fail a run
+            logger.exception(
+                "Triton readiness gate unavailable; continuing without it"
+            )
+            return None
+
+        for model in models:
+            try:
+                outcome = ensure_model_ready(model, model)
+            except Exception:  # noqa: BLE001 - see docstring
+                logger.exception(
+                    "Triton readiness check raised for model %s; continuing "
+                    "without it", model
+                )
+                continue
+            if not outcome.ready:
+                logger.error(
+                    "Refusing to start the pipeline: %s", outcome.message
+                )
+                return outcome.message
+        return None
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -1667,6 +1720,29 @@ class WorkflowExecutor:
             # pipeline asks Triton for a model it doesn't have and never
             # reaches PLAYING.
             self._resolve_model_names(document)
+
+            # Triton readiness gate (cold-model-first-run-failure
+            # Requirements 2.11-2.13, design.md Decisions 1-7). Runs HERE —
+            # after name resolution, before the pipeline is built or the
+            # plugin scan runs — because `emltriton`'s Initialize() enqueues
+            # the load and checks readiness on the very next line, with no
+            # wait: a model whose asynchronous load is still in flight fails
+            # the GStreamer state change instantly and reports only
+            # "Pipeline failed to change state to PLAYING", naming neither
+            # the model nor its state. Triton load state lives only in this
+            # process, so every backend restart re-opens that window
+            # (measured on jetson-thor1, 2026-09-22: the single failure in
+            # twelve runs was the first after a container restart).
+            #
+            # Running before the pipeline also means a cold model never
+            # reaches the failure handler that relocates folder-source
+            # frames to failed/ — Requirement 2.2 is satisfied by ordering
+            # rather than by a special case (design.md Decision 7).
+            readiness_failure = self._await_model_readiness(document)
+            if readiness_failure is not None:
+                self._finish_failed(session, execution,
+                                    error=readiness_failure)
+                return
 
             # The per-run artifact location: unique per execution so runs of
             # the same workflow never overwrite each other (R1.2). Both the

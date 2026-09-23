@@ -70,6 +70,51 @@ def get_db():
         db.close()
 
 
+def validate_model_readiness(workflow):
+    """Reject a run whose Triton model is not ready, naming the model.
+
+    Bugfix: `.kiro/specs/cold-model-first-run-failure/` (Requirements 2.1,
+    2.3; design.md Decision 6 — one helper, both run paths).
+
+    Nothing on this path read model state, and `emltriton` enqueues the load
+    then checks readiness on the very next line with no wait, so a run
+    against a converted-but-still-loading model failed the GStreamer state
+    change and reported only "Pipeline failed to change state to PLAYING",
+    steering the operator toward a phantom pipeline bug.
+
+    Raises 503 — the same status this module's other unavailability guard
+    uses — with a detail naming the model and its state. Waiting happens
+    inside the gate; only a timeout or a terminal state reaches here.
+    """
+    configurations = workflow.get("featureConfigurations")
+    if not configurations:
+        return
+    model_name = (configurations[0] or {}).get("modelName")
+    if not model_name:
+        return
+
+    try:
+        from dda_triton.model_readiness import ensure_model_ready
+    except Exception:  # noqa: BLE001 - gate plumbing must not block a run
+        logger.exception(
+            "Triton readiness gate unavailable; continuing without it"
+        )
+        return
+
+    try:
+        outcome = ensure_model_ready(model_name, model_name)
+    except Exception:  # noqa: BLE001 - see above
+        logger.exception(
+            "Triton readiness check raised for model %s; continuing without "
+            "it", model_name
+        )
+        return
+
+    if not outcome.ready:
+        logger.error("Refusing to run the workflow: %s", outcome.message)
+        raise HTTPException(status_code=503, detail=outcome.message)
+
+
 def validate_workflow_requirements(workflow):
     if not workflow.get("imageSources"):
         raise HTTPException(
@@ -192,6 +237,16 @@ async def run_inference_for_stream(
 
     workflow = workflow_accessor.get_workflow_by_id(workflow_id, db)
     validate_workflow_requirements(workflow)
+
+    # Triton readiness gate (cold-model-first-run-failure Requirements 2.1,
+    # 2.2, 2.3). Runs BEFORE the pipeline is built, which is what fixes both
+    # reported harms on this path: the operator gets an error naming the
+    # model and its state instead of the generic "Pipeline failed to change
+    # state to PLAYING", and because the run never reaches
+    # `execute_workflow_pipeline`'s catch-all, a folder-source image is no
+    # longer moved to failed/ by a transient not-ready condition
+    # (design.md Decision 7 — fixed by ordering, not by a special case).
+    validate_model_readiness(workflow)
 
     # Run inference if workflow configures a model
     if workflow.get("featureConfigurations"):

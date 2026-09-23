@@ -263,3 +263,96 @@ class TestResolutionResultShape:
         except AttributeError:
             raised = True
         assert raised
+
+
+class TestCapabilityCameraIdFallback:
+    """`_resolved_parameter_values` resolves a camera identity from
+    `capabilities` when `params` carries none.
+
+    Bugfix: `.kiro/specs/static-camera-workflow-binding-invisible/`, task
+    3.2. The virtual Static_Image_Camera entry is built with `params: {}`
+    and its identity under `capabilities.staticImage` — a shape pinned as the
+    shipped contract by `static-image-camera-binding-and-pin-discoverability`
+    Requirements 3.5/3.17, so it cannot be fixed by populating `params`.
+    Without the fallback, a resolved static binding yields an empty
+    assignment and `aravis_feed._effective_values` discards the node's
+    rendered `camera_id`, failing every run with "no camera id".
+
+    The device-side counterpart of the Portal's `cameraIdValue()` fallback
+    (Requirements 2.1-2.4 of that bugfix).
+
+    _Requirements: 2.4, 3.5_
+    """
+
+    @staticmethod
+    def _entry(params, capabilities):
+        return CameraSourceState(
+            camera_source_id="csid",
+            name="entry",
+            type="StaticImage",
+            origin="edge-discovered",
+            params=params,
+            capabilities=capabilities,
+            discovered=True,
+        )
+
+    def test_static_image_capability_supplies_both_spellings(self):
+        from workflow_engine.camera_binding import _resolved_parameter_values
+
+        values = _resolved_parameter_values(
+            self._entry({}, {"staticImage": {"id": "static-image-camera"}})
+        )
+
+        # Both spellings, exactly as a populated params.cameraId yields
+        # through _PARAM_ALIASES, so the assignment is shape-indistinguishable
+        # from a physical camera's.
+        assert values == {
+            "camera_id": "static-image-camera",
+            "cameraId": "static-image-camera",
+        }
+
+    def test_params_camera_id_always_wins_over_capabilities(self):
+        """A populated `params` is never overridden — physical cameras keep
+        byte-identical resolved values (Requirement 3.5)."""
+        from workflow_engine.camera_binding import _resolved_parameter_values
+
+        values = _resolved_parameter_values(
+            self._entry(
+                {"cameraId": "Aravis-Real-01"},
+                {"staticImage": {"id": "static-image-camera"}},
+            )
+        )
+
+        assert values["cameraId"] == "Aravis-Real-01"
+        assert values["camera_id"] == "Aravis-Real-01"
+
+    def test_unrelated_capability_families_are_ignored(self):
+        """The fallback is keyed on the capability family, so an `aravis`
+        block's own fields never become a camera id by accident."""
+        from workflow_engine.camera_binding import _resolved_parameter_values
+
+        values = _resolved_parameter_values(
+            self._entry({}, {"aravis": {"id": "should-not-be-used"}})
+        )
+
+        assert values == {}
+
+    def test_no_params_and_no_capabilities_resolves_nothing(self):
+        from workflow_engine.camera_binding import _resolved_parameter_values
+
+        assert _resolved_parameter_values(self._entry({}, {})) == {}
+
+    def test_a_malformed_capabilities_block_is_ignored(self):
+        """Never raise on unexpected shapes: the resolver runs on every
+        watcher pass."""
+        from workflow_engine.camera_binding import _resolved_parameter_values
+
+        assert _resolved_parameter_values(
+            self._entry({}, {"staticImage": "not-a-mapping"})
+        ) == {}
+        assert _resolved_parameter_values(
+            self._entry({}, {"staticImage": {"id": ""}})
+        ) == {}
+        assert _resolved_parameter_values(
+            self._entry({}, {"staticImage": {"id": None}})
+        ) == {}

@@ -65,6 +65,28 @@ STATUS_INVALID = "invalid"
 #: aravis_camera_source node declares ``camera_id``.
 _PARAM_ALIASES = {"devicePath": "device", "cameraId": "camera_id"}
 
+#: The node parameter names that carry an Aravis camera identity, in the two
+#: spellings the inventory and the node catalog use. Mirrors
+#: ``aravis_feed._camera_id``'s lookup order.
+_CAMERA_ID_KEYS = ("camera_id", "cameraId")
+
+#: Inventory ``capabilities`` families whose block carries an ``id`` that IS
+#: the camera identity, for entries whose ``params`` carry none
+#: (static-camera-workflow-binding-invisible, Requirement 2.4).
+#:
+#: The virtual Static_Image_Camera entry is built with ``params: {}`` and its
+#: identity under ``capabilities.staticImage`` — a shape pinned as the
+#: shipped contract by static-image-camera-binding-and-pin-discoverability
+#: Requirements 3.5/3.17, so it cannot be fixed by populating ``params``.
+#: Without this fallback a resolved static binding produces an EMPTY
+#: assignment, and ``aravis_feed._effective_values`` prefers the assignment's
+#: params over the node's rendered parameters without merging, so the
+#: compiled-in ``camera_id`` is discarded and every run fails with "no camera
+#: id" (measured on jetson-thor1, 2026-09-22). This is the device-side
+#: counterpart of the Portal's ``cameraIdValue()`` capabilities fallback
+#: (Requirements 2.1-2.4 of that bugfix).
+_CAMERA_ID_CAPABILITY_FAMILIES = ("staticImage",)
+
 
 @dataclass(frozen=True)
 class ResolutionResult:
@@ -224,7 +246,15 @@ def _resolved_parameter_values(entry) -> Dict[str, Any]:
     """The inventory entry's parameter values keyed by node parameter
     name: ``devicePath`` resolves the ``device`` slot parameter, and
     ``gain`` / ``exposure`` (and any identically named parameter) pass
-    through when present."""
+    through when present.
+
+    When ``params`` carries no camera identity but the entry's
+    ``capabilities`` do, the identity is taken from there
+    (:data:`_CAMERA_ID_CAPABILITY_FAMILIES`, Requirement 2.4). Entries whose
+    ``params`` already name a camera — every physical Aravis camera, and any
+    configured Image_Source wrapping the static one — are unaffected, so
+    their resolved values stay byte-identical (Requirement 3.5).
+    """
     params = _get(entry, "params") or {}
     values: Dict[str, Any] = {}
     for key, value in params.items():
@@ -234,7 +264,36 @@ def _resolved_parameter_values(entry) -> Dict[str, Any]:
         alias = _PARAM_ALIASES.get(key)
         if alias is not None and alias not in params:
             values[alias] = value
+
+    if not any(values.get(key) for key in _CAMERA_ID_KEYS):
+        camera_id = _capability_camera_id(entry)
+        if camera_id:
+            # Both spellings, exactly as a populated ``params.cameraId``
+            # yields through _PARAM_ALIASES, so a static assignment is
+            # shape-indistinguishable from a physical one and every
+            # downstream reader works unchanged.
+            for key in _CAMERA_ID_KEYS:
+                values[key] = camera_id
     return values
+
+
+def _capability_camera_id(entry) -> Optional[str]:
+    """The camera identity from an entry's ``capabilities``, or None.
+
+    Keyed on the capability family rather than on any literal camera id, so
+    the resolver stays free of hard-coded identifiers.
+    """
+    capabilities = _get(entry, "capabilities") or {}
+    if not isinstance(capabilities, Mapping):
+        return None
+    for family in _CAMERA_ID_CAPABILITY_FAMILIES:
+        block = capabilities.get(family)
+        if not isinstance(block, Mapping):
+            continue
+        camera_id = block.get("id")
+        if isinstance(camera_id, str) and camera_id:
+            return camera_id
+    return None
 
 
 def _override_violations(node_id, node_type, override: Dict[str, Any]) -> List[str]:

@@ -277,9 +277,50 @@ def _camera_binding_dependencies():
         """The ``build_inventory`` merge of Image_Source records (through
         the existing accessor, read-only — 11.3) and the latest discovery
         snapshot; the discovery global may still be starting up, in which
-        case configured sources alone form the inventory."""
+        case configured sources alone form the inventory.
+
+        The Static_Image_Camera pin state is passed too
+        (static-camera-workflow-binding-invisible, Requirements 2.1, 2.5):
+        ``build_inventory`` appends the virtual ``static-image-camera``
+        entry only when ``static_image_pinned`` is true, and this provider
+        used to call it with two arguments — so a workflow bound to that
+        camera was permanently rejected with ``missing camera source
+        static-image-camera`` while every other device surface reported the
+        camera present (measured on jetson-thor1, 2026-09-22).
+
+        ``static_image_absent_since`` is deliberately NOT passed (design.md
+        Decision 3). Its value means "when absence was first established",
+        is derived from the pin worker's marker and is stabilized across
+        restarts so the reported *shadow* does not churn; the local resolver
+        never reads ``absent`` or ``absentSince`` at all, so supplying one
+        here would put a meaningless timestamp in a typed field. The
+        consequence is deliberate and recorded: unpinning flips the
+        registration to invalid within one poll tick, and re-pinning
+        restores it through the existing re-resolution hooks.
+        """
         from camera_sync.inventory import build_inventory
         from dao.sqlite_db.sqlite_db_operations import SessionLocal
+        from utils.static_image_camera import get_store
+
+        # Guarded exactly as the Edge_Sync_Agent guards it
+        # (camera_sync/agent.py). This is load-bearing, not defensive
+        # boilerplate: get_store() constructs StaticImageStore, whose
+        # __init__ reads os.environ["COMPONENT_WORK_PATH"] and therefore
+        # raises KeyError off-device, and the watcher converts ANY provider
+        # exception into an EMPTY inventory — which would mark every camera
+        # binding on the device invalid, turning a static-camera bug into a
+        # total outage (Requirement 2.5).
+        static_image_pinned = False
+        static_image_metadata = None
+        try:
+            status = get_store().status()
+            static_image_pinned = bool(status.get("pinned"))
+            static_image_metadata = status.get("metadata")
+        except Exception:  # noqa: BLE001 - never empty the inventory
+            logger.exception(
+                "Static image pin state could not be read; resolving camera "
+                "bindings without the static camera entry"
+            )
 
         camera_discovery = getattr(server_setup, "camera_discovery", None)
         snapshot = (
@@ -289,7 +330,12 @@ def _camera_binding_dependencies():
             image_sources = server_setup.image_source_accessor.list_image_sources(
                 None, session
             )
-            return build_inventory(image_sources, snapshot)
+            return build_inventory(
+                image_sources,
+                snapshot,
+                static_image_pinned=static_image_pinned,
+                static_image_metadata=static_image_metadata,
+            )
 
     return store, inventory_provider
 
