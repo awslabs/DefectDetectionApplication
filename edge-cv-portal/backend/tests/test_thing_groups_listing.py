@@ -27,6 +27,7 @@ import boto3
 import pytest
 
 from conftest import REGION, TEST_ENV
+from dynamo_helpers import all_table_names
 
 REGISTRATIONS_TABLE_NAME = "test-device-registrations"
 USECASE_DEVICE_INDEX = "usecase-device-index"
@@ -45,7 +46,7 @@ def tg_env(aws_stack):
     os.environ.setdefault("QUICK_SETUP_BOOTSTRAP_SHA256", "0" * 64)
 
     client = boto3.client("dynamodb", region_name=REGION)
-    existing = client.list_tables().get("TableNames", [])
+    existing = all_table_names(client)
     if REGISTRATIONS_TABLE_NAME not in existing:
         client.create_table(
             TableName=REGISTRATIONS_TABLE_NAME,

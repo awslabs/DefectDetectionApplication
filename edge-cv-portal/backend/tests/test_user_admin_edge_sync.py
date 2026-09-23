@@ -23,6 +23,7 @@ import sys
 
 import pytest
 from botocore.exceptions import ClientError
+from dynamo_helpers import all_table_names
 
 REGION = "us-east-1"
 EDGE_CREDENTIALS_TABLE = "test-edge-credentials"
@@ -123,7 +124,7 @@ def user_admin(aws_stack):
     os.environ.pop("ACCOUNT_SYNC_FUNCTION", None)
 
     ddb = boto3.client("dynamodb", region_name=REGION)
-    existing = ddb.list_tables()["TableNames"]
+    existing = all_table_names(ddb)
     for table_name in (EDGE_CREDENTIALS_TABLE,):
         if table_name not in existing:
             ddb.create_table(

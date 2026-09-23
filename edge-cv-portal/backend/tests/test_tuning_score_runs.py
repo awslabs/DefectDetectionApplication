@@ -43,6 +43,7 @@ from decimal import Decimal
 import boto3
 import pytest
 from botocore.exceptions import ClientError
+from dynamo_helpers import all_table_names
 
 REGION = "us-east-1"
 ACCOUNT_ID = "123456789012"
@@ -226,7 +227,7 @@ def tuning(aws_stack):
     """The real handler module against moto, with the tuning table and the
     Use_Case's Sample_Store bucket in place."""
     dynamodb = boto3.client("dynamodb", region_name=REGION)
-    if TUNING_TABLE_NAME not in dynamodb.list_tables().get("TableNames", []):
+    if TUNING_TABLE_NAME not in all_table_names(dynamodb):
         dynamodb.create_table(
             TableName=TUNING_TABLE_NAME,
             KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"},

@@ -22,6 +22,7 @@ import os
 import sys
 
 import pytest
+from dynamo_helpers import all_table_names
 
 REGION = "us-east-1"
 ACCOUNT_SYNC_TABLE = "test-account-sync"
@@ -60,7 +61,7 @@ def account_sync(aws_stack):
     os.environ["ACCOUNT_SYNC_TABLE"] = ACCOUNT_SYNC_TABLE
 
     ddb = boto3.client("dynamodb", region_name=REGION)
-    if ACCOUNT_SYNC_TABLE not in ddb.list_tables()["TableNames"]:
+    if ACCOUNT_SYNC_TABLE not in all_table_names(ddb):
         ddb.create_table(
             TableName=ACCOUNT_SYNC_TABLE,
             KeySchema=[{"AttributeName": "device_id", "KeyType": "HASH"}],

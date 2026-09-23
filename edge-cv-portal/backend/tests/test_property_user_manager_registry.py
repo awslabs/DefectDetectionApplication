@@ -53,6 +53,7 @@ import pytest
 from botocore.exceptions import ClientError
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
+from dynamo_helpers import all_table_names
 
 REGION = "us-east-1"
 EDGE_CREDENTIALS_TABLE = "test-user-manager-registry-credentials"
@@ -212,7 +213,7 @@ def user_manager(aws_stack):
 
     os.environ["EDGE_CREDENTIALS_TABLE"] = EDGE_CREDENTIALS_TABLE
     ddb = boto3.client("dynamodb", region_name=REGION)
-    if EDGE_CREDENTIALS_TABLE not in ddb.list_tables()["TableNames"]:
+    if EDGE_CREDENTIALS_TABLE not in all_table_names(ddb):
         ddb.create_table(
             TableName=EDGE_CREDENTIALS_TABLE,
             KeySchema=[{"AttributeName": "username", "KeyType": "HASH"}],

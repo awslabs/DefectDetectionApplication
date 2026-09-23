@@ -49,6 +49,7 @@ import uuid
 
 import pytest
 from botocore.exceptions import ClientError
+from dynamo_helpers import all_table_names
 
 REGION = "us-east-1"
 
@@ -75,7 +76,7 @@ def _unit_registry_table(aws_stack):
     import boto3
 
     ddb = boto3.client("dynamodb", region_name=REGION)
-    if UNIT_REGISTRY_TABLE not in ddb.list_tables()["TableNames"]:
+    if UNIT_REGISTRY_TABLE not in all_table_names(ddb):
         ddb.create_table(
             TableName=UNIT_REGISTRY_TABLE,
             KeySchema=[

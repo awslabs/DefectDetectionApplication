@@ -82,6 +82,7 @@ import uuid
 
 import pytest
 from boto3.dynamodb.conditions import Key
+from dynamo_helpers import all_table_names
 
 REGION = "us-east-1"
 
@@ -193,7 +194,7 @@ def gsi_audit_table(aws_stack):
     import boto3
 
     ddb = boto3.client("dynamodb", region_name=REGION)
-    if GSI_AUDIT_TABLE not in ddb.list_tables()["TableNames"]:
+    if GSI_AUDIT_TABLE not in all_table_names(ddb):
         ddb.create_table(
             TableName=GSI_AUDIT_TABLE,
             KeySchema=[{"AttributeName": "event_id", "KeyType": "HASH"},

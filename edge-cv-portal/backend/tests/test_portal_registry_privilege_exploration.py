@@ -64,6 +64,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from dynamo_helpers import all_table_names
 
 REGION = "us-east-1"
 
@@ -105,7 +106,7 @@ def build_api(aws_stack):
     import boto3
 
     ddb = boto3.client("dynamodb", region_name=REGION)
-    existing = ddb.list_tables()["TableNames"]
+    existing = all_table_names(ddb)
 
     if BUILD_JOBS_TABLE not in existing:
         # Deployed BuildJobs schema, GSIs included (the sibling suite

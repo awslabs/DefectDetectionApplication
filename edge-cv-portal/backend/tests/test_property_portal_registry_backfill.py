@@ -90,6 +90,7 @@ from contextlib import contextmanager
 import pytest
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
+from dynamo_helpers import all_table_names
 
 REGION = "us-east-1"
 
@@ -217,7 +218,7 @@ def registry(shared, aws_stack):
     import boto3
 
     ddb = boto3.client("dynamodb", region_name=REGION)
-    if BACKFILL_REGISTRY_TABLE not in ddb.list_tables()["TableNames"]:
+    if BACKFILL_REGISTRY_TABLE not in all_table_names(ddb):
         ddb.create_table(
             TableName=BACKFILL_REGISTRY_TABLE,
             KeySchema=[

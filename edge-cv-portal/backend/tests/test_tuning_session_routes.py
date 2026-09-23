@@ -32,6 +32,7 @@ import uuid
 
 import boto3
 import pytest
+from dynamo_helpers import all_table_names
 
 REGION = "us-east-1"
 ACCOUNT_ID = "123456789012"
@@ -93,7 +94,7 @@ def tuning(aws_stack):
     """The real handler module against moto, with the tuning table and the
     Use_Case's Sample_Store bucket in place."""
     dynamodb = boto3.client("dynamodb", region_name=REGION)
-    existing = dynamodb.list_tables().get("TableNames", [])
+    existing = all_table_names(dynamodb)
     if TUNING_TABLE_NAME not in existing:
         dynamodb.create_table(
             TableName=TUNING_TABLE_NAME,
