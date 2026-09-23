@@ -56,8 +56,8 @@ backend container, trigger once.
 
 ## Tasks
 
-- [ ] 1. Confirm the bug on both paths, pin today's behaviour
-  - [ ] 1.1 Triton readiness fake — the missing test primitive. No test anywhere
+- [x] 1. Confirm the bug on both paths, pin today's behaviour
+  - [x] 1.1 Triton readiness fake — the missing test primitive. No test anywhere
     fakes Triton readiness on a workflow path (`get_model_status` appears in no
     executor test), so build one under `test/backend-test/dda_triton/` following
     the shape of `test/backend-test/vllm_model_reload/fakes.py`: a substitutable
@@ -67,7 +67,7 @@ backend container, trigger once.
     `test/backend-test/workflow_engine` and `test/backend-test/dda_triton` green
     today, plus current pass/skip counts for the suites task 4.1 compares against.
     - _Requirements: 2.12_
-  - [ ] 1.2 Exploration, ENGINE path (MUST FAIL on unfixed code):
+  - [x] 1.2 Exploration, ENGINE path (MUST FAIL on unfixed code):
     `test/backend-test/workflow_engine/test_cold_model_engine_exploration.py`.
     With the fake reporting `LOADING` and a `FakePipelineManager` injected via
     `_pipeline_manager_factory`, execute a Triton-backed document and assert the
@@ -77,13 +77,13 @@ backend container, trigger once.
     `"Pipeline failed to change state to PLAYING, check logs above this."`
     Record that text verbatim in the outcome; it is the evidence for harm 1.18.
     - _Requirements: 1.13-1.18, 2.11, Property 3_
-  - [ ] 1.3 Exploration, CLASSIC path (MUST FAIL on unfixed code): the same
+  - [x] 1.3 Exploration, CLASSIC path (MUST FAIL on unfixed code): the same
     assertion for `POST /workflows/{id}/run`, plus the input-consumption half —
     on `F` the folder-source image is moved to
     `{INFERENCE_RESULTS_DIR}/{workflowId}/failed/` and the error carries "Source
     image file has been moved to"; post-fix it must be untouched in place.
     - _Requirements: 1.1-1.6, 2.1, 2.2, Property 1_
-  - [ ] 1.4 Preservation (MUST PASS on unfixed code), observation-first, both
+  - [x] 1.4 Preservation (MUST PASS on unfixed code), observation-first, both
     paths: with the fake reporting `READY`, a warm execution produces a
     `run_pipeline` call with the byte-identical launch string and arguments, the
     same artifact layout and the same terminal status as `F` (captured as explicit
@@ -92,8 +92,8 @@ backend container, trigger once.
     A document with no `emltriton` element never consults Triton at all.
     - _Requirements: 3.2, 3.4, Property 2, Property 4_
 
-- [ ] 2. The shared readiness helper
-  - [ ] 2.1 New `src/backend/dda_triton/model_readiness.py` —
+- [x] 2. The shared readiness helper
+  - [x] 2.1 New `src/backend/dda_triton/model_readiness.py` —
     `ensure_model_ready(model_name)` returning a structured outcome
     (`ready` / `failed(reason)`), implementing design.md Decisions 2-5:
     - empty-repo no-op via `feature_configs_utils.triton_repo_has_models()`
@@ -117,7 +117,7 @@ backend container, trigger once.
     - any wait longer than one interval logs at INFO with elapsed time (Decision
       5 — this is the data that decides whether the deferred reconciler is needed).
     - _Requirements: 2.11, 2.12, 2.13, 2.15_
-  - [ ] 2.2 Helper units in `test/backend-test/dda_triton/test_model_readiness.py`:
+  - [x] 2.2 Helper units in `test/backend-test/dda_triton/test_model_readiness.py`:
     one case per state in Decision 2's table; `UNKNOWN` kicks exactly once then
     polls; `LOADING` never kicks; `LOADING → READY` mid-poll succeeds; budget
     exhaustion produces the full message; `UNAVAILABLE` surfaces `reason`;
@@ -125,9 +125,9 @@ backend container, trigger once.
     constructed when the repo is empty (assert on the fake, not just the return).
     - _Requirements: 2.11-2.15_
 
-- [ ] 3. Wire the gate into both paths (design.md Decision 6 — one helper, two
+- [x] 3. Wire the gate into both paths (design.md Decision 6 — one helper, two
   call sites, so the paths cannot drift)
-  - [ ] 3.1 ENGINE path: `src/backend/workflow_engine/pipeline_executor.py`,
+  - [x] 3.1 ENGINE path: `src/backend/workflow_engine/pipeline_executor.py`,
     in `execute()` immediately after `_resolve_model_names(document)`
     (`~:1669`): for each DISTINCT resolved `emltriton` model in the document,
     call the helper; on a non-ready outcome `_finish_failed` with the helper's
@@ -136,7 +136,7 @@ backend container, trigger once.
     change (2.13). Documents with no `emltriton` element are untouched.
     Exploration 1.2 now passes; preservation 1.4 still passes.
     - _Requirements: 2.11, 2.13, 3.11, Property 3, Property 4_
-  - [ ] 3.2 CLASSIC path: `src/backend/endpoints/workflow.py`
+  - [x] 3.2 CLASSIC path: `src/backend/endpoints/workflow.py`
     `run_inference_for_stream` — call the same helper in the pre-flight, before
     the pipeline is built, and return an error naming the model and state instead
     of the generic pipeline error. Because the gate precedes the pipeline, the
@@ -146,8 +146,8 @@ backend container, trigger once.
     handler. Exploration 1.3 now passes.
     - _Requirements: 2.1, 2.2, 2.3, Property 1_
 
-- [ ] 4. Gates
-  - [ ] 4.1 `test/backend-test/workflow_engine`, `test/backend-test/dda_triton`
+- [x] 4. Gates
+  - [x] 4.1 `test/backend-test/workflow_engine`, `test/backend-test/dda_triton`
     and the classic-path suites green, at or better than task 1.1's counts.
     Explicitly confirm untouched and passing: `test/backend-test/vllm_model_reload/**`
     (3.10), `test/backend-test/utils/test_feature_configs_utils.py` (the `7812407`
@@ -155,14 +155,14 @@ backend container, trigger once.
     `_TRITON_MODEL_REPO` (`test_workflow_capture_routing.py`,
     `test_property_capture_routing.py`).
     - _Requirements: 3.1-3.12, Property 2, Property 4_
-  - [ ] 4.2 Security preservation gate at or better than baseline. Grep
+  - [x] 4.2 Security preservation gate at or better than baseline. Grep
     `test/backend-test/security/baselines/` for every file this spec changes and
     rebaseline only what is genuinely pinned, with a note naming this task; do not
     assume either way. Move `edge-cv-portal/infrastructure/cdk.out` aside first if
     a portal deploy has regenerated it.
     - _Requirements: —_
 
-- [ ] 5. USER ACTION — build the JP7 LocalServer component
+- [x] 5. USER ACTION — build the JP7 LocalServer component
   - Per `.kiro/steering/builds.md`: confirm no other component build is running,
     move `cdk.out` aside, run the guard suite green FIRST (it runs after the ~1 h
     compile, so a stale baseline wastes the whole build), then build
@@ -174,7 +174,7 @@ backend container, trigger once.
     hardware pass.
     - _Requirements: 2.10_
 
-- [ ] 6. USER ACTION — hardware verification on `jetson-thor1`
+- [x] 6. USER ACTION — hardware verification on `jetson-thor1`
   - (a) **Engine path, the deterministic reproduction**: restart the LocalServer
     backend container, then immediately trigger a Triton-backed deployed workflow.
     The first run must either succeed after a wait that appears in the log with its

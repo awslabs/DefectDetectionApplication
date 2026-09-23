@@ -60,8 +60,8 @@ sufficient.
 
 ## Tasks
 
-- [ ] 1. Confirm the bug, pin the current behaviour
-  - [ ] 1.1 Establish the device test environment: identify the interpreter that
+- [x] 1. Confirm the bug, pin the current behaviour
+  - [x] 1.1 Establish the device test environment: identify the interpreter that
     runs `test/backend-test/workflow_engine` and `test/backend-test/camera_sync`
     green today, and record the exact command plus the current pass/skip counts
     for `test_workflow_camera_binding.py`,
@@ -71,7 +71,7 @@ sufficient.
     `test_property_pin_inventory.py`. These counts are the before-picture every
     later task is compared against.
     - _Requirements: —_
-  - [ ] 1.2 Exploration suite (MUST FAIL on unfixed code):
+  - [x] 1.2 Exploration suite (MUST FAIL on unfixed code):
     `test/backend-test/workflow_engine/test_static_camera_binding_exploration.py`.
     Two cases, one per defect, both tagged with the bugfix.md property they
     prove:
@@ -89,7 +89,7 @@ sufficient.
     Record both failure texts verbatim in this task's outcome — (b) is the
     evidence that the one-line fix is insufficient.
     - _Requirements: 1.1-1.8, Property 1_
-  - [ ] 1.3 Preservation suite (MUST PASS on unfixed code), written
+  - [x] 1.3 Preservation suite (MUST PASS on unfixed code), written
     observation-first:
     `test/backend-test/workflow_engine/test_static_camera_binding_preservation.py`.
     For a physical Aravis entry (populated `params.cameraId`), a V4L2 entry, a
@@ -102,8 +102,8 @@ sufficient.
     populated `params.cameraId` (3.4 — the RF-DETR workaround path).
     - _Requirements: 3.4, 3.5, 3.6, Property 2_
 
-- [ ] 2. The two fix legs
-  - [ ] 2.1 **Leg 1 — the provider.** `src/backend/workflow_engine/runtime.py`,
+- [x] 2. The two fix legs
+  - [x] 2.1 **Leg 1 — the provider.** `src/backend/workflow_engine/runtime.py`,
     `inventory_provider()`: add the function-local
     `from utils.static_image_camera import get_store`, the guarded
     `status()` block (design.md Decision 2 — `except Exception` +
@@ -114,7 +114,7 @@ sufficient.
     `absent`, and inventing one would put a meaningless timestamp in a typed
     field. Exploration case (a) now passes; case (b) still fails.
     - _Requirements: 2.1, 2.2, 2.5, 2.6_
-  - [ ] 2.2 **Leg 2 — the capabilities fallback.**
+  - [x] 2.2 **Leg 2 — the capabilities fallback.**
     `src/backend/workflow_engine/camera_binding.py`,
     `_resolved_parameter_values`: after the existing `params` projection, when no
     camera-id key resolved, read the camera id from
@@ -129,8 +129,8 @@ sufficient.
     (b) now passes; task 1.3 still passes untouched.
     - _Requirements: 2.3, 2.4, 3.2, 3.5_
 
-- [ ] 3. The coverage that was missing
-  - [ ] 3.1 `test/backend-test/workflow_engine/test_inventory_provider.py` —
+- [x] 3. The coverage that was missing
+  - [x] 3.1 `test/backend-test/workflow_engine/test_inventory_provider.py` —
     bugfix.md Property 3, the test that would have caught this bug. Drives the
     REAL `_camera_binding_dependencies()` closure (substituting `server_setup`,
     `SessionLocal` and a temp-dir store; no injected lambda): pinned → the
@@ -140,7 +140,7 @@ sufficient.
     `{}` (2.5). Assert the `build_inventory` call's keyword arguments directly,
     so a future kwarg omission fails here.
     - _Requirements: 2.1, 2.5, 2.7, Property 3_
-  - [ ] 3.2 Extend two existing suites rather than duplicating them:
+  - [x] 3.2 Extend two existing suites rather than duplicating them:
     `test/backend-test/camera_sync/test_property_pin_inventory.py` gains the
     workflow-provider leg (presence tracks pin state on BOTH inventories, agent
     and workflow), and
@@ -150,8 +150,8 @@ sufficient.
     neither → unchanged empty result).
     - _Requirements: 2.1, 2.4, Property 1, Property 2_
 
-- [ ] 4. Gates
-  - [ ] 4.1 Full `test/backend-test/workflow_engine` and
+- [x] 4. Gates
+  - [x] 4.1 Full `test/backend-test/workflow_engine` and
     `test/backend-test/camera_sync` green, at or better than task 1.1's counts.
     Explicitly confirm untouched and passing:
     `test_property_static_camera_dedup_preservation.py`,
@@ -159,14 +159,14 @@ sufficient.
     `test_property_registration_reevaluation.py`,
     `test_workflow_watcher_binding_behavior.py`.
     - _Requirements: 3.1-3.10, Property 2_
-  - [ ] 4.2 Security preservation gate at or better than baseline, and confirm
+  - [x] 4.2 Security preservation gate at or better than baseline, and confirm
     no rebaseline is owed: neither changed file is pinned in
     `test/backend-test/security/baselines/` (verify by grep, do not assume). Run
     the two out-of-scope guards; move `edge-cv-portal/infrastructure/cdk.out`
     aside first if a portal deploy has regenerated it.
     - _Requirements: —_
 
-- [ ] 5. USER ACTION — build the JP7 LocalServer component
+- [x] 5. USER ACTION — build the JP7 LocalServer component
   - Per `.kiro/steering/builds.md`: confirm no other component build is running
     (`pgrep -af "gdk component build"`, `pgrep -af build-custom.sh`), move
     `cdk.out` aside, run the guard suite green FIRST (it runs late in the build,
@@ -178,7 +178,7 @@ sufficient.
     built too, each needs its own hardware pass.
     - _Requirements: 2.8_
 
-- [ ] 6. USER ACTION — hardware verification on `jetson-thor1`
+- [x] 6. USER ACTION — hardware verification on `jetson-thor1`
   - Deploy the built component, then, with an image pinned through the portal
     pin API:
     (a) deploy a workflow whose camera node is bound **by the

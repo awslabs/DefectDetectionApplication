@@ -399,6 +399,14 @@ cloud mAP@50-95 gain. RF-DETR was both highest and most uniform.
 
 ### Two pre-existing device bugs surfaced (neither RF-DETR-specific)
 
+> **Both are fixed and verified on hardware as of 2026-09-23** in
+> `aws.edgeml.dda.LocalServer.arm64JP7` **1.0.44** on `jetson-thor1`
+> (deployment `fbd816b5-07a6-46a4-85e2-d84c5843d71b`). The RF-DETR workaround
+> below — binding through the wrapping Image_Source `cfg-my6j3zx1` — is **no
+> longer required**: a camera node bound directly to
+> `cameraSourceId: "static-image-camera"` now registers as runnable and runs.
+> Evidence in each spec's `verification-notes.md`.
+
 1. **The workflow engine cannot see the Static_Image_Camera.**
    `camera_sync/agent.py:932` calls `build_inventory(..., static_image_pinned=…)`,
    but the workflow engine's provider at `workflow_engine/runtime.py:292` calls
@@ -409,8 +417,8 @@ cloud mAP@50-95 gain. RF-DETR was both highest and most uniform.
    `missing camera source static-image-camera` and the artifact set is marked
    invalid — even though the pin exists, `/cameras` lists the camera and the
    `dda-camera-registry` shadow reports it. Portal-side binding validation
-   passes, so this only appears on hardware. Worked around here by binding to an
-   Image_Source that wraps the camera (`cfg-my6j3zx1`, `cameraId:
+   passes, so this only appears on hardware. Worked around at the time by binding
+   to an Image_Source that wraps the camera (`cfg-my6j3zx1`, `cameraId:
    static-image-camera`), which resolves normally.
    Specced as `.kiro/specs/static-camera-workflow-binding-invisible/`, which
    also covers a second-order defect found while writing it up: fixing only the
@@ -418,13 +426,21 @@ cloud mAP@50-95 gain. RF-DETR was both highest and most uniform.
    `no camera id`, because the virtual entry's `params` is empty by design and
    the device never reads the identity from `capabilities.staticImage` — the
    device-side mirror of a Portal defect already fixed frontend-only.
+   **Fixed** (both legs) and verified on `jetson-thor1` in 1.0.44 on 2026-09-23:
+   a workflow bound to the bare identifier registers `registered`, the
+   `missing camera source` line is gone, and 10 runs produced the same three
+   `blue_plate` detections (0.951 / 0.940 / 0.939) as the workaround path.
+   Unpinning flips the registration to `invalid: missing camera source
+   static-image-camera` and re-pinning restores it without a redeploy. The
+   workaround binding still resolves identically, so nothing that used it breaks.
 2. **First workflow run after a backend restart loses a Triton readiness race.**
    The one failed run of twelve died with `emltriton.cpp:196 … Model is not
    ready for inference` → `Failed to initialize underlying triton server` →
    GStreamer never reaching `PLAYING`. Later runs are fine. Affects any model,
    not just RF-DETR; related to the `UNAVAILABLE`-on-failed-load work in
-   `7812407`. Mitigation while it stands: discard the first execution after a
-   restart, or wait for the model's `READY` before triggering.
+   `7812407`. Mitigation while it stood: discard the first execution after a
+   restart, or wait for the model's `READY` before triggering. **No longer
+   needed** — a readiness gate now runs before the pipeline on both run paths.
    This is the same defect class as the existing
    `.kiro/specs/cold-model-first-run-failure/` spec, which was filed from the
    classic run path on 2026-08-14 and had deferred the engine path in its
@@ -432,6 +448,15 @@ cloud mAP@50-95 gain. RF-DETR was both highest and most uniform.
    Requirements 2.11-2.15) rather than duplicated, and its root cause is now
    confirmed: `emltriton`'s `Initialize()` enqueues the load and checks
    readiness on the very next line, so a load still in flight fails instantly.
+   **Fixed** and verified on `jetson-thor1` in 1.0.44 on 2026-09-23: three
+   restart-then-trigger cycles on the engine path and one on the classic path all
+   logged `is UNKNOWN; requesting a load before waiting` → `reached READY after
+   3.0s of waiting` and then succeeded; 11 post-fix runs, 0 failures, and
+   `Pipeline failed to change state to PLAYING` appears nowhere. On the classic
+   path the folder-source image is no longer relocated to `failed/`. Observed
+   cold window was one poll interval (3.0 s) in every case, so the Triton
+   boot-time reconciler stays deferred — see the spec's
+   `verification-notes.md` §(e).
 
 Also observed, and benign: the backend's restart during deployment exits
 gracefully (code 0) but can take ~2 minutes, because the shutdown waits for the
