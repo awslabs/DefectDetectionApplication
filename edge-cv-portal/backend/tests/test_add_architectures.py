@@ -102,6 +102,32 @@ class TestAddArchitectures:
         declaration = json.loads(after["provenance"]["scaffoldDeclaration"])
         assert declaration["architectures"] == ["x86_64", "arm64_jp5"]
 
+    def test_generated_kind_renders_the_added_build_configuration(self, benv, scaffold):
+        """A `generated` record (Node_Generator output) carries the same
+        declaration-rendered `builds/{arch}/meson.build` layout as a
+        `scaffold`, so an Architecture_Addition must render the added
+        architecture's build configuration for it too. Regression: gating
+        the rendering on `kind == 'scaffold'` left generated records
+        without a build file and the build failed in CodeBuild with
+        "no build configuration found" (6.3)."""
+        usecase_id, admin, plugin = scaffold
+        plugin_id = plugin["plugin_id"]
+        # Same source tree, but recorded as Node_Generator output.
+        benv.stack.tables.plugin_records.update_item(
+            Key={"plugin_id": plugin_id, "version": 1},
+            UpdateExpression="SET kind = :k",
+            ExpressionAttributeValues={":k": "generated"},
+        )
+
+        status, body = post_architectures(benv, admin, plugin_id, 1, ["arm64_jp6"])
+
+        assert status == 202, body
+        assert "builds/arm64_jp6/meson.build" in source_keys(benv, plugin)
+        after = benv.get_item(plugin_id, 1)
+        declaration = json.loads(after["provenance"]["scaffoldDeclaration"])
+        assert "arm64_jp6" in declaration["architectures"]
+        assert body["builds"]["arm64_jp6"]["buildStatus"] == "building"
+
     def test_imported_kind_adds_without_scaffold_rendering(self, benv):
         usecase_id = benv.create_usecase()
         admin = benv.make_admin(usecase_id)

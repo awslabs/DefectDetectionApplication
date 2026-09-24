@@ -348,6 +348,13 @@ def is_stale(item: Dict, entry: Optional[Dict]) -> bool:
     return artifact_source_revision(entry) < source_revision_of(item)
 
 
+# Record kinds whose Source_Tree is rendered from a recorded declaration and
+# therefore carries one `builds/{arch}/meson.build` per Target_Architecture:
+# the create wizard's `scaffold` and the Node_Generator's `generated`. An
+# Architecture_Addition must render that file for the added architecture or
+# the build fails with "no build configuration found".
+SCAFFOLDED_KINDS = ('scaffold', 'generated')
+
 ADDITION_REASON_UNKNOWN = 'unknown'
 ADDITION_REASON_ALREADY_REQUESTED = 'already_requested'
 ADDITION_REASON_UNAVAILABLE = 'unavailable'
@@ -1071,11 +1078,12 @@ def add_architectures(event: Dict, user: Dict, plugin_id: str, version: int) -> 
     versions are locked (409 LIFECYCLE_LOCKED — create a new version);
     a version with builds in flight is rejected (409 BUILDS_IN_PROGRESS).
 
-    Scaffold-kind records gain the per-arch build configuration for each
-    added architecture (rendered from the recorded declaration, only
-    where no such file exists), the declaration's `architectures` list is
-    extended, and the Source_Revision is bumped only when a file was
-    written (6.3). Existing Plugin_Artifacts are never modified.
+    Declaration-backed records (`scaffold` and `generated`, see
+    SCAFFOLDED_KINDS) gain the per-arch build configuration for each added
+    architecture (rendered from the recorded declaration, only where no
+    such file exists), the declaration's `architectures` list is extended,
+    and the Source_Revision is bumped only when a file was written (6.3).
+    Existing Plugin_Artifacts are never modified.
     """
     body, err = parse_body(event)
     if err:
@@ -1133,10 +1141,14 @@ def add_architectures(event: Dict, user: Dict, plugin_id: str, version: int) -> 
     values: Dict[str, Any] = {':t': now_ms()}
     files_written: List[str] = []
 
-    # Scaffold kinds: render the missing per-arch build configuration and
-    # extend the recorded declaration (6.3).
+    # Declaration-backed records (`scaffold` from the create wizard and
+    # `generated` from the Node_Generator both render the same
+    # `builds/{arch}/meson.build` layout from a recorded declaration):
+    # render the missing per-arch build configuration and extend the
+    # recorded declaration (6.3). `imported` records carry no declaration
+    # and build from their upstream meson/autotools tree, so they skip this.
     declaration_json = (item.get('provenance') or {}).get('scaffoldDeclaration')
-    if item.get('kind') == 'scaffold' and declaration_json:
+    if declaration_json and item.get('kind') in SCAFFOLDED_KINDS:
         declaration = json.loads(declaration_json)
         declared = [str(a) for a in declaration.get('architectures') or []]
         present = [f['file'] for f in plugin_records.list_source_objects(prefix)]
