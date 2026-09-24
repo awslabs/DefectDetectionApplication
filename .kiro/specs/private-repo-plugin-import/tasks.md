@@ -195,6 +195,28 @@ flowchart TD
     tests + build, infrastructure 242 tests + build all green. The manual
     pass with a real private repository and PAT is still to be done after
     deploy.
+  - Manual pass (2026-09-24, deployed portal, private GitHub repo
+    `rvanderwerf/dda-private-import-test` with a repo-scoped fine-grained
+    PAT, use case "cookies", temporary Cognito identity removed afterwards):
+    connection verified in 20 s; subdirectory import from `main` landed
+    `imported` with the auto Git_Link and `last_sync.commit` equal to the
+    repository head, x86_64 build succeeded; `branch=release/1` + shallow
+    imported that branch's tree (marker string present) and linked to
+    `release/1`; `revision=v1.0.0` + shallow imported the tag's commit;
+    whole-tree import recorded `import_source` and no link (the scan accepts
+    the nested meson.build, so the failure surfaces at build time as "no
+    build configuration" — pre-existing import behaviour, not this feature);
+    a Source_Editor edit pushed back through the auto-created link as
+    commit `aa1ed73` touching only `plugins/private-passthrough/`; a
+    revoked token (secret swapped after verification) produced
+    `import_finding_category = authentication` with the re-verify guidance
+    and redacted git output; re-verification then failed and a further
+    import was rejected 409 `CONNECTION_NOT_VERIFIED {status: failed}`. No
+    token-like string appeared in any API response, record, or the
+    dda-plugin-fetch CloudWatch log. All test records, the connection (and
+    its secret), and the temporary identity were deleted and the deletions
+    verified by query. GitLab was not exercised (no GitLab repository
+    available).
 
 ## Notes
 
