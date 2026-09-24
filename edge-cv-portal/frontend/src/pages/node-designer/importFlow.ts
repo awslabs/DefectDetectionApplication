@@ -13,6 +13,7 @@
  * Module_Listing entries already carry their classification from
  * GET /plugin-modules.
  */
+import type { SelectProps } from '@cloudscape-design/components';
 import { ApiError } from '../../services/api';
 import {
   ARCHITECTURE_LABELS,
@@ -21,9 +22,12 @@ import {
   DEVICE_ARCHITECTURES,
   DeviceArchitecture,
   EnumeratedPlugin,
+  GitConnection,
+  ImportPluginRequest,
   ModulePluginEntry,
   PlatformCompatibilityEntry,
   PluginVersionDetail,
+  SyncFailureCategory,
 } from './types';
 
 // ---------------------------------------------------------- explanations
@@ -228,14 +232,16 @@ export const IMPORT_POLL_TIMEOUT_MS = 12 * 60 * 1000;
 export type ImportPollDecision =
   | { kind: 'wait' }
   | { kind: 'timeout' }
-  | { kind: 'failed'; finding: string }
+  | { kind: 'failed'; finding: string; category?: SyncFailureCategory }
   | { kind: 'select'; found: EnumeratedPlugin[] }
   | { kind: 'done' };
 
 /**
  * Decide the next step from the record's import status:
  * - 'fetching': keep waiting, or give up past IMPORT_POLL_TIMEOUT_MS;
- * - 'failed': show the recorded import finding;
+ * - 'failed': show the recorded import finding (with the fetch
+ *   Failure_Category when the import went through a Git_Connection;
+ *   private-repo-plugin-import 3.1);
  * - 'pending_selection': open the plugin selection dialog over the
  *   enumerated plugins_found;
  * - 'imported' (and anything else): the import is complete — navigate
@@ -244,7 +250,7 @@ export type ImportPollDecision =
 export function importPollDecision(
   plugin: Pick<
     PluginVersionDetail,
-    'import_status' | 'import_finding' | 'plugins_found'
+    'import_status' | 'import_finding' | 'import_finding_category' | 'plugins_found'
   >,
   elapsedMs: number
 ): ImportPollDecision {
@@ -259,12 +265,148 @@ export function importPollDecision(
         finding:
           plugin.import_finding ||
           'The repository could not be imported',
+        ...(plugin.import_finding_category
+          ? { category: plugin.import_finding_category }
+          : {}),
       };
     case 'pending_selection':
       return { kind: 'select', found: plugin.plugins_found || [] };
     default:
       return { kind: 'done' };
   }
+}
+
+// ------------------------------------------ Git_Connection imports
+//
+// Import through a verified Git_Connection of the use case
+// (private-repo-plugin-import): the pure pieces of the Import_View's
+// connection source - option list, branch rule, request body, and the
+// guidance shown for a classified fetch failure.
+
+/** Route of the Git connections page (named in guidance and empty states). */
+export const GIT_CONNECTIONS_ROUTE = '/node-designer/git-connections';
+
+/**
+ * Only `verified` connections can be imported through (4.2); each option
+ * shows the repository URL and default branch for confirmation.
+ */
+export function verifiedConnectionOptions(
+  connections: GitConnection[]
+): SelectProps.Option[] {
+  return connections
+    .filter((c) => c.status === 'verified')
+    .map((c) => ({
+      label: c.name,
+      value: c.connection_id,
+      description: `${c.repo_url} · ${c.default_branch}`,
+    }));
+}
+
+/**
+ * Client-side mirror of the backend branch rule (validate_branch_name):
+ * non-empty, no whitespace, no leading '-', no '..', no trailing '/'.
+ * An empty input is acceptable - it means the connection's default.
+ */
+export function isValidBranchName(branch: string): boolean {
+  const value = branch.trim();
+  if (!value) {
+    return true;
+  }
+  return (
+    !/\s/.test(value) &&
+    !value.startsWith('-') &&
+    !value.includes('..') &&
+    !value.endsWith('/')
+  );
+}
+
+export const BRANCH_ERROR_TEXT =
+  'Use a git branch name without spaces, ".." or a trailing "/".';
+export const SUBDIR_ERROR_TEXT =
+  'Use a relative repository path without ".." segments.';
+
+/**
+ * The Git_Connection-specific part of the import request body (1.1,
+ * 1.5, 1.6): `connection_id` in place of `repo_url`, plus `path` and
+ * `branch` only when given. `shallow` is handled for both source kinds
+ * by shallowParam.
+ */
+export function connectionSourceParams(
+  connectionId: string,
+  subdir: string,
+  branch: string
+): Pick<ImportPluginRequest, 'connection_id' | 'path' | 'branch'> {
+  return {
+    connection_id: connectionId,
+    ...(subdir.trim() ? { path: subdir.trim() } : {}),
+    ...(branch.trim() ? { branch: branch.trim() } : {}),
+  };
+}
+
+/** `shallow` is sent only when checked (4.6) so unchecked requests are unchanged. */
+export function shallowParam(shallow: boolean): Pick<ImportPluginRequest, 'shallow'> {
+  return shallow ? { shallow: true } : {};
+}
+
+/** Header and guidance the Import_View shows above a failed fetch's finding (3.2, 3.3). */
+export interface ImportFailureGuidance {
+  header: string;
+  guidance: string | null;
+  /** Link to the Git connections page (authentication failures: re-verify there). */
+  linkGitConnections: boolean;
+}
+
+export function importFailureGuidance(
+  category: SyncFailureCategory | undefined
+): ImportFailureGuidance {
+  switch (category) {
+    case 'authentication':
+      return {
+        header: 'Import failed: the connection\'s token was rejected',
+        guidance:
+          'The repository host rejected the Git connection\'s token. ' +
+          'Re-verify the connection on the Git connections page, then ' +
+          'import again. This import did not start a re-verification.',
+        linkGitConnections: true,
+      };
+    case 'not_found':
+      return {
+        header: 'Import failed: not found',
+        guidance:
+          'The repository, branch, revision, or subdirectory does not ' +
+          'exist, or the connection\'s token cannot see it. Check the ' +
+          'connection\'s repository URL and the branch, revision, and ' +
+          'path you entered.',
+        linkGitConnections: false,
+      };
+    case 'unreachable':
+      return {
+        header: 'Import failed: repository unreachable',
+        guidance:
+          'The repository host could not be reached from the fetch. Try ' +
+          'again later.',
+        linkGitConnections: false,
+      };
+    default:
+      return { header: 'Import failed', guidance: null, linkGitConnections: false };
+  }
+}
+
+/**
+ * Text for a 409 CONNECTION_NOT_VERIFIED rejection (3.5): the
+ * connection's current status, and where to re-verify - the import never
+ * re-verifies as a side effect.
+ */
+export function connectionNotVerifiedText(
+  connectionName: string | undefined,
+  status: unknown
+): string {
+  const name = connectionName ? `"${connectionName}"` : 'selected';
+  const state = typeof status === 'string' && status ? status : 'not verified';
+  return (
+    `The Git connection ${name} is ${state}, so it cannot be used for an ` +
+    'import. Re-verify it on the Git connections page, then try again.'
+  );
 }
 
 // ------------------------------------------ external documentation
@@ -399,10 +541,10 @@ export function allPluginNames(plugins: ModulePluginEntry[]): string[] {
  * the import proceeds. True exactly when the source is the module
  * listing, plugins are available, and nothing is selected yet. An
  * unavailable or empty plugin list never blocks (whole-module
- * fallback), and manual repository URL imports are never gated.
+ * fallback), and repository URL / Git connection imports are never gated.
  */
 export function moduleSelectionIncomplete(
-  source: 'module' | 'manual',
+  source: 'module' | 'manual' | 'connection',
   availableNames: string[],
   selectedNames: string[]
 ): boolean {

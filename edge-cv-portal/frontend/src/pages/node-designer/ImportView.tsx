@@ -64,25 +64,34 @@ import {
   Classification,
   DeviceArchitecture,
   EnumeratedPlugin,
+  GitConnection,
   ModulePluginEntry,
   PluginModuleEntry,
   PluginVersionDetail,
+  SyncFailureCategory,
 } from './types';
 import { ClassificationBadge } from './badges';
+import { isValidSourcePath } from './sourcePath';
 import {
   addAllToSelection,
   allPluginNames,
   archRevisionEntries,
   archRevisionsParam,
+  BRANCH_ERROR_TEXT,
   CLASSIFICATION_EXPLANATIONS,
   classifyPluginSet,
+  connectionNotVerifiedText,
+  connectionSourceParams,
   filterPluginEntries,
+  GIT_CONNECTIONS_ROUTE,
   GSTREAMER_DOCS_URL,
   GSTREAMER_PLUGIN_SETS_DOCS_URL,
   IMPORT_POLL_INTERVAL_MS,
+  importFailureGuidance,
   importPollDecision,
   incompatiblePlatformWarnings,
   isModuleListingUnavailable,
+  isValidBranchName,
   PlatformWarning,
   moduleSelectionIncomplete,
   moduleSelectionSummary,
@@ -92,10 +101,18 @@ import {
   restrictArchitectureSelection,
   selectableArchitectures,
   selectedPluginsParam,
+  shallowParam,
+  SUBDIR_ERROR_TEXT,
   togglePluginSelection,
+  verifiedConnectionOptions,
 } from './importFlow';
 
-type ImportSource = 'module' | 'manual';
+/**
+ * Where the plugin source comes from: the official Module_Listing, a
+ * public repository URL, or a verified Git_Connection of the use case
+ * (private-repo-plugin-import 4.1; the two public kinds are unchanged).
+ */
+type ImportSource = 'module' | 'manual' | 'connection';
 type ImportStep = 'form' | 'confirm';
 
 export default function ImportView() {
@@ -111,6 +128,18 @@ export default function ImportView() {
   // Listing failure message (6.3): surfaced and manual entry forced.
   const [listingError, setListingError] = useState<string | null>(null);
   const [selectedModule, setSelectedModule] = useState<SelectProps.Option | null>(null);
+
+  // --- Git_Connection source (private-repo-plugin-import 4.2-4.4):
+  // the use case's connections (only verified ones are offered), the
+  // chosen one, the optional subdirectory and branch, and the shallow
+  // clone option (4.6, both source kinds; sent only when checked).
+  const [connections, setConnections] = useState<GitConnection[]>([]);
+  const [connectionsLoading, setConnectionsLoading] = useState(false);
+  const [connectionsError, setConnectionsError] = useState<string | null>(null);
+  const [selectedConnection, setSelectedConnection] = useState<SelectProps.Option | null>(null);
+  const [subdir, setSubdir] = useState('');
+  const [branch, setBranch] = useState('');
+  const [shallow, setShallow] = useState(false);
 
   // --- form fields
   const [repoUrl, setRepoUrl] = useState('');
@@ -129,9 +158,13 @@ export default function ImportView() {
   const [acknowledged, setAcknowledged] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  // The recorded finding of a failed import, with the fetch
+  // Failure_Category when the import went through a Git_Connection so
+  // the guidance can say what to fix (3.1-3.3).
   const [importFinding, setImportFinding] = useState<{
     finding: string;
     pluginId: string;
+    category?: SyncFailureCategory;
   } | null>(null);
 
   // --- plugin-set selection dialog: a pending_selection import lists
@@ -279,9 +312,61 @@ export default function ImportView() {
 
   const modulePluginNames = modulePlugins ? allPluginNames(modulePlugins) : [];
 
+  // --- Git connections of the use case, loaded when the connection
+  // source is chosen (and reloaded when the use case changes). Only
+  // verified connections are offered (4.2); the list never blocks the
+  // other sources.
+  const usecaseIdForConnections = source === 'connection' ? selectedUseCase?.value : undefined;
+  useEffect(() => {
+    setSelectedConnection(null);
+    if (!usecaseIdForConnections) {
+      return;
+    }
+    let cancelled = false;
+    setConnectionsLoading(true);
+    setConnectionsError(null);
+    (async () => {
+      try {
+        const response = await nodeDesignerApi.listGitConnections(usecaseIdForConnections);
+        if (!cancelled) {
+          setConnections(response.connections || []);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setConnections([]);
+          setConnectionsError(err?.message || 'Git connections could not be loaded');
+        }
+      } finally {
+        if (!cancelled) {
+          setConnectionsLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [usecaseIdForConnections]);
+
+  const connectionOptions = verifiedConnectionOptions(connections);
+  const chosenConnection = selectedConnection?.value
+    ? connections.find((c) => c.connection_id === selectedConnection.value)
+    : undefined;
+  // Subdirectory and branch follow the backend rules exactly
+  // (normalize_source_path, validate_branch_name); empty = whole tree /
+  // the connection's default branch.
+  const subdirError = subdir.trim() && !isValidSourcePath(subdir) ? SUBDIR_ERROR_TEXT : null;
+  const branchError = !isValidBranchName(branch) ? BRANCH_ERROR_TEXT : null;
+
   // The effective import source repository URL: a selected module feeds
-  // its published repository location into the import path (6.2).
-  const effectiveRepoUrl = source === 'module' ? chosenModule?.repoUrl || '' : repoUrl.trim();
+  // its published repository location into the import path (6.2); a
+  // Git_Connection contributes its stored URL (shown for confirmation,
+  // never sent - the backend clones the connection's URL).
+  const effectiveRepoUrl =
+    source === 'module'
+      ? chosenModule?.repoUrl || ''
+      : source === 'connection'
+        ? chosenConnection?.repo_url || ''
+        : repoUrl.trim();
   const effectiveModuleName = source === 'module' ? chosenModule?.name : undefined;
 
   // Classification shown before the import proceeds (15.2): the
@@ -320,9 +405,16 @@ export default function ImportView() {
     selectedModulePlugins
   );
 
+  // A connection import needs a chosen (verified) connection and valid
+  // optional subdirectory / branch inputs; the public kinds need a URL.
+  const sourceComplete =
+    source === 'connection'
+      ? !!chosenConnection && !subdirError && !branchError
+      : !!effectiveRepoUrl;
+
   const formComplete =
     !!selectedUseCase?.value &&
-    !!effectiveRepoUrl &&
+    sourceComplete &&
     architectures.length > 0 &&
     !selectionIncomplete;
 
@@ -347,6 +439,7 @@ export default function ImportView() {
         setImportFinding({
           finding: decision.finding,
           pluginId: plugin.plugin_id,
+          ...(decision.category ? { category: decision.category } : {}),
         });
       } else if (decision.kind === 'select') {
         // Plugin set: open the selection dialog over the enumerated
@@ -418,7 +511,7 @@ export default function ImportView() {
   }, [fetchProgress, settleImport]);
 
   const startImport = async () => {
-    if (!selectedUseCase?.value || !effectiveRepoUrl) {
+    if (!selectedUseCase?.value || !sourceComplete) {
       return;
     }
     setImporting(true);
@@ -433,13 +526,19 @@ export default function ImportView() {
     try {
       const response = await nodeDesignerApi.importPlugin({
         usecase_id: selectedUseCase.value,
-        repo_url: effectiveRepoUrl,
+        // Exactly one source (1.2): the connection id in place of the
+        // URL for a Git_Connection import; the token never leaves the
+        // backend. Public kinds send exactly what they always have.
+        ...(source === 'connection' && chosenConnection
+          ? connectionSourceParams(chosenConnection.connection_id, subdir, branch)
+          : { repo_url: effectiveRepoUrl }),
         ...(revision.trim() ? { revision: revision.trim() } : {}),
         architectures: selectedArchValues,
         ...(archRevisionOverrides ? { arch_revisions: archRevisionOverrides } : {}),
         deepstream,
         ...(effectiveModuleName ? { module_name: effectiveModuleName } : {}),
         ...(selectedParam ? { selected_plugins: selectedParam } : {}),
+        ...shallowParam(shallow),
       });
       const startedAt = Date.now();
       if (!settleImport(response.plugin, startedAt)) {
@@ -452,7 +551,13 @@ export default function ImportView() {
         });
       }
     } catch (err: any) {
-      setImportError(err?.message || 'The import request failed');
+      // A not-verified connection is rejected with its current status
+      // (3.5); the import never re-verifies as a side effect.
+      setImportError(
+        err?.code === 'CONNECTION_NOT_VERIFIED'
+          ? connectionNotVerifiedText(chosenConnection?.name, err?.details?.status)
+          : err?.message || 'The import request failed'
+      );
       setImporting(false);
     }
   };
@@ -607,7 +712,7 @@ export default function ImportView() {
         {importFinding && (
           <Alert
             type="error"
-            header="Import failed"
+            header={importFailureGuidance(importFinding.category).header}
             action={
               <Button
                 onClick={() => navigate(`/node-designer/plugins/${importFinding.pluginId}`)}
@@ -616,7 +721,31 @@ export default function ImportView() {
               </Button>
             }
           >
-            {importFinding.finding}
+            <SpaceBetween size="xs">
+              {/* Category guidance for a Git_Connection fetch failure
+                  (3.2, 3.3): what to fix and, for a rejected token,
+                  where to re-verify - never a re-verification here. */}
+              {importFailureGuidance(importFinding.category).guidance && (
+                <div>
+                  {importFailureGuidance(importFinding.category).guidance}
+                  {importFailureGuidance(importFinding.category).linkGitConnections && (
+                    <>
+                      {' '}
+                      <Link
+                        href={GIT_CONNECTIONS_ROUTE}
+                        onFollow={(event) => {
+                          event.preventDefault();
+                          navigate(GIT_CONNECTIONS_ROUTE);
+                        }}
+                      >
+                        Open Git connections
+                      </Link>
+                    </>
+                  )}
+                </div>
+              )}
+              <div>{importFinding.finding}</div>
+            </SpaceBetween>
           </Alert>
         )}
 
@@ -659,14 +788,41 @@ export default function ImportView() {
 
         <Container header={<Header variant="h2">Import details</Header>}>
           <ColumnLayout columns={2} variant="text-grid">
+            {source === 'connection' && chosenConnection && (
+              <div>
+                <Box variant="awsui-key-label">Git connection</Box>
+                <div>{chosenConnection.name}</div>
+              </div>
+            )}
             <div>
               <Box variant="awsui-key-label">Repository URL</Box>
               <div>{effectiveRepoUrl}</div>
             </div>
+            {source === 'connection' && chosenConnection && (
+              <div>
+                <Box variant="awsui-key-label">Branch</Box>
+                <div>{branch.trim() || chosenConnection.default_branch}</div>
+              </div>
+            )}
+            {source === 'connection' && (
+              <div>
+                <Box variant="awsui-key-label">Subdirectory</Box>
+                <div>{subdir.trim() || 'whole repository'}</div>
+              </div>
+            )}
             <div>
               <Box variant="awsui-key-label">Revision</Box>
-              <div>{revision.trim() || 'default branch'}</div>
+              <div>
+                {revision.trim() ||
+                  (source === 'connection' ? 'branch head' : 'default branch')}
+              </div>
             </div>
+            {shallow && (
+              <div>
+                <Box variant="awsui-key-label">Clone depth</Box>
+                <div>shallow (depth 1)</div>
+              </div>
+            )}
             {archRevisionOverrides && (
               <div>
                 <Box variant="awsui-key-label">Per-architecture revisions</Box>
@@ -755,7 +911,7 @@ export default function ImportView() {
     <SpaceBetween size="l">
       <Header
         variant="h1"
-        description="Import a GStreamer plugin from the official module listing or a public repository URL."
+        description="Import a GStreamer plugin from the official module listing, a public repository URL, or a private repository through one of this use case's Git connections."
       >
         Import plugin
       </Header>
@@ -803,10 +959,126 @@ export default function ImportView() {
                 label: 'Repository URL',
                 description: 'Import from a public source repository URL.',
               },
+              {
+                value: 'connection',
+                label: 'Git connection',
+                description:
+                  'Import from a private repository through a verified Git connection of this use case.',
+              },
             ]}
           />
 
-          {source === 'module' ? (
+          {source === 'connection' && (
+            <>
+              {connectionsError && (
+                <Alert type="error" header="Git connections unavailable">
+                  {connectionsError}
+                </Alert>
+              )}
+              <FormField
+                label="Git connection"
+                description="Only verified connections of the selected use case can be imported through; each shows its repository URL and default branch. The connection's token stays in the portal and is never shown here."
+              >
+                <Select
+                  placeholder="Select a verified Git connection"
+                  statusType={connectionsLoading ? 'loading' : 'finished'}
+                  loadingText="Loading Git connections"
+                  selectedOption={selectedConnection}
+                  options={connectionOptions}
+                  onChange={({ detail }) => {
+                    setSelectedConnection(detail.selectedOption);
+                    // Pre-fill the branch with the connection's default (4.4).
+                    const picked = connections.find(
+                      (c) => c.connection_id === detail.selectedOption.value
+                    );
+                    setBranch(picked?.default_branch || '');
+                  }}
+                  empty={
+                    connectionsLoading ? (
+                      'Loading Git connections'
+                    ) : (
+                      <span>
+                        No verified Git connections for this use case.{' '}
+                        <Link
+                          href={GIT_CONNECTIONS_ROUTE}
+                          onFollow={(event) => {
+                            event.preventDefault();
+                            navigate(GIT_CONNECTIONS_ROUTE);
+                          }}
+                        >
+                          Create or verify one on the Git connections page
+                        </Link>
+                        .
+                      </span>
+                    )
+                  }
+                  ariaLabel="Git connection"
+                />
+              </FormField>
+              {!connectionsLoading && !connectionsError && connectionOptions.length === 0 && (
+                <Alert type="info" header="No verified Git connections">
+                  This use case has no verified Git connection yet.{' '}
+                  <Link
+                    href={GIT_CONNECTIONS_ROUTE}
+                    onFollow={(event) => {
+                      event.preventDefault();
+                      navigate(GIT_CONNECTIONS_ROUTE);
+                    }}
+                  >
+                    Open Git connections
+                  </Link>{' '}
+                  to add one and verify its token, then return here to import.
+                </Alert>
+              )}
+              <FormField
+                label={
+                  <span>
+                    Subdirectory <i>- optional</i>
+                  </span>
+                }
+                description="Repository subdirectory holding the plugin source; leave empty to import the whole repository."
+                errorText={subdirError}
+              >
+                <Input
+                  value={subdir}
+                  onChange={({ detail }) => setSubdir(detail.value)}
+                  placeholder="plugins/my-element"
+                  ariaLabel="Subdirectory"
+                />
+              </FormField>
+              <FormField
+                label={
+                  <span>
+                    Branch <i>- optional</i>
+                  </span>
+                }
+                description="Branch to clone; pre-filled with the connection's default branch. The imported version is linked to this branch for later push and pull."
+                errorText={branchError}
+              >
+                <Input
+                  value={branch}
+                  onChange={({ detail }) => setBranch(detail.value)}
+                  placeholder={chosenConnection?.default_branch || 'main'}
+                  ariaLabel="Branch"
+                />
+              </FormField>
+            </>
+          )}
+
+          {source === 'manual' && (
+            <FormField
+              label="Repository URL"
+              description="Public http, https, or git repository containing the plugin source."
+            >
+              <Input
+                value={repoUrl}
+                onChange={({ detail }) => setRepoUrl(detail.value)}
+                placeholder="https://example.com/my-gst-plugin.git"
+              />
+            </FormField>
+          )}
+
+          {source === 'module' && (
             <>
               <FormField
                 label="Module"
@@ -921,17 +1193,6 @@ export default function ImportView() {
                 </FormField>
               )}
             </>
-          ) : (
-            <FormField
-              label="Repository URL"
-              description="Public http, https, or git repository containing the plugin source."
-            >
-              <Input
-                value={repoUrl}
-                onChange={({ detail }) => setRepoUrl(detail.value)}
-                placeholder="https://example.com/my-gst-plugin.git"
-              />
-            </FormField>
           )}
 
           <FormField
@@ -940,7 +1201,11 @@ export default function ImportView() {
                 Revision <i>- optional</i>
               </span>
             }
-            description="Branch, tag, or commit to import; the repository default branch is used when omitted."
+            description={
+              source === 'connection'
+                ? 'Tag or commit to check out after cloning the branch; the branch head is imported when omitted. The link stays on the branch.'
+                : 'Branch, tag, or commit to import; the repository default branch is used when omitted.'
+            }
           >
             <Input
               value={revision}
@@ -988,6 +1253,17 @@ export default function ImportView() {
               </SpaceBetween>
             )}
           </ExpandableSection>
+
+          {/* Shallow clone (private-repo-plugin-import 4.6): offered for
+              every source kind, unchecked by default, sent only when
+              checked so unchecked requests are unchanged. */}
+          <Checkbox
+            checked={shallow}
+            onChange={({ detail }) => setShallow(detail.checked)}
+            description="Clone at depth 1: faster for large repositories. A revision that is a bare commit hash may not be reachable from a shallow clone."
+          >
+            Shallow clone
+          </Checkbox>
         </SpaceBetween>
       </Container>
 

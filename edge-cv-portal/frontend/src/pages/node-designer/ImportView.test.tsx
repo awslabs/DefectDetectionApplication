@@ -27,6 +27,7 @@ const {
   importPlugin,
   selectImportPlugins,
   getVersion,
+  listGitConnections,
 } = vi.hoisted(() => ({
   navigateMock: vi.fn(),
   listUseCases: vi.fn(),
@@ -35,6 +36,7 @@ const {
   importPlugin: vi.fn(),
   selectImportPlugins: vi.fn(),
   getVersion: vi.fn(),
+  listGitConnections: vi.fn(),
 }));
 
 vi.mock('react-router-dom', () => ({
@@ -67,6 +69,7 @@ vi.mock('./api', () => ({
     importPlugin,
     selectImportPlugins,
     getVersion,
+    listGitConnections,
   },
 }));
 
@@ -687,4 +690,321 @@ describe('ImportView per-architecture revisions', () => {
     await waitFor(() => expect(importPlugin).toHaveBeenCalled());
     expect(importPlugin.mock.calls[0][0].arch_revisions).toBeUndefined();
   });
+});
+
+
+// ------------------------------------------------------------------
+// Import through a Git_Connection (private-repo-plugin-import 4.1-4.6,
+// 3.2, 3.3, 3.5). The public sources above are unchanged: every
+// earlier test in this file is the preservation oracle.
+// ------------------------------------------------------------------
+
+const CONNECTION = (overrides: Record<string, unknown> = {}) => ({
+  connection_id: 'c-1',
+  usecase_id: 'uc-1',
+  name: 'plugins-repo',
+  provider: 'github',
+  repo_url: 'https://github.com/acme/private-plugins.git',
+  default_branch: 'develop',
+  status: 'verified',
+  verification: { at: 1 },
+  created_by: 'user-1',
+  created_at: 1,
+  updated_at: 1,
+  ...overrides,
+});
+
+/** Choose the Git connection source tile. */
+async function chooseConnectionSource(container: HTMLElement) {
+  await waitFor(() => expect(listPluginModules).toHaveBeenCalled());
+  const wrapper = createWrapper(container);
+  const tiles = wrapper.findTiles()!;
+  tiles.findInputByValue('connection')!.click();
+  await waitFor(() => expect(listGitConnections).toHaveBeenCalledWith('uc-1'));
+}
+
+/** The connection Select: selects on the connection form are [0] use case, [1] connection. */
+function connectionSelect(container: HTMLElement) {
+  return createWrapper(container).findAllSelects()[1];
+}
+
+/** Pick a connection option by its connection id. */
+async function pickConnection(container: HTMLElement, connectionId: string) {
+  const select = connectionSelect(container);
+  select.openDropdown();
+  select.selectOptionByValue(connectionId);
+  await waitFor(() => expect(select.findTrigger().getElement()).toHaveTextContent('plugins-repo'));
+}
+
+async function selectArchitecture(container: HTMLElement, arch = 'x86_64') {
+  const archSelect = createWrapper(container).findMultiselect()!;
+  archSelect.openDropdown();
+  archSelect.selectOptionByValue(arch);
+}
+
+describe('ImportView Git connection source', () => {
+  it('defaults to the public sources and offers the Git connection tile (4.1)', async () => {
+    const { container } = render(<ImportView />);
+    await waitFor(() => expect(listPluginModules).toHaveBeenCalled());
+    const tiles = createWrapper(container).findTiles()!;
+    expect(tiles.findInputByValue('module')!.getElement()).toBeChecked();
+    expect(tiles.findInputByValue('connection')).not.toBeNull();
+    // Nothing connection-related renders until the tile is chosen, and
+    // the connections are not even requested.
+    expect(screen.queryByLabelText('Subdirectory')).toBeNull();
+    expect(listGitConnections).not.toHaveBeenCalled();
+    // No token input anywhere (4.5).
+    expect(container.querySelector('input[type="password"]')).toBeNull();
+  });
+
+  it('lists only verified connections with their URL and default branch (4.2)', async () => {
+    listGitConnections.mockResolvedValue({
+      connections: [
+        CONNECTION(),
+        CONNECTION({ connection_id: 'c-2', name: 'verifying-repo', status: 'verifying' }),
+        CONNECTION({ connection_id: 'c-3', name: 'failed-repo', status: 'failed' }),
+      ],
+      count: 3,
+    });
+    const { container } = render(<ImportView />);
+    await chooseConnectionSource(container);
+
+    const select = connectionSelect(container);
+    select.openDropdown();
+    const options = select.findDropdown().findOptions();
+    expect(options).toHaveLength(1);
+    expect(options[0].getElement()).toHaveTextContent('plugins-repo');
+    expect(options[0].getElement()).toHaveTextContent('https://github.com/acme/private-plugins.git');
+    expect(options[0].getElement()).toHaveTextContent('develop');
+    expect(screen.queryByText('verifying-repo')).toBeNull();
+    expect(screen.queryByText('failed-repo')).toBeNull();
+  });
+
+  it('says so and links to the Git connections page when none is verified (4.3)', async () => {
+    listGitConnections.mockResolvedValue({
+      connections: [CONNECTION({ status: 'failed' })],
+      count: 1,
+    });
+    const { container } = render(<ImportView />);
+    await chooseConnectionSource(container);
+    await screen.findByText('No verified Git connections');
+    const link = screen.getByRole('link', { name: 'Open Git connections' });
+    expect(link).toHaveAttribute('href', '/node-designer/git-connections');
+    fireEvent.click(link);
+    expect(navigateMock).toHaveBeenCalledWith('/node-designer/git-connections');
+    // The review stays blocked without a connection.
+    await selectArchitecture(container);
+    expect(screen.getByRole('button', { name: 'Review import' })).toBeDisabled();
+  });
+
+  it('pre-fills the branch, validates the subdirectory, and sends connection_id instead of repo_url (4.4, 1.1, 1.5, 1.6)', async () => {
+    listGitConnections.mockResolvedValue({ connections: [CONNECTION()], count: 1 });
+    importPlugin.mockResolvedValue(IMPORTED_RESPONSE);
+    const { container } = render(<ImportView />);
+    await chooseConnectionSource(container);
+    await pickConnection(container, 'c-1');
+
+    const branchInput = screen.getByLabelText('Branch') as HTMLInputElement;
+    expect(branchInput.value).toBe('develop');
+    await selectArchitecture(container);
+
+    // A bad subdirectory blocks the review with the shared rule.
+    const subdirInput = screen.getByLabelText('Subdirectory');
+    fireEvent.change(subdirInput, { target: { value: '../escape' } });
+    expect(
+      screen.getByText('Use a relative repository path without ".." segments.')
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review import' })).toBeDisabled();
+    fireEvent.change(subdirInput, { target: { value: 'plugins/resize' } });
+    fireEvent.change(branchInput, { target: { value: 'release/1' } });
+    fireEvent.change(container.querySelector('input[placeholder="main"]')!, {
+      target: { value: 'v1.2.0' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review import' }));
+    await screen.findByText('Upstream classification');
+    // Confirmation shows the connection, its URL, branch and subdirectory.
+    expect(screen.getByText('plugins-repo')).toBeInTheDocument();
+    expect(screen.getByText('https://github.com/acme/private-plugins.git')).toBeInTheDocument();
+    expect(screen.getByText('release/1')).toBeInTheDocument();
+    expect(screen.getByText('plugins/resize')).toBeInTheDocument();
+    // A private repository is unclassified: acknowledgment required.
+    createWrapper(container).findCheckbox()!.findNativeInput().click();
+    fireEvent.click(screen.getByRole('button', { name: 'Import plugin' }));
+
+    await waitFor(() => expect(importPlugin).toHaveBeenCalled());
+    const body = importPlugin.mock.calls[0][0];
+    expect(body).toEqual({
+      usecase_id: 'uc-1',
+      connection_id: 'c-1',
+      path: 'plugins/resize',
+      branch: 'release/1',
+      revision: 'v1.2.0',
+      architectures: ['x86_64'],
+      deepstream: false,
+    });
+    expect(body.repo_url).toBeUndefined();
+    expect(body.shallow).toBeUndefined();
+    expect(JSON.stringify(body)).not.toMatch(/token|secret/i);
+  });
+
+  it('omits path and branch when left at their defaults and sends shallow only when checked (4.6)', async () => {
+    listGitConnections.mockResolvedValue({ connections: [CONNECTION()], count: 1 });
+    importPlugin.mockResolvedValue(IMPORTED_RESPONSE);
+    const { container } = render(<ImportView />);
+    await chooseConnectionSource(container);
+    await pickConnection(container, 'c-1');
+    await selectArchitecture(container);
+    // Clear the pre-filled branch: the backend then uses the default.
+    fireEvent.change(screen.getByLabelText('Branch'), { target: { value: '' } });
+    const shallow = screen.getByRole('checkbox', { name: /Shallow clone/ });
+    expect(shallow).not.toBeChecked();
+    fireEvent.click(shallow);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Review import' }));
+    await screen.findByText('Upstream classification');
+    expect(screen.getByText('shallow (depth 1)')).toBeInTheDocument();
+    expect(screen.getByText('whole repository')).toBeInTheDocument();
+    createWrapper(container).findCheckbox()!.findNativeInput().click();
+    fireEvent.click(screen.getByRole('button', { name: 'Import plugin' }));
+
+    await waitFor(() => expect(importPlugin).toHaveBeenCalled());
+    expect(importPlugin.mock.calls[0][0]).toEqual({
+      usecase_id: 'uc-1',
+      connection_id: 'c-1',
+      architectures: ['x86_64'],
+      deepstream: false,
+      shallow: true,
+    });
+  });
+
+  it('offers the shallow clone option to public URL imports too, unchecked by default (4.6)', async () => {
+    importPlugin.mockResolvedValue(IMPORTED_RESPONSE);
+    const { container } = render(<ImportView />);
+    await fillForm(container, 'gst-plugins-good');
+    const shallow = screen.getByRole('checkbox', { name: /Shallow clone/ });
+    expect(shallow).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Review import' }));
+    await screen.findByText('Upstream classification');
+    fireEvent.click(screen.getByRole('button', { name: 'Import plugin' }));
+    await waitFor(() => expect(importPlugin).toHaveBeenCalled());
+    // Unchecked: the request is exactly the pre-feature one (6.1).
+    expect(importPlugin.mock.calls[0][0]).not.toHaveProperty('shallow');
+    expect(importPlugin.mock.calls[0][0]).not.toHaveProperty('connection_id');
+    expect(importPlugin.mock.calls[0][0].repo_url).toBe(MODULES[0].repoUrl);
+  });
+
+  it('shows a not-verified rejection with the connection status and never re-verifies (3.5)', async () => {
+    listGitConnections.mockResolvedValue({ connections: [CONNECTION()], count: 1 });
+    importPlugin.mockRejectedValue(
+      new ApiError('The Git connection is not verified', 409, 'CONNECTION_NOT_VERIFIED', {
+        connection_id: 'c-1',
+        status: 'failed',
+      })
+    );
+    const { container } = render(<ImportView />);
+    await chooseConnectionSource(container);
+    await pickConnection(container, 'c-1');
+    await selectArchitecture(container);
+    fireEvent.click(screen.getByRole('button', { name: 'Review import' }));
+    await screen.findByText('Upstream classification');
+    createWrapper(container).findCheckbox()!.findNativeInput().click();
+    fireEvent.click(screen.getByRole('button', { name: 'Import plugin' }));
+
+    await screen.findByText(/The Git connection "plugins-repo" is failed/);
+    expect(screen.getByText(/Re-verify it on the Git connections page/)).toBeInTheDocument();
+    expect(navigateMock).not.toHaveBeenCalled();
+    // Only the import call went out: nothing else was triggered.
+    expect(importPlugin).toHaveBeenCalledTimes(1);
+  });
+
+  it(
+    'explains a rejected token and links the Git connections page (3.2)',
+    async () => {
+      listGitConnections.mockResolvedValue({ connections: [CONNECTION()], count: 1 });
+      importPlugin.mockResolvedValue(FETCHING_RESPONSE('plugin-9'));
+      getVersion.mockResolvedValue({
+        plugin: {
+          plugin_id: 'plugin-9',
+          version: 1,
+          import_status: 'failed',
+          import_finding:
+            "The repository rejected the Git connection's token. Re-verify the " +
+            'connection on the Git connections page, then import again. Fetch ' +
+            'output: fatal: Authentication failed for https://***@github.com/acme/private-plugins.git/',
+          import_finding_category: 'authentication',
+          import_source: {
+            kind: 'git_connection',
+            connection_id: 'c-1',
+            branch: 'develop',
+            revision: 'default',
+            shallow: false,
+          },
+        },
+      });
+      const { container } = render(<ImportView />);
+      await chooseConnectionSource(container);
+      await pickConnection(container, 'c-1');
+      await selectArchitecture(container);
+      fireEvent.click(screen.getByRole('button', { name: 'Review import' }));
+      await screen.findByText('Upstream classification');
+      createWrapper(container).findCheckbox()!.findNativeInput().click();
+      fireEvent.click(screen.getByRole('button', { name: 'Import plugin' }));
+
+      await screen.findByText(/Cloning repository/);
+      await waitFor(
+        () =>
+          expect(
+            screen.getByText("Import failed: the connection's token was rejected")
+          ).toBeInTheDocument(),
+        { timeout: 10_000 }
+      );
+      expect(screen.getByText(/This import did not start a re-verification/)).toBeInTheDocument();
+      expect(screen.getByText(/Authentication failed/)).toBeInTheDocument();
+      const link = screen.getByRole('link', { name: 'Open Git connections' });
+      expect(link).toHaveAttribute('href', '/node-designer/git-connections');
+      // The redacted finding is shown as recorded: no token anywhere.
+      expect(container.textContent).not.toMatch(/ghp_|glpat-/);
+      expect(navigateMock).not.toHaveBeenCalled();
+    },
+    15_000
+  );
+
+  it(
+    'explains a not-found failure (3.3)',
+    async () => {
+      listGitConnections.mockResolvedValue({ connections: [CONNECTION()], count: 1 });
+      importPlugin.mockResolvedValue(FETCHING_RESPONSE('plugin-10'));
+      getVersion.mockResolvedValue({
+        plugin: {
+          plugin_id: 'plugin-10',
+          version: 1,
+          import_status: 'failed',
+          import_finding:
+            'The repository, branch, revision, or subdirectory could not be found: ' +
+            "the subdirectory 'plugins/nope' does not exist in the repository at the fetched revision",
+          import_finding_category: 'not_found',
+        },
+      });
+      const { container } = render(<ImportView />);
+      await chooseConnectionSource(container);
+      await pickConnection(container, 'c-1');
+      await selectArchitecture(container);
+      fireEvent.click(screen.getByRole('button', { name: 'Review import' }));
+      await screen.findByText('Upstream classification');
+      createWrapper(container).findCheckbox()!.findNativeInput().click();
+      fireEvent.click(screen.getByRole('button', { name: 'Import plugin' }));
+
+      await waitFor(
+        () => expect(screen.getByText('Import failed: not found')).toBeInTheDocument(),
+        { timeout: 10_000 }
+      );
+      expect(
+        screen.getByText(/The repository, branch, revision, or subdirectory does not exist/)
+      ).toBeInTheDocument();
+      expect(screen.getByText(/plugins\/nope/)).toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: 'Open Git connections' })).toBeNull();
+    },
+    15_000
+  );
 });

@@ -82,7 +82,7 @@ flowchart TD
 
 ### Request contract
 
-`POST /plugins/import` gains two optional fields and one mutual-exclusion
+`POST /plugins/import` gains four optional fields and one mutual-exclusion
 rule:
 
 ```jsonc
@@ -93,89 +93,148 @@ rule:
   "repo_url": "https://github.com/org/public.git",
   "connection_id": "c-...",
   // only with connection_id:
-  "path": "plugins/my-element",
-  "revision": "main"          // already exists; unchanged semantics
+  "path": "plugins/my-element",   // subdirectory to import (default: whole tree)
+  "branch": "release/1",          // branch to clone (default: connection's default_branch)
+  // either source:
+  "revision": "v1.2.0",           // already exists; unchanged semantics
+  "shallow": true                 // depth-1 clone; default false, sent only when true
 }
 ```
 
 - Both or neither → 400 `INVALID_IMPORT_SOURCE {field}`.
-- Unknown or cross-Use_Case connection → 404 (consistent with the existing
-  record-scoping behavior; the connection is invisible outside its Use_Case).
-- Connection not `verified` → 409 `CONNECTION_NOT_VERIFIED {status}`,
-  the same code the Push/Pull precondition uses.
+- Unknown or cross-Use_Case connection → 404 `CONNECTION_NOT_FOUND`
+  (consistent with the git-sync endpoints and the existing record-scoping
+  behavior; the connection is invisible outside its Use_Case, and the two
+  cases are indistinguishable). The connection is resolved only after the
+  RBAC gate, so an unauthorized caller learns nothing about which
+  connections exist.
+- Connection not `verified` → 409 `CONNECTION_NOT_VERIFIED {connection_id,
+  status}`, the same code the Push/Pull precondition uses; no
+  re-verification is started.
 - `path` failing the relative-path rule → 400 `INVALID_FILE_PATH {file}`,
   reusing `normalize_source_path` (which, post
   custom-node-source-lifecycle, also rejects control characters and
   segments with edge whitespace).
+- `branch` that is not a plausible git branch name → 400 `INVALID_BRANCH`;
+  `path` / `branch` without a `connection_id` → 400 `INVALID_IMPORT_SOURCE`;
+  non-boolean `shallow` → 400 `INVALID_SHALLOW`.
+- A subdirectory import is named after the last path segment unless `name`
+  is given (`derive_import_name(..., subdir=)`); whole-tree imports keep the
+  URL-derived name.
 
 ### `start_fetch` change
 
-One extra override when a connection is named, mirroring
+`fetch_env_overrides` (pure; `start_fetch` passes its result to StartBuild)
+adds five overrides when a connection is named, mirroring
 `git_sync.start_sync_operation`:
 
 ```python
-env_overrides.append({
-    'name': 'GIT_TOKEN',
-    'value': f'{secret_arn}:token',
-    'type': 'SECRETS_MANAGER',
-})
-env_overrides.append({'name': 'REPO_SUBDIR', 'value': path or '', 'type': 'PLAINTEXT'})
+GIT_TOKEN     SECRETS_MANAGER  f'{secret_arn}:token'      # the only non-PLAINTEXT variable
+GIT_USERNAME  PLAINTEXT        provider_username(conn)    # x-access-token / oauth2
+REPO_SUBDIR   PLAINTEXT        path or ''
+REPO_BRANCH   PLAINTEXT        branch or ''
+RESULT_KEY    PLAINTEXT        fetch_result_key(dest_prefix)
 ```
 
-`REPO_URL` is the Git_Connection's stored URL; the token never touches it.
-Property 3 below pins the invariant that exactly one override is
-`SECRETS_MANAGER` and no PLAINTEXT value contains the token.
+and, for either source kind, `SHALLOW=1` only when the request asked for it,
+so an anonymous non-shallow fetch's override list is byte-identical to the
+pre-feature one (Property 1). `REPO_URL` is the Git_Connection's stored URL;
+the token never touches it. Property 3 pins the invariant that exactly one
+override is `SECRETS_MANAGER` and no PLAINTEXT value contains the token.
 
-### Fetch buildspec change
+### Fetch runner
 
-```bash
-# auth (only when GIT_TOKEN is present)
-if [ -n "$GIT_TOKEN" ]; then
-  export HOME=/tmp/githome; mkdir -p "$HOME"
-  printf '#!/bin/sh\necho "$GIT_TOKEN"\n' > /tmp/askpass.sh
-  chmod +x /tmp/askpass.sh
-  export GIT_ASKPASS=/tmp/askpass.sh
-  export GIT_TERMINAL_PROMPT=0
-  git config --global credential.username x-access-token
-fi
-git clone "$REPO_URL" /tmp/repo
-...
-# sync only the requested subdirectory
-SRC=/tmp/repo${REPO_SUBDIR:+/$REPO_SUBDIR}
-test -d "$SRC" || { echo "PATH_NOT_FOUND: $REPO_SUBDIR"; exit 1; }
-aws s3 sync "$SRC/" "s3://$ARTIFACTS_BUCKET/$DEST_PREFIX/"
-```
+The five-line inline buildspec becomes a real script,
+`edge-cv-portal/plugin-build-images/plugin-fetch/fetch.sh`, which
+`node-designer-stack.ts` reads at synth time (`fs.readFileSync`) and inlines
+as the project's single build command. The project therefore stays
+`NO_SOURCE` and needs no new read grant, while the script is testable offline
+(`tests/test_plugin_fetch_runner.py` runs it against local bare repositories
+with a fake `aws`). Behaviour:
 
-`GIT_TERMINAL_PROMPT=0` turns a missing/invalid credential into an immediate
-failure instead of a hung build. `x-access-token` as the username works for
-both GitHub PATs and GitLab PATs, matching the runner.
+- **Credentials** (only when `GIT_TOKEN` is set): isolated `HOME` whose
+  `.gitconfig` resets `credential.helper` (so no helper the image might
+  configure can store the token), and a `GIT_ASKPASS` helper that answers
+  the username prompt with `GIT_USERNAME` and the password prompt with
+  `GIT_TOKEN` from the environment. `GIT_TERMINAL_PROMPT=0` is set for every
+  fetch, so a rejected or missing credential fails fast. The token is never
+  on a command line, in a URL, or in a file that outlives the build.
+- **Clone**: `--depth 1` when `SHALLOW` is set, `--branch "$REPO_BRANCH"` when
+  set; then the optional `REVISION` checkout (a shallow clone fetches the
+  revision at depth 1, deepening with `--unshallow` only when the host
+  refuses).
+- **Subdirectory guard**: `REPO_SUBDIR` must be relative and present, else
+  the build fails with a marker (`INVALID_SUBDIR`, `PATH_NOT_FOUND`); the
+  sync then covers `"$SRC_DIR/"` only, so the Source_Tree matches what a
+  later Push writes back.
+- **Result document**: when `RESULT_KEY` is set (connection imports only),
+  every exit writes `{status, commit, branch, failure_marker, stderr_tail}`
+  to `s3://{bucket}/{RESULT_KEY}`. Failure markers: `CLONE_FAILED`,
+  `BRANCH_NOT_FOUND`, `REVISION_NOT_FOUND`, `INVALID_SUBDIR`,
+  `PATH_NOT_FOUND`, `SYNC_FAILED`.
+
+Anonymous, option-free invocations perform the original operations
+(`git clone`, optional `git checkout`, `rm -rf .git`, `aws s3 sync`), with
+`--quiet` and stderr captured for the result document.
+
+### Post-import revision adjustment
+
+`adjust_revision` (per-architecture revision override on a settled import)
+re-fetches a connection-sourced record through its `import_source`
+connection: the connection is resolved again (404 / 409 exactly as on
+import, never a re-verification) and the fetch carries the same
+subdirectory, branch, and clone depth, so the adjusted architecture builds
+the same tree shape as the others. A failed adjustment fetch's per-arch
+`logTail` carries the classified, redacted finding.
 
 ### Result handling
 
-`handle_fetch_result` gains two things:
+The result document lives at `fetch_result_key(dest_prefix)` =
+`plugin-sources/{uc}/{pid}/{v}.fetch/result.json` (multi-revision fetches:
+`{v}.fetch/result-rev-{slug}.json`) — a sibling of the version prefix, so it
+is covered by the fetch role's existing `plugin-sources/*` write grant and the
+importer's existing bucket read, yet never appears in the version's tree
+listing (scoped to `{v}/`). `plugin_records._cleanup_record_objects` deletes
+the `.fetch/` directory with the tree.
 
-1. **Failure classification.** The fetch build's log tail is classified with
-   the shared `classify_failure` and stored redacted, so the Import_View can
-   distinguish `authentication` from `not_found` from `internal` instead of
-   showing a generic clone failure (Requirement 3).
-2. **Git_Link recording.** On success for a connection-sourced import, write
-   `git = {connection_id, branch, path, linked_by, linked_at, last_sync:
-   {kind: 'pull', commit, branch, path, by, at}}`. The commit comes from a
-   `git rev-parse HEAD` the buildspec writes next to the synced tree (same
-   mechanism the sync runner uses for its `result.json`).
+`handle_fetch_result` (and `_handle_multi_fetch_result`) gain two things,
+both only when the record carries `import_source`:
+
+1. **Failure classification** (`fetch_failure_finding`, pure). The runner's
+   marker wins for a missing path / branch / revision (`not_found`);
+   otherwise the shared `classify_failure` runs over the stderr tail
+   (`authentication` / `not_found` / `unreachable` / `internal`). The stored
+   `import_finding` is the category's human text plus a redacted, capped
+   excerpt of the tail; `import_finding_category` carries the category. A
+   build that died before the runner ran (no document) settles as `internal`.
+   An unbuildable tree keeps the existing scan finding, with no category
+   (Requirement 3.4).
+2. **Git_Link recording** (`import_git_link`, pure). On a buildable tree,
+   write `git = {connection_id, branch, path, linked_by, linked_at,
+   last_sync: {kind: 'pull', commit, branch, path, by, at}}` — the branch
+   the runner resolved (else the requested one), the fetched commit as the
+   pull baseline, the importing user as `linked_by`. Multi-revision imports
+   link the DEFAULT revision's tree. **Whole-tree imports (no `path`) are not
+   linked**: a Repository_Path is a subdirectory (the sync runner refuses
+   `.`), so a root-tree link could neither Push nor Pull; `import_source`
+   still records the origin and a hand link stays possible.
 
 ### Data model
 
 `PluginRecords` gains, on connection-sourced imports only:
 
 ```
-import_source: {kind: 'git_connection', connection_id, path, revision}
-git: {...}                      # existing Git_Link shape (Requirement 5)
+import_source: {kind: 'git_connection', connection_id, branch, revision, shallow, path?}
+git: {...}                      # existing Git_Link shape (Requirement 5), subdirectory imports
 import_finding_category?: str   # Failure_Category for a failed fetch (3.1)
 ```
 
-`import_source` is absent on anonymous imports, so Property 1 (preservation)
-can assert byte-equality of the record for that path.
+An anonymous import that asked for `shallow` records `provenance.shallow:
+true` and nothing else; `import_source` is absent on anonymous imports, so
+Property 1 (preservation) can assert byte-equality of the record for that
+path. Both `version_detail` (records API, polled by the Import_View) and
+`import_detail` (import response) expose `import_source` and
+`import_finding_category`.
 
 ### Infrastructure
 
@@ -185,31 +244,55 @@ can assert byte-equality of the record for that path.
   IAM change in this feature.
 - `PluginImporterHandler`'s role gains read on the GitConnections table. It
   must NOT gain `GetSecretValue`; the CDK test asserts that negative.
-- The fetch project's buildspec and `environmentVariables` gain `GIT_TOKEN`
-  (empty default) and `REPO_SUBDIR`.
+- The fetch project's buildspec becomes the inlined runner (`env.shell:
+  bash`, pre-flight guard + script); its `environmentVariables` gain
+  `REPO_BRANCH`, `REPO_SUBDIR`, `SHALLOW`, `RESULT_KEY` (empty defaults) and
+  `GIT_USERNAME` (`x-access-token`). `GIT_TOKEN` is never a project-level
+  variable — it arrives only as a StartBuild override.
 - No new project, table, Lambda, or route.
 
 ### Frontend
 
-`ImportView.tsx` gains a source `RadioGroup` ("Public repository URL" /
-"Git connection"), and when the latter is chosen a `Select` of verified
-connections (reusing `listGitConnections`), a subdirectory `Input` validated
-by the existing `isValidSourcePath`, and the existing revision input. The
-public-URL branch is untouched, which keeps the existing ImportView tests
-meaningful as preservation tests. `pages/node-designer/api.ts`'s
-`importPlugin` body gains the optional `connection_id` and `path`.
+`ImportView.tsx` already chooses its source with a Cloudscape `Tiles`
+control ("Official GStreamer module" / "Repository URL"); it gains a third
+tile, "Git connection", so the source choice stays one control (the default
+tile is unchanged, so the existing flow is untouched for existing users,
+4.1). When the new tile is chosen the view shows a `Select` of verified
+connections (reusing `listGitConnections`, each option showing repository
+URL and default branch), an empty state linking the Git connections page, a
+subdirectory `Input` validated by the existing `isValidSourcePath`, a branch
+`Input` pre-filled with the connection's default branch (client-side mirror
+of the backend branch rule), and the existing revision input. A "Shallow
+clone" checkbox (unchecked by default, sent only when checked) applies to
+every source kind. Failure text follows `import_finding_category`
+(`importFailureGuidance`, shared with the plugin detail page):
+`authentication` names the Git connections page and links it (no automatic
+re-verification), `not_found` explains the repository / branch / revision /
+path may not exist; a 409 `CONNECTION_NOT_VERIFIED` shows the connection's
+status. The pure pieces (`verifiedConnectionOptions`, `isValidBranchName`,
+`connectionSourceParams`, `shallowParam`, `importFailureGuidance`,
+`connectionNotVerifiedText`) live in `importFlow.ts`. The request type
+`ImportPluginRequest` makes `repo_url` optional and gains `connection_id`,
+`path`, `branch`, and `shallow`; `PluginVersionDetail` gains
+`import_source` and `import_finding_category`.
 
 ## Error Handling
 
 | Condition | Code | Status |
 | --- | --- | --- |
-| both or neither source | `INVALID_IMPORT_SOURCE` | 400 |
-| unknown / cross-use-case connection | `NOT_FOUND` | 404 |
+| both or neither source; `path`/`branch` without a connection | `INVALID_IMPORT_SOURCE` | 400 |
+| unknown / cross-use-case connection | `CONNECTION_NOT_FOUND` (same code as the git-sync endpoints; the two cases are indistinguishable) | 404 |
 | connection not verified | `CONNECTION_NOT_VERIFIED` | 409 |
 | bad subdirectory | `INVALID_FILE_PATH` | 400 |
+| bad branch name | `INVALID_BRANCH` | 400 |
+| `revision` starting with `-` (would read as a git option) | `INVALID_REVISION` | 400 |
+| non-boolean `shallow` | `INVALID_SHALLOW` | 400 |
+| fetch could not be started | `REPO_FETCH_FAILED` (unchanged) | 502 |
 | clone rejected the token | import finding, category `authentication` | — |
-| repo/revision/path missing | import finding, category `not_found` | — |
-| no plugin found under path | existing no-plugins finding | — |
+| repo/branch/revision/path missing | import finding, category `not_found` | — |
+| host unreachable | import finding, category `unreachable` | — |
+| build died before the runner ran | import finding, category `internal` | — |
+| no plugin found under path | existing no-plugins finding, no category | — |
 
 ## Testing Strategy
 
@@ -239,18 +322,24 @@ meaningful as preservation tests. `pages/node-designer/api.ts`'s
 
 ### Tests
 
-- **Backend** (pytest + moto + hypothesis): extend `test_plugin_importer.py`
-  with the connection-sourced happy path, the four rejections, and the
-  auto-link assertion; new `test_property_import_source.py` for Properties
-  2-4 and 6; extend the existing redaction property for Property 5. The
-  moto caveat from the sync work applies: `start_build` does not persist
-  `environmentVariablesOverride`, so the test must wrap
+- **Backend** (pytest + moto + hypothesis): new `test_private_repo_import.py`
+  (the connection-sourced happy path, the rejections, failure
+  classification and redaction, the auto-link and its pull baseline,
+  multi-revision connection imports, `.fetch/` cleanup on delete, and the
+  anonymous preservation cases; `test_plugin_importer.py` stays unchanged as
+  the preservation baseline); new `test_property_import_source.py` for
+  Properties 1-6. The moto caveat from the sync work applies: `start_build`
+  does not persist `environmentVariablesOverride`, so the test wraps
   `codebuild.start_build` with a recorder to assert Property 3.
-- **Fetch buildspec** (offline shell, following
-  `plugin-build-images/git-sync/tests/`): a local bare repo with a
-  `pre-receive`-free read path, asserting the askpass clone works, that a
-  missing token fails fast rather than prompting, that `REPO_SUBDIR` scopes
-  the sync, and that the token appears in no file the build leaves behind.
+- **Fetch runner** (offline, `tests/test_plugin_fetch_runner.py`, following
+  `plugin-build-images/git-sync/tests/`): runs `fetch.sh` against local
+  bare repositories with a fake `aws` on PATH, and against a local
+  basic-auth HTTP remote (git's dumb protocol behind `http.server`) so git
+  really prompts: asserting the askpass clone works, that a missing or
+  rejected token fails fast rather than prompting (and classifies as
+  `authentication`), that `REPO_SUBDIR` / `REPO_BRANCH` / `SHALLOW` /
+  `REVISION` behave, that the result document carries the right marker,
+  and that the token appears in no file the build leaves behind.
 - **Infrastructure** (jest): `fetchRole` has `GetSecretValue` on exactly the
   connection secret pattern; `PluginImporterRole` has no `GetSecretValue`;
   the buildspec contains the askpass block and the subdirectory guard;

@@ -814,7 +814,7 @@ exports[`plugin build CodeBuild projects (Requirements 3.1, 3.2) all build proje
       "Cache": {
         "Type": "NO_CACHE",
       },
-      "Description": "Clones a public plugin repository at a revision and syncs the tree to plugin-sources/",
+      "Description": "Clones a plugin repository (anonymously, or through a Git connection token) at a revision and syncs the tree to plugin-sources/",
       "EncryptionKey": "alias/aws/s3",
       "Environment": {
         "ComputeType": "BUILD_GENERAL1_SMALL",
@@ -841,6 +841,31 @@ exports[`plugin build CodeBuild projects (Requirements 3.1, 3.2) all build proje
             "Type": "PLAINTEXT",
             "Value": "",
           },
+          {
+            "Name": "REPO_BRANCH",
+            "Type": "PLAINTEXT",
+            "Value": "",
+          },
+          {
+            "Name": "REPO_SUBDIR",
+            "Type": "PLAINTEXT",
+            "Value": "",
+          },
+          {
+            "Name": "SHALLOW",
+            "Type": "PLAINTEXT",
+            "Value": "",
+          },
+          {
+            "Name": "RESULT_KEY",
+            "Type": "PLAINTEXT",
+            "Value": "",
+          },
+          {
+            "Name": "GIT_USERNAME",
+            "Type": "PLAINTEXT",
+            "Value": "x-access-token",
+          },
         ],
         "Image": "aws/codebuild/standard:7.0",
         "ImagePullCredentialsType": "CODEBUILD",
@@ -857,14 +882,14 @@ exports[`plugin build CodeBuild projects (Requirements 3.1, 3.2) all build proje
       "Source": {
         "BuildSpec": "{
   "version": "0.2",
+  "env": {
+    "shell": "bash"
+  },
   "phases": {
     "build": {
       "commands": [
         "test -n \\"$REPO_URL\\" && test -n \\"$DEST_PREFIX\\"",
-        "git clone \\"$REPO_URL\\" /tmp/repo",
-        "if [ -n \\"$REVISION\\" ]; then git -C /tmp/repo checkout \\"$REVISION\\"; fi",
-        "rm -rf /tmp/repo/.git",
-        "aws s3 sync /tmp/repo/ \\"s3://$ARTIFACTS_BUCKET/$DEST_PREFIX/\\""
+        "#!/usr/bin/env bash\\n# dda-plugin-fetch: clone a plugin repository and sync its tree to S3.\\n#\\n# Runs inside the dda-plugin-fetch CodeBuild project (node-designer-stack.ts\\n# inlines this file into the project's buildspec at synth time, so the\\n# project stays NO_SOURCE and needs no extra read grant). Invoked by\\n# plugin_importer.start_fetch through StartBuild environment overrides:\\n#\\n#   REPO_URL      clone target (required)\\n#   DEST_PREFIX   s3 prefix that receives the tree, no trailing slash (required)\\n#   REVISION      optional tag / commit / branch to check out after cloning\\n#   REPO_BRANCH   optional branch to clone (Git_Connection imports;\\n#                 private-repo-plugin-import 1.6)\\n#   REPO_SUBDIR   optional repository subdirectory to sync instead of the\\n#                 whole tree (1.5)\\n#   SHALLOW       non-empty = depth-1 clone (1.8)\\n#   GIT_TOKEN     SECRETS_MANAGER-resolved credential (Authenticated_Fetch,\\n#                 2.1); absent = anonymous public clone, exactly as before\\n#   GIT_USERNAME  basic-auth username git sends with the token\\n#   RESULT_KEY    optional s3 key for result.json (written on every exit\\n#                 once set; the Lambda classifies failures from it, 3.1)\\n#\\n# Credential handling (2.2): the token reaches git only through GIT_ASKPASS\\n# - a helper that echoes the environment variable when git prompts - so it\\n# is never on a command line, in a remote URL, or in a file that outlives\\n# the build. GIT_TERMINAL_PROMPT=0 (set for every fetch) turns a rejected\\n# or missing credential into an immediate failure instead of a hung build.\\n#\\n# Anonymous, option-free invocations perform the same operations as the\\n# original five-line buildspec: \`git clone \\"$REPO_URL\\" /tmp/repo\`, optional\\n# \`git checkout \\"$REVISION\\"\`, \`rm -rf .git\`, \`aws s3 sync\`.\\nset -uo pipefail\\n\\n: \\"\${ARTIFACTS_BUCKET:?ARTIFACTS_BUCKET is required}\\"\\n: \\"\${REPO_URL:?REPO_URL is required}\\"\\n: \\"\${DEST_PREFIX:?DEST_PREFIX is required}\\"\\nREVISION=\\"\${REVISION:-}\\"\\nREPO_BRANCH=\\"\${REPO_BRANCH:-}\\"\\nREPO_SUBDIR=\\"\${REPO_SUBDIR:-}\\"\\nSHALLOW=\\"\${SHALLOW:-}\\"\\nRESULT_KEY=\\"\${RESULT_KEY:-}\\"\\nGIT_USERNAME=\\"\${GIT_USERNAME:-x-access-token}\\"\\n\\nWORK_DIR=\\"\${FETCH_WORK_DIR:-/tmp/dda-fetch}\\"\\nREPO_DIR=\\"\${FETCH_REPO_DIR:-/tmp/repo}\\"\\nrm -rf \\"$WORK_DIR\\" \\"$REPO_DIR\\"\\nmkdir -p \\"$WORK_DIR\\"\\nERR_LOG=\\"$WORK_DIR/stderr.log\\"\\n: > \\"$ERR_LOG\\"\\n\\nSTATUS=failed\\nCOMMIT=\\"\\"\\nBRANCH_RESOLVED=\\"\\"\\nMARKER=\\"\\"\\n\\n# ------------------------------------------------------------------ result\\nwrite_result() {\\n  # Always attempt when a RESULT_KEY was given; failures here never mask\\n  # the fetch outcome (the CodeBuild build status still carries it).\\n  [ -n \\"$RESULT_KEY\\" ] || return 0\\n  tail -c 8192 \\"$ERR_LOG\\" > \\"$WORK_DIR/tail.txt\\" 2>/dev/null || : > \\"$WORK_DIR/tail.txt\\"\\n  python3 - \\"$STATUS\\" \\"$COMMIT\\" \\"$BRANCH_RESOLVED\\" \\"$MARKER\\" \\"$WORK_DIR/tail.txt\\" \\\\\\n      > \\"$WORK_DIR/result.json\\" <<'PY'\\nimport json, sys\\nstatus, commit, branch, marker, tail_file = sys.argv[1:6]\\nwith open(tail_file, errors=\\"replace\\") as fh:\\n    tail = fh.read()\\njson.dump({\\n    \\"status\\": status,\\n    \\"commit\\": commit or None,\\n    \\"branch\\": branch or None,\\n    \\"failure_marker\\": marker or None,\\n    \\"stderr_tail\\": tail,\\n}, sys.stdout)\\nPY\\n  if [ -n \\"\${RESULT_FILE:-}\\" ]; then\\n    cp \\"$WORK_DIR/result.json\\" \\"$RESULT_FILE\\"\\n  fi\\n  aws s3 cp \\"$WORK_DIR/result.json\\" \\"s3://$ARTIFACTS_BUCKET/$RESULT_KEY\\" \\\\\\n      --only-show-errors >/dev/null 2>>\\"$ERR_LOG\\" \\\\\\n    || echo \\"dda-plugin-fetch: WARN result upload failed\\" >&2\\n}\\n\\nfail() {\\n  MARKER=\\"$1\\"\\n  echo \\"$1: $2\\" >> \\"$ERR_LOG\\"\\n  cat \\"$ERR_LOG\\" >&2\\n  echo \\"dda-plugin-fetch: FAILED ($1): $2\\" >&2\\n  write_result\\n  exit 1\\n}\\n\\n# ------------------------------------------------------------- credentials\\n# Never wait on a terminal prompt (CodeBuild has none): a repository that\\n# demands credentials we do not hold fails immediately, whichever kind of\\n# fetch this is.\\nexport GIT_TERMINAL_PROMPT=0\\n\\nif [ -n \\"\${GIT_TOKEN:-}\\" ]; then\\n  # Isolated HOME so nothing leaks into (or reads from) the build image's\\n  # git configuration; an empty credential.helper resets any helper the\\n  # image might configure, so the askpass helper is git's ONLY credential\\n  # source - it answers both the username and the password prompt from\\n  # the environment, and the token is never written anywhere.\\n  export HOME=\\"$WORK_DIR/home\\"\\n  mkdir -p \\"$HOME\\"\\n  printf '[credential]\\\\n\\\\thelper =\\\\n' > \\"$HOME/.gitconfig\\"\\n  ASKPASS=\\"$WORK_DIR/askpass.sh\\"\\n  printf '%s\\\\n' '#!/bin/sh' \\\\\\n    'case \\"$1\\" in' \\\\\\n    '  *sername*) printf \\"%s\\\\n\\" \\"$GIT_USERNAME\\" ;;' \\\\\\n    '  *) printf \\"%s\\\\n\\" \\"$GIT_TOKEN\\" ;;' \\\\\\n    'esac' > \\"$ASKPASS\\"\\n  chmod 700 \\"$ASKPASS\\"\\n  export GIT_ASKPASS=\\"$ASKPASS\\"\\n  echo \\"dda-plugin-fetch: authenticated fetch (token via askpass)\\"\\nfi\\n\\n# -------------------------------------------------------------------- clone\\nCLONE_ARGS=()\\nif [ -n \\"$SHALLOW\\" ]; then\\n  CLONE_ARGS+=(--depth 1)\\nfi\\nif [ -n \\"$REPO_BRANCH\\" ]; then\\n  CLONE_ARGS+=(--branch \\"$REPO_BRANCH\\")\\nfi\\necho \\"dda-plugin-fetch: cloning\${REPO_BRANCH:+ branch $REPO_BRANCH}\${SHALLOW:+ (shallow)}\\"\\nif ! git clone --quiet \\"\${CLONE_ARGS[@]}\\" \\"$REPO_URL\\" \\"$REPO_DIR\\" 2>>\\"$ERR_LOG\\"; then\\n  if [ -n \\"$REPO_BRANCH\\" ] && grep -qi \\"remote branch .* not found\\\\|could not find remote branch\\" \\"$ERR_LOG\\"; then\\n    fail BRANCH_NOT_FOUND \\"branch '$REPO_BRANCH' not found in the repository\\"\\n  fi\\n  fail CLONE_FAILED \\"git clone failed\\"\\nfi\\n\\n# ----------------------------------------------------------------- revision\\nif [ -n \\"$REVISION\\" ]; then\\n  if [ -n \\"$SHALLOW\\" ]; then\\n    # Depth-1 fetch of the named revision (tags and branches always; bare\\n    # SHAs when the host allows reachable-SHA fetches), else deepen fully.\\n    if git -C \\"$REPO_DIR\\" fetch --quiet --depth 1 origin -- \\"$REVISION\\" 2>>\\"$ERR_LOG\\"; then\\n      git -C \\"$REPO_DIR\\" checkout --quiet FETCH_HEAD 2>>\\"$ERR_LOG\\" \\\\\\n        || fail REVISION_NOT_FOUND \\"revision '$REVISION' could not be checked out\\"\\n    else\\n      git -C \\"$REPO_DIR\\" fetch --quiet --unshallow origin 2>>\\"$ERR_LOG\\" || :\\n      git -C \\"$REPO_DIR\\" fetch --quiet --tags origin 2>>\\"$ERR_LOG\\" || :\\n      git -C \\"$REPO_DIR\\" checkout --quiet \\"$REVISION\\" 2>>\\"$ERR_LOG\\" \\\\\\n        || fail REVISION_NOT_FOUND \\"revision '$REVISION' not found\\"\\n    fi\\n  else\\n    git -C \\"$REPO_DIR\\" checkout --quiet \\"$REVISION\\" 2>>\\"$ERR_LOG\\" \\\\\\n      || fail REVISION_NOT_FOUND \\"revision '$REVISION' not found\\"\\n  fi\\nfi\\n\\nCOMMIT=\\"$(git -C \\"$REPO_DIR\\" rev-parse HEAD 2>>\\"$ERR_LOG\\" || true)\\"\\nBRANCH_RESOLVED=\\"$(git -C \\"$REPO_DIR\\" rev-parse --abbrev-ref HEAD 2>>\\"$ERR_LOG\\" || true)\\"\\nif [ \\"$BRANCH_RESOLVED\\" = \\"HEAD\\" ]; then\\n  BRANCH_RESOLVED=\\"$REPO_BRANCH\\"\\nfi\\n\\n# ------------------------------------------------------------- subdirectory\\nSRC_DIR=\\"$REPO_DIR\\"\\nif [ -n \\"$REPO_SUBDIR\\" ]; then\\n  # Same rule as the Lambda's normalize_source_path: relative, not '.',\\n  # and no '..' SEGMENT (a directory literally named 'a..b' is fine).\\n  case \\"/\${REPO_SUBDIR%/}/\\" in\\n    //*|*/../*|/./) fail INVALID_SUBDIR \\"subdirectory '$REPO_SUBDIR' is not a relative path\\" ;;\\n  esac\\n  SRC_DIR=\\"$REPO_DIR/\${REPO_SUBDIR%/}\\"\\n  if [ ! -d \\"$SRC_DIR\\" ]; then\\n    fail PATH_NOT_FOUND \\"subdirectory '$REPO_SUBDIR' not found in the repository\\"\\n  fi\\nfi\\n\\n# --------------------------------------------------------------------- sync\\nrm -rf \\"$REPO_DIR/.git\\"\\nif ! aws s3 sync \\"$SRC_DIR/\\" \\"s3://$ARTIFACTS_BUCKET/$DEST_PREFIX/\\" 2>>\\"$ERR_LOG\\"; then\\n  fail SYNC_FAILED \\"aws s3 sync to $DEST_PREFIX failed\\"\\nfi\\n\\nSTATUS=succeeded\\necho \\"dda-plugin-fetch: synced \${REPO_SUBDIR:-/} at \${COMMIT:0:12} to s3://$ARTIFACTS_BUCKET/$DEST_PREFIX/\\"\\nif [ -s \\"$ERR_LOG\\" ]; then\\n  cat \\"$ERR_LOG\\" >&2\\nfi\\nwrite_result\\nexit 0\\n"
       ]
     }
   }

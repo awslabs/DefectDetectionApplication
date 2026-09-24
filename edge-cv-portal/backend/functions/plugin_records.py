@@ -550,6 +550,15 @@ def version_detail(item: Dict) -> Dict:
         detail['import_status'] = item['import_status']
     if item.get('import_finding'):
         detail['import_finding'] = item['import_finding']
+    if item.get('import_finding_category'):
+        # Failure_Category of a failed Authenticated_Fetch (private-repo-
+        # plugin-import 3.1): authentication / not_found / unreachable /
+        # internal, so the Import_View can say what to fix.
+        detail['import_finding_category'] = item['import_finding_category']
+    if item.get('import_source'):
+        # Import_Source of a Git_Connection import (1.7): connection id,
+        # branch, path, revision, shallow - never credential material.
+        detail['import_source'] = item['import_source']
     if item.get('plugins_found') is not None:
         detail['plugins_found'] = item['plugins_found']
     if item.get('selected_plugins') is not None:
@@ -901,10 +910,12 @@ def _cleanup_record_objects(versions: List[Dict]) -> None:
     """
     Best-effort S3 cleanup of a deleted Plugin_Record: the source
     snapshots under every version's plugin-sources prefix
-    (source_s3_prefix plus any multi-revision fetches[*].source_prefix)
-    and the promoted Plugin_Library artifacts (artifacts[*].s3Key and
-    the detached .sig alongside). A cleanup failure never fails the
-    delete — it only logs a warning (the record itself is gone).
+    (source_s3_prefix plus any multi-revision fetches[*].source_prefix),
+    the `{version}.fetch/` result documents an Authenticated_Fetch
+    (import through a Git_Connection) leaves beside the tree, and the
+    promoted Plugin_Library artifacts (artifacts[*].s3Key and the
+    detached .sig alongside). A cleanup failure never fails the delete
+    — it only logs a warning (the record itself is gone).
     """
     prefixes = set()
     keys = set()
@@ -914,6 +925,10 @@ def _cleanup_record_objects(versions: List[Dict]) -> None:
         for fetch in (item.get('fetches') or {}).values():
             if (fetch or {}).get('source_prefix'):
                 prefixes.add(fetch['source_prefix'])
+        if item.get('import_source') and item.get('usecase_id'):
+            prefixes.add(source_s3_prefix(
+                item['usecase_id'], item['plugin_id'],
+                int(item['version'])).rstrip('/') + '.fetch/')
         for entry in (item.get('artifacts') or {}).values():
             so_key = (entry or {}).get('s3Key')
             if so_key:

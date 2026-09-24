@@ -171,9 +171,13 @@ without setting the link up by hand.
 
 #### Acceptance Criteria
 
-1. WHEN an Import from a Git_Connection succeeds, THE Portal SHALL record a
-   Git_Link on the imported Plugin_Version carrying that connection, the
-   resolved branch, and the Import's subdirectory as the Repository_Path.
+1. WHEN an Import from a Git_Connection with a `path` succeeds, THE Portal
+   SHALL record a Git_Link on the imported Plugin_Version carrying that
+   connection, the resolved branch, and the Import's subdirectory as the
+   Repository_Path. A whole-repository Import (no `path`) records its
+   origin in the Plugin_Record's Import_Source but no Git_Link, because a
+   Repository_Path must be a subdirectory (the sync runner refuses the
+   repository root); the user can still link it by hand.
 2. THE Portal SHALL record the Import's resolved commit as the Git_Link's
    last sync of kind `pull`, so the Divergence_Guard has a baseline.
 3. THE Portal SHALL leave every existing Git_Link behavior unchanged: the

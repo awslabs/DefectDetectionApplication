@@ -16,6 +16,7 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import { Construct } from 'constructs';
+import * as fs from 'fs';
 import * as path from 'path';
 import { NodeDesignerApiStack } from './node-designer-api-stack';
 import { portalRegistryEnforced } from './context-helpers';
@@ -521,6 +522,8 @@ export class NodeDesignerStack extends cdk.Stack {
     // tree (without .git) to the DEST_PREFIX under plugin-sources/. The role
     // can only write the plugin-sources prefix.
     // ------------------------------------------------------------------
+    const gitSecretArnPattern =
+      `arn:aws:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:${GIT_SECRET_PREFIX}/*`;
     const fetchRole = new iam.Role(this, 'PluginFetchRole', {
       assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
       description: 'Plugin repository fetch role (plugin-sources write only)',
@@ -538,11 +541,28 @@ export class NodeDesignerStack extends cdk.Stack {
         StringLike: { 's3:prefix': [`${PLUGIN_SOURCES_PREFIX}/*`] },
       },
     }));
-
+    // private-repo-plugin-import Requirement 2.3: an Authenticated_Fetch
+    // resolves the Git_Connection token itself from a SECRETS_MANAGER-typed
+    // environment variable, exactly like the git-sync runner. This is the
+    // only secret the fetch role can read; the Lambda that starts the fetch
+    // never can (asserted in node-designer-private-import.test.ts).
+    fetchRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [gitSecretArnPattern],
+    }));
+    // The runner script is inlined into the buildspec at synth time, so the
+    // project stays NO_SOURCE and needs no S3 read grant for its own code,
+    // while the script itself remains a file with offline shell tests
+    // (backend/tests/test_plugin_fetch_runner.py).
+    const fetchRunnerScript = fs.readFileSync(
+      path.join(__dirname, '../../plugin-build-images/plugin-fetch/fetch.sh'),
+      'utf8',
+    );
     this.fetchProject = new codebuild.Project(this, 'PluginFetchProject', {
       projectName: 'dda-plugin-fetch',
       description:
-        'Clones a public plugin repository at a revision and syncs the tree to plugin-sources/',
+        'Clones a plugin repository (anonymously, or through a Git connection token) at a revision and syncs the tree to plugin-sources/',
       role: fetchRole,
       environment: {
         buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
@@ -550,28 +570,35 @@ export class NodeDesignerStack extends cdk.Stack {
       },
       environmentVariables: {
         ARTIFACTS_BUCKET: { value: bucket.bucketName },
-        // REPO_URL / REVISION / DEST_PREFIX arrive as StartBuild overrides.
+        // REPO_URL / REVISION / DEST_PREFIX arrive as StartBuild overrides;
+        // a Git_Connection import adds GIT_TOKEN (SECRETS_MANAGER),
+        // GIT_USERNAME, REPO_BRANCH, REPO_SUBDIR, RESULT_KEY, and either
+        // kind may add SHALLOW (private-repo-plugin-import 1.5, 1.6, 1.8, 2.1).
         REPO_URL: { value: '' },
         REVISION: { value: '' },
         DEST_PREFIX: { value: '' },
+        REPO_BRANCH: { value: '' },
+        REPO_SUBDIR: { value: '' },
+        SHALLOW: { value: '' },
+        RESULT_KEY: { value: '' },
+        GIT_USERNAME: { value: 'x-access-token' },
       },
       buildSpec: codebuild.BuildSpec.fromObject({
         version: '0.2',
+        env: { shell: 'bash' },
         phases: {
           build: {
             commands: [
               'test -n "$REPO_URL" && test -n "$DEST_PREFIX"',
-              'git clone "$REPO_URL" /tmp/repo',
-              'if [ -n "$REVISION" ]; then git -C /tmp/repo checkout "$REVISION"; fi',
-              'rm -rf /tmp/repo/.git',
-              'aws s3 sync /tmp/repo/ "s3://$ARTIFACTS_BUCKET/$DEST_PREFIX/"',
+              // fetch.sh: askpass credential, branch/shallow clone,
+              // subdirectory scoping, result.json (private-repo-plugin-import).
+              fetchRunnerScript,
             ],
           },
         },
       }),
       timeout: cdk.Duration.minutes(10),
     });
-
     // ------------------------------------------------------------------
     // Git sync runner project (custom-node-source-lifecycle Requirements
     // 2.4, 3, 4, 9.5). The ONLY place in the portal with a git binary and
@@ -620,8 +647,6 @@ export class NodeDesignerStack extends cdk.Stack {
         StringLike: { 's3:prefix': [`${PLUGIN_SOURCES_PREFIX}/*`, `${PLUGIN_GIT_SYNC_PREFIX}/*`] },
       },
     }));
-    const gitSecretArnPattern =
-      `arn:aws:secretsmanager:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:secret:${GIT_SECRET_PREFIX}/*`;
     gitSyncRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['secretsmanager:GetSecretValue'],
@@ -824,6 +849,11 @@ export class NodeDesignerStack extends cdk.Stack {
       // runs inside this Lambda on the select-plugins / adjust-revision paths).
       resources: [this.fetchProject.projectArn, ...buildProjectArns],
     }));
+    // private-repo-plugin-import 1.1 / 2.1: the importer resolves the
+    // Git_Connection (URL, default branch, status, secret ARN) to build the
+    // fetch's StartBuild overrides. Read-only, and deliberately NO
+    // secretsmanager:GetSecretValue - the token is resolved by CodeBuild.
+    this.gitConnectionsTable.grantReadData(this.pluginImporterHandler);
 
     // node_generator.py - Bedrock Converse scaffold-generation sessions
     // (mirrors workflow_generator.py: settings-table Bedrock_Configuration,

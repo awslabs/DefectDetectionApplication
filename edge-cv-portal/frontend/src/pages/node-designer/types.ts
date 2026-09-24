@@ -351,6 +351,19 @@ export interface PluginVersionDetail {
    */
   import_status?: ImportStatus;
   import_finding?: string;
+  /**
+   * Failure_Category of a failed Authenticated_Fetch (private-repo-
+   * plugin-import 3.1): present only when the import went through a
+   * Git_Connection and the fetch failed, so the Import_View can say
+   * whether to fix the token, the path, or the repository.
+   */
+  import_finding_category?: SyncFailureCategory;
+  /**
+   * Import_Source of a Git_Connection import (1.7): which connection,
+   * branch, subdirectory, revision and clone depth - never credential
+   * material. Absent on public-URL imports.
+   */
+  import_source?: ImportSource;
   plugins_found?: EnumeratedPlugin[];
   selected_plugins?: string[];
   /**
@@ -518,10 +531,38 @@ export interface ModulePluginsResponse {
   cached: boolean;
 }
 
-/** Request body of POST /plugins/import (Requirements 4.1, 5.1, 6.2). */
+/**
+ * Import_Source recorded on a Plugin_Record imported through a
+ * Git_Connection (private-repo-plugin-import 1.7). `path` is the
+ * imported subdirectory (absent = whole tree); `revision` is 'default'
+ * when the branch head was imported.
+ */
+export interface ImportSource {
+  kind: 'git_connection';
+  connection_id: string;
+  branch: string;
+  revision: string;
+  shallow: boolean;
+  path?: string;
+}
+
+/**
+ * Request body of POST /plugins/import (Requirements 4.1, 5.1, 6.2).
+ * Exactly one of `repo_url` (anonymous public clone) or `connection_id`
+ * (Authenticated_Fetch through a verified Git_Connection of the use
+ * case; private-repo-plugin-import 1.1, 1.2) must be present.
+ */
 export interface ImportPluginRequest {
   usecase_id: string;
-  repo_url: string;
+  repo_url?: string;
+  /** Git_Connection to fetch through; the connection's stored repository URL is cloned. */
+  connection_id?: string;
+  /** Subdirectory of the repository to import (connection imports only; 1.5). */
+  path?: string;
+  /** Branch to clone (connection imports only; defaults to the connection's default branch; 1.6). */
+  branch?: string;
+  /** Depth-1 clone (either source kind; sent only when true; 1.8). */
+  shallow?: boolean;
   revision?: string;
   architectures: string[];
   name?: string;

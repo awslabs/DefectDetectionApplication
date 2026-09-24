@@ -12,16 +12,22 @@ import {
   archRevisionsParam,
   canAdjustRevision,
   CLASSIFICATION_EXPLANATIONS,
+  BRANCH_ERROR_TEXT,
   classifyPluginSet,
+  connectionNotVerifiedText,
+  connectionSourceParams,
   filterPluginEntries,
+  GIT_CONNECTIONS_ROUTE,
   GSTREAMER_DOCS_URL,
   GSTREAMER_PLUGIN_SETS_DOCS_URL,
   IMPORT_POLL_TIMEOUT_MS,
   importedPluginsLabel,
   importedPluginsSummary,
+  importFailureGuidance,
   importPollDecision,
   incompatiblePlatformWarnings,
   isModuleListingUnavailable,
+  isValidBranchName,
   platformWarningMessage,
   pluginDocsUrl,
   pluginEntryDescription,
@@ -29,10 +35,13 @@ import {
   requiresAcknowledgment,
   restrictArchitectureSelection,
   selectableArchitectures,
+  shallowParam,
   togglePluginSelection,
+  verifiedConnectionOptions,
 } from './importFlow';
 import type {
   EnumeratedPlugin,
+  GitConnection,
   PlatformCompatibilityEntry,
   PluginVersionDetail,
 } from './types';
@@ -975,6 +984,151 @@ describe('adjustRevisionError', () => {
     );
     expect(adjustRevisionError('   ')).toBe(
       'Enter a revision to import for this platform'
+    );
+  });
+});
+
+
+// ------------------------------------------------------------------
+// Git_Connection import helpers (private-repo-plugin-import 4.2, 4.4,
+// 4.6, 3.1-3.3, 3.5).
+// ------------------------------------------------------------------
+
+const connection = (overrides: Partial<GitConnection> = {}): GitConnection => ({
+  connection_id: 'c-1',
+  usecase_id: 'uc-1',
+  name: 'plugins-repo',
+  provider: 'github',
+  repo_url: 'https://github.com/acme/private-plugins.git',
+  default_branch: 'main',
+  status: 'verified',
+  verification: { at: 1 },
+  created_by: 'user-1',
+  created_at: 1,
+  updated_at: 1,
+  ...overrides,
+});
+
+describe('verifiedConnectionOptions', () => {
+  it('offers only verified connections, showing URL and default branch (4.2)', () => {
+    const options = verifiedConnectionOptions([
+      connection(),
+      connection({ connection_id: 'c-2', name: 'pending', status: 'verifying' }),
+      connection({ connection_id: 'c-3', name: 'broken', status: 'failed' }),
+    ]);
+    expect(options).toEqual([
+      {
+        label: 'plugins-repo',
+        value: 'c-1',
+        description: 'https://github.com/acme/private-plugins.git · main',
+      },
+    ]);
+  });
+
+  it('is empty without connections', () => {
+    expect(verifiedConnectionOptions([])).toEqual([]);
+  });
+});
+
+describe('isValidBranchName', () => {
+  it('accepts empty (= the connection default) and ordinary branch names', () => {
+    for (const branch of ['', '  ', 'main', 'release/1.2', 'feature-x_y', 'v1.0']) {
+      expect(isValidBranchName(branch)).toBe(true);
+    }
+  });
+
+  it('rejects whitespace, leading "-", "..", and a trailing "/" like the backend', () => {
+    for (const branch of ['my branch', '-flag', 'a..b', 'release/', 'tab\tname']) {
+      expect(isValidBranchName(branch)).toBe(false);
+    }
+    expect(BRANCH_ERROR_TEXT).toMatch(/branch name/);
+  });
+});
+
+describe('connectionSourceParams / shallowParam', () => {
+  it('sends connection_id and only the given path and branch (1.1, 1.5, 1.6)', () => {
+    expect(connectionSourceParams('c-1', '', '')).toEqual({ connection_id: 'c-1' });
+    expect(connectionSourceParams('c-1', ' plugins/x ', ' release/1 ')).toEqual({
+      connection_id: 'c-1',
+      path: 'plugins/x',
+      branch: 'release/1',
+    });
+  });
+
+  it('sends shallow only when checked (4.6)', () => {
+    expect(shallowParam(false)).toEqual({});
+    expect(shallowParam(true)).toEqual({ shallow: true });
+  });
+});
+
+describe('moduleSelectionIncomplete with the connection source', () => {
+  it('never gates a Git connection import', () => {
+    expect(moduleSelectionIncomplete('connection', ['a', 'b'], [])).toBe(false);
+    expect(moduleSelectionIncomplete('module', ['a', 'b'], [])).toBe(true);
+  });
+});
+
+describe('importPollDecision with a fetch Failure_Category', () => {
+  it('carries the category of a failed connection import (3.1)', () => {
+    expect(
+      importPollDecision(
+        {
+          import_status: 'failed',
+          import_finding: 'The repository rejected the token',
+          import_finding_category: 'authentication',
+        },
+        0
+      )
+    ).toEqual({
+      kind: 'failed',
+      finding: 'The repository rejected the token',
+      category: 'authentication',
+    });
+  });
+
+  it('omits the category for anonymous failures (6.1)', () => {
+    expect(
+      importPollDecision({ import_status: 'failed', import_finding: 'nope' }, 0)
+    ).toEqual({ kind: 'failed', finding: 'nope' });
+  });
+});
+
+describe('importFailureGuidance', () => {
+  it('names the rejected token and the Git connections page for authentication (3.2)', () => {
+    const guidance = importFailureGuidance('authentication');
+    expect(guidance.header).toMatch(/token was rejected/);
+    expect(guidance.guidance).toMatch(/Git connections page/);
+    expect(guidance.guidance).toMatch(/did not start a re-verification/);
+    expect(guidance.linkGitConnections).toBe(true);
+    expect(GIT_CONNECTIONS_ROUTE).toBe('/node-designer/git-connections');
+  });
+
+  it('explains that the repository, revision, or path may not exist for not_found (3.3)', () => {
+    const guidance = importFailureGuidance('not_found');
+    expect(guidance.header).toBe('Import failed: not found');
+    expect(guidance.guidance).toMatch(/repository, branch, revision, or subdirectory does not exist/);
+    expect(guidance.linkGitConnections).toBe(false);
+  });
+
+  it('keeps the plain header without a category (anonymous imports, 6.1)', () => {
+    expect(importFailureGuidance(undefined)).toEqual({
+      header: 'Import failed',
+      guidance: null,
+      linkGitConnections: false,
+    });
+    expect(importFailureGuidance('internal').guidance).toBeNull();
+    expect(importFailureGuidance('unreachable').header).toMatch(/unreachable/);
+  });
+});
+
+describe('connectionNotVerifiedText', () => {
+  it('shows the connection status and where to re-verify (3.5)', () => {
+    expect(connectionNotVerifiedText('plugins-repo', 'failed')).toBe(
+      'The Git connection "plugins-repo" is failed, so it cannot be used for an ' +
+        'import. Re-verify it on the Git connections page, then try again.'
+    );
+    expect(connectionNotVerifiedText(undefined, undefined)).toMatch(
+      /^The Git connection selected is not verified/
     );
   });
 });

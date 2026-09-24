@@ -107,7 +107,7 @@ import posixpath
 import re
 import uuid
 from html.parser import HTMLParser
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
 import boto3
@@ -142,12 +142,24 @@ from plugin_records import (
     forbidden_response,
     get_version_item,
     new_version_item,
+    normalize_source_path,
     not_found_response,
     now_ms,
     parse_body,
     plugin_table,
     source_s3_prefix,
     version_detail,
+)
+# Git_Connection lookup, the token environment override, and the shared
+# failure classifier / redactor (private-repo-plugin-import). These live in
+# the shared layer: this module must not import git_sync.py (no function
+# module imports another - see fetch_build_id_from_arn below).
+from git_connections import (
+    classify_failure,
+    provider_username,
+    redact,
+    resolve_connection,
+    token_env_override,
 )
 
 # Configure logging
@@ -321,7 +333,8 @@ def default_plugin_name(repo_url: str) -> str:
 
 
 def derive_import_name(explicit_name: Optional[str], repo_url: str,
-                       selected_plugins: List[str]) -> str:
+                       selected_plugins: List[str],
+                       subdir: Optional[str] = None) -> str:
     """
     Record name for POST /plugins/import. An explicitly provided name
     always wins. Otherwise the URL-derived base name is used — and when
@@ -331,13 +344,128 @@ def derive_import_name(explicit_name: Optional[str], repo_url: str,
     the whole plugin set. Multi-plugin or absent selections keep the
     base name. Hyphenated names stay sanitize-safe for the S3 artifact
     keys plugin_builds.sanitize_plugin_name derives.
+
+    A Git_Connection import scoped to a repository subdirectory
+    (private-repo-plugin-import 1.5) names the record after that
+    directory's last segment instead of the repository, since a monorepo's
+    name says nothing about the plugin inside it.
     """
     if explicit_name:
         return explicit_name
-    base = default_plugin_name(repo_url)
+    if subdir:
+        base = subdir.rstrip('/').rsplit('/', 1)[-1] or default_plugin_name(repo_url)
+    else:
+        base = default_plugin_name(repo_url)
     if len(selected_plugins) == 1:
         return f'{base}-{selected_plugins[0]}'
     return base
+
+
+# ------------------------------------- Import_Source (private-repo import)
+
+IMPORT_SOURCE_GIT_CONNECTION = 'git_connection'
+
+
+def validate_import_source(repo_url: Any, connection_id: Any
+                           ) -> Optional[Tuple[str, str]]:
+    """
+    Source exclusivity of POST /plugins/import (private-repo-plugin-import
+    1.2, Property 2): exactly one of `repo_url` (anonymous public clone)
+    or `connection_id` (Authenticated_Fetch through a Git_Connection) must
+    be present. Returns None when acceptable, else (message, field) where
+    field names the offending input for the error envelope.
+    """
+    has_url = bool(repo_url)
+    has_connection = bool(connection_id)
+    if has_url and has_connection:
+        return ('Provide either repo_url or connection_id, not both',
+                'connection_id')
+    if not has_url and not has_connection:
+        return ('Provide repo_url (public repository) or connection_id '
+                '(Git connection)', 'repo_url')
+    return None
+
+
+def import_source_record(connection: Dict, subdir: Optional[str],
+                         branch: Optional[str], revision: Optional[str],
+                         shallow: bool) -> Dict:
+    """The Plugin_Record's `import_source` for a Git_Connection import
+    (1.7): identifiers and options only - never the secret ARN, the
+    token, or an authenticated URL."""
+    record: Dict[str, Any] = {
+        'kind': IMPORT_SOURCE_GIT_CONNECTION,
+        'connection_id': connection['connection_id'],
+        'branch': branch or connection.get('default_branch'),
+        'revision': revision or DEFAULT_REVISION,
+        'shallow': bool(shallow),
+    }
+    if subdir:
+        record['path'] = subdir
+    return record
+
+
+def import_source_audit(connection: Optional[Dict], subdir: Optional[str],
+                        branch: Optional[str], shallow: bool) -> Dict:
+    """Audit-log details of the Import_Source (7.3): empty for an
+    anonymous import so its audit entry is unchanged; the connection id,
+    subdirectory, branch, and clone depth otherwise - never the token."""
+    details: Dict[str, Any] = {}
+    if connection:
+        details['connection_id'] = connection['connection_id']
+        details['branch'] = branch or connection.get('default_branch')
+        if subdir:
+            details['path'] = subdir
+    if shallow:
+        details['shallow'] = True
+    return details
+
+
+def connection_rejection(connection: Optional[Dict], reason: str,
+                         connection_id: Any) -> Dict:
+    """
+    The response for a Git_Connection that resolve_connection refused
+    (1.3, 1.4, 7.2): 404 CONNECTION_NOT_FOUND for an unknown or
+    cross-Use_Case id (indistinguishable; the same code git_sync uses),
+    409 CONNECTION_NOT_VERIFIED with the connection's current status
+    otherwise - never a re-verification (design review question 1).
+    """
+    if reason == 'not_found':
+        return error_response(404, 'CONNECTION_NOT_FOUND',
+                              'Git connection not found',
+                              {'connection_id': connection_id})
+    status = (connection or {}).get('status')
+    return error_response(
+        409, 'CONNECTION_NOT_VERIFIED',
+        f"Git connection is '{status}'; only verified connections "
+        'can be used for an import',
+        {'connection_id': connection_id, 'status': status})
+
+
+def validate_revision(revision: Any) -> Optional[str]:
+    """None when `revision` is acceptable as a tag / commit / branch to
+    check out (a string that is empty - meaning the default - or does
+    not start with '-', so it can never read as a git option); else the
+    rejection reason."""
+    if revision is None:
+        return None
+    if not isinstance(revision, str):
+        return 'revision must be a string'
+    if revision.strip().startswith('-'):
+        return 'revision must not start with "-"'
+    return None
+
+
+def validate_branch_name(branch: Any) -> Optional[str]:
+    """None when `branch` is an acceptable git branch name for the fetch
+    (non-empty string, no whitespace, no leading '-', no '..'); else the
+    rejection reason. Absent branches are handled by the caller."""
+    if not isinstance(branch, str) or not branch.strip():
+        return 'branch must be a non-empty string'
+    if any(c.isspace() for c in branch):
+        return 'branch must not contain whitespace'
+    if branch.startswith('-') or '..' in branch or branch.endswith('/'):
+        return 'branch is not a valid git branch name'
+    return None
 
 
 def selection_rename(current_name: Optional[str],
@@ -1102,22 +1230,169 @@ def write_module_plugins_cache(module: str, plugins: List[Dict],
 
 # --------------------------------------------------- fetch orchestration
 
-def start_fetch(repo_url: str, revision: Optional[str], dest_prefix: str,
-                usecase_id: str, plugin_id: str, version: int,
-                revision_slug_id: Optional[str] = None) -> str:
+def fetch_result_key(dest_prefix: str) -> str:
     """
-    StartBuild on the lightweight CodeBuild fetch step (4.1): clone
-    `repo_url` at `revision` (default branch when empty) and sync the
-    tree to s3://{bucket}/{dest_prefix}/. Never polls — the request
-    path answers 202 immediately (API Gateway caps REST integrations at
-    29 s) and the EventBridge-delivered build state change reaches
-    `handle_fetch_result`, attributed back to the Plugin_Record by the
-    PLUGIN_ID / PLUGIN_VERSION / USECASE_ID env overrides. Fetches of a
-    multi-revision import (arch_revisions) additionally carry the
-    REVISION_SLUG override so the result handler can update the right
-    entry of the record's `fetches` map.
+    S3 key of the Authenticated_Fetch's result document (private-repo-
+    plugin-import 3.1, 5.2): a sibling of the version's source prefix -
+    `plugin-sources/{uc}/{pid}/{v}.fetch/result.json` - so it is covered by
+    the fetch role's existing plugin-sources/* write grant yet never
+    appears in the version's tree listing (which is scoped to `{v}/`).
+    Multi-revision fetches (dest `.../{v}/rev-{slug}`) resolve to the same
+    version-level `.fetch/` directory with the slug in the file name.
+    """
+    base = dest_prefix.rstrip('/')
+    marker = '/rev-'
+    if marker in base:
+        version_prefix, slug = base.rsplit(marker, 1)
+        return f'{version_prefix}.fetch/result-rev-{slug}.json'
+    return f'{base}.fetch/result.json'
 
-    Returns the CodeBuild build id.
+
+def read_fetch_result(dest_prefix: str) -> Optional[Dict]:
+    """
+    The result document an Authenticated_Fetch wrote at
+    fetch_result_key(dest_prefix): {status, commit, branch,
+    failure_marker, stderr_tail}. None when the build never got to write
+    it (image pull failure, timeout before the runner ran, upload
+    failure) or the object is unreadable - callers then fall back to an
+    unclassified finding rather than failing the result handler.
+    """
+    key = fetch_result_key(dest_prefix)
+    try:
+        obj = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=key)
+        result = json.loads(obj['Body'].read().decode('utf-8', 'replace'))
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') not in ('NoSuchKey', '404'):
+            logger.warning(f"Could not read fetch result {key}: {e}")
+        return None
+    except ValueError as e:
+        logger.warning(f"Fetch result {key} is not valid JSON: {e}")
+        return None
+    return result if isinstance(result, dict) else None
+
+
+#: Fetch runner failure markers (plugin-fetch/fetch.sh `fail`) that name
+#: a missing repository path, branch, or revision: category not_found
+#: whatever git printed (3.1, 3.3).
+FETCH_NOT_FOUND_MARKERS = {
+    'PATH_NOT_FOUND': 'the subdirectory {path!r} does not exist in the '
+                      'repository at the fetched revision',
+    'BRANCH_NOT_FOUND': 'the branch {branch!r} does not exist in the '
+                        'repository',
+    'REVISION_NOT_FOUND': 'the revision {revision!r} does not exist in the '
+                          'repository',
+}
+
+#: Human text per Failure_Category for a failed Authenticated_Fetch
+#: (3.2, 3.3): the Import_View shows it as the import finding.
+FETCH_FAILURE_TEXT = {
+    'authentication': (
+        'The repository rejected the Git connection\'s token. Re-verify '
+        'the connection on the Git connections page, then import again'),
+    'not_found': (
+        'The repository, branch, revision, or subdirectory could not be '
+        'found'),
+    'unreachable': 'The repository host could not be reached',
+    'internal': 'The repository could not be fetched',
+}
+
+#: Maximum characters of the (redacted) fetch stderr tail kept in an
+#: import finding.
+FETCH_FINDING_EXCERPT_CHARS = 600
+
+
+def fetch_failure_finding(result: Optional[Dict], import_source: Dict,
+                          revision: Optional[str] = None
+                          ) -> Tuple[str, str]:
+    """
+    (import_finding, import_finding_category) of a failed
+    Authenticated_Fetch (3.1, 3.3), pure over the runner's result
+    document. The category is not_found when the runner's failure marker
+    names a missing path / branch / revision, else the shared
+    classify_failure over the stderr tail - the sync path's classifier.
+    The finding is the category's text plus a redacted excerpt of the
+    tail, so no token-like substring survives (2.4, Property 5). Without
+    a result document (the build died before the runner ran) the finding
+    is the generic fetch failure, category 'internal'.
+    """
+    result = result or {}
+    marker = str(result.get('failure_marker') or '')
+    tail = str(result.get('stderr_tail') or '')
+    if marker in FETCH_NOT_FOUND_MARKERS:
+        category = 'not_found'
+        detail = FETCH_NOT_FOUND_MARKERS[marker].format(
+            path=import_source.get('path') or '',
+            branch=import_source.get('branch') or '',
+            revision=revision or import_source.get('revision') or '')
+        text = f'{FETCH_FAILURE_TEXT[category]}: {detail}'
+    else:
+        category = classify_failure(tail) if tail else 'internal'
+        text = FETCH_FAILURE_TEXT.get(category, FETCH_FAILURE_TEXT['internal'])
+    excerpt = ' '.join(redact(tail).split())
+    if len(excerpt) > FETCH_FINDING_EXCERPT_CHARS:
+        excerpt = '...' + excerpt[-FETCH_FINDING_EXCERPT_CHARS:]
+    finding = text if not excerpt else f'{text}. Fetch output: {excerpt}'
+    return finding, category
+
+
+def import_git_link(item: Dict, result: Optional[Dict],
+                    timestamp: int) -> Optional[Dict]:
+    """
+    The Git_Link auto-created for a successful connection-sourced import
+    (5.1, 5.2, Property 6): the Import_Source's connection, the resolved
+    branch (the runner's, else the requested one), the subdirectory as
+    the Repository_Path, linked by the importing user, with the fetched
+    commit as a last_sync of kind 'pull' so the Divergence_Guard has a
+    baseline. None for a whole-tree import (no `path`): a Repository_Path
+    is a subdirectory - the sync runner refuses '.' - so a root-tree link
+    could neither Push nor Pull; import_source still records the origin.
+    """
+    source = item.get('import_source') or {}
+    path = source.get('path')
+    if not source.get('connection_id') or not path:
+        return None
+    result = result or {}
+    branch = result.get('branch') or source.get('branch')
+    by = ((item.get('provenance') or {}).get('importedBy')
+          or item.get('created_by') or 'system')
+    link: Dict[str, Any] = {
+        'connection_id': source['connection_id'],
+        'branch': branch,
+        'path': path,
+        'linked_by': by,
+        'linked_at': timestamp,
+    }
+    commit = result.get('commit')
+    if commit:
+        link['last_sync'] = {'kind': 'pull', 'commit': commit,
+                             'branch': branch, 'path': path,
+                             'by': by, 'at': timestamp}
+    return link
+
+
+def fetch_env_overrides(repo_url: str, revision: Optional[str],
+                        dest_prefix: str, usecase_id: str, plugin_id: str,
+                        version: int,
+                        revision_slug_id: Optional[str] = None,
+                        connection: Optional[Dict] = None,
+                        subdir: Optional[str] = None,
+                        branch: Optional[str] = None,
+                        shallow: bool = False) -> List[Dict]:
+    """
+    The StartBuild environmentVariablesOverride of a fetch (pure; Property
+    1 and Property 3 of private-repo-plugin-import). An anonymous,
+    non-shallow fetch yields exactly the six (seven with REVISION_SLUG)
+    PLAINTEXT variables it always has. A Git_Connection fetch adds:
+
+      GIT_TOKEN     SECRETS_MANAGER  {secret_arn}:token  (the only non-plaintext
+                                     variable; CodeBuild resolves it)
+      GIT_USERNAME  PLAINTEXT        provider's basic-auth username
+      REPO_SUBDIR   PLAINTEXT        subdirectory to sync ('' = whole tree)
+      REPO_BRANCH   PLAINTEXT        branch to clone
+      RESULT_KEY    PLAINTEXT        where the build writes result.json
+
+    and either kind adds SHALLOW=1 only when the request asked for it.
+    No PLAINTEXT value ever carries the token.
     """
     env_overrides = [
         {'name': 'REPO_URL', 'value': repo_url, 'type': 'PLAINTEXT'},
@@ -1131,9 +1406,51 @@ def start_fetch(repo_url: str, revision: Optional[str], dest_prefix: str,
         env_overrides.append(
             {'name': 'REVISION_SLUG', 'value': revision_slug_id,
              'type': 'PLAINTEXT'})
+    if connection:
+        env_overrides.extend([
+            token_env_override(connection),
+            {'name': 'GIT_USERNAME',
+             'value': provider_username(connection), 'type': 'PLAINTEXT'},
+            {'name': 'REPO_SUBDIR', 'value': subdir or '', 'type': 'PLAINTEXT'},
+            {'name': 'REPO_BRANCH', 'value': branch or '', 'type': 'PLAINTEXT'},
+            {'name': 'RESULT_KEY', 'value': fetch_result_key(dest_prefix),
+             'type': 'PLAINTEXT'},
+        ])
+    if shallow:
+        env_overrides.append({'name': 'SHALLOW', 'value': '1',
+                              'type': 'PLAINTEXT'})
+    return env_overrides
+
+
+def start_fetch(repo_url: str, revision: Optional[str], dest_prefix: str,
+                usecase_id: str, plugin_id: str, version: int,
+                revision_slug_id: Optional[str] = None,
+                connection: Optional[Dict] = None,
+                subdir: Optional[str] = None,
+                branch: Optional[str] = None,
+                shallow: bool = False) -> str:
+    """
+    StartBuild on the lightweight CodeBuild fetch step (4.1): clone
+    `repo_url` at `revision` (default branch when empty) and sync the
+    tree to s3://{bucket}/{dest_prefix}/. Never polls — the request
+    path answers 202 immediately (API Gateway caps REST integrations at
+    29 s) and the EventBridge-delivered build state change reaches
+    `handle_fetch_result`, attributed back to the Plugin_Record by the
+    PLUGIN_ID / PLUGIN_VERSION / USECASE_ID env overrides. Fetches of a
+    multi-revision import (arch_revisions) additionally carry the
+    REVISION_SLUG override so the result handler can update the right
+    entry of the record's `fetches` map.
+
+    With a Git_Connection the fetch authenticates (Authenticated_Fetch,
+    private-repo-plugin-import 1.1, 2.1): see fetch_env_overrides for the
+    exact variables. Returns the CodeBuild build id.
+    """
     start = codebuild.start_build(
         projectName=FETCH_PROJECT_NAME,
-        environmentVariablesOverride=env_overrides,
+        environmentVariablesOverride=fetch_env_overrides(
+            repo_url, revision, dest_prefix, usecase_id, plugin_id, version,
+            revision_slug_id=revision_slug_id, connection=connection,
+            subdir=subdir, branch=branch, shallow=shallow),
     )
     return start['build']['id']
 
@@ -1486,6 +1803,10 @@ def import_detail(item: Dict) -> Dict:
     detail['import_status'] = item.get('import_status')
     if item.get('import_finding'):
         detail['import_finding'] = item['import_finding']
+    if item.get('import_finding_category'):
+        detail['import_finding_category'] = item['import_finding_category']
+    if item.get('import_source'):
+        detail['import_source'] = item['import_source']
     if item.get('plugins_found') is not None:
         detail['plugins_found'] = item['plugins_found']
     if item.get('selected_plugins') is not None:
@@ -1520,24 +1841,71 @@ def import_repository(event: Dict, user: Dict) -> Dict:
 
     usecase_id = body.get('usecase_id')
     repo_url = body.get('repo_url')
+    connection_id = body.get('connection_id')
     revision = body.get('revision') or None
     architectures = body.get('architectures')
     module_name = body.get('module_name') or None
     deepstream = bool(body.get('deepstream', False))
 
-    missing = [f for f in ('usecase_id', 'repo_url') if not body.get(f)]
-    if missing:
+    if not usecase_id:
         return error_response(400, 'MISSING_FIELDS',
-                              f"Missing required fields: {', '.join(missing)}")
+                              'Missing required fields: usecase_id')
 
-    url_error = validate_repo_url(repo_url)
-    if url_error:
-        return error_response(400, 'INVALID_REPO_URL', url_error,
-                              {'repo_url': repo_url})
+    # Import_Source (private-repo-plugin-import 1.2): exactly one of an
+    # anonymous public URL or a Git_Connection.
+    source_error = validate_import_source(repo_url, connection_id)
+    if source_error:
+        message, field = source_error
+        return error_response(400, 'INVALID_IMPORT_SOURCE', message,
+                              {'field': field})
 
-    if revision is not None and not isinstance(revision, str):
-        return error_response(400, 'INVALID_REVISION',
-                              'revision must be a string')
+    if repo_url:
+        # Anonymous import: the public-URL rule, unchanged (6.3).
+        url_error = validate_repo_url(repo_url)
+        if url_error:
+            return error_response(400, 'INVALID_REPO_URL', url_error,
+                                  {'repo_url': repo_url})
+
+    # Git_Connection import options (1.5, 1.6): a repository subdirectory
+    # confined like a Repository_Path, and a branch to clone.
+    subdir: Optional[str] = None
+    branch: Optional[str] = None
+    if connection_id:
+        if not isinstance(connection_id, str):
+            return error_response(400, 'INVALID_IMPORT_SOURCE',
+                                  'connection_id must be a string',
+                                  {'field': 'connection_id'})
+        raw_path = body.get('path')
+        if raw_path not in (None, ''):
+            subdir = normalize_source_path(raw_path)
+            if subdir is None:
+                return error_response(
+                    400, 'INVALID_FILE_PATH',
+                    'path must be a relative repository directory without '
+                    '".." segments', {'file': raw_path})
+        raw_branch = body.get('branch')
+        if raw_branch not in (None, ''):
+            branch_error = validate_branch_name(raw_branch)
+            if branch_error:
+                return error_response(400, 'INVALID_BRANCH', branch_error,
+                                      {'branch': raw_branch})
+            branch = raw_branch
+    elif any(body.get(f) not in (None, '') for f in ('path', 'branch')):
+        return error_response(
+            400, 'INVALID_IMPORT_SOURCE',
+            'path and branch apply only to a connection_id import',
+            {'field': 'path' if body.get('path') else 'branch'})
+
+    # Clone depth (1.8): opt-in; absent/false keeps today's full clone.
+    shallow_raw = body.get('shallow', False)
+    if not isinstance(shallow_raw, bool):
+        return error_response(400, 'INVALID_SHALLOW',
+                              'shallow must be a boolean')
+    shallow = shallow_raw
+
+    revision_error = validate_revision(revision)
+    if revision_error:
+        return error_response(400, 'INVALID_REVISION', revision_error)
 
     if (not isinstance(architectures, list) or not architectures
             or not all(isinstance(a, str) for a in architectures)):
@@ -1591,13 +1959,35 @@ def import_repository(event: Dict, user: Dict) -> Dict:
     except ValueError:
         return error_response(404, 'USECASE_NOT_FOUND', 'Use case not found')
 
+    # Git_Connection resolution (1.1, 1.3, 1.4, 7.2) - after the RBAC gate
+    # so an unauthorized caller learns nothing about which connections
+    # exist. Cross-Use_Case and unknown ids are indistinguishable (404);
+    # a connection that is not `verified` is rejected up front rather than
+    # failing minutes later inside CodeBuild.
+    connection: Optional[Dict] = None
+    if connection_id:
+        connection, reason = resolve_connection(connection_id, usecase_id)
+        if reason:
+            return connection_rejection(connection, reason, connection_id)
+        # The clone target is the connection's stored HTTPS URL (validated
+        # at creation to carry no embedded credentials); the token travels
+        # to CodeBuild separately as a SECRETS_MANAGER variable (2.1).
+        repo_url = connection['repo_url']
+        if not branch:
+            branch = connection.get('default_branch') or None
+
     # Record name: explicit `name` wins; otherwise the URL-derived base
-    # name, with a single-plugin import-time selection appended
-    # ("gst-plugins-good-rtsp") so the record shows what was imported.
-    name = derive_import_name(body.get('name'), repo_url, selected_plugins)
+    # name (or the imported subdirectory's name), with a single-plugin
+    # import-time selection appended ("gst-plugins-good-rtsp") so the
+    # record shows what was imported.
+    name = derive_import_name(body.get('name'), repo_url, selected_plugins,
+                              subdir=subdir)
     plugin_id = str(uuid.uuid4())
     version = 1
     prefix = source_s3_prefix(usecase_id, plugin_id, version)
+    fetch_options = {'connection': connection, 'subdir': subdir,
+                     'branch': branch if connection else None,
+                     'shallow': shallow}
 
     # Effective per-arch revision plan: a single distinct revision keeps
     # today's one-fetch flat layout (mode 'single' also collapses
@@ -1616,7 +2006,8 @@ def import_repository(event: Dict, user: Dict) -> Dict:
             revision = plan['revision']
             fetch_build_id = start_fetch(
                 repo_url, revision, prefix.rstrip('/'),
-                usecase_id=usecase_id, plugin_id=plugin_id, version=version)
+                usecase_id=usecase_id, plugin_id=plugin_id, version=version,
+                **fetch_options)
         else:
             fetches = plan['fetches']
             for slug in sorted(fetches):
@@ -1627,7 +2018,8 @@ def import_repository(event: Dict, user: Dict) -> Dict:
                      else entry['revision']),
                     entry['source_prefix'].rstrip('/'),
                     usecase_id=usecase_id, plugin_id=plugin_id,
-                    version=version, revision_slug_id=slug)
+                    version=version, revision_slug_id=slug,
+                    **fetch_options)
     except Exception as exc:
         logger.error(f'Fetch StartBuild failed: {exc}', exc_info=True)
         log_audit_event(
@@ -1638,7 +2030,9 @@ def import_repository(event: Dict, user: Dict) -> Dict:
             result='failure',
             details={'usecase_id': usecase_id, 'repo_url': repo_url,
                      'revision': revision or DEFAULT_REVISION,
-                     'reason': 'REPO_FETCH_FAILED'}
+                     'reason': 'REPO_FETCH_FAILED',
+                     **import_source_audit(connection, subdir, branch,
+                                           shallow)}
         )
         return error_response(
             502, 'REPO_FETCH_FAILED',
@@ -1658,6 +2052,14 @@ def import_repository(event: Dict, user: Dict) -> Dict:
     )
     item['requested_architectures'] = architectures
     item['import_status'] = IMPORT_STATUS_FETCHING
+    if connection:
+        # Import_Source (1.7): which connection, where in the repository,
+        # which branch - never the token or the secret's value. The
+        # Git_Link itself is recorded once the fetch succeeds (5.1).
+        item['import_source'] = import_source_record(
+            connection, subdir, branch, revision, shallow)
+    elif shallow:
+        item['provenance']['shallow'] = True
     if plan['mode'] == 'single':
         item['fetch_build_id'] = fetch_build_id
     else:
@@ -1695,6 +2097,7 @@ def import_repository(event: Dict, user: Dict) -> Dict:
                  'classification': provenance['classification'],
                  'architectures': architectures,
                  'import_status': IMPORT_STATUS_FETCHING,
+                 **import_source_audit(connection, subdir, branch, shallow),
                  **({'fetch_build_id': fetch_build_id}
                     if plan['mode'] == 'single' else
                     {'arch_revisions': plan['arch_revisions'],
@@ -1800,6 +2203,14 @@ def handle_fetch_result(detail: Dict) -> Dict:
     SETTLED record: their results — a `fetches` entry named by
     REVISION_SLUG carrying the pending_archs marker — route to
     _handle_adjustment_fetch_result before the import paths above.
+
+    Connection-sourced imports (import_source present; private-repo-
+    plugin-import) additionally read the runner's result document
+    (read_fetch_result): a failure is classified and redacted into
+    import_finding / import_finding_category (3.1, 2.4), and a buildable
+    tree gains the auto-created Git_Link with the fetched commit as its
+    pull baseline (import_git_link, 5.1, 5.2). Anonymous imports never
+    read it, so their record fields are unchanged (6.1).
     """
     build_id = fetch_build_id_from_arn(detail.get('build-id') or '')
     build_status = detail.get('build-status')
@@ -1851,6 +2262,15 @@ def handle_fetch_result(detail: Dict) -> Dict:
     pending_selection = [str(n) for n
                          in item.get('pending_selected_plugins') or []]
 
+    # Connection-sourced import (private-repo-plugin-import): the runner
+    # left a result document next to the tree - the commit for the
+    # Git_Link on success, the failure marker and stderr tail for the
+    # finding otherwise. Anonymous imports never touch it (6.1).
+    import_source = item.get('import_source') or {}
+    fetch_result = (read_fetch_result(item.get('source_s3_prefix') or '')
+                    if import_source else None)
+    source_details: Dict[str, Any] = {}
+
     if build_status == 'SUCCEEDED':
         files = list_source_tree(item.get('source_s3_prefix') or '')
         record_provenance = item.get('provenance') or {}
@@ -1864,6 +2284,29 @@ def handle_fetch_result(detail: Dict) -> Dict:
             classification_or_module=(record_provenance.get('moduleName')
                                       or record_provenance.get('classification')))
         buildable = scan['buildable']
+        if import_source and buildable:
+            # Auto-created Git_Link with the fetched commit as its pull
+            # baseline (5.1, 5.2); an unbuildable tree keeps the existing
+            # failed-import finding, distinct from a clone failure (3.4).
+            link = import_git_link(item, fetch_result, now_ms())
+            if link:
+                updates['git'] = link
+                source_details['git_link'] = {
+                    'connection_id': link['connection_id'],
+                    'branch': link['branch'], 'path': link['path']}
+    elif import_source:
+        # Classified, redacted finding for the Authenticated_Fetch (3.1,
+        # 2.4): authentication / not_found / unreachable / internal.
+        finding, category = fetch_failure_finding(fetch_result,
+                                                  import_source)
+        updates = {
+            'import_status': IMPORT_STATUS_FAILED,
+            'import_finding': finding,
+            'import_finding_category': category,
+            'import_error_code': 'REPO_FETCH_FAILED',
+        }
+        source_details['finding_category'] = category
+        buildable = False
     else:
         # Unreachable repository or missing revision (4.4).
         updates = {
@@ -1893,7 +2336,8 @@ def handle_fetch_result(detail: Dict) -> Dict:
                  'fetch_status': build_status,
                  'import_status': updates['import_status'],
                  **({'reason': 'REPO_FETCH_FAILED'}
-                    if build_status != 'SUCCEEDED' else {})}
+                    if build_status != 'SUCCEEDED' else {}),
+                 **source_details}
     )
     logger.info(f"Recorded fetch {build_id} for {plugin_id} v{version}: "
                 f"{updates['import_status']}")
@@ -1983,6 +2427,12 @@ def _handle_multi_fetch_result(item: Dict, build_id: str,
                          in refreshed.get('pending_selected_plugins') or []]
     record_provenance = refreshed.get('provenance') or {}
 
+    # Connection-sourced import: per-fetch result documents (one per
+    # slug) carry the classification of a failure and the default tree's
+    # commit for the Git_Link. Anonymous imports never read them (6.1).
+    import_source = refreshed.get('import_source') or {}
+    source_details: Dict[str, Any] = {}
+
     if failed_slugs:
         failed_revisions = [str((fetches[s] or {}).get('revision') or s)
                             for s in failed_slugs]
@@ -1991,6 +2441,18 @@ def _handle_multi_fetch_result(item: Dict, build_id: str,
             'import_finding': multi_fetch_failure_finding(failed_revisions),
             'import_error_code': 'REPO_FETCH_FAILED',
         }
+        if import_source:
+            # Classify from the first failed revision's result document
+            # (3.1); the finding names every failed revision as before,
+            # then the redacted classification detail (2.4).
+            first = fetches[failed_slugs[0]] or {}
+            finding, category = fetch_failure_finding(
+                read_fetch_result(first.get('source_prefix') or ''),
+                import_source, revision=first.get('revision'))
+            updates['import_finding'] = (
+                f"{updates['import_finding']}. {finding}")
+            updates['import_finding_category'] = category
+            source_details['finding_category'] = category
         buildable = False
     else:
         files = list_source_tree(refreshed.get('source_s3_prefix') or '')
@@ -2001,6 +2463,18 @@ def _handle_multi_fetch_result(item: Dict, build_id: str,
                                       or record_provenance.get(
                                           'classification')))
         buildable = scan['buildable']
+        if import_source and buildable:
+            # Git_Link on the DEFAULT revision's tree - the one the record
+            # exposes and a later Push would write back (5.1, 5.2).
+            link = import_git_link(
+                refreshed,
+                read_fetch_result(refreshed.get('source_s3_prefix') or ''),
+                now_ms())
+            if link:
+                updates['git'] = link
+                source_details['git_link'] = {
+                    'connection_id': link['connection_id'],
+                    'branch': link['branch'], 'path': link['path']}
 
     if not _advance_import_record(plugin_id, version, updates):
         # A concurrent delivery finalized the record between the slug
@@ -2025,7 +2499,8 @@ def _handle_multi_fetch_result(item: Dict, build_id: str,
                  'fetch_statuses': statuses,
                  'import_status': updates['import_status'],
                  **({'reason': 'REPO_FETCH_FAILED'}
-                    if failed_slugs else {})}
+                    if failed_slugs else {}),
+                 **source_details}
     )
     logger.info(f"Recorded fetch {build_id} for {plugin_id} v{version}: "
                 f"{updates['import_status']}")
@@ -2105,10 +2580,20 @@ def _handle_adjustment_fetch_result(item: Dict, build_id: str,
     else:
         # The fetch failure surfaces on the pending archs' entries ONLY
         # — arch_revisions (the prior mapping) and every other
-        # architecture's entry are untouched (2.4, 3.5).
+        # architecture's entry are untouched (2.4, 3.5). A connection-
+        # sourced record's adjustment left a result document like its
+        # import did: classify it so a rejected token is not reported
+        # as a missing revision (private-repo-plugin-import 3.1).
+        log_tail = adjustment_fetch_failure_log_tail(revision)
+        import_source = item.get('import_source') or {}
+        if import_source:
+            finding, _category = fetch_failure_finding(
+                read_fetch_result(entry.get('source_prefix') or ''),
+                import_source, revision=revision)
+            log_tail = f'{log_tail}. {finding}'
         values[':fail'] = {
             'buildStatus': BUILD_FAILED,
-            'logTail': adjustment_fetch_failure_log_tail(revision),
+            'logTail': log_tail,
         }
         for index, arch in enumerate(pending):
             names[f'#a{index}'] = arch
@@ -2322,6 +2807,9 @@ def adjust_revision(event: Dict, user: Dict, plugin_id: str,
         return error_response(400, 'INVALID_REVISION',
                               'revision must be a non-empty string')
     revision = revision.strip()
+    revision_error = validate_revision(revision)
+    if revision_error:
+        return error_response(400, 'INVALID_REVISION', revision_error)
 
     err = authorize_record_access(user, event, item, manage=True,
                                   permission=Permission.NODE_DESIGNER_MANAGE)
@@ -2337,6 +2825,30 @@ def adjust_revision(event: Dict, user: Dict, plugin_id: str,
             'repository imports whose import has settled',
             {'kind': item.get('kind'),
              'import_status': item.get('import_status')})
+
+    # A connection-sourced record (private-repo-plugin-import) re-fetches
+    # through the same Git_Connection with the same subdirectory, branch,
+    # and clone depth as the import, so the adjusted architecture builds
+    # the same tree shape as the others. The connection must still be
+    # verified - the rejection mirrors the import's, and never
+    # re-verifies.
+    import_source = item.get('import_source') or {}
+    fetch_options: Dict[str, Any] = {}
+    if import_source:
+        connection, reason = resolve_connection(
+            import_source.get('connection_id'), item['usecase_id'])
+        if reason:
+            return connection_rejection(connection, reason,
+                                        import_source.get('connection_id'))
+        fetch_options = {'connection': connection,
+                         'subdir': import_source.get('path') or None,
+                         'branch': import_source.get('branch') or None,
+                         'shallow': bool(import_source.get('shallow'))}
+    # The clone target: the connection's CURRENT stored URL for a
+    # connection import (the token belongs to that URL), else the
+    # provenance URL of the anonymous import.
+    clone_url = (fetch_options['connection']['repo_url'] if fetch_options
+                 else provenance['repoUrl'])
 
     fetches = item.get('fetches') or {}
     slug, action = adjustment_fetch_slot(item, revision)
@@ -2380,11 +2892,11 @@ def adjust_revision(event: Dict, user: Dict, plugin_id: str,
         }
         try:
             fetch_build_id = start_fetch(
-                provenance['repoUrl'],
+                clone_url,
                 (None if revision == DEFAULT_REVISION else revision),
                 entry['source_prefix'].rstrip('/'),
                 usecase_id=item['usecase_id'], plugin_id=plugin_id,
-                version=version, revision_slug_id=slug)
+                version=version, revision_slug_id=slug, **fetch_options)
         except Exception as exc:
             logger.error(f'Adjustment fetch StartBuild failed: {exc}',
                          exc_info=True)

@@ -43,7 +43,6 @@ import json
 import logging
 import os
 import posixpath
-import re
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -108,13 +107,25 @@ PLUGIN_OPERATIONS_INDEX = 'plugin-operations-index'
 
 # ---------------------------------------------------------------- constants
 
-PROVIDERS = ('github', 'gitlab')
-#: HTTPS basic-auth username each provider expects with a token.
-PROVIDER_USERNAMES = {'github': 'x-access-token', 'gitlab': 'oauth2'}
-
-CONNECTION_VERIFYING = 'verifying'
-CONNECTION_VERIFIED = 'verified'
-CONNECTION_FAILED = 'failed'
+# Provider constants, the Failure_Category vocabulary, the stderr
+# classifier, the excerpt redactor, and the token environment override are
+# shared with plugin_importer.py through the shared layer
+# (private-repo-plugin-import task 1) and re-exported here under their
+# original names so existing callers and tests are unchanged.
+from git_connections import (  # noqa: E402
+    CONNECTION_FAILED,
+    CONNECTION_VERIFIED,
+    CONNECTION_VERIFYING,
+    FAILURE_CATEGORIES,
+    PROVIDERS,
+    PROVIDER_USERNAMES,
+    _CLASSIFY_RULES,
+    _REDACTIONS,
+    classify_failure,
+    get_connection,
+    redact,
+    token_env_override,
+)
 
 OP_VERIFY = 'verify'
 OP_PUSH = 'push'
@@ -132,9 +143,6 @@ PULL_IN_PLACE = 'in_place'
 PULL_NEW_VERSION = 'new_version'
 PULL_MODES = (PULL_IN_PLACE, PULL_NEW_VERSION)
 
-FAILURE_CATEGORIES = ('authentication', 'not_found', 'unreachable', 'diverged',
-                      'push_rejected', 'invalid_source', 'internal')
-
 #: Sync_Operation retention (design data model)
 OPERATION_TTL_SECONDS = 180 * 24 * 3600
 
@@ -145,28 +153,6 @@ MAX_VALIDATION_FILE_BYTES = 512 * 1024
 LOG_EXCERPT_MAX_CHARS = 8 * 1024
 
 SYSTEM_USER_ID = 'system:git-sync-service'
-
-# Runner stderr markers -> Failure_Category (mirror of runner.sh classify)
-_CLASSIFY_RULES = (
-    ('authentication', ('authentication failed', 'could not read username',
-                        'could not read password', ' 401', 'http 401', ' 403',
-                        'http 403', 'invalid username or password',
-                        'permission denied')),
-    ('not_found', ('repository not found', 'not found', ' 404', 'http 404',
-                   "couldn't find remote ref", 'could not find remote branch',
-                   'pathspec', 'does not appear to be a git repository')),
-    ('unreachable', ('could not resolve host', 'connection timed out',
-                     'unable to access', 'failed to connect', 'connection refused',
-                     'network is unreachable', 'operation timed out')),
-)
-
-# Credential material patterns removed from stored excerpts (9.5).
-_REDACTIONS = (
-    re.compile(r'https?://[^/@\s]+@'),                      # user:token@host
-    re.compile(r'\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{8,}\b'),   # GitHub classic
-    re.compile(r'\bgithub_pat_[A-Za-z0-9_]{8,}\b'),               # GitHub fine-grained
-    re.compile(r'\bglpat-[A-Za-z0-9_\-]{8,}\b'),                  # GitLab PAT
-)
 
 
 # ------------------------------------------------------------ pure helpers
@@ -226,25 +212,6 @@ def normalize_repo_path(path: Any) -> Optional[str]:
     if clean is None:
         return None
     return posixpath.normpath(clean.replace('\\', '/'))
-
-
-def classify_failure(text: Any) -> str:
-    """Failure_Category of runner stderr (Property 11): exactly one of
-    authentication / not_found / unreachable / internal."""
-    lowered = str(text or '').lower()
-    for category, markers in _CLASSIFY_RULES:
-        if any(marker in lowered for marker in markers):
-            return category
-    return 'internal'
-
-
-def redact(text: Any) -> str:
-    """Remove credential material from a log excerpt (9.5, Property 11)."""
-    result = str(text or '')
-    result = _REDACTIONS[0].sub('https://***@', result)
-    for pattern in _REDACTIONS[1:]:
-        result = pattern.sub('***', result)
-    return result
 
 
 def connection_view(item: Dict) -> Dict:
@@ -340,8 +307,7 @@ def build_start_environment(kind: str, operation_id: str, connection: Dict,
         plain('REPO_URL', connection.get('repo_url')),
         plain('GIT_PROVIDER', provider),
         plain('GIT_USERNAME', PROVIDER_USERNAMES.get(provider, 'x-access-token')),
-        {'name': 'GIT_TOKEN', 'value': f"{connection['secret_arn']}:token",
-         'type': 'SECRETS_MANAGER'},
+        token_env_override(connection),
         plain('DEFAULT_BRANCH', connection.get('default_branch')),
         plain('RESULT_KEY', result_key_for(operation_id)),
     ]
@@ -373,12 +339,6 @@ def connections_table():
 
 def operations_table():
     return dynamodb.Table(GIT_SYNC_OPERATIONS_TABLE)
-
-
-def get_connection(connection_id: str) -> Optional[Dict]:
-    response = connections_table().get_item(Key={'connection_id': connection_id})
-    item = response.get('Item')
-    return decimal_to_native(item) if item else None
 
 
 def query_connections(usecase_id: str) -> List[Dict]:

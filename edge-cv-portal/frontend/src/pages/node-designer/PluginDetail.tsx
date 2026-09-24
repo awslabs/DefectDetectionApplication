@@ -19,6 +19,7 @@ import {
   FormField,
   Header,
   Input,
+  Link,
   Multiselect,
   SpaceBetween,
   Spinner,
@@ -48,7 +49,9 @@ import {
   adjustRevisionError,
   archRevisionLabel,
   canAdjustRevision,
+  GIT_CONNECTIONS_ROUTE,
   importedPluginsSummary,
+  importFailureGuidance,
   platformWarningMessage,
 } from './importFlow';
 import RegistrationPrompt from './RegistrationPrompt';
@@ -739,8 +742,35 @@ export default function PluginDetail() {
         </Alert>
       )}
       {plugin.import_status === 'failed' && plugin.import_finding && (
-        <Alert type="error" header="Import failed">
-          {plugin.import_finding}
+        <Alert
+          type="error"
+          header={importFailureGuidance(plugin.import_finding_category).header}
+        >
+          <SpaceBetween size="xs">
+            {/* Git_Connection fetch failures carry a Failure_Category
+                (private-repo-plugin-import 3.1-3.3): say what to fix,
+                and for a rejected token where to re-verify. */}
+            {importFailureGuidance(plugin.import_finding_category).guidance && (
+              <div>
+                {importFailureGuidance(plugin.import_finding_category).guidance}
+                {importFailureGuidance(plugin.import_finding_category).linkGitConnections && (
+                  <>
+                    {' '}
+                    <Link
+                      href={GIT_CONNECTIONS_ROUTE}
+                      onFollow={(event) => {
+                        event.preventDefault();
+                        navigate(GIT_CONNECTIONS_ROUTE);
+                      }}
+                    >
+                      Open Git connections
+                    </Link>
+                  </>
+                )}
+              </div>
+            )}
+            <div>{plugin.import_finding}</div>
+          </SpaceBetween>
         </Alert>
       )}
 
