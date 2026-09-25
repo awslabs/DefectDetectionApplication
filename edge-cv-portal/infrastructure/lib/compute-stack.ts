@@ -121,6 +121,18 @@ export class ComputeStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
 
+    // Minimize this stack's IAM policies. aws-cdk-lib >= 2.260 (the first
+    // release with the NodejsFunction bundling fixes) grants DynamoDB's
+    // principal-only stream actions (GetRecords/GetShardIterator) in a
+    // statement of their own on every table grant. With this stack's role
+    // and table count that duplication pushed the template past
+    // CloudFormation's 1,000,000-byte limit (1.17 MB, deploy rejected).
+    // Minimization merges statements that share resources or actions back
+    // together; every role keeps exactly the same action x resource x
+    // condition grants. Scoped to this stack (set before any child exists)
+    // so the other stacks' policies are untouched.
+    this.node.setContext('@aws-cdk/aws-iam:minimizePolicies', true);
+
     // Validate the trusted UseCase account list at synth time. An empty list
     // would otherwise produce an empty sts:AssumeRole resource list; the
     // design requires an explicit failure rather than any fallback to a
