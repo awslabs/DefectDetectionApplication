@@ -52,7 +52,7 @@ from vllm_fit_check import (
 )
 
 PROFILE_ARCHS = sorted(DEVICE_MEMORY_PROFILE_BYTES)
-UNPROFILED_ARCHS = ("arm64_jp4", "x86_64", "unknown-arch")
+UNPROFILED_ARCHS = ("arm64_cpu", "x86_64", "unknown-arch")
 
 # ---------------------------------------------------------------------------
 # The corrected model's arithmetic, mirrored LOCALLY from design Decision 2

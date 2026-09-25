@@ -18,7 +18,7 @@ parsed out of ``edge-cv-portal/infrastructure/lib/compute-stack.ts``:
    collapse to the single ``x86_64`` gate arch),
 3. ``LOCAL_SERVER_ARCH_IDS`` == ``local_server_component_arch``'s observable
    codomain (driven with every real component name plus the legacy bare
-   ``.arm64``/``.aarch64`` JP4 names).
+   ``.aarch64`` alias of the generic arm64 CPU build).
 
 A future fan-out (e.g. JP8) that adds an arch to any one vocabulary without
 the others - the exact omission that produced cb139a40 - fails here, before
@@ -49,11 +49,11 @@ from test_jp7_localserver_floor_exploration import (
 #: Greengrass VersionRequirement floors are exact three-part versions).
 _SEMVER = re.compile(r"\d+\.\d+\.\d+")
 
-#: Legacy bare JetPack 4 component names: retired on the write side but
-#: still recognized on read for already-provisioned JP4 devices - they are
-#: part of local_server_component_arch's observable input vocabulary.
-_LEGACY_JP4_COMPONENT_NAMES = (
-    "aws.edgeml.dda.LocalServer.arm64",
+#: Legacy component names still recognized on read - part of
+#: local_server_component_arch's observable input vocabulary. The bare
+#: ``.aarch64`` alias resolves like the bare ``.arm64`` generic arm64 CPU
+#: build (which the packager itself emits for arm64_cpu).
+_LEGACY_COMPONENT_NAMES = (
     "aws.edgeml.dda.LocalServer.aarch64",
 )
 
@@ -134,14 +134,14 @@ class TestFloorMapCoverageLockstep:
             self, packaging, deployments):
         # Validates: Requirements 2.4
         # Drive the REAL classifier with every component name the packager
-        # can emit, plus the legacy bare JP4 names it must keep recognizing
+        # can emit, plus the legacy bare aarch64 name it must keep recognizing
         # on read. The set of arch ids it can produce (its observable
         # codomain) must equal LOCAL_SERVER_ARCH_IDS - the constant
         # deployments.py uses to complete the floor map (it cannot import
         # workflow_packaging; this test IS the documented lockstep pin).
         component_names = (
             tuple(packaging.ARCH_TO_LOCAL_SERVER_COMPONENT.values())
-            + _LEGACY_JP4_COMPONENT_NAMES)
+            + _LEGACY_COMPONENT_NAMES)
         codomain = {}
         for name in component_names:
             arch = deployments.local_server_component_arch(name)

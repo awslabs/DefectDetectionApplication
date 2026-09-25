@@ -7,7 +7,7 @@ This directory contains scripts and configuration files for provisioning and man
 ### Prerequisites
 
 - AWS Account with appropriate IAM permissions
-- EC2 instance or physical device (ARM64 or x86_64) running Ubuntu 18.04, 20.04, or 22.04
+- EC2 instance or physical device (ARM64 or x86_64) running Ubuntu 20.04, 22.04, or 24.04
 - AWS CLI configured with credentials
 - SSH access to the device
 

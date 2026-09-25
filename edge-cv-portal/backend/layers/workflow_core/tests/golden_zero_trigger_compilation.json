@@ -1,6 +1,6 @@
 {
   "folder_capture": {
-    "arm64_jp4": {
+    "arm64_cpu": {
       "document": {
         "executorBindings": [],
         "pluginDependencies": [],
@@ -68,7 +68,7 @@
             "name": "s0"
           }
         ],
-        "targetArch": "arm64_jp4",
+        "targetArch": "arm64_cpu",
         "workflowId": "",
         "workflowVersion": ""
       },
@@ -427,7 +427,7 @@
     }
   },
   "icam_inference_mqtt": {
-    "arm64_jp4": {
+    "arm64_cpu": {
       "document": {
         "executorBindings": [
           {
@@ -496,7 +496,7 @@
             "name": "s0"
           }
         ],
-        "targetArch": "arm64_jp4",
+        "targetArch": "arm64_cpu",
         "workflowId": "",
         "workflowVersion": ""
       },

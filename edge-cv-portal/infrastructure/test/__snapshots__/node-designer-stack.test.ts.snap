@@ -2,7 +2,7 @@
 
 exports[`plugin build CodeBuild projects (Requirements 3.1, 3.2) all build projects stack snapshot 1`] = `
 {
-  "dda-plugin-build-arm64_jp4": {
+  "dda-plugin-build-arm64_cpu": {
     "Properties": {
       "Artifacts": {
         "Type": "NO_ARTIFACTS",
@@ -10,7 +10,7 @@ exports[`plugin build CodeBuild projects (Requirements 3.1, 3.2) all build proje
       "Cache": {
         "Type": "NO_CACHE",
       },
-      "Description": "Custom node plugin build for arm64_jp4 (fresh container per build, prefix-scoped role, no VPC access to portal internals)",
+      "Description": "Custom node plugin build for arm64_cpu (fresh container per build, prefix-scoped role, no VPC access to portal internals)",
       "EncryptionKey": "alias/aws/s3",
       "Environment": {
         "ComputeType": "BUILD_GENERAL1_LARGE",
@@ -18,7 +18,7 @@ exports[`plugin build CodeBuild projects (Requirements 3.1, 3.2) all build proje
           {
             "Name": "TARGET_ARCH",
             "Type": "PLAINTEXT",
-            "Value": "arm64_jp4",
+            "Value": "arm64_cpu",
           },
           {
             "Name": "ARTIFACTS_BUCKET",
@@ -93,7 +93,7 @@ exports[`plugin build CodeBuild projects (Requirements 3.1, 3.2) all build proje
               {
                 "Ref": "PluginBuildImageRepositoryDC232F59",
               },
-              ":arm64_jp4",
+              ":arm64_cpu",
             ],
           ],
         },
@@ -101,10 +101,10 @@ exports[`plugin build CodeBuild projects (Requirements 3.1, 3.2) all build proje
         "PrivilegedMode": false,
         "Type": "ARM_CONTAINER",
       },
-      "Name": "dda-plugin-build-arm64_jp4",
+      "Name": "dda-plugin-build-arm64_cpu",
       "ServiceRole": {
         "Fn::GetAtt": [
-          "PluginBuildRolearm64jp42798C3A5",
+          "PluginBuildRolearm64cpu0AB9FFC7",
           "Arn",
         ],
       },

@@ -30,18 +30,13 @@ interface CompilationTabProps {
 }
 
 // Available compilation targets with descriptions
+// (JetPack 4 and its 'jetson-xavier' target are no longer supported.)
 const COMPILATION_TARGETS = [
-  {
-    id: 'jetson-xavier',
-    name: 'NVIDIA Jetson Xavier (JetPack 4.x)',
-    description: 'ARM64 with NVIDIA GPU acceleration for edge AI inference (CUDA 10.2, TensorRT 8.2.1)',
-    recommended: true,
-  },
   {
     id: 'jetson-xavier-jp5',
     name: 'NVIDIA Jetson Xavier / Orin (JetPack 5.x)',
     description: 'ARM64 Jetson Xavier or Orin on JetPack 5 — device runtime CUDA 11.4, TensorRT 8.5.2',
-    recommended: false,
+    recommended: true,
   },
   {
     id: 'jetson-xavier-jp6',
@@ -70,7 +65,7 @@ const COMPILATION_TARGETS = [
   {
     id: 'onnx',
     name: 'ONNX Runtime (portable)',
-    description: 'Export the trained model to ONNX (.onnx) for the pluggable ONNX Runtime engine — runs on Jetson/x86 without Neo/DLR. GPU acceleration (CUDA/TensorRT) is available on JetPack 5 and 6; JetPack 4 runs ONNX on CPU only. ONNX is the vision route for JetPack 7. See docs/multi-runtime-inference.md.',
+    description: 'Export the trained model to ONNX (.onnx) for the pluggable ONNX Runtime engine — runs on Jetson/x86 without Neo/DLR. GPU acceleration (CUDA/TensorRT) is available on JetPack 5 and 6. ONNX is the vision route for JetPack 7. See docs/multi-runtime-inference.md.',
     recommended: false,
   },
 ];
@@ -84,7 +79,7 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [showTargetModal, setShowTargetModal] = useState(false);
   const [showPublishModal, setShowPublishModal] = useState(false);
-  const [selectedTargets, setSelectedTargets] = useState<string[]>(['jetson-xavier', 'x86_64-cpu']);
+  const [selectedTargets, setSelectedTargets] = useState<string[]>(['jetson-xavier-jp5', 'x86_64-cpu']);
   const [componentName, setComponentName] = useState(`model-${trainingJob?.model_name?.toLowerCase().replace(/[^a-z0-9-]/g, '-') || 'model'}`);
   const [componentVersion, setComponentVersion] = useState('1.0.0');
   // Existing published versions for the component being published, so the
@@ -993,7 +988,9 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
 // Helper functions
 function getTargetDescription(target: string): string {
   const descriptions: Record<string, string> = {
-    'jetson-xavier': 'NVIDIA Jetson Xavier — JetPack 4.x (ARM64 + GPU)',
+    // Retired JetPack 4 target: kept so historical compilation jobs still
+    // render a readable label.
+    'jetson-xavier': 'NVIDIA Jetson Xavier — JetPack 4.x (retired)',
     'jetson-xavier-jp5': 'NVIDIA Jetson Xavier / Orin — JetPack 5.x (ARM64 + GPU)',
     'jetson-xavier-jp6': 'NVIDIA Jetson Orin — JetPack 6.x (ARM64 + GPU)',
     'x86_64-cpu': 'x86_64 CPU only',

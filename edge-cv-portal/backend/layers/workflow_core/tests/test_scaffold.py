@@ -126,9 +126,9 @@ class TestRenderScaffold:
 
     def test_c_skeleton_avoids_version_gated_apis(self):
         # The C skeleton must link against every supported device stack:
-        # JetPack 4 ships GStreamer 1.14 / glib 2.56, JetPack 5 ships
-        # GStreamer 1.16. Symbols introduced after those versions must not
-        # appear anywhere in the rendered scaffold.
+        # the oldest, Ubuntu 20.04 (arm64 CPU and JetPack 5), ships
+        # GStreamer 1.16 / glib 2.64. Symbols introduced after those
+        # versions must not appear anywhere in the rendered scaffold.
         version_gated_symbols = (
             "gst_buffer_new_memdup",           # GStreamer >= 1.20
             "g_memdup2",                       # glib >= 2.68

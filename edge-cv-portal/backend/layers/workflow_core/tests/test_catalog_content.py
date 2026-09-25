@@ -259,7 +259,7 @@ class TestCsiCameraSourceNodeType:
         assert {m.arch for m in descriptor.mappings} == set(ARCHITECTURES)
         # Non-JP6 physical archs: the standard JPEG file chain reading
         # the staged capture frame (Requirement 1.3).
-        for arch in ("x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5"):
+        for arch in ("x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5"):
             mapping = descriptor.mapping_for(arch)
             factories = [entry["factory"] for entry in mapping.element_chain]
             assert factories == ["filesrc", "emexifextract", "jpegparse",
@@ -548,7 +548,7 @@ class TestModelInferenceNodeType:
         descriptor = get_node_type("model_inference")
         device_mappings = [m for m in descriptor.mappings if m.arch != "sim"]
         assert sorted(m.arch for m in device_mappings) == sorted(
-            ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6",
+            ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6",
              "arm64_jp7"])
         for mapping in device_mappings:
             factories = [entry["factory"] for entry in mapping.element_chain]
@@ -641,7 +641,7 @@ class TestBedrockInferenceNodeType:
         assert descriptor.hardware_dependent is True
         device_mappings = [m for m in descriptor.mappings if m.arch != "sim"]
         assert sorted(m.arch for m in device_mappings) == sorted(
-            ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6",
+            ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6",
              "arm64_jp7"])
         for mapping in device_mappings:
             assert mapping.element_chain == []

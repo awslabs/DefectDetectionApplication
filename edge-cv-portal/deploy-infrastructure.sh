@@ -61,7 +61,10 @@ if [ -n "$PORTAL_REGISTRY_ENFORCED" ]; then
   CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c portalRegistryEnforced=$PORTAL_REGISTRY_ENFORCED"
 fi
 
-cdk deploy --all --require-approval never --force $CDK_CONTEXT_ARGS
+# The project-local CLI (devDependency aws-cdk, installed by `npm ci` above):
+# aws-cdk-lib emits a cloud-assembly schema that an older global `cdk` on
+# PATH cannot read ("Cloud assembly schema version mismatch").
+npx cdk deploy --all --require-approval never --force $CDK_CONTEXT_ARGS
 
 echo "✅ Deployment completed successfully!"
 echo ""

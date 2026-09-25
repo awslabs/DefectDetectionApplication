@@ -18,7 +18,7 @@ devices:
   jp6-orinagx:
     base_url: http://localhost:5000       # tunnel-forwarded or LAN address
     profile:
-      architecture: arm64_jp6             # x86_64 | arm64_jp4 | arm64_jp5 | arm64_jp6
+      architecture: arm64_jp6             # x86_64 | arm64_cpu | arm64_jp5 | arm64_jp6 | arm64_jp7
       capabilities: [vllm, onnx_models, workflows]   # no dlr_models on JP6 (TRT10)
     credentials: env:DDA_HARNESS_TOKEN    # omit when local auth is disabled
     expected:

@@ -13,7 +13,7 @@ import { describe, it, expect } from 'vitest';
 import * as fc from 'fast-check';
 import { HOOK_FILE, pickFileForDiagnostics } from './diagnosticsFile';
 
-const ARCHES = ['x86_64', 'x86_64_nvidia', 'arm64_jp4', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7'];
+const ARCHES = ['x86_64', 'x86_64_nvidia', 'arm64_cpu', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7'];
 const C_SOURCE = 'plugin/gstcustomblur.c';
 
 function scaffoldPaths(arches: string[]): string[] {

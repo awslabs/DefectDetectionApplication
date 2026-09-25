@@ -44,6 +44,7 @@ from pathlib import Path
 from _common import (
     MODEL_DIR,
     WORK,
+    cap_onnx_ir_version,
     fetch_base_weights,
     hp,
     run_converter,
@@ -309,6 +310,9 @@ def export(model, metrics, base=None, class_names=None):
     dst = MODEL_DIR / "model.onnx"
     shutil.copy2(src, dst)
     print(f"exported {src} -> {dst} ({dst.stat().st_size} bytes)", flush=True)
+    # onnxslim (simplify=True) re-serialises the graph with the installed
+    # onnx's IR version; keep the IR the edge runtimes load.
+    cap_onnx_ir_version(dst)
 
     # Verify the graph matches what the device decoder expects: one input,
     # one output shaped [1, 4+nc, N]. A surprise here (e.g. NMS baked in, or

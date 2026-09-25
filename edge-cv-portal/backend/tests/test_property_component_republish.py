@@ -12,7 +12,7 @@ from hypothesis import given, strategies as st
 
 from test_plugin_components import components_module  # noqa: F401
 
-ARCHES = ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6", "arm64_jp7"]
+ARCHES = ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6", "arm64_jp7"]
 
 _checksum = st.text(alphabet="0123456789abcdef", min_size=8, max_size=8)
 _entry = st.fixed_dictionaries({

@@ -68,7 +68,7 @@ devices:
   jp6-orinagx:
     base_url: http://localhost:5000       # tunnel-forwarded or LAN address
     profile:
-      architecture: arm64_jp6             # x86_64 | arm64_jp4 | arm64_jp5 | arm64_jp6
+      architecture: arm64_jp6             # x86_64 | arm64_cpu | arm64_jp5 | arm64_jp6 | arm64_jp7
       capabilities: [vllm, onnx_models, workflows]   # no dlr_models on JP6 (TRT10)
     credentials: env:DDA_HARNESS_TOKEN    # omit when local auth is disabled
     expected:
@@ -91,7 +91,7 @@ Field reference:
 | Field | Meaning |
 | --- | --- |
 | `base_url` | The device Backend_API root, e.g. `http://192.168.1.42:5000` or a tunnel-forwarded `http://localhost:5000`. Required. |
-| `profile.architecture` | One of `x86_64`, `arm64_jp4`, `arm64_jp5`, `arm64_jp6`. Unknown values are rejected (fail closed). Required. |
+| `profile.architecture` | One of `x86_64`, `arm64_cpu`, `arm64_jp5`, `arm64_jp6`, `arm64_jp7`. Unknown values are rejected (fail closed). Required. |
 | `profile.capabilities` | Any of `vllm`, `dlr_models`, `onnx_models`, `workflows`, `auth_enabled`. Unknown names are rejected. Stages gate on these (see below). |
 | `credentials` | A credential **reference** (never a value) — see [Credentials](#credentials). Required only with `auth_enabled`. |
 | `expected.vision_models` | Vision model names the device must report (asserted present). Empty list = enumerate-only. |

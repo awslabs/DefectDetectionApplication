@@ -79,7 +79,8 @@ case "$JETPACK_MAJOR" in
         ;;
     *)
         echo "ERROR: JETPACK_MAJOR must be 5, 6 or 7 (got '${JETPACK_MAJOR}')." >&2
-        echo "       GPU onnxruntime is not supported on JetPack 4." >&2
+        echo "       GPU onnxruntime is built for JetPack 5/6/7 only; the CPU images" >&2
+        echo "       (x86_64, generic arm64) use the onnxruntime CPU wheel." >&2
         exit 1
         ;;
 esac

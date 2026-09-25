@@ -11,7 +11,7 @@ plugins.
 from __future__ import annotations
 
 from .models import (
-    ARCH_ARM64_JP4,
+    ARCH_ARM64_CPU,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
     ARCH_ARM64_JP7,
@@ -61,15 +61,16 @@ _COMMON = _GST_CORE | _DDA_ELEMENTS | _LOCALSERVER_PYTHON
 #: arch -> frozenset of plugin names bundled with the LocalServer build
 #: for that architecture. ``sim`` mirrors the x86_64 sandbox image.
 #: ``x86_64_nvidia`` mirrors ``x86_64`` — the LocalServer amd64 GPU build
-#: bundles the same base plugin set.
+#: bundles the same base plugin set. ``arm64_cpu`` is the generic CPU image
+#: built for arm64: the same base set, no NVIDIA elements.
 LOCALSERVER_BUNDLED_PLUGINS = {
     ARCH_X86_64: _COMMON,
     ARCH_X86_64_NVIDIA: _COMMON,
-    ARCH_ARM64_JP4: _COMMON | frozenset({"nvvideo4linux2"}),
+    ARCH_ARM64_CPU: _COMMON,
     ARCH_ARM64_JP5: _COMMON | frozenset({"nvvideo4linux2"}),
     ARCH_ARM64_JP6: _COMMON | frozenset({"nvvideo4linux2"}),
     # arm64_jp7 (Jetson Thor) does NOT get nvvideo4linux2: unlike the
-    # l4t-jetpack-based JP4/JP5/JP6 images, Dockerfile.jp7 builds on the
+    # l4t-jetpack-based JP5/JP6 images, Dockerfile.jp7 builds on the
     # nvcr CUDA 13 Ubuntu 24.04 base and installs only the upstream
     # gstreamer1.0-plugins-good/bad sets — no L4T GStreamer package that
     # would provide nvvideo4linux2. No catalog node type declares that

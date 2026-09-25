@@ -591,8 +591,8 @@ gst_${element}_process_sample (Gst${element_camel} * self, GstSample * sample)
       if (PyBytes_AsStringAndSize (result, &out_data, &out_size) == 0) {
         /* allocate + fill (both GStreamer 1.0 APIs) rather than the
          * newer one-shot memdup helper, so the plugin links on every
-         * supported device stack (JetPack 4 ships GStreamer 1.14,
-         * JetPack 5 ships 1.16). */
+         * supported device stack (the Ubuntu 20.04 stacks, arm64 CPU
+         * and JetPack 5, ship GStreamer 1.16). */
         out = gst_buffer_new_allocate (NULL, (gsize) out_size, NULL);
         gst_buffer_fill (out, 0, out_data, (gsize) out_size);
         gst_buffer_copy_into (out, buffer, GST_BUFFER_COPY_TIMESTAMPS, 0, -1);
@@ -897,8 +897,8 @@ _ARCH_NOTES = {
     "x86_64_nvidia": "# x86_64 build with the NVIDIA GPU runtime available at\n"
                      "# run time; add CUDA dependencies here if your hook's\n"
                      "# native side needs them.",
-    "arm64_jp4": "# Cross build for arm64 Jetson JetPack 4; built with the\n"
-                 "# JetPack 4 cross toolchain image.",
+    "arm64_cpu": "# Build for generic (non-Jetson) arm64 CPU hosts; built with\n"
+                 "# the Ubuntu 20.04 arm64 image (no NVIDIA stack).",
     "arm64_jp5": "# Cross build for arm64 Jetson JetPack 5; built with the\n"
                  "# JetPack 5 cross toolchain image.",
     "arm64_jp6": "# Cross build for arm64 Jetson JetPack 6; built with the\n"
@@ -921,7 +921,7 @@ gst_app_dep = dependency('gstreamer-app-1.0')
 python_dep = dependency('python3-embed')
 
 # dladdr (the hook's sys.path self-location) lives in libdl on older
-# glibc (the JetPack 4/5 cross toolchains); on glibc >= 2.34 (JetPack 6,
+# glibc (the Ubuntu 20.04 arm64 CPU / JetPack 5 images); on glibc >= 2.34 (JetPack 6,
 # modern x86_64) it is merged into libc and this resolves to an empty
 # dependency. required:false keeps both cases linking.
 cc = meson.get_compiler('c')

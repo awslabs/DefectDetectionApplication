@@ -81,9 +81,8 @@ describe('requiresAcknowledgment', () => {
 });
 
 describe('selectableArchitectures', () => {
-  it('restricts DeepStream imports to arm64 JetPack 4/5/6 (5.1)', () => {
+  it('restricts DeepStream imports to arm64 JetPack 5/6 (5.1)', () => {
     expect(selectableArchitectures(true)).toEqual([
-      'arm64_jp4',
       'arm64_jp5',
       'arm64_jp6',
     ]);
@@ -93,7 +92,7 @@ describe('selectableArchitectures', () => {
     expect(selectableArchitectures(false)).toEqual([
       'x86_64',
       'x86_64_nvidia',
-      'arm64_jp4',
+      'arm64_cpu',
       'arm64_jp5',
       'arm64_jp6',
       'arm64_jp7',
@@ -106,12 +105,16 @@ describe('restrictArchitectureSelection', () => {
     expect(
       restrictArchitectureSelection(['x86_64', 'arm64_jp5', 'x86_64_nvidia'], true)
     ).toEqual(['arm64_jp5']);
+    // The generic arm64 CPU build has no DeepStream runtime either.
+    expect(
+      restrictArchitectureSelection(['arm64_cpu', 'arm64_jp6'], true)
+    ).toEqual(['arm64_jp6']);
   });
 
   it('keeps the selection unchanged when DeepStream is off', () => {
-    expect(restrictArchitectureSelection(['x86_64', 'arm64_jp4'], false)).toEqual([
+    expect(restrictArchitectureSelection(['x86_64', 'arm64_cpu'], false)).toEqual([
       'x86_64',
-      'arm64_jp4',
+      'arm64_cpu',
     ]);
   });
 });
@@ -546,17 +549,17 @@ describe('platform compatibility display helpers', () => {
 
     it('omits the suggestion for non-official repositories', () => {
       expect(
-        platformWarningMessage('arm64_jp4', {
+        platformWarningMessage('arm64_cpu', {
           compatible: false,
-          platformVersion: '1.14',
+          platformVersion: '1.16',
           requiredVersion: '1.24.0',
           reason:
-            'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 provides 1.14',
+            'The source requires GStreamer >= 1.24.0; arm64 CPU provides 1.16',
           suggestedRevision: null,
         })
       ).toBe(
-        'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 ' +
-          'provides 1.14.'
+        'The source requires GStreamer >= 1.24.0; arm64 CPU ' +
+          'provides 1.16.'
       );
     });
 
@@ -571,8 +574,8 @@ describe('platform compatibility display helpers', () => {
         'The source requires GStreamer >= 1.24.0; arm64 JetPack 5 ' +
           'provides 1.16.'
       );
-      expect(platformWarningMessage('arm64_jp4', { compatible: false })).toBe(
-        'This source may not be compatible with arm64 JetPack 4.'
+      expect(platformWarningMessage('arm64_cpu', { compatible: false })).toBe(
+        'This source may not be compatible with arm64 CPU.'
       );
     });
   });
@@ -583,17 +586,17 @@ describe('platform compatibility display helpers', () => {
         platform_compatibility: {
           x86_64: compatibleX86,
           arm64_jp5: incompatibleJp5,
-          arm64_jp4: {
+          arm64_cpu: {
             compatible: false,
-            platformVersion: '1.14',
+            platformVersion: '1.16',
             requiredVersion: '1.24.0',
             reason:
-              'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 provides 1.14',
-            suggestedRevision: '1.14',
+              'The source requires GStreamer >= 1.24.0; arm64 CPU provides 1.16',
+            suggestedRevision: '1.16',
           },
         },
       });
-      expect(warnings.map((w) => w.arch)).toEqual(['arm64_jp4', 'arm64_jp5']);
+      expect(warnings.map((w) => w.arch)).toEqual(['arm64_cpu', 'arm64_jp5']);
       expect(warnings[1].message).toContain('Import revision 1.16');
     });
 
@@ -620,16 +623,16 @@ describe('archRevisionsParam', () => {
   it('keeps only non-empty trimmed overrides of selected architectures', () => {
     expect(
       archRevisionsParam(
-        { arm64_jp5: ' 1.16 ', arm64_jp4: '1.14', x86_64: '   ' },
-        ['x86_64', 'arm64_jp4', 'arm64_jp5']
+        { arm64_jp5: ' 1.16 ', arm64_cpu: '1.16.3', x86_64: '   ' },
+        ['x86_64', 'arm64_cpu', 'arm64_jp5']
       )
-    ).toEqual({ arm64_jp4: '1.14', arm64_jp5: '1.16' });
+    ).toEqual({ arm64_cpu: '1.16.3', arm64_jp5: '1.16' });
   });
 
   it('drops overrides of architectures no longer selected', () => {
     expect(
-      archRevisionsParam({ arm64_jp5: '1.16', arm64_jp4: '1.14' }, ['arm64_jp4'])
-    ).toEqual({ arm64_jp4: '1.14' });
+      archRevisionsParam({ arm64_jp5: '1.16', arm64_cpu: '1.16.3' }, ['arm64_cpu'])
+    ).toEqual({ arm64_cpu: '1.16.3' });
   });
 
   it('is undefined when no override remains (single revision everywhere)', () => {
@@ -713,7 +716,7 @@ import type { ImportFetchEntry, ImportFetchStatus } from './types';
 const ALL_ARCHS = [
   'x86_64',
   'x86_64_nvidia',
-  'arm64_jp4',
+  'arm64_cpu',
   'arm64_jp5',
   'arm64_jp6',
   'arm64_jp7',
@@ -727,7 +730,7 @@ const versionArb = fc.constantFrom('1.14', '1.16', '1.18', '1.20', '1.24.0');
 const reasonArb = fc
   .oneof(
     fc.constantFrom(
-      'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 provides 1.14',
+      'The source requires GStreamer >= 1.24.0; arm64 CPU provides 1.16',
       'This source may not be compatible with x86_64'
     ),
     fc.string({ minLength: 1, maxLength: 40 })
@@ -889,28 +892,28 @@ describe('canAdjustRevision', () => {
 
   const incompatibleWithSuggestion: PlatformCompatibilityEntry = {
     compatible: false,
-    platformVersion: '1.14',
+    platformVersion: '1.16',
     requiredVersion: '1.24.0',
     reason: null,
-    suggestedRevision: '1.14',
+    suggestedRevision: '1.16',
   };
 
   const settledImport: AdjustableDetail = {
     kind: 'imported',
     import_status: 'imported',
-    platform_compatibility: { arm64_jp4: incompatibleWithSuggestion },
+    platform_compatibility: { arm64_cpu: incompatibleWithSuggestion },
   };
 
   it('is true exactly for a settled import with an incompatible entry carrying a suggestion (2.1)', () => {
-    expect(canAdjustRevision(settledImport, 'arm64_jp4')).toBe(true);
+    expect(canAdjustRevision(settledImport, 'arm64_cpu')).toBe(true);
   });
 
   it('is false for non-imports (mirrors the backend 409 gate, 2.5)', () => {
     expect(
-      canAdjustRevision({ ...settledImport, kind: 'scaffold' }, 'arm64_jp4')
+      canAdjustRevision({ ...settledImport, kind: 'scaffold' }, 'arm64_cpu')
     ).toBe(false);
     expect(
-      canAdjustRevision({ ...settledImport, kind: 'generated' }, 'arm64_jp4')
+      canAdjustRevision({ ...settledImport, kind: 'generated' }, 'arm64_cpu')
     ).toBe(false);
   });
 
@@ -921,13 +924,13 @@ describe('canAdjustRevision', () => {
       'failed',
     ] as const) {
       expect(
-        canAdjustRevision({ ...settledImport, import_status: status }, 'arm64_jp4')
+        canAdjustRevision({ ...settledImport, import_status: status }, 'arm64_cpu')
       ).toBe(false);
     }
     expect(
       canAdjustRevision(
         { ...settledImport, import_status: undefined },
-        'arm64_jp4'
+        'arm64_cpu'
       )
     ).toBe(false);
   });
@@ -938,10 +941,10 @@ describe('canAdjustRevision', () => {
         {
           ...settledImport,
           platform_compatibility: {
-            arm64_jp4: { ...incompatibleWithSuggestion, compatible: true },
+            arm64_cpu: { ...incompatibleWithSuggestion, compatible: true },
           },
         },
-        'arm64_jp4'
+        'arm64_cpu'
       )
     ).toBe(false);
     expect(
@@ -949,13 +952,13 @@ describe('canAdjustRevision', () => {
         {
           ...settledImport,
           platform_compatibility: {
-            arm64_jp4: {
+            arm64_cpu: {
               ...incompatibleWithSuggestion,
               suggestedRevision: null,
             },
           },
         },
-        'arm64_jp4'
+        'arm64_cpu'
       )
     ).toBe(false);
   });
@@ -965,7 +968,7 @@ describe('canAdjustRevision', () => {
     expect(
       canAdjustRevision(
         { kind: 'imported', import_status: 'imported' },
-        'arm64_jp4'
+        'arm64_cpu'
       )
     ).toBe(false);
   });

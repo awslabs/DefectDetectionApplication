@@ -20,8 +20,9 @@ server reject the write with ``BadTypeMismatch`` (observed on-device: Int64 ->
 Boolean ``DefectDetected`` tag). ``_default_opcua_writer`` now reads the node's
 declared variant type and coerces the value to it before writing.
 
-These tests inject a self-contained fake ``opcua`` module (Client / ua /
-VariantType / DataValue / Variant) so they run without the real package.
+These tests inject self-contained fake ``asyncua`` / ``asyncua.sync``
+modules (sync Client / ua / VariantType / DataValue / Variant) so they run
+without the real package.
 """
 import sys
 import types
@@ -38,7 +39,8 @@ from workflow_engine.output_bindings import (
 
 
 # ---------------------------------------------------------------------------
-# Fake ``opcua`` module (Client / ua) injected at the import boundary.
+# Fake ``asyncua`` package (sync Client / ua) injected at the import
+# boundary.
 # ---------------------------------------------------------------------------
 
 
@@ -70,7 +72,8 @@ class _FakeDataValue:
         self.Value = variant
 
 
-def _make_fake_opcua(node):
+def _make_fake_asyncua(node):
+    """Fake ``asyncua`` + ``asyncua.sync`` modules, keyed for ``sys.modules``."""
     ua = types.SimpleNamespace(
         VariantType=_FakeVariantType,
         Variant=_FakeVariant,
@@ -101,10 +104,17 @@ def _make_fake_opcua(node):
         def disconnect(self):
             node.events.append(("disconnect",))
 
-    module = types.ModuleType("opcua")
-    module.Client = _FakeClient
-    module.ua = ua
-    return module
+    sync_module = types.ModuleType("asyncua.sync")
+    sync_module.Client = _FakeClient
+    package = types.ModuleType("asyncua")
+    package.sync = sync_module
+    package.ua = ua
+    return {"asyncua": package, "asyncua.sync": sync_module}
+
+
+def _install(monkeypatch, modules):
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
 
 
 class _FakeNode:
@@ -122,9 +132,9 @@ class _FakeNode:
 
 
 def _write(node, value, security=None):
-    module = _make_fake_opcua(node)
+    modules = _make_fake_asyncua(node)
     with pytest.MonkeyPatch.context() as m:
-        m.setitem(sys.modules, "opcua", module)
+        _install(m, modules)
         _default_opcua_writer("opc.tcp://host:4840/", "ns=2;i=7", value, security)
 
 
@@ -139,7 +149,7 @@ def _write(node, value, security=None):
 ])
 def test_coerce_boolean(value, expected):
     with pytest.MonkeyPatch.context() as m:
-        m.setitem(sys.modules, "opcua", _make_fake_opcua(_FakeNode("Boolean")))
+        _install(m, _make_fake_asyncua(_FakeNode("Boolean")))
         assert _opcua_coerce(value, _FakeVariantType.Boolean) is expected
 
 
@@ -149,26 +159,26 @@ def test_coerce_boolean(value, expected):
 ])
 def test_coerce_integer(vt):
     with pytest.MonkeyPatch.context() as m:
-        m.setitem(sys.modules, "opcua", _make_fake_opcua(_FakeNode(vt)))
+        _install(m, _make_fake_asyncua(_FakeNode(vt)))
         assert _opcua_coerce("1", vt) == 1
         assert isinstance(_opcua_coerce("1", vt), int)
 
 
 def test_coerce_float():
     with pytest.MonkeyPatch.context() as m:
-        m.setitem(sys.modules, "opcua", _make_fake_opcua(_FakeNode("Double")))
+        _install(m, _make_fake_asyncua(_FakeNode("Double")))
         assert _opcua_coerce("0.93626", _FakeVariantType.Double) == pytest.approx(0.93626)
 
 
 def test_coerce_string():
     with pytest.MonkeyPatch.context() as m:
-        m.setitem(sys.modules, "opcua", _make_fake_opcua(_FakeNode("String")))
+        _install(m, _make_fake_asyncua(_FakeNode("String")))
         assert _opcua_coerce(1, _FakeVariantType.String) == "1"
 
 
 def test_coerce_unknown_type_passes_through():
     with pytest.MonkeyPatch.context() as m:
-        m.setitem(sys.modules, "opcua", _make_fake_opcua(_FakeNode("DateTime")))
+        _install(m, _make_fake_asyncua(_FakeNode("DateTime")))
         sentinel = object()
         assert _opcua_coerce(sentinel, _FakeVariantType.DateTime) is sentinel
 

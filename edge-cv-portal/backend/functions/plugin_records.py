@@ -105,6 +105,7 @@ from workflow_core.scaffold import (
     render_scaffold,
     scaffold_defects,
 )
+from workflow_core.catalog import DEVICE_ARCHITECTURES
 # Introspection_Report parsing and Parameter_Suggestion derivation
 # (gst-parameter-prepopulation design component 4): pure module shipped
 # alongside this handler in the functions asset.
@@ -428,11 +429,14 @@ def stale_architectures(item: Dict) -> List[str]:
 
 
 def successful_build_archs(item: Dict) -> List[str]:
-    """Architectures with a successfully built Plugin_Artifact"""
+    """Architectures with a successfully built Plugin_Artifact. An artifact
+    stored for an architecture that is no longer a target (e.g. the
+    retired arm64_jp4) never counts: nothing can package or deploy it."""
     artifacts = item.get('artifacts') or {}
     return sorted(
         arch for arch, entry in artifacts.items()
-        if isinstance(entry, dict) and entry.get('buildStatus') == BUILD_SUCCEEDED
+        if arch in DEVICE_ARCHITECTURES
+        and isinstance(entry, dict) and entry.get('buildStatus') == BUILD_SUCCEEDED
     )
 
 

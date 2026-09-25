@@ -20,7 +20,8 @@ from typing import Dict, List, Mapping, Optional, Set
 import yaml
 
 # Known Device_Profile vocabulary (design: Data Models).
-KNOWN_ARCHITECTURES = frozenset({"x86_64", "arm64_jp4", "arm64_jp5", "arm64_jp6"})
+KNOWN_ARCHITECTURES = frozenset(
+    {"x86_64", "arm64_cpu", "arm64_jp5", "arm64_jp6", "arm64_jp7"})
 KNOWN_CAPABILITIES = frozenset({"vllm", "dlr_models", "onnx_models", "workflows", "auth_enabled"})
 
 # Environment variable names.

@@ -19,45 +19,54 @@
     "@types/react-dom": "^18.0.11",
     "@types/uuid": "^9.0.0",
     "@types/websocket": "^1.0.5",
-    "axios": "1.12.0",
+    "axios": "1.20.0",
     "rc-slider": "^10.1.1",
     "react": "^18.2.0",
     "react-cookie": "^7.0.1",
     "react-dom": "^18.2.0",
     "react-hook-form": "^7.43.9",
-    "react-router-dom": "^6.5.0",
+    "react-router-dom": "^7.18.4",
     "react-scripts": "5.0.1",
     "react-zoom-pan-pinch": "^3.4.4",
     "sass": "^1.59.2",
     "styled-components": "^6.0.0-rc.1",
     "typescript": "^4.9.5",
-    "uuid": "^9.0.0",
+    "uuid": "^11.1.1",
     "web-vitals": "^2.1.4",
     "yup": "^1.1.1"
   },
   "overrides": {
-    "brace-expansion": "1.1.12",
-    "http-proxy-middleware": "2.0.9",
-    "tmp": "0.2.5",
-    "form-data": "4.0.4",
+    "http-proxy-middleware": "^2.0.10",
+    "tmp": "^0.2.7",
+    "form-data": "^4.0.6",
     "nth-check": "^2.1.1",
-    "webpack-dev-server": "^5.2.1",
+    "webpack-dev-server": "^5.2.6",
     "webpack-dev-middleware": "^7.2.1",
-    "postcss": "^8.4.47",
+    "postcss": "^8.5.28",
+    "svgo": "^2.8.4",
+    "serialize-javascript": "^7.1.2",
+    "@tootallnate/once": "^2.0.1",
+    "uuid": "$uuid",
+    "ajv@^6": "^6.15.0",
+    "js-yaml@^3": "^3.15.2",
+    "js-yaml@^4": "^4.3.2",
+    "yaml@^1": "^1.10.3",
+    "yaml@^2": "^2.9.1",
+    "immutable@^4": "^4.3.9",
     "react-scripts": {
       "nth-check": "^2.1.1",
-      "webpack-dev-server": "^5.2.1",
-      "postcss": "^8.4.47"
+      "webpack-dev-server": "^5.2.6",
+      "postcss": "^8.5.28"
     }
   },
   "devDependencies": {
-    "@testing-library/cypress": "10.0.3",
-    "cypress": "14.0.0",
+    "@testing-library/cypress": "10.1.3",
+    "cypress": "15.21.1",
     "eslint-config-prettier": "^8.5.0",
     "eslint-plugin-cypress": "^2.12.1",
     "fast-check": "3.23.2",
     "husky": "^8.0.3",
-    "lint-staged": "^13.2.2",
+    "lint-staged": "^15.5.2",
     "openapi-typescript-codegen": "^0.20.1",
     "prettier": "2.8.8"
   },
@@ -75,7 +84,10 @@
   "jest": {
     "transformIgnorePatterns": [
       "node_modules/(?!axios)/"
-    ]
+    ],
+    "moduleNameMapper": {
+      "^react-router/dom$": "<rootDir>/node_modules/react-router/dist/development/dom-export.js"
+    }
   },
   "eslintConfig": {
     "extends": [

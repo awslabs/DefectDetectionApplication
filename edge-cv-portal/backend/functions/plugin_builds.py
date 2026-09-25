@@ -58,7 +58,7 @@ fails the build"). The trigger is idempotent via a conditional
 components_triggered marker on the Plugin_Record version.
 
 DeepStream-flagged records restrict selectable architectures to the
-JetPack builds arm64_jp4/jp5/jp6 (5.1); the JetPack build projects pin
+JetPack builds arm64_jp5/jp6 (5.1); the JetPack build projects pin
 the DeepStream SDK matching each release (5.2, infrastructure).
 
 Access control: build submission and prebuilt upload require
@@ -321,11 +321,16 @@ def arch_source_prefix(item: Dict, arch: str) -> str:
 def requested_architectures(item: Dict) -> List[str]:
     """Architectures whose builds this version is waiting on — the
     monotonic union of every architecture ever requested for the version
-    (custom-node-source-lifecycle 6.5)"""
+    (custom-node-source-lifecycle 6.5), read through the current
+    architecture set: an architecture that is no longer a target (e.g. the
+    retired arm64_jp4) is dropped, so a legacy record can never wait on, or
+    default a rebuild to, a build that no longer exists."""
     requested = item.get('requested_architectures')
     if requested:
-        return [str(a) for a in requested]
-    return sorted((item.get('artifacts') or {}).keys())
+        archs = [str(a) for a in requested]
+    else:
+        archs = sorted((item.get('artifacts') or {}).keys())
+    return [a for a in archs if a in DEVICE_ARCHITECTURES]
 
 
 def union_requested_architectures(item: Dict, added: List[str]) -> List[str]:
@@ -435,7 +440,7 @@ def validate_architectures(architectures: List[str],
     """
     Validate a Target_Architecture selection; returns None or an error
     tuple (code, message, details). DeepStream-flagged records restrict
-    the selectable architectures to arm64_jp4/jp5/jp6 (5.1).
+    the selectable architectures to arm64_jp5/jp6 (5.1).
     """
     invalid = [a for a in architectures if a not in DEVICE_ARCHITECTURES]
     if invalid:

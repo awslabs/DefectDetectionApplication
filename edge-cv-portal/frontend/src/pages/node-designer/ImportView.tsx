@@ -8,7 +8,7 @@
  * plain-language explanation before proceeding, with required
  * acknowledgment for bad/ugly/unclassified imports (15.2, 15.3, 15.7);
  * DeepStream toggle restricting selectable architectures to arm64
- * JetPack 4/5/6 (5.1); listing failure surfaces the error and falls
+ * JetPack 5/6 (5.1); listing failure surfaces the error and falls
  * back to manual URL entry (6.3).
  *
  * The import is asynchronous: POST /plugins/import answers 202 with
@@ -381,7 +381,7 @@ export default function ImportView() {
   );
 
   // DeepStream toggle restricts the selectable Target_Architectures to
-  // arm64 JetPack 4/5/6, pruning any other selection (5.1).
+  // arm64 JetPack 5/6, pruning any other selection (5.1).
   const onDeepstreamChange = (checked: boolean) => {
     setDeepstream(checked);
     const kept = restrictArchitectureSelection(
@@ -1217,7 +1217,7 @@ export default function ImportView() {
           {/* Optional per-architecture revision overrides: platform
               generations can need different source branches (e.g.
               gst-plugins-good main for the GStreamer 1.20+ platforms,
-              '1.16' for arm64 JetPack 5, '1.14' for arm64 JetPack 4).
+              '1.16' for arm64 CPU and arm64 JetPack 5).
               Blank inputs follow the Revision field above; only
               non-empty overrides are sent. */}
           <ExpandableSection
@@ -1270,13 +1270,13 @@ export default function ImportView() {
       <Container header={<Header variant="h2">Build targets</Header>}>
         <SpaceBetween size="m">
           <Toggle checked={deepstream} onChange={({ detail }) => onDeepstreamChange(detail.checked)}>
-            NVIDIA DeepStream plugin (restricts targets to arm64 JetPack 4/5/6)
+            NVIDIA DeepStream plugin (restricts targets to arm64 JetPack 5/6)
           </Toggle>
           <FormField
             label="Target architectures"
             description={
               deepstream
-                ? 'DeepStream plugins target Jetson devices: arm64 JetPack 4, 5, and 6.'
+                ? 'DeepStream plugins target Jetson devices: arm64 JetPack 5 and 6.'
                 : 'Architectures the plugin is built for.'
             }
           >

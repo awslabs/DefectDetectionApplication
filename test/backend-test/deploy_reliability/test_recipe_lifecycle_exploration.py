@@ -145,7 +145,7 @@ def test_recipe_gates_running_on_health_via_detached_startup(recipe_name):
 RECIPE_DEFAULT_PROFILE = {
     "recipe-arm64-jp6.yaml": "tegra",
     "recipe-arm64-jp5.yaml": "tegra",
-    "recipe-arm64.yaml": "tegra",
+    "recipe-arm64.yaml": "generic",
     "recipe-amd64.yaml": "generic",
 }
 

@@ -385,3 +385,53 @@ def test_train_py_imports_without_ultralytics_and_keeps_defaults(monkeypatch):
     assert mod.CHECKPOINT_MEMBER == "best.pt"
     assert mod.MODEL_DIR is common.MODEL_DIR and mod.WORK is common.WORK
     assert "ultralytics" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# cap_onnx_ir_version: exported models keep the IR the edge runtimes load
+# ---------------------------------------------------------------------------
+
+class _FakeModel:
+    def __init__(self, ir_version):
+        self.ir_version = ir_version
+
+
+def _install_fake_onnx(monkeypatch, ir_version):
+    """A stand-in `onnx` module recording load/check/save calls, so the cap
+    logic is tested without the real (heavy) package."""
+    calls = []
+    model = _FakeModel(ir_version)
+    fake = type(sys)("onnx")
+    fake.load = lambda path: calls.append(("load", path)) or model
+    fake.save = lambda m, path: calls.append(("save", m.ir_version, path))
+    fake.checker = type(sys)("onnx.checker")
+    fake.checker.check_model = lambda m: calls.append(("check", m.ir_version))
+    monkeypatch.setitem(sys.modules, "onnx", fake)
+    return calls
+
+
+def test_cap_onnx_ir_version_lowers_newer_ir_and_revalidates(monkeypatch, tmp_path):
+    # onnx 1.22 stamps IR 13 on re-serialised graphs; onnxruntime < 1.20
+    # (the in-job 1.19.2 and older device builds) only load IR <= 10.
+    calls = _install_fake_onnx(monkeypatch, 13)
+    path = tmp_path / "model.onnx"
+    assert common.cap_onnx_ir_version(path) == (13, 10)
+    assert common.EDGE_MAX_ONNX_IR_VERSION == 10
+    # Validated under the lowered IR BEFORE the file is rewritten.
+    assert calls == [("load", str(path)), ("check", 10), ("save", 10, str(path))]
+
+
+def test_cap_onnx_ir_version_leaves_supported_ir_untouched(monkeypatch, tmp_path):
+    calls = _install_fake_onnx(monkeypatch, 10)
+    path = tmp_path / "model.onnx"
+    assert common.cap_onnx_ir_version(path) == (10, 10)
+    assert calls == [("load", str(path))]
+
+
+def test_cap_onnx_ir_version_without_onnx_leaves_file_alone(monkeypatch, tmp_path):
+    # None in sys.modules makes `import onnx` raise ImportError.
+    monkeypatch.setitem(sys.modules, "onnx", None)
+    path = tmp_path / "model.onnx"
+    path.write_bytes(b"stub")
+    assert common.cap_onnx_ir_version(path) is None
+    assert path.read_bytes() == b"stub"

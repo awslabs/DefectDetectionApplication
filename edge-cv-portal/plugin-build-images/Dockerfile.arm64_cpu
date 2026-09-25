@@ -1,0 +1,46 @@
+# dda-plugin-build:arm64_cpu - generic arm64 CPU plugin build image
+# (linux/arm64, native ARM build on a CodeBuild ARM fleet).
+#
+# Ubuntu 20.04 + GStreamer 1.16 dev headers, matching the generic arm64 CPU
+# LocalServer image (src/backend/Dockerfile built on the Ubuntu 20.04 arm64
+# build server) that non-Jetson arm64 hosts such as AWS Graviton run as
+# aws.edgeml.dda.LocalServer.arm64. No CUDA/TensorRT/DeepStream: the target
+# has no NVIDIA GPU. Used by the CodeBuild project dda-plugin-build-arm64_cpu
+# (node-designer-stack.ts); the buildspec runs /usr/local/bin/dda-plugin-build.
+#
+# Build (from edge-cv-portal/plugin-build-images/):
+#   docker buildx build --platform linux/arm64 -f Dockerfile.arm64_cpu \
+#     -t <repo-uri>:arm64_cpu .
+FROM public.ecr.aws/ubuntu/ubuntu:20.04
+ENV DEBIAN_FRONTEND=noninteractive
+# Ubuntu 20.04: apt meson is 0.53, older than the scaffold's
+# `meson_version : '>= 0.60'` - install meson + ninja from pip instead.
+# python3-dev (3.8) provides the python3-embed pkg-config dependency.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        cmake \
+        autoconf \
+        automake \
+        libtool \
+        git \
+        python3 \
+        python3-dev \
+        python3-pip \
+        libgstreamer1.0-dev \
+        libgstreamer-plugins-base1.0-dev \
+        libgstreamer-plugins-bad1.0-dev \
+        ca-certificates \
+        curl \
+        unzip \
+        xxd \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --no-cache-dir 'meson==1.4.2' ninja
+# AWS CLI v2 (S3 staging/promotion + KMS signing in the entrypoint).
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" \
+        -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/awscliv2.zip /tmp/aws
+COPY dda-plugin-build /usr/local/bin/dda-plugin-build
+RUN chmod +x /usr/local/bin/dda-plugin-build

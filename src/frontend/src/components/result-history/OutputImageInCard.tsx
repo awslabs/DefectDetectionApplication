@@ -70,7 +70,7 @@ export default function OutputImageInCard({
         <ButtonWithPadding
           iconName="expand"
           onClick={(): void =>
-            navigate(isInferenceResultPageType ? resultDetailsUrl : captureResultDetailsUrl, { state: resultsList })
+            void navigate(isInferenceResultPageType ? resultDetailsUrl : captureResultDetailsUrl, { state: resultsList })
           }
         />
       </div>

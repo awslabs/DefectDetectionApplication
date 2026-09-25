@@ -181,7 +181,8 @@ describe('Property 2: preservation — sibling layers and handler wiring (Requir
     ).toBe(true);
 
     // Function configuration unchanged.
-    expect(handler.Properties.Runtime).toBe('python3.11');
+    // CONSCIOUS UPDATE (dependabot-remediation): python3.12, because the imaging layer's Pillow 12.3 ships only manylinux_2_28 wheels, which the python3.11 runtime (Amazon Linux 2, glibc 2.26) cannot load.
+    expect(handler.Properties.Runtime).toBe('python3.12');
     expect(handler.Properties.Handler).toBe('synthetic_data.handler');
     expect(handler.Properties.MemorySize).toBe(1024);
     expect(handler.Properties.Timeout).toBe(900);

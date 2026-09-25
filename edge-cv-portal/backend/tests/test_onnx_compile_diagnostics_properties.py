@@ -21,9 +21,9 @@ Observations recorded on the unfixed tree while writing this suite:
 - Poller A stores the raw uppercase `CompilationJobStatus` verbatim,
   captures `compiled_model_s3` on COMPLETED and
   `failure_reason = response.get('FailureReason', 'Unknown')` on FAILED.
-- `COMPILATION_TARGETS` has exactly seven entries, JP5/JP6 share the
+- `COMPILATION_TARGETS` has exactly six entries, JP5/JP6 share the
   cuda-ver 11.4 / trt-ver 8.5.2 / gpu-code sm_72 triple, and there is NO
-  `jetson-xavier-jp7` key.
+  `jetson-xavier-jp7` key (nor the retired JetPack 4 `jetson-xavier`).
 - IMPORTANT scope note on 3.19: on the unfixed tree poller A
   (`get_compilation_status`) describes EVERY entry, terminal or not (that
   is exactly Defect 1's trigger), and the fix does not add a terminal
@@ -84,17 +84,11 @@ _FUNCTIONS_DIR = os.path.join(
 # Frozen baselines observed on the UNFIXED tree
 # ---------------------------------------------------------------------------
 
-# COMPILATION_TARGETS identity (3.3): all seven entries, byte-identical
+# COMPILATION_TARGETS identity (3.3): all six entries, byte-identical
 # compiler options (dict-literal key order matches the source so the
-# json.dumps strings compare equal), and NO jetson-xavier-jp7 key.
+# json.dumps strings compare equal), and NO jetson-xavier-jp7 key. The
+# JetPack 4 'jetson-xavier' target was retired with JetPack 4 support.
 FROZEN_COMPILATION_TARGETS = {
-    'jetson-xavier': {
-        'os': 'LINUX', 'arch': 'ARM64', 'accelerator': 'NVIDIA',
-        'compiler_options': json.dumps({
-            'cuda-ver': '10.2', 'gpu-code': 'sm_72', 'trt-ver': '8.2.1',
-            'max-workspace-size': '2147483648', 'precision-mode': 'fp16',
-            'jetson-platform': 'xavier'}),
-    },
     'jetson-xavier-jp5': {
         'os': 'LINUX', 'arch': 'ARM64', 'accelerator': 'NVIDIA',
         'compiler_options': json.dumps({
@@ -133,7 +127,6 @@ NEO_TARGETS = [k for k in FROZEN_COMPILATION_TARGETS if k != 'onnx']
 
 # Frozen safe-target mapping used in Neo job-name derivation.
 FROZEN_TARGET_NAME_MAPPING = {
-    'jetson-xavier': 'jetson',
     'jetson-xavier-jp5': 'jetsonjp5',
     'jetson-xavier-jp6': 'jetsonjp6',
     'x86_64-cpu': 'x86cpu',
@@ -663,14 +656,16 @@ def test_neo_polling_identity(props_env, status, with_reason):
 # ---------------------------------------------------------------------------
 
 def test_compilation_targets_identity(props_env):
-    """All seven entries frozen, including the JP5/JP6 cuda-ver 11.4 /
-    trt-ver 8.5.2 / gpu-code sm_72 triples, and NO jetson-xavier-jp7 key.
+    """All six entries frozen, including the JP5/JP6 cuda-ver 11.4 /
+    trt-ver 8.5.2 / gpu-code sm_72 triples, NO jetson-xavier-jp7 key, and
+    NO retired JetPack 4 jetson-xavier key.
     # Validates: Requirements 3.3
     """
     targets = props_env.compilation.COMPILATION_TARGETS
     assert targets == FROZEN_COMPILATION_TARGETS
     assert "jetson-xavier-jp7" not in targets
-    assert len(targets) == 7
+    assert "jetson-xavier" not in targets
+    assert len(targets) == 6
     for jp in ("jetson-xavier-jp5", "jetson-xavier-jp6"):
         options = json.loads(targets[jp]["compiler_options"])
         assert (options["cuda-ver"], options["trt-ver"],

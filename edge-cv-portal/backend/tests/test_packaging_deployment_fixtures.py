@@ -194,7 +194,7 @@ class TestWorkflowRecipeAmd64Matrix:
             ["x86_64", "x86_64_nvidia"],
             ["arm64_jp5"],
             ["x86_64", "arm64_jp5", "x86_64_nvidia"],
-            ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"],
+            ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6"],
         )
         for archs in combos:
             assert (packaging.recipe_manifest_order(archs)
@@ -327,7 +327,7 @@ class TestListingFieldDerivationRoundTrip:
         ["x86_64_nvidia"],
         ["x86_64", "x86_64_nvidia"],
         ["arm64_jp5"],
-        ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"],
+        ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6"],
     ], ids=lambda a: "+".join(a))
     def test_supported_architectures_round_trip_the_recipe(
             self, plugin_components_module, components_module, archs):

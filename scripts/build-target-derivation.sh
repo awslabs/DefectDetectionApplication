@@ -35,6 +35,9 @@
 #   Nvidia   | IS_X86_NVIDIA=1  | ""          | Dockerfile.x86_64_nvidia | 1
 #   (none)   | all 0            | ""          | Dockerfile               | 0 (forced)
 #
+# The (none) row serves aws.edgeml.dda.LocalServer.amd64 and the generic
+# arm64 CPU component aws.edgeml.dda.LocalServer.arm64.
+#
 # JP5/JP6/Nvidia rows and the no-token default row are byte-for-byte the
 # semantics previously inlined in build-custom.sh; JP7 is the added row.
 
@@ -94,8 +97,8 @@ derive_build_target() {
 # can be turned off for a fast CPU-only build with ONNXRUNTIME_GPU=0) and on
 # the x86 NVIDIA target (Dockerfile.x86_64_nvidia installs the prebuilt x86_64
 # onnxruntime-gpu wheel — PyPI ships GPU wheels for x86_64 only, so no source
-# build is needed there). JetPack 4 stays CPU-only (its native python 3.6 has
-# no compatible build path) and plain x86 uses the CPU wheel.
+# build is needed there). The generic arm64 CPU component
+# (aws.edgeml.dda.LocalServer.arm64) and plain x86 use the CPU wheel.
 #
 # Must be called after derive_build_target (reads the IS_* flags). Honors the
 # existing ONNXRUNTIME_GPU env opt-out on GPU targets (ONNXRUNTIME_GPU=0 in

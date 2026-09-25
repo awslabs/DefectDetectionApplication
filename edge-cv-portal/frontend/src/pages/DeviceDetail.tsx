@@ -34,7 +34,7 @@ import ResultsTab from '../components/ResultsTab';
 const TARGET_ARCHITECTURE_OPTIONS = [
   { label: 'x86_64', value: 'x86_64' },
   { label: 'x86_64_nvidia', value: 'x86_64_nvidia' },
-  { label: 'arm64_jp4 (JetPack 4)', value: 'arm64_jp4' },
+  { label: 'arm64_cpu (generic ARM64 CPU)', value: 'arm64_cpu' },
   { label: 'arm64_jp5 (JetPack 5)', value: 'arm64_jp5' },
   { label: 'arm64_jp6 (JetPack 6)', value: 'arm64_jp6' },
   { label: 'arm64_jp7 (JetPack 7)', value: 'arm64_jp7' },
@@ -241,7 +241,8 @@ export default function DeviceDetail() {
       arm64JP7: 'arm64_jp7',
       arm64JP6: 'arm64_jp6',
       arm64JP5: 'arm64_jp5',
-      arm64: 'arm64_jp4',
+      arm64: 'arm64_cpu',
+      aarch64: 'arm64_cpu',
       amd64: 'x86_64',
     };
     return map[suffix] ?? null;

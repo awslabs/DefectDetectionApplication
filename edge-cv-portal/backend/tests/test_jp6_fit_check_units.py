@@ -124,7 +124,7 @@ class TestFractionCap:
 
     def test_unknown_architecture_returns_none(self):
         assert fraction_cap('x86_64') is None
-        assert fraction_cap('arm64_jp4') is None
+        assert fraction_cap('arm64_cpu') is None
         assert fraction_cap(None) is None
 
     def test_reservation_falls_back_to_jp6_for_unknown_arch(self):
@@ -188,7 +188,7 @@ class TestEvaluateFitEdges:
                 * DEVICE_MEMORY_PROFILE_BYTES['arm64_jp6'])
 
     def test_unknown_architectures_are_skipped_without_findings(self):
-        assert evaluate_fit({}, 2 * GIB, ['x86_64', 'arm64_jp4']) == []
+        assert evaluate_fit({}, 2 * GIB, ['x86_64', 'arm64_cpu']) == []
         findings = evaluate_fit(
             {}, 2 * GIB, ['x86_64', 'arm64_jp6', 'unknown', 'arm64_jp7'])
         assert [f.arch for f in findings] == ['arm64_jp6', 'arm64_jp7']

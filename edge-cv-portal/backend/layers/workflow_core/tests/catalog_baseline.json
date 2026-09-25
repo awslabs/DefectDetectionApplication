@@ -51,7 +51,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -259,7 +259,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [],
         "executor_binding": "bedrock_inference",
         "plugin_dependencies": [
@@ -554,7 +554,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -756,7 +756,7 @@
         "plugin_dependencies": []
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [],
         "executor_binding": "conditional",
         "plugin_dependencies": []
@@ -866,7 +866,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -1126,7 +1126,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -1397,7 +1397,7 @@
         "plugin_dependencies": []
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -1578,7 +1578,7 @@
         "plugin_dependencies": []
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -1733,7 +1733,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -1940,7 +1940,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -2086,7 +2086,7 @@
         "plugin_dependencies": []
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [],
         "executor_binding": "digital_input",
         "plugin_dependencies": []
@@ -2233,7 +2233,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -2480,7 +2480,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -2764,7 +2764,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {},
@@ -2949,7 +2949,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -3110,7 +3110,7 @@
         "plugin_dependencies": []
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [],
         "executor_binding": "inference_filter",
         "plugin_dependencies": []
@@ -3360,7 +3360,7 @@
         "plugin_dependencies": []
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [],
         "executor_binding": "metadata",
         "plugin_dependencies": []
@@ -3453,7 +3453,7 @@
         "plugin_dependencies": []
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [],
         "executor_binding": "modbus_write",
         "plugin_dependencies": []
@@ -3683,7 +3683,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {
@@ -3875,7 +3875,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [],
         "executor_binding": "mqtt_publish",
         "plugin_dependencies": [
@@ -4090,7 +4090,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [],
         "executor_binding": "mqtt_subscribe",
         "plugin_dependencies": [
@@ -4420,7 +4420,7 @@
         "element_chain": [],
         "executor_binding": "opcua_subscribe",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
@@ -4428,15 +4428,15 @@
         "element_chain": [],
         "executor_binding": "opcua_subscribe",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [],
         "executor_binding": "opcua_subscribe",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
@@ -4444,7 +4444,7 @@
         "element_chain": [],
         "executor_binding": "opcua_subscribe",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
@@ -4452,7 +4452,7 @@
         "element_chain": [],
         "executor_binding": "opcua_subscribe",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
@@ -4460,7 +4460,7 @@
         "element_chain": [],
         "executor_binding": "opcua_subscribe",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
@@ -4769,7 +4769,7 @@
         "element_chain": [],
         "executor_binding": "opcua_write",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
@@ -4777,15 +4777,15 @@
         "element_chain": [],
         "executor_binding": "opcua_write",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [],
         "executor_binding": "opcua_write",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
@@ -4793,7 +4793,7 @@
         "element_chain": [],
         "executor_binding": "opcua_write",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
@@ -4801,7 +4801,7 @@
         "element_chain": [],
         "executor_binding": "opcua_write",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
@@ -4809,7 +4809,7 @@
         "element_chain": [],
         "executor_binding": "opcua_write",
         "plugin_dependencies": [
-          "python:opcua"
+          "python:asyncua"
         ]
       },
       {
@@ -5003,7 +5003,7 @@
         ]
       },
       {
-        "arch": "arm64_jp4",
+        "arch": "arm64_cpu",
         "element_chain": [
           {
             "args_template": {

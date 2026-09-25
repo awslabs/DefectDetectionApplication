@@ -7,7 +7,7 @@
 # **Validates: Requirements 1.1, 1.4**
 #
 # detect_target_architecture must print exactly one member of the fixed set
-#   {x86_64, x86_64_nvidia, arm64_jp4, arm64_jp5, arm64_jp6, arm64_jp7}
+#   {x86_64, x86_64_nvidia, arm64_cpu, arm64_jp5, arm64_jp6, arm64_jp7}
 # or nothing (empty) when undetermined, and must NEVER exit non-zero.
 #
 # Strategy: the function resolves its inputs from (a) overridable file/uname
@@ -102,10 +102,10 @@ _tegra_release() {  # <R-major-line-body>
 # aarch64 via /etc/nv_tegra_release (Req 1.2)
 # ============================================================================
 
-@test "aarch64: nv_tegra_release R32 -> arm64_jp4" {
+@test "aarch64: nv_tegra_release R32 (retired JetPack 4) -> empty, never arm64_cpu" {
     export DETECT_ARCH_UNAME_M="aarch64"
     _tegra_release "# R32 (release), REVISION: 7.1, GCID: 12345, BOARD: t210ref"
-    _run_detect "arm64_jp4"
+    _run_detect ""
 }
 
 @test "aarch64: nv_tegra_release R35 -> arm64_jp5" {
@@ -157,11 +157,11 @@ _tegra_release() {  # <R-major-line-body>
     _run_detect "arm64_jp6"
 }
 
-@test "aarch64: dpkg nvidia-l4t-core 32.x fallback -> arm64_jp4" {
+@test "aarch64: dpkg nvidia-l4t-core 32.x (retired JetPack 4) -> empty, never arm64_cpu" {
     export DETECT_ARCH_UNAME_M="aarch64"
     export NV_TEGRA_RELEASE_FILE="${FIX}/absent-tegra-release"
     export STUB_DPKG_L4T_VERSION="32.7.1-20220219090344"
-    _run_detect "arm64_jp4"
+    _run_detect ""
 }
 
 @test "aarch64: dpkg nvidia-l4t-core 38.x fallback -> arm64_jp7" {
@@ -178,11 +178,17 @@ _tegra_release() {  # <R-major-line-body>
     _run_detect "arm64_jp6"
 }
 
-@test "aarch64: no release file and no dpkg package -> empty" {
+@test "aarch64: no release file and no dpkg package -> arm64_cpu (non-Jetson host)" {
     export DETECT_ARCH_UNAME_M="aarch64"
     export NV_TEGRA_RELEASE_FILE="${FIX}/absent-tegra-release"
     export STUB_DPKG_L4T_VERSION=""
-    _run_detect ""
+    _run_detect "arm64_cpu"
+}
+
+@test "arm64 machine name with no L4T -> arm64_cpu" {
+    export DETECT_ARCH_UNAME_M="arm64"
+    export NV_TEGRA_RELEASE_FILE="${FIX}/absent-tegra-release"
+    _run_detect "arm64_cpu"
 }
 
 # ============================================================================

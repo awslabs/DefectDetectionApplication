@@ -3,7 +3,7 @@
 **Feature: custom-node-designer, Property 20: Plugin_Component manifests are exactly the built architectures**
 
 For all Plugin_Record versions with random per-architecture build
-outcomes (over x86_64, x86_64_nvidia, arm64_jp4/jp5/jp6, at least one
+outcomes (over x86_64, x86_64_nvidia, arm64_cpu/jp5/jp6, at least one
 success), the assembled Plugin_Component recipe is named
 ``dda.plugin.{pluginId}`` at version ``{pluginVersion}.0.0``, is
 install-only, and contains exactly one platform manifest per
@@ -48,14 +48,14 @@ def components_module(aws_stack):
 # agree with a wrong platform map).
 # ---------------------------------------------------------------------------
 
-ARCHS = ("x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6")
+ARCHS = ("x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6")
 
 EXPECTED_PLATFORM = {
     "x86_64": {"os": "linux", "architecture": "amd64"},
     "x86_64_nvidia": {"os": "linux", "architecture": "amd64",
                       "runtime": "nvidia"},
-    "arm64_jp4": {"os": "linux", "architecture": "aarch64",
-                  "variant": "arm64_jp4"},
+    "arm64_cpu": {"os": "linux", "architecture": "aarch64",
+                  "variant": "arm64_cpu"},
     "arm64_jp5": {"os": "linux", "architecture": "aarch64",
                   "variant": "arm64_jp5"},
     "arm64_jp6": {"os": "linux", "architecture": "aarch64",

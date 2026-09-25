@@ -131,7 +131,7 @@ def target_architectures_from_platforms(platforms) -> List[str]:
     plugin_components.platform_for:
 
       - architecture aarch64  -> the JetPack arch named by the 'variant'
-                                 attribute (arm64_jp4 / arm64_jp5 / arm64_jp6)
+                                 attribute (arm64_cpu / arm64_jp5 / arm64_jp6 / arm64_jp7)
       - architecture amd64 + 'runtime: nvidia' -> x86_64_nvidia
       - architecture amd64 (no runtime)        -> x86_64
 

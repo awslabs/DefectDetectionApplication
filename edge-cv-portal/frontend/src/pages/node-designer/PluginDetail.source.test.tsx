@@ -146,7 +146,7 @@ function buildsView(overrides: Partial<PluginBuildsView> = {}): PluginBuildsView
     component_packaging_triggered: false,
     source_revision: 3,
     stale_architectures: [],
-    buildable_architectures: ['x86_64', 'arm64_jp4', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7'],
+    buildable_architectures: ['x86_64', 'arm64_cpu', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7'],
     component: { version: '0.2', revision: 2, architectures: ['arm64_jp5', 'x86_64'], status: 'published' },
     ...overrides,
   };
@@ -442,9 +442,9 @@ describe('PluginDetail add architectures', () => {
     const trigger = screen.getByRole('button', { name: /Select architectures to add/ });
     fireEvent.mouseDown(trigger);
     fireEvent.click(trigger);
-    // Registry minus requested: jp4, jp6, jp7 — never x86_64 or jp5.
+    // Registry minus requested: cpu, jp6, jp7 — never x86_64 or jp5.
     expect(await screen.findAllByRole('option')).toHaveLength(3);
-    expect(screen.getByRole('option', { name: /arm64 JetPack 4/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /arm64 CPU/ })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /arm64 JetPack 6/ })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: /x86_64/ })).toBeNull();
     expect(screen.queryByRole('option', { name: /JetPack 5/ })).toBeNull();

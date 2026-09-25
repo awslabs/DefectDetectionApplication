@@ -66,7 +66,7 @@ PLUGIN_PREFIX = "dda.plugin."
 ARCH_TO_GG_PLATFORM = {
     "x86_64": "amd64",
     "x86_64_nvidia": "amd64",
-    "arm64_jp4": "aarch64",
+    "arm64_cpu": "aarch64",
     "arm64_jp5": "aarch64",
     "arm64_jp6": "aarch64",
 }

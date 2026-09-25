@@ -32,7 +32,7 @@ from conftest import TEST_ENV
 ACCOUNT = "123456789012"
 REGION = "us-east-1"
 
-ALL_ARCHS = ("x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6")
+ALL_ARCHS = ("x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6")
 
 
 @pytest.fixture(scope="module")

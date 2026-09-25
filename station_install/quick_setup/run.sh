@@ -314,7 +314,7 @@ fi
 
 # Detect the DDA Target_Architecture up front (read-only, never fatal) so it can
 # seed the Greengrass Nucleus platform `variant` override during provisioning:
-# LocalServer's per-JetPack aarch64 variants (arm64_jp4/jp5/jp6) all report
+# LocalServer's aarch64 variants (arm64_cpu, arm64_jp5/jp6/jp7) all report
 # architecture "aarch64", so a multi-arm-variant Workflow_Component only deploys
 # to a device that declares its `variant` (device-arch-compatibility). Passing
 # the detected token as DDA_PLATFORM_VARIANT makes setup_station.sh write the

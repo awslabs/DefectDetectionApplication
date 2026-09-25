@@ -16,7 +16,7 @@
 export const DEVICE_ARCHITECTURES = [
   'x86_64',
   'x86_64_nvidia',
-  'arm64_jp4',
+  'arm64_cpu',
   'arm64_jp5',
   'arm64_jp6',
   'arm64_jp7',
@@ -26,7 +26,6 @@ export type DeviceArchitecture = (typeof DEVICE_ARCHITECTURES)[number];
 
 /** Architectures with a DeepStream runtime (Requirement 5.1). */
 export const DEEPSTREAM_ARCHITECTURES = [
-  'arm64_jp4',
   'arm64_jp5',
   'arm64_jp6',
 ] as const;
@@ -35,7 +34,7 @@ export const DEEPSTREAM_ARCHITECTURES = [
 export const ARCHITECTURE_LABELS: Record<DeviceArchitecture, string> = {
   x86_64: 'x86_64',
   x86_64_nvidia: 'x86_64 (NVIDIA GPU)',
-  arm64_jp4: 'arm64 JetPack 4',
+  arm64_cpu: 'arm64 CPU',
   arm64_jp5: 'arm64 JetPack 5',
   arm64_jp6: 'arm64 JetPack 6',
   arm64_jp7: 'arm64 JetPack 7',
@@ -584,7 +583,8 @@ export interface ImportPluginRequest {
    * neither is given). Distinct effective revisions fetch once each;
    * absent keeps today's single-revision behavior exactly. Motivating
    * scenario: gst-plugins-good needs main for the GStreamer 1.20+
-   * platforms but branch '1.16' for arm64_jp5 and '1.14' for arm64_jp4.
+   * platforms but branch '1.16' for the Ubuntu 20.04 platforms
+   * (arm64_cpu, arm64_jp5).
    */
   arch_revisions?: Record<string, string>;
 }

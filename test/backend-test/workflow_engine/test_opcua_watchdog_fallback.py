@@ -16,8 +16,8 @@
 
 Feature: trigger-activation-runtime — design C6's
 :class:`OpcuaSubscribeWorker` exercised through its injection seams
-(``client_factory`` for a scripted stub opcua client, ``waiter`` for the
-watchdog/poll interval waits — no opcua package, no network, no real
+(``client_factory`` for a scripted stub OPC UA client, ``waiter`` for the
+watchdog/poll interval waits — no asyncua package, no network, no real
 sleeps beyond millisecond cadences):
 
 (a) each of the spike's four keepalive loss signals (TimeoutError /
@@ -72,7 +72,7 @@ SETTLE_SECONDS = 0.05
 
 
 # ---------------------------------------------------------------------------
-# Scripted stub opcua client (the ``client_factory`` seam)
+# Scripted stub OPC UA client (the ``client_factory`` seam)
 # ---------------------------------------------------------------------------
 
 
@@ -103,7 +103,7 @@ class StubSubscription:
 
 
 class ScriptedOpcuaClient:
-    """Stub python-opcua client: security/connect calls recorded,
+    """Stub asyncua.sync client: security/connect calls recorded,
     subscription setup failable on demand, node reads scripted.
 
     - ``keepalive_errors``: exceptions the server-status node read raises

@@ -250,8 +250,25 @@ class TestBuildSubmission:
         assert status == 400
         assert body["error"]["code"] == "INVALID_ARCHITECTURES"
 
+    def test_rejects_retired_jetpack4_architecture(self, benv):
+        """JetPack 4 support was removed: arm64_jp4 is no longer a
+        selectable Target_Architecture (writes stay strict)."""
+        usecase_id = benv.create_usecase()
+        admin = benv.make_admin(usecase_id)
+        plugin = benv.create_plugin(admin, usecase_id)
+
+        status, body = benv.post_build(admin, plugin["plugin_id"],
+                                       plugin["version"],
+                                       {"architectures": ["arm64_jp4"]})
+
+        assert status == 400
+        assert body["error"]["code"] == "INVALID_ARCHITECTURES"
+        assert "arm64_jp4" not in body["error"]["details"]["valid"]
+        assert "arm64_cpu" in body["error"]["details"]["valid"]
+
     def test_deepstream_record_restricted_to_jetpack_architectures(self, benv):
-        """DeepStream-flagged records may only select arm64_jp4/jp5/jp6 (5.1)."""
+        """DeepStream-flagged records may only select arm64_jp5/jp6 (5.1);
+        the generic arm64 CPU build has no DeepStream."""
         usecase_id = benv.create_usecase()
         admin = benv.make_admin(usecase_id)
         plugin = benv.create_plugin(admin, usecase_id, deepstream=True)
@@ -263,9 +280,16 @@ class TestBuildSubmission:
         assert body["error"]["code"] == "INVALID_ARCHITECTURES"
         assert body["error"]["details"]["invalid"] == ["x86_64"]
 
+        status, body = benv.post_build(admin, plugin["plugin_id"],
+                                       plugin["version"],
+                                       {"architectures": ["arm64_cpu", "arm64_jp6"]})
+        assert status == 400
+        assert body["error"]["code"] == "INVALID_ARCHITECTURES"
+        assert body["error"]["details"]["invalid"] == ["arm64_cpu"]
+
         status, _ = benv.post_build(admin, plugin["plugin_id"],
                                     plugin["version"],
-                                    {"architectures": ["arm64_jp4", "arm64_jp6"]})
+                                    {"architectures": ["arm64_jp5", "arm64_jp6"]})
         assert status == 202
 
     def test_viewer_cannot_submit_builds(self, benv):
@@ -377,12 +401,12 @@ class TestBuildResults:
         plugin = benv.create_plugin(admin, usecase_id)
         plugin_id, version = plugin["plugin_id"], plugin["version"]
         benv.post_build(admin, plugin_id, version,
-                        {"architectures": ["arm64_jp4"]})
-        build_id = benv.get_item(plugin_id, version)["artifacts"]["arm64_jp4"]["buildId"]
+                        {"architectures": ["arm64_cpu"]})
+        build_id = benv.get_item(plugin_id, version)["artifacts"]["arm64_cpu"]["buildId"]
 
         # Stage the CloudWatch build log the handler tails (3.4).
         logs = benv.stack.plugin_builds.logs_client
-        group, stream = "/aws/codebuild/dda-plugin-build-arm64_jp4", build_id.split(":")[1]
+        group, stream = "/aws/codebuild/dda-plugin-build-arm64_cpu", build_id.split(":")[1]
         logs.create_log_group(logGroupName=group)
         logs.create_log_stream(logGroupName=group, logStreamName=stream)
         now = int(time.time() * 1000)
@@ -392,13 +416,13 @@ class TestBuildResults:
         ])
 
         result = benv.deliver_result(
-            arch="arm64_jp4", build_id=build_id, status="FAILED",
+            arch="arm64_cpu", build_id=build_id, status="FAILED",
             plugin_id=plugin_id, version=version, usecase_id=usecase_id,
             plugin_name="blur-regions",
             logs={"group-name": group, "stream-name": stream})
 
         assert result["recorded"] is True
-        entry = benv.get_item(plugin_id, version)["artifacts"]["arm64_jp4"]
+        entry = benv.get_item(plugin_id, version)["artifacts"]["arm64_cpu"]
         assert entry["buildStatus"] == "failed"
         assert "undefined reference" in entry["logTail"]
         assert "s3Key" not in entry and "checksum" not in entry \
@@ -465,7 +489,7 @@ class TestComponentPackagingTrigger:
                 lambda **kw: invocations.append(kw))})())
 
         benv.post_build(admin, plugin_id, version,
-                        {"architectures": ["x86_64", "arm64_jp4"]})
+                        {"architectures": ["x86_64", "arm64_cpu"]})
         item = benv.get_item(plugin_id, version)
 
         # First arch succeeds: not settled yet, no trigger.
@@ -479,7 +503,7 @@ class TestComponentPackagingTrigger:
 
         # Second arch fails: settled with one success -> single trigger.
         r2 = benv.deliver_result(
-            arch="arm64_jp4", build_id=item["artifacts"]["arm64_jp4"]["buildId"],
+            arch="arm64_cpu", build_id=item["artifacts"]["arm64_cpu"]["buildId"],
             status="FAILED", plugin_id=plugin_id, version=version,
             usecase_id=usecase_id, plugin_name="blur-regions")
         assert r2["component_packaging_triggered"] is True

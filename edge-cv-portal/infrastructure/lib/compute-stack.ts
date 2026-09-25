@@ -136,9 +136,12 @@ export class ComputeStack extends cdk.Stack {
     }
 
     // Lambda Layer for shared utilities
+    // python3.12 is listed for the Pillow (imaging layer) consumers, which
+    // run on python3.12; the vendored packages are pure Python or fall back
+    // to their pure-Python implementations there.
     const sharedLayer = new lambda.LayerVersion(this, 'SharedLayer', {
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/shared')),
-      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11, lambda.Runtime.PYTHON_3_12],
       description: 'Shared utilities for Edge CV Portal Lambda functions - v2024-12-12-fixed-syntax',
     });
 
@@ -709,9 +712,13 @@ export class ComputeStack extends cdk.Stack {
       // backend coverage test (test_workflow_min_localserver_floor_coverage.py)
       // enforces it. Archs missing from the map resolve the safe '1.0.0'
       // per-lineage floor with a loud warning, never the cross-lineage scalar.
-      // Keys are workflow_core arch ids.
+      // Keys are workflow_core arch ids. arm64_cpu (the bare .arm64 name, now
+      // the generic arm64 CPU build) floors at 1.1.0: every 1.0.x build of
+      // that name still installed in the field is a JetPack 4-era build that
+      // identifies as arm64_jp4 on device, so a workflow's dependency must
+      // pull such a device up to an arm64_cpu-aware build.
       WORKFLOW_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({
-        arm64_jp4: '1.0.0',
+        arm64_cpu: '1.1.0',
         arm64_jp5: '1.0.0',
         arm64_jp6: '1.0.0',
         arm64_jp7: '1.0.0',
@@ -1635,7 +1642,8 @@ export class ComputeStack extends cdk.Stack {
     const staticImagePinPrefix = 'static-image-pins';
 
     const cameraRegistryHandler = new lambda.Function(this, 'CameraRegistryHandler', {
-      runtime: lambda.Runtime.PYTHON_3_11,
+      // python3.12: the attached imaging layer's Pillow needs glibc >= 2.28.
+      runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'camera_registry.handler',
       // The functions directory asset bundles camera_sync.py and
       // pin_requests.py alongside camera_registry.py (both are imported
@@ -2204,7 +2212,7 @@ export class ComputeStack extends cdk.Stack {
     const imagingLayer = new lambda.LayerVersion(this, 'ImagingLayer', {
       code: lambda.Code.fromAsset(imagingLayerSourceDir, {
         bundling: {
-          image: lambda.Runtime.PYTHON_3_11.bundlingImage,
+          image: lambda.Runtime.PYTHON_3_12.bundlingImage,
           command: [
             'bash',
             '-c',
@@ -2215,15 +2223,19 @@ export class ComputeStack extends cdk.Stack {
               try {
                 // Same wheel targeting as build.sh: Pillow ships native
                 // extensions, so force the manylinux wheel matching the
-                // Lambda runtime (Python 3.11, x86_64) regardless of host.
+                // Lambda runtime (Python 3.12, x86_64) regardless of host.
+                // Pillow >= 12 publishes only manylinux_2_28 wheels, which
+                // need the glibc 2.34 of the python3.12 runtime (Amazon
+                // Linux 2023); python3.11 (Amazon Linux 2, glibc 2.26)
+                // cannot load them.
                 execSync(
                   [
                     'pip install',
                     `-r ${path.join(imagingLayerSourceDir, 'requirements.txt')}`,
                     `-t ${path.join(outputDir, 'python')}`,
-                    '--platform manylinux2014_x86_64',
+                    '--platform manylinux_2_28_x86_64',
                     '--implementation cp',
-                    '--python-version 3.11',
+                    '--python-version 3.12',
                     '--only-binary=:all:',
                   ].join(' '),
                   { stdio: ['ignore', 'pipe', 'pipe'] }
@@ -2237,7 +2249,7 @@ export class ComputeStack extends cdk.Stack {
           },
         },
       }),
-      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
       description:
         'Pillow imaging layer for DDA labeling mask rendering (built by ' +
         'backend/layers/imaging/build.sh)',
@@ -2274,7 +2286,8 @@ export class ComputeStack extends cdk.Stack {
     // SES notifications, and manifest generation (segmentation mask
     // rendering with Pillow is why it gets 2 GB / 900 s).
     const ddaLabelingWorker = new lambda.Function(this, 'DdaLabelingWorker', {
-      runtime: lambda.Runtime.PYTHON_3_11,
+      // python3.12: the attached imaging layer's Pillow needs glibc >= 2.28.
+      runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'dda_labeling_worker.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
       role: createLambdaRole('DdaLabelingWorker'),
@@ -2313,7 +2326,8 @@ export class ComputeStack extends cdk.Stack {
     // API handler (dda_labeling.py): team management, DDA job creation
     // (delegated from labeling.py), labeler task APIs, admin review.
     const ddaLabelingHandler = new lambda.Function(this, 'DdaLabelingHandler', {
-      runtime: lambda.Runtime.PYTHON_3_11,
+      // python3.12: the attached imaging layer's Pillow needs glibc >= 2.28.
+      runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'dda_labeling.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
       role: createLambdaRole('DdaLabeling'),
@@ -2442,7 +2456,8 @@ export class ComputeStack extends cdk.Stack {
     // SAM pre-labeling per image. Returns partial batch responses, hence
     // reportBatchItemFailures.
     const ddaAutolabelWorker = new lambda.Function(this, 'DdaAutolabelWorker', {
-      runtime: lambda.Runtime.PYTHON_3_11,
+      // python3.12: the attached imaging layer's Pillow needs glibc >= 2.28.
+      runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'dda_autolabel_worker.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
       role: createLambdaRole('DdaAutolabelWorker'),

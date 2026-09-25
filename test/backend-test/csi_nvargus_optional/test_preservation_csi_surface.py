@@ -25,7 +25,7 @@ tests PASS on the unfixed tree and must KEEP passing on the fixed tree
 - **Recipes byte-identical (3.5)**: sha256 of all five arm64 recipes + both
   amd64 recipes pinned in ``goldens/recipe_sha256.json``. Design Decision 1's
   keystone — the fix gates the installer SCRIPT, never the recipes.
-- **setup_station prefix property (3.4, 3.6)**: every one of the 1625 unfixed
+- **setup_station prefix property (3.4, 3.6)**: every one of the 1581 unfixed
   lines of ``station_install/setup_station.sh`` (pinned byte-for-byte in
   ``goldens/setup_station_unfixed_prefix.txt``) is byte-identical AND in the
   same position in the fixed file — the task 3.1 CSI opt-in block is strictly
@@ -34,7 +34,7 @@ tests PASS on the unfixed tree and must KEEP passing on the fixed tree
   allowance the security gate's
   ``test_preservation_dependency_setup_station.py`` grants). Corollary
   asserted directly: the ``dependency_baseline_unpinned_py36.json`` entries
-  still resolve at their recorded line numbers (656, 680).
+  still resolve at their recorded line numbers (663, 687).
 - **Staged-frame contract fingerprint (3.1, 3.2)**: the contract constants
   observed verbatim in the UNFIXED ``nvidia_csi_capture.sh`` — capture dir,
   ``latest.jpg``, ``config.json`` keys + jq defaults (gain 4, exposure
@@ -152,7 +152,8 @@ def test_recipe_byte_identical_to_unfixed_golden(recipe_name):
 
 # ---------------------------------------------------------------------------
 # setup_station prefix property (3.4, 3.6): the unfixed file is pinned
-# byte-for-byte as goldens/setup_station_unfixed_prefix.txt (1625 lines).
+# byte-for-byte as goldens/setup_station_unfixed_prefix.txt (1581 lines;
+# re-baselined when JetPack 4 support was removed mid-file).
 # Every unfixed line must remain byte-identical and IN THE SAME POSITION in
 # the (future) fixed file — the CSI opt-in block is strictly appended.
 # ---------------------------------------------------------------------------
@@ -163,7 +164,7 @@ def _prefix_golden_lines():
 
 def test_setup_station_unfixed_lines_form_a_byte_identical_prefix():
     """Requirement 3.4: every existing provisioning step unchanged — each of
-    the 1625 unfixed lines is byte-identical at the same line number in the
+    the 1581 unfixed lines is byte-identical at the same line number in the
     current file; anything the fix adds comes strictly AFTER them. Only the
     F1 requests-pin line may differ, and only in its version token (the
     security gate's own allowance).
@@ -171,8 +172,8 @@ def test_setup_station_unfixed_lines_form_a_byte_identical_prefix():
     Validates: Requirements 3.4, 3.6
     """
     golden_lines = _prefix_golden_lines()
-    assert len(golden_lines) == 1625, (
-        "the unfixed-tree golden should have exactly 1625 lines (the "
+    assert len(golden_lines) == 1581, (
+        "the unfixed-tree golden should have exactly 1581 lines (the "
         "recorded unfixed line count), got {}".format(len(golden_lines)))
     current_lines = _read(SETUP_STATION).splitlines()
     assert len(current_lines) >= len(golden_lines), (
@@ -200,7 +201,7 @@ def test_unpinned_py36_entries_resolve_at_recorded_line_numbers():
     """Requirement 3.4/3.6 corollary asserted directly: the security gate's
     dependency_baseline_unpinned_py36.json records the unpinned
     system-python3 install lines of setup_station.sh WITH line numbers
-    (656, 680); those lines must still be found verbatim at exactly those
+    (663, 687); those lines must still be found verbatim at exactly those
     numbers — the premise that an end-of-file append never shifts them.
 
     Validates: Requirements 3.4, 3.6
@@ -209,9 +210,9 @@ def test_unpinned_py36_entries_resolve_at_recorded_line_numbers():
         baseline = json.load(f)
     entries = [e for e in baseline["entries"]
                if e["file"] == "station_install/setup_station.sh"]
-    assert sorted(e["lineno"] for e in entries) == [656, 680], (
+    assert sorted(e["lineno"] for e in entries) == [663, 687], (
         "the unpinned-py36 baseline no longer records setup_station.sh "
-        "entries at lines 656 and 680 — it was rebaselined with shifted "
+        "entries at lines 663 and 687 — it was rebaselined with shifted "
         "line numbers, meaning the CSI block was NOT strictly appended: "
         "{!r}".format(entries))
     current_lines = _read(SETUP_STATION).splitlines()

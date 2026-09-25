@@ -46,7 +46,7 @@ from camera_discovery import aravis, v4l2
 logger = logging.getLogger(__name__)
 
 #: V4L2 driver names that expose Jetson CSI sensors as video nodes
-#: (the tegra-video family; JP4/JP5 report "tegra-video", newer stacks
+#: (the tegra-video family; JP5 reports "tegra-video", newer stacks
 #: report the camrtc capture driver).
 TEGRA_CSI_DRIVERS = frozenset(
     {

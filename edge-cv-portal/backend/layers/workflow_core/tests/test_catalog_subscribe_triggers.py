@@ -154,7 +154,7 @@ class TestTriggerMappings:
     EXPECTED = {
         "mqtt_subscribe": ("mqtt_subscribe",
                            ["python:paho-mqtt", "python:awsiotsdk"]),
-        "opcua_subscribe": ("opcua_subscribe", ["python:opcua"]),
+        "opcua_subscribe": ("opcua_subscribe", ["python:asyncua"]),
     }
 
     @pytest.mark.parametrize("type_id", ["mqtt_subscribe", "opcua_subscribe"])

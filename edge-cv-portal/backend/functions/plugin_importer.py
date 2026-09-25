@@ -749,8 +749,8 @@ def dedupe_selected_plugins(selected) -> List[str]:
 # Optional per-architecture source revisions (POST /plugins/import
 # `arch_revisions: {arch: revision}`): importing e.g. gst-plugins-good
 # for all platforms needs different branches per platform generation
-# (main for the GStreamer 1.20+ platforms, '1.16' for arm64_jp5, '1.14'
-# for arm64_jp4). Each arch's effective revision is its override or the
+# (main for the GStreamer 1.20+ platforms, '1.16' for the Ubuntu 20.04
+# platforms arm64_cpu/arm64_jp5). Each arch's effective revision is its override or the
 # top-level revision (default branch when neither is given). When more
 # than one DISTINCT effective revision exists, each distinct revision
 # fetches ONCE to its own rev-{slug}/ prefix and archs sharing a
@@ -1554,7 +1554,7 @@ def submit_builds(architectures: List[str]) -> Dict[str, Dict]:
 #: assistant's build-platform description:
 #:   - x86_64:        Ubuntu 22.04                        -> GStreamer 1.20
 #:   - x86_64_nvidia: CUDA on Ubuntu 22.04                -> GStreamer 1.20
-#:   - arm64_jp4:     L4T r32 (JetPack 4, Ubuntu 18.04)   -> GStreamer 1.14
+#:   - arm64_cpu:     Ubuntu 20.04 (non-Jetson arm64)     -> GStreamer 1.16
 #:   - arm64_jp5:     L4T r35 (JetPack 5, Ubuntu 20.04)   -> GStreamer 1.16
 #:   - arm64_jp6:     L4T r36 (JetPack 6, Ubuntu 22.04)   -> GStreamer 1.20
 #:   - arm64_jp7:     Ubuntu 24.04 + CUDA 13 (Thor)       -> GStreamer 1.24
@@ -1565,8 +1565,8 @@ PLATFORM_GSTREAMER_VERSIONS = platform_gstreamer_versions()
 #: subproject fallback when the source requires more than the platform
 #: ships. Observed in production: gst-plugins-good main (requires
 #: GStreamer >= 1.24) builds fine on x86_64 / x86_64_nvidia /
-#: arm64_jp6 (which ship 1.20) via the fallback, while arm64_jp4
-#: (Ubuntu 18.04) and arm64_jp5 (Ubuntu 20.04) fail with an obscure
+#: arm64_jp6 (which ship 1.20) via the fallback, while the Ubuntu
+#: 20.04 platforms (arm64_cpu, arm64_jp5) fail with an obscure
 #: meson subproject error — their toolchains are too old to build a
 #: current GStreamer from source. arm64_jp7 (Ubuntu 24.04) has the
 #: fallback too. Shared with workflow_core.catalog.platforms.
@@ -1699,7 +1699,7 @@ def platform_compatibility(required_version: Optional[str],
         (`classification_or_module` carries the provenance moduleName
         or a good/bad/ugly classification), the upstream release branch
         matching the platform's GStreamer minor (e.g. '1.16' for
-        arm64_jp5, '1.14' for arm64_jp4) — verified working in
+        arm64_jp5 and arm64_cpu) — verified working in
         production. Non-official repositories get no suggestion (None):
         their branch layout is unknown.
     """
@@ -2793,7 +2793,11 @@ def adjust_revision(event: Dict, user: Dict, plugin_id: str,
     if not item:
         return not_found_response()
 
-    architectures = [str(a) for a in item.get('requested_architectures') or []]
+    # Only architectures that are still targets can take a revision: a
+    # legacy record may still list a retired one (e.g. arm64_jp4), whose
+    # rebuild would fail at build start.
+    architectures = [str(a) for a in item.get('requested_architectures') or []
+                     if str(a) in DEVICE_ARCHITECTURES]
     architecture = body.get('architecture')
     if not isinstance(architecture, str) or architecture not in architectures:
         return error_response(

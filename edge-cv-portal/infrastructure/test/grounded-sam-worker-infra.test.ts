@@ -227,7 +227,8 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
   test('handler, runtime, timeout and memory are unchanged', () => {
     const [, fn] = lambdaByHandler('dda_autolabel_worker.handler');
     expect(fn.Properties.Handler).toBe('dda_autolabel_worker.handler');
-    expect(fn.Properties.Runtime).toBe('python3.11');
+    // CONSCIOUS UPDATE (dependabot-remediation): python3.12, because the imaging layer's Pillow 12.3 ships only manylinux_2_28 wheels, which the python3.11 runtime (Amazon Linux 2, glibc 2.26) cannot load.
+    expect(fn.Properties.Runtime).toBe('python3.12');
     expect(fn.Properties.Timeout).toBe(300);
     // 2048 MB per llm-model-token-and-image-sizing Req 6.11 (the
     // Image_Downscaler allocation) — this feature must not move it.
@@ -314,7 +315,7 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
     expect(env.COMPONENT_BUCKET_PREFIX).toBe('dda-component');
     expect(env.WORKFLOW_MIN_LOCAL_SERVER_VERSIONS).toBe(
       JSON.stringify({
-        arm64_jp4: '1.0.0',
+        arm64_cpu: '1.1.0',
         arm64_jp5: '1.0.0',
         arm64_jp6: '1.0.0',
         arm64_jp7: '1.0.0',

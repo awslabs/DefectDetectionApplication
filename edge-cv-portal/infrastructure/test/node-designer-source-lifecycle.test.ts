@@ -73,7 +73,13 @@ function statementsOfRole(rolePrefix: string): any[] {
   expect(roleIds.length).toBe(1);
   const roleId = roleIds[0];
   const statements: any[] = [];
-  for (const policy of Object.values(template.findResources('AWS::IAM::Policy'))) {
+  // Inline DefaultPolicy statements plus the OverflowPolicy managed
+  // policies CDK spills them into once a role's inline policy grows
+  // past the size limit (search both carrier types).
+  for (const policy of [
+    ...Object.values(template.findResources('AWS::IAM::Policy')),
+    ...Object.values(template.findResources('AWS::IAM::ManagedPolicy')),
+  ]) {
     const attached = asArray((policy as any).Properties.Roles).some(
       (r: any) => text(r).includes(roleId),
     );
@@ -196,7 +202,12 @@ describe('GitSyncHandler Lambda (Requirement 2.4)', () => {
     );
     expect(handlerRoleId).toBeDefined();
     const statements: any[] = [];
-    for (const policy of Object.values(template.findResources('AWS::IAM::Policy'))) {
+    // Both carrier types: CDK spills inline statements into OverflowPolicy
+    // managed policies once the role's inline policy grows past the limit.
+    for (const policy of [
+      ...Object.values(template.findResources('AWS::IAM::Policy')),
+      ...Object.values(template.findResources('AWS::IAM::ManagedPolicy')),
+    ]) {
       const attached = asArray((policy as any).Properties.Roles).some(
         (r: any) => text(r).includes(handlerRoleId as string),
       );

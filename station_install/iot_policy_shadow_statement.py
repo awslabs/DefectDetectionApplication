@@ -25,8 +25,8 @@ preserving every existing statement verbatim and in order (``augment``).
 
 Constraints (design D3, camera-shadow-sync-provisioning spec):
 
-- Pure stdlib, Python 3.6-compatible (JP4 devices run Ubuntu 18.04's system
-  python3). No AWS SDK, no network: input is a policy document JSON on
+- Pure stdlib, compatible with the oldest station's system python3
+  (Python 3.6 syntax is kept). No AWS SDK, no network: input is a policy document JSON on
   stdin; output is an exit code (``check``) or the augmented document JSON
   on stdout (``augment``).
 - Distributed as a sibling file of setup_station.sh, following the

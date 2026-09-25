@@ -84,17 +84,18 @@ services:
       - JETSON_TENSORRT=$JETSON_TENSORRT
       # Request GPU capabilities so the L4T NVIDIA Container Runtime performs its
       # CSV injection (host-files-for-container.d/*.csv, incl. tensorrt.csv ->
-      # libnvinfer.so.8.2.1). Without these, `runtime: nvidia` injects nothing
+      # libnvinfer.so.8.x). Without these, `runtime: nvidia` injects nothing
       # from the CSVs, so libnvinfer.so* (which lives in /usr/lib/aarch64-linux-gnu,
       # NOT the tegra/ dir we bind-mount) is absent in the container and the
       # python+DLR base_model fails: "libnvinfer.so.8: cannot open shared object
       # file". CUDA still works via the explicit mounts below, which masks the gap.
-      # Requires /etc/nvidia-container-runtime/config.toml mode = "csv" on JP4/L4T r32.
+      # Requires /etc/nvidia-container-runtime/config.toml mode = "csv" on the
+      # L4T runtimes that inject through CSV files.
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - CUDA_HOME=/usr/local/cuda/
       # /usr/local/cuda-12.6/... leads the path on JP6 ONLY (the dir does not
-      # exist in JP4/JP5 images, where the loader silently skips it): the JP6
+      # exist in JP5/JP7 images, where the loader silently skips it): the JP6
       # image's /usr/local/cuda is a real mount-point dir (not a symlink), so
       # the host CUDA mount above no longer shadows the image's cuda-12.6
       # toolkit, and torch/vllm (built against CUDA 12.6) must resolve the
@@ -111,8 +112,8 @@ services:
       # be on LD_LIBRARY_PATH for the DLR model to load. Its .so.8/.so.11 sonames
       # do not collide with the base image's TRT 10 / cuDNN 9 / cuBLAS 12, and
       # being last it cannot shadow the cuda-12.6 libs torch/vLLM resolve first.
-      # On JP4/JP5 the dir does not exist (TRT 8 is native under /usr/lib), so the
-      # loader silently skips it — harmless.
+      # On JP5/JP7 the dir does not exist (JP5's TRT 8 is native under /usr/lib),
+      # so the loader silently skips it — harmless.
       - LD_LIBRARY_PATH=/usr/local/cuda-12.6/targets/aarch64-linux/lib/:$LD_LIBRARY_PATH:$CUDA_HOME/lib64/:/usr/lib/aarch64-linux-gnu/tegra:/usr/local/cuda/targets/aarch64-linux/lib/:/opt/dda/trt8-runtime/lib
       - GRPC_POLL_STRATEGY=poll
       - GRPC_ENABLE_FORK_SUPPORT=1

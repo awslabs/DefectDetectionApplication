@@ -5,7 +5,8 @@ arch_revisions + plugin_builds per-arch source resolution).
 Motivating scenario: importing gst-plugins-good for every platform
 needs DIFFERENT source revisions per platform generation — the default
 branch for the GStreamer 1.20+ platforms (x86_64 / x86_64_nvidia /
-arm64_jp6), branch '1.16' for arm64_jp5, branch '1.14' for arm64_jp4.
+arm64_jp6), branch '1.16' for arm64_jp5, and here an explicit '1.14'
+override for arm64_cpu (a distinct third revision).
 
 Covers:
 - validation of the optional POST /plugins/import `arch_revisions`
@@ -89,7 +90,7 @@ def multi_fetch_detail(plugin, build_id, slug, status="SUCCEEDED"):
 # =====================================================================
 
 class TestValidateArchRevisions:
-    ARCHS = ["arm64_jp4", "arm64_jp5", "x86_64"]
+    ARCHS = ["arm64_cpu", "arm64_jp5", "x86_64"]
 
     def test_absent_is_valid(self, aws_stack):
         mod = aws_stack.plugin_importer
@@ -170,15 +171,15 @@ class TestRevisionFetchPlan:
         assert plan == {"mode": "single", "revision": "1.16"}
 
     def test_distinct_revisions_fetch_once_each(self, aws_stack):
-        archs = ["arm64_jp4", "arm64_jp5", "arm64_jp6", "x86_64"]
+        archs = ["arm64_cpu", "arm64_jp5", "arm64_jp6", "x86_64"]
         plan = self._plan(aws_stack, None,
-                          {"arm64_jp4": "1.14", "arm64_jp5": "1.16"}, archs)
+                          {"arm64_cpu": "1.14", "arm64_jp5": "1.16"}, archs)
 
         assert plan["mode"] == "multi"
         # One fetch per DISTINCT revision; archs sharing one share it.
         assert sorted(plan["fetches"]) == ["1.14", "1.16", "default"]
         assert plan["arch_revisions"] == {
-            "arm64_jp4": "1.14",
+            "arm64_cpu": "1.14",
             "arm64_jp5": "1.16",
             "arm64_jp6": "default",
             "x86_64": "default",
@@ -197,20 +198,20 @@ class TestRevisionFetchPlan:
         """Every arch overridden: the top-level revision is never
         fetched, so the first slug (sorted) is the default tree."""
         plan = self._plan(aws_stack, "main",
-                          {"arm64_jp4": "1.14", "arm64_jp5": "1.16"},
-                          ["arm64_jp4", "arm64_jp5"])
+                          {"arm64_cpu": "1.14", "arm64_jp5": "1.16"},
+                          ["arm64_cpu", "arm64_jp5"])
         assert sorted(plan["fetches"]) == ["1.14", "1.16"]
         assert plan["default_slug"] == "1.14"
 
     def test_slug_collisions_disambiguate(self, aws_stack):
         plan = self._plan(aws_stack, None,
-                          {"arm64_jp4": "a/b", "arm64_jp5": "a b"},
-                          ["arm64_jp4", "arm64_jp5"])
+                          {"arm64_cpu": "a/b", "arm64_jp5": "a b"},
+                          ["arm64_cpu", "arm64_jp5"])
         assert plan["mode"] == "multi"
         assert sorted(plan["fetches"]) == ["a-b", "a-b-2"]
         # Both archs still resolve to their own revision's slug.
         revisions = {plan["fetches"][plan["arch_revisions"][arch]]["revision"]
-                     for arch in ("arm64_jp4", "arm64_jp5")}
+                     for arch in ("arm64_cpu", "arm64_jp5")}
         assert revisions == {"a/b", "a b"}
 
 
@@ -288,8 +289,8 @@ class TestSingleRevisionUnchanged:
         status, body = ienv.import_plugin(admin, {
             "usecase_id": usecase_id,
             "repo_url": REPO_URL,
-            "architectures": ["arm64_jp4", "arm64_jp5"],
-            "arch_revisions": {"arm64_jp4": "1.16", "arm64_jp5": "1.16"},
+            "architectures": ["arm64_cpu", "arm64_jp5"],
+            "arch_revisions": {"arm64_cpu": "1.16", "arm64_jp5": "1.16"},
         })
 
         assert status == 202
@@ -320,11 +321,11 @@ class TestSingleRevisionUnchanged:
 
 class MultiImportEnv:
     """One multi-revision import: default branch for x86_64/arm64_jp6,
-    '1.16' for arm64_jp5, '1.14' for arm64_jp4 (the gst-plugins-good
-    scenario)."""
+    '1.16' for arm64_jp5, an explicit '1.14' for arm64_cpu (the
+    gst-plugins-good scenario with a third distinct revision)."""
 
-    ARCHS = ["arm64_jp4", "arm64_jp5", "arm64_jp6", "x86_64"]
-    OVERRIDES = {"arm64_jp4": "1.14", "arm64_jp5": "1.16"}
+    ARCHS = ["arm64_cpu", "arm64_jp5", "arm64_jp6", "x86_64"]
+    OVERRIDES = {"arm64_cpu": "1.14", "arm64_jp5": "1.16"}
 
     def __init__(self, ienv, admin_setup, body_extra=None):
         self.ienv = ienv
@@ -384,7 +385,7 @@ class TestMultiRevisionFanOut:
         # default revision share the fetch.
         record = env_setup.record()
         assert record["arch_revisions"] == {
-            "arm64_jp4": "1.14", "arm64_jp5": "1.16",
+            "arm64_cpu": "1.14", "arm64_jp5": "1.16",
             "arm64_jp6": "default", "x86_64": "default",
         }
         assert record["import_status"] == "fetching"
@@ -443,7 +444,7 @@ class TestMultiRevisionFetchSettling:
         overrides = {call["projectName"]: call["sourceLocationOverride"]
                      for call in recorder.calls}
         flat = record["source_s3_prefix"].replace("rev-default/", "")
-        assert overrides["dda-plugin-build-arm64_jp4"] == \
+        assert overrides["dda-plugin-build-arm64_cpu"] == \
             f"{bucket}/{flat}rev-1.14/"
         assert overrides["dda-plugin-build-arm64_jp5"] == \
             f"{bucket}/{flat}rev-1.16/"

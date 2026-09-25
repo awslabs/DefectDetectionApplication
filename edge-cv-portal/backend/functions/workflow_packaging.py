@@ -86,7 +86,7 @@ from shared_utils import (
 from workflow_core.serializer import parse as parse_definition
 from workflow_core.compiler import compile as compile_workflow, CompileContext
 from workflow_core.catalog import (
-    ARCH_ARM64_JP4,
+    ARCH_ARM64_CPU,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
     ARCH_ARM64_JP7,
@@ -140,11 +140,15 @@ MODELS_TABLE = os.environ.get('MODELS_TABLE')
 # (surfaced in manifest.json for the deployment compatibility check, 8.4).
 #
 # LocalServer ships as independently-versioned per-architecture variants
-# (aws.edgeml.dda.LocalServer.arm64 / .arm64JP5 / .arm64JP6 / .amd64), whose
-# version lineages are NOT comparable to each other: at time of writing the
-# .arm64 variant is ~1.0.124 while .arm64JP6 is ~1.0.35. A single global
-# minimum therefore falsely blocks the JetPack variants (a JP6 device running
-# 1.0.35 can never satisfy an arm64-derived "1.0.63"). WORKFLOW_MIN_LOCAL_
+# (aws.edgeml.dda.LocalServer.arm64 / .arm64JP5 / .arm64JP6 / .arm64JP7 /
+# .amd64), whose version lineages are NOT comparable to each other: at time
+# of writing the bare .arm64 variant is ~1.0.124 while .arm64JP6 is ~1.0.35.
+# A single global minimum therefore falsely blocks the JetPack variants (a
+# JP6 device running 1.0.35 can never satisfy an arm64-derived "1.0.63").
+# The bare .arm64 lineage is now the generic arm64 CPU component
+# (arm64_cpu); its versions up to 1.0.124 are JetPack 4-era builds that
+# identify as arm64_jp4 on device, so the deployed arm64_cpu floor must sit
+# above them (compute-stack.ts). WORKFLOW_MIN_LOCAL_
 # SERVER_VERSIONS is a JSON object keyed by workflow_core arch id
 # ({"arm64_jp6": "1.0.0", ...}) giving each variant lineage its own floor.
 # Hardened contract (jp7-workflow-min-localserver-floor): when a map IS
@@ -260,7 +264,7 @@ ARCH_X86_64_NVIDIA = 'x86_64_nvidia'
 ARCH_TO_GG_PLATFORM = {
     'x86_64': 'amd64',
     'x86_64_nvidia': 'amd64',
-    'arm64_jp4': 'aarch64',
+    'arm64_cpu': 'aarch64',
     'arm64_jp5': 'aarch64',
     'arm64_jp6': 'aarch64',
     'arm64_jp7': 'aarch64',
@@ -268,12 +272,13 @@ ARCH_TO_GG_PLATFORM = {
 
 # arch id (workflow_core) -> per-architecture LocalServer component variant
 # (edge-deploy-reliability Requirement 2.9). Same fail-closed naming
-# discipline as greengrass_publish.TARGET_TO_LOCAL_SERVER: every variant is
-# explicitly JetPack/arch-tagged, the retired bare '.arm64' name is never
-# emitted, and an unknown arch raises instead of guessing a variant. Both
-# x86_64 flavors run the single amd64 LocalServer build.
+# discipline as greengrass_publish.TARGET_TO_LOCAL_SERVER: every JetPack
+# variant is explicitly JetPack-tagged, the bare '.arm64' name is the
+# generic arm64 CPU (non-Jetson) build, and an unknown arch raises instead
+# of guessing a variant. Both x86_64 flavors run the single amd64
+# LocalServer build.
 ARCH_TO_LOCAL_SERVER_COMPONENT = {
-    ARCH_ARM64_JP4: 'aws.edgeml.dda.LocalServer.arm64JP4',
+    ARCH_ARM64_CPU: 'aws.edgeml.dda.LocalServer.arm64',
     ARCH_ARM64_JP5: 'aws.edgeml.dda.LocalServer.arm64JP5',
     ARCH_ARM64_JP6: 'aws.edgeml.dda.LocalServer.arm64JP6',
     ARCH_ARM64_JP7: 'aws.edgeml.dda.LocalServer.arm64JP7',
@@ -288,12 +293,13 @@ ARCH_TO_LOCAL_SERVER_COMPONENT = {
 # component name(s) for the selected architectures means matching entries
 # on these target ids (vision-model-packaging-regression 2.2). Values are
 # the exact TARGET_TO_LOCAL_SERVER / TARGET_TO_PLATFORM keys in
-# greengrass_publish.py ('jetson-xavier' is the legacy JetPack 4 id;
+# greengrass_publish.py (arm64_cpu publishes as the 'arm64-cpu' target;
 # x86_64/x86_64_nvidia publish as the 'x86_64-cpu'/'x86_64-cuda' targets).
+# Legacy JetPack 4 'jetson-xavier' entries are never matched.
 # Same fail-closed discipline as ARCH_TO_LOCAL_SERVER_COMPONENT: an
 # unknown arch raises instead of guessing a target.
 ARCH_TO_PUBLISH_TARGET = {
-    ARCH_ARM64_JP4: 'jetson-xavier',
+    ARCH_ARM64_CPU: 'arm64-cpu',
     ARCH_ARM64_JP5: 'jetson-xavier-jp5',
     ARCH_ARM64_JP6: 'jetson-xavier-jp6',
     # JP7 publish-target id, following the jp5/jp6 'jetson-xavier-jpN'
@@ -1739,8 +1745,9 @@ def local_server_component_dependencies(archs) -> Dict:
     ``minLocalServerVersion``; when several archs collapse to the one
     variant, the floor is the maximum of their per-arch floors. FAILS
     CLOSED on an unknown arch (the greengrass_publish.
-    TARGET_TO_LOCAL_SERVER naming discipline): the retired bare '.arm64'
-    name is never emitted and no variant is guessed.
+    TARGET_TO_LOCAL_SERVER naming discipline): the bare '.arm64' name is
+    emitted only for arm64_cpu (the generic arm64 CPU build) and no
+    variant is guessed.
 
     Multiple distinct variants: return {} and log a warning naming the
     omitted variants. Greengrass ComponentDependencies is recipe-GLOBAL,

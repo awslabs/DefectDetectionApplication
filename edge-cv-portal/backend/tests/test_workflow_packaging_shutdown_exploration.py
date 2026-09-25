@@ -53,7 +53,7 @@ TRAINING_JOBS_TABLE_NAME = (
 DEVICE_WORKFLOWS_ROOT = "/aws_dda/workflows"
 
 #: All device architectures build_recipe accepts (portal catalog).
-ARCHS = ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"]
+ARCHS = ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6"]
 
 #: Lifecycle steps Greengrass executes as part of the stop sequence of a
 #: FINISHED one-shot generic component (Shutdown ~10ms after Run exits 0,

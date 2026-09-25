@@ -36,7 +36,7 @@ Transport code itself lives in later tasks and plugs into the seams
 defined here:
 
 - Tasks 7.x/8.x's transport workers (Greengrass IPC / paho MQTT /
-  python-opcua) are produced by the injected
+  asyncua's synchronous OPC UA client) are produced by the injected
   ``mqtt_transport_factory`` / ``opcua_transport_factory`` (see the
   factory contract on :class:`TriggerSubscriptionManager`); they deliver
   firings through the ``on_delivery`` callback (routed to
@@ -2427,7 +2427,7 @@ def _opcua_source_timestamp(data: Any) -> Optional[str]:
     supply one (design Data Models: OPC UA Trigger_Context's
     ``source_timestamp``).
 
-    python-opcua hands ``datachange_notification`` a ``DataChangeNotif``
+    asyncua hands ``datachange_notification`` a ``DataChangeNotif``
     whose ``monitored_item.Value.SourceTimestamp`` is a ``datetime`` (or
     None); anything unexpected degrades to None rather than failing the
     delivery.
@@ -2448,9 +2448,16 @@ def _opcua_source_timestamp(data: Any) -> Optional[str]:
 
 class _OpcuaDataChangeHandler:
     """The ``SubHandler``-shaped object ``create_subscription`` receives:
-    python-opcua calls ``datachange_notification(node, val, data)`` on it
-    from the subscription's delivery thread. Bound to one subscribe
-    generation so a notification from a torn-down session is inert."""
+    asyncua calls ``datachange_notification(node, val, data)`` on it from
+    the client's event-loop thread. Bound to one subscribe generation so a
+    notification from a torn-down session is inert.
+
+    Both callbacks run ON the client's event loop, so they must return
+    promptly and must never call back into the client (a synchronous
+    client call made from the loop thread would wait on that same loop):
+    delivery only enqueues through ``on_delivery``, and a status change is
+    only logged — the Liveness_Watchdog, on its own thread, owns session
+    loss and teardown."""
 
     def __init__(self, worker: "OpcuaSubscribeWorker", generation: int) -> None:
         self._worker = worker
@@ -2459,23 +2466,30 @@ class _OpcuaDataChangeHandler:
     def datachange_notification(self, node: Any, val: Any, data: Any) -> None:
         self._worker._handle_datachange(val, data, self._generation)
 
+    def status_change_notification(self, status: Any) -> None:
+        """asyncua reports subscription status changes (e.g. ``BadShutdown``
+        when its own connection check sees the server go away) through the
+        handler; without this method it logs the missing callback as an
+        exception. The watchdog's next keepalive read surfaces the loss."""
+        self._worker._handle_status_change(status, self._generation)
+
 
 class OpcuaSubscribeWorker:
     """OPC UA subscribe transport worker (Requirements 6.6, 6.7, 6.8,
-    8.4, 8.5, 8.6 — design C6, tasks 8.1/8.2): one ``python-opcua``
+    8.4, 8.5, 8.6 — design C6, tasks 8.1/8.2): one ``asyncua.sync``
     client session per trigger node with a true data-change subscription
     on ``node_id``, a Liveness_Watchdog, subscribe→poll auto-fallback,
     and an explicit poll mode.
 
     Fits the manager's transport-factory worker contract: ``start()`` /
     ``stop()`` plus a callable ``reconnect`` attribute the manager
-    late-binds into the node's :class:`ReconnectEngine`. The ``opcua``
+    late-binds into the node's :class:`ReconnectEngine`. The ``asyncua``
     client is imported lazily inside :meth:`_build_session`, so this
     module stays importable without the package (matching
     ``output_bindings``' discipline).
 
     - **Session build** mirrors ``output_bindings._default_opcua_writer``
-      exactly (Requirement 6.6): ``opcua.Client(endpoint)`` →
+      exactly (Requirement 6.6): ``asyncua.sync.Client(endpoint)`` →
       ``set_user``/``set_password``/``set_security_string`` from the SAME
       parameter mapping (the security dict is produced by the reused
       ``output_bindings._opcua_security_from_params`` helper; the
@@ -2490,7 +2504,7 @@ class OpcuaSubscribeWorker:
       non-JSON-native types at persistence time; ``source_timestamp`` is
       ISO-8601 when the server supplies one, else None) →
       ``on_delivery`` (Requirement 6.8). Handler exceptions are contained
-      — nothing ever raises into the opcua delivery thread.
+      — nothing ever raises into the client's event-loop thread.
     - **Liveness_Watchdog** (Requirement 8.4, the key spike finding —
       a dying server sends the subscribed client NO signal): while a
       subscribe-mode session is active, a daemon watchdog thread performs
@@ -2542,7 +2556,7 @@ class OpcuaSubscribeWorker:
       session inert, so a stale signal can never fire a spurious
       activation or a spurious loss.
 
-    Injection seams (tests need neither the opcua package nor real
+    Injection seams (tests need neither the asyncua package nor real
     time): ``client_factory`` (``(endpoint) -> client``) substitutes a
     stub client — it receives the same security-configuration and
     ``connect()`` calls the real one does; ``watchdog_interval``
@@ -2750,24 +2764,39 @@ class OpcuaSubscribeWorker:
         )
 
     def _build_session(self) -> Any:
-        """One connected, security-configured opcua client — the exact
+        """One connected, security-configured OPC UA client — the exact
         ``_default_opcua_writer`` session build (Requirement 6.6):
         ``Client(endpoint)``, then the security calls, then ``connect()``.
-        The ``opcua`` import happens here (lazily) so the module imports
-        without the package."""
+        The ``asyncua`` import happens here (lazily) so the module imports
+        without the package.
+
+        A build that fails after the client exists disconnects it before
+        re-raising: the ``asyncua.sync`` client runs its own NON-daemon
+        event-loop thread from construction on and ``disconnect()`` is
+        what stops it, so every failed (re)connect attempt would otherwise
+        leak a thread that also blocks interpreter shutdown."""
         if self._client_factory is not None:
             client = self._client_factory(self.endpoint)
         else:
+            from workflow_engine.output_bindings import (
+                OPCUA_PACKAGE,
+                _new_opcua_client,
+            )
+
             try:
-                from opcua import Client
+                from asyncua.sync import Client
             except ImportError as e:
                 raise RuntimeError(
-                    "The 'opcua' Python package is not available; it is "
-                    "delivered as a Workflow_Component dependency"
+                    f"The '{OPCUA_PACKAGE}' Python package is not available; "
+                    "it is delivered as a LocalServer dependency"
                 ) from e
-            client = Client(self.endpoint)
-        self._apply_security(client)
-        client.connect()
+            client = _new_opcua_client(Client, self.endpoint)
+        try:
+            self._apply_security(client)
+            client.connect()
+        except BaseException:
+            self._close_session_quietly(None, client)
+            raise
         return client
 
     def _apply_security(self, client: Any) -> None:
@@ -2796,7 +2825,7 @@ class OpcuaSubscribeWorker:
         cert = security.get("client_cert_path")
         key = security.get("client_key_path")
         if policy and cert and key:
-            # opcua set_security_string format:
+            # asyncua set_security_string format:
             # "<Policy>,<Mode>,<client_cert>,<client_key>[,<server_cert>]"
             mode = security.get("security_mode") or "SignAndEncrypt"
             parts = [str(policy), str(mode), str(cert), str(key)]
@@ -2811,7 +2840,7 @@ class OpcuaSubscribeWorker:
         """Build the OPC UA Trigger_Context ``{endpoint, node_id, value,
         source_timestamp}`` from one data-change notification and deliver
         it (Requirement 6.8); contained — a delivery failure is logged,
-        never raised into the opcua subscription thread."""
+        never raised into the client's event-loop thread."""
         if self._is_stale(generation):
             return
         try:
@@ -2827,7 +2856,7 @@ class OpcuaSubscribeWorker:
                 }
             )
         except Exception:  # noqa: BLE001 - containment: a delivery
-            # failure never propagates into the opcua delivery thread.
+            # failure never propagates into the client's event loop.
             logger.exception(
                 "Trigger '%s' failed to deliver a data change from OPC UA "
                 "node '%s' at %s",
@@ -2835,6 +2864,27 @@ class OpcuaSubscribeWorker:
                 self.node_id,
                 self.endpoint,
             )
+
+    def _handle_status_change(self, status: Any, generation: int) -> None:
+        """Log a subscription status change (asyncua reports e.g.
+        ``BadShutdown`` when the server goes away). Deliberately inert
+        otherwise: this runs on the client's event loop, where a
+        synchronous teardown would wait on that same loop, and the
+        Liveness_Watchdog's next keepalive read (within
+        :data:`OPCUA_WATCHDOG_INTERVAL_SECONDS`) routes the loss to the
+        reconnect engine."""
+        if self._is_stale(generation):
+            return
+        code = getattr(status, "Status", status)
+        logger.warning(
+            "Trigger '%s' OPC UA subscription on node '%s' at %s reported "
+            "status %s; the liveness watchdog confirms loss on its next "
+            "keepalive",
+            self._health.node_id,
+            self.node_id,
+            self.endpoint,
+            getattr(code, "name", code),
+        )
 
     def _is_stale(self, generation: int) -> bool:
         with self._lock:

@@ -303,7 +303,8 @@ describe('non-regression: definitions this feature must not touch', () => {
     expect(matches).toHaveLength(1);
 
     const [, layer] = matches[0] as [string, any];
-    expect(layer.Properties.CompatibleRuntimes).toEqual(['python3.11']);
+    // CONSCIOUS UPDATE (dependabot-remediation): python3.12, because the imaging layer's Pillow 12.3 ships only manylinux_2_28 wheels, which the python3.11 runtime (Amazon Linux 2, glibc 2.26) cannot load.
+    expect(layer.Properties.CompatibleRuntimes).toEqual(['python3.12']);
     expect(layer.Properties.Description).toBe(
       'Pillow for synthetic preview image decode/diff (bbox_from_diff auto-annotation)'
     );

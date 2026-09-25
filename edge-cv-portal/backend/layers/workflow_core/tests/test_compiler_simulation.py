@@ -285,12 +285,12 @@ class TestHardwareOutputStubs:
         assert not bindings & _HARDWARE_BINDINGS
 
     def test_hardware_only_plugin_dependencies_dropped(self):
-        # python:opcua is required on devices but not by the recording stub.
+        # python:asyncua is required on devices but not by the recording stub.
         graph = self._graph()
         non_sim = _compile_ok(graph)
         sim = _compile_ok(graph, simulation=True)
-        assert "python:opcua" in non_sim.plugin_dependencies
-        assert "python:opcua" not in sim.plugin_dependencies
+        assert "python:asyncua" in non_sim.plugin_dependencies
+        assert "python:asyncua" not in sim.plugin_dependencies
 
 
 # --------------------------------------------------------------------------
@@ -348,7 +348,7 @@ class TestModelInferenceStub:
         # Non-simulation compilation must stay byte-identical on every
         # device architecture: RGB capsfilter + emltriton with the model
         # name and LocalServer Triton paths (Requirement 6.2).
-        for arch in ("x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5",
+        for arch in ("x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5",
                      "arm64_jp6"):
             document = _compile_ok(self._graph(), arch=arch)
             elements = _elements_of(document, "inf")

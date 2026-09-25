@@ -230,7 +230,7 @@ class TestRecipeAssembly:
         recipe = components_module.build_plugin_recipe(
             "plg-1", 1, "b",
             {a: "p.so" for a in
-             ("x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6")})
+             ("x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6")})
 
         by_arch = {}
         for manifest in recipe["Manifests"]:
@@ -242,8 +242,8 @@ class TestRecipeAssembly:
             else:
                 by_arch["x86_64"] = platform
         assert set(by_arch) == {"x86_64", "x86_64_nvidia",
-                                "arm64_jp4", "arm64_jp5", "arm64_jp6"}
-        for jp in ("arm64_jp4", "arm64_jp5", "arm64_jp6"):
+                                "arm64_cpu", "arm64_jp5", "arm64_jp6"}
+        for jp in ("arm64_cpu", "arm64_jp5", "arm64_jp6"):
             assert by_arch[jp] == {"os": "linux", "architecture": "aarch64",
                                    "variant": jp}
         assert by_arch["x86_64_nvidia"] == {"os": "linux",
@@ -267,7 +267,7 @@ class TestAutoPackaging:
 
     def test_successful_packaging_registers_and_records_pointer(self, cenv):
         plugin = cenv.seed_plugin(["x86_64", "arm64_jp5"],
-                                  failed_archs=["arm64_jp4"])
+                                  failed_archs=["arm64_cpu"])
         gg = cenv.patch_usecase_clients()
 
         result = cenv.package(plugin)

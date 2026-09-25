@@ -57,12 +57,12 @@ COMPONENT_BUCKET = os.environ.get('COMPONENT_BUCKET', f'{COMPONENT_BUCKET_PREFIX
 # NOTE: the JetPack-specific ARM64 variants (arm64JP5 / arm64JP6) are published by
 # gdk-component-build-and-publish.sh as distinct components. They must be listed
 # here so they are mirrored into usecase accounts; otherwise a JP5/JP6 device has
-# no deployable LocalServer in the portal even though the generic arm64 variant is
-# shared.
+# no deployable LocalServer in the portal even though the generic arm64 CPU
+# variant is shared.
 DDA_LOCAL_SERVER_COMPONENTS = {
     'arm64': {
         'name': 'aws.edgeml.dda.LocalServer.arm64',
-        'description': 'DDA LocalServer for ARM64 Jetson JetPack 4 (L4T r32.x / Ubuntu 18.04)',
+        'description': 'DDA LocalServer for generic ARM64 CPU devices (non-Jetson, e.g. AWS Graviton)',
         'platforms': ['linux/arm64']
     },
     'arm64JP5': {

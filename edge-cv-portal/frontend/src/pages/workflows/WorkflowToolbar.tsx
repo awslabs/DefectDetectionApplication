@@ -88,7 +88,7 @@ export function canEditWorkflows(role: UserRole | undefined | null): boolean {
 export const PACKAGE_ARCH_OPTIONS: readonly MultiselectProps.Option[] = [
   { value: 'x86_64', label: 'x86_64 (CPU)' },
   { value: 'x86_64_nvidia', label: 'x86_64 (NVIDIA GPU)' },
-  { value: 'arm64_jp4', label: 'ARM64 · JetPack 4' },
+  { value: 'arm64_cpu', label: 'ARM64 (CPU)' },
   { value: 'arm64_jp5', label: 'ARM64 · JetPack 5' },
   { value: 'arm64_jp6', label: 'ARM64 · JetPack 6' },
   { value: 'arm64_jp7', label: 'ARM64 · JetPack 7' },

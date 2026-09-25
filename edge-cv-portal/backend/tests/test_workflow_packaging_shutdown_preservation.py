@@ -56,7 +56,7 @@ PLUGIN_PREFIX = "dda.plugin."
 ARCH_TO_GG_PLATFORM = {
     "x86_64": "amd64",
     "x86_64_nvidia": "amd64",
-    "arm64_jp4": "aarch64",
+    "arm64_cpu": "aarch64",
     "arm64_jp5": "aarch64",
     "arm64_jp6": "aarch64",
 }
@@ -65,7 +65,7 @@ ARCH_TO_GG_PLATFORM = {
 #: handler's ComponentDependencies output (edge-deploy-reliability) —
 #: build_recipe passes these through untouched.
 LOCAL_SERVER_COMPONENTS = (
-    "aws.edgeml.dda.LocalServer.arm64JP4",
+    "aws.edgeml.dda.LocalServer.arm64",
     "aws.edgeml.dda.LocalServer.arm64JP5",
     "aws.edgeml.dda.LocalServer.arm64JP6",
     "aws.edgeml.dda.LocalServer.amd64",

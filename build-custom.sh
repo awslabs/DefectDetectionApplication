@@ -54,11 +54,10 @@ else
   echo "WARNING: skipping interpreter-version audit guard (python3 or test/python_version_audit.py not found)."
 fi
 
-# change to 20.04 or 18.04
-IMAGE_VER="18.04"
-#IMAGE_VER="20.04"
 BUILDKIT_PROGRESS=plain
 export BUILDKIT_PROGRESS
+# Base-image Ubuntu release (edgemlsdk -u and the generic Dockerfile's OS
+# build arg): the build host's own release.
 IMAGE_VER=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
 
 # Export as environment variable
@@ -344,7 +343,7 @@ else
       #      pinned requests version < 2.32.4 (CVE-2024-47081) reappears at
       #      station_install/setup_station.sh or src/backend/requirements.txt
       #      (the two Python-3.11 pin sites), or if the documented B324
-      #      RFC-2617 digest-auth allowlist drifts. Unpinned system-python3.6
+      #      RFC-2617 digest-auth allowlist drifts. Unpinned system-python3
       #      installs and out-of-scope pins are never flagged.
       #   2. Fix-checking + negative-fixture suite — the in-scope pins stay
       #      >= 2.32.4, the B324 accepted false positive stays documented, and a

@@ -78,7 +78,7 @@ TEST_ENV = {
     "BUILD_PROJECTS_JSON": json.dumps({
         arch: f"dda-plugin-build-{arch}"
         for arch in ("x86_64", "x86_64_nvidia",
-                     "arm64_jp4", "arm64_jp5", "arm64_jp6")
+                     "arm64_cpu", "arm64_jp5", "arm64_jp6")
     }),
     # PLUGIN_SIGNING_KEY_ARN is set inside the aws_stack fixture (the
     # moto KMS key only exists once the mock is active).

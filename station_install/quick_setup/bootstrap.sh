@@ -28,7 +28,7 @@ set -u
 
 MIN_FREE_KB=2097152                       # 2 GB in KB
 SUPPORTED_ARCHS="x86_64 aarch64"
-SUPPORTED_UBUNTU="18.04 20.04 22.04 24.04"
+SUPPORTED_UBUNTU="20.04 22.04 24.04"
 
 # --- argument parsing --------------------------------------------------------
 

@@ -7,10 +7,11 @@
  * manifests ({name: {version, architectures}}) and device architectures
  * ({thing: arch | null}); architectures are matched by exact name with
  * no cross-architecture fallback; a device with no recorded
- * Target_Architecture (null/absent) fails closed; `arm64_jp4` misses
- * carry the JetPack-4-specific reason. The backend gate remains
- * authoritative — this twin only predicts its verdict so incompatible
- * devices can be warned about before submit.
+ * Target_Architecture (null/absent) fails closed; every miss carries the
+ * `ARCH_UNSUPPORTED` reason (the JetPack 4 reason was retired with
+ * JetPack 4). The backend gate remains authoritative — this twin only
+ * predicts its verdict so incompatible devices can be warned about
+ * before submit.
  *
  * Kept free of React/UI imports so the fast-check property test
  * (task 15.5) can exercise it directly.
@@ -19,13 +20,8 @@
 /** Keep in sync with deployments.py VLLM_MODEL_COMPONENT_PREFIX. */
 export const VLLM_MODEL_COMPONENT_PREFIX = 'model-vllm-';
 
-/** Keep in sync with deployments.py VLLM_GATE_REASON_JP4 / _ARCH. */
-export const VLLM_GATE_REASON_JP4 = 'JP4_UNSUPPORTED';
+/** Keep in sync with deployments.py VLLM_GATE_REASON_ARCH. */
 export const VLLM_GATE_REASON_ARCH = 'ARCH_UNSUPPORTED';
-
-/** Keep in sync with deployments.py VLLM_JP4_UNSUPPORTED_MESSAGE. */
-export const VLLM_JP4_UNSUPPORTED_MESSAGE =
-  'JetPack 4 does not support vLLM inference';
 
 /** True when a Greengrass component is a published vLLM_Model_Component. */
 export function isVllmModelComponent(
@@ -62,7 +58,7 @@ export interface VllmArchGateEntry {
   device: string;
   deviceArch: string | null;
   supported: string[];
-  reason: typeof VLLM_GATE_REASON_JP4 | typeof VLLM_GATE_REASON_ARCH;
+  reason: typeof VLLM_GATE_REASON_ARCH;
 }
 
 /**
@@ -71,8 +67,7 @@ export interface VllmArchGateEntry {
  * set of every vLLM-bearing component, by exact name, with no fallback.
  * A device whose architecture is null/absent fails closed. Returns []
  * when every device is covered, otherwise one entry per
- * (component, device) miss, with the JetPack-4 reason for `arm64_jp4`
- * devices and `ARCH_UNSUPPORTED` otherwise.
+ * (component, device) miss with the `ARCH_UNSUPPORTED` reason.
  */
 export function evaluateVllmArchGate(
   componentManifests: Record<string, VllmComponentManifest>,
@@ -91,10 +86,7 @@ export function evaluateVllmArchGate(
           device,
           deviceArch,
           supported: [...supported].sort(),
-          reason:
-            deviceArch === 'arm64_jp4'
-              ? VLLM_GATE_REASON_JP4
-              : VLLM_GATE_REASON_ARCH,
+          reason: VLLM_GATE_REASON_ARCH,
         });
       }
     }
@@ -105,7 +97,7 @@ export function evaluateVllmArchGate(
 /**
  * One-line description of a gate entry: the device's recorded
  * architecture (or its absence) alongside the component's supported set
- * (3.9), with the JetPack-4 message for jp4 misses.
+ * (3.9).
  */
 export function describeVllmArchEntry(entry: VllmArchGateEntry): string {
   const version = entry.version ? ` v${entry.version}` : '';
@@ -116,13 +108,9 @@ export function describeVllmArchEntry(entry: VllmArchGateEntry): string {
     entry.supported.length > 0
       ? `supported: ${entry.supported.join(', ')}`
       : 'no supported architectures recorded';
-  const jp4 =
-    entry.reason === VLLM_GATE_REASON_JP4
-      ? ` — ${VLLM_JP4_UNSUPPORTED_MESSAGE}`
-      : '';
   return (
     `Device "${entry.device}" (${arch}) is not supported by ` +
-    `${entry.component}${version} (${supported})${jp4}`
+    `${entry.component}${version} (${supported})`
   );
 }
 
@@ -161,10 +149,7 @@ export function parseVllmGateRejection(
         device: String(u.device ?? 'unknown device'),
         deviceArch: u.deviceArch == null ? null : String(u.deviceArch),
         supported: Array.isArray(u.supported) ? u.supported.map(String) : [],
-        reason:
-          u.reason === VLLM_GATE_REASON_JP4
-            ? VLLM_GATE_REASON_JP4
-            : VLLM_GATE_REASON_ARCH,
+        reason: VLLM_GATE_REASON_ARCH,
       })),
   };
 }

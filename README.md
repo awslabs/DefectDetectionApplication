@@ -254,11 +254,13 @@ cd DefectDetectionApplication
 ./gdk-component-build-and-publish.sh
 ```
 
-**Selecting the build target.** For ARM64/Jetson builds, pass the architecture
-and JetPack version so the correct base image, recipe, and component name are used:
+**Selecting the build target.** For ARM64 builds, pass the architecture and the
+target (`cpu` for a generic non-Jetson arm64 host, or the JetPack version) so the
+correct base image, recipe, and component name are used. JetPack 4 is no longer
+supported:
 
 ```bash
-./gdk-component-build-and-publish.sh aarch64 4   # JetPack 4.6 (L4T r32.x) -> aws.edgeml.dda.LocalServer.arm64
+./gdk-component-build-and-publish.sh aarch64 cpu # generic arm64 CPU (e.g. Graviton) -> aws.edgeml.dda.LocalServer.arm64
 ./gdk-component-build-and-publish.sh aarch64 5   # JetPack 5   (L4T r35.x) -> aws.edgeml.dda.LocalServer.arm64JP5
 ./gdk-component-build-and-publish.sh aarch64 6   # JetPack 6   (L4T r36.x) -> aws.edgeml.dda.LocalServer.arm64JP6
 ./gdk-component-build-and-publish.sh aarch64 7   # JetPack 7   (L4T r38.x) -> aws.edgeml.dda.LocalServer.arm64JP7
@@ -269,8 +271,9 @@ Each JetPack target builds against its matching base image (JP5:
 `l4t-jetpack:r35.4.1`, JP6: `l4t-jetpack:r36.3.0`, JP7: digest-pinned
 `nvcr.io/nvidia/cuda` CUDA 13.0.x Ubuntu 24.04 arm64 — NGC publishes no
 `l4t-jetpack` r38.x tag) and is published as a distinct component. Deploy the
-component that matches the device's JetPack version, and compile models for
-the matching compilation target (Jetson JetPack 4.x / 5.x / 6.x).
+component that matches the device's JetPack version (or the arm64 CPU
+component on a non-Jetson arm64 host), and compile models for the matching
+compilation target (Jetson JetPack 5.x / 6.x / 7.x, or arm64 CPU).
 
 > **JetPack 7 builds require an Ubuntu 24.04 arm64 build server.** See
 > [JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
@@ -314,7 +317,7 @@ If you prefer manual IAM role and EC2 setup, create a role with trust policy for
 
 The JP7 target (`aws.edgeml.dda.LocalServer.arm64JP7`, JetPack 7.1/7.2, Jetson
 Linux r38.x) is built on an **Ubuntu 24.04 LTS (noble) arm64** host. The
-JP4/JP5/JP6 build-server flow above applies, with the noble-specific deltas
+JP5/JP6 build-server flow above applies, with the noble-specific deltas
 documented here. Following this section end-to-end produces a host that builds
 the JP7 component and that the portal accepts as capable of JP7 dispatched
 builds.
@@ -665,7 +668,7 @@ Ground Truth creates manifests with job-specific attribute names. The portal aut
 ### Compilation
 
 - Compile trained models for edge deployment
-- Targets: x86_64 CPU, ARM64, Jetson Xavier
+- Targets: x86_64 CPU, ARM64 CPU, Jetson (JetPack 5/6/7)
 - Compiled models are packaged as Greengrass components
 
 ## ML Workflow
@@ -706,7 +709,7 @@ Each model package's `manifest.json` declares which engine loads it via a
 | `pytorch` | Native PyTorch (TorchScript) | `model.pt` |
 
 GPU acceleration for ONNX (CUDA + TensorRT execution providers) is available on
-**JetPack 5, 6, and 7**; **JetPack 4 runs ONNX on CPU only**. GPU requires a
+**JetPack 5, 6, and 7**; the CPU images (x86_64, arm64 CPU) run ONNX on CPU. GPU requires a
 LocalServer backend image built with the ONNX GPU runtime (see
 [Build requirement for GPU](#build-requirement-for-gpu) below).
 
@@ -836,7 +839,7 @@ for JetPack 5, 6, and 7 by `gdk-component-build-and-publish.sh`:
 
 `build-custom.sh` defaults `ONNXRUNTIME_GPU=1` for JP5/JP6/JP7 (the source build adds
 ~1–2 h and is memory-heavy). For a fast CPU-only image, set `ONNXRUNTIME_GPU=0`.
-JetPack 4 is CPU-only regardless. The engine auto-selects TensorRT → CUDA → CPU
+The CPU images (x86_64, arm64 CPU) are CPU-only regardless. The engine auto-selects TensorRT → CUDA → CPU
 providers at load, so the same package runs on either a GPU or CPU image.
 
 ## Using LLMs (vLLM)
@@ -855,8 +858,8 @@ LocalServer image installs `vllm==0.10.2+cu126` from the Jetson AI Lab index
 default** (`install_vllm_gpu.sh`, Thor `sm_110`, against
 `torch==2.9.0+cu130`) since no prebuilt Thor/cu130 wheel exists — see
 [JetPack 7 (JP7) Devices](#jetpack-7-jp7-devices-jetson-thor-jetpack-71--72).
-The deployment architecture gate rejects vLLM components targeted at JP4/JP5
-devices. The full stage-by-stage validation procedure lives in
+The deployment architecture gate rejects vLLM components targeted at JP5 or
+CPU-only devices. The full stage-by-stage validation procedure lives in
 [test/on-hardware/jp6_vllm_validation.md](test/on-hardware/jp6_vllm_validation.md).
 
 ### Build requirement
@@ -1212,8 +1215,8 @@ sudo systemctl start greengrass
    path so artifacts stay small (a few MB instead of multiple GB). This happens
    automatically when the packaged artifact exceeds 2 GB — see
    `gdk-component-build-and-publish.sh`. Rebuild/publish for the device's
-   architecture (e.g. `./gdk-component-build-and-publish.sh aarch64 4` for
-   JetPack 4) and deploy that version. ECR-based components also require the
+   architecture (e.g. `./gdk-component-build-and-publish.sh aarch64 5` for
+   JetPack 5) and deploy that version. ECR-based components also require the
    device token-exchange role to have `ecr:GetAuthorizationToken`,
    `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, and `s3:GetObject` in the
    device's region.

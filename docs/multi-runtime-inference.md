@@ -243,8 +243,9 @@ sample before implementing.
     prebuilt Jetson GPU wheels target each JetPack's *native* python (3.8 on
     r35, 3.10 on r36), not the 3.9 the container uses, and PyPI's
     onnxruntime-gpu is x86_64-only.
-  - **JetPack 4: CPU only.** Its native python is 3.6 (EOL) and there is no
-    compatible cp39 GPU build path; the portal compile UI notes this.
+  - **CPU images (x86_64, generic arm64 CPU): CPU only.** They install the
+    onnxruntime CPU wheel. (JetPack 4, previously CPU-only here, is no longer
+    supported.)
   OnnxRunner auto-selects TensorRT → CUDA → CPU providers, so the same code path
   works for either wheel.
 - `torch` — Jetson wheel, **only if PyTorch runtime ships in v1**; gate behind a

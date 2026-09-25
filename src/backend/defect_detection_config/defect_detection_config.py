@@ -95,10 +95,11 @@ class DefectDetectionConfig:
         discovery (ListComponents prefix match), cached per instance.
 
         The name cannot be derived from the CPU architecture alone: aarch64
-        alone spans three distinct components (``...LocalServer.arm64`` on
-        JP4, ``...arm64JP5``, ``...arm64JP6``). The previous hardcoded
-        arch map returned the JP4 name on every Jetson, so JP5/JP6
-        stations failed every GetConfiguration call in a retry loop.
+        alone spans several distinct components (``...LocalServer.arm64`` on
+        generic arm64 CPU hosts, ``...arm64JP5``, ``...arm64JP6``,
+        ``...arm64JP7``). The previous hardcoded arch map returned the bare
+        arm64 name on every Jetson, so JP5/JP6 stations failed every
+        GetConfiguration call in a retry loop.
         """
         if self._component_name:
             return self._component_name

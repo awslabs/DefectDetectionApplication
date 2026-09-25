@@ -1,3 +1,7 @@
 PyYAML>=6.0
-requests>=2.31.0
-
+# Security floors (Dependabot remediation): requests >= 2.33.0 and
+# urllib3 >= 2.7.0 close the insecure temp-file reuse and the cross-origin
+# proxied-redirect header leak. The vendored python/ snapshot carries
+# requests 2.34.2 / urllib3 2.8.0.
+requests>=2.34.2
+urllib3>=2.8.0

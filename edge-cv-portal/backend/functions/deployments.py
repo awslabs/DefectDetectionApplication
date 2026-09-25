@@ -138,8 +138,9 @@ WORKFLOW_MIN_LOCAL_SERVER_VERSION = os.environ.get(
 
 # Per-arch minimum LocalServer versions. LocalServer ships as independently-
 # versioned per-architecture variants (aws.edgeml.dda.LocalServer.arm64 /
-# .arm64JP5 / .arm64JP6 / .amd64) whose version lineages are NOT comparable
-# (the arm64 variant may be at 1.0.124 while arm64JP6 is at 1.0.35). A single
+# .arm64JP5 / .arm64JP6 / .arm64JP7 / .amd64) whose version lineages are NOT
+# comparable (the bare arm64 variant — the generic arm64 CPU build — may be
+# at 1.0.124 while arm64JP6 is at 1.0.35). A single
 # global minimum is therefore variant-blind and falsely blocks the JetPack
 # variants (a JP6 device on 1.0.35 can never satisfy an arm64-derived
 # "1.0.63"). WORKFLOW_MIN_LOCAL_SERVER_VERSIONS is a JSON object keyed by
@@ -175,7 +176,7 @@ def _parse_min_versions_map():
 # constant because this module cannot import workflow_packaging (Lambda
 # bundling constraint documented above).
 LOCAL_SERVER_ARCH_IDS = (
-    'arm64_jp4', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7', 'x86_64')
+    'arm64_cpu', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7', 'x86_64')
 
 # Safe per-lineage floor: satisfiable in EVERY LocalServer variant lineage
 # (all variants version from 1.0.x and workflow support ships in current
@@ -1254,7 +1255,7 @@ def create_deployment(body, user):
         # model-vllm-* component or a workflow component whose version
         # item records has_llm_inference. Component sets with neither
         # produce no manifests and are untouched — pre-feature
-        # validation applies verbatim, jp4 included.
+        # validation applies verbatim on every architecture.
         vllm_manifests = collect_vllm_component_manifests({
             comp['component_name']: comp.get('component_version')
             for comp in components if comp.get('component_name')
@@ -2183,9 +2184,7 @@ def evaluate_plugin_arch_gate(component_manifests, device_archs):
     return offending
 
 
-VLLM_GATE_REASON_JP4 = 'JP4_UNSUPPORTED'
 VLLM_GATE_REASON_ARCH = 'ARCH_UNSUPPORTED'
-VLLM_JP4_UNSUPPORTED_MESSAGE = 'JetPack 4 does not support vLLM inference'
 
 
 def evaluate_vllm_arch_gate(component_manifests, device_archs):
@@ -2206,9 +2205,8 @@ def evaluate_vllm_arch_gate(component_manifests, device_archs):
 
     Returns [] when every device is covered (3.7), otherwise one entry
     {component, version, device, deviceArch, supported, reason} per
-    (component, device) miss (3.4). ``reason`` is ``'JP4_UNSUPPORTED'``
-    ("JetPack 4 does not support vLLM inference") when the device's
-    architecture is ``arm64_jp4`` (3.5), else ``'ARCH_UNSUPPORTED'``.
+    (component, device) miss (3.4). ``reason`` is ``'ARCH_UNSUPPORTED'``
+    (JetPack 4 and its dedicated reason are no longer supported).
     """
     offending = []
     for name in sorted(component_manifests):
@@ -2223,9 +2221,7 @@ def evaluate_vllm_arch_gate(component_manifests, device_archs):
                     'device': device,
                     'deviceArch': device_arch,
                     'supported': sorted(supported),
-                    'reason': (VLLM_GATE_REASON_JP4
-                               if device_arch == 'arm64_jp4'
-                               else VLLM_GATE_REASON_ARCH),
+                    'reason': VLLM_GATE_REASON_ARCH,
                 })
     return offending
 
@@ -2475,7 +2471,7 @@ def collect_vllm_component_manifests(components):
       nothing.
 
     Deployments containing neither contribute zero findings, so
-    pre-feature validation applies verbatim — jp4 included (8.5)."""
+    pre-feature validation applies verbatim on every architecture (8.5)."""
     manifests = {}
     for name in sorted(components or {}):
         version = components[name]
@@ -3030,20 +3026,20 @@ def local_server_component_arch(component_name):
     LocalServer components are named ``aws.edgeml.dda.LocalServer.<suffix>``
     where the suffix identifies the variant lineage:
     ``arm64JP7`` -> ``arm64_jp7``,
-    ``arm64JP6`` -> ``arm64_jp6``, ``arm64JP5`` -> ``arm64_jp5``,
-    ``arm64JP4`` -> ``arm64_jp4`` (explicit JetPack 4), and the legacy
-    ``arm64``/``aarch64`` -> ``arm64_jp4`` (the bare pre-rename JetPack 4
-    name, still recognized on read for already-provisioned JP4 devices),
-    ``amd64``/``x86_64`` -> ``x86_64``. Used to pick the per-arch minimum so
-    a device is gated against its own variant lineage.
+    ``arm64JP6`` -> ``arm64_jp6``, ``arm64JP5`` -> ``arm64_jp5``, the bare
+    ``arm64``/``aarch64`` -> ``arm64_cpu`` (the generic arm64 CPU build),
+    ``amd64``/``x86_64`` -> ``x86_64``. The retired JetPack 4 ``arm64JP4``
+    resolves to None (an arch-undetermined device). Used to pick the per-arch
+    minimum so a device is gated against its own variant lineage.
     """
     if not component_name or not component_name.startswith(
             LOCAL_SERVER_COMPONENT_PREFIX):
         return None
     suffix = component_name[len(LOCAL_SERVER_COMPONENT_PREFIX):].lstrip('.').lower()
     # Match the longer JetPack-tagged tokens BEFORE the bare ``arm64`` prefix:
-    # "arm64jp4"/"arm64jp5"/"arm64jp6"/"arm64jp7" all start with "arm64", so
-    # an explicit arm64JP4 must not be misclassified as the legacy bare arm64.
+    # "arm64jp4"/"arm64jp5"/"arm64jp6"/"arm64jp7" all start with "arm64", so a
+    # JetPack-tagged name must never be misclassified as the bare arm64 CPU
+    # build (the retired arm64JP4 in particular resolves to None, not CPU).
     if 'jp7' in suffix:
         return 'arm64_jp7'
     if 'jp6' in suffix:
@@ -3051,12 +3047,12 @@ def local_server_component_arch(component_name):
     if 'jp5' in suffix:
         return 'arm64_jp5'
     if 'jp4' in suffix:
-        return 'arm64_jp4'
+        return None
     if 'amd64' in suffix or 'x86' in suffix:
         return 'x86_64'
-    # Legacy bare JetPack 4 names (retired on the write side, recognized here).
+    # The bare name is the generic arm64 CPU (non-Jetson) build.
     if 'arm64' in suffix or 'aarch64' in suffix:
-        return 'arm64_jp4'
+        return 'arm64_cpu'
     return None
 
 
@@ -4065,7 +4061,7 @@ def create_workflow_deployment(body, user):
         # packaged_architectures — the supported set the gate compares
         # device architectures against). Versions without LLM content
         # contribute zero findings, keeping pre-feature validation
-        # verbatim, jp4 included.
+        # verbatim on every architecture.
         if version_item.get('has_llm_inference'):
             vllm_manifests = {
                 workflow_component_name(workflow_id): {

@@ -121,7 +121,7 @@ def finding_key(finding):
 # Random dep/record worlds
 # ---------------------------------------------------------------------------
 
-ARCHS = ("x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6")
+ARCHS = ("x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6")
 
 # Random lifecycle states: the packageable pair, dev, plus unknown /
 # absent values that must fail closed (11.3).

@@ -33,7 +33,7 @@ _POS = Position(0.0, 0.0)
 #: Subscription plugin dependencies that must never appear in simulation
 #: output — the sandbox has no broker or OPC UA server to talk to.
 _SUBSCRIPTION_PLUGIN_DEPS = {"python:paho-mqtt", "python:awsiotsdk",
-                             "python:opcua"}
+                             "python:asyncua"}
 
 #: Trigger executor binding kinds that must never appear in simulation.
 _TRIGGER_BINDINGS = {"mqtt_subscribe", "opcua_subscribe"}
@@ -163,8 +163,8 @@ class TestNoBrokerOrServerContent:
         sim = _compile_ok(graph, simulation=True)
         # Devices need the subscription clients beyond the
         # LocalServer-bundled set (python:paho-mqtt is bundled, so only
-        # awsiotsdk and opcua surface); the sandbox must list none.
-        assert {"python:awsiotsdk", "python:opcua"} <= \
+        # awsiotsdk and asyncua surface); the sandbox must list none.
+        assert {"python:awsiotsdk", "python:asyncua"} <= \
             set(non_sim.plugin_dependencies)
         assert not _SUBSCRIPTION_PLUGIN_DEPS & set(sim.plugin_dependencies)
 

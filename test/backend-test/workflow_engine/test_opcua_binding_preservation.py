@@ -421,7 +421,7 @@ def test_every_output_binding_runner_is_invoked_despite_failures(specs):
 
 
 def test_default_opcua_writer_connects_writes_and_disconnects():
-    """With a fake ``opcua`` module injected at the client boundary, the
+    """With fake ``asyncua`` modules injected at the client boundary, the
     real ``_default_opcua_writer`` connects, sets the node value, and
     disconnects, in that order (the integration-test writer path)."""
     events = []
@@ -447,11 +447,14 @@ def test_default_opcua_writer_connects_writes_and_disconnects():
         def disconnect(self):
             events.append(("disconnect", self._endpoint))
 
-    opcua_module = types.ModuleType("opcua")
-    opcua_module.Client = FakeClient
+    sync_module = types.ModuleType("asyncua.sync")
+    sync_module.Client = FakeClient
+    asyncua_module = types.ModuleType("asyncua")
+    asyncua_module.sync = sync_module
+    fake_modules = {"asyncua": asyncua_module, "asyncua.sync": sync_module}
 
     endpoint = "opc.tcp://127.0.0.1:4840/dda/"
-    with patch.dict(sys.modules, {"opcua": opcua_module}):
+    with patch.dict(sys.modules, fake_modules):
         _default_opcua_writer(endpoint, "ns=2;s=DefectFlag", True)
 
     assert events == [

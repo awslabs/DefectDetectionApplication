@@ -22,15 +22,19 @@ import { NodeDesignerApiStack } from './node-designer-api-stack';
 import { portalRegistryEnforced } from './context-helpers';
 
 /**
- * The five plugin Target_Architectures (custom-node-designer requirements
- * glossary): plain x86_64, x86_64 with the NVIDIA GPU runtime, and the three
- * Jetson JetPack generations. One CodeBuild project per architecture, each
- * with its own custom build image (Requirements 3.1, 5.2).
+ * The plugin Target_Architectures (custom-node-designer requirements
+ * glossary): plain x86_64, x86_64 with the NVIDIA GPU runtime, the generic
+ * (non-Jetson) arm64 CPU host, and the Jetson JetPack generations. One
+ * CodeBuild project per architecture, each with its own custom build image
+ * (Requirements 3.1, 5.2). JetPack 4 (arm64_jp4) is no longer a target.
  */
 export const PLUGIN_BUILD_ARCHITECTURES = [
   'x86_64',
   'x86_64_nvidia',
-  'arm64_jp4',
+  // Generic arm64 CPU (e.g. AWS Graviton): Ubuntu 20.04 + GStreamer 1.16,
+  // matching the arm64 CPU LocalServer image (plugin-build-images/
+  // Dockerfile.arm64_cpu).
+  'arm64_cpu',
   'arm64_jp5',
   'arm64_jp6',
   // custom-node-source-lifecycle Requirement 7.1: Jetson Thor (JetPack 7,
@@ -75,12 +79,12 @@ export interface NodeDesignerStackProps extends cdk.StackProps {
  * - The portal installation's asymmetric KMS signing key (ECDSA P-256,
  *   SIGN_VERIFY) used to sign Plugin_Artifact SHA-256 digests after successful
  *   builds and to verify them at packaging time (Requirements 3.3, 10.4).
- * - Five CodeBuild projects, one per Target_Architecture, each running a
+ * - One CodeBuild project per Target_Architecture, each running a
  *   per-arch custom build image from the ECR repository created here:
  *   x86_64 (Ubuntu 22.04 / GStreamer 1.20, matching the test-sandbox image),
  *   x86_64_nvidia (same base plus the CUDA toolkit and NVIDIA GStreamer
- *   runtime headers), and arm64 JetPack 4/5/6 cross-build images pinning the
- *   DeepStream SDK version matching each JetPack release (Requirement 5.2).
+ *   runtime headers), arm64_cpu (Ubuntu 20.04 / GStreamer 1.16), and arm64
+ *   JetPack 5/6/7 images matching each JetPack release (Requirement 5.2).
  *   Every build runs in a fresh CodeBuild container with a role scoped to
  *   exactly the plugin-source and staging prefixes of that architecture and
  *   NO VpcConfig, so builds have no network path to portal internals
@@ -355,13 +359,15 @@ export class NodeDesignerStack extends cdk.Stack {
 
     // ------------------------------------------------------------------
     // Per-arch plugin build images. One ECR repository, tagged per
-    // Target_Architecture (x86_64, x86_64_nvidia, arm64_jp4/jp5/jp6). The
-    // images are built/pushed out of band (like the test-sandbox image):
+    // Target_Architecture (x86_64, x86_64_nvidia, arm64_cpu, arm64_jp5/jp6/
+    // jp7). The images are built/pushed out of band (like the test-sandbox
+    // image):
     //   - x86_64:        Ubuntu 22.04 + GStreamer 1.20 (matches the sandbox)
     //   - x86_64_nvidia: same base + CUDA toolkit + NVIDIA GStreamer runtime
     //                    headers
-    //   - arm64_jp4/5/6: JetPack cross-build images pinning the L4T +
-    //                    DeepStream SDK version matching each JetPack release
+    //   - arm64_cpu:     Ubuntu 20.04 + GStreamer 1.16, no NVIDIA stack
+    //   - arm64_jp5/6/7: JetPack build images pinning the L4T / CUDA stack
+    //                    matching each JetPack release
     // The tag defaults to the architecture name; override the tag suffix via
     // the CDK context value `pluginBuildImageTag` (tag = `<arch>-<suffix>`).
     // ------------------------------------------------------------------

@@ -30,8 +30,9 @@ How the two sides are exercised (documented decision):
   watchdog/poll threads (cheapest deterministic drive of the session
   build; the task explicitly allows this).
 - **Writer side (oracle)**: the REAL ``output_bindings._default_opcua_writer``
-  is invoked — a fake ``opcua`` module is injected via ``sys.modules``
-  whose ``Client`` is the same recording stub — with the security dict
+  is invoked — fake ``asyncua`` / ``asyncua.sync`` modules are injected
+  via ``sys.modules`` whose sync ``Client`` is the same recording stub —
+  with the security dict
   produced by ``_opcua_security_from_params`` for the same parameters,
   exactly as ``OutputBindingProcessor`` computes it before calling the
   writer. This is a true parity check against the production writer
@@ -69,7 +70,7 @@ _NODE_ID = "ns=2;i=5"
 
 
 class _RecordingClient:
-    """Stub opcua client recording the security-configuration calls; the
+    """Stub OPC UA client recording the security-configuration calls; the
     write-path extras (``get_node``/``set_value``/``disconnect``) are
     tolerated no-ops so the real writer runs to completion."""
 
@@ -102,21 +103,24 @@ class _RecordingNode:
         pass
 
 
-def _fake_opcua_module(created):
-    """A fake ``opcua`` module whose ``Client`` records into ``created``;
+def _fake_asyncua_modules(created):
+    """Fake ``asyncua`` / ``asyncua.sync`` modules (keyed for
+    ``sys.modules``) whose sync ``Client`` records into ``created``;
     ``ua`` is explicitly None so the writer deterministically takes its
     native-write fallback (no typed-variant resolution)."""
 
-    module = types.ModuleType("opcua")
+    sync_module = types.ModuleType("asyncua.sync")
 
     class Client(_RecordingClient):
         def __init__(self, endpoint):
             super().__init__(endpoint)
             created.append(self)
 
-    module.Client = Client
-    module.ua = None
-    return module
+    sync_module.Client = Client
+    package = types.ModuleType("asyncua")
+    package.sync = sync_module
+    package.ua = None
+    return {"asyncua": package, "asyncua.sync": sync_module}
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +211,7 @@ def test_subscription_security_calls_equal_writer_security_calls(
     #    dict computed the way OutputBindingProcessor computes it
     security = _opcua_security_from_params(parameters)
     writer_clients = []
-    with patch.dict(sys.modules, {"opcua": _fake_opcua_module(writer_clients)}):
+    with patch.dict(sys.modules, _fake_asyncua_modules(writer_clients)):
         _default_opcua_writer(_ENDPOINT, _NODE_ID, 1, security)
 
     assert len(writer_clients) == 1

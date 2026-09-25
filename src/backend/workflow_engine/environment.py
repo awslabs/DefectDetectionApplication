@@ -20,7 +20,7 @@ Answers two questions the WorkflowWatcher needs when validating a
 discovered Workflow_Component artifact set (Requirement 9.1):
 
 - Which workflow_core target architecture does this device correspond
-  to (``x86_64`` / ``arm64_jp4`` / ``arm64_jp5`` / ``arm64_jp6`` /
+  to (``x86_64`` / ``arm64_cpu`` / ``arm64_jp5`` / ``arm64_jp6`` /
   ``arm64_jp7``)?
 - Which LocalServer component version is running here (compared against
   the manifest's ``minLocalServerVersion``)?
@@ -39,7 +39,7 @@ import re
 from typing import Optional, Tuple
 
 from workflow_engine.vendor.workflow_core.catalog import (
-    ARCH_ARM64_JP4,
+    ARCH_ARM64_CPU,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
     ARCH_ARM64_JP7,
@@ -58,8 +58,9 @@ def device_arch() -> str:
 
     x86 machines map to ``x86_64``. On aarch64 the JetPack generation is
     read from the LocalServer component path (variant names embed
-    ``JP5``/``JP6``/``JP7``; the plain ``arm64`` variant is JetPack 4),
-    the same signal ``pipeline_builder._is_jp6`` relies on.
+    ``JP5``/``JP6``/``JP7``; the plain ``arm64`` variant is the generic
+    arm64 CPU image for non-Jetson hosts), the same signal
+    ``pipeline_builder._is_jp6`` relies on.
     """
     machine = platform.machine().lower()
     if machine in ("x86_64", "amd64"):
@@ -72,7 +73,7 @@ def device_arch() -> str:
         return ARCH_ARM64_JP6
     if "JP5" in component_path:
         return ARCH_ARM64_JP5
-    return ARCH_ARM64_JP4
+    return ARCH_ARM64_CPU
 
 
 def local_server_version() -> Optional[str]:

@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from .models import (
-    ARCH_ARM64_JP4,
+    ARCH_ARM64_CPU,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
     ARCH_ARM64_JP7,
@@ -204,7 +204,7 @@ CSI_CAMERA_SOURCE = NodeTypeDescriptor(
         GstMapping(arch=ARCH_X86_64_NVIDIA, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg"),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
-        GstMapping(arch=ARCH_ARM64_JP4, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg"),
+        GstMapping(arch=ARCH_ARM64_CPU, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg"),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
         GstMapping(arch=ARCH_ARM64_JP5, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg"),
@@ -330,7 +330,7 @@ FOLDER_SOURCE = NodeTypeDescriptor(
         GstMapping(arch=ARCH_X86_64_NVIDIA, element_chain=_jpeg_file_chain("{location}"),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
-        GstMapping(arch=ARCH_ARM64_JP4, element_chain=_jpeg_file_chain("{location}"),
+        GstMapping(arch=ARCH_ARM64_CPU, element_chain=_jpeg_file_chain("{location}"),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
         GstMapping(arch=ARCH_ARM64_JP5, element_chain=_jpeg_file_chain("{location}"),
@@ -867,7 +867,7 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
 #: always (JP7 via the from-source vLLM build — jp7-vllm-enablement
 #: Requirement 4.1); JetPack 5 only while ``JP5_VLLM_ENABLED`` is
 #: flipped on (see models.py). The other architectures (``x86_64``,
-#: ``x86_64_nvidia``, ``arm64_jp4``) never appear here, so
+#: ``x86_64_nvidia``, ``arm64_cpu``) never appear here, so
 #: ``llm_inference`` has no mapping for them and the compiler's
 #: existing unmapped-architecture error (node + arch, no document)
 #: implements Requirement 6.8 with no new compiler code path.
@@ -1489,12 +1489,12 @@ OPCUA_WRITE = NodeTypeDescriptor(
                                         "server's certificate to pin/trust.",
                             examples=["/aws_dda/opcua/server-cert.der"]),
     ],
-    # Executor-level OPC UA client write; the opcua Python lib is a
-    # packaged dependency (not bundled with LocalServer).
+    # Executor-level OPC UA client write through asyncua's synchronous
+    # client (asyncua.sync), declared as the node's Python dependency.
     # Simulation: recording binding, no server contact (Requirement 12.6).
     mappings=_same_on_device_archs(
         executor_binding="opcua_write",
-        plugin_dependencies=["python:opcua"],
+        plugin_dependencies=["python:asyncua"],
     ) + [_recording_binding("opcua_write")],
     hardware_dependent=True,
 )
@@ -1930,13 +1930,13 @@ OPCUA_SUBSCRIBE = NodeTypeDescriptor(
         *_trigger_policy_parameters(),
     ],
     # Executor-level OPC UA subscription (or poll loop) held by the
-    # device's trigger subscription manager; the opcua Python lib is the
-    # same packaged dependency the opcua_write node uses. Simulation: an
+    # device's trigger subscription manager; the asyncua Python lib is the
+    # same declared dependency the opcua_write node uses. Simulation: an
     # appsrc event source the test harness feeds from the Test_Dataset
     # instead of any session, mirroring digital_input (Requirement 12.6).
     mappings=_same_on_device_archs(
         executor_binding="opcua_subscribe",
-        plugin_dependencies=["python:opcua"],
+        plugin_dependencies=["python:asyncua"],
     ) + [
         GstMapping(
             arch=ARCH_SIM,

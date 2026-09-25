@@ -10,6 +10,13 @@ WARNINGS=()
 # Get the Ubuntu release version
 UBUNTU_VERSION=$(lsb_release -rs)
 
+# JetPack 4 / Ubuntu 18.04 hosts are no longer supported; stop before any
+# provisioning step runs (the oldest supported release is Ubuntu 20.04).
+if [ "$UBUNTU_VERSION" = "18.04" ]; then
+    echo "❌ Ubuntu 18.04 (JetPack 4) is no longer supported by DDA; use Ubuntu 20.04 or newer." >&2
+    exit 1
+fi
+
 # Helper function to run commands with logging
 run_cmd() {
     local cmd="$@"
@@ -319,7 +326,7 @@ fi
 # Check mandatory dependencies
 check_mandatory_deps
 
-# Function to install from source for Ubuntu 18.04
+# Function to install Python 3.11 from source (Ubuntu 20.04, and the PPA fallback)
 install_from_source() {
   # Check for python3.11 specifically
   if command -v python3.11 >/dev/null 2>&1; then
@@ -415,7 +422,7 @@ install_from_source() {
 
 # Function to install from deadsnakes PPA
 install_from_ppa() {
-  echo "Ubuntu version is not 18.04. Installing Python 3.11 from the deadsnakes PPA."
+  echo "Installing Python 3.11 from the deadsnakes PPA."
 
   # Add the deadsnakes PPA
   if ! apt_run "apt update"; then
@@ -597,15 +604,15 @@ fi
 echo ""
 
 echo "▶ Installing Python 3.11..."
-# The deadsnakes PPA has NO prebuilt python3.11 for Ubuntu 18.04 (bionic, JP4)
-# or 20.04 (focal, JP5) on arm64 (Jetson) — it only ships arm64 packages for
-# 22.04 (jammy, JP6). So build from source on 18.04/20.04 and use the PPA only
+# The deadsnakes PPA has NO prebuilt python3.11 for Ubuntu 20.04 (focal: JP5
+# and arm64 CPU hosts) on arm64 — it only ships arm64 packages for 22.04+
+# (jammy, JP6). So build from source on 20.04 and use the PPA only
 # on 22.04+ (with a source-build fallback if the PPA install fails, e.g. on an
 # unexpected arch/release). In every case, do NOT change the system python3 —
 # apt and other OS tools depend on it and its C extensions (apt_pkg, etc.);
 # python3.11 is installed alongside it, leaving the SYSTEM python3 unchanged.
 case "$UBUNTU_VERSION" in
-  18.04|20.04)
+  20.04)
     echo "Detected Ubuntu $UBUNTU_VERSION - building Python 3.11 from source (deadsnakes has no prebuilt 3.11 for this release/arch)..."
     if ! install_from_source; then
       add_error "Python 3.11 installation from source failed"
@@ -648,7 +655,7 @@ fi
 if [ -n "$PYTHON311" ]; then
   echo "Using Python at: $PYTHON311"
   run_cmd "$PYTHON311 -m pip install --upgrade pip" || add_warning "Failed to upgrade pip"
-  run_cmd "$PYTHON311 -m pip install --force-reinstall requests==2.32.4" || add_warning "Failed to install requests"
+  run_cmd "$PYTHON311 -m pip install --force-reinstall requests==2.34.2" || add_warning "Failed to install requests"
   run_cmd "$PYTHON311 -m pip install protobuf" || add_warning "Failed to install protobuf"
 else
   add_warning "python3.11 not found. Using system python3 instead."
@@ -725,7 +732,7 @@ echo ""
 echo "▶ Installing Docker..."
 
 # Remove snap Docker if present — the snap bundles iptables 1.8.10 (nf_tables)
-# which is incompatible with older kernels (4.9.x on JetPack 4.6.x / Ubuntu 18.04).
+# which is incompatible with older kernels.
 # It also conflicts with the apt docker.io package we need.
 if snap list docker >/dev/null 2>&1; then
     echo "Removing snap Docker (incompatible with this kernel)..."
@@ -766,76 +773,22 @@ if check_command docker && docker ps >/dev/null 2>&1; then
         fi
     fi
 else
-    if [ "$UBUNTU_VERSION" = "18.04" ]; then
-        # Ubuntu 18.04 / JetPack 4.6.x — NVIDIA ships its own Docker 19.03 with
-        # nvidia-container-runtime pre-configured. docker-ce from Docker's repo
-        # conflicts with NVIDIA's packages and breaks the daemon.
-        # We must fully purge any docker-ce remnants before installing docker.io.
-        echo "Ubuntu 18.04 / JetPack detected — using NVIDIA-provided Docker..."
-        
-        # Purge any conflicting docker-ce packages and config left from prior installs
-        if dpkg -l docker-ce >/dev/null 2>&1 || dpkg -l docker-ce-cli >/dev/null 2>&1; then
-            echo "Removing conflicting docker-ce packages..."
-            run_cmd "systemctl stop docker.socket" || true
-            run_cmd "systemctl stop docker" || true
-            run_cmd "systemctl stop containerd" || true
-            run_cmd "apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" || true
-            run_cmd "apt-get autoremove -y" || true
-            # Clean up leftover config and state that prevent docker.io from starting
-            run_cmd "rm -rf /var/lib/docker" || true
-            run_cmd "rm -rf /var/lib/containerd" || true
-            run_cmd "rm -f /etc/apt/sources.list.d/docker.list" || true
-            run_cmd "rm -f /etc/apt/keyrings/docker.gpg" || true
-            echo "✓ Conflicting docker-ce packages removed"
-        fi
-        
-        # Install NVIDIA's Docker packages
-        if ! apt_run "apt-get update"; then
-            add_warning "Failed to update package manager"
-        fi
-        if ! apt_run "apt-get install -y docker.io containerd"; then
-            add_error "Failed to install docker.io"
-        else
-            echo "✓ docker.io installed"
-        fi
-        
-        # Install nvidia-container-runtime if not present (needed for GPU containers)
-        if ! dpkg -l nvidia-container-runtime >/dev/null 2>&1; then
-            apt_run "apt-get install -y nvidia-container-runtime" || add_warning "nvidia-container-runtime not available — GPU containers may not work"
-        fi
-        
-        # Install Compose V2 plugin manually (required for --profile flag)
-        echo "Installing Docker Compose V2 plugin..."
-        COMPOSE_ARCH=$(uname -m)
-        case "$COMPOSE_ARCH" in
-            aarch64) COMPOSE_ARCH="aarch64" ;;
-            x86_64)  COMPOSE_ARCH="x86_64" ;;
-        esac
-        mkdir -p /usr/local/lib/docker/cli-plugins
-        if run_cmd "curl -fsSL https://github.com/docker/compose/releases/download/v2.24.7/docker-compose-linux-${COMPOSE_ARCH} -o /usr/local/lib/docker/cli-plugins/docker-compose"; then
-            run_cmd "chmod +x /usr/local/lib/docker/cli-plugins/docker-compose"
-            echo "✓ Docker Compose V2 plugin installed"
-        else
-            add_error "Failed to download Docker Compose V2 plugin"
-        fi
+    if ! run_cmd "mkdir -m 0755 -p /etc/apt/keyrings"; then
+        add_warning "Failed to create keyrings directory"
+    fi
+    
+    if ! run_cmd "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"; then
+        add_error "Failed to download Docker GPG key"
+    elif ! run_cmd "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable' | tee /etc/apt/sources.list.d/docker.list > /dev/null"; then
+        add_error "Failed to add Docker repository"
+    elif ! apt_run "apt-get update"; then
+        add_error "Failed to update package manager after adding Docker repo"
+    elif ! apt_run "apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y"; then
+        add_error "Failed to install Docker packages"
+    elif ! run_cmd "docker run hello-world"; then
+        add_warning "Docker installed but hello-world test failed"
     else
-        if ! run_cmd "mkdir -m 0755 -p /etc/apt/keyrings"; then
-            add_warning "Failed to create keyrings directory"
-        fi
-        
-        if ! run_cmd "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"; then
-            add_error "Failed to download Docker GPG key"
-        elif ! run_cmd "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable' | tee /etc/apt/sources.list.d/docker.list > /dev/null"; then
-            add_error "Failed to add Docker repository"
-        elif ! apt_run "apt-get update"; then
-            add_error "Failed to update package manager after adding Docker repo"
-        elif ! apt_run "apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y"; then
-            add_error "Failed to install Docker packages"
-        elif ! run_cmd "docker run hello-world"; then
-            add_warning "Docker installed but hello-world test failed"
-        else
-            echo "✓ Docker installed successfully"
-        fi
+        echo "✓ Docker installed successfully"
     fi
 fi
 
@@ -915,20 +868,23 @@ else
 fi
 echo ""
 
-# Register the NVIDIA Container Runtime with the Docker daemon (Jetson/aarch64).
+# Register the NVIDIA Container Runtime with the Docker daemon (Jetson only).
 #
 # On Jetson/L4T the DDA LocalServer container gets GPU access via
 # `runtime: nvidia` in docker-compose (the supported mechanism). That requires
-# the `nvidia` runtime to be registered in /etc/docker/daemon.json. NVIDIA's
-# JetPack 4.6 Docker pre-registers it, but a stock docker-ce install on
-# JetPack 5 (Ubuntu 20.04) installs nvidia-container-runtime WITHOUT wiring it
-# into the daemon, so containers fail to start with:
+# the `nvidia` runtime to be registered in /etc/docker/daemon.json. A stock
+# docker-ce install on JetPack 5 (Ubuntu 20.04) installs
+# nvidia-container-runtime WITHOUT wiring it into the daemon, so containers
+# fail to start with:
 #   "unknown or invalid runtime name: nvidia"
 # Registering it here (idempotent) fixes that. Without it, compose falls back to
 # the unsupported --gpus/CDI hook and fails with:
 #   "invoking the NVIDIA Container Runtime Hook directly ... is not supported."
+# Generic (non-Jetson) arm64 CPU hosts such as AWS Graviton have no L4T and no
+# NVIDIA runtime; they run the CPU image under the generic compose profile.
 ARCH_RAW=$(uname -m)
-if [ "$ARCH_RAW" = "aarch64" ]; then
+if [ "$ARCH_RAW" = "aarch64" ] && { [ -f /etc/nv_tegra_release ] || \
+        dpkg-query -W -f '${Version}' nvidia-l4t-core >/dev/null 2>&1; }; then
     echo "▶ Configuring NVIDIA Container Runtime for Docker (Jetson)..."
     if docker info 2>/dev/null | grep -qi "Runtimes:.*nvidia"; then
         echo "✓ nvidia runtime already registered with Docker"
@@ -1019,8 +975,8 @@ resolve_aws_credentials || true
 thing_group_name="${DDA_THING_GROUP:-DDA_transition_EC2_Group}"
 
 # --- Nucleus platform variant override (device-arch-compatibility) -----------
-# LocalServer ships as independently-versioned per-JetPack aarch64 variants
-# (arm64_jp4 / arm64_jp5 / arm64_jp6 / arm64_jp7) that ALL report architecture "aarch64" to
+# LocalServer ships as independently-versioned aarch64 variants
+# (arm64_cpu / arm64_jp5 / arm64_jp6 / arm64_jp7) that ALL report architecture "aarch64" to
 # Greengrass. A Workflow_Component packaged for more than one arm variant
 # disambiguates its per-arch manifests with a custom Nucleus platform attribute
 # `variant` (== the workflow_core arch token). Unless the device declares that
@@ -1031,7 +987,7 @@ thing_group_name="${DDA_THING_GROUP:-DDA_transition_EC2_Group}"
 # The arch token is detected with the shared detect_arch.sh helper (the same
 # detection the quick-setup flow reports), so both provisioning paths agree; an
 # explicit DDA_PLATFORM_VARIANT env var overrides detection (testing / unusual
-# images). Only the aarch64 JetPack variants need the disambiguator — x86
+# images). Only the aarch64 variants need the disambiguator — x86
 # flavors match on the standard architecture/runtime attributes — so the
 # override is written only for arm64_* tokens. --init-config MERGES with the
 # provisioning-generated config (per the Greengrass installer docs), so this

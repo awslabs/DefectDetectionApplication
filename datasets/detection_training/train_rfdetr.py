@@ -69,6 +69,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from _common import (
     MODEL_DIR,
     WORK,
+    cap_onnx_ir_version,
     fetch_base_weights,
     hp,
     run_converter,
@@ -706,6 +707,8 @@ def main():
     dst = MODEL_DIR / "model.onnx"
     shutil.copy2(produced, dst)
     print(f"exported {produced} -> {dst} ({dst.stat().st_size} bytes)", flush=True)
+    # Keep the IR the edge runtimes load, whatever onnx the export used.
+    cap_onnx_ir_version(dst)
 
     try:
         inputs, outputs = read_onnx_io(dst)

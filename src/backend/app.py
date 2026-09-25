@@ -124,7 +124,7 @@ from workflow_engine import runtime as workflow_engine_runtime
 # vLLM capability probe (vllm-triton-inference, Requirements 4.1, 4.2, 4.3,
 # 8.3): the companion Triton_vLLM_Runtime and the Text_Generation_API router
 # exist only on images whose build installed the vllm wheel (Dockerfile.jp6's
-# VLLM_ENABLE layer). Images without vLLM (jp4, jp5-default, x86 variants)
+# VLLM_ENABLE layer). Images without vLLM (arm64 CPU, jp5-default, x86 variants)
 # skip the import, the router registration, and the manager startup below —
 # exactly the pre-feature startup sequence.
 VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
@@ -425,7 +425,7 @@ if __name__ == "__main__":  # pragma: no cover
     workflow_engine_runtime.start_workflow_engine()
 
     # Start the companion vLLM runtime (no-op on images without the vllm
-    # wheel — jp4, jp5-default, x86 — which run exactly the pre-feature
+    # wheel — arm64 CPU, jp5-default, x86 — which run exactly the pre-feature
     # startup sequence, Requirement 8.3). Install the result into the /health
     # endpoint (edge-deploy-reliability, Defect B): only a genuinely started
     # runtime server (non-None) arms the 8901 reachability gate — a contained

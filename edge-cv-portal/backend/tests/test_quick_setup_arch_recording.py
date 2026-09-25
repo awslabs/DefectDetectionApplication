@@ -50,7 +50,7 @@ INVALID_TOKEN_ERROR_CODE = "invalid_token"
 
 # The fixed set the write gate accepts — identical to devices.py / quick_setup.py.
 TARGET_ARCHITECTURES = ("x86_64", "x86_64_nvidia",
-                        "arm64_jp4", "arm64_jp5", "arm64_jp6", "arm64_jp7")
+                        "arm64_cpu", "arm64_jp5", "arm64_jp6", "arm64_jp7")
 
 REPORTABLE_FROM = ("in_progress", "failed")
 

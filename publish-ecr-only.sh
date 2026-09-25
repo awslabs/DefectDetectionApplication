@@ -4,30 +4,23 @@ set -o pipefail
 # Publish-only (ECR + S3) for an already-built LocalServer component, WITHOUT
 # rebuilding. Mirrors the >2GB ECR path in gdk-component-build-and-publish.sh,
 # reusing the locally-built flask-app:latest / react-webapp:latest images and the
-# existing custom-build staging dir. For aarch64 JetPack 5.
+# existing custom-build staging dir. For aarch64 (JetPack 5 by default).
 
 ARCH="aarch64"
 
 # Component selection. An explicit component name may be passed as $1 to publish a
-# pre-built image without rebuilding — required for JP6 (arm64JP6) and useful on a
-# build server whose host OS does not match the target (this box is Ubuntu 18.04 but
-# builds JP5/JP6 images too). With no arg, fall back to host-OS detection:
-#   Ubuntu 18.04 == JetPack 4 -> arm64 (no suffix); anything else -> arm64JP5.
+# pre-built image without rebuilding — required for JP6 (arm64JP6), JP7 (arm64JP7)
+# and the generic arm64 CPU component (the bare aws.edgeml.dda.LocalServer.arm64).
+# With no arg the JP5 component is published (JetPack 4 is no longer supported,
+# so the build host's OS release no longer selects the component).
 COMPONENT_BASE="aws.edgeml.dda.LocalServer.arm64"
-OS_VERSION_ID=""
-if [ -r /etc/os-release ]; then
-    OS_VERSION_ID=$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-}")
-fi
 
 if [ -n "${1:-}" ]; then
     COMPONENT_NAME="$1"
     echo "Using explicit component name override: ${COMPONENT_NAME}"
-elif [ "$OS_VERSION_ID" = "18.04" ]; then
-    COMPONENT_NAME="${COMPONENT_BASE}"
-    echo "Detected Ubuntu 18.04 (JetPack 4): using JP4 artifacts (${COMPONENT_NAME})"
 else
     COMPONENT_NAME="${COMPONENT_BASE}JP5"
-    echo "Detected Ubuntu ${OS_VERSION_ID:-unknown} (JetPack 5): using JP5 artifacts (${COMPONENT_NAME})"
+    echo "No component name given: using JP5 artifacts (${COMPONENT_NAME})"
 fi
 
 echo "Checking AWS credentials..."
@@ -60,7 +53,11 @@ LATEST_VERSION=$(aws greengrassv2 list-component-versions \
     --arn "arn:aws:greengrass:${PUB_REGION}:${PUB_ACCOUNT_ID}:components:${COMPONENT_NAME}" \
     --no-paginate --query 'componentVersions[0].componentVersion' --output text 2>/dev/null | head -n1)
 LATEST_VERSION=$(echo "$LATEST_VERSION" | tr -d '[:space:]')
-if [ "$LATEST_VERSION" = "None" ] || [ -z "$LATEST_VERSION" ]; then
+if [ -n "${COMPONENT_VERSION_OVERRIDE:-}" ]; then
+    # Explicit version (see gdk-component-build-and-publish.sh); must be
+    # higher than the latest registered one.
+    COMPONENT_VERSION="$COMPONENT_VERSION_OVERRIDE"
+elif [ "$LATEST_VERSION" = "None" ] || [ -z "$LATEST_VERSION" ]; then
     COMPONENT_VERSION="1.0.0"
 else
     V_MAJOR=$(echo "$LATEST_VERSION" | cut -d. -f1)
@@ -77,6 +74,12 @@ if [ -z "$COMPONENT_VERSION" ]; then
     echo "ERROR: failed to compute COMPONENT_VERSION (latest='$LATEST_VERSION')"; exit 1
 fi
 echo "Latest registered: ${LATEST_VERSION}; publishing version: $COMPONENT_VERSION"
+# The dda/flask-app and dda/react-webapp ECR repos are shared by every
+# LocalServer variant, so the image tag is scoped by variant: two variants
+# at the same component version must never overwrite each other's image
+# (arm64JP7 1.0.44 once overwrote the arm64JP5 1.0.44 image this way).
+IMAGE_TAG_PREFIX="${COMPONENT_NAME#aws.edgeml.dda.LocalServer.}-"
+IMAGE_TAG="${IMAGE_TAG_PREFIX}${COMPONENT_VERSION}"
 
 # Authenticate to ECR and ensure repos exist.
 aws ecr get-login-password --region "$PUB_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
@@ -85,12 +88,12 @@ aws ecr describe-repositories --repository-names dda/flask-app --region "$PUB_RE
 aws ecr describe-repositories --repository-names dda/react-webapp --region "$PUB_REGION" >/dev/null 2>&1 || \
     aws ecr create-repository --repository-name dda/react-webapp --region "$PUB_REGION" >/dev/null
 
-echo "Pushing flask-app to ECR (${ECR_REPO_BACKEND}:${COMPONENT_VERSION})..."
-docker tag flask-app:latest "${ECR_REPO_BACKEND}:${COMPONENT_VERSION}"
-docker push "${ECR_REPO_BACKEND}:${COMPONENT_VERSION}"
-echo "Pushing react-webapp to ECR (${ECR_REPO_FRONTEND}:${COMPONENT_VERSION})..."
-docker tag react-webapp:latest "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}"
-docker push "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}"
+echo "Pushing flask-app to ECR (${ECR_REPO_BACKEND}:${IMAGE_TAG_PREFIX}${COMPONENT_VERSION})..."
+docker tag flask-app:latest "${ECR_REPO_BACKEND}:${IMAGE_TAG_PREFIX}${COMPONENT_VERSION}"
+docker push "${ECR_REPO_BACKEND}:${IMAGE_TAG_PREFIX}${COMPONENT_VERSION}"
+echo "Pushing react-webapp to ECR (${ECR_REPO_FRONTEND}:${IMAGE_TAG_PREFIX}${COMPONENT_VERSION})..."
+docker tag react-webapp:latest "${ECR_REPO_FRONTEND}:${IMAGE_TAG_PREFIX}${COMPONENT_VERSION}"
+docker push "${ECR_REPO_FRONTEND}:${IMAGE_TAG_PREFIX}${COMPONENT_VERSION}"
 
 # Repackage a scripts-only zip (same name/layout as the full zip, minus the image tars).
 rm -f "${STAGE_DIR}/flask-app.tar" "${STAGE_DIR}/react-webapp.tar" "${STAGE_DIR}"/.tmp-* 2>/dev/null || true
@@ -108,15 +111,15 @@ aws s3 cp "$APP_ZIP" "$S3_URI" --region "$PUB_REGION"
 python3 -c "import yaml" 2>/dev/null || pip3 install --user pyyaml >/dev/null 2>&1 || true
 ECR_RECIPE="greengrass-build/recipes/recipe-ecr.yaml"
 mkdir -p greengrass-build/recipes
-python3 - "recipe.yaml" "$ECR_RECIPE" "$ECR_REPO_BACKEND" "$ECR_REPO_FRONTEND" "$COMPONENT_VERSION" "$S3_URI" "$COMPONENT_NAME" <<'PYEOF'
+python3 - "recipe.yaml" "$ECR_RECIPE" "$ECR_REPO_BACKEND" "$ECR_REPO_FRONTEND" "$COMPONENT_VERSION" "$S3_URI" "$COMPONENT_NAME" "$IMAGE_TAG" <<'PYEOF'
 import re, sys, yaml
 
-src, out, ecr_backend, ecr_frontend, version, s3_uri, component_name = sys.argv[1:8]
+src, out, ecr_backend, ecr_frontend, version, s3_uri, component_name, image_tag = sys.argv[1:9]
 
 with open(src) as f:
     text = f.read()
 
-# recipe.yaml on disk is written for whichever target (JP4/JP5/JP6) was
+# recipe.yaml on disk is written for whichever target (arm64 CPU/JP5/JP6/JP7) was
 # published last; retarget every occurrence of its component name (the
 # ComponentName field, access-control policy keys, and lifecycle script
 # paths under custom-build/<name>/...) to the component being published,
@@ -135,9 +138,9 @@ deps['aws.greengrass.TokenExchangeService'] = {'VersionRequirement': '~2.0.0'}
 
 def rewrite_install(script: str) -> str:
     script = re.sub(r'docker load -i \S*flask-app\.tar',
-                    f'docker tag {ecr_backend}:{version} flask-app:latest', script)
+                    f'docker tag {ecr_backend}:{image_tag} flask-app:latest', script)
     script = re.sub(r'docker load -i \S*react-webapp\.tar(?:\.gz)?',
-                    f'docker tag {ecr_frontend}:{version} react-webapp:latest', script)
+                    f'docker tag {ecr_frontend}:{image_tag} react-webapp:latest', script)
     return script
 
 changed = False
@@ -150,8 +153,8 @@ for manifest in recipe.get('Manifests', []):
             changed = True
         install['Script'] = new_script
     manifest['Artifacts'] = [
-        {'URI': f'docker:{ecr_backend}:{version}'},
-        {'URI': f'docker:{ecr_frontend}:{version}'},
+        {'URI': f'docker:{ecr_backend}:{image_tag}'},
+        {'URI': f'docker:{ecr_frontend}:{image_tag}'},
         {'URI': s3_uri, 'Unarchive': 'ZIP'},
     ]
 

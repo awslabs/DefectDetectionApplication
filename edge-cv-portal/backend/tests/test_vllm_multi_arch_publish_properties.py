@@ -27,8 +27,9 @@ Requirements enumerate:
    `derive_vllm_component_name` returns `model-vllm-{safe}` verbatim.
 4. **Gate semantics** (3.6, 3.7, 3.8, 3.9) — exact-name matching with no
    fallback, fail closed on a null device architecture and on an empty
-   supported set, `arm64_jp4` -> `JP4_UNSUPPORTED` with the JetPack-4
-   message, and exactly one entry per (component, device) miss.
+   supported set, every miss carrying reason `ARCH_UNSUPPORTED` (the
+   dedicated JetPack 4 reason retired with JetPack 4), and exactly one
+   entry per (component, device) miss.
 5. **Target-map resolution baseline** (3.18, 3.19; design Preservation
    test case 6) — the exact `(LocalServer variant, platform)` pair every
    currently mapped target resolves to today, and a genuinely unknown
@@ -113,19 +114,19 @@ COMPONENT_NAME_INDEX = "component_name-index"
 BASELINE_TARGET_RESOLUTION = {
     "x86_64-cpu": ("aws.edgeml.dda.LocalServer.amd64", "amd64"),
     "x86_64-cuda": ("aws.edgeml.dda.LocalServer.amd64", "amd64"),
-    "jetson-xavier": ("aws.edgeml.dda.LocalServer.arm64JP4", "aarch64"),
     "jetson-xavier-jp5": ("aws.edgeml.dda.LocalServer.arm64JP5", "aarch64"),
     "jetson-xavier-jp6": ("aws.edgeml.dda.LocalServer.arm64JP6", "aarch64"),
-    "arm64-cpu": ("aws.edgeml.dda.LocalServer.arm64JP4", "aarch64"),
+    # The generic arm64 CPU build (JetPack 4 and its 'jetson-xavier'
+    # target are retired).
+    "arm64-cpu": ("aws.edgeml.dda.LocalServer.arm64", "aarch64"),
 }
 
-#: Every Target_Architecture the deployment gate can see, plus the JP4
-#: value that is never in a vLLM supported set (3.8).
-ALL_DEVICE_ARCHS = ("arm64_jp4", "arm64_jp5", "arm64_jp6", "arm64_jp7",
+#: Every Target_Architecture the deployment gate can see, including the
+#: CPU-only arm64_cpu that is never in a vLLM supported set (3.8).
+ALL_DEVICE_ARCHS = ("arm64_cpu", "arm64_jp5", "arm64_jp6", "arm64_jp7",
                     "x86_64", "x86_64_nvidia")
 VLLM_ARCHS = ("arm64_jp5", "arm64_jp6", "arm64_jp7")
 
-JP4_MESSAGE = "JetPack 4 does not support vLLM inference"
 
 #: LocalServer variant every vLLM architecture MUST depend on, and the
 #: `(variant, platform)` pair every mapped target resolves to on the FIXED
@@ -873,17 +874,15 @@ def test_preservation_arch_gate_exact_fail_closed_and_one_entry_per_miss(
 
     Over (component arch, device arch) pairs: matching is by exact name
     with no cross-architecture fallback, a null device architecture and an
-    empty supported set both fail closed for every device, `arm64_jp4`
-    carries reason `JP4_UNSUPPORTED` (with the JetPack-4 message
-    constant), and the gate returns exactly one entry per
-    (component, device) miss.
+    empty supported set both fail closed for every device, every miss
+    carries reason `ARCH_UNSUPPORTED`, and the gate returns exactly one
+    entry per (component, device) miss.
 
     # Validates: Requirements 3.6, 3.7, 3.8, 3.9
     """
     deployments = stack.deployments
-    assert deployments.VLLM_JP4_UNSUPPORTED_MESSAGE == JP4_MESSAGE
-    assert deployments.VLLM_GATE_REASON_JP4 == "JP4_UNSUPPORTED"
     assert deployments.VLLM_GATE_REASON_ARCH == "ARCH_UNSUPPORTED"
+    assert not hasattr(deployments, "VLLM_GATE_REASON_JP4")
 
     devices = {f"thing-{index}": arch
                for index, arch in enumerate(device_archs)}
@@ -908,11 +907,9 @@ def test_preservation_arch_gate_exact_fail_closed_and_one_entry_per_miss(
         assert finding["deviceArch"] == device_arch
         assert finding["supported"] == sorted(
             manifests[finding["component"]]["architectures"])
-        expected_reason = ("JP4_UNSUPPORTED" if device_arch == "arm64_jp4"
-                           else "ARCH_UNSUPPORTED")
-        assert finding["reason"] == expected_reason
-        # arm64_jp4 never appears in a vLLM supported set (3.8).
-        assert "arm64_jp4" not in finding["supported"]
+        assert finding["reason"] == "ARCH_UNSUPPORTED"
+        # arm64_cpu (CPU-only) never appears in a vLLM supported set (3.8).
+        assert "arm64_cpu" not in finding["supported"]
 
     # Fail closed on a null device architecture (3.6).
     for name, manifest in manifests.items():
@@ -1322,8 +1319,8 @@ def test_property6_per_jetpack_arch_gate_is_exact_and_fail_closed(
 
     For any per-JetPack component whose supported set is `[a]` and any
     device architecture `b` (including None): no findings when `b == a`,
-    at least one finding when `b != a` (with reason `JP4_UNSUPPORTED` and
-    the JetPack-4 message for `arm64_jp4`), at least one finding on a
+    at least one finding when `b != a` (with reason `ARCH_UNSUPPORTED`),
+    at least one finding on a
     null device architecture, and at least one finding on an empty
     supported set.
 
@@ -1354,13 +1351,7 @@ def test_property6_per_jetpack_arch_gate_is_exact_and_fail_closed(
         assert finding["component"] == name
         assert finding["deviceArch"] == device_arch
         assert finding["supported"] == [component_arch]
-        if device_arch == "arm64_jp4":
-            # JetPack 4: reason JP4_UNSUPPORTED with the JetPack-4
-            # message constant (3.8).
-            assert finding["reason"] == deployments.VLLM_GATE_REASON_JP4
-            assert deployments.VLLM_JP4_UNSUPPORTED_MESSAGE == JP4_MESSAGE
-        else:
-            assert finding["reason"] == deployments.VLLM_GATE_REASON_ARCH
+        assert finding["reason"] == deployments.VLLM_GATE_REASON_ARCH
 
     # A null device architecture yields at least one finding whatever the
     # component's architecture (3.6).

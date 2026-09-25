@@ -456,7 +456,7 @@ export default function CreateDeployment() {
   // each selected device's recorded Target_Architecture is checked
   // against the supported set of every selected model-vllm-* component
   // with the same pure predicate as the backend gate (exact-name match,
-  // absent arch fails closed, jp4-specific reason). LLM-bearing workflow
+  // absent arch fails closed). LLM-bearing workflow
   // components cannot be checked client-side — the version-item
   // has_llm_inference/packaged_architectures discriminators are not
   // exposed by the workflow APIs — so those rely on the authoritative

@@ -19,7 +19,7 @@ Pure data: no I/O, importable everywhere workflow_core is.
 from typing import Dict, List
 
 from .models import (
-    ARCH_ARM64_JP4,
+    ARCH_ARM64_CPU,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
     ARCH_ARM64_JP7,
@@ -47,14 +47,15 @@ BUILD_PLATFORMS: Dict[str, Dict[str, str]] = {
         "notes": "Same base as x86_64 plus the CUDA toolkit and NVIDIA "
                  "GStreamer runtime headers.",
     },
-    ARCH_ARM64_JP4: {
-        "label": "arm64 JetPack 4",
-        "os": "L4T r32 / Ubuntu 18.04",
-        "gstreamer": "1.14",
-        "meson": "0.45 (pip meson in the image)",
-        "compiler": "gcc 7",
-        "notes": "Oldest toolchain: no meson subproject fallback for newer "
-                 "GStreamer; DeepStream 5.x SDK.",
+    ARCH_ARM64_CPU: {
+        "label": "arm64 CPU",
+        "os": "Ubuntu 20.04",
+        "gstreamer": "1.16",
+        "meson": "1.4 (pip meson in the image)",
+        "compiler": "gcc 9",
+        "notes": "Generic non-Jetson arm64 host (e.g. AWS Graviton): no "
+                 "NVIDIA stack; no meson subproject fallback for newer "
+                 "GStreamer.",
     },
     ARCH_ARM64_JP5: {
         "label": "arm64 JetPack 5",
@@ -89,8 +90,8 @@ BUILD_PLATFORMS: Dict[str, Dict[str, str]] = {
 #: subproject fallback when the source requires more than the platform
 #: ships. Observed in production: gst-plugins-good main (requires
 #: GStreamer >= 1.24) builds fine on the Ubuntu 22.04 platforms via the
-#: fallback, while arm64_jp4 (Ubuntu 18.04) and arm64_jp5 (Ubuntu 20.04)
-#: fail with an obscure meson subproject error.
+#: fallback, while the Ubuntu 20.04 platforms (arm64_cpu, arm64_jp5) fail
+#: with an obscure meson subproject error.
 PLATFORMS_WITH_SUBPROJECT_FALLBACK = frozenset(
     {ARCH_X86_64, ARCH_X86_64_NVIDIA, ARCH_ARM64_JP6, ARCH_ARM64_JP7})
 

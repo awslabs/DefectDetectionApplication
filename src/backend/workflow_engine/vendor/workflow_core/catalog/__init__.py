@@ -8,7 +8,7 @@ plugin manifest.
 """
 
 from .models import (
-    ARCH_ARM64_JP4,
+    ARCH_ARM64_CPU,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
     ARCH_ARM64_JP7,
@@ -90,7 +90,7 @@ __all__ = [
     "DEVICE_ARCHITECTURES",
     "ARCH_X86_64",
     "ARCH_X86_64_NVIDIA",
-    "ARCH_ARM64_JP4",
+    "ARCH_ARM64_CPU",
     "ARCH_ARM64_JP5",
     "ARCH_ARM64_JP6",
     "ARCH_ARM64_JP7",

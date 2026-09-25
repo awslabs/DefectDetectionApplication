@@ -51,7 +51,7 @@ def ca(aws_stack):
               settings_table=resource.Table(SETTINGS_TABLE_NAME))
 
 HOOK = "plugin/frame_processing_hook.py"
-ARCHES = ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6", "arm64_jp7"]
+ARCHES = ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6", "arm64_jp7"]
 
 _path = st.from_regex(r"(plugin|builds/[a-z0-9_]{2,8}|docs)/[a-z_]{1,8}\.(c|build|md|h)",
                       fullmatch=True)

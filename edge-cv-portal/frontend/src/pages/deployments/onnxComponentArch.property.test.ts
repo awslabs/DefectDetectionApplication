@@ -115,11 +115,12 @@ describe('existing-name arch inference — preservation baseline (task 2, Proper
     );
     fc.assert(
       fc.property(safeFragmentArb, (safe) => {
-        // The legacy JP4 id 'jetson-xavier' and the x86 targets carry NO
-        // JetPack token: empty set (left to the coarse arm64/amd64 filter).
+        // The retired JP4 id 'jetson-xavier' resolves to the retired
+        // arm64_jp4 id (never a supported device); the x86 targets carry
+        // NO JetPack token: empty set (left to the coarse amd64 filter).
         expect(
           inferComponentTargetArchs(`model-${safe}-jetson-xavier`)
-        ).toEqual([]);
+        ).toEqual(['arm64_jp4']);
         expect(inferComponentTargetArchs(`model-${safe}-x86-64-cpu`)).toEqual(
           []
         );
@@ -155,7 +156,7 @@ const onnxMajorArb = fc.constantFrom('5', '6', '7');
 const ALL_DEVICE_ARCHS = [
   'x86_64',
   'x86_64_nvidia',
-  'arm64_jp4',
+  'arm64_cpu',
   'arm64_jp5',
   'arm64_jp6',
   'arm64_jp7',
@@ -258,7 +259,7 @@ describe('per-JetPack ONNX arch inference — Property 7 (fix checking, task 4.5
         })),
       safeFragmentArb.map((safe) => ({
         name: `model-${safe}-jetson-xavier`,
-        expected: [] as string[],
+        expected: ['arm64_jp4'],
       })),
       safeFragmentArb.map((safe) => ({
         name: `model-${safe}`,

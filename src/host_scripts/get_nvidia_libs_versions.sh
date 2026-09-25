@@ -172,7 +172,7 @@ echo "JETSON_TENSORRT=${JETSON_TENSORRT}" >> /tmp/.dda.env
 #
 # The authoritative signal that this host is a CUDA-capable Jetson is the L4T
 # marker file /etc/nv_tegra_release, which is present on ALL JetPack releases
-# (JP4 r32.x, JP5 r35.x, JP6 r36.x). We rely on that rather than on the exact
+# (JP5 r35.x, JP6 r36.x, JP7 r38.x). We rely on that rather than on the exact
 # CUDA toolkit layout (CUDA 12 on JP6 dropped /usr/local/cuda/version.txt, and
 # nvcc is only present with the full toolkit) or on a specific driver path
 # (/usr/lib/aarch64-linux-gnu/tegra/libcuda.so* moved on JP6). GPU access inside
@@ -182,7 +182,7 @@ echo "JETSON_TENSORRT=${JETSON_TENSORRT}" >> /tmp/.dda.env
 # on the host to choose the tegra profile.
 #
 # Fallbacks: also treat the host as GPU-capable if CUDA was detected (is_gpu==1
-# from nvcc/version.txt above) or if libcuda.so* exists in the known JP4/JP5
+# from nvcc/version.txt above) or if libcuda.so* exists in the known JP5
 # Tegra driver dir — so non-standard installs still resolve correctly.
 TEGRA_DRIVER_DIR="/usr/lib/aarch64-linux-gnu/tegra"
 if [ "$arch" = "aarch64" ] && { \
@@ -196,8 +196,8 @@ else
 fi
 
 # Use the GPU (tegra) profile when this is an aarch64 Jetson with CUDA present.
-# This covers both JetPack 4 (Xavier, L4T r32.x) and JetPack 5 (Orin, L4T r35.x);
-# the JP5-specific backend image is selected at build time (Dockerfile.jp5), while
+# This covers every supported JetPack (JP5 r35.x, JP6 r36.x, JP7 r38.x); the
+# JetPack-specific backend image is selected at build time (Dockerfile.jp5/6/7), while
 # the runtime profile is the same `tegra` profile that mounts the CUDA libraries.
 # NOTE: Orin is intentionally NOT disabled here — the old "disable gpu for orin"
 # guard was for a bug that no longer applies, and disabling it left the container

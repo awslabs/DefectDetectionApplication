@@ -14,7 +14,7 @@ workflow component whose version item records ``has_llm_inference``:
 - workflow components use the ``packaged_architectures`` set the
   Component_Packager recorded on the version item;
 - deployments containing neither contribute zero findings, so
-  pre-feature validation applies verbatim — jp4 included (8.5);
+  pre-feature validation applies verbatim — arm64_cpu included (8.5);
 - any violation returns ``409 VLLM_ARCH_UNSUPPORTED`` with the complete
   offending list and submits nothing (3.4).
 
@@ -142,7 +142,7 @@ class TestVllmRecordLookup:
         (8.5)."""
         manifests = deployments.collect_vllm_component_manifests({
             "model-defect-classifier": "1.0.0",
-            "aws.edgeml.dda.LocalServer.jp4": "1.2.0",
+            "aws.edgeml.dda.LocalServer.arm64": "1.2.0",
             "aws.greengrass.Nucleus": "2.4.0",
         })
         assert manifests == {}
@@ -263,16 +263,16 @@ def gate_env(env, deployments, monkeypatch):
 # ==========================================================================
 
 class TestWorkflowVllmGate:
-    def test_llm_workflow_rejected_for_jp4_device(self, gate_env):
+    def test_llm_workflow_rejected_for_arm64_cpu_device(self, gate_env):
         """A workflow version recorded as containing an LLM_Inference_Node
-        rejects jp4 targets with the JetPack-4 reason and submits
-        nothing (3.4, 3.5)."""
+        rejects a generic arm64 CPU target (no vLLM runtime) with the
+        ARCH_UNSUPPORTED reason and submits nothing (3.4, 3.5)."""
         gate_env.mark_packaged(True, ["arm64_jp6"])
-        gate_env.register_device("jp4-cam-01")
-        gate_env.put_device_record("jp4-cam-01", arch="arm64_jp4")
+        gate_env.register_device("cpu-cam-01")
+        gate_env.put_device_record("cpu-cam-01", arch="arm64_cpu")
 
         status, payload = gate_env.deploy_workflow(
-            target_devices=["jp4-cam-01"])
+            target_devices=["cpu-cam-01"])
 
         assert status == 409
         assert payload["error"]["code"] == "VLLM_ARCH_UNSUPPORTED"
@@ -280,10 +280,10 @@ class TestWorkflowVllmGate:
         assert entry["component"] == \
             f"dda.workflow.{gate_env.workflow_id}"
         assert entry["version"] == "1.0.0"
-        assert entry["device"] == "jp4-cam-01"
-        assert entry["deviceArch"] == "arm64_jp4"
+        assert entry["device"] == "cpu-cam-01"
+        assert entry["deviceArch"] == "arm64_cpu"
         assert entry["supported"] == ["arm64_jp6"]
-        assert entry["reason"] == "JP4_UNSUPPORTED"
+        assert entry["reason"] == "ARCH_UNSUPPORTED"
         assert gate_env.gg.create_deployment_calls == []
 
     def test_llm_workflow_deploys_to_supported_arch(self, gate_env):
@@ -299,13 +299,13 @@ class TestWorkflowVllmGate:
 
     def test_workflow_without_llm_content_is_untouched(self, gate_env):
         """Versions without has_llm_inference contribute zero findings —
-        pre-feature validation verbatim, jp4 included (8.5)."""
-        gate_env.mark_packaged(False, ["arm64_jp4"])
-        gate_env.register_device("jp4-cam-01")
-        gate_env.put_device_record("jp4-cam-01", arch="arm64_jp4")
+        pre-feature validation verbatim, arm64_cpu included (8.5)."""
+        gate_env.mark_packaged(False, ["arm64_cpu"])
+        gate_env.register_device("cpu-cam-01")
+        gate_env.put_device_record("cpu-cam-01", arch="arm64_cpu")
 
         status, payload = gate_env.deploy_workflow(
-            target_devices=["jp4-cam-01"])
+            target_devices=["cpu-cam-01"])
 
         assert status == 201, payload
 
@@ -330,27 +330,29 @@ class TestWorkflowVllmGate:
 # ==========================================================================
 
 class TestModelComponentVllmGate:
-    def test_vllm_component_rejected_for_jp4_device(self, gate_env):
+    def test_vllm_component_rejected_for_retired_jp4_record(self, gate_env):
         """A model-vllm-* component resolves its supported set from the
-        backing record via the component_name-index GSI; jp4 misses carry
-        the JetPack-4 reason and nothing is submitted (3.4, 3.5)."""
+        backing record via the component_name-index GSI. A device still
+        carrying a stale record of the retired arm64_jp4 arch fails closed
+        with the generic ARCH_UNSUPPORTED reason (the dedicated JetPack 4
+        reason was removed) and nothing is submitted (3.4, 3.5)."""
         seed_vllm_record(gate_env.deployments, "model-vllm-summarizer",
                          ["arm64_jp6"])
-        gate_env.put_device_record("jp4-cam-01", arch="arm64_jp4")
+        gate_env.put_device_record("legacy-jp4-cam-01", arch="arm64_jp4")
 
         status, payload = gate_env.deploy_components(
             [{"component_name": "model-vllm-summarizer",
               "component_version": "1.0.0"}],
-            target_devices=["jp4-cam-01"])
+            target_devices=["legacy-jp4-cam-01"])
 
         assert status == 409
         assert payload["error"]["code"] == "VLLM_ARCH_UNSUPPORTED"
         [entry] = payload["error"]["details"]["unsupported"]
         assert entry["component"] == "model-vllm-summarizer"
-        assert entry["device"] == "jp4-cam-01"
+        assert entry["device"] == "legacy-jp4-cam-01"
         assert entry["deviceArch"] == "arm64_jp4"
         assert entry["supported"] == ["arm64_jp6"]
-        assert entry["reason"] == "JP4_UNSUPPORTED"
+        assert entry["reason"] == "ARCH_UNSUPPORTED"
         assert gate_env.gg.create_deployment_calls == []
 
     def test_unresolvable_backing_record_fails_closed(self, gate_env):
@@ -376,18 +378,18 @@ class TestModelComponentVllmGate:
         """The 409 carries the complete offending list (3.4)."""
         seed_vllm_record(gate_env.deployments, "model-vllm-multi",
                          ["arm64_jp6"])
-        gate_env.put_device_record("jp4-cam-01", arch="arm64_jp4")
+        gate_env.put_device_record("cpu-cam-01", arch="arm64_cpu")
         gate_env.put_device_record("jp5-cam-01", arch="arm64_jp5")
         gate_env.put_device_record("jp6-cam-01", arch="arm64_jp6")
 
         status, payload = gate_env.deploy_components(
             [{"component_name": "model-vllm-multi",
               "component_version": "1.0.0"}],
-            target_devices=["jp4-cam-01", "jp5-cam-01", "jp6-cam-01"])
+            target_devices=["cpu-cam-01", "jp5-cam-01", "jp6-cam-01"])
 
         assert status == 409
         unsupported = payload["error"]["details"]["unsupported"]
         assert [(e["device"], e["reason"]) for e in unsupported] == [
-            ("jp4-cam-01", "JP4_UNSUPPORTED"),
+            ("cpu-cam-01", "ARCH_UNSUPPORTED"),
             ("jp5-cam-01", "ARCH_UNSUPPORTED"),
         ]

@@ -338,7 +338,7 @@ JP5_VLLM_ENABLED = os.environ.get('JP5_VLLM_ENABLED', 'false').lower() == 'true'
 def vllm_supported_architectures() -> List[str]:
     """Supported Target_Architecture set for vLLM_Model_Components:
     always arm64_jp6 and arm64_jp7, arm64_jp5 only when JP5 support is
-    flagged on, never arm64_jp4. Mirrors
+    flagged on, never a CPU-only architecture. Mirrors
     packaging.vllm_supported_architectures."""
     archs = ['arm64_jp6', 'arm64_jp7']
     if JP5_VLLM_ENABLED:
@@ -1289,7 +1289,7 @@ def import_model(event: Dict, context: Any) -> Dict:
         "model_s3_uri": "s3://bucket/path/model.tar.gz",
         "description": "string",  // optional
         "auto_compile": true,  // optional, default false
-        "compilation_targets": ["x86_64-cpu", "jetson-xavier"],  // optional
+        "compilation_targets": ["x86_64-cpu", "jetson-xavier-jp5"],  // optional
         "fine_tunable": {  // optional; set by Smart Import when it kept the checkpoint
             "arch": "yolo" | "rf_detr",
             "kind": "ultralytics_checkpoint" | "rfdetr_checkpoint",
@@ -1549,7 +1549,6 @@ def get_model_format_spec(event: Dict, context: Any) -> Dict:
             'Model file must be PyTorch 1.8 compatible'
         ],
         'supported_compilation_targets': [
-            'jetson-xavier',
             'jetson-xavier-jp5',
             'jetson-xavier-jp6',
             'x86_64-cpu',

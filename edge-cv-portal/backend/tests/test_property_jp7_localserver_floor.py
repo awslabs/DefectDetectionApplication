@@ -11,12 +11,14 @@ and is recorded here as the golden contract. These tests PASS on the unfixed
 tree and MUST keep passing after the fix — none of them exercises the bug
 condition (a KNOWN arch missing from a CONFIGURED, non-empty floor map):
 
-- **jp4/jp5/jp6 identity (3.1)**: with the REAL ``compute-stack.ts`` literal
+- **jp5/jp6 identity (3.1)**: with the REAL ``compute-stack.ts`` literal
   loaded, the packager resolves ``'1.0.0'`` from each JetPack arch's own map
   entry — recipe entry ``'>=1.0.0'`` HARD, manifest
   ``minLocalServerVersion: '1.0.0'`` — and a PBT pins that ANY map containing
   the arch resolves exactly its entry (map-entry resolution is untouched by
-  the fix by construction).
+  the fix by construction). The generic arm64 CPU lineage (``arm64_cpu``,
+  which replaced the retired JetPack 4 entry) resolves its own ``'1.1.0'``
+  floor the same way.
 - **Scalar-chain identity (3.6)**: an EMPTY floor map resolves the scalar for
   every arch (known, unknown, ``None``) — the contract the env-clearing
   preservation suites (e.g. test_workflow_packaging_localserver_
@@ -28,8 +30,8 @@ condition (a KNOWN arch missing from a CONFIGURED, non-empty floor map):
   with ``by_arch={}`` (the per-version-override calling convention) gates
   EVERY device against the override, regardless of variant.
 - **Legacy recognition (3.6)**: ``local_server_component_arch`` pinned over
-  the full component-name vocabulary (JP-tagged, legacy bare arm64/aarch64,
-  amd64/x86, junk).
+  the full component-name vocabulary (JP-tagged, bare arm64/aarch64 generic
+  CPU, retired arm64JP4, amd64/x86, junk).
 - **Manifest schema (3.4)**: ``build_manifest`` key set and value types
   pinned; only the VALUES for previously-missing archs may change after the
   fix (so no value for jp7/x86 floors is asserted here).
@@ -76,9 +78,10 @@ from test_workflow_packaging_deployment_integration import FakeGreengrass
 # --------------------------------------------------------------------------
 
 #: arch id -> LocalServer variant component name (the fail-closed
-#: ARCH_TO_LOCAL_SERVER_COMPONENT discipline; bare '.arm64' never emitted).
+#: ARCH_TO_LOCAL_SERVER_COMPONENT discipline; the bare '.arm64' name is
+#: the generic arm64 CPU build, emitted only for arm64_cpu).
 LOCAL_SERVER_VARIANTS = {
-    "arm64_jp4": "aws.edgeml.dda.LocalServer.arm64JP4",
+    "arm64_cpu": "aws.edgeml.dda.LocalServer.arm64",
     "arm64_jp5": "aws.edgeml.dda.LocalServer.arm64JP5",
     "arm64_jp6": "aws.edgeml.dda.LocalServer.arm64JP6",
     "arm64_jp7": "aws.edgeml.dda.LocalServer.arm64JP7",
@@ -87,14 +90,18 @@ LOCAL_SERVER_VARIANTS = {
 }
 
 ARCHS = sorted(LOCAL_SERVER_VARIANTS)
-JP456_ARCHS = ("arm64_jp4", "arm64_jp5", "arm64_jp6")
+JP56_ARCHS = ("arm64_jp5", "arm64_jp6")
+#: The generic arm64 CPU lineage floors above every JetPack 4-era bare
+#: LocalServer.arm64 build (compute-stack.ts).
+ARM64_CPU_FLOOR = "1.1.0"
 AMD64_FLAVORS = ("x86_64", "x86_64_nvidia")
 
 LOCAL_SERVER_PREFIX = "aws.edgeml.dda.LocalServer."
 
 #: Installed-component name suffixes the gate can encounter on real devices
-#: (write side emits the JP-tagged/amd64 names; legacy bare names survive on
-#: already-provisioned JP4 devices; x86_64 is an accepted amd64 alias).
+#: (write side emits the JP-tagged/bare-arm64/amd64 names; the retired
+#: arm64JP4 and legacy aarch64 names can survive on already-provisioned
+#: devices; x86_64 is an accepted amd64 alias).
 VARIANT_SUFFIXES = ("arm64JP4", "arm64JP5", "arm64JP6", "arm64JP7",
                     "arm64", "aarch64", "amd64", "x86_64")
 
@@ -223,25 +230,49 @@ device_fleets = st.dictionaries(
 
 
 # ==========================================================================
-# (1) jp4/jp5/jp6 identity with the REAL deployed literal (Requirement 3.1)
+# (1) jp5/jp6 identity with the REAL deployed literal (Requirement 3.1)
 # ==========================================================================
 
-class TestJp456IdentityWithProdLiteral:
+class TestJp56IdentityWithProdLiteral:
 
-    def test_prod_literal_carries_jp456_entries_at_1_0_0(self):
-        """**Property 2: Preservation** — the deployed literal's jp4/jp5/jp6
+    def test_prod_literal_carries_jp56_entries_at_1_0_0(self):
+        """**Property 2: Preservation** — the deployed literal's jp5/jp6
         entries are exactly '1.0.0' (observed unfixed; the fix only ADDS
         keys, it must never change these).
 
         # Validates: Requirements 3.1
         """
-        for arch in JP456_ARCHS:
+        for arch in JP56_ARCHS:
             assert PROD_FLOOR_MAP.get(arch) == "1.0.0", (
                 "PRESERVATION REGRESSION (3.1): compute-stack.ts floor "
                 "entry for {} changed: {!r}".format(
                     arch, PROD_FLOOR_MAP.get(arch)))
 
-    @pytest.mark.parametrize("arch", JP456_ARCHS)
+    def test_prod_literal_arm64_cpu_floor_replaces_retired_jp4(self):
+        """The retired arm64_jp4 entry is gone and the generic arm64 CPU
+        lineage carries its own floor, above every JetPack 4-era bare
+        LocalServer.arm64 build."""
+        assert "arm64_jp4" not in PROD_FLOOR_MAP
+        assert PROD_FLOOR_MAP.get("arm64_cpu") == ARM64_CPU_FLOOR
+
+    def test_arm64_cpu_resolution_recipe_and_manifest(self, packaging):
+        """With the prod literal + scalar loaded, arm64_cpu resolves its
+        own 1.1.0 floor: recipe entry '>=1.1.0' HARD on the bare
+        LocalServer.arm64 name, manifest minLocalServerVersion '1.1.0'."""
+        with floors(packaging, dict(PROD_FLOOR_MAP), PROD_SCALAR):
+            assert packaging.min_local_server_version_for(
+                "arm64_cpu") == ARM64_CPU_FLOOR
+            out = packaging.local_server_component_dependencies(["arm64_cpu"])
+            assert out == {"aws.edgeml.dda.LocalServer.arm64": {
+                "VersionRequirement": ">=" + ARM64_CPU_FLOOR,
+                "DependencyType": "HARD",
+            }}
+            manifest = _manifest(packaging, "arm64_cpu")
+            assert manifest["minLocalServerVersion"] == ARM64_CPU_FLOOR
+            assert manifest["minLocalServerVersions"][
+                "arm64_cpu"] == ARM64_CPU_FLOOR
+
+    @pytest.mark.parametrize("arch", JP56_ARCHS)
     def test_jp_arch_resolution_recipe_and_manifest_byte_identical(
             self, packaging, arch):
         """**Property 2: Preservation** — with the prod literal + scalar
@@ -264,9 +295,9 @@ class TestJp456IdentityWithProdLiteral:
 
             manifest = _manifest(packaging, arch)
             assert manifest["minLocalServerVersion"] == "1.0.0"
-            # The embedded map's jp4/jp5/jp6 entries stay byte-identical
+            # The embedded map's jp5/jp6 entries stay byte-identical
             # (the fix may only ADD jp7/x86 keys additively, 3.4).
-            for jp_arch in JP456_ARCHS:
+            for jp_arch in JP56_ARCHS:
                 assert manifest["minLocalServerVersions"][jp_arch] == "1.0.0"
 
     @given(arch=st.sampled_from(ARCHS), entry=versions,
@@ -439,23 +470,26 @@ class TestLegacyNameRecognitionPinned:
     #: The full observed vocabulary of local_server_component_arch (read
     #: side), recorded from the unfixed tree.
     OBSERVED_MAPPING = {
-        LOCAL_SERVER_PREFIX + "arm64JP4": "arm64_jp4",
+        # The retired JetPack 4 variant is arch-undetermined (None), so
+        # such a device falls to the scalar and never matches a lineage.
+        LOCAL_SERVER_PREFIX + "arm64JP4": None,
         LOCAL_SERVER_PREFIX + "arm64JP5": "arm64_jp5",
         LOCAL_SERVER_PREFIX + "arm64JP6": "arm64_jp6",
         LOCAL_SERVER_PREFIX + "arm64JP7": "arm64_jp7",
-        # Legacy bare JetPack 4 names: retired on the write side, still
-        # recognized on read for already-provisioned JP4 devices.
-        LOCAL_SERVER_PREFIX + "arm64": "arm64_jp4",
-        LOCAL_SERVER_PREFIX + "aarch64": "arm64_jp4",
+        # The bare name (and its legacy aarch64 alias) is the generic
+        # arm64 CPU build.
+        LOCAL_SERVER_PREFIX + "arm64": "arm64_cpu",
+        LOCAL_SERVER_PREFIX + "aarch64": "arm64_cpu",
         LOCAL_SERVER_PREFIX + "amd64": "x86_64",
         LOCAL_SERVER_PREFIX + "x86_64": "x86_64",
     }
 
     def test_full_name_vocabulary_maps_as_observed(self, deployments):
         """**Property 2: Preservation** — the read-side legacy recognition
-        is unchanged over the full name vocabulary: JP-tagged names map to
-        their arch ids, legacy bare arm64/aarch64 map to arm64_jp4 (whose
-        floor entry exists), amd64/x86 map to x86_64.
+        is pinned over the full name vocabulary: JP-tagged names map to
+        their arch ids, bare arm64/aarch64 map to arm64_cpu (whose floor
+        entry exists), the retired arm64JP4 is undetermined (None),
+        amd64/x86 map to x86_64.
 
         # Validates: Requirements 3.6
         """

@@ -17,9 +17,9 @@ The pipeline executor finalizes a run as ``completed`` (commit + log)
 BEFORE it invokes the post-run output-binding handler, and
 ``OutputBindingProcessor.process`` swallows each binding failure inside a
 contained ``try/except`` (Requirement 13.7 isolation). As a result a run
-whose ``opcua_write`` binding fails -- e.g. because the ``opcua`` package
+whose ``opcua_write`` binding fails -- e.g. because the ``asyncua`` package
 is missing and ``_default_opcua_writer`` re-raises
-``RuntimeError("The 'opcua' Python package is not available ...")`` -- is
+``RuntimeError("The 'asyncua' Python package is not available ...")`` -- is
 reported as a SILENT SUCCESS: terminal status ``completed`` with no
 ``failing_node_id``.
 
@@ -58,10 +58,10 @@ from workflow_engine.pipeline_executor import (
 )
 
 # The exact message the real _default_opcua_writer re-raises when the
-# opcua package is missing on the device.
+# asyncua package is missing on the device.
 MISSING_OPCUA_MESSAGE = (
-    "The 'opcua' Python package is not available; it is delivered as a "
-    "Workflow_Component dependency"
+    "The 'asyncua' Python package is not available; it is delivered as a "
+    "LocalServer dependency"
 )
 
 BASE_SEGMENTS = [

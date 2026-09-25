@@ -15,8 +15,8 @@ from test_plugin_builds import PluginBuildsEnv
 from test_plugin_records import make_scaffold_declaration
 
 CONFIGURED = sorted(json.loads(TEST_ENV["BUILD_PROJECTS_JSON"]))
-ALL_ARCHES = ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6", "arm64_jp7"]
-DEEPSTREAM = {"arm64_jp4", "arm64_jp5", "arm64_jp6"}
+ALL_ARCHES = ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6", "arm64_jp7"]
+DEEPSTREAM = {"arm64_jp5", "arm64_jp6"}
 
 _arch_lists = st.lists(st.sampled_from(CONFIGURED), min_size=1, max_size=3, unique=True)
 

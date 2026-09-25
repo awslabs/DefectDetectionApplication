@@ -6,12 +6,12 @@ For all Custom_Node_Type declarations (valid ones, and ones corrupted with
 a random known defect — port type outside PORT_TYPES, category outside
 CATEGORIES, parameter type outside PARAMETER_TYPES, architecture outside
 ARCHITECTURES, default violating its own constraints, DeepStream mapping
-outside arm64_jp4/jp5/jp6, duplicate parameter names or mapping
+outside arm64_jp5/jp6, duplicate parameter names or mapping
 architectures, ...), ``descriptor_from_declaration`` succeeds if and only
 if the declaration is valid; on success the resulting descriptor
 faithfully reflects the declaration and satisfies the same catalog
 well-formedness predicate as built-in node types, and DeepStream-flagged
-declarations yield mappings only for arm64_jp4/jp5/jp6; on failure the
+declarations yield mappings only for arm64_jp5/jp6; on failure the
 error identifies the offending field.
 
 **Validates: Requirements 1.7, 5.3, 8.4, 8.5**

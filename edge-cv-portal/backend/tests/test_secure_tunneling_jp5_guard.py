@@ -130,7 +130,7 @@ def test_cap_jp5_passes_compatible(devices):
     assert devices._cap_secure_tunneling_version("1.0.19", "arm64_jp5") == "1.0.19"
 
 
-@pytest.mark.parametrize("arch", ["arm64_jp6", "x86_64", "arm64_jp4", None])
+@pytest.mark.parametrize("arch", ["arm64_jp6", "x86_64", "arm64_cpu", None])
 def test_cap_non_jp5_untouched(devices, arch):
     """Only JP5 is capped; every other arch (and unknown) passes through."""
     assert devices._cap_secure_tunneling_version("2.0.1", arch) == "2.0.1"

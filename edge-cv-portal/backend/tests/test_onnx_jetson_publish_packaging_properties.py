@@ -41,7 +41,7 @@ It pins the baselines design.md's Preservation Checking enumerates:
 
 The compile-targets guard (3.9) is NOT duplicated here — the gate is
 re-running `test_onnx_compile_diagnostics_exploration.py` case 9 (no JP7 Neo
-compile target, exactly seven targets). The frontend inference baseline
+compile target, exactly six targets). The frontend inference baseline
 (3.13) lives in
 `edge-cv-portal/frontend/src/pages/deployments/onnxComponentArch.property.test.ts`
 (preservation describe block).
@@ -108,13 +108,13 @@ _PUBLISH_PATH = os.path.join(_FUNCTIONS, "greengrass_publish.py")
 #: mapped compile target resolves to TODAY (greengrass_publish.py
 #: TARGET_TO_LOCAL_SERVER / TARGET_TO_PLATFORM, observed unfixed). The fix
 #: ADDS the three onnx-jetson-xavier-jp{N} keys; these pairs must never
-#: change (3.1).
+#: change (3.1). JetPack 4 removal retired the 'jetson-xavier' target and
+#: moved 'arm64-cpu' onto the bare generic arm64 CPU LocalServer.
 BASELINE_TARGET_RESOLUTION = {
-    "jetson-xavier": ("aws.edgeml.dda.LocalServer.arm64JP4", "aarch64"),
     "jetson-xavier-jp5": ("aws.edgeml.dda.LocalServer.arm64JP5", "aarch64"),
     "jetson-xavier-jp6": ("aws.edgeml.dda.LocalServer.arm64JP6", "aarch64"),
     "jetson-xavier-jp7": ("aws.edgeml.dda.LocalServer.arm64JP7", "aarch64"),
-    "arm64-cpu": ("aws.edgeml.dda.LocalServer.arm64JP4", "aarch64"),
+    "arm64-cpu": ("aws.edgeml.dda.LocalServer.arm64", "aarch64"),
     "x86_64-cpu": ("aws.edgeml.dda.LocalServer.amd64", "amd64"),
     "x86_64-cuda": ("aws.edgeml.dda.LocalServer.amd64", "amd64"),
 }
@@ -123,7 +123,7 @@ BASELINE_TARGET_RESOLUTION = {
 #: byte-identical (dict equality) because the fix must not touch either
 #: map (3.8).
 BASELINE_ARCH_TO_LOCAL_SERVER_COMPONENT = {
-    "arm64_jp4": "aws.edgeml.dda.LocalServer.arm64JP4",
+    "arm64_cpu": "aws.edgeml.dda.LocalServer.arm64",
     "arm64_jp5": "aws.edgeml.dda.LocalServer.arm64JP5",
     "arm64_jp6": "aws.edgeml.dda.LocalServer.arm64JP6",
     "arm64_jp7": "aws.edgeml.dda.LocalServer.arm64JP7",
@@ -133,7 +133,7 @@ BASELINE_ARCH_TO_LOCAL_SERVER_COMPONENT = {
 BASELINE_ARCH_TO_GG_PLATFORM = {
     "x86_64": "amd64",
     "x86_64_nvidia": "amd64",
-    "arm64_jp4": "aarch64",
+    "arm64_cpu": "aarch64",
     "arm64_jp5": "aarch64",
     "arm64_jp6": "aarch64",
     "arm64_jp7": "aarch64",
@@ -145,7 +145,7 @@ BASELINE_ARCH_TO_GG_PLATFORM = {
 #: 'onnx-jetson-xavier-jp7' as a second accepted id); every arch here keeps
 #: exactly this singleton acceptance (3.7).
 BASELINE_NON_JP7_ARCH_TO_PUBLISH_TARGET = {
-    "arm64_jp4": "jetson-xavier",
+    "arm64_cpu": "arm64-cpu",
     "arm64_jp5": "jetson-xavier-jp5",
     "arm64_jp6": "jetson-xavier-jp6",
     "x86_64": "x86_64-cpu",
@@ -192,7 +192,6 @@ EXPECTED_BYO_MANIFEST = {
 #: Neo compile-target ids a trained vision model can hold completed
 #: compilation jobs for (COMPILATION_TARGETS vocabulary minus 'onnx').
 NEO_TARGETS = (
-    "jetson-xavier",
     "jetson-xavier-jp5",
     "jetson-xavier-jp6",
     "arm64-cpu",
@@ -205,7 +204,7 @@ NEO_TARGETS = (
 #: ONNX entries NOW pins that they contribute nothing to non-JP7 coverage,
 #: before and after the fix.
 PUBLISHED_TARGET_POOL = (
-    "jetson-xavier",
+    "arm64-cpu",
     "jetson-xavier-jp5",
     "jetson-xavier-jp6",
     "jetson-xavier-jp7",
@@ -607,7 +606,7 @@ mapped_target_lists = st.lists(
     min_size=1, max_size=3, unique=True)
 
 # Genuinely unknown packaging targets (3.2): the prefix guarantees they can
-# never collide with a mapped target — today's seven ids OR the three
+# never collide with a mapped target — today's six ids OR the three
 # onnx-jetson-xavier-jp{N} ids the fix adds — so this stays "genuinely
 # unknown" on both trees.
 unknown_targets = _slugs.map(lambda s: f"unknown-target-{s}")

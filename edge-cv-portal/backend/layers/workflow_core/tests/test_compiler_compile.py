@@ -493,7 +493,7 @@ class TestPluginDependencies:
             ],
         )
         document = _compile_ok(graph)
-        assert document.plugin_dependencies == ["dda-dewarp", "python:opcua"]
+        assert document.plugin_dependencies == ["dda-dewarp", "python:asyncua"]
 
     def test_dependencies_are_arch_specific(self):
         # icam_source on x86_64 uses bundled v4l2; still nothing extra.

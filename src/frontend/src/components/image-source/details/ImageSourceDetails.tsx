@@ -178,7 +178,7 @@ export default function ImageSourceDetails(): JSX.Element {
                 variant="h2"
                 actions={
                   <Button
-                    onClick={(): void => navigate(editImageSourceUrl)}
+                    onClick={(): void => void navigate(editImageSourceUrl)}
                   >
                     Edit
                   </Button>
@@ -257,7 +257,7 @@ export default function ImageSourceDetails(): JSX.Element {
                 header={
                   <Header
                     variant="h2"
-                    actions={<Button onClick={(): void => navigate(editImageSourceSettingsUrl)}>Edit</Button>}
+                    actions={<Button onClick={(): void => void navigate(editImageSourceSettingsUrl)}>Edit</Button>}
                   >
                     Image settings
                   </Header>
@@ -280,7 +280,7 @@ export default function ImageSourceDetails(): JSX.Element {
                   <Header
                     variant="h2"
                     actions={
-                      <Button onClick={(): void => navigate(`/image-sources/${imageSourceId}/edit-region-of-interest`)}>
+                      <Button onClick={(): void => void navigate(`/image-sources/${imageSourceId}/edit-region-of-interest`)}>
                         Edit
                       </Button>
                     }

@@ -12,7 +12,7 @@ env vars, so `min_local_server_version_for` resolves to the scalar default
 
 - single-arch outputs of ``local_server_component_dependencies``::
 
-    arm64_jp4     -> {"aws.edgeml.dda.LocalServer.arm64JP4":
+    arm64_cpu     -> {"aws.edgeml.dda.LocalServer.arm64":
                       {"VersionRequirement": ">=1.0.0", "DependencyType": "HARD"}}
     arm64_jp5     -> {"aws.edgeml.dda.LocalServer.arm64JP5": {same shape}}
     arm64_jp6     -> {"aws.edgeml.dda.LocalServer.arm64JP6": {same shape}}
@@ -62,9 +62,10 @@ from hypothesis import strategies as st
 # --------------------------------------------------------------------------
 
 #: arch id -> LocalServer variant component name (the fail-closed
-#: ARCH_TO_LOCAL_SERVER_COMPONENT discipline; bare '.arm64' never appears).
+#: ARCH_TO_LOCAL_SERVER_COMPONENT discipline; the bare '.arm64' name is the
+#: generic arm64 CPU build, which replaced the retired JetPack 4 variant).
 LOCAL_SERVER_VARIANTS = {
-    "arm64_jp4": "aws.edgeml.dda.LocalServer.arm64JP4",
+    "arm64_cpu": "aws.edgeml.dda.LocalServer.arm64",
     "arm64_jp5": "aws.edgeml.dda.LocalServer.arm64JP5",
     "arm64_jp6": "aws.edgeml.dda.LocalServer.arm64JP6",
     "x86_64": "aws.edgeml.dda.LocalServer.amd64",

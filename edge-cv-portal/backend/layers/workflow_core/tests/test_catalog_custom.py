@@ -250,11 +250,11 @@ class TestInvalidFieldRejection:
 
 
 class TestDeepStreamRestriction:
-    """DeepStream-flagged declarations are restricted to arm64_jp4/jp5/jp6
+    """DeepStream-flagged declarations are restricted to arm64_jp5/jp6
     mappings (Requirement 5.3)."""
 
     def test_deepstream_architectures_are_the_jetpack_builds(self):
-        assert DEEPSTREAM_ARCHITECTURES == ("arm64_jp4", "arm64_jp5", "arm64_jp6")
+        assert DEEPSTREAM_ARCHITECTURES == ("arm64_jp5", "arm64_jp6")
 
     def test_deepstream_x86_64_mapping_rejected(self):
         decl = valid_declaration(deepstream=True)  # mapping is x86_64

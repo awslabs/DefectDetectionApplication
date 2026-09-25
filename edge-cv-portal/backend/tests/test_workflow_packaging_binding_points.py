@@ -234,7 +234,7 @@ class TestBindingHintExtraction:
 # --------------------------------------------------------------------------
 
 class TestIcamBindingPointsEmission:
-    ARCHS = ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"]
+    ARCHS = ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6"]
 
     @pytest.fixture
     def camera_env(self, env, packaging, monkeypatch):
@@ -294,7 +294,7 @@ class TestIcamBindingPointsEmission:
 # --------------------------------------------------------------------------
 
 class TestCsiBindingPointsEmission:
-    ARCHS = ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"]
+    ARCHS = ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6"]
 
     @pytest.fixture
     def csi_env(self, env, packaging, monkeypatch):
@@ -496,7 +496,7 @@ def mixed_camera_definition():
 
 
 class TestAravisBindingPoints:
-    ARCHS = ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"]
+    ARCHS = ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6"]
 
     @pytest.fixture
     def aravis_env(self, env, packaging, monkeypatch):

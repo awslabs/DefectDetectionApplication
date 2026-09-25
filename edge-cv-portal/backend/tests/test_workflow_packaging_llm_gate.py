@@ -50,7 +50,7 @@ def make_deployable_greengrass():
 def llm_definition():
     """folder_source -> model_inference -> llm_inference -> mqtt_publish.
     Compiles for arm64_jp6 with no curated plugin dependencies; the
-    llm_inference node has no mapping for x86_64/x86_64_nvidia/arm64_jp4."""
+    llm_inference node has no mapping for x86_64/x86_64_nvidia/arm64_cpu."""
     return {
         "schemaVersion": 1,
         "nodes": [
@@ -183,7 +183,7 @@ class TestGatherLlmInferenceNodeIds:
 class TestLlmArchGateFindings:
     def test_no_llm_node_yields_no_findings_for_any_archs(self, packaging):
         """Requirement 8.1: pre-feature workflows contribute zero findings."""
-        archs = ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"]
+        archs = ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6"]
         assert packaging.llm_arch_gate_findings(llm_free_definition(), archs) == []
 
     def test_vllm_archs_only_yields_no_findings(self, packaging):
@@ -196,9 +196,9 @@ class TestLlmArchGateFindings:
     def test_one_finding_per_node_and_unsupported_arch(self, packaging):
         """Requirement 7.2: the complete (node, arch) finding list."""
         findings = packaging.llm_arch_gate_findings(
-            llm_definition(), ["arm64_jp6", "x86_64", "arm64_jp4"])
+            llm_definition(), ["arm64_jp6", "x86_64", "arm64_cpu"])
         assert [(f["nodeId"], f["arch"]) for f in findings] == [
-            ("llm", "x86_64"), ("llm", "arm64_jp4")]
+            ("llm", "x86_64"), ("llm", "arm64_cpu")]
         for finding in findings:
             assert finding["code"] == "V6_LLM_ARCH_UNSUPPORTED"
             assert "llm" in finding["message"]
@@ -210,10 +210,10 @@ class TestLlmArchGateFindings:
             {"id": "llm2", "type": "llm_inference"},
         ]}
         findings = packaging.llm_arch_gate_findings(
-            definition, ["x86_64_nvidia", "arm64_jp4"])
+            definition, ["x86_64_nvidia", "arm64_cpu"])
         assert {(f["nodeId"], f["arch"]) for f in findings} == {
-            ("llm1", "x86_64_nvidia"), ("llm1", "arm64_jp4"),
-            ("llm2", "x86_64_nvidia"), ("llm2", "arm64_jp4")}
+            ("llm1", "x86_64_nvidia"), ("llm1", "arm64_cpu"),
+            ("llm2", "x86_64_nvidia"), ("llm2", "arm64_cpu")}
 
 
 # --------------------------------------------------------------------------
@@ -228,12 +228,12 @@ class TestLlmGateRejection:
     def test_unsupported_arch_rejected_409_with_complete_findings(self, llm_env):
         """Requirement 7.2: 409 identifying the node and every unsupported
         requested architecture; no component version registered."""
-        status, payload = llm_env.package(["arm64_jp6", "x86_64", "arm64_jp4"])
+        status, payload = llm_env.package(["arm64_jp6", "x86_64", "arm64_cpu"])
         assert status == 409
         assert payload["error"]["code"] == "V6_LLM_ARCH_UNSUPPORTED"
         findings = payload["error"]["details"]["findings"]
         assert {(f["nodeId"], f["arch"]) for f in findings} == {
-            ("llm", "x86_64"), ("llm", "arm64_jp4")}
+            ("llm", "x86_64"), ("llm", "arm64_cpu")}
         llm_env.greengrass.create_component_version.assert_not_called()
         item = llm_env.version_item()
         assert not item.get("component_arn")
@@ -258,8 +258,22 @@ class TestLlmFreeWorkflowDiscriminator:
         with has_llm_inference recorded false."""
         harness = LlmPackagingEnv(env, packaging, monkeypatch,
                                   llm_free_definition())
-        status, payload = harness.package(["x86_64", "arm64_jp4"])
+        status, payload = harness.package(["x86_64", "arm64_cpu"])
         assert status == 201, payload
         item = harness.version_item()
         assert item["has_llm_inference"] is False
-        assert item["packaged_architectures"] == ["x86_64", "arm64_jp4"]
+        assert item["packaged_architectures"] == ["x86_64", "arm64_cpu"]
+
+    def test_retired_jetpack4_arch_rejected_400(self, env, packaging,
+                                                monkeypatch):
+        """JetPack 4 support was removed: packaging for arm64_jp4 is an
+        unsupported architecture and registers nothing."""
+        harness = LlmPackagingEnv(env, packaging, monkeypatch,
+                                  llm_free_definition())
+        status, payload = harness.package(["x86_64", "arm64_jp4"])
+        assert status == 400
+        assert payload["error"]["code"] == "UNSUPPORTED_ARCHITECTURE"
+        supported = payload["error"]["details"]["supported_architectures"]
+        assert "arm64_jp4" not in supported
+        assert "arm64_cpu" in supported
+        harness.greengrass.create_component_version.assert_not_called()

@@ -170,15 +170,18 @@ export class SyntheticDataStack extends cdk.Stack {
     // asset bundling (see below) so synth always produces a populated
     // layer regardless of the build host state.
     // ------------------------------------------------------------------
+    // python3.12: the handler runs on python3.12 for the imaging layer's
+    // Pillow (see SyntheticImagingLayer); python3.11 stays listed so the
+    // layer matches the ComputeStack's SharedLayer.
     const sharedLayer = new lambda.LayerVersion(this, 'SyntheticSharedLayer', {
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/shared')),
-      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11, lambda.Runtime.PYTHON_3_12],
       description: 'Shared utilities for the synthetic data Lambda function',
     });
 
     const jwtLayer = new lambda.LayerVersion(this, 'SyntheticJwtLayer', {
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/jwt')),
-      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11, lambda.Runtime.PYTHON_3_12],
       description: 'JWT dependencies for the synthetic data Lambda function',
     });
 
@@ -198,7 +201,7 @@ export class SyntheticDataStack extends cdk.Stack {
     const imagingLayer = new lambda.LayerVersion(this, 'SyntheticImagingLayer', {
       code: lambda.Code.fromAsset(imagingLayerSourceDir, {
         bundling: {
-          image: lambda.Runtime.PYTHON_3_11.bundlingImage,
+          image: lambda.Runtime.PYTHON_3_12.bundlingImage,
           command: [
             'bash',
             '-c',
@@ -209,15 +212,19 @@ export class SyntheticDataStack extends cdk.Stack {
               try {
                 // Same wheel targeting as build.sh: Pillow ships native
                 // extensions, so force the manylinux wheel matching the
-                // Lambda runtime (Python 3.11, x86_64) regardless of host.
+                // Lambda runtime (Python 3.12, x86_64) regardless of host.
+                // Pillow >= 12 publishes only manylinux_2_28 wheels, which
+                // need the glibc 2.34 of the python3.12 runtime (Amazon
+                // Linux 2023); python3.11 (Amazon Linux 2, glibc 2.26)
+                // cannot load them.
                 execSync(
                   [
                     'pip install',
                     `-r ${path.join(imagingLayerSourceDir, 'requirements.txt')}`,
                     `-t ${path.join(outputDir, 'python')}`,
-                    '--platform manylinux2014_x86_64',
+                    '--platform manylinux_2_28_x86_64',
                     '--implementation cp',
-                    '--python-version 3.11',
+                    '--python-version 3.12',
                     '--only-binary=:all:',
                   ].join(' '),
                   { stdio: ['ignore', 'pipe', 'pipe'] }
@@ -231,7 +238,7 @@ export class SyntheticDataStack extends cdk.Stack {
           },
         },
       }),
-      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
       description:
         'Pillow for synthetic preview image decode/diff (bbox_from_diff auto-annotation)',
     });
@@ -388,7 +395,8 @@ export class SyntheticDataStack extends cdk.Stack {
     // ------------------------------------------------------------------
     this.syntheticDataHandler = new lambda.Function(this, 'SyntheticDataHandler', {
       functionName: HANDLER_FUNCTION_NAME,
-      runtime: lambda.Runtime.PYTHON_3_11,
+      // python3.12: the attached imaging layer's Pillow needs glibc >= 2.28.
+      runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'synthetic_data.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
       role: handlerRole,

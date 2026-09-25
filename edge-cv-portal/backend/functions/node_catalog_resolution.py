@@ -172,7 +172,10 @@ def descriptors_from_items(items: Sequence[Dict]) -> List:
     Registration already validated every stored declaration through
     descriptor_from_declaration, so a conversion failure indicates a
     corrupted item; it is skipped with a log rather than failing the
-    whole catalog.
+    whole catalog. Stored declarations are converted leniently for
+    architectures only: a mapping for an architecture that is no longer a
+    target (e.g. the retired arm64_jp4) is dropped instead of discarding
+    the whole node type, so existing workflows keep resolving it.
     """
     descriptors = []
     for item in items:
@@ -180,7 +183,8 @@ def descriptors_from_items(items: Sequence[Dict]) -> List:
         if not isinstance(declaration, dict):
             continue
         try:
-            descriptors.append(descriptor_from_declaration(declaration))
+            descriptors.append(descriptor_from_declaration(
+                declaration, lenient_architectures=True))
         except DeclarationError as e:
             logger.warning(
                 "Skipping stored custom node type %r v%s with an invalid "

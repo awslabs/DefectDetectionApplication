@@ -90,7 +90,7 @@ LOCAL_SERVER_FOR_TARGET = {
 #: Today's singleton publish-target map (workflow_packaging
 #: ARCH_TO_PUBLISH_TARGET), restated.
 EXPECTED_PRIMARY_TARGET = {
-    "arm64_jp4": "jetson-xavier",
+    "arm64_cpu": "arm64-cpu",
     "arm64_jp5": "jetson-xavier-jp5",
     "arm64_jp6": "jetson-xavier-jp6",
     "arm64_jp7": "jetson-xavier-jp7",

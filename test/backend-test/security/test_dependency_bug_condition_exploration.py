@@ -18,7 +18,7 @@ Property 1: Expected Behavior -- every in-scope ``requests`` pin is now
 ``>= 2.32.4`` (CVE-2024-47081 removed) on its Python-3.8+ target
 (``setup_station.sh:513``, ``requirements.txt:9`` -- both bumped to ``2.32.4``),
 the B324 vendored HTTP Digest-auth ``md5`` / ``sha1`` usage
-(``requests/auth.py`` 148/156/205) carries a documented accepted-exception, and
+(``requests/auth.py`` 179/187/237) carries a documented accepted-exception, and
 the audit returns zero disallowed hits.
 
 This file was WRITTEN IN TASK 1 to OBSERVE the counterexample shape (the two
@@ -73,15 +73,15 @@ def test_f1_setup_station_line_513_pins_vulnerable_requests():
     lineno, line = _matches[0]
     print(f"\n[F1 fixed] setup_station.sh:{lineno} == {line!r}")
 
-    assert "requests==2.32.4" in line, (
-        f"expected the fixed requests==2.32.4 pin on line {lineno}, got {line!r}"
+    assert "requests==2.34.2" in line, (
+        f"expected the fixed requests==2.34.2 pin on line {lineno}, got {line!r}"
     )
-    assert "requests==2.32.3" not in line, (
-        f"the vulnerable requests==2.32.3 pin must be gone from line {lineno}, got {line!r}"
+    assert "requests==2.32.3" not in line and "requests==2.32.4" not in line, (
+        f"the vulnerable requests pins must be gone from line {lineno}, got {line!r}"
     )
-    # The fixed version is no longer classified as a disallowed (< 2.32.4) pin.
-    assert not audit._pin_is_disallowed("2.32.4"), (
-        "requests==2.32.4 must NOT classify as a disallowed (< 2.32.4) pin"
+    # The fixed version is not classified as a disallowed (< 2.32.4) pin.
+    assert not audit._pin_is_disallowed("2.34.2"), (
+        "requests==2.34.2 must NOT classify as a disallowed (< 2.32.4) pin"
     )
     # Surrounding structure preserved byte-for-byte by the fix.
     assert "run_cmd" in line, f"expected run_cmd wrapper on line 513: {line!r}"
@@ -111,15 +111,15 @@ def test_f2_requirements_line_9_pins_vulnerable_requests():
     print(f"\n[F2 fixed] requirements.txt:8 == {line8!r}")
     print(f"[F2 fixed] requirements.txt:9 == {line9!r}")
 
-    assert line9.strip() == "requests==2.32.4", (
-        f"expected line 9 to be 'requests==2.32.4', got {line9!r}"
+    assert line9.strip() == "requests==2.34.2", (
+        f"expected line 9 to be 'requests==2.34.2', got {line9!r}"
     )
-    assert not audit._pin_is_disallowed("2.32.4"), (
-        "requests==2.32.4 must NOT classify as a disallowed (< 2.32.4) pin"
+    assert not audit._pin_is_disallowed("2.34.2"), (
+        "requests==2.34.2 must NOT classify as a disallowed (< 2.32.4) pin"
     )
-    # Line 8 urllib3==2.2.3 is out of scope (NOT flagged, NOT bumped).
-    assert line8.strip() == "urllib3==2.2.3", (
-        f"expected line 8 to be 'urllib3==2.2.3', got {line8!r}"
+    # Line 8 carries the patched urllib3 (>= 2.7.0, dependabot-remediation).
+    assert line8.strip() == "urllib3==2.8.0", (
+        f"expected line 8 to be 'urllib3==2.8.0', got {line8!r}"
     )
 
 
@@ -185,14 +185,15 @@ def test_run_audit_non_empty():
 def test_b324_accepted_exceptions_present_and_justified():
     """F3 (Req 1.3): the B324 vendored HTTP Digest-auth ``md5`` / ``sha1`` usage
     carries a DOCUMENTED accepted-false-positive allowlist entry for
-    ``requests/auth.py`` lines 148 (``hashlib.md5``), 156 (``hashlib.sha1``), and
-    205 (``hashlib.sha1``), each with a non-empty RFC-2617 justification, and the
+    ``requests/auth.py`` lines 179 (``hashlib.md5``), 187 (``hashlib.sha1``), and
+    237 (``hashlib.sha1``) of the vendored requests 2.34.2, each with a
+    non-empty RFC-2617 justification, and the
     allowlist still matches the vendored file (specificity guard)."""
     by_lineno = {exc.lineno: exc for exc in audit.ACCEPTED_EXCEPTIONS}
 
-    for lineno, expected_token in ((148, "hashlib.md5"),
-                                   (156, "hashlib.sha1"),
-                                   (205, "hashlib.sha1")):
+    for lineno, expected_token in ((179, "hashlib.md5"),
+                                   (187, "hashlib.sha1"),
+                                   (237, "hashlib.sha1")):
         assert lineno in by_lineno, (
             f"expected an ACCEPTED_EXCEPTIONS entry for auth.py line {lineno}"
         )

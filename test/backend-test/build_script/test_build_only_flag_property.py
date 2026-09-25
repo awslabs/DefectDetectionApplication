@@ -46,8 +46,9 @@ SCRIPT = os.path.join(REPO_ROOT, "gdk-component-build-and-publish.sh")
 # Tokens the script's argument parser actually accepts, plus arbitrary junk:
 # the guard must fire before parsing, so the property holds for both.
 _VALID_TOKENS = st.sampled_from(
-    ["x86_64", "amd64", "aarch64", "arm64", "4", "5", "6",
-     "jp4", "jp5", "jp6", "JP4", "JP5", "JP6", "--jp4", "--jp5", "--jp6"]
+    ["x86_64", "amd64", "aarch64", "arm64", "cpu", "5", "6", "7",
+     "CPU", "jp5", "jp6", "jp7", "JP5", "JP6", "JP7", "--cpu", "--jp5",
+     "--jp6", "--jp7"]
 )
 _JUNK_TOKENS = st.text(
     alphabet=string.ascii_letters + string.digits + "-_./",

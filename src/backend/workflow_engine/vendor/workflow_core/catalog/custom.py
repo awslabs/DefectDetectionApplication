@@ -18,11 +18,14 @@ Validation (Requirements 5.3, 8.2, 8.5):
     catalog well-formedness predicate),
   - mappings against ``ARCHITECTURES``,
   - DeepStream-flagged declarations restricted to the JetPack
-    architectures (``arm64_jp4/jp5/jp6``) — a DeepStream-backed type is
+    architectures (``arm64_jp5/jp6``) — a DeepStream-backed type is
     unavailable on architectures without a matching runtime (5.3).
 
 Invalid declarations raise :class:`DeclarationError` identifying the
-offending field (8.5).
+offending field (8.5). Read paths convert STORED declarations with
+``lenient_architectures=True``, which drops mappings for architectures
+that are no longer targets (e.g. the retired ``arm64_jp4``) instead of
+rejecting the whole node type; writes stay strict.
 """
 
 from __future__ import annotations
@@ -31,7 +34,6 @@ import re
 from typing import Any, Sequence
 
 from .models import (
-    ARCH_ARM64_JP4,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
     ARCHITECTURES,
@@ -50,7 +52,6 @@ from .nodes import NODE_CATALOG
 #: DeepStream targets Jetson, so DeepStream-flagged declarations may only
 #: declare mappings for the JetPack builds.
 DEEPSTREAM_ARCHITECTURES = (
-    ARCH_ARM64_JP4,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
 )
@@ -275,6 +276,18 @@ def _element_from_wire(element: Any, field: str) -> dict:
     return {"factory": factory, "args_template": dict(args_template)}
 
 
+def _mapping_arch_supported(mapping: Any, deepstream: bool) -> bool:
+    """Whether a wire mapping names an architecture that is still a target
+    for this declaration (the lenient read-side filter). A malformed
+    mapping counts as supported so the strict conversion reports it."""
+    if not isinstance(mapping, dict):
+        return True
+    arch = mapping.get("arch")
+    if arch not in ARCHITECTURES:
+        return False
+    return not (deepstream and arch not in DEEPSTREAM_ARCHITECTURES)
+
+
 def _mapping_from_wire(mapping: Any, field: str, deepstream: bool) -> GstMapping:
     mapping = _require_dict(mapping, field)
 
@@ -319,7 +332,9 @@ def _mapping_from_wire(mapping: Any, field: str, deepstream: bool) -> GstMapping
 # Public API
 # --------------------------------------------------------------------------
 
-def descriptor_from_declaration(decl: Any) -> NodeTypeDescriptor:
+def descriptor_from_declaration(
+    decl: Any, *, lenient_architectures: bool = False
+) -> NodeTypeDescriptor:
     """Convert a stored Custom_Node_Type declaration into a frozen descriptor.
 
     ``decl`` is the node-catalog wire shape (camelCase — identical to what
@@ -330,11 +345,19 @@ def descriptor_from_declaration(decl: Any) -> NodeTypeDescriptor:
     (``[{arch, elementChain: [{factory, argsTemplate}], executorBinding,
     pluginDependencies}]``), and ``hardwareDependent``. An optional
     ``deepstream`` flag restricts the declarable mapping architectures to
-    ``arm64_jp4/jp5/jp6`` (Requirement 5.3). Extra keys (``typeVersion``,
+    ``arm64_jp5/jp6`` (Requirement 5.3). Extra keys (``typeVersion``,
     ``lifecycleState``) are ignored.
 
     Raises :class:`DeclarationError` identifying the offending field for
     any invalid declaration (Requirement 8.5).
+
+    ``lenient_architectures`` (read paths over STORED declarations): a
+    mapping whose architecture is no longer a target (unknown, e.g. the
+    retired ``arm64_jp4``, or outside the DeepStream set for a
+    DeepStream-flagged type) is dropped instead of raising, so a node type
+    never disappears from the catalog because one of its architectures was
+    retired; it simply has no mapping there. Every other check stays
+    strict. Registration and updates keep the strict default.
     """
     decl = _require_dict(decl, "declaration")
 
@@ -375,6 +398,8 @@ def descriptor_from_declaration(decl: Any) -> NodeTypeDescriptor:
     seen_archs = set()
     for index, mapping in enumerate(_require_list(decl.get("mappings", []), "mappings")):
         field = "mappings[{0}]".format(index)
+        if lenient_architectures and not _mapping_arch_supported(mapping, deepstream):
+            continue
         converted = _mapping_from_wire(mapping, field, deepstream)
         if converted.arch in seen_archs:
             raise DeclarationError(

@@ -51,7 +51,7 @@ from test_plugin_importer import (ImporterEnv, MESON_PLUGIN,
 
 BUCKET = TEST_ENV["PORTAL_ARTIFACTS_BUCKET"]
 FETCH_ARN_PREFIX = ImporterEnv.FETCH_BUILD_ARN_PREFIX
-ALL_ARCHS = ["x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6"]
+ALL_ARCHS = ["x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6"]
 
 # Task 2 (preservation): the configured per-arch CodeBuild projects and
 # an architecture no project is configured for (3.3).
@@ -328,7 +328,7 @@ class TestAdjustRevisionStaleRead:
         queued and no build would start at all. Both are the same stale
         re-read.
         """
-        arch, slug, revision = "arm64_jp4", "1.16", "1.16"
+        arch, slug, revision = "arm64_cpu", "1.16", "1.16"
         usecase_id, plugin_id, base = new_record_ids(aws_stack)
         # An earlier adjustment already synced revision 1.16's tree
         # (fetches entry 'succeeded'); this platform's entry is queued.
@@ -902,7 +902,7 @@ class TestPreservationRetryAndFailurePaths:
         and records the fetch-failure logTail on the affected arch's
         entry ONLY — no builds started, other platforms' entries and
         arch_revisions byte-identical (3.6)."""
-        arch, other = "arm64_jp4", "arm64_jp5"
+        arch, other = "arm64_cpu", "arm64_jp5"
         slug, revision = "1.16", "1.16"
         other_slug = "1-18"
         build_id = "dda-plugin-fetch:adjust-fail-1"

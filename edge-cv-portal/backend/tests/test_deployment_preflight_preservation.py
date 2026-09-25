@@ -185,6 +185,9 @@ CE_A_DEVICE = "adlink-dlap-701"
 CE_B_SEGHEAD = "model-cookies-segmentation-seghead-jetson-xavier"
 CE_B_YOLO = "model-yolo-test-jetson-xavier"
 DEAD_LOCAL_SERVER_JP4 = "aws.edgeml.dda.LocalServer.arm64JP4"
+#: Dead in the recorded evidence (no published version in either
+#: namespace). The bare name is now the generic arm64 CPU build and gets
+#: published again, but these fakes deliberately never seed it.
 DEAD_LOCAL_SERVER_BARE = "aws.edgeml.dda.LocalServer.arm64"
 
 #: Counterexample C — the removed model and the workflow that kept it.
@@ -232,7 +235,9 @@ AWS_MANAGED_VERSIONS = {
     "aws.greengrass.SecureTunneling": "1.0.19",
 }
 
-JETSON_VARIANTS = ("arm64_jp4", "arm64_jp5", "arm64_jp6", "arm64_jp7")
+#: Every aarch64 device arch (the generic CPU build plus the JetPack
+#: lineages).
+JETSON_VARIANTS = ("arm64_cpu", "arm64_jp5", "arm64_jp6", "arm64_jp7")
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -1134,7 +1139,9 @@ class TestVllmGateIdentity:
 
     def test_workflow_path_vllm_arch_unsupported_envelope(self, wf_env):
         """`VLLM_ARCH_UNSUPPORTED` on `create_workflow_deployment`, whole
-        envelope, including the jp4 reason branch."""
+        envelope. The target carries a stale record of the retired
+        arm64_jp4 arch: it fails closed with the generic ARCH_UNSUPPORTED
+        reason (the dedicated JetPack 4 reason was removed with JP4)."""
         workflow_id = wf_env.seed_workflow(
             has_llm_inference=True, packaged_architectures=["arm64_jp6"])
         wf_env.gg.register_device("jp4-cam-01", local_server_version="99.0.0",
@@ -1154,7 +1161,7 @@ class TestVllmGateIdentity:
                 "device": "jp4-cam-01",
                 "deviceArch": "arm64_jp4",
                 "supported": ["arm64_jp6"],
-                "reason": "JP4_UNSUPPORTED"}]}}}
+                "reason": "ARCH_UNSUPPORTED"}]}}}
         assert wf_env.gg.create_deployment_calls == []
 
 

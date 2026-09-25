@@ -72,7 +72,7 @@ NO_REGISTRY_RECORD_MESSAGE = (
     "Use_Case model registry; it may have been removed since the workflow "
     "was validated")
 
-VALID_ARCHS = ("x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5",
+VALID_ARCHS = ("x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5",
                "arm64_jp6")
 
 
@@ -138,7 +138,7 @@ def resolve(packaging, model_names, usecase_id, archs):
 ARCH_TO_TARGET = {
     "x86_64": "x86_64-cpu",
     "x86_64_nvidia": "x86_64-cuda",
-    "arm64_jp4": "jetson-xavier",
+    "arm64_cpu": "arm64-cpu",
     "arm64_jp5": "jetson-xavier-jp5",
     "arm64_jp6": "jetson-xavier-jp6",
 }

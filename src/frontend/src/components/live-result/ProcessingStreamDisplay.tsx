@@ -70,7 +70,7 @@ export default function ProcessingStreamDisplay({
       <Alert
         type="info"
         action={(
-          <Button variant="normal" onClick={(): void => navigate(`/workflows/${workflowId}/edit`)}>
+          <Button variant="normal" onClick={(): void => void navigate(`/workflows/${workflowId}/edit`)}>
             Edit workflow
           </Button>
         )}

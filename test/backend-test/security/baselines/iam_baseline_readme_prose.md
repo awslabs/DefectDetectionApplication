@@ -172,11 +172,11 @@ DDA consists of several key components:
 - **Supported Platforms**:
   - x86_64 CPU systems
   - ARM64 CPU systems
-  - NVIDIA Jetson devices (Xavier Only with Jetpack 4.X, JP5+ coming soon)
+  - NVIDIA Jetson devices (JetPack 5, 6 and 7)
 - **Supported Operating Systems**:
   - X86 Ubuntu 20.04, 22.04, (24.04 coming soon)
-  - Jetson devices currently Jetpack 4.X
-  - ARM64 - Ubuntu 18.04-22.04
+  - Jetson devices: JetPack 5.x, 6.x, 7.x
+  - ARM64 - Ubuntu 20.04-24.04
 
 ### Supported Cameras and Sensors
 
@@ -245,12 +245,12 @@ DDA consists of several key components:
    
    **The EC2 build instance depends on the edge device configuration:**
    
-   **If your edge device is ARM64 (Jetson Xavier, ARM64 systems):**
+   **If your edge device is ARM64 (Jetson, ARM64 CPU systems):**
    ```bash
-   # Launch Ubuntu 18.04 ARM64, g4dn.2xlarge
+   # Launch Ubuntu 20.04 ARM64 (JetPack 5 / arm64 CPU builds)
    # Storage: 512GB, Security: SSH (port 22)
    # Attach IAM role: dda-build-role
-   # AMI: Find Ubuntu 18.04 in AWS Marketplace → [Ryan to add details]
+   # AMI: Ubuntu 20.04 LTS ARM64 (see README.md for the JP6/JP7 build hosts)
    ```
    
    **If your edge device is x86_64 CPU (Intel/AMD systems):**

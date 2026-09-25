@@ -31,8 +31,12 @@ Both stacks ARE wired into synthesizable CDK app entrypoints. When the CDK
 toolchain is available, the test re-synths each with the canonical fixture
 context (``portalAccountId=111111111111``, ``externalId=fixture-eid``,
 ``trustedUseCaseAccountIds=222222222222,333333333333``, region ``us-east-1``)
-and asserts the emitted IAM statement multiset equals the committed FIXED
-baseline (an identity guard against future live-tree drift).
+and asserts the emitted IAM grants equal the committed FIXED baseline (an
+identity guard against future live-tree drift). The live comparison is at
+grant-atom granularity (one effect/action/resource/condition tuple per
+action x resource, see ``iam_grant_atoms``) so an aws-cdk-lib upgrade that
+only regroups the statements a grant method emits is not reported as drift,
+while any permission added or removed still is.
 
 Independently of the toolchain, ``test_baseline_drift_confined_to_I*`` compares
 the committed unfixed and fixed baselines and asserts the ONLY differences are
@@ -83,7 +87,9 @@ import pytest
 from _iam_preservation_support import (
     REPO_ROOT,
     read_repo_file,
+    iam_grant_atoms,
     iam_statements_multiset,
+    statement_grant_atoms,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -228,9 +234,14 @@ def test_synth_iam_statements_match_fixed_baseline(stack):
             f"cdk synth for {stack} did not produce a template in this "
             f"environment; the baseline-diff layer covers it."
         )
-    fresh_ms = iam_statements_multiset(fresh)
-    baseline_ms = iam_statements_multiset(_load_baseline_template(fixed_file))
-    approved_ms = _approved_additions(stack)
+    # Grant-atom sets (see iam_grant_atoms): stable across CDK statement
+    # regrouping, exact on every permission.
+    fresh_ms = iam_grant_atoms(fresh)
+    baseline_ms = iam_grant_atoms(_load_baseline_template(fixed_file))
+    approved_ms = collections.Counter()
+    for canonical, count in _approved_additions(stack).items():
+        for atom in statement_grant_atoms(json.loads(canonical)):
+            approved_ms[atom] += count
 
     # Removals are never acceptable: a statement disappearing means a grant the
     # baseline recorded is gone, which the allowlist must not be able to excuse.

@@ -26,7 +26,7 @@ IAM_PROFILE="dda-edge-device-role"  # Default IAM instance profile
 SSH_CIDR=""  # SSH CIDR must be explicitly specified (no default open access)
 
 # AMI IDs (Ubuntu)
-AMI_ARM64_US_EAST_1="ami-0c13dec58913b948c"  # Ubuntu 18.04 ARM64
+AMI_ARM64_US_EAST_1="ami-06223c2ee878345c6"  # Ubuntu 22.04 ARM64
 AMI_X86_US_EAST_1="ami-0c7217cdde317cfec"    # Ubuntu 22.04 x86_64
 
 # EBS Volume Configuration

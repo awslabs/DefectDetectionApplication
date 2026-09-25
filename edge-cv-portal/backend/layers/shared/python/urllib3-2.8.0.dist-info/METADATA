@@ -1,11 +1,12 @@
-Metadata-Version: 2.4
+Metadata-Version: 2.5
 Name: urllib3
-Version: 2.6.3
+Version: 2.8.0
 Summary: HTTP library with thread-safe connection pooling, file post, and more.
 Project-URL: Changelog, https://github.com/urllib3/urllib3/blob/main/CHANGES.rst
 Project-URL: Documentation, https://urllib3.readthedocs.io
 Project-URL: Code, https://github.com/urllib3/urllib3
 Project-URL: Issue tracker, https://github.com/urllib3/urllib3/issues
+Project-URL: Security policy, https://urllib3.readthedocs.io/en/latest/security.html
 Author-email: Andrey Petrov <andrey.petrov@shazow.net>
 Maintainer-email: Seth Michael Larson <sethmichaellarson@gmail.com>, Quentin Pradet <quentin@pradet.me>, Illia Volochii <illia.volochii@gmail.com>
 License-Expression: MIT
@@ -17,18 +18,18 @@ Classifier: Operating System :: OS Independent
 Classifier: Programming Language :: Python
 Classifier: Programming Language :: Python :: 3
 Classifier: Programming Language :: Python :: 3 :: Only
-Classifier: Programming Language :: Python :: 3.9
 Classifier: Programming Language :: Python :: 3.10
 Classifier: Programming Language :: Python :: 3.11
 Classifier: Programming Language :: Python :: 3.12
 Classifier: Programming Language :: Python :: 3.13
 Classifier: Programming Language :: Python :: 3.14
+Classifier: Programming Language :: Python :: 3.15
 Classifier: Programming Language :: Python :: Free Threading :: 2 - Beta
 Classifier: Programming Language :: Python :: Implementation :: CPython
 Classifier: Programming Language :: Python :: Implementation :: PyPy
 Classifier: Topic :: Internet :: WWW/HTTP
 Classifier: Topic :: Software Development :: Libraries
-Requires-Python: >=3.9
+Requires-Python: >=3.10
 Provides-Extra: brotli
 Requires-Dist: brotli>=1.2.0; (platform_python_implementation == 'CPython') and extra == 'brotli'
 Requires-Dist: brotlicffi>=1.2.0.0; (platform_python_implementation != 'CPython') and extra == 'brotli'
@@ -119,9 +120,15 @@ collaborating with other contributors. Drop by and say hello 👋
 
 ## Contributing
 
-urllib3 happily accepts contributions. Please see our
+urllib3 welcomes contributions. Please read our
 [contributing documentation](https://urllib3.readthedocs.io/en/latest/contributing.html)
-for some tips on getting started.
+before starting work.
+
+Check for existing pull requests addressing the same issue, and share feedback
+and suggestions in the existing pull request and issue. Duplicate pull
+requests, including alternative solutions, will be rejected without review
+unless a maintainer has approved opening an alternative pull request in
+advance.
 
 
 ## Security Disclosures
@@ -129,6 +136,10 @@ for some tips on getting started.
 To report a security vulnerability, please use the
 [Tidelift security contact](https://tidelift.com/security).
 Tidelift will coordinate the fix and disclosure with maintainers.
+
+See the repository
+[Security Policy](https://urllib3.readthedocs.io/en/latest/security.html)
+for more details.
 
 
 ## Maintainers

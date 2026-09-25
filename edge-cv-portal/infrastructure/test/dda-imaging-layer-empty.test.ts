@@ -323,11 +323,12 @@ describe('Property 2: preservation — attach sites, layer metadata, sibling ass
       };
     });
 
+    // CONSCIOUS UPDATE (dependabot-remediation): python3.12, because the imaging layer's Pillow 12.3 ships only manylinux_2_28 wheels, which the python3.11 runtime (Amazon Linux 2, glibc 2.26) cannot load.
     expect(observed).toEqual([
       {
         function: 'DdaLabelingWorker',
         handler: 'dda_labeling_worker.handler',
-        runtime: 'python3.11',
+        runtime: 'python3.12',
         timeout: 900,
         memorySize: 2048,
         llmEnv: { imageLimits: false, tokenLimits: false },
@@ -335,7 +336,7 @@ describe('Property 2: preservation — attach sites, layer metadata, sibling ass
       {
         function: 'DdaLabelingHandler',
         handler: 'dda_labeling.handler',
-        runtime: 'python3.11',
+        runtime: 'python3.12',
         timeout: 900,
         memorySize: 2048,
         llmEnv: { imageLimits: true, tokenLimits: true },
@@ -343,7 +344,7 @@ describe('Property 2: preservation — attach sites, layer metadata, sibling ass
       {
         function: 'DdaAutolabelWorker',
         handler: 'dda_autolabel_worker.handler',
-        runtime: 'python3.11',
+        runtime: 'python3.12',
         timeout: 300,
         memorySize: 2048,
         llmEnv: { imageLimits: true, tokenLimits: true },
@@ -364,7 +365,8 @@ describe('Property 2: preservation — attach sites, layer metadata, sibling ass
       'Pillow imaging layer for DDA labeling mask rendering (built by ' +
         'backend/layers/imaging/build.sh)'
     );
-    expect(imagingLayer.Properties.CompatibleRuntimes).toEqual(['python3.11']);
+    // CONSCIOUS UPDATE (dependabot-remediation): python3.12, because the imaging layer's Pillow 12.3 ships only manylinux_2_28 wheels, which the python3.11 runtime (Amazon Linux 2, glibc 2.26) cannot load.
+    expect(imagingLayer.Properties.CompatibleRuntimes).toEqual(['python3.12']);
   });
 
   test('SharedLayer staged asset is a verbatim copy of backend/layers/shared (Requirement 3.2)', () => {

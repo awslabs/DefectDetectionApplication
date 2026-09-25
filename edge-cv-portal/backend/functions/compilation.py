@@ -57,20 +57,9 @@ USECASES_TABLE = os.environ.get('USECASES_TABLE')
 SETTINGS_TABLE = os.environ.get('SETTINGS_TABLE')
 
 # Compilation target configurations
+# JetPack 4 (the former bare 'jetson-xavier' target, CUDA 10.2 / TensorRT
+# 8.2.1) is no longer supported; its id is rejected as an invalid target.
 COMPILATION_TARGETS = {
-    'jetson-xavier': {
-        'os': 'LINUX',
-        'arch': 'ARM64',
-        'accelerator': 'NVIDIA',
-        'compiler_options': json.dumps({
-            'cuda-ver': '10.2',
-            'gpu-code': 'sm_72',
-            'trt-ver': '8.2.1',
-            'max-workspace-size': '2147483648',
-            'precision-mode': 'fp16',
-            'jetson-platform': 'xavier'
-        })
-    },
     'jetson-xavier-jp5': {
         'os': 'LINUX',
         'arch': 'ARM64',
@@ -410,7 +399,7 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
     
     Request body:
     {
-        "targets": ["jetson-xavier", "x86_64-cpu", "x86_64-cuda", "arm64-cpu"],
+        "targets": ["jetson-xavier-jp5", "x86_64-cpu", "x86_64-cuda", "arm64-cpu"],
         "auto_triggered": true  # Optional flag for auto-triggered compilations
     }
     """
@@ -532,7 +521,6 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
             
             # Create safe target name for SageMaker job naming
             target_name_mapping = {
-                'jetson-xavier': 'jetson',
                 'jetson-xavier-jp5': 'jetsonjp5',
                 'jetson-xavier-jp6': 'jetsonjp6',
                 'x86_64-cpu': 'x86cpu',

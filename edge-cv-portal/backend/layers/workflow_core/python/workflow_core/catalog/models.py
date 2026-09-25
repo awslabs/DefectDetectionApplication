@@ -52,7 +52,11 @@ CATEGORIES = (
 
 ARCH_X86_64 = "x86_64"
 ARCH_X86_64_NVIDIA = "x86_64_nvidia"
-ARCH_ARM64_JP4 = "arm64_jp4"
+#: Generic (non-Jetson) arm64 CPU host, e.g. AWS Graviton: no NVIDIA GPU,
+#: served by the bare ``aws.edgeml.dda.LocalServer.arm64`` component built
+#: from the generic CPU image. JetPack 4 (``arm64_jp4``) is no longer a
+#: target; this id took its place in the architecture tuples.
+ARCH_ARM64_CPU = "arm64_cpu"
 ARCH_ARM64_JP5 = "arm64_jp5"
 ARCH_ARM64_JP6 = "arm64_jp6"
 ARCH_ARM64_JP7 = "arm64_jp7"
@@ -64,7 +68,7 @@ ARCH_SIM = "sim"
 ARCHITECTURES = (
     ARCH_X86_64,
     ARCH_X86_64_NVIDIA,
-    ARCH_ARM64_JP4,
+    ARCH_ARM64_CPU,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
     ARCH_ARM64_JP7,
@@ -75,7 +79,7 @@ ARCHITECTURES = (
 DEVICE_ARCHITECTURES = (
     ARCH_X86_64,
     ARCH_X86_64_NVIDIA,
-    ARCH_ARM64_JP4,
+    ARCH_ARM64_CPU,
     ARCH_ARM64_JP5,
     ARCH_ARM64_JP6,
     ARCH_ARM64_JP7,

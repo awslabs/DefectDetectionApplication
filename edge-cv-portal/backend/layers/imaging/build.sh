@@ -16,12 +16,13 @@ echo "Building imaging Lambda Layer..."
 mkdir -p python
 
 # Pillow ships native extensions; force the manylinux wheel matching the
-# Lambda runtime (Python 3.11, x86_64) so the layer works regardless of the
-# build host.
+# Lambda runtime (Python 3.12, x86_64) so the layer works regardless of the
+# build host. Pillow >= 12 publishes only manylinux_2_28 wheels, which need
+# the python3.12 runtime (Amazon Linux 2023); the layer's consumers run on it.
 pip install -r requirements.txt -t python/ \
-    --platform manylinux2014_x86_64 \
+    --platform manylinux_2_28_x86_64 \
     --implementation cp \
-    --python-version 3.11 \
+    --python-version 3.12 \
     --only-binary=:all:
 
 echo "Imaging Lambda Layer built successfully!"

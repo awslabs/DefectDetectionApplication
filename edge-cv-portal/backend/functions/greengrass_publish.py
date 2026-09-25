@@ -59,27 +59,28 @@ class PublishError(Exception):
     pass
 
 
-# Every LocalServer variant is explicitly JetPack/arch-tagged. The JetPack 4
-# variant is `arm64JP4` (renamed from the bare, untagged `arm64`); the bare
-# `aws.edgeml.dda.LocalServer.arm64` name is RETIRED as a produced/depended
-# name so nothing owns the ambiguous "generic aarch64" catch-all that used to
-# be stamped onto models with an unknown compile target (localserver-arch-
-# naming). Legacy bare-arm64 installs are still recognized on the READ side
-# (deployments.local_server_component_arch), but are never produced here.
-JP4_LOCAL_SERVER = 'aws.edgeml.dda.LocalServer.arm64JP4'
+# Every Jetson LocalServer variant is explicitly JetPack-tagged
+# (arm64JP5/JP6/JP7). The bare `aws.edgeml.dda.LocalServer.arm64` name is the
+# generic arm64 CPU (non-Jetson) build and is produced ONLY for the explicit
+# `arm64-cpu` compile target — never as a catch-all for an unknown aarch64
+# target, which fails closed (localserver-arch-naming). JetPack 4 (the
+# `jetson-xavier` target and its `arm64JP4` LocalServer) is no longer
+# supported: a legacy model still listing that target gets a per-target
+# failed publish instead of a dependency on a LocalServer nobody ships.
+ARM64_CPU_LOCAL_SERVER = 'aws.edgeml.dda.LocalServer.arm64'
 _AMD64_LOCAL_SERVER = 'aws.edgeml.dda.LocalServer.amd64'
 
 # Compilation target -> DDA LocalServer component name.
-# aarch64 has three JetPack-tagged variants (arm64JP4/JP5/JP6). A model
-# compiled for a given JetPack device MUST depend on that JetPack's variant,
-# otherwise the deployment pulls in the wrong LocalServer, which collides on
-# port 3443 with the correct variant and crash-loops the device to BROKEN.
+# aarch64 has three JetPack-tagged variants (arm64JP5/JP6/JP7) plus the
+# generic arm64 CPU build. A model compiled for a given JetPack device MUST
+# depend on that JetPack's variant, otherwise the deployment pulls in the
+# wrong LocalServer, which collides on port 3443 with the correct variant and
+# crash-loops the device to BROKEN.
 TARGET_TO_LOCAL_SERVER = {
-    'jetson-xavier': JP4_LOCAL_SERVER,                           # JetPack 4
     'jetson-xavier-jp5': 'aws.edgeml.dda.LocalServer.arm64JP5',  # JetPack 5
     'jetson-xavier-jp6': 'aws.edgeml.dda.LocalServer.arm64JP6',  # JetPack 6
     'jetson-xavier-jp7': 'aws.edgeml.dda.LocalServer.arm64JP7',  # JetPack 7
-    'arm64-cpu': JP4_LOCAL_SERVER,                               # arm64 CPU -> JP4 baseline
+    'arm64-cpu': ARM64_CPU_LOCAL_SERVER,                         # generic arm64 CPU
     'x86_64-cpu': _AMD64_LOCAL_SERVER,
     'x86_64-cuda': _AMD64_LOCAL_SERVER,
     # Compiled-ONNX per-JetPack targets (one Greengrass component per
@@ -92,7 +93,6 @@ TARGET_TO_LOCAL_SERVER = {
 
 # Target to platform mapping
 TARGET_TO_PLATFORM = {
-    'jetson-xavier': 'aarch64',
     'jetson-xavier-jp5': 'aarch64',
     'jetson-xavier-jp6': 'aarch64',
     'jetson-xavier-jp7': 'aarch64',
@@ -184,7 +184,7 @@ def resolve_local_server_component(target: str, platform: str) -> str:
         f"Cannot resolve a LocalServer dependency for target '{target}' "
         f"(platform '{platform}'): no known JetPack-tagged LocalServer "
         f"variant. The model must declare a supported compile target "
-        f"(jetson-xavier, jetson-xavier-jp5, jetson-xavier-jp6, "
+        f"(jetson-xavier-jp5, jetson-xavier-jp6, "
         f"jetson-xavier-jp7, x86_64-cpu, x86_64-cuda, arm64-cpu, "
         f"onnx-jetson-xavier-jp5, onnx-jetson-xavier-jp6, "
         f"onnx-jetson-xavier-jp7)."
@@ -257,7 +257,7 @@ def generate_component_recipe(
     Phase 3: Component Creation from DDA notebook
     """
     
-    # Determine DDA LocalServer dependency based on target (JP4 vs JP5) / platform
+    # Determine DDA LocalServer dependency based on target (JetPack / arm64 CPU / amd64)
     local_server_component = resolve_local_server_component(target, platform)
 
     # Model Startup readiness gate.
@@ -381,7 +381,7 @@ JP5_VLLM_ENABLED = os.environ.get('JP5_VLLM_ENABLED', 'false').lower() == 'true'
 def vllm_supported_architectures() -> list:
     """Supported Target_Architecture set for vLLM_Model_Components:
     always arm64_jp6 and arm64_jp7, arm64_jp5 only when JP5 support is
-    flagged on, never arm64_jp4 (2.5). Mirrors
+    flagged on, never a CPU-only architecture (2.5). Mirrors
     packaging.vllm_supported_architectures."""
     archs = ['arm64_jp6', 'arm64_jp7']
     if JP5_VLLM_ENABLED:
@@ -698,7 +698,7 @@ def publish_component(event: Dict, context: Any) -> Dict:
         "component_name": "model-defect-classifier",
         "component_version": "1.0.0",
         "friendly_name": "Defect Classifier",  // Optional
-        "targets": ["jetson-xavier", "x86_64-cpu"]  // Optional, defaults to all packaged
+        "targets": ["jetson-xavier-jp5", "x86_64-cpu"]  // Optional, defaults to all packaged
     }
     """
     try:
@@ -983,7 +983,7 @@ def publish_component(event: Dict, context: Any) -> Dict:
             platform = TARGET_TO_PLATFORM.get(target)
             
             # Create unique component name per target
-            # e.g., model-defect-classifier-jetson-xavier, model-defect-classifier-x86-64-cpu
+            # e.g., model-defect-classifier-jetson-xavier-jp5, model-defect-classifier-x86-64-cpu
             # vLLM records follow the SAME convention (design step 2): the
             # base name model-vllm-{safe_model_name} stays the record's
             # top-level component_name / GSI key and display name, while each

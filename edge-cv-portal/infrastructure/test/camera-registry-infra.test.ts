@@ -265,7 +265,8 @@ describe('camera sync and registry Lambdas (Requirement 3.2)', () => {
       'AWS::Lambda::Function',
       (props) => props.Handler === 'camera_registry.handler'
     );
-    expect(handler.Properties.Runtime).toBe('python3.11');
+    // CONSCIOUS UPDATE (dependabot-remediation): python3.12, because the imaging layer's Pillow 12.3 ships only manylinux_2_28 wheels, which the python3.11 runtime (Amazon Linux 2, glibc 2.26) cannot load.
+    expect(handler.Properties.Runtime).toBe('python3.12');
     expect(
       handler.Properties.Environment.Variables.CAMERA_REGISTRY_TABLE
     ).toBeDefined();

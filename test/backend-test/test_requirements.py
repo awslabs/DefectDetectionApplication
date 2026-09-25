@@ -15,9 +15,12 @@
 
 Bug condition exploration test for the opcua-output-node-bugfix spec
 (Part 1). The ``opcua_write`` output binding's ``_default_opcua_writer``
-does ``from opcua import Client``; the ``opcua`` (python-opcua) package
-must therefore be present in the packaged runtime dependency list so it
-is installed on the JP5 edge device.
+imports the OPC UA client; the package providing it must therefore be
+present in the packaged runtime dependency list so it is installed on the
+edge device. dependabot-remediation replaced the unmaintained python-opcua
+(``opcua``, unfixed GHSA-mfpj-3qhm-976m) with its maintained successor
+``asyncua`` (``from asyncua.sync import Client``); python-opcua must not
+come back.
 
 On the UNFIXED tree this test FAILS -- ``opcua`` is absent from
 ``requirements.txt`` -- which is the counterexample that confirms Part 1
@@ -36,8 +39,8 @@ BACKEND_REQUIREMENTS = os.path.join(
     REPO_ROOT, "src", "backend", "requirements.txt"
 )
 
-# Distribution name at the start of a requirement line, e.g. "opcua" from
-# "opcua==0.98.13" or "scikit-learn>=1.1.3,<1.2".
+# Distribution name at the start of a requirement line, e.g. "asyncua" from
+# "asyncua==2.0.1" or "scikit-learn>=1.1.3,<1.2".
 _NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
@@ -63,18 +66,20 @@ def test_requirements_file_exists():
 
 
 def test_opcua_is_a_packaged_runtime_dependency():
-    """``opcua`` (python-opcua) MUST be listed in the packaged runtime
-    dependency list so ``from opcua import Client`` succeeds on device.
-
-    UNFIXED: FAILS -- ``opcua`` is absent (the counterexample that proves
-    the binding cannot import its client on JP5).
+    """``asyncua`` MUST be listed in the packaged runtime dependency list so
+    ``from asyncua.sync import Client`` succeeds on device, and the
+    unmaintained python-opcua (``opcua``) must not be listed alongside it.
     """
     with open(BACKEND_REQUIREMENTS) as f:
         names = _parse_requirement_names(f.read())
 
-    assert "opcua" in names, (
-        "'opcua' (python-opcua) is not listed in src/backend/requirements.txt; "
-        "the opcua_write binding's `from opcua import Client` will raise "
+    assert "asyncua" in names, (
+        "'asyncua' is not listed in src/backend/requirements.txt; the "
+        "opcua_write binding's `from asyncua.sync import Client` will raise "
         "ModuleNotFoundError on the edge device. Listed packages: {0}".format(
             sorted(names))
+    )
+    assert "opcua" not in names, (
+        "python-opcua ('opcua') is unmaintained with an unfixed advisory "
+        "(GHSA-mfpj-3qhm-976m); asyncua replaces it"
     )

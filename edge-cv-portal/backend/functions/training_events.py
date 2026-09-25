@@ -147,7 +147,9 @@ def handle_training_state_change(event: Dict, context: Any) -> Dict:
                         target_mapping = {
                             'x86_64': 'x86_64-cpu',
                             'aarch64': 'arm64-cpu', 
-                            'jetson': 'jetson-xavier'
+                            # Legacy short name: JetPack 4 is retired, so a
+                            # Jetson target means the oldest supported JetPack.
+                            'jetson': 'jetson-xavier-jp5'
                         }
                         
                         # Convert frontend targets to backend targets

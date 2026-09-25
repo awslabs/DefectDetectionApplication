@@ -120,7 +120,7 @@ export default function CaptureImageDisplay({
           imageSrc={`data:image/jpg;base64,${image}`}
           extraActions={(
             <SpaceBetween direction="horizontal" size="xs">
-              <Button onClick={(): void => navigate(editImageSettingsUrl)}>
+              <Button onClick={(): void => void navigate(editImageSettingsUrl)}>
                 Edit image settings
               </Button>
               {!isLivePreviewChecked && (

@@ -30,7 +30,7 @@ DEVICES_TABLE = os.environ.get('DEVICES_TABLE')
 # DDA Target_Architectures a device can be recorded as (matched exactly by
 # the deployment architecture gate — x86_64 and x86_64_nvidia are distinct)
 TARGET_ARCHITECTURES = ('x86_64', 'x86_64_nvidia',
-                        'arm64_jp4', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7')
+                        'arm64_cpu', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7')
 
 # Named shadow carrying the device's model GPU-fallback status snapshot
 # (spec: model-gpu-fallback-visibility). Reported-only telemetry mirrored to

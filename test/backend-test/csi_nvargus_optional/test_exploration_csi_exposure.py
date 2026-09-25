@@ -26,9 +26,10 @@ trigger pattern 1:1), no Error(89) degraded-state watchdog exists, and the
 three consumer-less legacy capture scripts still ship.
 
 Case 6 documents F(X) and PASSES on the unfixed tree (and must NOT be
-inverted by the fix): all five arm64 recipes invoke
+inverted by the fix): all four Jetson recipes invoke
 `install_nvidia_csi_service.sh` unconditionally in their Install lifecycle
-and the amd64 recipes never do — the Decision 1 premise that the
+and the non-Jetson recipes (amd64, and the generic arm64 CPU recipe since
+JetPack 4 was retired) never do — the Decision 1 premise that the
 unconditional Install hook becomes the fix's distribution channel.
 
 The SAME suite is re-run in task 3.6 against the fixed tree, where cases 1-5
@@ -72,20 +73,21 @@ LEGACY_SCRIPTS = (
     os.path.join(HOST_SCRIPTS_DIR, "nvidia_csi_server.sh"),
 )
 
-#: All five arm64 recipe variants run the installer in Install (defect 1.2's
+#: All four Jetson recipe variants run the installer in Install (defect 1.2's
 #: distribution surface — and, per design Decision 1, the fix's channel).
 ARM64_RECIPES = (
     "recipe.yaml",
-    "recipe-arm64.yaml",
     "recipe-arm64-jp5.yaml",
     "recipe-arm64-jp6.yaml",
     "recipe-arm64-jp7.yaml",
 )
 
-#: The amd64 recipes never touch the CSI installer.
+#: The non-Jetson recipes never touch the CSI installer: amd64, and the
+#: generic arm64 CPU recipe (recipe-arm64.yaml; its JetPack 4 use is retired).
 AMD64_RECIPES = (
     "recipe-amd64.yaml",
     "recipe-amd64-nvidia.yaml",
+    "recipe-arm64.yaml",
 )
 
 #: Opt-in marker written by provisioning (design Decision 1).
@@ -485,10 +487,10 @@ def test_legacy_capture_scripts_no_longer_ship():
 
 # ---------------------------------------------------------------------------
 # Case 6 — documents F(X); PASSES on the unfixed tree and must NOT be
-# inverted by the fix: all five arm64 recipes invoke the installer
+# inverted by the fix: all four Jetson recipes invoke the installer
 # unconditionally in Install (Decision 1 changes the SCRIPT, not the
 # recipes — the unconditional hook becomes the fix's distribution channel),
-# and the amd64 recipes never invoke it.
+# and the non-Jetson recipes never invoke it.
 # ---------------------------------------------------------------------------
 
 def _install_scripts(recipe_name):
@@ -508,7 +510,7 @@ def _install_scripts(recipe_name):
 
 @pytest.mark.parametrize("recipe_name", ARM64_RECIPES)
 def test_arm64_recipe_install_invokes_csi_installer(recipe_name):
-    """F(X) pin (Decision 1 premise): every arm64 recipe's Install
+    """F(X) pin (Decision 1 premise): every Jetson recipe's Install
     lifecycle invokes install_nvidia_csi_service.sh unconditionally — true
     before AND after the fix (the fix gates the script, not the recipes).
 
@@ -525,13 +527,14 @@ def test_arm64_recipe_install_invokes_csi_installer(recipe_name):
 
 @pytest.mark.parametrize("recipe_name", AMD64_RECIPES)
 def test_amd64_recipe_never_invokes_csi_installer(recipe_name):
-    """F(X) pin: the amd64 recipes contain no CSI installer invocation
-    anywhere — amd64 devices are untouched by construction.
+    """F(X) pin: the non-Jetson recipes (amd64, generic arm64 CPU) contain
+    no CSI installer invocation anywhere — those devices are untouched by
+    construction.
 
     Validates: Requirements 1.2
     """
     content = _read(os.path.join(REPO_ROOT, recipe_name))
     assert "install_nvidia_csi_service" not in content, (
         "{}: unexpectedly references install_nvidia_csi_service — the "
-        "amd64 recipes must never install the CSI service"
+        "non-Jetson recipes must never install the CSI service"
         .format(recipe_name))

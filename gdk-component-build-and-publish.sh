@@ -78,20 +78,22 @@ print_step() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
 
-# Usage: ./gdk-component-build-and-publish.sh [ARCH] [JETPACK]
+# Usage: ./gdk-component-build-and-publish.sh [ARCH] [TARGET]
 #   ARCH:    x86_64 or aarch64 (default: auto-detect from host)
-#   JETPACK: 4, 5, 6, or 7 (required for aarch64 builds)
+#   TARGET:  cpu, 5, 6, or 7 (required for aarch64 builds; cpu = generic
+#            non-Jetson arm64 host, 5/6/7 = JetPack generation)
 #
 # Supported configurations:
 #   x86_64           -> aws.edgeml.dda.LocalServer.amd64      (Ubuntu 20.04)
-#   aarch64 + JP4    -> aws.edgeml.dda.LocalServer.arm64      (Ubuntu 18.04, L4T r32.x)
+#   aarch64 + cpu    -> aws.edgeml.dda.LocalServer.arm64      (generic arm64 CPU, e.g. AWS Graviton)
 #   aarch64 + JP5    -> aws.edgeml.dda.LocalServer.arm64JP5   (Ubuntu 20.04, L4T r35.x)
 #   aarch64 + JP6    -> aws.edgeml.dda.LocalServer.arm64JP6   (Ubuntu 22.04, L4T r36.x)
 #   aarch64 + JP7    -> aws.edgeml.dda.LocalServer.arm64JP7   (Ubuntu 24.04, L4T r38.x)
+# JetPack 4 is no longer supported.
 #
 # Examples:
 #   ./gdk-component-build-and-publish.sh                 # auto-detect arch (x86_64)
-#   ./gdk-component-build-and-publish.sh aarch64 4       # ARM64 JetPack 4.6
+#   ./gdk-component-build-and-publish.sh aarch64 cpu     # generic ARM64 CPU
 #   ./gdk-component-build-and-publish.sh aarch64 5       # ARM64 JetPack 5
 #   ./gdk-component-build-and-publish.sh aarch64 6       # ARM64 JetPack 6
 #   ./gdk-component-build-and-publish.sh aarch64 7       # ARM64 JetPack 7
@@ -107,21 +109,26 @@ print_step() {
 #   SKIP_PUBLISH=1 ./gdk-component-build-and-publish.sh aarch64 6   # build only
 #   SKIP_BUILD=1   ./gdk-component-build-and-publish.sh aarch64 6   # publish only
 #
-# Argument parsing is order-independent and accepts both the positional JetPack
-# number (4|5|6|7) and the --jp4/--jp5/--jp6/--jp7 flags (kept as backward-compatible aliases).
+# Argument parsing is order-independent and accepts the positional target
+# (cpu|5|6|7) and the --cpu/--jp5/--jp6/--jp7 flags (kept as backward-compatible aliases).
 ARCH=""
 JETPACK=""
 for arg in "$@"; do
     case "$arg" in
         x86_64|amd64)        ARCH="x86_64" ;;
         aarch64|arm64)       ARCH="aarch64" ;;
-        4|jp4|JP4|--jp4)     JETPACK="4" ;;
+        cpu|CPU|--cpu)       JETPACK="cpu" ;;
         5|jp5|JP5|--jp5)     JETPACK="5" ;;
         6|jp6|JP6|--jp6)     JETPACK="6" ;;
         7|jp7|JP7|--jp7)     JETPACK="7" ;;
+        4|jp4|JP4|--jp4)
+            echo "ERROR: JetPack 4 is no longer supported."
+            echo "Usage: $0 [x86_64|aarch64] [cpu|5|6|7]"
+            exit 1
+            ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: $0 [x86_64|aarch64] [4|5|6|7]"
+            echo "Usage: $0 [x86_64|aarch64] [cpu|5|6|7]"
             exit 1
             ;;
     esac
@@ -139,16 +146,16 @@ case $ARCH in
         COMPONENT_NAME="aws.edgeml.dda.LocalServer.amd64"
         ;;
     aarch64)
-        # JetPack version is required for aarch64 so we never silently publish
-        # the wrong component (passing nothing previously defaulted to JP4 and
-        # produced aws.edgeml.dda.LocalServer.arm64 even when JP5 was intended).
+        # The target is required for aarch64 so we never silently publish the
+        # wrong component (passing nothing once defaulted to the bare
+        # aws.edgeml.dda.LocalServer.arm64 even when JP5 was intended).
         if [ -z "$JETPACK" ]; then
-            echo "ERROR: JetPack version is required for aarch64 builds."
-            echo "Usage: $0 aarch64 <4|5|6|7>"
-            echo "  4 = JetPack 4.6 (Ubuntu 18.04, L4T r32.x)  -> aws.edgeml.dda.LocalServer.arm64"
-            echo "  5 = JetPack 5   (Ubuntu 20.04, L4T r35.x)  -> aws.edgeml.dda.LocalServer.arm64JP5"
-            echo "  6 = JetPack 6   (Ubuntu 22.04, L4T r36.x)  -> aws.edgeml.dda.LocalServer.arm64JP6"
-            echo "  7 = JetPack 7   (Ubuntu 24.04, L4T r38.x)  -> aws.edgeml.dda.LocalServer.arm64JP7"
+            echo "ERROR: A target (cpu or JetPack version) is required for aarch64 builds."
+            echo "Usage: $0 aarch64 <cpu|5|6|7>"
+            echo "  cpu = generic arm64 CPU (non-Jetson)      -> aws.edgeml.dda.LocalServer.arm64"
+            echo "  5   = JetPack 5 (Ubuntu 20.04, L4T r35.x) -> aws.edgeml.dda.LocalServer.arm64JP5"
+            echo "  6   = JetPack 6 (Ubuntu 22.04, L4T r36.x) -> aws.edgeml.dda.LocalServer.arm64JP6"
+            echo "  7   = JetPack 7 (Ubuntu 24.04, L4T r38.x) -> aws.edgeml.dda.LocalServer.arm64JP7"
             exit 1
         fi
         if [ "$JETPACK" = "7" ]; then
@@ -161,6 +168,7 @@ case $ARCH in
             RECIPE_FILE="recipe-arm64-jp5.yaml"
             COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64JP5"
         else
+            # cpu: the generic arm64 CPU image (src/backend/Dockerfile).
             RECIPE_FILE="recipe-arm64.yaml"
             COMPONENT_NAME="aws.edgeml.dda.LocalServer.arm64"
         fi
@@ -173,7 +181,7 @@ esac
 
 print_step "Detecting architecture and preparing configuration"
 echo "Architecture: $ARCH"
-echo "JetPack version: ${JETPACK:-n/a}"
+echo "Target: ${JETPACK:-n/a}"
 echo "Component name: $COMPONENT_NAME"
 echo "Recipe file: $RECIPE_FILE"
 
@@ -349,9 +357,17 @@ for z in "$ARTIFACT_DIR"/*.zip; do
 done
 echo "Total artifact size: $(numfmt --to=iec "$TOTAL_SIZE" 2>/dev/null || echo "${TOTAL_SIZE} bytes")"
 
-if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ]; then
+# COMPONENT_VERSION_OVERRIDE is honored only by the ECR + API publish path:
+# `gdk component publish` always resolves NEXT_PATCH itself, so a small
+# artifact would otherwise ignore the override and publish latest+1 (the
+# first arm64 CPU build published 1.0.0 instead of 1.1.0 this way).
+if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ] || [ -n "${COMPONENT_VERSION_OVERRIDE:-}" ]; then
     echo ""
-    echo "Artifacts exceed the Greengrass 2GB limit — using ECR for Docker images + S3 for scripts."
+    if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ]; then
+        echo "Artifacts exceed the Greengrass 2GB limit — using ECR for Docker images + S3 for scripts."
+    else
+        echo "COMPONENT_VERSION_OVERRIDE=${COMPONENT_VERSION_OVERRIDE} — using the ECR + S3 publish path (the only path that honors an explicit version)."
+    fi
     echo ""
 
     if [ -z "$PUB_REGION" ] || [ -z "$PUB_ACCOUNT_ID" ] || [ "$PUB_ACCOUNT_ID" = "None" ]; then
@@ -369,7 +385,13 @@ if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ]; then
     LATEST_VERSION=$(aws greengrassv2 list-component-versions \
         --arn "arn:aws:greengrass:${PUB_REGION}:${PUB_ACCOUNT_ID}:components:${COMPONENT_NAME}" \
         --query 'componentVersions[0].componentVersion' --output text 2>/dev/null || echo "None")
-    if [ "$LATEST_VERSION" = "None" ] || [ -z "$LATEST_VERSION" ]; then
+    if [ -n "${COMPONENT_VERSION_OVERRIDE:-}" ]; then
+        # Explicit version, e.g. to start a lineage above versions still
+        # installed in the field (the first arm64 CPU build of the bare
+        # aws.edgeml.dda.LocalServer.arm64 name publishes above its JetPack
+        # 4-era 1.0.x builds). Must be higher than the latest registered one.
+        COMPONENT_VERSION="$COMPONENT_VERSION_OVERRIDE"
+    elif [ "$LATEST_VERSION" = "None" ] || [ -z "$LATEST_VERSION" ]; then
         COMPONENT_VERSION="1.0.0"
     else
         V_MAJOR=$(echo "$LATEST_VERSION" | cut -d. -f1)
@@ -378,6 +400,12 @@ if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ]; then
         COMPONENT_VERSION="${V_MAJOR}.${V_MINOR}.$((V_PATCH + 1))"
     fi
     echo "Publishing version: $COMPONENT_VERSION"
+    # The dda/flask-app and dda/react-webapp ECR repos are shared by every
+    # LocalServer variant, so the image tag is scoped by variant: two variants
+    # at the same component version must never overwrite each other's image
+    # (arm64JP7 1.0.44 once overwrote the arm64JP5 1.0.44 image this way).
+    IMAGE_TAG_PREFIX="${COMPONENT_NAME#aws.edgeml.dda.LocalServer.}-"
+    IMAGE_TAG="${IMAGE_TAG_PREFIX}${COMPONENT_VERSION}"
 
     # Authenticate to ECR and ensure the repositories exist.
     aws ecr get-login-password --region "$PUB_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
@@ -388,11 +416,11 @@ if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ]; then
 
     # Push the locally-built images (left tagged flask-app/react-webapp by build-custom.sh).
     echo "Pushing flask-app to ECR..."
-    docker tag flask-app:latest "${ECR_REPO_BACKEND}:${COMPONENT_VERSION}"
-    docker push "${ECR_REPO_BACKEND}:${COMPONENT_VERSION}"
+    docker tag flask-app:latest "${ECR_REPO_BACKEND}:${IMAGE_TAG_PREFIX}${COMPONENT_VERSION}"
+    docker push "${ECR_REPO_BACKEND}:${IMAGE_TAG_PREFIX}${COMPONENT_VERSION}"
     echo "Pushing react-webapp to ECR..."
-    docker tag react-webapp:latest "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}"
-    docker push "${ECR_REPO_FRONTEND}:${COMPONENT_VERSION}"
+    docker tag react-webapp:latest "${ECR_REPO_FRONTEND}:${IMAGE_TAG_PREFIX}${COMPONENT_VERSION}"
+    docker push "${ECR_REPO_FRONTEND}:${IMAGE_TAG_PREFIX}${COMPONENT_VERSION}"
 
     # Repackage a scripts-only zip with the SAME name/layout as the full zip
     # (minus the image tars) so the recipe's decompressedPath references stay valid.
@@ -417,10 +445,10 @@ if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ]; then
     python3 -c "import yaml" 2>/dev/null || pip3 install --user pyyaml >/dev/null 2>&1 || true
     ECR_RECIPE="greengrass-build/recipes/recipe-ecr.yaml"
     mkdir -p greengrass-build/recipes
-    python3 - "recipe.yaml" "$ECR_RECIPE" "$ECR_REPO_BACKEND" "$ECR_REPO_FRONTEND" "$COMPONENT_VERSION" "$S3_URI" <<'PYEOF'
+    python3 - "recipe.yaml" "$ECR_RECIPE" "$ECR_REPO_BACKEND" "$ECR_REPO_FRONTEND" "$COMPONENT_VERSION" "$S3_URI" "$IMAGE_TAG" <<'PYEOF'
 import re, sys, yaml
 
-src, out, ecr_backend, ecr_frontend, version, s3_uri = sys.argv[1:7]
+src, out, ecr_backend, ecr_frontend, version, s3_uri, image_tag = sys.argv[1:8]
 
 with open(src) as f:
     recipe = yaml.safe_load(f)
@@ -435,9 +463,9 @@ def rewrite_install(script: str) -> str:
     # Replace the tar-load commands with ECR retags so docker-compose still
     # finds the flask-app / react-webapp image names at Run time.
     script = re.sub(r'docker load -i \S*flask-app\.tar',
-                    f'docker tag {ecr_backend}:{version} flask-app:latest', script)
+                    f'docker tag {ecr_backend}:{image_tag} flask-app:latest', script)
     script = re.sub(r'docker load -i \S*react-webapp\.tar(?:\.gz)?',
-                    f'docker tag {ecr_frontend}:{version} react-webapp:latest', script)
+                    f'docker tag {ecr_frontend}:{image_tag} react-webapp:latest', script)
     return script
 
 changed = False
@@ -450,8 +478,8 @@ for manifest in recipe.get('Manifests', []):
             changed = True
         install['Script'] = new_script
     manifest['Artifacts'] = [
-        {'URI': f'docker:{ecr_backend}:{version}'},
-        {'URI': f'docker:{ecr_frontend}:{version}'},
+        {'URI': f'docker:{ecr_backend}:{image_tag}'},
+        {'URI': f'docker:{ecr_frontend}:{image_tag}'},
         {'URI': s3_uri, 'Unarchive': 'ZIP'},
     ]
 

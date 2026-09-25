@@ -48,11 +48,17 @@ member set. An unknown `--arch` exits 2 with a usage line and writes nothing.
 
 ### Pins
 
-`requirements.txt` (YOLO): `ultralytics==8.3.40`, `onnx==1.17.0`,
+`requirements.txt` (YOLO): `ultralytics==8.3.40`, `onnx==1.22.0`,
 `onnxruntime==1.19.2`, `onnxslim==0.1.34`, `numpy<2`.
 
+onnx 1.22 stamps IR version 13 on graphs it re-serialises (ultralytics'
+onnxslim pass does), and onnxruntime older than 1.20 cannot load that. Both
+entry points therefore lower the exported model to IR 10 with
+`_common.cap_onnx_ir_version`, the IR every earlier export carried. The
+opset-17 graph itself is unchanged.
+
 `requirements-rfdetr.txt` (RF-DETR): `rfdetr[train,onnx]==1.10.1`,
-`onnx==1.17.0`, `onnxruntime==1.19.2`, `numpy<2`. The `train` extra brings
+`onnx==1.22.0`, `onnxruntime==1.19.2`, `numpy<2`. The `train` extra brings
 pytorch_lightning / torchmetrics / pycocotools for `.train()` and
 `.evaluate()`; `onnx` brings onnxsim / onnx_graphsurgeon for `.export()`.
 There is no `onnxexport` extra in 1.10.1. Both launch examples below use the

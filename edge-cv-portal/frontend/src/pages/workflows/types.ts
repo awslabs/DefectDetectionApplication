@@ -135,7 +135,7 @@ export const SOURCE_KIND_TO_SOURCE_TYPE = {
 
 export const ARCHITECTURES = [
   'x86_64',
-  'arm64_jp4',
+  'arm64_cpu',
   'arm64_jp5',
   'arm64_jp6',
   'sim',
@@ -289,7 +289,7 @@ export interface NodeTypeDescriptor {
 const DEVICE_ARCHITECTURES = [
   'x86_64',
   'x86_64_nvidia',
-  'arm64_jp4',
+  'arm64_cpu',
   'arm64_jp5',
   'arm64_jp6',
   'arm64_jp7',

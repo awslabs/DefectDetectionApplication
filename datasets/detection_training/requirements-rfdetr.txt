@@ -4,6 +4,6 @@
 #   onnx  -> onnx, onnxsim, onnx_graphsurgeon, onnxruntime, polygraphy (.export())
 # There is no `onnxexport` extra in this version.
 rfdetr[train,onnx]==1.10.1
-onnx==1.17.0
+onnx==1.22.0
 onnxruntime==1.19.2
 numpy<2

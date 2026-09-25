@@ -101,7 +101,7 @@ _FLOOR_ENV_VARS = ("WORKFLOW_MIN_LOCAL_SERVER_VERSION",
 NO_RECORD_MESSAGE = "no record in the Use_Case model registry"
 UNPUBLISHED_MESSAGE = "no published Greengrass component"
 
-ARCHS = ("arm64_jp4", "arm64_jp5", "arm64_jp6", "x86_64", "x86_64_nvidia")
+ARCHS = ("arm64_cpu", "arm64_jp5", "arm64_jp6", "x86_64", "x86_64_nvidia")
 
 #: Recorded default floor (no floor env vars configured).
 DEFAULT_FLOOR = "1.0.0"

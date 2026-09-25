@@ -231,13 +231,16 @@ RUN pip install --no-cache-dir psutil==5.9.5
 # pin, so the requirements install below does not re-resolve awscrt.
 RUN pip install --no-cache-dir --only-binary :all: awscrt==0.36.1 && \
     python3 -c "import awscrt.mqtt, awscrt.eventstream; print('awscrt wheel OK')"
-RUN pip install --no-cache-dir -r ./requirements.txt
 # The noble base pulls Debian's python3-cryptography/python3-cffi into the
 # shared /usr/lib/python3/dist-packages (compiled for the distro 3.12), so
-# pip treats the transitive cryptography dep as satisfied while the DDA
-# 3.11 interpreter has no matching _cffi_backend. Install real 3.11 wheels.
+# the DDA 3.11 interpreter sees a cryptography with no matching
+# _cffi_backend and no pip RECORD file. Install real 3.11 wheels BEFORE the
+# requirements: asyncua (and its pyOpenSSL) need a newer cryptography than
+# the Debian copy, and pip cannot upgrade that copy in place
+# (uninstall-no-record-file).
 RUN pip install --no-cache-dir --ignore-installed cffi cryptography && \
     python3 -c "import _cffi_backend, cryptography; print('cryptography/cffi OK')"
+RUN pip install --no-cache-dir -r ./requirements.txt
 RUN pip install --no-cache-dir --upgrade requests
 
 # Bake the model conversion dependencies into the image at build time so the runtime
@@ -496,8 +499,8 @@ RUN if [ "$VLLM_ENABLE" = "1" ]; then \
 #
 # ALLOWLISTED CONFLICT — grpcio-tools vs protobuf. vLLM v0.11.x's
 # transitive closure installs protobuf 6.x, which violates the
-# `protobuf<5.0dev` pin of the grpcio-tools release this image uses for
-# `grpc_tools.protoc` (requirements.txt, shared with JP4/JP5/JP6/x86).
+# `protobuf<6.0dev` pin of the grpcio-tools release this image uses for
+# `grpc_tools.protoc` (requirements.txt, shared with JP5/JP6/x86/arm64 CPU).
 # The mismatch is metadata-only here: the protoc invocation that consumes
 # grpcio-tools runs EARLIER in this same build and succeeds against
 # protobuf 6.x, and nothing at runtime imports grpc_tools. Upgrading

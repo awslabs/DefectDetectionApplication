@@ -52,11 +52,10 @@ RUN python3.11 -m pip install --no-cache-dir -r ./model_conversion_requirements.
 # RF-DETR object-detection + segmentation models). Without it those models fail
 # to initialize in the Triton python stub with "ModuleNotFoundError: No module
 # named 'onnxruntime'" and sit in LOADING forever (DLR/Neo models are
-# unaffected — engines import lazily per-runner). JP5/JP6 install this too; JP4
-# was the only target missing it. JetPack 4 (CUDA 10.2, L4T r32) has no
-# supported GPU onnxruntime build path, so this is CPU-only: the onnxruntime
-# 1.16.3 cp311 aarch64 manylinux_2_17 wheel installs on this glibc 2.27
-# (Ubuntu 18.04) base, and OnnxRunner falls back to the CPU provider.
+# unaffected — engines import lazily per-runner). The JetPack images build a
+# GPU onnxruntime; this image serves the CPU targets (x86_64 and the generic
+# arm64 CPU component), so it installs the onnxruntime 1.16.3 cp311
+# manylinux_2_17 CPU wheel and OnnxRunner uses the CPU provider.
 ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
 RUN python3.11 -m pip install --no-cache-dir ${ONNXRUNTIME_SPEC}
 RUN ./edge_ml1_p_camera_management/install_aravis.sh

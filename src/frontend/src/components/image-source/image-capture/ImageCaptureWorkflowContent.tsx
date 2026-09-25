@@ -262,7 +262,7 @@ export default function ImageCaptureWorkflowContent({ workflow }: ImageCaptureWo
         imageSrc={`data:image/jpg;base64, ${imagePreview?.image || ""}`}
         extraActions={(
           <SpaceBetween direction="horizontal" size="xs">
-            <Button variant="normal" onClick={(): void => navigate(`/image-sources/${imageSourceId}/edit-settings`)}>
+            <Button variant="normal" onClick={(): void => void navigate(`/image-sources/${imageSourceId}/edit-settings`)}>
               Edit image settings
             </Button>
             <Button
@@ -312,7 +312,7 @@ export default function ImageCaptureWorkflowContent({ workflow }: ImageCaptureWo
         imageSrc={`${getCaptureAPI}/${captureImageType.INPUT_IMAGE}${authEnabled ? `?token=${encodeURIComponent(token)}` : ""}`}
         extraActions={(
           <SpaceBetween direction="horizontal" size="xs">
-            <Button variant="normal" onClick={(): void => navigate(`/image-sources/${imageSourceId}/edit-settings`)}>
+            <Button variant="normal" onClick={(): void => void navigate(`/image-sources/${imageSourceId}/edit-settings`)}>
               Edit image settings
             </Button>
             <Button variant="primary" disabled>

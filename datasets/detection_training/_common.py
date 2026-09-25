@@ -363,6 +363,46 @@ def fetch_base_weights(
 
 
 # ---------------------------------------------------------------------------
+# ONNX IR version ceiling
+# ---------------------------------------------------------------------------
+
+#: Highest ONNX IR version the DDA edge runtimes load. Every model exported
+#: before the onnx >= 1.22 bump carried IR 10 (what onnx 1.17 wrote), and
+#: onnxruntime builds older than 1.20 (including the 1.19.2 pinned for the
+#: in-job verification) reject anything newer. onnx 1.22 / 1.23 stamp IR
+#: 13 / 14 on graphs they re-serialise, which ultralytics' onnxslim pass does.
+EDGE_MAX_ONNX_IR_VERSION = 10
+
+
+def cap_onnx_ir_version(path: Path, max_ir: int = EDGE_MAX_ONNX_IR_VERSION):
+    """Lower an exported model's IR version to ``max_ir`` in place.
+
+    The exported graph only uses opset-17 operators and standard tensor
+    types, which IR 8 and later express identically, so lowering the IR
+    stamp does not change the model; ``onnx.checker`` re-validates it
+    under the lowered IR before the file is rewritten. Returns
+    ``(before, after)``, or None when onnx is not importable (the file is
+    then left untouched).
+    """
+    try:
+        import onnx
+    except ImportError:
+        print("WARN: onnx is not importable; exported IR version left "
+              "unchanged", flush=True)
+        return None
+    model = onnx.load(str(path))
+    before = model.ir_version
+    if before <= max_ir:
+        return before, before
+    model.ir_version = max_ir
+    onnx.checker.check_model(model)
+    onnx.save(model, str(path))
+    print(f"ONNX IR version {before} -> {max_ir} (edge runtime ceiling)",
+          flush=True)
+    return before, max_ir
+
+
+# ---------------------------------------------------------------------------
 # Metadata
 # ---------------------------------------------------------------------------
 

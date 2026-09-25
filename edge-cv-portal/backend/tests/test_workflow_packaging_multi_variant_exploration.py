@@ -47,11 +47,12 @@ LOCAL_SERVER_PREFIX = "aws.edgeml.dda.LocalServer."
 
 # The arch -> LocalServer variant partition from the design (Fix
 # Implementation §7 / greengrass_publish.TARGET_TO_LOCAL_SERVER naming
-# discipline): JP4/JP5/JP6 are distinct variants; both x86_64 flavors
-# collapse to the single amd64 variant. Hardcoded as an independent oracle
-# rather than read back from the module under test.
+# discipline): the generic arm64 CPU build and JP5/JP6 are distinct
+# variants; both x86_64 flavors collapse to the single amd64 variant.
+# Hardcoded as an independent oracle rather than read back from the module
+# under test.
 VARIANT_OF = {
-    "arm64_jp4": "aws.edgeml.dda.LocalServer.arm64JP4",
+    "arm64_cpu": "aws.edgeml.dda.LocalServer.arm64",
     "arm64_jp5": "aws.edgeml.dda.LocalServer.arm64JP5",
     "arm64_jp6": "aws.edgeml.dda.LocalServer.arm64JP6",
     "x86_64": "aws.edgeml.dda.LocalServer.amd64",
@@ -78,7 +79,7 @@ def local_server_entries(dependencies):
 
 # --------------------------------------------------------------------------
 # Hypothesis strategy: non-empty arch subsets of
-# {arm64_jp4, arm64_jp5, arm64_jp6, x86_64, x86_64_nvidia} that map to MORE
+# {arm64_cpu, arm64_jp5, arm64_jp6, x86_64, x86_64_nvidia} that map to MORE
 # THAN ONE distinct LocalServer variant (isBugCondition_F). Any 2+ subset
 # qualifies except {x86_64, x86_64_nvidia}, which collapses to amd64.
 # --------------------------------------------------------------------------
@@ -127,7 +128,7 @@ class TestMultiVariantLocalServerEmission:
     def test_multi_variant_selection_emits_zero_local_server_entries(
             self, packaging, archs):
         """Property 11 (Bug Condition): for ANY non-empty arch subset of
-        {arm64_jp4, arm64_jp5, arm64_jp6, x86_64, x86_64_nvidia} mapping to
+        {arm64_cpu, arm64_jp5, arm64_jp6, x86_64, x86_64_nvidia} mapping to
         more than one distinct LocalServer variant, the fixed
         local_server_component_dependencies emits ZERO LocalServer entries —
         the recipe's dependency closure never carries a LocalServer variant

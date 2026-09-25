@@ -40,7 +40,7 @@ import "./commands";
 // Alternatively you can use CommonJS syntax:
 // require('./commands')
 
-import { mount, MountOptions, MountReturn } from "cypress/react18";
+import { mount, MountOptions, MountReturn } from "cypress/react";
 import { MemoryRouter, MemoryRouterProps } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { createQueryClient } from "components/react-query";

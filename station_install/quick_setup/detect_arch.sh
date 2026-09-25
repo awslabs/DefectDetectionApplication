@@ -4,7 +4,7 @@
 #
 # Exposes one pure function, detect_target_architecture, that prints exactly
 # one of:
-#     x86_64 | x86_64_nvidia | arm64_jp4 | arm64_jp5 | arm64_jp6 | arm64_jp7
+#     x86_64 | x86_64_nvidia | arm64_cpu | arm64_jp5 | arm64_jp6 | arm64_jp7
 # or nothing (empty output) when the architecture cannot be resolved to the
 # fixed set. It is read-only (no system changes) and NEVER exits non-zero, so
 # the caller can capture its output without risking the provisioning run
@@ -15,7 +15,10 @@
 #     arch="$(detect_target_architecture)"
 #
 # On aarch64/arm64 the JetPack major is derived from the installed L4T release
-# (which distinguishes JetPack 4/5/6/7 — the kernel CPU arch does not); on
+# (which distinguishes JetPack 5/6/7 — the kernel CPU arch does not); an
+# aarch64 host with no L4T at all is a generic (non-Jetson) arm64 CPU host
+# (arm64_cpu), while an L4T release outside the supported set (e.g. JetPack
+# 4's R32) stays undetermined rather than being misreported as CPU. On
 # x86_64/amd64 the value is x86_64_nvidia when an NVIDIA GPU runtime is
 # detectable, else x86_64.
 #
@@ -38,11 +41,10 @@ _detect_arch_machine() {
     fi
 }
 
-# _detect_jetpack_arch_from_major <major> -> the arch token for a known L4T
-# major (32/35/36/38), else nothing.
+# _detect_jetpack_arch_from_major <major> -> the arch token for a supported
+# L4T major (35/36/38), else nothing (JetPack 4's R32 is no longer supported).
 _detect_jetpack_arch_from_major() {
     case "$1" in
-        32) printf 'arm64_jp4' ;;
         35) printf 'arm64_jp5' ;;
         36) printf 'arm64_jp6' ;;
         38) printf 'arm64_jp7' ;;
@@ -50,7 +52,7 @@ _detect_jetpack_arch_from_major() {
     esac
 }
 
-# _detect_jetpack_from_tegra_release <file> -> arm64_jp{4,5,6,7} or nothing.
+# _detect_jetpack_from_tegra_release <file> -> arm64_jp{5,6,7} or nothing.
 # The first line of nv_tegra_release looks like:
 #   # R35 (release), REVISION: 4.1, GCID: ..., BOARD: ...
 _detect_jetpack_from_tegra_release() {
@@ -60,7 +62,7 @@ _detect_jetpack_from_tegra_release() {
     _detect_jetpack_arch_from_major "$major"
 }
 
-# _detect_jetpack_from_dpkg -> arm64_jp{4,5,6,7} or nothing.
+# _detect_jetpack_from_dpkg -> arm64_jp{5,6,7} or nothing.
 # Fallback source: the leading major of the nvidia-l4t-core package version,
 # e.g. "35.4.1-20230..." -> 35.
 _detect_jetpack_from_dpkg() {
@@ -69,6 +71,16 @@ _detect_jetpack_from_dpkg() {
     version=$(dpkg-query -W -f '${Version}' nvidia-l4t-core 2>/dev/null) || return 0
     major=$(printf '%s' "$version" | sed -nE 's/^([0-9]+).*/\1/p')
     _detect_jetpack_arch_from_major "$major"
+}
+
+# _detect_l4t_present -> 0 (true) when this host carries ANY L4T signal (the
+# release file or an installed nvidia-l4t-core package), supported or not.
+_detect_l4t_present() {
+    local file="${NV_TEGRA_RELEASE_FILE:-/etc/nv_tegra_release}" version
+    [ -e "$file" ] && return 0
+    command -v dpkg-query >/dev/null 2>&1 || return 1
+    version=$(dpkg-query -W -f '${Version}' nvidia-l4t-core 2>/dev/null) || return 1
+    [ -n "$version" ]
 }
 
 # _detect_has_nvidia_gpu -> 0 (true) when an NVIDIA GPU runtime is detectable,
@@ -98,6 +110,10 @@ detect_target_architecture() {
             arch="$(_detect_jetpack_from_tegra_release \
                 "${NV_TEGRA_RELEASE_FILE:-/etc/nv_tegra_release}")"
             [ -n "$arch" ] || arch="$(_detect_jetpack_from_dpkg)"
+            # No L4T at all: a generic (non-Jetson) arm64 CPU host.
+            if [ -z "$arch" ] && ! _detect_l4t_present; then
+                arch="arm64_cpu"
+            fi
             ;;
         x86_64|amd64)
             if _detect_has_nvidia_gpu; then

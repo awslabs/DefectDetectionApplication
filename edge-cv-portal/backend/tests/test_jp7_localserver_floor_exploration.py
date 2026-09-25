@@ -170,12 +170,17 @@ def _gate(deployments, stack_env, greengrass, thing_names):
 # --------------------------------------------------------------------------
 
 class TestExtractorSanity:
-    def test_literal_parses_with_jp456_floors_and_wellformed_scalar(
+    def test_literal_parses_with_jp56_and_cpu_floors_and_wellformed_scalar(
             self, stack_env):
         # Validates: Requirements 1.1 (extraction preamble - the real
         # deployed configuration, not a synthetic map)
         floor_map, scalar = stack_env
-        assert floor_map.get("arm64_jp4") == "1.0.0"
+        # arm64_cpu floors at 1.1.0: the first generic arm64 CPU build
+        # published after JetPack 4 support was removed. Older bare
+        # LocalServer.arm64 installs are JP4-era builds and must not
+        # satisfy the floor.
+        assert "arm64_jp4" not in floor_map
+        assert floor_map.get("arm64_cpu") == "1.1.0"
         assert floor_map.get("arm64_jp5") == "1.0.0"
         assert floor_map.get("arm64_jp6") == "1.0.0"
         assert re.fullmatch(r"\d+\.\d+\.\d+", scalar), scalar

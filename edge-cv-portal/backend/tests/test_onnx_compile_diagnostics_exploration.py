@@ -24,7 +24,8 @@ defects exist:
 - Case 8  (isBugCondition_5): poller B (models.get_model) polls an ONNX
   export *training* job with the Neo describe_compilation_job API.
 - Case 9  (non-goal guard, MUST PASS on unfixed AND fixed code, do NOT
-  invert): no `jetson-xavier-jp7` compile target; exactly seven targets.
+  invert): no `jetson-xavier-jp7` compile target; exactly six targets
+  (the JetPack 4 `jetson-xavier` target was retired with JetPack 4).
 
 Follows test_vllm_packaging_dispatch.py: module-scoped fixture on the
 moto-backed `aws_stack`, its own training-jobs table created with the
@@ -615,6 +616,8 @@ def test_case_9_non_goal_guard_no_jp7_compile_target(diag_env):
     targets = diag_env.compilation.COMPILATION_TARGETS
     assert "jetson-xavier-jp7" not in targets, (
         "A jetson-xavier-jp7 compile target must NOT exist (non-goal)")
-    assert len(targets) == 7, (
-        f"Exactly seven compile targets must be defined, found "
+    assert "jetson-xavier" not in targets, (
+        "The retired JetPack 4 jetson-xavier compile target must NOT exist")
+    assert len(targets) == 6, (
+        f"Exactly six compile targets must be defined, found "
         f"{sorted(targets)}")

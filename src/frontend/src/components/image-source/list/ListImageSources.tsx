@@ -62,7 +62,7 @@ export default function ListImageSources(): JSX.Element {
             header="No image sources"
             message="No image sources to display."
             action={
-              <Button onClick={(): void => navigate("/image-sources/add")}>
+              <Button onClick={(): void => void navigate("/image-sources/add")}>
                 Add image source
               </Button>
             }
@@ -202,7 +202,7 @@ function ImageSourcesHeader({
         <SpaceBetween direction="horizontal" size="s">
           <Button
             variant="primary"
-            onClick={(): void => navigate("/image-sources/add")}
+            onClick={(): void => void navigate("/image-sources/add")}
           >
             Add image source
           </Button>

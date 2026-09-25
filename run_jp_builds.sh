@@ -1,12 +1,11 @@
 #!/bin/bash
 # Build the per-JetPack LocalServer components SEQUENTIALLY via GDK.
 #
-# Each JetPack target N is built as the explicitly-tagged component
-# aws.edgeml.dda.LocalServer.arm64JP${N} (COMPONENT_PREFIX + N). JetPack 4
-# therefore builds as aws.edgeml.dda.LocalServer.arm64JP4 — the explicit name
-# that replaces the retired bare aws.edgeml.dda.LocalServer.arm64 (see
-# .kiro/specs/localserver-arch-naming). JP4/JP5/JP6/JP7 all share this one
-# naming path; nothing here emits the bare untagged arm64 name.
+# Each JetPack target N (5, 6 or 7) is built as the explicitly-tagged
+# component aws.edgeml.dda.LocalServer.arm64JP${N} (COMPONENT_PREFIX + N).
+# JetPack 4 is no longer supported. The bare aws.edgeml.dda.LocalServer.arm64
+# name is the generic arm64 CPU (non-Jetson) component; it is not built here
+# (use ./gdk-component-build-and-publish.sh aarch64 cpu).
 #
 # Sequential is REQUIRED (see .kiro/steering/builds.md): the targets share
 # greengrass-build/, custom-build/, and the docker image tags
@@ -19,7 +18,6 @@
 #   ./run_jp_builds.sh                # build JP6 then JP5 (default)
 #   TARGETS="6" ./run_jp_builds.sh    # build only JP6
 #   TARGETS="5 6" ./run_jp_builds.sh  # build JP5 then JP6
-#   TARGETS="4" ./run_jp_builds.sh    # build only JP4 (aws.edgeml.dda.LocalServer.arm64JP4)
 #   TARGETS="7" ./run_jp_builds.sh    # build only JP7 (aws.edgeml.dda.LocalServer.arm64JP7)
 #
 # gdk-config.json holds ONE component at a time (the gdk config schema enforces
@@ -90,6 +88,14 @@ build_target () {
 
 OVERALL=0
 for jp in $TARGETS; do
+  case "$jp" in
+    5|6|7) ;;
+    *)
+      echo "### JP${jp}: unsupported target (supported: 5 6 7; JetPack 4 is no longer supported) ###"
+      OVERALL=1
+      continue
+      ;;
+  esac
   echo "### JP${jp} build starting ###"
   build_target "$jp" || OVERALL=1
 done

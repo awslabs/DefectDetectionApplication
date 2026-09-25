@@ -44,7 +44,7 @@ Three sections:
    requests==`` pin line may differ only in its version token — the one
    allowance ``test_preservation_dependency_setup_station.py`` grants);
    the ``dependency_baseline_unpinned_py36.json`` entries still resolve
-   verbatim at their recorded line numbers (656, 680); and the security
+   verbatim at their recorded line numbers (663, 687); and the security
    preservation suite FILES are unmodified (git diff vs HEAD — no
    weakened, edited, or deleted gate tests).
 
@@ -53,7 +53,7 @@ Three sections:
    asserted textually: both branches present, exact marker path,
    ``run_cmd``/``add_warning`` tolerant style, ``list-unit-files`` guard,
    and the block strictly APPENDED (its first line comes after the unfixed
-   file's last line, 1625 — the placement that keeps the unpinned-py36
+   file's last line, 1581 — the placement that keeps the unpinned-py36
    golden's recorded line numbers valid).
 
 Honesty guard: no gst/Argus/CUDA/real-systemd execution — stub-binary
@@ -84,9 +84,10 @@ UNPINNED_PY36_BASELINE = os.path.join(BASELINES_DIR,
 PRESERVATION_SUITE_DIR = os.path.join("test", "backend-test", "security",
                                       "preservation")
 
-#: The unfixed setup_station.sh line count (task 2's recorded baseline) —
-#: the CSI opt-in block must start strictly AFTER this line.
-UNFIXED_SETUP_STATION_LINES = 1625
+#: The unfixed setup_station.sh line count (task 2's recorded baseline,
+#: re-baselined when JetPack 4 support was removed mid-file) — the CSI
+#: opt-in block must start strictly AFTER this line.
+UNFIXED_SETUP_STATION_LINES = 1581
 
 #: The one line of setup_station.sh allowed to differ from its golden, and
 #: only in its version token — the same allowance the security gate's
@@ -395,10 +396,10 @@ def test_setup_station_golden_matches_fixed_file_under_gate_normalization():
                 "  golden:  {!r}\n  current: {!r}".format(i + 1, gold, cur))
 
 
-def test_unpinned_py36_baseline_entries_resolve_at_656_and_680():
+def test_unpinned_py36_baseline_entries_resolve_at_663_and_687():
     """Property 5 / requirement 3.6: dependency_baseline_unpinned_py36.json
     was NOT rebaselined — its setup_station.sh entries still resolve
-    verbatim at their recorded line numbers 656 and 680, proving the CSI
+    verbatim at their recorded line numbers 663 and 687, proving the CSI
     block was strictly appended and shifted nothing.
 
     Validates: Requirements 2.4, 3.6
@@ -408,9 +409,9 @@ def test_unpinned_py36_baseline_entries_resolve_at_656_and_680():
         baseline = json.load(f)
     entries = [e for e in baseline["entries"]
                if e["file"] == "station_install/setup_station.sh"]
-    assert sorted(e["lineno"] for e in entries) == [656, 680], (
+    assert sorted(e["lineno"] for e in entries) == [663, 687], (
         "the unpinned-py36 baseline no longer records setup_station.sh "
-        "entries at lines 656 and 680: {!r}".format(entries))
+        "entries at lines 663 and 687: {!r}".format(entries))
     current_lines = _read(SETUP_STATION).splitlines()
     for entry in entries:
         assert current_lines[entry["lineno"] - 1] == entry["text"], (
@@ -457,7 +458,7 @@ def _csi_block():
 
 def test_setup_station_block_is_strictly_appended():
     """The block's first line comes AFTER the unfixed file's last line
-    (1625) and every CSI artifact lives inside the block — nothing was
+    (1581) and every CSI artifact lives inside the block — nothing was
     inserted mid-file (which would shift the unpinned-py36 golden's
     recorded line numbers).
 

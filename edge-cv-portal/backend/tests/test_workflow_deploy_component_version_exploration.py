@@ -286,7 +286,8 @@ class TestCase4VllmGateOnBumpedMajor:
 
         # BUG (1.4): on unfixed code get_version_item(workflow_id, 2)
         # resolves nothing, so no manifest is produced and the LLM-bearing
-        # workflow sails past the architecture gate onto e.g. a jp4 device.
+        # workflow sails past the architecture gate onto e.g. an arm64_cpu
+        # device (no vLLM runtime).
         assert component_name in manifests, (
             "vLLM gate manifest missing for the bumped-major LLM-bearing "
             f"workflow entry — the gate is skipped; manifests={manifests!r}")

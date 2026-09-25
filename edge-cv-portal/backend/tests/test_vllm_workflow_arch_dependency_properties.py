@@ -120,7 +120,7 @@ DEFAULT_FLOOR = "1.0.0"
 #: ARCH_TO_PUBLISH_TARGET primary plus arm64_jp7's extra ONNX id) — the
 #: real field vocabulary the strategies generate over.
 ARCH_ACCEPTED_TARGETS = {
-    "arm64_jp4": ("jetson-xavier",),
+    "arm64_cpu": ("arm64-cpu",),
     "arm64_jp5": ("jetson-xavier-jp5",),
     "arm64_jp6": ("jetson-xavier-jp6",),
     "arm64_jp7": ("jetson-xavier-jp7", "onnx-jetson-xavier-jp7"),

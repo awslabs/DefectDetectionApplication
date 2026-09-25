@@ -618,10 +618,10 @@ def clean_component_names():
         st.integers(min_value=1, max_value=9999))
 
 
-#: The only variant values the account's 41 variant-bearing manifests use, and
-#: the only Jetson `Target_Architecture` values the portal records
-#: (evidence.md §1.1, §1.3).
-JETPACK_VARIANTS = ('arm64_jp4', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7')
+#: The aarch64 `Target_Architecture` values the portal records, which are
+#: also the variant values its variant-bearing manifests use (evidence.md
+#: §1.1, §1.3; the retired arm64_jp4 was replaced by the generic arm64_cpu).
+JETPACK_VARIANTS = ('arm64_cpu', 'arm64_jp5', 'arm64_jp6', 'arm64_jp7')
 DEVICE_RUNTIMES = (None, 'aws_nucleus_classic', 'nvidia')
 #: Attributes a device may report that no manifest constrains — a matcher must
 #: ignore them rather than treat them as a mismatch.

@@ -33,7 +33,7 @@ same stable ids the Portal registry shows).
   inventory, after constraint-checking them against the vendored
   workflow_core catalog descriptor for the node type (10.3); a violation
   marks the resolution ``invalid``.
-- JP4/JP5 adapter binding points (``adapterBinding: true``, empty slots)
+- JP5 adapter binding points (``adapterBinding: true``, empty slots)
   never substitute into the document — they yield ``adapter_assignments``
   (node id -> resolved camera parameters) consumed by the executor when
   it connects the camera adapter to the appsrc.
@@ -98,7 +98,7 @@ class ResolutionResult:
     inventory entry (design shape ``{nodeId, cameraSourceId}``),
     ``adapter_assignments`` maps adapter-fed node ids to their resolved
     camera parameters, ``aravis_assignments`` maps Aravis-fed node ids to
-    theirs (same shape, kept distinct so the executor can tell the JP4/5
+    theirs (same shape, kept distinct so the executor can tell the JP5
     camera adapter apart from the Aravis frame feed), and ``errors``
     carries one human-readable reason per problem (missing sources and
     override constraint violations) for the watcher's
@@ -186,7 +186,7 @@ def resolve_bindings(document: Dict[str, Any],
                 "params": values,
             }
         elif point.get("adapterBinding") is True:
-            # JP4/JP5: the executor's camera adapter feeds the appsrc; the
+            # JP5: the executor's camera adapter feeds the appsrc; the
             # binding selects which camera it connects, not an element arg.
             adapter_assignments[node_id] = {
                 "cameraSourceId": camera_source_id,

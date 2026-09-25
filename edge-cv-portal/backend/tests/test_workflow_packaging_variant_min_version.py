@@ -51,17 +51,17 @@ class TestMinLocalServerVersionFor:
         # A None arch stays on the scalar chain (Requirement 3.6).
         assert packaging.min_local_server_version_for(None) == "1.0.63"
 
-    def test_arm64_jp4_keyed_like_other_arches(self, packaging, monkeypatch):
-        """The arm64_jp4 lineage is gated by its own per-arch floor when
-        present, independent of the JP5/JP6/x86 lineages (localserver-arch-
-        naming Requirement 4.1)."""
+    def test_arm64_cpu_keyed_like_other_arches(self, packaging, monkeypatch):
+        """The generic arm64 CPU (arm64_cpu) lineage is gated by its own
+        per-arch floor when present, independent of the JP5/JP6/x86
+        lineages (localserver-arch-naming Requirement 4.1)."""
         monkeypatch.setattr(
             packaging, "MIN_LOCAL_SERVER_VERSIONS",
-            {"arm64_jp4": "1.0.10", "arm64_jp5": "1.0.5", "arm64_jp6": "1.0.0"})
+            {"arm64_cpu": "1.1.0", "arm64_jp5": "1.0.5", "arm64_jp6": "1.0.0"})
         monkeypatch.setattr(
             packaging, "MIN_LOCAL_SERVER_VERSION", "1.0.63")
         # Its own floor, not the scalar and not another arch's floor.
-        assert packaging.min_local_server_version_for("arm64_jp4") == "1.0.10"
+        assert packaging.min_local_server_version_for("arm64_cpu") == "1.1.0"
         # JP5/JP6 unchanged (Requirement 4.2).
         assert packaging.min_local_server_version_for("arm64_jp5") == "1.0.5"
         assert packaging.min_local_server_version_for("arm64_jp6") == "1.0.0"
@@ -72,8 +72,8 @@ class TestMinLocalServerVersionFor:
         # cross-lineage scalar '1.0.63'.
         assert packaging.min_local_server_version_for("x86_64") == "1.0.0"
 
-    def test_arm64_jp4_falls_back_to_scalar_when_unmapped(self, packaging, monkeypatch):
-        """With no arm64_jp4 entry under a CONFIGURED map, the safe
+    def test_arm64_cpu_falls_back_to_safe_floor_when_unmapped(self, packaging, monkeypatch):
+        """With no arm64_cpu entry under a CONFIGURED map, the safe
         per-lineage floor '1.0.0' applies — never the cross-lineage scalar.
 
         CONSCIOUS UPDATE (jp7-workflow-min-localserver-floor design,
@@ -83,9 +83,20 @@ class TestMinLocalServerVersionFor:
             packaging, "MIN_LOCAL_SERVER_VERSIONS", {"arm64_jp6": "1.0.0"})
         monkeypatch.setattr(
             packaging, "MIN_LOCAL_SERVER_VERSION", "1.0.63")
-        assert packaging.min_local_server_version_for("arm64_jp4") == "1.0.0"
+        assert packaging.min_local_server_version_for("arm64_cpu") == "1.0.0"
         # JP6 still gated by its own floor.
         assert packaging.min_local_server_version_for("arm64_jp6") == "1.0.0"
+
+    def test_retired_arm64_jp4_is_an_unknown_arch(self, packaging, monkeypatch):
+        """JetPack 4 support was removed: arm64_jp4 is no longer a known
+        arch, so it stays on the scalar chain like any unknown arch (the
+        packaging handler rejects it before any floor is resolved)."""
+        monkeypatch.setattr(
+            packaging, "MIN_LOCAL_SERVER_VERSIONS", {"arm64_jp6": "1.0.0"})
+        monkeypatch.setattr(
+            packaging, "MIN_LOCAL_SERVER_VERSION", "1.0.63")
+        assert "arm64_jp4" not in packaging.ARCH_TO_LOCAL_SERVER_COMPONENT
+        assert packaging.min_local_server_version_for("arm64_jp4") == "1.0.63"
 
 
 class TestManifestStampsVariantMinimums:

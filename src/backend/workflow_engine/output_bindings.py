@@ -39,7 +39,7 @@ processor receives the parsed inference tag values (``is_anomalous``,
   Core over mutual TLS using the configured thing name and device-local
   certificate paths;
 - writes ``opcua_write`` bindings' rendered value to the configured
-  server node through the ``opcua`` client the Workflow_Component
+  server node through the ``asyncua`` synchronous client the LocalServer
   packages as a Python dependency (Requirement 9.6);
 - writes ``modbus_write`` bindings' rendered value to the configured
   coil or holding register on a Modbus TCP server through the stdlib
@@ -64,6 +64,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from workflow_engine.branching import bedrock_branches
 from workflow_engine.detections import METADATA_KEY_DETECTIONS
@@ -780,7 +781,7 @@ def _opcua_coerce(value: Any, variant_type: Any) -> Any:
     normalizes numeric/boolean strings ("true"/"1" -> True/1). Unknown
     variant types pass the value through unchanged.
     """
-    from opcua import ua
+    from asyncua import ua
 
     normalized = _coerce(value)
     vt = ua.VariantType
@@ -836,11 +837,87 @@ def _opcua_security_from_params(parameters: Dict[str, Any]) -> Optional[Dict[str
     return security or None
 
 
+#: The OPC UA client package. asyncua (FreeOpcUa's maintained successor to
+#: python-opcua, whose final release carries an unfixed advisory) keeps
+#: python-opcua's synchronous Client/Node API under ``asyncua.sync``.
+OPCUA_PACKAGE = "asyncua"
+
+#: asyncua's client logs "Requested session timeout to be ...ms, got ...ms
+#: instead" at WARNING on EVERY connect to a server that revises the
+#: requested session timeout (most do). ``opcua_write`` opens one session
+#: per write, so on such servers every inspection would print a console
+#: warning python-opcua never printed. The record is demoted to DEBUG
+#: (DEBUG handlers still get it) rather than dropped.
+ASYNCUA_CLIENT_LOGGER = "asyncua.client.client"
+_ASYNCUA_SESSION_TIMEOUT_PREFIX = "Requested session timeout to be"
+
+
+class _DemoteSessionTimeoutRevision(logging.Filter):
+    """Logger filter demoting asyncua's per-connect session-timeout
+    revision warning to DEBUG; every other record passes untouched."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (record.levelno == logging.WARNING
+                and isinstance(record.msg, str)
+                and record.msg.startswith(_ASYNCUA_SESSION_TIMEOUT_PREFIX)):
+            record.levelno = logging.DEBUG
+            record.levelname = logging.getLevelName(logging.DEBUG)
+        return True
+
+
+_SESSION_TIMEOUT_REVISION_FILTER = _DemoteSessionTimeoutRevision()
+
+
+def _install_asyncua_log_filter() -> None:
+    """Attach the session-timeout demotion filter to asyncua's client
+    logger once (idempotent)."""
+    client_logger = logging.getLogger(ASYNCUA_CLIENT_LOGGER)
+    if _SESSION_TIMEOUT_REVISION_FILTER not in client_logger.filters:
+        client_logger.addFilter(_SESSION_TIMEOUT_REVISION_FILTER)
+
+
+def _new_opcua_client(client_class: Any, endpoint: str) -> Any:
+    """Construct an ``asyncua.sync`` client for ``endpoint``.
+
+    ``asyncua.sync.Client`` starts its event-loop thread (a NON-daemon
+    thread) in the constructor and only then parses the endpoint URL, so a
+    malformed endpoint (e.g. an unclosed IPv6 bracket) would raise from the
+    constructor and strand that thread for the life of the process. The
+    endpoint is parsed the same way (``urllib.parse.urlparse``) first, so a
+    bad endpoint fails before any thread exists."""
+    try:
+        urlparse(endpoint)
+    except ValueError as error:
+        raise ValueError(
+            f"Invalid OPC UA endpoint '{endpoint}': {error}") from error
+    _install_asyncua_log_filter()
+    return client_class(endpoint)
+
+
+def _disconnect_opcua_client(client: Any, connected: bool) -> None:
+    """Disconnect an ``asyncua.sync`` client, always.
+
+    The synchronous client runs its own event-loop thread (a NON-daemon
+    thread) from construction on; ``disconnect()`` is what stops it, so it
+    must run even when ``connect()`` failed — otherwise every failed
+    attempt leaks a thread that also blocks interpreter shutdown. When the
+    session never connected, a disconnect failure is swallowed so it cannot
+    mask the connect error; after a successful connect it propagates as
+    before."""
+    try:
+        client.disconnect()
+    except Exception:
+        if connected:
+            raise
+        logger.debug("Quiet disconnect of unconnected OPC UA client failed",
+                     exc_info=True)
+
+
 def _default_opcua_writer(
     endpoint: str, node_id: str, value: Any, security: Optional[Dict[str, Any]] = None
 ) -> None:
-    """Write a value to an OPC UA server node through the ``opcua``
-    client the Workflow_Component packages (Requirement 9.6).
+    """Write a value to an OPC UA server node through the ``asyncua``
+    synchronous client the LocalServer packages (Requirement 9.6).
 
     The rendered value is coerced to the node's declared data type so a
     templated int/string (e.g. ``is_anomalous`` -> 1) writes cleanly to a
@@ -853,41 +930,43 @@ def _default_opcua_writer(
     certificate-based signing/encryption. Absent => anonymous, no security.
     """
     try:
-        from opcua import Client
+        from asyncua.sync import Client
     except ImportError as e:
         raise RuntimeError(
-            "The 'opcua' Python package is not available; it is delivered "
-            "as a Workflow_Component dependency"
+            f"The '{OPCUA_PACKAGE}' Python package is not available; it is "
+            "delivered as a LocalServer dependency"
         ) from e
     # ``ua`` is only needed for the typed write; tolerate its absence and
     # fall back to a native write so the node data type can't wedge us.
     try:
-        from opcua import ua
+        from asyncua import ua
     except ImportError:
         ua = None
 
-    client = Client(endpoint)
-    if security:
-        username = security.get("username")
-        if username:
-            client.set_user(str(username))
-            password = security.get("password")
-            if password is not None:
-                client.set_password(str(password))
-        policy = security.get("security_policy")
-        cert = security.get("client_cert_path")
-        key = security.get("client_key_path")
-        if policy and cert and key:
-            # opcua set_security_string format:
-            # "<Policy>,<Mode>,<client_cert>,<client_key>[,<server_cert>]"
-            mode = security.get("security_mode") or "SignAndEncrypt"
-            parts = [str(policy), str(mode), str(cert), str(key)]
-            server_cert = security.get("server_cert_path")
-            if server_cert:
-                parts.append(str(server_cert))
-            client.set_security_string(",".join(parts))
-    client.connect()
+    client = _new_opcua_client(Client, endpoint)
+    connected = False
     try:
+        if security:
+            username = security.get("username")
+            if username:
+                client.set_user(str(username))
+                password = security.get("password")
+                if password is not None:
+                    client.set_password(str(password))
+            policy = security.get("security_policy")
+            cert = security.get("client_cert_path")
+            key = security.get("client_key_path")
+            if policy and cert and key:
+                # set_security_string format:
+                # "<Policy>,<Mode>,<client_cert>,<client_key>[,<server_cert>]"
+                mode = security.get("security_mode") or "SignAndEncrypt"
+                parts = [str(policy), str(mode), str(cert), str(key)]
+                server_cert = security.get("server_cert_path")
+                if server_cert:
+                    parts.append(str(server_cert))
+                client.set_security_string(",".join(parts))
+        client.connect()
+        connected = True
         node = client.get_node(node_id)
         variant_type = None
         if ua is not None:
@@ -904,7 +983,7 @@ def _default_opcua_writer(
             # incompatibility).
             node.set_value(value)
     finally:
-        client.disconnect()
+        _disconnect_opcua_client(client, connected)
 
 
 #: Catalog register types for modbus_write bindings.

@@ -93,8 +93,8 @@ const errorStatusJob = {
 /** A Neo job stored with SageMaker's verbatim uppercase FAILED and the
  *  describe response's FailureReason. */
 const neoFailedJob = {
-  target: 'jetson-xavier',
-  compilation_job_name: 'defect-model-jetson-xavier',
+  target: 'jetson-xavier-jp5',
+  compilation_job_name: 'defect-model-jetson-xavier-jp5',
   status: 'FAILED',
   failure_reason:
     'ClientError: InputConfiguration: Unable to load provided PyTorch model',
@@ -184,7 +184,7 @@ describe('CompilationTab — diagnostic rendering (Req 2.14, 2.16, 2.17)', () =>
     // `status === 'Failed'` filter always excluded uppercase FAILED.
     expect(screen.getByText('Compilation Errors')).not.toBeNull();
     expect(
-      screen.getByText('jetson-xavier Compilation Failed')
+      screen.getByText('jetson-xavier-jp5 Compilation Failed')
     ).not.toBeNull();
     expect(
       screen.getByText(new RegExp(neoFailedJob.failure_reason))

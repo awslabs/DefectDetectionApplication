@@ -164,7 +164,7 @@ describe('PluginDetail build retry', () => {
     builds: {
       x86_64: { buildStatus: 'succeeded', logTail: '', prebuilt: false },
       arm64_jp5: { buildStatus: 'failed', logTail: 'meson: error', prebuilt: false },
-      arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error', prebuilt: false },
+      arm64_cpu: { buildStatus: 'failed', logTail: 'meson: error', prebuilt: false },
     },
     settled: true,
     component_packaging_triggered: false,
@@ -196,7 +196,7 @@ describe('PluginDetail build retry', () => {
 
     fireEvent.click(retryButtons[0]);
     await waitFor(() =>
-      expect(startBuilds).toHaveBeenCalledWith('p-1', 1, ['arm64_jp4'])
+      expect(startBuilds).toHaveBeenCalledWith('p-1', 1, ['arm64_cpu'])
     );
   });
 
@@ -213,7 +213,7 @@ describe('PluginDetail build retry', () => {
       await screen.findByRole('button', { name: 'Retry failed builds' })
     );
     await waitFor(() =>
-      expect(startBuilds).toHaveBeenCalledWith('p-1', 1, ['arm64_jp4', 'arm64_jp5'])
+      expect(startBuilds).toHaveBeenCalledWith('p-1', 1, ['arm64_cpu', 'arm64_jp5'])
     );
   });
 
@@ -403,14 +403,14 @@ describe('PluginDetail revision adjustment (bug condition exploration)', () => {
   // suggestedRevision, editable by the user.
   //
   // **Validates: Requirements 1.1, 1.3**
-  const jp4IncompatibleMap = {
-    arm64_jp4: {
+  const cpuIncompatibleMap = {
+    arm64_cpu: {
       compatible: false,
-      platformVersion: '1.14',
+      platformVersion: '1.16',
       requiredVersion: '1.24.0',
       reason:
-        'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 provides 1.14',
-      suggestedRevision: '1.14',
+        'The source requires GStreamer >= 1.24.0; arm64 CPU provides 1.16',
+      suggestedRevision: '1.16',
     },
   };
 
@@ -418,17 +418,17 @@ describe('PluginDetail revision adjustment (bug condition exploration)', () => {
     await renderDetail(
       importedDetail({
         artifacts: {
-          arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error' },
+          arm64_cpu: { buildStatus: 'failed', logTail: 'meson: error' },
         },
-        platform_compatibility: jp4IncompatibleMap,
+        platform_compatibility: cpuIncompatibleMap,
       })
     );
 
     // The advisory warning renders (unchanged behavior)...
     expect(
       screen.getByText(
-        'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 ' +
-          'provides 1.14. Import revision 1.14 for this platform instead.'
+        'The source requires GStreamer >= 1.24.0; arm64 CPU ' +
+          'provides 1.16. Import revision 1.16 for this platform instead.'
       )
     ).toBeInTheDocument();
 
@@ -438,7 +438,7 @@ describe('PluginDetail revision adjustment (bug condition exploration)', () => {
     fireEvent.click(adjust);
 
     // The revision input is pre-filled with the recorded suggestion.
-    expect(screen.getByDisplayValue('1.14')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('1.16')).toBeInTheDocument();
   });
 });
 
@@ -450,13 +450,13 @@ describe('PluginDetail revision adjustment (fix specifics)', () => {
   // state, and errors surface on the affected platform's entry only.
   //
   // **Validates: Requirements 2.1, 2.4**
-  const jp4Incompatible = {
+  const cpuIncompatible = {
     compatible: false,
-    platformVersion: '1.14',
+    platformVersion: '1.16',
     requiredVersion: '1.24.0',
     reason:
-      'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 provides 1.14',
-    suggestedRevision: '1.14',
+      'The source requires GStreamer >= 1.24.0; arm64 CPU provides 1.16',
+    suggestedRevision: '1.16',
   };
 
   function detailWithWarning(
@@ -464,9 +464,9 @@ describe('PluginDetail revision adjustment (fix specifics)', () => {
   ): PluginVersionDetail {
     return importedDetail({
       artifacts: {
-        arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error' },
+        arm64_cpu: { buildStatus: 'failed', logTail: 'meson: error' },
       },
-      platform_compatibility: { arm64_jp4: jp4Incompatible },
+      platform_compatibility: { arm64_cpu: cpuIncompatible },
       ...overrides,
     });
   }
@@ -483,7 +483,7 @@ describe('PluginDetail revision adjustment (fix specifics)', () => {
     await renderDetail(
       detailWithWarning({
         platform_compatibility: {
-          arm64_jp4: { ...jp4Incompatible, suggestedRevision: null },
+          arm64_cpu: { ...cpuIncompatible, suggestedRevision: null },
         },
       })
     );
@@ -507,9 +507,9 @@ describe('PluginDetail revision adjustment (fix specifics)', () => {
     const adjustedView = {
       plugin_id: 'p-1',
       version: 1,
-      requested_architectures: ['arm64_jp4', 'x86_64'],
+      requested_architectures: ['arm64_cpu', 'x86_64'],
       builds: {
-        arm64_jp4: { buildStatus: 'queued', logTail: '', prebuilt: false },
+        arm64_cpu: { buildStatus: 'queued', logTail: '', prebuilt: false },
         x86_64: { buildStatus: 'succeeded', logTail: '', prebuilt: false },
       },
       settled: false,
@@ -525,19 +525,19 @@ describe('PluginDetail revision adjustment (fix specifics)', () => {
     fireEvent.click(screen.getByRole('button', { name: /adjust revision/i }));
 
     // The pre-filled suggestion is editable before applying.
-    const input = screen.getByDisplayValue('1.14');
-    fireEvent.change(input, { target: { value: '1.16' } });
+    const input = screen.getByDisplayValue('1.16');
+    fireEvent.change(input, { target: { value: '1.18' } });
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
 
     await waitFor(() =>
-      expect(adjustRevision).toHaveBeenCalledWith('p-1', 1, 'arm64_jp4', '1.16')
+      expect(adjustRevision).toHaveBeenCalledWith('p-1', 1, 'arm64_cpu', '1.18')
     );
     // The page reflects the response's builds view (the platform is
     // queued while the adjustment fetch runs) and the input closes.
     await waitFor(() =>
-      expect(screen.getByText('arm64 JetPack 4: queued')).toBeInTheDocument()
+      expect(screen.getByText('arm64 CPU: queued')).toBeInTheDocument()
     );
-    expect(screen.queryByDisplayValue('1.16')).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue('1.18')).not.toBeInTheDocument();
   });
 
   it('surfaces the adjustment error on the affected platform only', async () => {
@@ -548,13 +548,13 @@ describe('PluginDetail revision adjustment (fix specifics)', () => {
     await renderDetail(
       detailWithWarning({
         artifacts: {
-          arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error' },
+          arm64_cpu: { buildStatus: 'failed', logTail: 'meson: error' },
           arm64_jp5: { buildStatus: 'failed', logTail: 'meson: error' },
         },
         platform_compatibility: {
-          arm64_jp4: jp4Incompatible,
+          arm64_cpu: cpuIncompatible,
           arm64_jp5: {
-            ...jp4Incompatible,
+            ...cpuIncompatible,
             platformVersion: '1.16',
             reason:
               'The source requires GStreamer >= 1.24.0; arm64 JetPack 5 provides 1.16',
@@ -590,26 +590,26 @@ describe('PluginDetail revision adjustment (end-to-end detail-page flow)', () =>
   // Integration flow (task 5): the incompatible-platform warning
   // renders with the adjust action -> Apply calls the endpoint -> the
   // page state reflects the response's builds view and the revision
-  // label shows the adjusted revision once arm64_jp4 maps through
+  // label shows the adjusted revision once arm64_cpu maps through
   // arch_revisions -> fetches -> the build poll resumes because the
   // view is no longer settled.
   //
   // **Validates: Requirements 2.4, 3.3**
-  const jp4Incompatible = {
+  const cpuIncompatible = {
     compatible: false,
-    platformVersion: '1.14',
+    platformVersion: '1.16',
     requiredVersion: '1.24.0',
     reason:
-      'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 provides 1.14',
-    suggestedRevision: '1.14',
+      'The source requires GStreamer >= 1.24.0; arm64 CPU provides 1.16',
+    suggestedRevision: '1.16',
   };
 
   const settledBuilds = {
     plugin_id: 'p-1',
     version: 1,
-    requested_architectures: ['arm64_jp4', 'x86_64'],
+    requested_architectures: ['arm64_cpu', 'x86_64'],
     builds: {
-      arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error', prebuilt: false },
+      arm64_cpu: { buildStatus: 'failed', logTail: 'meson: error', prebuilt: false },
       x86_64: { buildStatus: 'succeeded', logTail: '', prebuilt: false },
     },
     settled: true,
@@ -626,31 +626,31 @@ describe('PluginDetail revision adjustment (end-to-end detail-page flow)', () =>
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const detail = importedDetail({
       artifacts: {
-        arm64_jp4: { buildStatus: 'failed', logTail: 'meson: error' },
+        arm64_cpu: { buildStatus: 'failed', logTail: 'meson: error' },
         x86_64: { buildStatus: 'succeeded' },
       },
-      platform_compatibility: { arm64_jp4: jp4Incompatible },
+      platform_compatibility: { arm64_cpu: cpuIncompatible },
     });
     getBuilds.mockResolvedValue(settledBuilds);
-    // The endpoint's 202 response: the '1.14' tree is recorded in the
-    // fetches map, arm64_jp4 mapped through arch_revisions, its build
+    // The endpoint's 202 response: the '1.16' tree is recorded in the
+    // fetches map, arm64_cpu mapped through arch_revisions, its build
     // queued — the view is no longer settled.
     const adjustedPlugin = {
       ...detail,
       fetches: {
-        '1.14': {
-          revision: '1.14',
-          source_prefix: 'plugin-sources/uc-1/p-1/1/rev-1.14/',
+        '1.16': {
+          revision: '1.16',
+          source_prefix: 'plugin-sources/uc-1/p-1/1/rev-1.16/',
           status: 'succeeded',
         },
       },
-      arch_revisions: { arm64_jp4: '1.14' },
+      arch_revisions: { arm64_cpu: '1.16' },
     };
     const queuedView = {
       ...settledBuilds,
       builds: {
         ...settledBuilds.builds,
-        arm64_jp4: { buildStatus: 'queued', logTail: '', prebuilt: false },
+        arm64_cpu: { buildStatus: 'queued', logTail: '', prebuilt: false },
       },
       settled: false,
     };
@@ -665,23 +665,23 @@ describe('PluginDetail revision adjustment (end-to-end detail-page flow)', () =>
     // The warning renders with the action.
     expect(
       screen.getByText(
-        'The source requires GStreamer >= 1.24.0; arm64 JetPack 4 ' +
-          'provides 1.14. Import revision 1.14 for this platform instead.'
+        'The source requires GStreamer >= 1.24.0; arm64 CPU ' +
+          'provides 1.16. Import revision 1.16 for this platform instead.'
       )
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /adjust revision/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
 
     await waitFor(() =>
-      expect(adjustRevision).toHaveBeenCalledWith('p-1', 1, 'arm64_jp4', '1.14')
+      expect(adjustRevision).toHaveBeenCalledWith('p-1', 1, 'arm64_cpu', '1.16')
     );
     // The page reflects the response's builds view...
     await waitFor(() =>
-      expect(screen.getByText('arm64 JetPack 4: queued')).toBeInTheDocument()
+      expect(screen.getByText('arm64 CPU: queued')).toBeInTheDocument()
     );
     // ...and the revision label shows the adjusted revision once the
     // architecture is mapped.
-    expect(screen.getByText('revision 1.14')).toBeInTheDocument();
+    expect(screen.getByText('revision 1.16')).toBeInTheDocument();
 
     // The poll resumes (the view is no longer settled): the next tick
     // refreshes the builds view and the page shows the running build.
@@ -690,7 +690,7 @@ describe('PluginDetail revision adjustment (end-to-end detail-page flow)', () =>
       ...queuedView,
       builds: {
         ...queuedView.builds,
-        arm64_jp4: { buildStatus: 'building', logTail: '', prebuilt: false },
+        arm64_cpu: { buildStatus: 'building', logTail: '', prebuilt: false },
       },
     });
     await vi.advanceTimersByTimeAsync(10_000);
@@ -698,7 +698,7 @@ describe('PluginDetail revision adjustment (end-to-end detail-page flow)', () =>
       expect(getBuilds.mock.calls.length).toBeGreaterThan(pollsBefore)
     );
     await waitFor(() =>
-      expect(screen.getByText('arm64 JetPack 4: building')).toBeInTheDocument()
+      expect(screen.getByText('arm64 CPU: building')).toBeInTheDocument()
     );
   });
 });

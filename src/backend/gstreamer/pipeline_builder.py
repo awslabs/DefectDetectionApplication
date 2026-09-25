@@ -121,7 +121,7 @@ class GstPipelineBuilder:
             # with DLR loaded), bake in EXIF orientation, and stage a PNG that
             # the pipeline reads via pngdec (libpng, not libjpeg). This drops
             # emexifextract/jpegparse/videoflip since orientation is already
-            # applied. Gated to JP6; JP4/JP5/x86 keep the jpegdec path.
+            # applied. Gated to JP6; every other target keeps the jpegdec path.
             png_path = self._stage_decoded_png(file_path)
             self.pipeline_config.add_plugin(PluginDefinition("filesrc",
                                                                 [PluginArg("blocksize", -1),

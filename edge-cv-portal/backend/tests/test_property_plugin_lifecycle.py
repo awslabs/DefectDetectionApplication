@@ -87,7 +87,7 @@ class ModelVersion:
 # Operation sequences
 # ---------------------------------------------------------------------------
 
-ARCHS = ("x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6")
+ARCHS = ("x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6")
 
 #: Each operation carries a selector integer used to pick the target
 #: version (mod the number of versions existing when it executes).

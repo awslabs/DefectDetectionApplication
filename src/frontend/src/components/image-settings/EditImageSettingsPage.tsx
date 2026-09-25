@@ -190,7 +190,7 @@ export default function EditImageSettingsPage(
               <Button
                 formAction="none"
                 variant="link"
-                onClick={(): void => navigate(-1)}
+                onClick={(): void => void navigate(-1)}
               >
                 Cancel
               </Button>

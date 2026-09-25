@@ -3,7 +3,7 @@
 # runtime. Selected by build-custom.sh via BACKEND_DOCKERFILE=Dockerfile.x86_64_nvidia
 # when the component name contains "Nvidia".
 #
-# Structure follows src/backend/Dockerfile (the plain x86/JP4 image) with two
+# Structure follows src/backend/Dockerfile (the CPU x86/arm64 image) with two
 # differences:
 #   * Base: nvidia/cuda cudnn-devel (Ubuntu 22.04) instead of
 #     public.ecr.aws/ubuntu/ubuntu:${OS} — full CUDA 12.6 toolkit + cuDNN 9,
@@ -69,15 +69,17 @@ RUN python3.11 -m pip install --no-cache-dir -r ./model_conversion_requirements.
 # it to 1 for this target):
 #   * GPU (ONNXRUNTIME_GPU=1, default here): prebuilt x86_64 onnxruntime-gpu
 #     wheel. The 1.20.x line pairs with CUDA 12.x + cuDNN 9 — exactly this
-#     base image — and matches the version the JP6 source build produces. No
-#     GPU is needed at build time; the CUDA/TensorRT execution providers
-#     resolve their driver libs at runtime (NVIDIA Container Toolkit).
+#     base image — and matches the line the JP6 source build produces
+#     (v1.20.1). PyPI no longer serves the 1.20.1 wheel, so this pins the
+#     1.20.2 patch release of the same line. No GPU is needed at build time;
+#     the CUDA/TensorRT execution providers resolve their driver libs at
+#     runtime (NVIDIA Container Toolkit).
 #   * CPU (ONNXRUNTIME_GPU=0): the same CPU wheel as the plain x86 image, for
 #     fast non-GPU rebuilds. The two packages must not coexist, so exactly one
 #     is installed.
 ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
 ARG ONNXRUNTIME_GPU=0
-ARG ONNXRUNTIME_GPU_SPEC=onnxruntime-gpu==1.20.1
+ARG ONNXRUNTIME_GPU_SPEC=onnxruntime-gpu==1.20.2
 RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
         python3.11 -m pip install --no-cache-dir ${ONNXRUNTIME_GPU_SPEC}; \
     else \

@@ -37,7 +37,7 @@ def simulator(aws_stack):
 # Generators: arbitrary artifacts maps
 # ---------------------------------------------------------------------------
 
-ARCHS = ("x86_64", "x86_64_nvidia", "arm64_jp4", "arm64_jp5", "arm64_jp6")
+ARCHS = ("x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5", "arm64_jp6")
 
 #: buildStatus values: the real lifecycle values plus arbitrary noise.
 _build_status = st.one_of(

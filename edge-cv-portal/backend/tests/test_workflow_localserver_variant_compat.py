@@ -2,8 +2,9 @@
 Variant-aware LocalServer compatibility (functions/deployments.py).
 
 LocalServer ships as independently-versioned per-architecture variants
-(aws.edgeml.dda.LocalServer.arm64 / .arm64JP5 / .arm64JP6 / .amd64) whose
-version lineages are NOT comparable: the arm64 variant may be at 1.0.124
+(aws.edgeml.dda.LocalServer.arm64 / .arm64JP5 / .arm64JP6 / .arm64JP7 /
+.amd64) whose version lineages are NOT comparable: the arm64 variant may be
+at 1.0.124
 while arm64JP6 is at 1.0.35. A single global minimum is therefore
 variant-blind and falsely blocks the JetPack variants (a JP6 device on
 1.0.35 can never satisfy an arm64-derived "1.0.63").
@@ -35,37 +36,38 @@ class TestLocalServerComponentArch:
         p = "aws.edgeml.dda.LocalServer."
         assert f(p + "arm64JP6") == "arm64_jp6"
         assert f(p + "arm64JP5") == "arm64_jp5"
-        assert f(p + "arm64") == "arm64_jp4"
-        assert f(p + "aarch64") == "arm64_jp4"
+        assert f(p + "arm64") == "arm64_cpu"
+        assert f(p + "aarch64") == "arm64_cpu"
         assert f(p + "amd64") == "x86_64"
         assert f(p + "x86_64") == "x86_64"
 
-    def test_explicit_arm64jp4_maps_to_arm64_jp4(self, deployments):
-        """The renamed explicit JetPack 4 variant (localserver-arch-naming
-        Requirement 3.1)."""
+    def test_retired_arm64jp4_is_undetermined(self, deployments):
+        """JetPack 4 support was removed: the explicit arm64JP4 variant no
+        longer identifies a supported lineage, so it resolves to None (an
+        arch-undetermined device, gated against the scalar)."""
         f = deployments.local_server_component_arch
         p = "aws.edgeml.dda.LocalServer."
-        assert f(p + "arm64JP4") == "arm64_jp4"
+        assert f(p + "arm64JP4") is None
 
-    def test_legacy_bare_names_still_recognized(self, deployments):
-        """Already-provisioned JP4 devices run the bare-named variant; the
-        read side must keep recognizing it as arm64_jp4 (Requirement 3.3)."""
+    def test_bare_names_are_the_generic_arm64_cpu_build(self, deployments):
+        """The bare-named variant (and its legacy aarch64 alias) is the
+        generic arm64 CPU (non-Jetson) build."""
         f = deployments.local_server_component_arch
         p = "aws.edgeml.dda.LocalServer."
-        assert f(p + "arm64") == "arm64_jp4"
-        assert f(p + "aarch64") == "arm64_jp4"
+        assert f(p + "arm64") == "arm64_cpu"
+        assert f(p + "aarch64") == "arm64_cpu"
 
-    def test_arm64jp4_not_misread_as_legacy_arm64(self, deployments):
-        """Token ordering: the longer arm64JP4 token must be matched before
-        the bare arm64 prefix. Both resolve to arm64_jp4, but arm64JP4 must
-        be recognized via its explicit JetPack token, not the legacy alias
+    def test_jetpack_tokens_not_misread_as_bare_arm64(self, deployments):
+        """Token ordering: the longer JetPack-tagged tokens must be matched
+        before the bare arm64 prefix, so no JetPack-tagged name (including
+        the retired arm64JP4) is misclassified as the generic CPU build
         (Requirement 3, Property 3)."""
         f = deployments.local_server_component_arch
         p = "aws.edgeml.dda.LocalServer."
-        # arm64JP4/JP5/JP6 must never fall through to the bare-arm64 branch.
-        assert f(p + "arm64JP4") == "arm64_jp4"
+        assert f(p + "arm64JP4") is None
         assert f(p + "arm64JP5") == "arm64_jp5"
         assert f(p + "arm64JP6") == "arm64_jp6"
+        assert f(p + "arm64JP7") == "arm64_jp7"
 
     def test_jp5_jp6_x86_unchanged(self, deployments):
         f = deployments.local_server_component_arch

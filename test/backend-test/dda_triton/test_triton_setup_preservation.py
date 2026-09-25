@@ -83,16 +83,21 @@ EXPECTED_RESOURCE_FILE_COPIES = {
 # and their sdists fail to build under Python 3.11. scikit-learn is capped <1.2 to
 # preserve conversion/inference behavior. This baseline reflects that approved
 # change; the rest of the pins are preserved exactly.
+#
+# dependabot-remediation: grpcio/grpcio-tools 1.56.2 -> 1.71.2 (the last line
+# whose grpcio-tools accepts protobuf 5.x), protobuf 4.25.8 -> 5.29.6, requests
+# 2.32.3 -> 2.34.2 and urllib3 2.2.3 -> 2.8.0 -- the patched releases, kept in
+# lockstep with src/backend/requirements.txt.
 EXPECTED_PINNED_DEPS = {
     "setuptools": None,
     "wheel": None,
     "meson": None,
-    "grpcio": "==1.56.2",
-    "grpcio-tools": "==1.56.2",
-    "protobuf": "==4.25.8",
-    "requests": "==2.32.3",
+    "grpcio": "==1.71.2",
+    "grpcio-tools": "==1.71.2",
+    "protobuf": "==5.29.6",
+    "requests": "==2.34.2",
     "opencv-python": None,
-    "urllib3": "==2.2.3",
+    "urllib3": "==2.8.0",
     "scikit-learn": ">=1.1.3,<1.2",
     "numpy": "==1.24.3",
 }

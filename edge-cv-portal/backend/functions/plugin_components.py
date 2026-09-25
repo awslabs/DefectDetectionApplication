@@ -184,12 +184,15 @@ def component_revision_of(component: Optional[Dict]) -> int:
 
 def artifact_checksums(item: Dict) -> Dict[str, str]:
     """{arch: checksum} of the successfully built Plugin_Artifacts — the
-    artifact set a Plugin_Component publish carries (8.1, 8.3)."""
+    artifact set a Plugin_Component publish carries (8.1, 8.3). Artifacts
+    for architectures without a Greengrass platform (e.g. the retired
+    arm64_jp4) are excluded, matching successful_build_archs."""
     artifacts = item.get('artifacts') or {}
     return {
         arch: str(entry['checksum'])
         for arch, entry in sorted(artifacts.items())
-        if isinstance(entry, dict) and entry.get('buildStatus') == 'succeeded'
+        if arch in ARCH_TO_GG_PLATFORM
+        and isinstance(entry, dict) and entry.get('buildStatus') == 'succeeded'
         and entry.get('checksum')
     }
 

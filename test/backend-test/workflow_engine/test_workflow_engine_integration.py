@@ -318,9 +318,9 @@ def mqtt_boundary():
 
 @pytest.fixture
 def opcua_boundary():
-    """A fake opcua module (the client is delivered as a component
-    dependency); the real _default_opcua_writer connect/write/disconnect
-    sequence runs against it."""
+    """Fake asyncua / asyncua.sync modules (the LocalServer ships the real
+    client); the real _default_opcua_writer connect/write/disconnect
+    sequence runs against them."""
     events = []
 
     class FakeNode:
@@ -344,9 +344,12 @@ def opcua_boundary():
         def disconnect(self):
             events.append(("disconnect", self._endpoint))
 
-    opcua_module = types.ModuleType("opcua")
-    opcua_module.Client = FakeClient
-    with patch.dict(sys.modules, {"opcua": opcua_module}):
+    sync_module = types.ModuleType("asyncua.sync")
+    sync_module.Client = FakeClient
+    asyncua_module = types.ModuleType("asyncua")
+    asyncua_module.sync = sync_module
+    fake_modules = {"asyncua": asyncua_module, "asyncua.sync": sync_module}
+    with patch.dict(sys.modules, fake_modules):
         yield events
 
 

@@ -5,28 +5,32 @@ setuptools<81
 wheel
 meson
 opencv-python
-urllib3==2.2.3
-requests==2.32.3
+urllib3==2.8.0
+requests==2.34.2
 python-dateutil==2.8.2
 Jetson.GPIO==2.0.21
 awsiotsdk==1.31.0
-marshmallow==3.19.0
+marshmallow==3.26.2
 pyyaml==6.0.1
-grpcio==1.56.2
-# Bumped from 1.51.1 to match grpcio 1.56.2: 1.51.1 has no cp311 aarch64 wheel
-# and its sdist build fails under Python 3.11 (ModuleNotFoundError: pkg_resources).
-# Sharing grpcio's version uses the working prebuilt cp311 aarch64 wheel.
-grpcio-tools==1.56.2
+# grpcio/grpcio-tools 1.71.2: the last release line whose grpcio-tools allows
+# protobuf 5.x (>=5.26.1,<6), so model_conversion_requirements.txt can pin the
+# patched protobuf 5.29.6. Prebuilt cp310/cp311 manylinux_2_17 aarch64 + x86_64
+# wheels. grpcio-tools-generated stubs require grpcio >= the tools version, so
+# the two stay in lockstep (here and in model_conversion_requirements.txt).
+grpcio==1.71.2
+grpcio-tools==1.71.2
 jsonschema==4.17.3
 numpy==1.24.3
-Pillow==10.3.0
+Pillow==12.3.0
 pycairo==1.23.0
 PyGObject==3.42.2
 python-periphery==2.4.1
 psutil==5.9.5
 fastapi==0.109.2
 uvicorn==0.23.2
-pydantic==2.1.1
+# pydantic 2.6.x: the line fastapi 0.109.2 was released and tested against;
+# >= 2.4.0 fixes the email-validation ReDoS (GHSA-mr82-8j83-vxmv).
+pydantic==2.6.4
 # dlr 1.10.0 ships only as dlr-1.10.0-py3-none-any.whl on PyPI (interpreter-agnostic
 # pure-Python frontend, no cp311 binary wheel exists or is needed); it imports under
 # Python 3.11. The native libdlr.so comes from the Neo-bundled runtime + staged CUDA
@@ -40,12 +44,12 @@ sqlalchemy==2.0.21
 alembic==1.12.1
 httpx==0.24.1
 scikit-learn>=1.1.3,<1.2
-# opcua 0.98.13 is the final release of the pure-Python `python-opcua` project
-# (import name `opcua`); it ships only as an sdist that builds an interpreter-agnostic
-# py3-none-any wheel, so it installs and imports cleanly under JP5 Python 3.11 / aarch64.
-# Required at runtime by _default_opcua_writer for the opcua_write output binding.
-# Transitive deps (cryptography, python-dateutil, pytz, aiofiles, lxml) resolve on-device.
-opcua==0.98.13
+# asyncua (FreeOpcUa's maintained successor to the unmaintained python-opcua,
+# whose final release 0.98.13 has an unfixed resource-exhaustion advisory,
+# GHSA-mfpj-3qhm-976m) serves the opcua_write output binding and the
+# opcua_subscribe trigger through its synchronous API (asyncua.sync), which
+# keeps python-opcua's Client/Node method names. Pure Python, Python >= 3.10.
+asyncua==2.0.1
 # paho-mqtt serves the mqtt_publish / mqtt_subscribe plain-broker and aws_iot paths
 # (_default_mqtt_publisher, AwsIotTlsSubscriber, PlainBrokerSubscriber); the Greengrass
 # path uses awsiotsdk instead. It was never installed in the image, so those paths failed

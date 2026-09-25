@@ -32,7 +32,7 @@ const RUNS = { numRuns: 100 };
 const FIXED_ARCHS = [
   'x86_64',
   'x86_64_nvidia',
-  'arm64_jp4',
+  'arm64_cpu',
   'arm64_jp5',
   'arm64_jp6',
   'arm64_jp7',
@@ -177,7 +177,13 @@ describe('archCompatibility twin', () => {
         .toEqual(['arm64_jp5']);
       expect(inferComponentTargetArchs('aws.edgeml.dda.LocalServer.arm64JP6'))
         .toEqual(['arm64_jp6']);
+      // JetPack 4 is retired: its token still resolves to the retired id,
+      // which no supported device records, so JP4-era components are
+      // never offered to a supported device.
       expect(inferComponentTargetArchs('jp4mic730ai')).toEqual(['arm64_jp4']);
+      expect(isArchCompatible('arm64_cpu', ['arm64_jp4'])).toBe(false);
+      expect(inferComponentTargetArchs('model-cookies-binary-jetson-xavier'))
+        .toEqual(['arm64_jp4']);
       // jetpack7-support Req 7.3: the JP7 token requires arm64_jp7.
       expect(inferComponentTargetArchs('aws.edgeml.dda.LocalServer.arm64JP7'))
         .toEqual(['arm64_jp7']);
@@ -185,12 +191,23 @@ describe('archCompatibility twin', () => {
         .toEqual(['arm64_jp7']);
     });
 
-    it('returns [] for names with no JetPack token (kept, not hidden)', () => {
-      expect(inferComponentTargetArchs('aws.edgeml.dda.LocalServer.aarch64'))
-        .toEqual([]);
+    it('infers arm64_cpu for the generic arm64 CPU build names', () => {
+      // The bare LocalServer name (and its legacy aarch64 alias) is the
+      // generic arm64 CPU build, so it is never offered to a JetPack device.
       expect(inferComponentTargetArchs('aws.edgeml.dda.LocalServer.arm64'))
-        .toEqual([]);
-      expect(inferComponentTargetArchs('model-cookies-binary-jetson-xavier'))
+        .toEqual(['arm64_cpu']);
+      expect(inferComponentTargetArchs('aws.edgeml.dda.LocalServer.aarch64'))
+        .toEqual(['arm64_cpu']);
+      // Models published for the 'arm64-cpu' compile target.
+      expect(inferComponentTargetArchs('model-cookies-binary-arm64-cpu'))
+        .toEqual(['arm64_cpu']);
+      const inferred = inferComponentTargetArchs('aws.edgeml.dda.LocalServer.arm64');
+      expect(isArchCompatible('arm64_cpu', inferred)).toBe(true);
+      expect(isArchCompatible('arm64_jp6', inferred)).toBe(false);
+    });
+    it('returns [] for names with no JetPack or CPU token (kept, not hidden)', () => {
+      expect(inferComponentTargetArchs('model-cookies-binary')).toEqual([]);
+      expect(inferComponentTargetArchs('model-cookies-binary-x86-64-cpu'))
         .toEqual([]);
       expect(inferComponentTargetArchs('model-vllm-opt125m-smoke')).toEqual([]);
     });
@@ -214,7 +231,10 @@ describe('archCompatibility twin', () => {
       ).toBe(false);
     });
 
-    it('only ever returns fixed-set arm64_jpN values', () => {
+    it('only ever returns fixed-set values or the retired arm64_jp4 id', () => {
+      // arm64_jp4 is no longer in the fixed set, but a JP4 token still
+      // resolves to it so JP4-era components match no supported device.
+      const inferable = [...FIXED_ARCHS, 'arm64_jp4'];
       const majorArb = fc.constantFrom('4', '5', '6', '7');
       const prefixArb = fc.constantFrom('jp', 'JP', 'jetpack', 'JetPack');
       fc.assert(
@@ -226,7 +246,7 @@ describe('archCompatibility twin', () => {
           (pre, kw, major, post) => {
             const archs = inferComponentTargetArchs(`${pre}${kw}${major}${post}`);
             for (const a of archs) {
-              expect(FIXED_ARCHS).toContain(a);
+              expect(inferable).toContain(a);
             }
           }
         ),

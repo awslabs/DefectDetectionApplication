@@ -36,7 +36,6 @@ import {
   splitVllmComponentName,
   vllmArchsForComponent,
   VLLM_GATE_REASON_ARCH,
-  VLLM_GATE_REASON_JP4,
   type VllmPerJetPackComponent,
   type VllmPublishedComponentArchSource,
 } from './vllmArchGate';
@@ -106,7 +105,7 @@ function oracleArchsForComponent(
 const SUFFIXED_ARCHES = ['arm64_jp5', 'arm64_jp6', 'arm64_jp7'] as const;
 
 /** Architectures a device or record can carry, mapped and unmapped alike. */
-const ALL_ARCHES = [...SUFFIXED_ARCHES, 'arm64_jp4', 'x86_64'] as const;
+const ALL_ARCHES = [...SUFFIXED_ARCHES, 'arm64_cpu', 'x86_64'] as const;
 
 const archArb = fc.constantFrom(...ALL_ARCHES);
 
@@ -272,7 +271,7 @@ describe('Property 6 twin: frontend suffix-arch resolution', () => {
   it(
     'a per-JetPack component from the publish write-back is compatible ' +
       'with its own architecture and no other, null device archs fail ' +
-      'closed, and jp4 misses carry the JetPack-4 reason',
+      'closed, and every miss carries the ARCH_UNSUPPORTED reason',
     () => {
       fc.assert(
         fc.property(writeBackArb, deviceArchsArb, ({ base, archs, published }, deviceArchs) => {
@@ -304,11 +303,7 @@ describe('Property 6 twin: frontend suffix-arch resolution', () => {
                 expect(misses).toHaveLength(1);
                 expect(misses[0].deviceArch).toBe(deviceArch);
                 expect(misses[0].supported).toEqual([arch]);
-                expect(misses[0].reason).toBe(
-                  deviceArch === 'arm64_jp4'
-                    ? VLLM_GATE_REASON_JP4
-                    : VLLM_GATE_REASON_ARCH
-                );
+                expect(misses[0].reason).toBe(VLLM_GATE_REASON_ARCH);
               }
             }
           }

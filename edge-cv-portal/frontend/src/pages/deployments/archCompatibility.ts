@@ -46,18 +46,30 @@ import { isVllmModelComponent } from './vllmArchGate';
 /** The client-side gated classes the deploy-screen arch filter covers. */
 export type GatedKind = 'vllm' | 'plugin';
 
+/** Lower-cased bare LocalServer names of the generic arm64 CPU build. */
+const ARM64_CPU_LOCAL_SERVER_NAMES = new Set([
+  'aws.edgeml.dda.localserver.arm64',
+  'aws.edgeml.dda.localserver.aarch64',
+]);
+/** Component-name suffix greengrass_publish.py gives 'arm64-cpu' publishes. */
+const ARM64_CPU_TARGET_SUFFIX = '-arm64-cpu';
+/** Component-name suffix of the retired JetPack 4 'jetson-xavier' target. */
+const RETIRED_JP4_TARGET_SUFFIX = '-jetson-xavier';
+
 /**
  * Infer the DDA JetPack Target_Architecture(s) a component targets from
  * the JetPack token encoded in its component name — the DDA naming
- * convention (`*-jp5`, `*JP6`, `arm64JP5`, `LocalServer.arm64JP6`, …).
+ * convention (`*-jp5`, `*JP6`, `arm64JP5`, `LocalServer.arm64JP6`, …) —
+ * or from the generic arm64 CPU naming (the bare `LocalServer.arm64`,
+ * `*-arm64-cpu`).
  *
  * This covers ordinary (non-gated) model and LocalServer components,
  * which the backend deployment gate does NOT arch-check but which still
  * only run on the matching JetPack major: a `-jp5` build must not be
  * offered for a jp6 device (device-arch-compatibility Req 3). Returns
  * the inferred fixed-set arch(es), or `[]` when the name carries no
- * JetPack token (arch cannot be judged from the name — the component is
- * left to the coarse arm64/amd64 filter and kept).
+ * JetPack or CPU token (arch cannot be judged from the name — the
+ * component is left to the coarse arm64/amd64 filter and kept).
  *
  * Matched case-insensitively; the `jpN` token is bounded by a non-digit
  * (or string end) so `jp5` does not match inside `jp513`-style strings
@@ -69,11 +81,25 @@ export function inferComponentTargetArchs(componentName: string): string[] {
   // Match a jetpack major token: jp4/jp5/jp6/jp7 or jetpack4/5/6/7, where
   // the digit is the major and is not immediately followed by another digit
   // (so "jp6" and "jp6.2" match major 6; "arm64jp5" matches major 5;
-  // "arm64JP7" matches major 7 — jetpack7-support Req 7.3).
+  // "arm64JP7" matches major 7 — jetpack7-support Req 7.3). JetPack 4 is
+  // retired: its token still resolves (to `arm64_jp4`, which no supported
+  // device records), so a JP4-era component is never offered to a
+  // supported device instead of slipping through the coarse arm64 filter.
+  // Keep the token set in sync with JP_TOKEN_RE in the backend's
+  // test_vllm_multi_arch_publish_properties.py.
   const re = /(?:jp|jetpack)(4|5|6|7)(?![0-9])/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(name)) !== null) {
     archs.add(`arm64_jp${m[1]}`);
+  }
+  // The legacy bare 'jetson-xavier' compile target was JetPack 4 only.
+  if (name.endsWith(RETIRED_JP4_TARGET_SUFFIX)) {
+    archs.add('arm64_jp4');
+  }
+  // The generic arm64 CPU build: the bare LocalServer name (and its legacy
+  // aarch64 alias) and models published for the 'arm64-cpu' compile target.
+  if (ARM64_CPU_LOCAL_SERVER_NAMES.has(name) || name.endsWith(ARM64_CPU_TARGET_SUFFIX)) {
+    archs.add('arm64_cpu');
   }
   return [...archs];
 }

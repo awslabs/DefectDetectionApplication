@@ -194,7 +194,7 @@ class TestEnvironment:
             ".../aws.edgeml.dda.LocalServer.arm64JP7/1.0.0/x-aarch64": "arm64_jp7",
             ".../aws.edgeml.dda.LocalServer.arm64JP6/1.0.0/x-aarch64": "arm64_jp6",
             ".../aws.edgeml.dda.LocalServer.arm64JP5/1.0.0/x-aarch64": "arm64_jp5",
-            ".../aws.edgeml.dda.LocalServer.arm64/1.0.0/x-aarch64": "arm64_jp4",
+            ".../aws.edgeml.dda.LocalServer.arm64/1.0.0/x-aarch64": "arm64_cpu",
         }
         for path, expected in cases.items():
             with patch("platform.machine", return_value="aarch64"), patch.dict(
