@@ -583,8 +583,8 @@ export interface ImportPluginRequest {
    * neither is given). Distinct effective revisions fetch once each;
    * absent keeps today's single-revision behavior exactly. Motivating
    * scenario: gst-plugins-good needs main for the GStreamer 1.20+
-   * platforms but branch '1.16' for the Ubuntu 20.04 platforms
-   * (arm64_cpu, arm64_jp5).
+   * platforms but branch '1.16' for the Ubuntu 20.04 platform
+   * (arm64_jp5).
    */
   arch_revisions?: Record<string, string>;
 }

@@ -1354,7 +1354,7 @@ class TestFetchModulePluginDescriptions:
 
 # gst-plugins-good main-branch style: the requirement is the project's
 # own major.minor series via the '.format(...)' form (requires
-# GStreamer >= 1.24 -> fails on arm64_cpu/1.16 and arm64_jp5/1.16).
+# GStreamer >= 1.24 -> fails on arm64_jp5/1.16).
 GST_GOOD_MAIN_MESON = """\
 project('gst-plugins-good', 'c',
   version : '1.24.2',
@@ -1471,25 +1471,26 @@ class TestPlatformCompatibility:
                   "arm64_jp6"]
 
     def test_1_24_requirement_matches_production_incident(self, aws_stack):
-        # gst-plugins-good main (>= 1.24): fails on arm64_cpu and
-        # arm64_jp5 (both 1.16), succeeds on x86_64 / x86_64_nvidia /
-        # arm64_jp6 (1.20).
+        # gst-plugins-good main (>= 1.24): fails on arm64_jp5 (1.16),
+        # succeeds on x86_64 / x86_64_nvidia / arm64_cpu / arm64_jp6
+        # (1.20, meson subproject fallback).
         result = aws_stack.plugin_importer.platform_compatibility(
             "1.24.0", self.ALL_ARCHES, "gst-plugins-good")
         assert {a: e["compatible"] for a, e in result.items()} == {
             "x86_64": True, "x86_64_nvidia": True,
-            "arm64_cpu": False, "arm64_jp5": False, "arm64_jp6": True,
+            "arm64_cpu": True, "arm64_jp5": False, "arm64_jp6": True,
         }
         assert result["arm64_jp5"]["reason"] == (
             "The source requires GStreamer >= 1.24.0; "
             "arm64 JetPack 5 provides 1.16")
         # Official module: the release branch matching the platform's
         # GStreamer minor is suggested (verified working in production).
-        assert result["arm64_cpu"]["suggestedRevision"] == "1.16"
         assert result["arm64_jp5"]["suggestedRevision"] == "1.16"
         # Compatible platforms carry no reason and no suggestion.
-        assert result["arm64_jp6"]["reason"] is None
-        assert result["arm64_jp6"]["suggestedRevision"] is None
+        for arch in ("arm64_cpu", "arm64_jp6"):
+            assert result[arch]["reason"] is None
+            assert result[arch]["suggestedRevision"] is None
+        assert result["arm64_cpu"]["platformVersion"] == "1.20"
         assert result["arm64_jp5"]["platformVersion"] == "1.16"
         assert result["arm64_jp5"]["requiredVersion"] == "1.24.0"
 
@@ -1505,7 +1506,7 @@ class TestPlatformCompatibility:
     def test_non_official_repo_gets_no_suggestion(self, aws_stack,
                                                   classification_or_module):
         result = aws_stack.plugin_importer.platform_compatibility(
-            "1.24.0", ["arm64_cpu", "arm64_jp5"], classification_or_module)
+            "1.24.0", ["arm64_jp5"], classification_or_module)
         for entry in result.values():
             assert entry["compatible"] is False
             assert entry["reason"]  # the why is still explained
@@ -1519,14 +1520,14 @@ class TestPlatformCompatibility:
         assert all(e["suggestedRevision"] is None for e in result.values())
 
     def test_1_18_requirement_splits_focal_from_jammy(self, aws_stack):
-        # The Ubuntu 20.04 platforms (arm64_cpu, arm64_jp5) ship 1.16;
-        # arm64_jp6 ships 1.20.
+        # The Ubuntu 20.04 platform (arm64_jp5) ships 1.16; the Ubuntu
+        # 22.04 platforms arm64_cpu and arm64_jp6 ship 1.20.
         result = aws_stack.plugin_importer.platform_compatibility(
             "1.18.0", ["arm64_cpu", "arm64_jp5", "arm64_jp6"],
             "gst-plugins-good")
-        assert result["arm64_cpu"]["compatible"] is False
-        assert result["arm64_cpu"]["suggestedRevision"] == "1.16"
+        assert result["arm64_cpu"]["compatible"] is True
         assert result["arm64_jp5"]["compatible"] is False
+        assert result["arm64_jp5"]["suggestedRevision"] == "1.16"
         assert result["arm64_jp6"]["compatible"] is True
 
     def test_1_16_requirement_is_met_by_the_oldest_platforms(self, aws_stack):
@@ -1653,7 +1654,7 @@ class TestVersionDetailPlatformCompatibility:
 
 #: Buildable single-plugin tree requiring GStreamer >= 1.24: with the
 #: gst-plugins-good classification this settles 'imported' carrying an
-#: incompatible platform_compatibility entry for arm64_cpu (platform
+#: incompatible platform_compatibility entry for arm64_jp5 (platform
 #: 1.16) with suggestedRevision '1.16' — the bug condition anchor.
 BUILDABLE_1_24_FILES = {
     "meson.build":
@@ -1711,17 +1712,17 @@ class AdjustRevisionEnv(ImporterEnv):
 
     def settled_incompatible_import(self, admin, usecase_id):
         """Settled ('imported') flat single-revision record whose
-        arm64_cpu platform_compatibility entry is incompatible with
+        arm64_jp5 platform_compatibility entry is incompatible with
         suggestedRevision '1.16' (isBugCondition holds for any
         requested revision != 'main')."""
         _, result, record = self.complete_import(admin, {
             "usecase_id": usecase_id,
             "repo_url": REPO_URL,
             "revision": "main",
-            "architectures": ["x86_64", "arm64_cpu"],
+            "architectures": ["x86_64", "arm64_jp5"],
         }, files=BUILDABLE_1_24_FILES)
         assert result == {"recorded": True, "import_status": "imported"}
-        compat = record["platform_compatibility"]["arm64_cpu"]
+        compat = record["platform_compatibility"]["arm64_jp5"]
         assert compat["compatible"] is False
         assert compat["suggestedRevision"] == "1.16"
         return record
@@ -1742,7 +1743,7 @@ def adj_env(aws_stack):
 
 @pytest.fixture
 def settled_incompatible(adj_env, admin_setup):
-    """(admin, settled record) with the arm64_cpu bug condition."""
+    """(admin, settled record) with the arm64_jp5 bug condition."""
     usecase_id, admin = admin_setup
     record = adj_env.settled_incompatible_import(admin, usecase_id)
     return admin, record
@@ -1771,7 +1772,7 @@ class TestRevisionAdjustmentBugExploration:
         admin, record = settled_incompatible
 
         status, body = adj_env.adjust_revision(
-            admin, record["plugin_id"], 1, "arm64_cpu", revision)
+            admin, record["plugin_id"], 1, "arm64_jp5", revision)
 
         assert status == 202, (
             f"adjust-revision answered {status} ({body}): no post-import "
@@ -1784,8 +1785,8 @@ class TestRevisionAdjustmentBugExploration:
 
     def test_adjustment_changes_the_effective_source_prefix(
             self, adj_env, settled_incompatible):
-        """Applying the suggested revision to arm64_cpu changes
-        arch_source_prefix(item, 'arm64_cpu') to the adjusted entry's
+        """Applying the suggested revision to arm64_jp5 changes
+        arch_source_prefix(item, 'arm64_jp5') to the adjusted entry's
         rev-{slug}/ prefix.
 
         Unfixed code: every reachable operation (including a plain
@@ -1794,11 +1795,11 @@ class TestRevisionAdjustmentBugExploration:
         admin, record = settled_incompatible
         plugin_id = record["plugin_id"]
         builds_mod = adj_env.stack.plugin_builds
-        flat_prefix = builds_mod.arch_source_prefix(record, "arm64_cpu")
+        flat_prefix = builds_mod.arch_source_prefix(record, "arm64_jp5")
         assert flat_prefix == record["source_s3_prefix"]  # flat layout
 
         status, body = adj_env.adjust_revision(
-            admin, plugin_id, 1, "arm64_cpu", "1.16")
+            admin, plugin_id, 1, "arm64_jp5", "1.16")
         assert status == 202, (
             f"adjust-revision answered {status} ({body}): no operation "
             "exists that changes the effective revision")
@@ -1820,7 +1821,7 @@ class TestRevisionAdjustmentBugExploration:
             adj_env.deliver_fetch_result(detail)
             updated = adj_env.get_record(plugin_id)
 
-        adjusted_prefix = builds_mod.arch_source_prefix(updated, "arm64_cpu")
+        adjusted_prefix = builds_mod.arch_source_prefix(updated, "arm64_jp5")
         assert adjusted_prefix == f"{record['source_s3_prefix']}rev-{slug}/"
         assert adjusted_prefix != flat_prefix
 
@@ -1844,7 +1845,7 @@ class TestRevisionAdjustmentBugExploration:
         # affected arch queued.
         adj_env.stack.tables.plugin_records.update_item(
             Key={"plugin_id": plugin_id, "version": 1},
-            UpdateExpression="SET fetches = :f, artifacts.arm64_cpu = :q",
+            UpdateExpression="SET fetches = :f, artifacts.arm64_jp5 = :q",
             ExpressionAttributeValues={
                 ":f": {slug: {
                     "revision": "1.14",
@@ -1852,7 +1853,7 @@ class TestRevisionAdjustmentBugExploration:
                         f"{record['source_s3_prefix']}rev-{slug}/",
                     "status": "fetching",
                     "fetch_build_id": fetch_build_id,
-                    "pending_archs": ["arm64_cpu"],
+                    "pending_archs": ["arm64_jp5"],
                 }},
                 ":q": {"buildStatus": "queued"},
             })
@@ -1867,7 +1868,7 @@ class TestRevisionAdjustmentBugExploration:
             f"the adjustment fetch result was dropped: {result}")
         updated = adj_env.get_record(plugin_id)
         assert updated["fetches"][slug]["status"] == "succeeded"
-        assert (updated.get("arch_revisions") or {}).get("arm64_cpu") == slug
+        assert (updated.get("arch_revisions") or {}).get("arm64_jp5") == slug
 
 
 # =====================================================================
@@ -2637,7 +2638,7 @@ class TestAdjustRevisionHandler:
         monkeypatch.setattr(adj_env.module, "codebuild", recorder)
 
         status, body = adj_env.adjust_revision(
-            admin, plugin_id, 1, "arm64_cpu", "1.14")
+            admin, plugin_id, 1, "arm64_jp5", "1.14")
 
         assert status == 202, body
         assert set(body) == {"plugin", "builds"}
@@ -2645,13 +2646,13 @@ class TestAdjustRevisionHandler:
         entry = updated["fetches"]["1.14"]
         assert entry["revision"] == "1.14"
         assert entry["status"] == "fetching"
-        assert entry["pending_archs"] == ["arm64_cpu"]
+        assert entry["pending_archs"] == ["arm64_jp5"]
         assert entry["source_prefix"] == \
             f"{record['source_s3_prefix']}rev-1.14/"
         assert entry["fetch_build_id"].startswith(
             TEST_ENV["FETCH_PROJECT_NAME"] + ":")
         # The adjusted arch re-queued; the packaging marker REMOVEd.
-        assert updated["artifacts"]["arm64_cpu"] == {"buildStatus": "queued"}
+        assert updated["artifacts"]["arm64_jp5"] == {"buildStatus": "queued"}
         assert "components_triggered" not in updated
         # arch_revisions is NOT written on the fetch path (it flips on
         # fetch success only, 2.4).
@@ -2687,18 +2688,18 @@ class TestAdjustRevisionHandler:
         monkeypatch.setattr(builds_module, "codebuild", builds_recorder)
 
         status, body = adj_env.adjust_revision(
-            admin, plugin_id, 1, "arm64_cpu", "1.16")
+            admin, plugin_id, 1, "arm64_jp5", "1.16")
 
         assert status == 202, body
         # No fetch was started: the synced tree is reused (2.2).
         assert self._fetch_calls(importer_recorder) == []
         updated = adj_env.get_record(plugin_id)
-        assert updated["arch_revisions"] == {"arm64_cpu": "1.16"}
+        assert updated["arch_revisions"] == {"arm64_jp5": "1.16"}
         assert updated["fetches"]["1.16"]["status"] == "succeeded"
         # The adjusted arch's build started from the adjusted tree.
-        entry = updated["artifacts"]["arm64_cpu"]
+        entry = updated["artifacts"]["arm64_jp5"]
         assert entry["buildStatus"] == "building"
-        assert entry["buildId"].startswith("dda-plugin-build-arm64_cpu:")
+        assert entry["buildId"].startswith("dda-plugin-build-arm64_jp5:")
         build_calls = self._build_calls(builds_recorder)
         assert len(build_calls) == 1
         bucket = TEST_ENV["PORTAL_ARTIFACTS_BUCKET"]
@@ -2724,14 +2725,14 @@ class TestAdjustRevisionHandler:
         monkeypatch.setattr(adj_env.module, "codebuild", recorder)
 
         status, body = adj_env.adjust_revision(
-            admin, plugin_id, 1, "arm64_cpu", "1.14")
+            admin, plugin_id, 1, "arm64_jp5", "1.14")
 
         assert status == 202, body
         updated = adj_env.get_record(plugin_id)
         assert sorted(updated["fetches"]) == ["1.14"]  # reset, not added
         entry = updated["fetches"]["1.14"]
         assert entry["status"] == "fetching"
-        assert entry["pending_archs"] == ["arm64_cpu"]
+        assert entry["pending_archs"] == ["arm64_jp5"]
         assert entry["fetch_build_id"] != "dda-plugin-fetch:old-attempt"
         assert entry["fetch_build_id"].startswith(
             TEST_ENV["FETCH_PROJECT_NAME"] + ":")
@@ -2758,15 +2759,15 @@ class TestAdjustRevisionHandler:
         monkeypatch.setattr(builds_module, "codebuild", builds_recorder)
 
         status, body = adj_env.adjust_revision(
-            admin, plugin_id, 1, "arm64_cpu", "1.14")
+            admin, plugin_id, 1, "arm64_jp5", "1.14")
 
         assert status == 202, body
         updated = adj_env.get_record(plugin_id)
         entry = updated["fetches"]["1.14"]
-        assert entry["pending_archs"] == ["x86_64", "arm64_cpu"]
+        assert entry["pending_archs"] == ["x86_64", "arm64_jp5"]
         assert entry["status"] == "fetching"
         assert entry["fetch_build_id"] == "dda-plugin-fetch:concurrent"
-        assert updated["artifacts"]["arm64_cpu"] == {"buildStatus": "queued"}
+        assert updated["artifacts"]["arm64_jp5"] == {"buildStatus": "queued"}
         assert "arch_revisions" not in updated
         assert self._fetch_calls(importer_recorder) == []
         assert self._build_calls(builds_recorder) == []
@@ -2795,7 +2796,7 @@ class TestAdjustRevisionRejections:
         before = adj_env.get_record(plugin_id)
 
         status, body = adj_env.adjust_revision(
-            scientist, plugin_id, 1, "arm64_cpu", "1.14")
+            scientist, plugin_id, 1, "arm64_jp5", "1.14")
 
         assert status == 403
         assert body["error"]["code"] == "FORBIDDEN"
@@ -2809,7 +2810,7 @@ class TestAdjustRevisionRejections:
         self._seed_record(adj_env, plugin_id, "SET kind = :k", {":k": kind})
 
         status, body = adj_env.adjust_revision(
-            admin, plugin_id, 1, "arm64_cpu", "1.14")
+            admin, plugin_id, 1, "arm64_jp5", "1.14")
 
         assert status == 409
         assert body["error"]["code"] == "REVISION_ADJUSTMENT_NOT_AVAILABLE"
@@ -2821,7 +2822,7 @@ class TestAdjustRevisionRejections:
         self._seed_record(adj_env, plugin_id, "REMOVE provenance.repoUrl")
 
         status, body = adj_env.adjust_revision(
-            admin, plugin_id, 1, "arm64_cpu", "1.14")
+            admin, plugin_id, 1, "arm64_jp5", "1.14")
 
         assert status == 409
         assert body["error"]["code"] == "REVISION_ADJUSTMENT_NOT_AVAILABLE"
@@ -2837,7 +2838,7 @@ class TestAdjustRevisionRejections:
         before = adj_env.get_record(plugin_id)
 
         status, body = adj_env.adjust_revision(
-            admin, plugin_id, 1, "arm64_cpu", "1.14")
+            admin, plugin_id, 1, "arm64_jp5", "1.14")
 
         assert status == 409
         assert body["error"]["code"] == "REVISION_ADJUSTMENT_NOT_AVAILABLE"
@@ -2860,7 +2861,7 @@ class TestAdjustRevisionRejections:
         admin, record = settled_incompatible
 
         status, body = adj_env.adjust_revision(
-            admin, record["plugin_id"], 1, "arm64_cpu", revision)
+            admin, record["plugin_id"], 1, "arm64_jp5", revision)
 
         assert status == 400
         assert body["error"]["code"] == "INVALID_REVISION"
@@ -2879,7 +2880,7 @@ class TestAdjustmentFetchResult:
         (record, slug, fetch_build_id)."""
         admin, record = settled_incompatible
         status, body = adj_env.adjust_revision(
-            admin, record["plugin_id"], 1, "arm64_cpu", "1.14")
+            admin, record["plugin_id"], 1, "arm64_jp5", "1.14")
         assert status == 202, body
         updated = adj_env.get_record(record["plugin_id"])
         return record, "1.14", updated["fetches"]["1.14"]["fetch_build_id"]
@@ -2904,11 +2905,11 @@ class TestAdjustmentFetchResult:
         updated = adj_env.get_record(record["plugin_id"])
         assert updated["fetches"][slug]["status"] == "succeeded"
         assert "pending_archs" not in updated["fetches"][slug]
-        assert updated["arch_revisions"] == {"arm64_cpu": slug}
+        assert updated["arch_revisions"] == {"arm64_jp5": slug}
         # The queued build started, sourcing the adjusted tree (2.3).
-        entry = updated["artifacts"]["arm64_cpu"]
+        entry = updated["artifacts"]["arm64_jp5"]
         assert entry["buildStatus"] == "building"
-        assert entry["buildId"].startswith("dda-plugin-build-arm64_cpu:")
+        assert entry["buildId"].startswith("dda-plugin-build-arm64_jp5:")
         calls = [c for c in recorder.calls
                  if c["projectName"].startswith("dda-plugin-build-")]
         assert len(calls) == 1
@@ -2931,7 +2932,7 @@ class TestAdjustmentFetchResult:
         assert updated["fetches"][slug]["status"] == "failed"
         assert "pending_archs" not in updated["fetches"][slug]
         # The fetch failure surfaces on the affected arch only (2.4).
-        assert updated["artifacts"]["arm64_cpu"] == {
+        assert updated["artifacts"]["arm64_jp5"] == {
             "buildStatus": "failed",
             "logTail":
                 adj_env.module.adjustment_fetch_failure_log_tail("1.14"),
@@ -3022,7 +3023,7 @@ class TestAdjustmentEndToEnd:
 
     def _settle_first_round(self, env, record, plugin_name):
         """Settle the import's build round like CodeBuild would: x86_64
-        succeeds, arm64_cpu (the incompatible platform) fails. Returns
+        succeeds, arm64_jp5 (the incompatible platform) fails. Returns
         the plugin attribution ref for result deliveries."""
         plugin = {"plugin_id": record["plugin_id"], "version": 1,
                   "usecase_id": record["usecase_id"]}
@@ -3032,14 +3033,14 @@ class TestAdjustmentEndToEnd:
             plugin, "x86_64", record["artifacts"]["x86_64"]["buildId"],
             "SUCCEEDED", plugin_name)
         env.deliver_build_result(
-            plugin, "arm64_cpu", record["artifacts"]["arm64_cpu"]["buildId"],
+            plugin, "arm64_jp5", record["artifacts"]["arm64_jp5"]["buildId"],
             "FAILED", plugin_name)
         return plugin
 
     def test_full_flow_rebuilds_from_the_adjusted_tree_and_packages_once(
             self, e2e_env, admin_setup, monkeypatch):
         """Full flow: import (flat, single revision) -> the platform
-        scan records the incompatible arm64_cpu entry with
+        scan records the incompatible arm64_jp5 entry with
         suggestedRevision '1.14' -> adjust via the endpoint -> fetch
         SUCCEEDED via handle_fetch_result -> the arch's StartBuild
         sources the rev-{slug}/ prefix (2.2, 2.3) -> build SUCCEEDED ->
@@ -3048,7 +3049,7 @@ class TestAdjustmentEndToEnd:
         invocations = self._stub_packaging(e2e_env, monkeypatch)
         builds_module = e2e_env.stack.plugin_builds
 
-        # Import settles 'imported' with the incompatible arm64_cpu
+        # Import settles 'imported' with the incompatible arm64_jp5
         # entry (asserted inside settled_incompatible_import).
         record = e2e_env.settled_incompatible_import(admin, usecase_id)
         plugin_id = record["plugin_id"]
@@ -3059,16 +3060,16 @@ class TestAdjustmentEndToEnd:
         assert len(invocations) == 1
         assert e2e_env.get_record(plugin_id).get("components_triggered")
 
-        # Adjust arm64_cpu to the suggested revision via the endpoint.
+        # Adjust arm64_jp5 to the suggested revision via the endpoint.
         status, body = e2e_env.adjust_revision(
-            admin, plugin_id, 1, "arm64_cpu", "1.14")
+            admin, plugin_id, 1, "arm64_jp5", "1.14")
         assert status == 202, body
         assert body["builds"]["settled"] is False
         adjusted = e2e_env.get_record(plugin_id)
         (slug,) = [s for s, e in adjusted["fetches"].items()
                    if e["revision"] == "1.14"]
         assert adjusted["fetches"][slug]["status"] == "fetching"
-        assert adjusted["artifacts"]["arm64_cpu"] == {"buildStatus": "queued"}
+        assert adjusted["artifacts"]["arm64_jp5"] == {"buildStatus": "queued"}
         # The adjustment opened a new build round (3.6).
         assert "components_triggered" not in adjusted
 
@@ -3081,31 +3082,31 @@ class TestAdjustmentEndToEnd:
                 plugin, adjusted["fetches"][slug]["fetch_build_id"], slug))
         assert result["recorded"] is True
         mapped = e2e_env.get_record(plugin_id)
-        assert mapped["arch_revisions"] == {"arm64_cpu": slug}
+        assert mapped["arch_revisions"] == {"arm64_jp5": slug}
         calls = [c for c in recorder.calls
                  if c["projectName"].startswith("dda-plugin-build-")]
         assert [c["projectName"] for c in calls] == \
-            ["dda-plugin-build-arm64_cpu"]
+            ["dda-plugin-build-arm64_jp5"]
         bucket = TEST_ENV["PORTAL_ARTIFACTS_BUCKET"]
         assert calls[0]["sourceLocationOverride"] == \
             f"{bucket}/{record['source_s3_prefix']}rev-{slug}/"
-        assert mapped["artifacts"]["arm64_cpu"]["buildStatus"] == "building"
+        assert mapped["artifacts"]["arm64_jp5"]["buildStatus"] == "building"
 
         # The adjusted build SUCCEEDED: the round settles and
         # auto-packaging triggers exactly once for it (3.6).
-        self._promote_artifact(e2e_env, usecase_id, "arm64_cpu",
+        self._promote_artifact(e2e_env, usecase_id, "arm64_jp5",
                                plugin_name)
-        build_id = mapped["artifacts"]["arm64_cpu"]["buildId"]
+        build_id = mapped["artifacts"]["arm64_jp5"]["buildId"]
         settled = e2e_env.deliver_build_result(
-            plugin, "arm64_cpu", build_id, "SUCCEEDED", plugin_name)
+            plugin, "arm64_jp5", build_id, "SUCCEEDED", plugin_name)
         assert settled["component_packaging_triggered"] is True
         assert len(invocations) == 2  # import round + adjusted round
         final = e2e_env.get_record(plugin_id)
-        assert final["artifacts"]["arm64_cpu"]["buildStatus"] == "succeeded"
+        assert final["artifacts"]["arm64_jp5"]["buildStatus"] == "succeeded"
         assert final["artifacts"]["x86_64"]["buildStatus"] == "succeeded"
         # A duplicate delivery of the settled result never re-triggers.
         duplicate = e2e_env.deliver_build_result(
-            plugin, "arm64_cpu", build_id, "SUCCEEDED", plugin_name)
+            plugin, "arm64_jp5", build_id, "SUCCEEDED", plugin_name)
         assert duplicate.get("recorded") is False
         assert len(invocations) == 2
 
@@ -3128,9 +3129,9 @@ class TestAdjustmentEndToEnd:
         before = e2e_env.get_record(plugin_id)
         flat_prefix = record["source_s3_prefix"]
 
-        # Adjust arm64_cpu; the adjustment fetch then FAILS.
+        # Adjust arm64_jp5; the adjustment fetch then FAILS.
         status, body = e2e_env.adjust_revision(
-            admin, plugin_id, 1, "arm64_cpu", "1.14")
+            admin, plugin_id, 1, "arm64_jp5", "1.14")
         assert status == 202, body
         fetch_build_id = e2e_env.get_record(
             plugin_id)["fetches"]["1.14"]["fetch_build_id"]
@@ -3141,7 +3142,7 @@ class TestAdjustmentEndToEnd:
 
         after = e2e_env.get_record(plugin_id)
         # The fetch failure surfaces on the affected arch only (2.4).
-        assert after["artifacts"]["arm64_cpu"] == {
+        assert after["artifacts"]["arm64_jp5"] == {
             "buildStatus": "failed",
             "logTail":
                 e2e_env.module.adjustment_fetch_failure_log_tail("1.14"),
@@ -3158,12 +3159,12 @@ class TestAdjustmentEndToEnd:
         recorder = RecordingCodeBuild(builds_module.codebuild)
         monkeypatch.setattr(builds_module, "codebuild", recorder)
         status, _ = e2e_env.post_build(admin, plugin_id, 1,
-                                       {"architectures": ["arm64_cpu"]})
+                                       {"architectures": ["arm64_jp5"]})
         assert status == 202
         calls = [c for c in recorder.calls
                  if c["projectName"].startswith("dda-plugin-build-")]
         assert [c["projectName"] for c in calls] == \
-            ["dda-plugin-build-arm64_cpu"]
+            ["dda-plugin-build-arm64_jp5"]
         bucket = TEST_ENV["PORTAL_ARTIFACTS_BUCKET"]
         assert calls[0]["sourceLocationOverride"] == f"{bucket}/{flat_prefix}"
         retried = e2e_env.get_record(plugin_id)

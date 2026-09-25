@@ -1554,7 +1554,7 @@ def submit_builds(architectures: List[str]) -> Dict[str, Dict]:
 #: assistant's build-platform description:
 #:   - x86_64:        Ubuntu 22.04                        -> GStreamer 1.20
 #:   - x86_64_nvidia: CUDA on Ubuntu 22.04                -> GStreamer 1.20
-#:   - arm64_cpu:     Ubuntu 20.04 (non-Jetson arm64)     -> GStreamer 1.16
+#:   - arm64_cpu:     Ubuntu 22.04 (non-Jetson arm64)     -> GStreamer 1.20
 #:   - arm64_jp5:     L4T r35 (JetPack 5, Ubuntu 20.04)   -> GStreamer 1.16
 #:   - arm64_jp6:     L4T r36 (JetPack 6, Ubuntu 22.04)   -> GStreamer 1.20
 #:   - arm64_jp7:     Ubuntu 24.04 + CUDA 13 (Thor)       -> GStreamer 1.24
@@ -1566,10 +1566,11 @@ PLATFORM_GSTREAMER_VERSIONS = platform_gstreamer_versions()
 #: ships. Observed in production: gst-plugins-good main (requires
 #: GStreamer >= 1.24) builds fine on x86_64 / x86_64_nvidia /
 #: arm64_jp6 (which ship 1.20) via the fallback, while the Ubuntu
-#: 20.04 platforms (arm64_cpu, arm64_jp5) fail with an obscure
-#: meson subproject error — their toolchains are too old to build a
-#: current GStreamer from source. arm64_jp7 (Ubuntu 24.04) has the
-#: fallback too. Shared with workflow_core.catalog.platforms.
+#: 20.04 platform (arm64_jp5) fails with an obscure meson subproject
+#: error — its toolchain is too old to build a current GStreamer from
+#: source. arm64_cpu (the same Ubuntu 22.04 packages as x86_64) and
+#: arm64_jp7 (Ubuntu 24.04) have the fallback too. Shared with
+#: workflow_core.catalog.platforms.
 PLATFORMS_WITH_SUBPROJECT_FALLBACK = SHARED_PLATFORMS_WITH_SUBPROJECT_FALLBACK
 
 #: Human-readable platform names for compatibility reasons (kept in
@@ -1699,8 +1700,7 @@ def platform_compatibility(required_version: Optional[str],
         (`classification_or_module` carries the provenance moduleName
         or a good/bad/ugly classification), the upstream release branch
         matching the platform's GStreamer minor (e.g. '1.16' for
-        arm64_jp5 and arm64_cpu) — verified working in
-        production. Non-official repositories get no suggestion (None):
+        arm64_jp5) — verified working in production. Non-official repositories get no suggestion (None):
         their branch layout is unknown.
     """
     required = _minor_version(required_version)

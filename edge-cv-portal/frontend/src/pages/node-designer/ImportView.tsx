@@ -1217,7 +1217,7 @@ export default function ImportView() {
           {/* Optional per-architecture revision overrides: platform
               generations can need different source branches (e.g.
               gst-plugins-good main for the GStreamer 1.20+ platforms,
-              '1.16' for arm64 CPU and arm64 JetPack 5).
+              '1.16' for arm64 JetPack 5).
               Blank inputs follow the Revision field above; only
               non-empty overrides are sent. */}
           <ExpandableSection

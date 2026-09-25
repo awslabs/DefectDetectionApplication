@@ -31,7 +31,7 @@ import { portalRegistryEnforced } from './context-helpers';
 export const PLUGIN_BUILD_ARCHITECTURES = [
   'x86_64',
   'x86_64_nvidia',
-  // Generic arm64 CPU (e.g. AWS Graviton): Ubuntu 20.04 + GStreamer 1.16,
+  // Generic arm64 CPU (e.g. AWS Graviton): Ubuntu 22.04 + GStreamer 1.20,
   // matching the arm64 CPU LocalServer image (plugin-build-images/
   // Dockerfile.arm64_cpu).
   'arm64_cpu',
@@ -83,7 +83,7 @@ export interface NodeDesignerStackProps extends cdk.StackProps {
  *   per-arch custom build image from the ECR repository created here:
  *   x86_64 (Ubuntu 22.04 / GStreamer 1.20, matching the test-sandbox image),
  *   x86_64_nvidia (same base plus the CUDA toolkit and NVIDIA GStreamer
- *   runtime headers), arm64_cpu (Ubuntu 20.04 / GStreamer 1.16), and arm64
+ *   runtime headers), arm64_cpu (Ubuntu 22.04 / GStreamer 1.20), and arm64
  *   JetPack 5/6/7 images matching each JetPack release (Requirement 5.2).
  *   Every build runs in a fresh CodeBuild container with a role scoped to
  *   exactly the plugin-source and staging prefixes of that architecture and
@@ -365,7 +365,7 @@ export class NodeDesignerStack extends cdk.Stack {
     //   - x86_64:        Ubuntu 22.04 + GStreamer 1.20 (matches the sandbox)
     //   - x86_64_nvidia: same base + CUDA toolkit + NVIDIA GStreamer runtime
     //                    headers
-    //   - arm64_cpu:     Ubuntu 20.04 + GStreamer 1.16, no NVIDIA stack
+    //   - arm64_cpu:     Ubuntu 22.04 + GStreamer 1.20, no NVIDIA stack
     //   - arm64_jp5/6/7: JetPack build images pinning the L4T / CUDA stack
     //                    matching each JetPack release
     // The tag defaults to the architecture name; override the tag suffix via

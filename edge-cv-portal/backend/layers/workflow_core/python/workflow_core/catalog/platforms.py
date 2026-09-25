@@ -49,13 +49,13 @@ BUILD_PLATFORMS: Dict[str, Dict[str, str]] = {
     },
     ARCH_ARM64_CPU: {
         "label": "arm64 CPU",
-        "os": "Ubuntu 20.04",
-        "gstreamer": "1.16",
-        "meson": "1.4 (pip meson in the image)",
-        "compiler": "gcc 9",
-        "notes": "Generic non-Jetson arm64 host (e.g. AWS Graviton): no "
-                 "NVIDIA stack; no meson subproject fallback for newer "
-                 "GStreamer.",
+        "os": "Ubuntu 22.04",
+        "gstreamer": "1.20",
+        "meson": "0.61",
+        "compiler": "gcc 11",
+        "notes": "Generic non-Jetson arm64 host (e.g. AWS Graviton): the "
+                 "x86_64 image's Ubuntu 22.04 base on arm64, no NVIDIA "
+                 "stack; meson subproject fallback available.",
     },
     ARCH_ARM64_JP5: {
         "label": "arm64 JetPack 5",
@@ -90,10 +90,12 @@ BUILD_PLATFORMS: Dict[str, Dict[str, str]] = {
 #: subproject fallback when the source requires more than the platform
 #: ships. Observed in production: gst-plugins-good main (requires
 #: GStreamer >= 1.24) builds fine on the Ubuntu 22.04 platforms via the
-#: fallback, while the Ubuntu 20.04 platforms (arm64_cpu, arm64_jp5) fail
-#: with an obscure meson subproject error.
+#: fallback, while the Ubuntu 20.04 platform (arm64_jp5) fails with an
+#: obscure meson subproject error. arm64_cpu uses the same Ubuntu 22.04
+#: packages as x86_64.
 PLATFORMS_WITH_SUBPROJECT_FALLBACK = frozenset(
-    {ARCH_X86_64, ARCH_X86_64_NVIDIA, ARCH_ARM64_JP6, ARCH_ARM64_JP7})
+    {ARCH_X86_64, ARCH_X86_64_NVIDIA, ARCH_ARM64_CPU, ARCH_ARM64_JP6,
+     ARCH_ARM64_JP7})
 
 
 def platform_gstreamer_versions() -> Dict[str, str]:

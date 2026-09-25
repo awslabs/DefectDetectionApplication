@@ -779,7 +779,7 @@ export function adjustRevisionError(value: string): string | null {
 // Importing one plugin set for every platform can need DIFFERENT
 // source revisions per platform generation (gst-plugins-good: main for
 // the GStreamer 1.20+ platforms, branch '1.16' for the GStreamer 1.16
-// platforms arm64_cpu and arm64_jp5). ImportView offers an optional
+// platform arm64_jp5). ImportView offers an optional
 // per-architecture
 // revision input under the top-level Revision field; only non-empty
 // overrides are sent as the import's arch_revisions map. Records of a

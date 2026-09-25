@@ -76,6 +76,16 @@ export IMAGE_VER
 . "$(dirname "$0")/scripts/build-target-derivation.sh"
 derive_build_target "$COMPONENT_NAME"
 
+# The generic arm64 CPU component (an aarch64 build with no JetPack token)
+# is an Ubuntu 22.04 image whatever the build host runs: only the JetPack 5
+# target stays on 20.04, and its plugin build image
+# (dda-plugin-build:arm64_cpu) and platform record are 22.04 / GStreamer
+# 1.20.
+if [ "$ARCHITECTURE" = "aarch64" ] && [ "$IS_JP5$IS_JP6$IS_JP7" = "000" ]; then
+  IMAGE_VER=22.04
+  export IMAGE_VER
+fi
+
 # DDA backend interpreter: 3.10 on JP6 (the Jetson AI Lab vLLM wheels are
 # cp310-only), 3.11 elsewhere ($PYTHON_VERSION — JP5/x86 behavior unchanged).
 # Threaded to the docker-compose backend build (`PYTHON_VERSION` build arg) and
