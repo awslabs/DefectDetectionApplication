@@ -12,7 +12,7 @@
 #
 # x86_64 images target linux/amd64 (emulated via qemu on an arm64 host);
 # the arm64 images are native linux/arm64 builds: arm64_cpu from plain
-# Ubuntu 20.04, the JetPack images from NVIDIA L4T bases (arm64_jp7 from the
+# Ubuntu 22.04, the JetPack images from NVIDIA L4T bases (arm64_jp7 from the
 # CUDA 13 Ubuntu 24.04 base shared with Dockerfile.jp7).
 set -euo pipefail
 cd "$(dirname "$0")"
