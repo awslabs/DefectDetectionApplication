@@ -28,6 +28,7 @@ import type {
   NodeStatusMap,
   WorkflowExecution,
   WorkflowExecutionMetadata,
+  WorkflowExecutionResults,
   WorkflowGraph,
 } from "api/WorkflowRegistrationAPI";
 import RunStatusGraph from "./RunStatusGraph";
@@ -61,6 +62,8 @@ const GRAPH: WorkflowGraph = {
     { id: "llm1", type: "llm_inference", position: { x: 480, y: 0 } },
     { id: "bedrock1", type: "bedrock_inference", position: { x: 0, y: 120 } },
     { id: "mqtt1", type: "mqtt_publish", position: { x: 240, y: 120 } },
+    // run-detection-visibility: a detection model node.
+    { id: "model_1", type: "model_inference", position: { x: 480, y: 120 } },
   ],
   connections: [],
 };
@@ -116,7 +119,16 @@ function mockAPIs(opts: {
   exec?: WorkflowExecution;
   statusMap?: NodeStatusMap;
   metadata?: WorkflowExecutionMetadata;
+  results?: WorkflowExecutionResults;
 }): void {
+  (
+    RegistrationAPI.getWorkflowExecutionResults as jest.Mock
+  ).mockResolvedValue(
+    opts.results ?? { hasImageResults: true, captureId: "cap-1", images: [] },
+  );
+  (
+    RegistrationAPI.workflowExecutionOverlayImageUrl as jest.Mock
+  ).mockImplementation((id: string) => `/overlay-image/${id}`);
   (RegistrationAPI.getWorkflowRegistrationGraph as jest.Mock).mockResolvedValue(
     GRAPH,
   );
@@ -330,5 +342,166 @@ describe("RunStatusGraph output-node preview", () => {
       expect(screen.getByText(/low confidence/)).toBeInTheDocument();
     });
     expect(screen.queryByTestId("node-preview-card")).toBeNull();
+  });
+});
+
+// --------------------------------------------------------------------------
+// run-detection-visibility: the model_inference preview (Requirement 3)
+// --------------------------------------------------------------------------
+
+const PPE_METADATA: WorkflowExecutionMetadata = {
+  is_anomalous: 1,
+  confidence: 0.963534,
+  detection_count: 2,
+  detections: [
+    {
+      label: "helmet",
+      confidence: 0.9354003071784973,
+      x_min: 92.18,
+      y_min: 201.91,
+      x_max: 169.87,
+      y_max: 255.16,
+      id: "de604231",
+    },
+    {
+      label: "no-helmet",
+      confidence: 0.6878951787948608,
+      x_min: 297.77,
+      y_min: 246.49,
+      x_max: 364.27,
+      y_max: 348.32,
+      id: "0a583a31",
+    },
+  ],
+};
+
+const RESULTS_WITH_OVERLAY_IMAGE: WorkflowExecutionResults = {
+  hasImageResults: true,
+  captureId: "cap-1",
+  images: [{ kind: "output", hasOverlay: true, hasOverlayImage: true }],
+};
+
+describe("RunStatusGraph model_inference preview", () => {
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("lists the run's detections and shows the overlay thumbnail (3.1, 3.2, 3.3)", async () => {
+    mockAPIs({
+      statusMap: { model_1: { status: "success", durationMs: 85 } },
+      metadata: PPE_METADATA,
+      results: RESULTS_WITH_OVERLAY_IMAGE,
+    });
+
+    renderGraph();
+
+    userEvent.click(await screen.findByTestId("node-model_1"));
+
+    const list = await screen.findByTestId("preview-detections");
+    expect(list).toHaveTextContent("Objects detected in this run (2)");
+    expect(list).toHaveTextContent("helmet — 93.5%");
+    expect(list).toHaveTextContent("no-helmet — 68.8%");
+
+    const thumbnail = await screen.findByTestId("preview-overlay-thumbnail");
+    expect(thumbnail).toHaveAttribute("src", `/overlay-image/${EXECUTION_ID}`);
+    // The pre-existing plain detail line is gone for a model node.
+    expect(screen.queryByText("model_1 — success")).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "View full results" }),
+    ).toHaveAttribute(
+      "href",
+      `/deployed-workflows/${REGISTRATION_ID}/executions/${EXECUTION_ID}/results`,
+    );
+  });
+
+  it("shows no thumbnail when the run has no overlay image", async () => {
+    mockAPIs({
+      statusMap: { model_1: { status: "success" } },
+      metadata: PPE_METADATA,
+      results: {
+        hasImageResults: true,
+        captureId: "cap-1",
+        images: [{ kind: "output", hasOverlay: false, hasOverlayImage: false }],
+      },
+    });
+
+    renderGraph();
+
+    userEvent.click(await screen.findByTestId("node-model_1"));
+
+    await screen.findByTestId("preview-detections");
+    await waitFor(() => {
+      expect(RegistrationAPI.getWorkflowExecutionResults).toHaveBeenCalled();
+    });
+    expect(screen.queryByTestId("preview-overlay-thumbnail")).toBeNull();
+  });
+
+  it("does not fetch results for a run without image results (3.7)", async () => {
+    mockAPIs({
+      exec: execution({ hasImageResults: false }),
+      statusMap: { model_1: { status: "success" } },
+      metadata: PPE_METADATA,
+    });
+
+    renderGraph();
+
+    userEvent.click(await screen.findByTestId("node-model_1"));
+
+    await screen.findByTestId("preview-detections");
+    expect(RegistrationAPI.getWorkflowExecutionResults).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("preview-overlay-thumbnail")).toBeNull();
+  });
+
+  it("shows the verdict fields for a model without a Detection_List (3.4)", async () => {
+    mockAPIs({
+      statusMap: { model_1: { status: "success" } },
+      metadata: { is_anomalous: 1, confidence: 0.71, trigger: {} },
+    });
+
+    renderGraph();
+
+    userEvent.click(await screen.findByTestId("node-model_1"));
+
+    const fields = await screen.findByTestId("preview-fields");
+    expect(fields).toHaveTextContent("is_anomalous");
+    expect(fields).toHaveTextContent("confidence");
+    expect(fields).toHaveTextContent("0.71");
+    expect(screen.queryByTestId("preview-detections")).toBeNull();
+  });
+
+  it("fetches nothing and shows the in-progress placeholder while the model node runs (3.5, 3.7)", async () => {
+    mockAPIs({
+      exec: execution({ status: "running", finishedAt: null }),
+      statusMap: { model_1: { status: "running" } },
+      metadata: PPE_METADATA,
+      results: RESULTS_WITH_OVERLAY_IMAGE,
+    });
+
+    renderGraph();
+
+    userEvent.click(await screen.findByTestId("node-model_1"));
+
+    expect(await screen.findByTestId("preview-pending")).toHaveTextContent(
+      PENDING_MESSAGE,
+    );
+    expect(RegistrationAPI.getWorkflowExecutionMetadata).not.toHaveBeenCalled();
+    expect(RegistrationAPI.getWorkflowExecutionResults).not.toHaveBeenCalled();
+  });
+
+  it("keeps the failure alert for a failed model node (3.5)", async () => {
+    mockAPIs({
+      statusMap: {
+        model_1: { status: "failure", detail: "Triton model not ready" },
+      },
+    });
+
+    renderGraph();
+
+    userEvent.click(await screen.findByTestId("node-model_1"));
+
+    const alert = await screen.findByTestId("node-detail");
+    expect(alert).toHaveTextContent("model_1 — failure");
+    expect(alert).toHaveTextContent("Triton model not ready");
+    expect(RegistrationAPI.getWorkflowExecutionResults).not.toHaveBeenCalled();
   });
 });

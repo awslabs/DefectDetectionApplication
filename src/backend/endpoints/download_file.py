@@ -199,6 +199,44 @@ def load_workflow_execution_output_image(
     )
 
 
+@unauthenticated_router.get("/workflows/executions/{execution_id}/overlay-image")
+def load_workflow_execution_overlay_image(
+    execution_id: str, token: str = None, db: Session = Depends(get_db)
+):
+    """Serve a deployed-workflow run's server-rendered overlay image
+    (run-detection-visibility Requirements 4.1-4.3, 4.5).
+
+    ``{capture_id}.overlay.jpg`` is the frame with the model's overlay
+    drawn in (for detection models: boxes, labels and percentages). Same
+    shape as the output-image route above: token-in-query auth, because a
+    browser ``<img>`` cannot attach an Authorization header, and the path
+    comes only from the execution record via
+    ``run_artifacts.overlay_image_path``. 404 when the execution is unknown
+    or the run produced no overlay image."""
+    validate_token_in_query_param(token)
+
+    execution = db.get(WorkflowExecution, execution_id)
+    if execution is None:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail=f"Workflow execution '{execution_id}' was not found",
+        )
+
+    image_path = run_artifacts.overlay_image_path(
+        execution.output_dir, execution.capture_id
+    )
+    if image_path:
+        return FileResponse(image_path, media_type="image/jpeg")
+
+    raise HTTPException(
+        status_code=HTTP_404_NOT_FOUND,
+        detail=(
+            f"Server unable to load overlay image for execution "
+            f"'{execution_id}'. Error: 'Image not found'."
+        ),
+    )
+
+
 @unauthenticated_router.get("/workflows/executions/{execution_id}/node-image")
 def load_workflow_execution_node_image(
     execution_id: str,

@@ -37,6 +37,7 @@ import {
   getWorkflowExecutionResults,
   workflowExecutionNodeImageUrl,
   workflowExecutionOutputImageUrl,
+  workflowExecutionOverlayImageUrl,
 } from "api/WorkflowRegistrationAPI";
 import type {
   WorkflowExecutionMetadata,
@@ -50,6 +51,12 @@ import {
   getMaskImageProp,
 } from "components/live-result/helpers";
 import { resultLayoutStyle } from "components/live-result/styles";
+import { runDetections } from "../detections";
+import DetectedObjectsTable from "./DetectedObjectsTable";
+
+/** Overlay toggle labels for a server-rendered overlay image (R1.3). */
+export const BOUNDING_BOXES_TOGGLE_LABEL = "Show bounding boxes";
+export const OVERLAY_TOGGLE_LABEL = "Show overlay";
 
 // --------------------------------------------------------------------------
 // Inference-node sections (vlm-bedrock-parity Requirement 4.3, 4.2)
@@ -278,6 +285,12 @@ function NodeSection({
  * `llm_inference` and `bedrock_inference` present identically. The `output`
  * entry is conditional now, so a node-image-only run renders node sections
  * with no output container.
+ *
+ * run-detection-visibility adds detection visibility: a run with a
+ * server-rendered overlay image and no mask shows that overlay (the model's
+ * boxes and labels) behind the same toggle, whose "off" position shows the
+ * original frame, and every run whose metadata carries a Detection_List gets
+ * the detected-objects table below the image.
  */
 export default function RunResults(): JSX.Element {
   const { executionId = "" } = useParams();
@@ -298,6 +311,11 @@ export default function RunResults(): JSX.Element {
   const hasOutputImage = !!results?.images?.some(
     (image) => image.kind === "output",
   );
+  // The run's server-rendered overlay (e.g. detection boxes), served by
+  // `.../overlay-image` (run-detection-visibility R1.1).
+  const hasOverlayImage = !!results?.images?.some(
+    (image) => image.kind === "output" && image.hasOverlayImage,
+  );
   const nodeGroups = groupByNode(results?.images ?? []);
 
   const overlayQuery = useQuery({
@@ -306,21 +324,31 @@ export default function RunResults(): JSX.Element {
     enabled: hasOverlay,
   });
 
-  // The node sections show each node's returned text and the run verdict, both
-  // of which live in the run metadata; only fetched when node frames exist.
+  // The run metadata carries each inference node's returned text, the run
+  // verdict and the run's Detection_List; fetched for every run so the
+  // detected-objects table can show (run-detection-visibility R2.1, R2.7).
   const metadataQuery = useQuery({
     queryKey: ["getWorkflowExecutionMetadata", executionId],
     queryFn: () => getWorkflowExecutionMetadata(executionId),
-    enabled: nodeGroups.length > 0,
   });
+  const detections = runDetections(metadataQuery.data);
+  const detectionsSection =
+    detections !== null ? (
+      <DetectedObjectsTable detections={detections} />
+    ) : null;
 
   const header = <Header variant="h1">Run results</Header>;
 
+  // The detected-objects table also renders beside a no-results or error
+  // message: a run can carry detections without viewable images (R2.7).
   const renderState = (content: JSX.Element): JSX.Element => (
     <ContentLayout header={header}>
-      <Container header={<Header variant="h2">Output images</Header>}>
-        {content}
-      </Container>
+      <SpaceBetween size="l">
+        <Container header={<Header variant="h2">Output images</Header>}>
+          {content}
+        </Container>
+        {detectionsSection}
+      </SpaceBetween>
     </ContentLayout>
   );
 
@@ -355,15 +383,51 @@ export default function RunResults(): JSX.Element {
   const backgroundColorProp = getMaskBackgroundColor(
     overlayQuery.data?.maskBackground ?? null,
   );
-  const maskImageProp = getMaskImageProp(maskImage, backgroundColorProp);
+
+  // Image mode (run-detection-visibility design table): a mask keeps today's
+  // client-side composite (R1.4). Otherwise a server-rendered overlay image
+  // is shown, with the same toggle the Run inference screen uses for
+  // detections — on: the overlay; off: the original frame (R1.1, R1.2).
+  // While a possible mask is still loading the original frame is shown, so a
+  // segmentation run never flashes the server overlay first (R1.6).
+  const maskSettled =
+    !hasOverlay || overlayQuery.isSuccess || overlayQuery.isError;
+  const imageOverlayMode =
+    hasOverlayImage && maskImage === null && maskSettled;
+  const maskImageProp = imageOverlayMode
+    ? {}
+    : getMaskImageProp(maskImage, backgroundColorProp);
+  const displayedImageSrc =
+    imageOverlayMode && showMask
+      ? workflowExecutionOverlayImageUrl(
+          executionId,
+          authEnabled ? token : undefined,
+        )
+      : imageSrc;
+  const overlayImageProps = imageOverlayMode
+    ? {
+        alt: showMask
+          ? "Run output with the model's overlay drawn on the captured frame"
+          : "Original captured frame of the run",
+      }
+    : {};
 
   const extraActions = (
     <RefreshDisplayActions
-      showAnomalyMaskToggle={!!maskImage}
+      showAnomalyMaskToggle={!!maskImage || imageOverlayMode}
       onClickAnomalyMaskToggle={(checked): void => setShowMask(checked)}
       anomalyMaskToggleChecked={!!showMask}
       // Feedback flag toggle is not applicable to deployed-workflow runs.
       showFlagForReviewToggle={false}
+      // A mask keeps the component's default "Show anomaly masks" label.
+      {...(imageOverlayMode
+        ? {
+            toggleLabel:
+              detections !== null
+                ? BOUNDING_BOXES_TOGGLE_LABEL
+                : OVERLAY_TOGGLE_LABEL,
+          }
+        : {})}
     />
   );
 
@@ -373,15 +437,16 @@ export default function RunResults(): JSX.Element {
         {hasOutputImage && (
           <Container header={<Header variant="h2">Output images</Header>}>
             <SpaceBetween size="l">
-              {overlayQuery.isError && (
+              {overlayQuery.isError && !imageOverlayMode && (
                 <Box variant="p" color="text-status-warning">
                   The overlay could not be loaded; showing the base image.
                 </Box>
               )}
               <div className={resultLayoutStyle}>
                 <InteractableImage
-                  imageSrc={imageSrc}
+                  imageSrc={displayedImageSrc}
                   {...maskImageProp}
+                  {...overlayImageProps}
                   showMask={!!showMask}
                   extraActions={extraActions}
                 />
@@ -389,6 +454,7 @@ export default function RunResults(): JSX.Element {
             </SpaceBetween>
           </Container>
         )}
+        {detectionsSection}
         {nodeGroups.map((group) => (
           <NodeSection
             key={group.nodeId}

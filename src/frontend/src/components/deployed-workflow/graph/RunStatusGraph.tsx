@@ -34,8 +34,10 @@ import {
   getWorkflowExecution,
   getWorkflowExecutionMetadata,
   getWorkflowExecutionNodeStatus,
+  getWorkflowExecutionResults,
   getWorkflowRegistrationGraph,
   workflowExecutionOutputImageUrl,
+  workflowExecutionOverlayImageUrl,
 } from "api/WorkflowRegistrationAPI";
 import useAuth from "components/auth/authHook";
 import { isExecutionActive } from "../presentation";
@@ -113,16 +115,18 @@ export default function RunStatusGraph(): JSX.Element {
 
   // Run-metadata query for the preview card (output-node-preview-popover
   // design): fetched lazily, only when the selected node's preview actually
-  // needs metadata — an llm_inference/bedrock_inference node whose status is
-  // terminal. Computed from raw query data because hooks must run before the
-  // early returns below.
+  // needs metadata — an llm_inference/bedrock_inference/model_inference node
+  // whose status is terminal. Computed from raw query data because hooks must
+  // run before the early returns below.
   const selectedNode = graph?.nodes?.find((node) => node.id === selectedNodeId);
   const selectedStatus =
     selectedNodeId !== null ? statusMap[selectedNodeId]?.status : undefined;
+  const selectedIsModel = selectedNode?.type === "model_inference";
   const metadataEnabled =
     selectedNode !== undefined &&
     (selectedNode.type === "llm_inference" ||
-      selectedNode.type === "bedrock_inference") &&
+      selectedNode.type === "bedrock_inference" ||
+      selectedIsModel) &&
     (selectedStatus === "success" ||
       selectedStatus === "warning" ||
       selectedStatus === "failure");
@@ -131,6 +135,31 @@ export default function RunStatusGraph(): JSX.Element {
     queryFn: () => getWorkflowExecutionMetadata(executionId),
     enabled: metadataEnabled,
   });
+
+  // Results query for a model_inference preview's overlay thumbnail
+  // (run-detection-visibility R3.3, R3.7): only for a selected model node
+  // that finished, in a run with image results. Shares its cache key with
+  // the results page.
+  const resultsEnabled =
+    selectedIsModel &&
+    (selectedStatus === "success" || selectedStatus === "warning") &&
+    (executionQuery.data?.hasImageResults ?? false);
+  const resultsQuery = useQuery({
+    queryKey: ["getWorkflowExecutionResults", executionId],
+    queryFn: () => getWorkflowExecutionResults(executionId),
+    enabled: resultsEnabled,
+  });
+  const hasOverlayImage =
+    resultsEnabled &&
+    !!resultsQuery.data?.images?.some(
+      (image) => image.kind === "output" && image.hasOverlayImage,
+    );
+  const overlayImageSrc = hasOverlayImage
+    ? workflowExecutionOverlayImageUrl(
+        executionId,
+        authEnabled ? token : undefined,
+      )
+    : undefined;
 
   if (graphQuery.isError) {
     return (
@@ -385,6 +414,7 @@ export default function RunStatusGraph(): JSX.Element {
               // actual in-flight fetch counts as loading (R3.4).
               metadataLoading: metadataEnabled && metadataQuery.isInitialLoading,
               metadataError: metadataQuery.isError,
+              overlayImageSrc,
             })}
           />
         )}

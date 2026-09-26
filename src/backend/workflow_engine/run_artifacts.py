@@ -127,6 +127,24 @@ def overlay_artifact_exists(
     return False
 
 
+def overlay_image_path(
+    output_dir: Optional[str], capture_id: Optional[str]
+) -> Optional[str]:
+    """The run's server-rendered overlay image on disk, or ``None``
+    (run-detection-visibility Requirements 4.1, 4.2, 4.5).
+
+    The marshal draws each model's overlay (for detection models: the
+    boxes, labels and percentages) into ``{capture_id}.overlay.jpg``; this
+    returns that path when the file exists. Unlike
+    :func:`base_output_image_path` there is no fallback: the path is built
+    only from the execution record's ``output_dir`` and ``capture_id``, so
+    no request input can steer it to another file."""
+    if not output_dir or not capture_id:
+        return None
+    path = _artifact_path(output_dir, capture_id, _OVERLAY_SUFFIX)
+    return path if os.path.isfile(path) else None
+
+
 def _port_sort_key(port: str) -> Tuple[int, str]:
     """Sort key placing known ports in presentation order and any other
     port after them, alphabetically."""

@@ -29,6 +29,11 @@ import {
 import { Link } from "react-router-dom";
 
 import type { PreviewViewModel } from "./previewModel";
+import {
+  PREVIEW_DETECTION_LIMIT,
+  formatConfidence,
+} from "../detections";
+import type { RunDetection } from "../detections";
 
 /** In-flight run placeholder message (R3.1). */
 export const PENDING_MESSAGE =
@@ -36,6 +41,58 @@ export const PENDING_MESSAGE =
 
 /** Missing-data fallback message (R3.3). */
 export const UNAVAILABLE_MESSAGE = "No preview is available for this node.";
+
+/** Empty Detection_List message (run-detection-visibility R3.2). */
+export const NO_DETECTIONS_MESSAGE = "No objects were detected.";
+
+/** Thumbnail box shared by the capture and detection previews. */
+const THUMBNAIL_STYLE: React.CSSProperties = {
+  maxWidth: 320,
+  maxHeight: 200,
+  objectFit: "contain",
+};
+
+/**
+ * The compact detection list of a model_inference preview: the first
+ * PREVIEW_DETECTION_LIMIT objects as "label — 93.5%", then how many more the
+ * run found (run-detection-visibility R3.2). The list is the run's, so it is
+ * labelled as such (design D6).
+ */
+function DetectionList({
+  detections,
+}: {
+  detections: RunDetection[];
+}): JSX.Element {
+  const shown = detections.slice(0, PREVIEW_DETECTION_LIMIT);
+  const remaining = detections.length - shown.length;
+  return (
+    <div data-testid="preview-detections">
+      <Box variant="awsui-key-label">
+        {`Objects detected in this run (${detections.length})`}
+      </Box>
+      {detections.length === 0 ? (
+        <Box variant="p">{NO_DETECTIONS_MESSAGE}</Box>
+      ) : (
+        <ul style={{ margin: 0, paddingInlineStart: 20 }}>
+          {shown.map((detection, index) => (
+            <li key={`${index}:${detection.id ?? ""}`}>
+              {`${detection.label} — ${formatConfidence(detection.confidence)}`}
+            </li>
+          ))}
+        </ul>
+      )}
+      {remaining > 0 && (
+        <Box
+          data-testid="preview-detections-more"
+          variant="small"
+          color="text-body-secondary"
+        >
+          {`and ${remaining} more`}
+        </Box>
+      )}
+    </div>
+  );
+}
 
 export interface NodePreviewCardProps {
   /** The selected output node's id (card header + failure alert header). */
@@ -107,15 +164,31 @@ export default function NodePreviewCard({
             data-testid="preview-thumbnail"
             src={viewModel.src}
             alt={`Output of ${nodeId}`}
-            style={{
-              maxWidth: 320,
-              maxHeight: 200,
-              objectFit: "contain",
-            }}
+            style={THUMBNAIL_STYLE}
             onError={(): void => setFailedImageSrc(viewModel.src)}
           />
         );
       break;
+    case "detections": {
+      // A thumbnail that fails to load is hidden; the list stays
+      // (run-detection-visibility R3.3).
+      const thumbnailSrc = viewModel.imageSrc;
+      body = (
+        <SpaceBetween size="s">
+          {thumbnailSrc !== undefined && failedImageSrc !== thumbnailSrc && (
+            <img
+              data-testid="preview-overlay-thumbnail"
+              src={thumbnailSrc}
+              alt={`Objects detected by ${nodeId}, drawn on the captured frame`}
+              style={THUMBNAIL_STYLE}
+              onError={(): void => setFailedImageSrc(thumbnailSrc)}
+            />
+          )}
+          <DetectionList detections={viewModel.detections} />
+        </SpaceBetween>
+      );
+      break;
+    }
     case "text":
       body = (
         <Box data-testid="preview-text" variant="p">

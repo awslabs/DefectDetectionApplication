@@ -82,6 +82,12 @@ export interface WorkflowRegistrationDetails extends WorkflowRegistration {
 export interface WorkflowExecutionResultImage {
   kind: "output" | "input" | "node";
   hasOverlay: boolean;
+  /**
+   * Present on the `output` entry: the run has a server-rendered overlay
+   * image (`{capture_id}.overlay.jpg`, e.g. detection boxes) served by
+   * `workflowExecutionOverlayImageUrl` (run-detection-visibility R4.4).
+   */
+  hasOverlayImage?: boolean;
   /** Present on `kind: "node"` entries: the inference node's id. */
   nodeId?: string;
   /** Present on `kind: "node"` entries: the node input port (`in`/`reference`). */
@@ -255,6 +261,19 @@ export function workflowExecutionOutputImageUrl(
   token?: string,
 ): string {
   const base = `${EXECUTIONS_ENDPOINT}/${id}/output-image`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+/**
+ * Build the URL of a run's server-rendered overlay image (the frame with the
+ * model's boxes and labels drawn in), token-aware exactly like
+ * `workflowExecutionOutputImageUrl` (run-detection-visibility R4.1, R4.3).
+ */
+export function workflowExecutionOverlayImageUrl(
+  id: string,
+  token?: string,
+): string {
+  const base = `${EXECUTIONS_ENDPOINT}/${id}/overlay-image`;
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 

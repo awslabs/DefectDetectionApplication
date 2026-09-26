@@ -8,6 +8,7 @@
 
 import fc from "fast-check";
 import type { NodeRunStatus } from "api/WorkflowRegistrationAPI";
+import { runDetections } from "../detections";
 import {
   OUTPUT_NODE_TYPES,
   SNIPPET_MAX_LENGTH,
@@ -265,5 +266,184 @@ describe("Property 3: Snippet truncation", () => {
       }),
       { numRuns: NUM_RUNS },
     );
+  });
+});
+
+// --------------------------------------------------------------------------
+// run-detection-visibility: the model_inference preview
+// --------------------------------------------------------------------------
+
+/** A metadata object carrying a Detection_List of arbitrary entries. */
+const detectionMetadataArb: fc.Arbitrary<Record<string, unknown>> = fc.record(
+  {
+    detections: fc.array(
+      fc.oneof(
+        fc.record({
+          id: fc.hexaString({ minLength: 8, maxLength: 8 }),
+          label: fc.string(),
+          confidence: fc.double({ min: 0, max: 1, noNaN: true }),
+          x_min: fc.double({ noNaN: true, noDefaultInfinity: true }),
+          y_min: fc.double({ noNaN: true, noDefaultInfinity: true }),
+          x_max: fc.double({ noNaN: true, noDefaultInfinity: true }),
+          y_max: fc.double({ noNaN: true, noDefaultInfinity: true }),
+        }),
+        fc.jsonValue(),
+      ),
+      { maxLength: 12 },
+    ),
+    is_anomalous: fc.constantFrom(0, 1),
+    confidence: fc.double({ min: 0, max: 1, noNaN: true }),
+  },
+  { requiredKeys: ["detections"] },
+);
+
+describe("Property 4 (run-detection-visibility): model_inference preview precedence", () => {
+  // **Validates: Requirements 3.2, 3.4, 3.5**
+  it("model_inference is a previewable node type", () => {
+    expect(isOutputNode("model_inference")).toBe(true);
+  });
+
+  it("a missing or non-terminal status yields 'pending'; failure yields 'failure'", () => {
+    fc.assert(
+      fc.property(
+        fc.option(fc.constantFrom("pending", "running"), { nil: undefined }),
+        fc.option(fc.string(), { nil: undefined }),
+        metadataArb,
+        (status, detail, metadata) => {
+          const pending = previewViewModel({
+            ...baseArgs("model_inference"),
+            statusEntry: status === undefined ? undefined : { status },
+            metadata,
+            overlayImageSrc: "/overlay-image/e1",
+          });
+          expect(pending.kind).toBe("pending");
+
+          const failed = previewViewModel({
+            ...baseArgs("model_inference"),
+            statusEntry:
+              detail === undefined
+                ? { status: "failure" }
+                : { status: "failure", detail },
+            metadata,
+          });
+          expect(failed).toEqual(
+            detail === undefined
+              ? { kind: "failure" }
+              : { kind: "failure", detail },
+          );
+        },
+      ),
+      { numRuns: NUM_RUNS },
+    );
+  });
+
+  it("a terminal status with metadata in flight or errored yields 'loading' / 'unavailable'", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("success", "warning"),
+        detectionMetadataArb,
+        (status, metadata) => {
+          expect(
+            previewViewModel({
+              ...baseArgs("model_inference"),
+              statusEntry: { status },
+              metadata,
+              metadataLoading: true,
+            }).kind,
+          ).toBe("loading");
+          expect(
+            previewViewModel({
+              ...baseArgs("model_inference"),
+              statusEntry: { status },
+              metadata,
+              metadataError: true,
+            }).kind,
+          ).toBe("unavailable");
+        },
+      ),
+      { numRuns: NUM_RUNS },
+    );
+  });
+
+  it("a Detection_List yields 'detections' carrying exactly runDetections(metadata) and the overlay thumbnail", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("success", "warning"),
+        detectionMetadataArb,
+        fc.option(fc.string({ minLength: 1 }), { nil: undefined }),
+        (status, metadata, overlayImageSrc) => {
+          const vm = previewViewModel({
+            ...baseArgs("model_inference"),
+            statusEntry: { status },
+            metadata,
+            overlayImageSrc,
+          });
+          const expected = runDetections(metadata);
+          expect(expected).not.toBeNull();
+          expect(vm).toEqual(
+            overlayImageSrc === undefined
+              ? { kind: "detections", detections: expected }
+              : { kind: "detections", detections: expected, imageSrc: overlayImageSrc },
+          );
+        },
+      ),
+      { numRuns: NUM_RUNS },
+    );
+  });
+
+  it("without a Detection_List, the verdict fields or 'unavailable'", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom("success", "warning"),
+        fc.option(fc.constantFrom(0, 1, true, false), { nil: undefined }),
+        fc.option(fc.double({ min: 0, max: 1, noNaN: true }), { nil: undefined }),
+        (status, isAnomalous, confidence) => {
+          const metadata: Record<string, unknown> = { trigger: {} };
+          if (isAnomalous !== undefined) {
+            metadata.is_anomalous = isAnomalous;
+          }
+          if (confidence !== undefined) {
+            metadata.confidence = confidence;
+          }
+          const vm = previewViewModel({
+            ...baseArgs("model_inference"),
+            statusEntry: { status },
+            metadata,
+            overlayImageSrc: "/overlay-image/e1",
+          });
+          const fields: [string, string][] = [];
+          if (isAnomalous !== undefined) {
+            fields.push(["is_anomalous", String(isAnomalous)]);
+          }
+          if (confidence !== undefined) {
+            fields.push(["confidence", String(confidence)]);
+          }
+          expect(vm).toEqual(
+            fields.length > 0 ? { kind: "fields", fields } : { kind: "unavailable" },
+          );
+        },
+      ),
+      { numRuns: NUM_RUNS },
+    );
+  });
+
+  it("leaves the bedrock_inference fields preview unchanged by the overlay argument", () => {
+    const vm = previewViewModel({
+      ...baseArgs("bedrock_inference"),
+      statusEntry: { status: "success" },
+      metadata: {
+        is_anomalous: true,
+        confidence: 0.93,
+        detections: [{ label: "plate", confidence: 0.9 }],
+      },
+      overlayImageSrc: "/overlay-image/e1",
+    });
+    expect(vm).toEqual({
+      kind: "fields",
+      fields: [
+        ["is_anomalous", "true"],
+        ["confidence", "0.93"],
+      ],
+    });
   });
 });

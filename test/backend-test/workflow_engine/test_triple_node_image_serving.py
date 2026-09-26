@@ -298,7 +298,7 @@ class TestTripleResultsInventory:
         # The whole payload, ordering included: the pre-existing output
         # entry first, then one node entry per persisted frame.
         assert body["images"] == [
-            {"kind": "output", "hasOverlay": True}
+            {"kind": "output", "hasOverlay": True, "hasOverlayImage": True}
         ] + _expected_node_entries()
 
         additive = [
@@ -327,7 +327,7 @@ class TestTripleResultsInventory:
         ).json()
 
         assert baseline["images"] == [
-            {"kind": "output", "hasOverlay": True}
+            {"kind": "output", "hasOverlay": True, "hasOverlayImage": True}
         ] + _expected_node_entries(inspection_frames=False)
         assert [
             image
@@ -335,10 +335,12 @@ class TestTripleResultsInventory:
             if image.get("port") not in _NEW_PORTS
         ] == baseline["images"]
 
-        # Field sets are the existing ones — no new keys on any entry.
+        # Field sets are the existing ones — no new keys on any entry. The
+        # output entry's hasOverlayImage is run-detection-visibility's
+        # additive flag (Requirement 4.4), not part of this change.
         for image in body["images"]:
             if image["kind"] == "output":
-                assert set(image) == {"kind", "hasOverlay"}
+                assert set(image) == {"kind", "hasOverlay", "hasOverlayImage"}
             else:
                 assert set(image) == {"kind", "nodeId", "port", "hasOverlay"}
         assert set(body) == {"hasImageResults", "captureId", "images"}

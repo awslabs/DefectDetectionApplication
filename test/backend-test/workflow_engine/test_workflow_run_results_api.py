@@ -177,7 +177,9 @@ class TestRunResults:
         body = response.json()
         assert body["hasImageResults"] is True
         assert body["captureId"] == _CAPTURE_ID
-        assert body["images"] == [{"kind": "output", "hasOverlay": False}]
+        assert body["images"] == [
+            {"kind": "output", "hasOverlay": False, "hasOverlayImage": False}
+        ]
 
     def test_has_results_with_overlay_artifact(
         self, client, session_factory, tmp_path
@@ -192,7 +194,9 @@ class TestRunResults:
             capture_id=_CAPTURE_ID,
         )
         body = client.get("/workflows/executions/exec-1/results").json()
-        assert body["images"] == [{"kind": "output", "hasOverlay": True}]
+        assert body["images"] == [
+            {"kind": "output", "hasOverlay": True, "hasOverlayImage": True}
+        ]
 
     def test_has_results_with_mask_artifact_sets_overlay(
         self, client, session_factory, tmp_path
@@ -208,6 +212,9 @@ class TestRunResults:
         )
         body = client.get("/workflows/executions/exec-1/results").json()
         assert body["images"][0]["hasOverlay"] is True
+        # A mask is not a server-rendered overlay image
+        # (run-detection-visibility Requirement 4.4).
+        assert body["images"][0]["hasOverlayImage"] is False
 
     def test_node_entries_appended_after_output_entry(
         self, client, session_factory, tmp_path
@@ -228,7 +235,7 @@ class TestRunResults:
         assert body["hasImageResults"] is True
         assert body["captureId"] == _CAPTURE_ID
         assert body["images"] == [
-            {"kind": "output", "hasOverlay": False},
+            {"kind": "output", "hasOverlay": False, "hasOverlayImage": False},
             {
                 "kind": "node",
                 "nodeId": "vlm1",
@@ -535,3 +542,107 @@ class TestResultsLinkArtifactsEquivalence:
             assert body["captureId"] == _CAPTURE_ID
         else:
             assert body["captureId"] is None
+
+
+class TestOverlayImageResolution:
+    """``run_artifacts.overlay_image_path`` (run-detection-visibility
+    Requirements 4.1, 4.2, 4.5): the file the ``.../overlay-image`` route
+    serves is exactly the run's ``{capture_id}.overlay.jpg``, with no
+    fallback to any other file."""
+
+    def test_returns_the_capture_id_overlay(self, tmp_path):
+        out = str(tmp_path)
+        overlay = os.path.join(out, f"{_CAPTURE_ID}.overlay.jpg")
+        _write(os.path.join(out, f"{_CAPTURE_ID}.jpg"), b"base")
+        _write(overlay, b"boxes")
+        assert run_artifacts.overlay_image_path(out, _CAPTURE_ID) == overlay
+
+    def test_none_without_an_overlay_file(self, tmp_path):
+        out = str(tmp_path)
+        _write(os.path.join(out, f"{_CAPTURE_ID}.jpg"), b"base")
+        _write(os.path.join(out, f"{_CAPTURE_ID}.mask.png"), _PNG_BYTES)
+        assert run_artifacts.overlay_image_path(out, _CAPTURE_ID) is None
+
+    def test_never_falls_back_to_another_runs_overlay(self, tmp_path):
+        out = str(tmp_path)
+        _write(os.path.join(out, "other-capture.overlay.jpg"), b"other")
+        _write(os.path.join(out, "frame-0001.overlay.jpg"), b"other")
+        assert run_artifacts.overlay_image_path(out, _CAPTURE_ID) is None
+
+    def test_none_for_missing_inputs_and_missing_dir(self, tmp_path):
+        assert run_artifacts.overlay_image_path(None, _CAPTURE_ID) is None
+        assert run_artifacts.overlay_image_path(str(tmp_path), None) is None
+        assert (
+            run_artifacts.overlay_image_path("/no/such/dir", _CAPTURE_ID)
+            is None
+        )
+
+    def test_a_directory_named_like_the_overlay_is_not_served(self, tmp_path):
+        out = str(tmp_path)
+        os.makedirs(os.path.join(out, f"{_CAPTURE_ID}.overlay.jpg"))
+        assert run_artifacts.overlay_image_path(out, _CAPTURE_ID) is None
+
+
+class TestResultsOverlayFlags:
+    """Property 1: results flags track the artifacts.
+
+    **Feature: run-detection-visibility, Property 1: Results flags track
+    the artifacts**
+    **Validates: Requirements 4.4, 5.3**
+
+    For every combination of base, overlay and mask files, the ``output``
+    entry (present exactly when the base image exists) reports
+    ``hasOverlayImage`` iff the overlay image exists, and keeps
+    ``hasOverlay`` as "overlay or mask exists" — the pre-existing
+    meaning."""
+
+    @settings(max_examples=100, deadline=None)
+    @given(
+        base_present=st.booleans(),
+        overlay_present=st.booleans(),
+        mask_present=st.booleans(),
+    )
+    def test_flags_match_files_on_disk(
+        self, base_present, overlay_present, mask_present, tmp_path_factory
+    ):
+        session_factory = make_session_factory()
+        out = str(tmp_path_factory.mktemp("run"))
+        if base_present:
+            _write(os.path.join(out, f"{_CAPTURE_ID}.jpg"), b"base")
+        if overlay_present:
+            _write(os.path.join(out, f"{_CAPTURE_ID}.overlay.jpg"), b"ov")
+        if mask_present:
+            _write(os.path.join(out, f"{_CAPTURE_ID}.mask.png"), _PNG_BYTES)
+
+        _seed_execution(
+            session_factory,
+            has_image_results=True,
+            output_dir=out,
+            capture_id=_CAPTURE_ID,
+        )
+
+        app = FastAPI()
+        app.include_router(workflow_engine_api.router)
+
+        def override_get_db():
+            db = session_factory()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[workflow_engine_api.get_db] = override_get_db
+        with TestClient(app) as client:
+            body = client.get("/workflows/executions/exec-1/results").json()
+
+        outputs = [image for image in body["images"] if image["kind"] == "output"]
+        if not base_present:
+            assert outputs == []
+            return
+        assert outputs == [
+            {
+                "kind": "output",
+                "hasOverlay": overlay_present or mask_present,
+                "hasOverlayImage": overlay_present,
+            }
+        ]

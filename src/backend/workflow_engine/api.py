@@ -323,7 +323,8 @@ def get_workflow_execution_results(
 
     ``images`` lists what actually exists on disk: the
     ``{"kind": "output"}`` entry only when the run's base output artifact
-    is present, followed by one additive
+    is present (its ``hasOverlayImage`` says whether ``.../overlay-image``
+    has a server-rendered overlay to serve), followed by one additive
     ``{"kind": "node", "nodeId", "port"}`` entry per persisted
     inference-node frame (``run_artifacts.list_node_images``, port-generic
     so ``bedrock_inference`` and ``llm_inference`` surface identically).
@@ -343,6 +344,13 @@ def get_workflow_execution_results(
                 "hasOverlay": run_artifacts.overlay_artifact_exists(
                     execution.output_dir, execution.capture_id
                 ),
+                # The server-rendered overlay (detection boxes) served by
+                # ``.../overlay-image``; ``hasOverlay`` keeps its broader
+                # "overlay or mask" meaning (run-detection-visibility 4.4).
+                "hasOverlayImage": run_artifacts.overlay_image_path(
+                    execution.output_dir, execution.capture_id
+                )
+                is not None,
             }
         )
     for entry in node_images:

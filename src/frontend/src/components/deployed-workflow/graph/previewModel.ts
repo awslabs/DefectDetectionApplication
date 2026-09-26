@@ -30,12 +30,18 @@ import type {
   NodeRunStatus,
   WorkflowExecutionMetadata,
 } from "api/WorkflowRegistrationAPI";
+import { runDetections } from "../detections";
+import type { RunDetection } from "../detections";
 
 // --------------------------------------------------------------------------
 // Output-node classification (D2 scope; R1.1, R1.4)
 // --------------------------------------------------------------------------
 
-/** Node types that get an output preview (Requirements D2 scope). */
+/**
+ * Node types that get an output preview (Requirements D2 scope), plus
+ * `model_inference`, whose preview is the run's detections
+ * (run-detection-visibility R3.1).
+ */
 export const OUTPUT_NODE_TYPES = new Set([
   "capture",
   "llm_inference",
@@ -43,6 +49,7 @@ export const OUTPUT_NODE_TYPES = new Set([
   "mqtt_publish",
   "opcua_write",
   "digital_output",
+  "model_inference",
 ]);
 
 /** True when the node type is one of the output-node types (R1.1, R1.4). */
@@ -78,6 +85,9 @@ export type PreviewViewModel =
   | { kind: "text"; text: string } // llm_inference (R2.2, snippet applied)
   | { kind: "fields"; fields: [string, string][] } // bedrock_inference (R2.3)
   | { kind: "status"; status: string; detail?: string } // publish types (R2.4)
+  // model_inference: the run's Detection_List, plus the overlay thumbnail
+  // when the run has one (run-detection-visibility R3.2, R3.3).
+  | { kind: "detections"; detections: RunDetection[]; imageSrc?: string }
   | { kind: "unavailable" }; // missing data (R3.3)
 
 /** The three publish-style output types whose preview is the run status. */
@@ -135,6 +145,25 @@ function fieldValue(value: unknown): string {
 }
 
 /**
+ * The run's top-level verdict fields (`is_anomalous`, `confidence`) as
+ * display rows, in that order; empty when neither is present. Bedrock merges
+ * them into the run metadata (R2.3), and an anomaly model's `model_inference`
+ * run records them through its capture tags (run-detection-visibility R3.4).
+ */
+function verdictFields(
+  metadata: WorkflowExecutionMetadata | undefined,
+): [string, string][] {
+  const fields: [string, string][] = [];
+  if (metadata !== undefined && "is_anomalous" in metadata) {
+    fields.push(["is_anomalous", fieldValue(metadata.is_anomalous)]);
+  }
+  if (metadata !== undefined && "confidence" in metadata) {
+    fields.push(["confidence", fieldValue(metadata.confidence)]);
+  }
+  return fields;
+}
+
+/**
  * Compute the preview view-model for the selected node.
  *
  * State precedence (evaluated in order; design "State precedence"):
@@ -148,6 +177,10 @@ function fieldValue(value: unknown): string {
  *      (R2.2, R3.3, R3.4).
  *    - `bedrock_inference`: loading → `loading`; `is_anomalous`/`confidence`
  *      present → `fields`; else `unavailable` (R2.3, R3.3, R3.4).
+ *    - `model_inference`: loading → `loading`; the run's Detection_List →
+ *      `detections` (with `overlayImageSrc` as its thumbnail when given);
+ *      else `is_anomalous`/`confidence` → `fields`; else `unavailable`
+ *      (run-detection-visibility R3.2–R3.5).
  *    - publish types → `status` with the node's status and detail (R2.4).
  */
 export function previewViewModel(args: {
@@ -159,6 +192,8 @@ export function previewViewModel(args: {
   metadata?: WorkflowExecutionMetadata;
   metadataLoading: boolean;
   metadataError: boolean;
+  /** The run's overlay image URL, when it has one (model_inference only). */
+  overlayImageSrc?: string;
 }): PreviewViewModel {
   const {
     nodeType,
@@ -169,6 +204,7 @@ export function previewViewModel(args: {
     metadata,
     metadataLoading,
     metadataError,
+    overlayImageSrc,
   } = args;
 
   // 1. Not an output node → no preview (R1.4).
@@ -204,7 +240,8 @@ export function previewViewModel(args: {
       : { kind: "status", status: status as string };
   }
 
-  // Metadata-backed types (llm_inference / bedrock_inference).
+  // Metadata-backed types (llm_inference / bedrock_inference /
+  // model_inference).
   if (metadataLoading) {
     return { kind: "loading" };
   }
@@ -223,13 +260,19 @@ export function previewViewModel(args: {
     return { kind: "unavailable" };
   }
 
-  // bedrock_inference: top-level merged fields (R2.3).
-  const fields: [string, string][] = [];
-  if (metadata !== undefined && "is_anomalous" in metadata) {
-    fields.push(["is_anomalous", fieldValue(metadata.is_anomalous)]);
+  if (nodeType === "model_inference") {
+    // The run's Detection_List wins; an anomaly model's verdict fields are
+    // the fallback (run-detection-visibility R3.2, R3.4).
+    const detections = runDetections(metadata);
+    if (detections !== null) {
+      return overlayImageSrc !== undefined
+        ? { kind: "detections", detections, imageSrc: overlayImageSrc }
+        : { kind: "detections", detections };
+    }
   }
-  if (metadata !== undefined && "confidence" in metadata) {
-    fields.push(["confidence", fieldValue(metadata.confidence)]);
-  }
+
+  // bedrock_inference (and a non-detection model_inference): top-level
+  // merged fields (R2.3).
+  const fields = verdictFields(metadata);
   return fields.length > 0 ? { kind: "fields", fields } : { kind: "unavailable" };
 }

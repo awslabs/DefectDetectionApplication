@@ -438,6 +438,54 @@ class TestWorkflows(LocalServerBaseTestCase):
             )
         assert response.status_code == 404, f"status_code: {response.status_code}"
 
+    # ------------------------------------------------------------------ #
+    # run-detection-visibility: the server-rendered overlay image
+    # (Requirements 4.1-4.3, 4.5), same shape as output-image above.
+    # ------------------------------------------------------------------ #
+    def test_load_workflow_execution_overlay_image_serves_file(self):
+        class _Exec:
+            output_dir = "/aws_dda/captures/wf-1/exec-1"
+            capture_id = "wf-1-exec-1"
+
+        self._override_download_db(_Exec())
+        with patch(
+            "endpoints.download_file.run_artifacts.overlay_image_path",
+            return_value="test/backend-test/captured_images_for_test/test-1.jpg",
+        ) as resolve_mock, patch(
+            "endpoints.download_file.validate_token_in_query_param"
+        ) as auth_mock:
+            response = self.client.get(
+                "/workflows/executions/exec-1/overlay-image?token=tok-1"
+            )
+        # The path comes only from the execution record (Requirement 4.5).
+        resolve_mock.assert_called_once_with(
+            "/aws_dda/captures/wf-1/exec-1", "wf-1-exec-1"
+        )
+        # Same token-in-query authorization as output-image (Requirement 4.3).
+        auth_mock.assert_called_once_with("tok-1")
+        assert response.status_code == 200, f"status_code: {response.status_code}"
+        assert response.headers["content-type"] == "image/jpeg"
+
+    def test_load_workflow_execution_overlay_image_unknown_execution_404(self):
+        self._override_download_db(None)
+        response = self.client.get("/workflows/executions/nope/overlay-image")
+        assert response.status_code == 404, f"status_code: {response.status_code}"
+
+    def test_load_workflow_execution_overlay_image_missing_file_404(self):
+        class _Exec:
+            output_dir = "/aws_dda/captures/wf-1/exec-1"
+            capture_id = "wf-1-exec-1"
+
+        self._override_download_db(_Exec())
+        with patch(
+            "endpoints.download_file.run_artifacts.overlay_image_path",
+            return_value=None,
+        ):
+            response = self.client.get(
+                "/workflows/executions/exec-1/overlay-image"
+            )
+        assert response.status_code == 404, f"status_code: {response.status_code}"
+
     @patch("utils.server_setup.inference_result_accessor.list_inference_result_data_with_capture_task_id")
     @patch("utils.server_setup.capture_task_manager.get_tasks", return_value=[{"captureTaskId": "fake-2d8b47fdadcb47859578be3e2c76e072","workflowId": "fake","interval": 5,"count": 5,"status": "Running"}])
     def test_get_capture_task_status(self, mock_get_tasks, mock_list_capture):
