@@ -74,3 +74,73 @@ export function normalizeCloudFrontDomain(
   domain = domain.replace(/\/+$/, '');
   return domain.length > 0 ? domain : undefined;
 }
+/**
+ * Resolves the `detectorExportImage` CDK context value
+ * (detector-checkpoint-import design D2). This is the Export_Image a
+ * Conversion_Job runs. It lands in ModelConverterHandler's
+ * `DETECTOR_EXPORT_IMAGE`, and every Conversion_Record carries it.
+ *
+ * - Absent or blank: returns '' (conversion is not configured). Convert then
+ *   returns 503 and inspect reports `convertible: false` with that reason
+ *   (Requirement 4.8).
+ * - Otherwise the value MUST be an ECR image pinned by digest,
+ *   `<account>.dkr.ecr.<region>.amazonaws.com/<repository>@sha256:<64 hex>`.
+ *   A tag is mutable, so it cannot be the image a record says it ran; any
+ *   other value fails the synth.
+ */
+export function detectorExportImage(contextValue: unknown): string {
+  if (contextValue === undefined || contextValue === null) return '';
+  if (typeof contextValue !== 'string') {
+    throw new Error(
+      `detectorExportImage must be a string (an ECR image URI pinned by digest); got ${typeof contextValue}`,
+    );
+  }
+  const uri = contextValue.trim();
+  if (uri.length === 0) return '';
+  const pinned =
+    /^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com(\.cn)?\/[a-z0-9]+(?:[._\/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/;
+  if (!pinned.test(uri)) {
+    throw new Error(
+      'detectorExportImage must be an ECR image pinned by digest ' +
+        '(<account>.dkr.ecr.<region>.amazonaws.com/<repository>@sha256:<digest>, as ' +
+        `detector-export-image/build-and-push.sh --push prints); got ${uri}`,
+    );
+  }
+  return uri;
+}
+
+/** SSM parameter bin/app.ts falls back to for `detectorExportImage`. */
+export const DETECTOR_EXPORT_IMAGE_SSM_PARAMETER = '/dda-portal/detector-export-image';
+
+/**
+ * The default `detectorExportImage` context bin/app.ts hands to the App
+ * (detector-checkpoint-import task 10). This follows the trusted-account
+ * precedent: env `DETECTOR_EXPORT_IMAGE` first, then the SSM parameter
+ * {@link DETECTOR_EXPORT_IMAGE_SSM_PARAMETER}.
+ *
+ * App-props context is overridden by every CLI or cdk.json value, so
+ * `-c detectorExportImage=...` still wins. `-c detectorExportImage=` (blank)
+ * still disables conversion. What this adds: a routine deploy that passes no
+ * `-c` at all (deploy-infrastructure.sh, and deploy-frontend.sh's compute
+ * redeploy) keeps the configured image instead of silently resetting it and
+ * turning every convert into a 503.
+ *
+ * Returns undefined when neither source has a value. A failed SSM read (no
+ * parameter, no credentials) also counts as no value. Validation stays with
+ * {@link detectorExportImage}, so a bad value from either source still fails
+ * the synth.
+ */
+export function detectorExportImageDefault(
+  env: Record<string, string | undefined>,
+  readSsmParameter: (name: string) => string | undefined,
+): string | undefined {
+  const fromEnv = (env.DETECTOR_EXPORT_IMAGE ?? '').trim();
+  if (fromEnv) return fromEnv;
+  let fromSsm = '';
+  try {
+    fromSsm = (readSsmParameter(DETECTOR_EXPORT_IMAGE_SSM_PARAMETER) ?? '').trim();
+  } catch {
+    return undefined;
+  }
+  return fromSsm && fromSsm !== 'None' ? fromSsm : undefined;
+}

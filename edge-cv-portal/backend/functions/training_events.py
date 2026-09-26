@@ -10,6 +10,10 @@ from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError
 
+# Imported-detector conversions (detector-checkpoint-import Requirement 7):
+# the shared Conversion_Status reducer (shared layer, stdlib only).
+from detector_conversion import is_detector_conversion_record, reconcile_conversion
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -67,6 +71,11 @@ def handle_training_state_change(event: Dict, context: Any) -> Dict:
         
         training_job = items[0]
         training_id = training_job['training_id']
+
+        # A Conversion_Record never takes the generic status copy or the
+        # auto-compile below (detector-checkpoint-import Requirement 7.3).
+        if is_detector_conversion_record(training_job):
+            return handle_conversion_state_change(table, training_job, detail)
         
         # Update training job status in DynamoDB
         timestamp = int(datetime.utcnow().timestamp() * 1000)
@@ -236,6 +245,53 @@ def handle_training_state_change(event: Dict, context: Any) -> Dict:
             'statusCode': 500,
             'body': json.dumps({'error': str(e)})
         }
+
+
+def handle_conversion_state_change(table: Any, record: Dict, detail: Dict) -> Dict:
+    """The EventBridge writer for a Conversion_Record (detector-checkpoint-
+    import Requirements 7.3-7.6): the shared reducer's conditional transition,
+    and the async packaging finalize only when this writer won the
+    InProgress -> Finalizing claim. Terminal records are never touched."""
+    training_id = record['training_id']
+    status = detail.get('TrainingJobStatus')
+    transition = reconcile_conversion(
+        table, record, status, detail.get('FailureReason'),
+        (detail.get('ModelArtifacts') or {}).get('S3ModelArtifacts'),
+        int(datetime.utcnow().timestamp() * 1000),
+        lambda_client=boto3.client('lambda'),
+        packaging_function=os.environ.get('PACKAGING_FUNCTION_NAME'))
+    if transition is None:
+        logger.info(f"Conversion {training_id}: no transition for SageMaker status {status} "
+                    f"(conversion.status {(record.get('conversion') or {}).get('status')})")
+    else:
+        logger.info(f"Conversion {training_id}: {transition.from_status} -> {transition.to_status}"
+                    f"{' (finalize invoked)' if transition.invoke_finalize else ''}")
+        if transition.to_status == 'Failed' and ALERT_TOPIC_ARN:
+            try:
+                sns.publish(
+                    TopicArn=ALERT_TOPIC_ARN,
+                    Subject=f"Model conversion failed: {detail.get('TrainingJobName')}"[:100],
+                    Message=json.dumps({
+                        'alert_type': 'model_conversion_failed',
+                        'training_id': training_id,
+                        'training_job_name': detail.get('TrainingJobName'),
+                        'failure_reason': transition.set_fields.get('failure_reason'),
+                        'usecase_id': record.get('usecase_id'),
+                        'model_name': record.get('model_name'),
+                    }, indent=2))
+            except Exception as e:
+                logger.error(f"Error sending SNS notification: {str(e)}")
+    return {
+        'statusCode': 200,
+        'body': json.dumps({
+            'training_id': training_id,
+            'status': status,
+            'conversion_status': transition.to_status if transition else
+            (record.get('conversion') or {}).get('status'),
+            'finalize_invoked': bool(transition and transition.invoke_finalize),
+            'compilation_triggered': False,
+        })
+    }
 
 
 def handler(event: Dict, context: Any) -> Dict:

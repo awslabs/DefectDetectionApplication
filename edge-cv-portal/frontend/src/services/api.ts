@@ -1108,6 +1108,123 @@ export interface DetectionRecordFields {
   top_k?: number;
 }
 
+/**
+ * `inspection_result.checkpoint` for a `.pt` / `.pth` source
+ * (detector-checkpoint-import Requirement 2): what the Checkpoint_Probe read
+ * from the file without unpickling it, and whether the portal can convert it
+ * to ONNX. It is a pre-flight verdict only: convert re-classifies the source
+ * server-side and never trusts what the page was shown (Requirement 4.1).
+ */
+export interface CheckpointAssessment {
+  /** 'ultralytics_checkpoint' | 'rfdetr_checkpoint' | 'torchscript' | 'state_dict' | 'legacy_torch' | 'onnx' | 'unknown'. */
+  kind: string;
+  arch: DetectionArch | null;
+  task: string | null;
+  model_class: string | null;
+  head_classes: string[];
+  num_classes: number | null;
+  /** In class-index order; null when the checkpoint stores no names. */
+  class_names: string[] | null;
+  /** YOLO `train_args.imgsz` / RF-DETR `args.resolution` (or the size's native resolution). */
+  train_input_size: number | null;
+  /** The library that saved the checkpoint: 'ultralytics' | 'rfdetr'. */
+  framework: string | null;
+  framework_version: string | null;
+  /** RF-DETR only: the inferred size, when the probe could tell. */
+  rfdetr_size?: RfDetrSize | null;
+  convertible: boolean;
+  /** Every failed condition, in user-facing words (Requirement 2.4). */
+  reasons: string[];
+}
+
+/** `conversion.status` of a Conversion_Record (Requirement 7). */
+export type ConversionStatus = 'InProgress' | 'Finalizing' | 'Completed' | 'Failed';
+
+/**
+ * What the portal's own validator read from the converted ONNX (the graph
+ * facts) plus the job's bounded, display-only claims (exporter, fleet-floor
+ * runtime, Parity_Check maxima), kept on a Completed Conversion_Record.
+ */
+export interface ConversionOnnxSummary {
+  ir_version?: number;
+  opset?: number;
+  input?: number[];
+  outputs?: number[][];
+  output_names?: string[];
+  /** YOLO: anchor count of the [1, 4 + C, N] output. */
+  anchors?: number;
+  /** RF-DETR: query count. */
+  top_k?: number;
+  exporter?: string | null;
+  fleet_floor_onnxruntime?: string | null;
+  parity_max_abs?: { box_max_abs?: number | null; score_max_abs?: number | null };
+  parity_runtimes?: string[];
+  onnx_bytes?: number;
+}
+
+/** `TrainingJobs.conversion` on a Conversion_Record (Requirements 4.6, 7, 11.3). */
+export interface ConversionDetails {
+  status: ConversionStatus;
+  job_name: string;
+  /** The Export_Image, pinned by digest (`…/dda-detector-export@sha256:…`). */
+  export_image?: string;
+  source_s3?: string;
+  source_sha256?: string;
+  source_bytes?: number;
+  source_framework?: string | null;
+  source_framework_version?: string | null;
+  started_at?: number;
+  finalizing_at?: number;
+  completed_at?: number;
+  failed_at?: number;
+  onnx_sha256?: string | null;
+  onnx_summary?: ConversionOnnxSummary;
+}
+
+/** `POST /models/upload-url` (Requirement 3): a presigned PUT for a server-issued key. */
+export interface ModelUploadUrlResponse {
+  upload_url: string;
+  model_s3_uri: string;
+  expires_in: number;
+}
+
+/** `POST /models/convert`, packaged import: an ONNX source or the PyTorch/Neo path. */
+export interface PackagedModelImportResponse {
+  converted_model_s3_uri: string;
+  model_name: string;
+  model_type: string;
+  input_shape: number[];
+  model_info: {
+    type: string;
+    architecture_hints: string[];
+    suggested_type?: string;
+  };
+  message: string;
+  import_result?: {
+    training_id: string;
+    message: string;
+  };
+  training_id?: string;
+  import_error?: string;
+  conversion?: undefined;
+}
+
+/**
+ * `POST /models/convert` for a detector checkpoint with ONNX output
+ * (Requirement 4.2(e)): the Conversion_Job has started and the record exists;
+ * the server validates, packages and publishes when the job finishes, so the
+ * page must not call packaging itself (Requirement 10.5).
+ */
+export interface CheckpointConversionStarted {
+  training_id: string;
+  model_name: string;
+  status: 'InProgress';
+  conversion: { status: ConversionStatus; job_name: string };
+  fine_tunable?: FineTunableCheckpoint | null;
+}
+
+export type ModelConvertResponse = PackagedModelImportResponse | CheckpointConversionStarted;
+
 /** A `TrainingJobs` record as returned by `GET /training` (fields the portal reads). */
 export interface TrainingJobRecord {
   training_id: string;
@@ -1127,6 +1244,8 @@ export interface TrainingJobRecord {
   metrics?: Record<string, number>;
   detection?: DetectionRecordFields;
   metadata?: { fine_tunable?: FineTunableCheckpoint | null; [key: string]: unknown };
+  /** Present only on a Conversion_Record (detector-checkpoint-import). */
+  conversion?: ConversionDetails;
   created_at: number;
   [key: string]: unknown;
 }
@@ -3940,6 +4059,12 @@ class ApiService {
       num_outputs?: number;
       input_shapes?: (number | null)[][];
       output_shapes?: (number | null)[][];
+      // .pt / .pth sources (detector-checkpoint-import Requirement 2): the
+      // pre-flight block, the class names in index order, and whether the
+      // file is a training checkpoint the portal keeps for fine-tuning.
+      class_names?: string[] | null;
+      checkpoint?: CheckpointAssessment;
+      fine_tunable?: boolean;
     };
     supported_model_types: Record<string, {
       description: string;
@@ -3947,6 +4072,23 @@ class ApiService {
     }>;
   }> {
     return this.request('/models/inspect', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * Presigned PUT for uploading a model file from the browser
+   * (detector-checkpoint-import Requirement 3). The server issues the key
+   * (`model-uploads/<uuid>/<name>` in the use case's own bucket); PUT the
+   * file to `upload_url`, then inspect and convert `model_s3_uri`.
+   */
+  async getModelUploadUrl(data: {
+    usecase_id: string;
+    file_name: string;
+    size_bytes: number;
+  }): Promise<ModelUploadUrlResponse> {
+    return this.request('/models/upload-url', {
       method: 'POST',
       body: JSON.stringify(data),
     });
@@ -3974,24 +4116,10 @@ class ApiService {
     // Detection resize geometry: letterbox (true) vs squash (false). Must match
     // how the model was trained — a mismatch silently degrades detections.
     preserve_aspect?: boolean;
-  }): Promise<{
-    converted_model_s3_uri: string;
-    model_name: string;
-    model_type: string;
-    input_shape: number[];
-    model_info: {
-      type: string;
-      architecture_hints: string[];
-      suggested_type?: string;
-    };
-    message: string;
-    import_result?: {
-      training_id: string;
-      message: string;
-    };
-    training_id?: string;
-    import_error?: string;
-  }> {
+  }): Promise<ModelConvertResponse> {
+    // A detector checkpoint with export_format 'onnx' starts a conversion and
+    // answers with the record id and `conversion`; everything else answers
+    // with the packaged import, as before.
     return this.request('/models/convert', {
       method: 'POST',
       body: JSON.stringify(data),

@@ -118,3 +118,100 @@ describe('CompilationTab — portal-trained detection gating (Req 7.1)', () => {
     expect(screen.queryByText('Component Actions')).toBeNull();
   });
 });
+
+/**
+ * detector-checkpoint-import task 8.4 (Requirements 11.4, 9.5-9.7, 7.9): a
+ * Conversion_Record is a detection ONNX package. Its metadata names the
+ * PyTorch checkpoint it was converted from (framework PYTORCH,
+ * checkpoint.pt), yet it never goes through Neo. Packaging is the server's
+ * job: Package is disabled while the conversion runs or after it failed, and
+ * stays available while Finalizing so a lost finalize can be retried.
+ */
+describe('CompilationTab — detector Conversion_Record', () => {
+  const conversionJob = (conversionStatus: string) =>
+    ({
+      ...baseJob,
+      training_id: 'cnv-1',
+      model_name: 'ppe-detection',
+      model_version: '1.0.0',
+      dataset_manifest_s3: undefined,
+      source: 'imported',
+      model_type: 'object_detection',
+      runtime: 'onnx',
+      instance_type: 'ml.m5.xlarge',
+      status:
+        conversionStatus === 'Completed' ? 'Completed' : conversionStatus === 'Failed' ? 'Failed' : 'InProgress',
+      metadata: {
+        framework: 'PYTORCH',
+        framework_version: 'ultralytics 8.4.2',
+        model_file: 'checkpoint.pt',
+        pt_file: 'checkpoint.pt',
+        fine_tunable: {
+          arch: 'yolo',
+          kind: 'ultralytics_checkpoint',
+          checkpoint_s3: 's3://bucket/converted-models/ppe_detection-1a2b3c4d/checkpoint.pt',
+          class_names: ['helmet', 'human', 'no-helmet', 'vest'],
+          num_classes: 4,
+        },
+      },
+      conversion: { status: conversionStatus, job_name: 'ppe_detection-cnv-20261001120000' },
+      ...(conversionStatus === 'Completed'
+        ? {
+            packaged_components: [
+              { target: 'jetson-xavier-jp7', component_package_s3: 's3://bucket/pkg.zip', status: 'packaged' },
+            ],
+          }
+        : {}),
+    }) as unknown as TrainingJob;
+
+  it('treats a Completed conversion like a detection ONNX package: no Neo, Package and Publish offered', async () => {
+    await renderTab(conversionJob('Completed'));
+
+    expect(screen.queryByText('Start Compilation')).toBeNull();
+    expect(screen.queryByText('No compilation jobs')).toBeNull();
+    expect(screen.getByText('Component Actions')).not.toBeNull();
+    expect(screen.getByText(/don't require\s+SageMaker Neo compilation/)).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Re-package Models' })).not.toBeDisabled();
+    expect(screen.getAllByRole('button', { name: 'Publish Component' })[0]).not.toBeDisabled();
+    expect(screen.getByTestId('conversion-packaging-note').textContent).toContain('packaged automatically');
+    expect(otherApiCalls).not.toContain('startCompilation');
+  });
+
+  it('disables Package while the conversion runs and says the server finalizes', async () => {
+    await renderTab(conversionJob('InProgress'));
+
+    expect(screen.queryByText('Start Compilation')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Package Models' })).toBeDisabled();
+    expect(screen.getByTestId('conversion-packaging-note').textContent).toContain(
+      'validates, packages and publishes the component automatically'
+    );
+    expect(otherApiCalls).not.toContain('startPackaging');
+  });
+
+  it('keeps Package available while Finalizing, to retry a lost finalize', async () => {
+    await renderTab(conversionJob('Finalizing'));
+
+    expect(screen.getByRole('button', { name: 'Package Models' })).not.toBeDisabled();
+    expect(screen.getByTestId('conversion-packaging-note').textContent).toContain('Package Models retries it');
+  });
+
+  it('disables Package for a failed conversion', async () => {
+    await renderTab(conversionJob('Failed'));
+
+    expect(screen.queryByText('Start Compilation')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Package Models' })).toBeDisabled();
+    expect(screen.getByTestId('conversion-packaging-note').textContent).toContain('conversion failed');
+  });
+
+  it('leaves a plain ONNX import (no conversion block) packageable as before', async () => {
+    const { conversion: _c, ...plainImport } = conversionJob('Completed') as unknown as Record<string, unknown>;
+    await renderTab({
+      ...plainImport,
+      metadata: { framework: 'ONNX', model_file: 'model.onnx', pt_file: 'model.onnx', fine_tunable: null },
+    } as unknown as TrainingJob);
+
+    expect(screen.getByText('Component Actions')).not.toBeNull();
+    expect(screen.queryByTestId('conversion-packaging-note')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Re-package Models' })).not.toBeDisabled();
+  });
+});

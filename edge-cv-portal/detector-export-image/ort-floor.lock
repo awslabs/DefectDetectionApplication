@@ -1,0 +1,13 @@
+# Fleet_Floor_Runtime venv (/opt/ort-floor): the oldest onnxruntime among the
+# default packaging targets (JP5 GPU build, CPU / x86 images: 1.16.3 ->
+# ONNX opset <= 19, IR version <= 9). numpy < 2 because 1.16.3 is built
+# against the numpy 1.x ABI.
+coloredlogs==15.0.1
+flatbuffers==25.12.19
+humanfriendly==10.0
+mpmath==1.3.0
+numpy==1.26.4
+onnxruntime==1.16.3
+packaging==26.3
+protobuf==7.36.2
+sympy==1.14.0

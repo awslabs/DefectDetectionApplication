@@ -99,13 +99,34 @@ def _load_model_converter():
     cp.classify_checkpoint = lambda *a, **k: {"kind": "unknown", "fine_tunable": False}
     cp.FINE_TUNABLE_KINDS = ("ultralytics_checkpoint", "rfdetr_checkpoint")
 
+    # detector-checkpoint-import added three imports: the stdlib-only
+    # shared-layer detector_conversion (loaded REAL), the shared-layer s3_cors
+    # (loaded REAL over the boto3 / botocore stubs) and botocore.config.Config
+    # for the SigV4 upload presign (stubbed). None of the #8 sites under test
+    # reach them.
+    cfg = types.ModuleType("botocore.config")
+    cfg.Config = lambda **kwargs: types.SimpleNamespace(**kwargs)
+    botocore.config = cfg
+    aws_stubs = {"boto3": boto3, "botocore": botocore, "botocore.exceptions": exc,
+                 "botocore.config": cfg}
+    dconv = load_module_from_path(
+        "detector_conversion_preservation",
+        "edge-cv-portal/backend/layers/shared/python/detector_conversion.py",
+    )
+    s3_cors = load_module_from_path(
+        "s3_cors_preservation",
+        "edge-cv-portal/backend/layers/shared/python/s3_cors.py",
+        injected_modules=aws_stubs,
+    )
+
     return load_module_from_path(
         "model_converter_preservation",
         "edge-cv-portal/backend/functions/model_converter.py",
         injected_modules={
-            "shared_utils": su, "boto3": boto3,
-            "botocore": botocore, "botocore.exceptions": exc,
+            "shared_utils": su, **aws_stubs,
             "checkpoint_probe": cp,
+            "detector_conversion": dconv,
+            "s3_cors": s3_cors,
         },
     )
 

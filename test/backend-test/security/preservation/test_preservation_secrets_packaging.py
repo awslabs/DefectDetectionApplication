@@ -64,6 +64,13 @@ DETECTION_TRAINING_REL = (
 CHECKPOINT_PROBE_REL = (
     "edge-cv-portal/backend/layers/shared/python/checkpoint_probe.py"
 )
+# Shared-layer module (stdlib only) added by detector-checkpoint-import:
+# packaging.py does ``import detector_conversion as dconv`` (Conversion_Record
+# routing + artifact validator). Loaded REAL, like detection_training, so the
+# production import resolves under the isolated loader.
+DETECTOR_CONVERSION_REL = (
+    "edge-cv-portal/backend/layers/shared/python/detector_conversion.py"
+)
 
 
 def _shared_utils_stub():
@@ -97,6 +104,10 @@ def _make_stubs(lambda_client):
     yaml = types.ModuleType("yaml")
     yaml.safe_load = lambda *a, **k: {}
 
+    detector_conversion = load_module_from_path(
+        "detector_conversion_preservation", DETECTOR_CONVERSION_REL
+    )
+
     return {
         "boto3": boto3,
         "botocore": botocore,
@@ -119,6 +130,8 @@ def _make_stubs(lambda_client):
                 ),
             },
         ),
+        # REAL shared-layer module (detector-checkpoint-import).
+        "detector_conversion": detector_conversion,
     }
 
 

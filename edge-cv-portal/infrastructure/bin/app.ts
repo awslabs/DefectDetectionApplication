@@ -10,9 +10,36 @@ import { NodeDesignerStack } from '../lib/node-designer-stack';
 import { BuildFleetStack } from '../lib/build-fleet-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
 import { FrontendStack } from '../lib/frontend-stack';
-import { normalizeCloudFrontDomain } from '../lib/context-helpers';
+import { detectorExportImageDefault, normalizeCloudFrontDomain } from '../lib/context-helpers';
 
-const app = new cdk.App();
+// One SSM String parameter, read synchronously via the AWS CLI (the same
+// mechanism as the trusted-account fallback below). Throws on any failure;
+// callers treat that as "no value".
+function readSsmParameter(name: string): string {
+  const region =
+    process.env.CDK_DEFAULT_REGION ||
+    process.env.AWS_REGION ||
+    process.env.AWS_DEFAULT_REGION ||
+    'us-east-1';
+  return execFileSync(
+    'aws',
+    ['ssm', 'get-parameter', '--name', name, '--query', 'Parameter.Value', '--output', 'text',
+      '--region', region],
+    { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }
+  ).trim();
+}
+
+// Default for `-c detectorExportImage` (detector-checkpoint-import): env
+// DETECTOR_EXPORT_IMAGE, then SSM /dda-portal/detector-export-image. Context
+// given to the App constructor is only a default: a -c or cdk.json value
+// always wins, so an explicit (even blank) -c behaves exactly as before. It
+// stops routine flag-less deploys from resetting the configured Export_Image.
+const detectorExportImageFallback = detectorExportImageDefault(process.env, readSsmParameter);
+const app = new cdk.App(
+  detectorExportImageFallback
+    ? { context: { detectorExportImage: detectorExportImageFallback } }
+    : undefined,
+);
 
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,

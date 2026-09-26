@@ -23,6 +23,7 @@ import {
 import { apiService } from '../services/api';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
+import { COMPILATION_TARGET_OPTIONS } from '../utils/compilationTargets';
 
 interface ValidationResult {
   valid: boolean;
@@ -41,14 +42,6 @@ interface ValidationResult {
   error?: string;
   details?: string[];
 }
-
-const COMPILATION_TARGETS: MultiselectProps.Option[] = [
-  { label: 'x86_64 CPU', value: 'x86_64-cpu', description: 'Intel/AMD 64-bit processors' },
-  { label: 'x86_64 CUDA', value: 'x86_64-cuda', description: 'NVIDIA GPU on x86_64' },
-  { label: 'ARM64 CPU', value: 'arm64-cpu', description: 'ARM 64-bit processors' },
-  { label: 'Jetson Xavier / Orin (JetPack 5.x)', value: 'jetson-xavier-jp5', description: 'NVIDIA Jetson Xavier or Orin — device runtime CUDA 11.4, TensorRT 8.5.2' },
-  { label: 'Jetson Orin (JetPack 6.x)', value: 'jetson-xavier-jp6', description: 'NVIDIA Jetson Orin — device runtime CUDA 12.2, TensorRT 8.6.2' },
-];
 
 export default function ImportModel() {
   const navigate = useNavigate();
@@ -389,7 +382,7 @@ export default function ImportModel() {
                         <Multiselect
                           selectedOptions={compilationTargets}
                           onChange={({ detail }) => setCompilationTargets(detail.selectedOptions as MultiselectProps.Option[])}
-                          options={COMPILATION_TARGETS}
+                          options={COMPILATION_TARGET_OPTIONS}
                           placeholder="Select compilation targets"
                           filteringType="auto"
                         />

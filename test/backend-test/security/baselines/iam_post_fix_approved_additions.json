@@ -9,13 +9,22 @@
       "greengrass component/coreDevice/deployment actions": "component build + device deployment paths",
       "iam:PassRole": "SageMaker job submission; conditioned on iam:PassedToService=sagemaker.amazonaws.com and limited to arn:aws:iam::*:role/DDA*Role",
       "iot / sagemaker / lambda / logs / s3 / tag / execute-api": "device registry, training + labeling, worker invocation, job log viewing, artifact and dataset access",
-      "sts:AssumeRole": "cross-account use-case access, scoped to explicit account ids (the fixture renders 222222222222/333333333333) - the I1-I4 pattern, not a wildcard account"
+      "sts:AssumeRole": "cross-account use-case access, scoped to explicit account ids (the fixture renders 222222222222/333333333333) - the I1-I4 pattern, not a wildcard account",
+      "lambda:InvokeFunction on PackagingHandler (2 statements)": "detector-checkpoint-import: TrainingHandler (sync-on-read) and TrainingEventsHandler (SageMaker state change) invoke the Packaging finalize for a Conversion_Record once its job completes (Requirements 7.4, 7.9; packagingHandler.grantInvoke in compute-stack.ts). Scoped to the one PackagingHandler function ARN and its versions/aliases (:*)."
     },
     "follow_up_not_blocking": [
       "s3:GetObject/s3:PutObject on arn:aws:s3:::*/* together with s3:ListAllMyBuckets grants read/write to every object in every bucket in the account; narrow to the portal's own buckets plus registered data-account buckets when that wiring allows it.",
       "logs:GetLogEvents/FilterLogEvents on Resource '*' could be narrowed to the portal's own log groups (logs:DescribeLogGroups genuinely requires '*')."
     ],
-    "reviewed": "Purely additive: 52 added, 0 removed. No wildcard administrative action, no unconditioned iam:PassRole, no wildcard-account sts:AssumeRole."
+    "reviewed": "Purely additive: 52 added, 0 removed. No wildcard administrative action, no unconditioned iam:PassRole, no wildcard-account sts:AssumeRole.",
+    "additions_after_2026_09_18": [
+      {
+        "spec": ".kiro/specs/detector-checkpoint-import (tasks.md 9.3)",
+        "added_on": "2026-09-25",
+        "statements": 2,
+        "reviewed": "Purely additive: 2 added, 0 removed. lambda:InvokeFunction on a single function ARN; no wildcard resource, no new iam:PassRole or sts:AssumeRole. The spec's ECR repository policy (dda-detector-export, pull-only for the trusted use-case accounts' DDASageMakerExecutionRole) is a resource policy, outside this IAM statement multiset; no ECR pull grant was added (the use-case role already has one)."
+      }
+    ]
   },
   "note": "IAM statements that the live tree synthesizes IN ADDITION to iam_baseline_<stack>.template.json (F'(X)). They post-date the security-iam-authorization-fixes I1-I4 rewrite and belong to features merged afterwards, so they are deliberately NOT recorded in iam_baseline_cdk_i_changes.json: that file must keep describing only the I1-I4 rewrite, and test_baseline_drift_confined_to_I1_I4 must keep proving that confinement against the untouched baselines. test_synth_iam_statements_match_fixed_baseline adds this allowlist to the baseline before comparing, so any statement that is neither in the baseline nor approved here still fails the gate, and any REMOVED statement still fails. Counting is per principal (iam_grant_atoms): a grant counts once per role that holds it, however CDK spreads that role's statements over its default policy and OverflowPolicy managed policies, so EdgeCVPortalComputeStack's policy minimization (compute-stack.ts) cannot move the gate. Two approvals that only re-granted a permission the same role already held through another approved statement were folded away when the unit changed from documents to principals (nothing newly approved): the iot:GetThingShadow/UpdateThingShadow on thing/* statement (covered by the iot device-registry statement) and s3:PutObject in the portal-artifacts-bucket statement (covered by that role's grantReadWrite statement).",
   "stacks": {
@@ -71,7 +80,9 @@
         "{\"Action\": [\"s3:GetObject\", \"s3:PutObject\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*/*\"}",
         "{\"Action\": [\"s3:GetObject*\", \"s3:GetBucket*\", \"s3:List*\", \"s3:DeleteObject*\", \"s3:PutObject\", \"s3:PutObjectLegalHold\", \"s3:PutObjectRetention\", \"s3:PutObjectTagging\", \"s3:PutObjectVersionTagging\", \"s3:Abort*\"], \"Effect\": \"Allow\", \"Resource\": [{\"Fn::ImportValue\": \"EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D\"}, {\"Fn::Join\": [\"\", [{\"Fn::ImportValue\": \"EdgeCVPortalStorageStack:ExportsOutputFnGetAttPortalArtifactsBucket31E9D392ArnA9B0CB6D\"}, \"/*\"]]}]}",
         "{\"Action\": [\"s3:ListBucket\", \"s3:GetBucketLocation\", \"s3:GetBucketTagging\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*\"}",
-        "{\"Action\": [\"sagemaker:CreateTrainingJob\", \"sagemaker:DescribeTrainingJob\", \"sagemaker:ListTrainingJobs\", \"sagemaker:CreateCompilationJob\", \"sagemaker:DescribeCompilationJob\", \"sagemaker:ListCompilationJobs\", \"sagemaker:CreateLabelingJob\", \"sagemaker:DescribeLabelingJob\", \"sagemaker:ListLabelingJobs\", \"sagemaker:StopLabelingJob\", \"sagemaker:DescribeWorkteam\", \"sagemaker:AddTags\"], \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:sagemaker:*:*:training-job/*\", \"arn:aws:sagemaker:*:*:compilation-job/*\", \"arn:aws:sagemaker:*:*:labeling-job/*\", \"arn:aws:sagemaker:*:*:model/*\", \"arn:aws:sagemaker:*:*:workteam/*\"]}"
+        "{\"Action\": [\"sagemaker:CreateTrainingJob\", \"sagemaker:DescribeTrainingJob\", \"sagemaker:ListTrainingJobs\", \"sagemaker:CreateCompilationJob\", \"sagemaker:DescribeCompilationJob\", \"sagemaker:ListCompilationJobs\", \"sagemaker:CreateLabelingJob\", \"sagemaker:DescribeLabelingJob\", \"sagemaker:ListLabelingJobs\", \"sagemaker:StopLabelingJob\", \"sagemaker:DescribeWorkteam\", \"sagemaker:AddTags\"], \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:sagemaker:*:*:training-job/*\", \"arn:aws:sagemaker:*:*:compilation-job/*\", \"arn:aws:sagemaker:*:*:labeling-job/*\", \"arn:aws:sagemaker:*:*:model/*\", \"arn:aws:sagemaker:*:*:workteam/*\"]}",
+        "{\"Action\": \"lambda:InvokeFunction\", \"Effect\": \"Allow\", \"Resource\": [{\"Fn::GetAtt\": [\"PackagingHandlerE6BEDE0E\", \"Arn\"]}, {\"Fn::Join\": [\"\", [{\"Fn::GetAtt\": [\"PackagingHandlerE6BEDE0E\", \"Arn\"]}, \":*\"]]}]}",
+        "{\"Action\": \"lambda:InvokeFunction\", \"Effect\": \"Allow\", \"Resource\": [{\"Fn::GetAtt\": [\"PackagingHandlerE6BEDE0E\", \"Arn\"]}, {\"Fn::Join\": [\"\", [{\"Fn::GetAtt\": [\"PackagingHandlerE6BEDE0E\", \"Arn\"]}, \":*\"]]}]}"
       ]
     }
   }

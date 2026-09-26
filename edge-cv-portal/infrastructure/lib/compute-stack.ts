@@ -14,6 +14,7 @@ import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as iot from 'aws-cdk-lib/aws-iot';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as cr from 'aws-cdk-lib/custom-resources';
+import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
 import { Construct } from 'constructs';
 import * as path from 'path';
@@ -27,7 +28,11 @@ import { QuickSetupApiStack } from './quick-setup-api-stack';
 import { DdaLabelingApiStack } from './dda-labeling-api-stack';
 import { WorkflowManagerGapsApiStack } from './workflow-manager-gaps-api-stack';
 import { WorkflowTuningApiStack } from './workflow-tuning-api-stack';
-import { groundedSamWorkerEnabled, portalRegistryEnforced } from './context-helpers';
+import {
+  detectorExportImage as resolveDetectorExportImage,
+  groundedSamWorkerEnabled,
+  portalRegistryEnforced,
+} from './context-helpers';
 import { PYTHON_CONTAINER_ASSET_EXCLUDES } from './container-asset-excludes';
 
 export interface ComputeStackProps extends cdk.StackProps {
@@ -1385,6 +1390,13 @@ export class ComputeStack extends cdk.Stack {
     // Update packaging handler environment with Greengrass function name
     packagingHandler.addEnvironment('GREENGRASS_PUBLISH_FUNCTION_NAME', greengrassPublishHandler.functionName);
 
+    // detector-checkpoint-import (Requirement 7.5): sync-on-read
+    // (training.get_training_job) may win the InProgress -> Finalizing claim
+    // for a Conversion_Record and then invokes Packaging asynchronously to
+    // finalize it. TrainingEventsHandler gets the same wiring below.
+    trainingHandler.addEnvironment('PACKAGING_FUNCTION_NAME', packagingHandler.functionName);
+    packagingHandler.grantInvoke(trainingHandler);
+
     // Components Lambda Handler for Greengrass Component Browser
     const componentsHandler = new lambda.Function(this, 'ComponentsHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
@@ -1465,6 +1477,48 @@ export class ComputeStack extends cdk.Stack {
     // Grant Model Import Lambda permission to invoke compilation
     compilationHandler.grantInvoke(modelImportHandler);
 
+    // Export_Image repository for imported detector checkpoints
+    // (detector-checkpoint-import design D2 / Requirement 5.5). The image is
+    // built and pushed out of band by edge-cv-portal/detector-export-image/
+    // build-and-push.sh and handed to the portal by digest
+    // (-c detectorExportImage=<repo-uri>@sha256:<digest>). A CDK
+    // DockerImageAsset is not used: it lands in the bootstrap repository,
+    // whose policy cannot grant use-case accounts a pull. RETAIN, so a stack
+    // teardown never deletes the image a Conversion_Record names.
+    const detectorExportRepository = new ecr.Repository(this, 'DetectorExportRepository', {
+      repositoryName: 'dda-detector-export',
+      imageScanOnPush: true,
+      imageTagMutability: ecr.TagMutability.IMMUTABLE,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    // Conversion_Jobs run in the use case's account under its
+    // DDASageMakerExecutionRole, which SageMaker uses to pull the image. That
+    // role already allows ECR pulls on '*' (usecase-account-stack.ts), so the
+    // repository policy is the only grant a cross-account pull needs. Concrete
+    // role ARNs only, taken from the trusted use-case account list the portal
+    // already scopes sts:AssumeRole to. Verified single-account only (spike,
+    // docs/detector-checkpoint-import-spike.md).
+    detectorExportRepository.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'UseCaseSageMakerExecutionRolePull',
+      effect: iam.Effect.ALLOW,
+      principals: props.trustedUseCaseAccountIds.map(
+        (id) => new iam.ArnPrincipal(`arn:aws:iam::${id}:role/DDASageMakerExecutionRole`)
+      ),
+      actions: [
+        'ecr:BatchCheckLayerAvailability',
+        'ecr:BatchGetImage',
+        'ecr:GetDownloadUrlForLayer',
+      ],
+    }));
+    new cdk.CfnOutput(this, 'DetectorExportRepositoryUri', {
+      value: detectorExportRepository.repositoryUri,
+      description: 'ECR repository for the detector checkpoint Export_Image (build-and-push.sh --push)',
+    });
+    // '' when unset: conversion is then reported as not configured (503).
+    const detectorExportImage = resolveDetectorExportImage(
+      this.node.tryGetContext('detectorExportImage'),
+    );
+
     // Model Converter Lambda Handler for auto-generating DDA metadata
     const modelConverterHandler = new lambda.Function(this, 'ModelConverterHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
@@ -1475,6 +1529,9 @@ export class ComputeStack extends cdk.Stack {
         ...lambdaEnvironment,
         MODEL_IMPORT_FUNCTION_NAME: modelImportHandler.functionName,
         CODE_VERSION: '2025-01-10-converter',
+        // detector-checkpoint-import: the pinned Export_Image; '' disables
+        // conversion (convert -> 503, inspect -> convertible: false).
+        DETECTOR_EXPORT_IMAGE: detectorExportImage,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(600), // 10 minutes for large model conversion
@@ -3167,6 +3224,10 @@ export class ComputeStack extends cdk.Stack {
         ...lambdaEnvironment,
         ALERT_TOPIC_ARN: trainingAlertTopic.topicArn,
         COMPILATION_FUNCTION_NAME: compilationHandler.functionName,
+        // detector-checkpoint-import: the finalize invoke for a
+        // Conversion_Record whose InProgress -> Finalizing claim this
+        // handler wins (Requirement 7.5).
+        PACKAGING_FUNCTION_NAME: packagingHandler.functionName,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(60),
@@ -3177,6 +3238,8 @@ export class ComputeStack extends cdk.Stack {
     
     // Grant permission to invoke compilation Lambda
     compilationHandler.grantInvoke(trainingEventsHandler);
+    // ... and the Packaging Lambda (conversion finalize, see above)
+    packagingHandler.grantInvoke(trainingEventsHandler);
 
     // Compilation Events Lambda Handler (for EventBridge)
     const compilationEventsHandler = new lambda.Function(this, 'CompilationEventsHandler', {

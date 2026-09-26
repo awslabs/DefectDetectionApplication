@@ -50,6 +50,10 @@ from detection_training import (
     normalize_detection_arch,
 )
 
+# Imported-detector conversions (detector-checkpoint-import): the record
+# predicate, the untrusted-artifact validator and the Finalizing transitions.
+import detector_conversion as dconv
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -951,6 +955,157 @@ def _trigger_component_creation(training_id: str, training_job: Dict) -> None:
         logger.error(f"Error triggering automatic component creation: {str(e)}")
 
 
+DETECTOR_CONVERSION_TARGETS = ['jetson-xavier-jp5', 'jetson-xavier-jp6', 'jetson-xavier-jp7',
+                               'x86_64-cpu']
+
+
+def _fail_conversion(table, training_id: str, training_job: Dict, user_id: str,
+                     error: 'dconv.ConversionValidationError', finalizing: bool) -> Dict:
+    """Finalizing -> Failed (conditional) for an artifact that failed
+    validation; nothing is packaged or published (Req 8.6)."""
+    if finalizing:
+        dconv.apply_conversion_transition(table, training_id, dconv.plan_finalize_transition(
+            success=False, now_ms=int(datetime.utcnow().timestamp() * 1000),
+            failure_reason=str(error)))
+    log_audit_event(
+        user_id=user_id, action='package_components', resource_type='training_job',
+        resource_id=training_id, result='failure',
+        details={'conversion': True, 'rule': error.rule, 'error': str(error)[:500]},
+    )
+    return create_response(422, {'error': str(error), 'rule': error.rule})
+
+
+def package_detector_conversion(training_id: str, training_job: Dict, body: Dict, user_id: str,
+                                requested_targets: Optional[List[str]]) -> Dict:
+    """Package a Conversion_Record (detector-checkpoint-import Requirements
+    7.9, 8 and 9).
+
+    InProgress -> 400 (still converting); Failed -> 400 with its reason.
+    Finalizing (the async finalize, or the Package action retrying a lost
+    invoke) and Completed (a re-package) both: HeadObject cap -> download ->
+    validate_conversion_artifact (the output is untrusted) ->
+    package_trained_detection_component, unchanged -> a conditional
+    Finalizing -> Completed with the validated ONNX facts. Component creation
+    follows the finalize that won, or an auto-triggered re-package.
+    """
+    usecase_id = training_job['usecase_id']
+    conv_status = dconv.conversion_status(training_job)
+    if conv_status == dconv.CONVERSION_IN_PROGRESS:
+        return create_response(400, {'error': 'The checkpoint conversion is still running'})
+    if conv_status == dconv.CONVERSION_FAILED:
+        return create_response(400, {
+            'error': training_job.get('failure_reason') or 'The checkpoint conversion failed'})
+    if conv_status not in (dconv.CONVERSION_FINALIZING, dconv.CONVERSION_COMPLETED):
+        return create_response(400, {'error': f"Unknown conversion status {conv_status!r}"})
+    if conv_status == dconv.CONVERSION_COMPLETED and body.get('finalize_conversion'):
+        # A repeated finalize (e.g. an async-invoke retry) never re-packages
+        # or re-publishes; an explicit Package action still re-packages.
+        return create_response(200, {
+            'training_id': training_id,
+            'packaged_components': training_job.get('packaged_components') or [],
+            'message': 'Conversion already finalized',
+            'component_creation_triggered': False,
+        })
+    finalizing = conv_status == dconv.CONVERSION_FINALIZING
+    table = dynamodb.Table(TRAINING_JOBS_TABLE)
+
+    artifact_s3 = training_job.get('artifact_s3')
+    if not artifact_s3:
+        return _fail_conversion(table, training_id, training_job, user_id,
+                                dconv.ConversionValidationError('artifact', 'the record has no artifact_s3'),
+                                finalizing)
+    usecase = get_usecase(usecase_id)
+    s3_usecase = get_usecase_client(
+        's3', usecase,
+        session_name=f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64])
+    parsed = urlparse(artifact_s3)
+    bucket, key = parsed.netloc, parsed.path.lstrip('/')
+
+    # Req 8.1: size before bytes.
+    try:
+        head = s3_usecase.head_object(Bucket=bucket, Key=key)
+    except ClientError as e:
+        if str(e.response.get('Error', {}).get('Code')) in ('404', 'NoSuchKey', 'NotFound'):
+            return _fail_conversion(table, training_id, training_job, user_id,
+                                    dconv.ConversionValidationError('artifact', f'{artifact_s3} does not exist'),
+                                    finalizing)
+        raise
+    size = int(head.get('ContentLength') or 0)
+    if size > dconv.ARTIFACT_SIZE_CAP:
+        return _fail_conversion(table, training_id, training_job, user_id,
+                                dconv.ConversionValidationError(
+                                    'size', f'artifact is {size} bytes; the limit is {dconv.ARTIFACT_SIZE_CAP}'),
+                                finalizing)
+
+    # Req 8.2-8.5: the artifact is attacker-controlled until validated.
+    temp_dir = tempfile.mkdtemp(prefix="dda_conv_validate_")
+    try:
+        local_tar = os.path.join(temp_dir, 'model.tar.gz')
+        s3_usecase.download_file(bucket, key, local_tar)
+        work = os.path.join(temp_dir, 'members')
+        os.makedirs(work)
+        try:
+            validated = dconv.validate_conversion_artifact(local_tar, training_job, work)
+        except dconv.ConversionValidationError as e:
+            logger.error(f"Conversion artifact for {training_id} rejected: {e}")
+            return _fail_conversion(table, training_id, training_job, user_id, e, finalizing)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Req 9.2: exactly the trained-detection packager. Its extractall is safe
+    # on this tarball: it has just been proven to hold exactly two regular
+    # files (design section 7).
+    targets = requested_targets or list(DETECTOR_CONVERSION_TARGETS)
+    try:
+        component_s3_uri = package_trained_detection_component(
+            artifact_s3, training_job, s3_usecase, usecase)
+    except Exception as e:
+        # The record stays Finalizing / Completed: the Package action retries.
+        logger.error(f"Conversion component packaging failed: {str(e)}")
+        return create_response(500, {'error': f"Failed to package detection component: {str(e)}"})
+    packaged_components = [
+        {'target': t, 'component_package_s3': component_s3_uri, 'status': 'packaged'}
+        for t in targets
+    ]
+
+    now_ms = int(datetime.utcnow().timestamp() * 1000)
+    if finalizing:
+        won = dconv.apply_conversion_transition(table, training_id, dconv.plan_finalize_transition(
+            success=True, now_ms=now_ms, packaged_components=packaged_components,
+            onnx_sha256=validated.onnx_sha256, onnx_summary=validated.summary))
+        if not won:
+            # Another finalize completed (or failed) the record first; its
+            # component is the published one.
+            logger.info(f"Conversion {training_id} was finalized concurrently; not publishing again")
+            return create_response(409, {
+                'error': 'The conversion was finalized by another request',
+                'training_id': training_id})
+    else:
+        table.update_item(
+            Key={'training_id': training_id},
+            UpdateExpression='SET packaged_components = :components, updated_at = :updated',
+            ExpressionAttributeValues={':components': packaged_components, ':updated': now_ms},
+        )
+    log_audit_event(
+        user_id=user_id, action='package_components', resource_type='training_job',
+        resource_id=training_id, result='success',
+        details={'targets': targets, 'packaged_count': len(targets), 'runtime': 'onnx',
+                 'model_type': 'object_detection', 'conversion': True,
+                 'onnx_sha256': validated.onnx_sha256,
+                 'source_sha256': (training_job.get('conversion') or {}).get('source_sha256')},
+    )
+    trigger = finalizing or bool(body.get('auto_triggered'))
+    if trigger:
+        _trigger_component_creation(training_id, training_job)
+    return create_response(200, {
+        'training_id': training_id,
+        'packaged_components': packaged_components,
+        'message': f'Packaged converted detection (ONNX) component for {len(targets)} target(s)',
+        'component_creation_triggered': trigger,
+        'conversion': {'status': dconv.CONVERSION_COMPLETED, 'onnx_sha256': validated.onnx_sha256},
+    })
+
+
 def package_components(event: Dict, context: Any) -> Dict:
     """
     Package compiled models as Greengrass components
@@ -1059,6 +1214,16 @@ def package_components(event: Dict, context: Any) -> Dict:
                 'message': f'Packaged vLLM component for {len(vllm_targets)} target(s)',
                 'component_creation_triggered': auto_triggered,
             })
+
+        # ── Imported detector conversion (detector-checkpoint-import) ─────
+        # A Conversion_Record's model.onnx came out of an isolated job that
+        # ran attacker-controllable code: it is validated before it is
+        # packaged, by the trained-detection packager below. Routed before
+        # both the trained-detection and imported-ONNX blocks, which a
+        # Conversion_Record never matches (Req 9.1).
+        if dconv.is_detector_conversion_record(training_job):
+            return package_detector_conversion(training_id, training_job, body, user_id,
+                                               requested_targets)
 
         # ── Trained detection (ONNX) bypass ────────────────────────────────
         # Portal-trained Object Detection jobs already exported model.onnx in

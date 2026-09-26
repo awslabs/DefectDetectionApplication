@@ -40,6 +40,9 @@ from compilation_status import (  # noqa: F401  (derive_compilation_status re-ex
 # Portal-trained Object Detection records already hold model.onnx and take the
 # same no-Neo path as imported ONNX (portal-detection-training Req 5.1).
 from detection_training import is_trained_detection_record
+# Imported-detector conversions already hold model.onnx (detector-checkpoint-
+# import Requirement 9.1): they take the same no-Neo exit.
+from detector_conversion import is_detector_conversion_record
 
 # Configure logging
 logger = logging.getLogger()
@@ -450,7 +453,8 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
         # carries no mochi.json, so extract_and_repackage_model below would
         # raise. Neo cannot emit ONNX anyway (that is what the 'onnx'
         # pseudo-target exists for), so even that step is redundant here.
-        if _is_onnx_import(training_job) or is_trained_detection_record(training_job):
+        if (_is_onnx_import(training_job) or is_trained_detection_record(training_job)
+                or is_detector_conversion_record(training_job)):
             if _is_onnx_import(training_job):
                 logger.info(f"Imported ONNX model {training_id}: skipping Neo compilation")
             else:

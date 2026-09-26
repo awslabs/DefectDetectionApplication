@@ -132,6 +132,12 @@ export class ApiModelStack extends cdk.NestedStack {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
+    // detector-checkpoint-import Requirement 3 (duplicate of api-gateway-stack.ts)
+    const modelUploadUrlResource = modelsResource.addResource('upload-url');
+    modelUploadUrlResource.addMethod('POST', modelConverterIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
 
     const modelTypesResource = modelsResource.addResource('types');
     modelTypesResource.addMethod('GET', modelConverterIntegration, {

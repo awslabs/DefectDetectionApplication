@@ -18,6 +18,8 @@ import {
 } from '@cloudscape-design/components';
 import { CompilationJob, TrainingJob } from '../types';
 import { apiService } from '../services/api';
+import { conversionStatusOf, isDetectorConversionRecord } from '../utils/detectorConversion';
+import { COMPILATION_TARGETS } from '../utils/compilationTargets';
 import {
   normalizeCompilationStatus,
   isDiagnosticCompilationJob,
@@ -29,46 +31,9 @@ interface CompilationTabProps {
   onRefresh?: () => void;
 }
 
-// Available compilation targets with descriptions
+// Available compilation targets with descriptions: the one list the import
+// pages' auto-compile pickers also use (utils/compilationTargets.ts).
 // (JetPack 4 and its 'jetson-xavier' target are no longer supported.)
-const COMPILATION_TARGETS = [
-  {
-    id: 'jetson-xavier-jp5',
-    name: 'NVIDIA Jetson Xavier / Orin (JetPack 5.x)',
-    description: 'ARM64 Jetson Xavier or Orin on JetPack 5 — device runtime CUDA 11.4, TensorRT 8.5.2',
-    recommended: true,
-  },
-  {
-    id: 'jetson-xavier-jp6',
-    name: 'NVIDIA Jetson Orin (JetPack 6.x)',
-    description: 'ARM64 Jetson Orin on JetPack 6 — device runtime CUDA 12.2, TensorRT 8.6.2',
-    recommended: false,
-  },
-  {
-    id: 'x86_64-cpu',
-    name: 'x86_64 CPU',
-    description: 'Standard x86 64-bit CPU-only inference',
-    recommended: true,
-  },
-  {
-    id: 'x86_64-cuda',
-    name: 'x86_64 with CUDA',
-    description: 'x86 64-bit with NVIDIA GPU acceleration',
-    recommended: false,
-  },
-  {
-    id: 'arm64-cpu',
-    name: 'ARM64 CPU',
-    description: 'ARM 64-bit CPU-only inference (e.g., AWS Graviton)',
-    recommended: false,
-  },
-  {
-    id: 'onnx',
-    name: 'ONNX Runtime (portable)',
-    description: 'Export the trained model to ONNX (.onnx) for the pluggable ONNX Runtime engine — runs on Jetson/x86 without Neo/DLR. GPU acceleration (CUDA/TensorRT) is available on JetPack 5 and 6. ONNX is the vision route for JetPack 7. See docs/multi-runtime-inference.md.',
-    recommended: false,
-  },
-];
 
 export default function CompilationTab({ trainingId, trainingJob, onRefresh }: CompilationTabProps) {
   const [compilationJobs, setCompilationJobs] = useState<CompilationJob[]>(trainingJob.compilation_jobs || []);
@@ -459,11 +424,24 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   // `runtime: 'onnx'` alone is the signal (matching the backend predicate
   // detection_training.is_trained_detection_record): an `object_detection`
   // record WITHOUT it is a TorchScript detector that still goes through Neo.
+  //
+  // A detector Conversion_Record (detector-checkpoint-import Req 11.4) is a
+  // detection ONNX package too: the converted model.onnx is packaged like a
+  // portal-trained detector and never goes through Neo. Its metadata says
+  // PYTORCH / checkpoint.pt (the fine-tunable source), so it is named here
+  // explicitly rather than left to the runtime check alone.
+  const isConversionRecord = isDetectorConversionRecord(tj);
+  const conversionStatus = conversionStatusOf(tj);
   const isOnnxModel =
+    isConversionRecord ||
     String(tj?.metadata?.framework || '').toUpperCase() === 'ONNX' ||
     String(tj?.validation_result?.metadata?.framework || '').toUpperCase() === 'ONNX' ||
     String(tj?.metadata?.model_file || tj?.metadata?.pt_file || '').toLowerCase().endsWith('.onnx') ||
     String(tj?.runtime || '').toLowerCase() === 'onnx';
+  // Packaging a conversion that is still running, or that failed, is a 400
+  // (Req 9.7); while Finalizing, Package is how a lost finalize is retried
+  // (Req 7.9), so it stays available then.
+  const conversionBlocksPackaging = conversionStatus === 'InProgress' || conversionStatus === 'Failed';
 
   if (compilationJobs.length === 0 && !isOnnxModel) {
     return (
@@ -703,6 +681,20 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
                 Greengrass component. One package deploys to all targets (JetPack 5/6/7, x86).
               </Alert>
             )}
+            {isConversionRecord && (
+              <Alert
+                type={conversionStatus === 'Failed' ? 'error' : 'info'}
+                data-testid="conversion-packaging-note"
+              >
+                {conversionStatus === 'InProgress'
+                  ? 'The checkpoint is still being converted to ONNX. When the job finishes, the portal validates, packages and publishes the component automatically; there is nothing to package yet.'
+                  : conversionStatus === 'Failed'
+                  ? 'The checkpoint conversion failed, so there is no ONNX to package. The reason is shown on the Overview tab.'
+                  : conversionStatus === 'Finalizing'
+                  ? 'The portal is validating and packaging the converted ONNX. If this does not finish, Package Models retries it.'
+                  : 'This model was converted from a detector checkpoint and packaged automatically. Re-package or publish a new version here.'}
+              </Alert>
+            )}
             
             <ColumnLayout columns={2}>
               <Box>
@@ -717,7 +709,7 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
                   <Button
                     onClick={handleStartPackaging}
                     loading={packagingLoading}
-                    disabled={packagingLoading || publishLoading}
+                    disabled={packagingLoading || publishLoading || conversionBlocksPackaging}
                   >
                     {hasPackagedComponents ? 'Re-package Models' : 'Package Models'}
                   </Button>

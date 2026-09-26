@@ -50,6 +50,14 @@ from detection_training import (
     resolve_detection_training_image,
     validate_detection_manifest_entry,
 )
+# Imported-detector conversions (detector-checkpoint-import Requirement 7):
+# the shared Conversion_Status reducer both status writers route through.
+from detector_conversion import (
+    apply_transition_to_record,
+    is_detector_conversion_record,
+    plan_conversion_transition,
+    reconcile_conversion,
+)
 
 # Configure logging
 logger = logging.getLogger()
@@ -1051,6 +1059,27 @@ def list_training_jobs(event: Dict, context: Any) -> Dict:
         return create_response(500, {'error': 'Internal server error'})
 
 
+def sync_conversion_record(table: Any, job: Dict, sm_response: Dict, now_ms: int) -> Dict:
+    """Sync-on-read for a Conversion_Record (detector-checkpoint-import
+    Requirements 7.3-7.6): reconcile against SageMaker through the shared
+    reducer and return the record as it now reads."""
+    status = sm_response.get('TrainingJobStatus')
+    reason = sm_response.get('FailureReason')
+    artifact = (sm_response.get('ModelArtifacts') or {}).get('S3ModelArtifacts')
+    transition = reconcile_conversion(
+        table, job, status, reason, artifact, now_ms,
+        lambda_client=boto3.client('lambda'),
+        packaging_function=os.environ.get('PACKAGING_FUNCTION_NAME'))
+    if transition is not None:
+        return apply_transition_to_record(job, transition)
+    if plan_conversion_transition(job, status, reason, artifact, now_ms) is not None:
+        # Our read was stale and another writer moved the record first:
+        # return what it wrote, not the pre-race view.
+        fresh = table.get_item(Key={'training_id': job['training_id']}).get('Item')
+        return fresh or job
+    return job
+
+
 def get_training_job(event: Dict, context: Any) -> Dict:
     """
     Get training job details and sync status from SageMaker
@@ -1127,6 +1156,15 @@ def get_training_job(event: Dict, context: Any) -> Dict:
                 
                 status = sm_response['TrainingJobStatus']
                 timestamp = int(datetime.utcnow().timestamp() * 1000)
+
+                # A Conversion_Record never takes the generic status copy
+                # below (detector-checkpoint-import Requirement 7.3): the
+                # shared reducer moves it with a conditional write, and only
+                # the winner of the InProgress -> Finalizing claim invokes the
+                # packaging finalize.
+                if is_detector_conversion_record(job):
+                    return create_response(200, sync_conversion_record(table, job, sm_response,
+                                                                       timestamp))
 
                 # Object Detection jobs declare MetricDefinitions, so their
                 # test mAP / precision / recall arrive in FinalMetricDataList.

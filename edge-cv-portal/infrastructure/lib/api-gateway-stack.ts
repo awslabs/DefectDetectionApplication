@@ -638,6 +638,13 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
+    // detector-checkpoint-import Requirement 3: presigned PUT for a browser
+    // upload of a .pt / .pth / .onnx into a server-issued staging key.
+    const modelUploadUrlResource = modelsResource.addResource('upload-url');
+    modelUploadUrlResource.addMethod('POST', modelConverterIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
 
     const modelTypesResource = modelsResource.addResource('types');
     modelTypesResource.addMethod('GET', modelConverterIntegration, {

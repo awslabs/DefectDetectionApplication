@@ -28,6 +28,16 @@ from shared_utils import (
 # Smart Import keeps a fine-tunable .pt/.pth as a sidecar so it can later be a
 # base model (rfdetr-training-and-transfer-learning Requirement 7).
 from checkpoint_probe import classify_checkpoint
+# Checkpoint -> ONNX conversion of imported detectors (detector-checkpoint-
+# import): the pure assessment / request / job / record pieces (stdlib only).
+# The checkpoint itself is only ever deserialized inside the network-isolated
+# Conversion_Job, never in this Lambda.
+import hashlib
+import re
+import time
+import detector_conversion as dconv
+from s3_cors import ensure_bucket_cors
+from botocore.config import Config
 
 # Configure logging
 logger = logging.getLogger()
@@ -40,6 +50,15 @@ sts = boto3.client('sts')
 # Environment variables
 TRAINING_JOBS_TABLE = os.environ.get('TRAINING_JOBS_TABLE')
 USECASES_TABLE = os.environ.get('USECASES_TABLE')
+# The pinned Export_Image (-c detectorExportImage); '' = conversion disabled.
+DETECTOR_EXPORT_IMAGE = os.environ.get('DETECTOR_EXPORT_IMAGE', '').strip()
+# Browser uploads (detector-checkpoint-import Requirement 3): a server-issued
+# key under this prefix of the use case bucket, presigned for 15 minutes with
+# SigV4. SigV4 query-string presigns sign only `host`, so the Content-Type the
+# browser picks cannot break the signature (camera_registry.PIN_S3_CLIENT_CONFIG).
+MODEL_UPLOAD_PREFIX = 'model-uploads'
+MODEL_UPLOAD_URL_TTL_S = 900
+UPLOAD_S3_CLIENT_CONFIG = Config(signature_version='s3v4')
 
 
 # ── Trusted model-source allowlist (#8) ─────────────────────────────────────
@@ -168,6 +187,310 @@ def get_usecase_details(usecase_id: str) -> Dict:
     except Exception as e:
         logger.error(f"Error getting use case details: {str(e)}")
         raise
+
+
+# ── Imported detector checkpoints (detector-checkpoint-import) ──────────────
+# Inspect classifies a .pt/.pth with the envelope-only probe and reports
+# whether it converts (Requirement 2); upload-url issues a presigned PUT into a
+# server-chosen staging key (Requirement 3); convert starts a network-isolated
+# Conversion_Job and writes the Conversion_Record (Requirement 4). Nothing here
+# imports torch or deserializes a checkpoint.
+
+def make_usecase_client(service: str, credentials: Dict, region: Optional[str] = None,
+                        config: Optional[Config] = None):
+    """Any boto3 client from assume_usecase_role() output (the
+    make_usecase_s3_client pattern, plus region and botocore config)."""
+    kwargs: Dict[str, Any] = {}
+    if region:
+        kwargs['region_name'] = region
+    if config is not None:
+        kwargs['config'] = config
+    if credentials.get('is_default_credentials'):
+        return boto3.client(service, **kwargs)
+    return boto3.client(
+        service,
+        aws_access_key_id=credentials['AccessKeyId'],
+        aws_secret_access_key=credentials['SecretAccessKey'],
+        aws_session_token=credentials['SessionToken'],
+        **kwargs,
+    )
+
+
+def _usecase_region(usecase: Dict) -> str:
+    return str(usecase.get('region') or os.environ.get('AWS_REGION', 'us-east-1'))
+
+
+def checkpoint_size_rejection(s3_client, bucket: str, key: str) -> Tuple[Optional[int], Optional[Dict]]:
+    """HeadObject the source and enforce the Checkpoint_Size_Cap BEFORE any
+    download (Requirements 2.7 and 3.6: a presigned PUT cannot bound what was
+    uploaded). Returns (size, None), or (None, the 400 response)."""
+    try:
+        head = s3_client.head_object(Bucket=bucket, Key=key)
+    except ClientError as e:
+        code = str(e.response.get('Error', {}).get('Code', ''))
+        if code in ('404', 'NoSuchKey', 'NotFound'):
+            return None, create_response(400, {'error': f"model_s3_uri s3://{bucket}/{key} does not exist"})
+        raise
+    size = int(head.get('ContentLength') or 0)
+    if size > dconv.CHECKPOINT_SIZE_CAP:
+        return None, create_response(400, {'error': (
+            f"Checkpoint is {size} bytes; the checkpoint size cap is {dconv.CHECKPOINT_SIZE_CAP} "
+            f"bytes ({dconv.CHECKPOINT_SIZE_CAP >> 20} MiB)")})
+    return size, None
+
+
+def inspect_checkpoint_file(local_path: str, usecase: Dict) -> Dict:
+    """Smart Import's inspection result for a .pt/.pth (Requirement 2): the
+    probe's classification as the `checkpoint` block, with today's fields
+    (type, suggested_type, detection_arch, num_classes, class_names,
+    input_width/height, architecture_hints) pre-filled from it."""
+    probe = classify_checkpoint(local_path)
+    unavailable = dconv.conversion_unavailable_reason(DETECTOR_EXPORT_IMAGE, _usecase_region(usecase))
+    assessment = dconv.assess_checkpoint(probe, conversion_available=unavailable is None,
+                                         unavailable_reason=unavailable)
+    info = dconv.assessment_prefill(assessment)
+    info['checkpoint'] = assessment
+    info['fine_tunable'] = bool(probe.get('fine_tunable'))
+    return info
+
+
+_UPLOAD_NAME_UNSAFE = re.compile(r'[^A-Za-z0-9._-]+')
+_TAG_VALUE_UNSAFE = re.compile(r'[^\w\s.:/=+\-@]')
+
+
+def sanitise_upload_name(file_name: str) -> str:
+    """The last path component, reduced to [A-Za-z0-9_-] plus its accepted
+    extension in lower case (so the stored key keeps the .pt / .pth / .onnx
+    that inspect and convert route on); never empty, never a path."""
+    base = str(file_name or '').replace('\\', '/').rsplit('/', 1)[-1]
+    lower = base.lower()
+    ext = next((e for e in dconv.UPLOAD_EXTENSIONS if lower.endswith(e)), '')
+    stem = base[:len(base) - len(ext)]
+    stem = _UPLOAD_NAME_UNSAFE.sub('_', stem.replace('.', '_')).strip('._-')[:100] or 'model'
+    return f"{stem}{ext}"
+
+
+def _tag_value(value: Any) -> str:
+    return _TAG_VALUE_UNSAFE.sub('_', str(value))[:256]
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def get_model_upload_url(event: Dict, context: Any) -> Dict:
+    """
+    Presigned PUT for uploading a model file from the browser (Requirement 3).
+    POST /api/v1/models/upload-url
+
+    Request body: {"usecase_id": "...", "file_name": "best.pt", "size_bytes": 5475290}
+    Response: {"upload_url", "model_s3_uri", "expires_in"}. The key is
+    `model-uploads/<uuid4>/<sanitised file_name>` in the use case's own bucket;
+    the caller never chooses bucket or prefix.
+    """
+    try:
+        user = get_user_from_event(event)
+        user_id = user['user_id']
+        try:
+            body = json.loads(event.get('body') or '{}')
+        except ValueError:
+            return create_response(400, {'error': 'Request body must be JSON'})
+        if not isinstance(body, dict):
+            return create_response(400, {'error': 'Request body must be a JSON object'})
+        error = validate_required_fields(body, ['usecase_id', 'file_name', 'size_bytes'])
+        if error:
+            return create_response(400, {'error': error})
+        usecase_id = str(body['usecase_id'])
+        if not check_user_access(user_id, usecase_id, 'DataScientist'):
+            return create_response(403, {'error': 'Insufficient permissions'})
+
+        file_name = str(body['file_name'])
+        if not file_name.lower().endswith(dconv.UPLOAD_EXTENSIONS):
+            return create_response(400, {'error': (
+                f"file_name must end in {', '.join(dconv.UPLOAD_EXTENSIONS)}; got {file_name!r}")})
+        size = body['size_bytes']
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            return create_response(400, {'error': 'size_bytes must be a positive integer'})
+        if size > dconv.CHECKPOINT_SIZE_CAP:
+            return create_response(400, {'error': (
+                f"File is {size} bytes; the checkpoint size cap is {dconv.CHECKPOINT_SIZE_CAP} bytes "
+                f"({dconv.CHECKPOINT_SIZE_CAP >> 20} MiB)")})
+
+        usecase = get_usecase_details(usecase_id)
+        bucket = usecase.get('s3_bucket')
+        if not bucket:
+            return create_response(400, {'error': 'The use case has no S3 bucket'})
+        credentials = assume_usecase_role(
+            usecase['cross_account_role_arn'],
+            usecase.get('external_id'),
+            f"upload-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
+        )
+        s3_client = make_usecase_client('s3', credentials, region=_usecase_region(usecase),
+                                        config=UPLOAD_S3_CLIENT_CONFIG)
+        key = f"{MODEL_UPLOAD_PREFIX}/{uuid.uuid4()}/{sanitise_upload_name(file_name)}"
+        # Same bucket CORS handling as data_management.get_upload_url (Req 3.5).
+        ensure_bucket_cors(s3_client, bucket)
+        # No ContentType in Params: the browser's header is then not signed.
+        upload_url = s3_client.generate_presigned_url(
+            'put_object', Params={'Bucket': bucket, 'Key': key},
+            ExpiresIn=MODEL_UPLOAD_URL_TTL_S)
+        model_s3_uri = f"s3://{bucket}/{key}"
+        log_audit_event(
+            user_id=user_id,
+            action='get_model_upload_url',
+            resource_type='model',
+            resource_id=model_s3_uri,
+            result='success',
+            details={'usecase_id': usecase_id, 'size_bytes': size},
+        )
+        return create_response(200, {'upload_url': upload_url, 'model_s3_uri': model_s3_uri,
+                                     'expires_in': MODEL_UPLOAD_URL_TTL_S})
+    except Exception as e:
+        logger.error(f"Error issuing model upload URL: {str(e)}")
+        return create_response(500, {'error': 'Failed to create upload URL'})
+
+
+def convert_checkpoint(body: Dict, user: Dict, usecase: Dict, credentials: Dict, s3_client,
+                       source_bucket: str, source_key: str, model_s3_uri: str) -> Dict:
+    """POST /models/convert for a .pt/.pth with export_format='onnx'
+    (Requirement 4): start a Conversion_Job and return the record id without
+    waiting. The caller has already checked the DataScientist role and the
+    trusted-source allowlist."""
+    user_id = user['user_id']
+    usecase_id = body['usecase_id']
+    model_name = body['model_name'].strip()
+
+    size, rejection = checkpoint_size_rejection(s3_client, source_bucket, source_key)
+    if rejection is not None:
+        return rejection
+    temp_dir = tempfile.mkdtemp(prefix="model_convert_ckpt_")
+    try:
+        source_ext = os.path.splitext(source_key)[1].lstrip('.').lower() or 'pt'
+        local_model = os.path.join(temp_dir, f'checkpoint.{source_ext}')
+        s3_client.download_file(source_bucket, source_key, local_model)
+
+        # (1) Re-classify server-side: the inspect result the client saw is
+        # never trusted (Req 4.1). 400 with the reasons, nothing created.
+        probe = classify_checkpoint(local_model)
+        assessment = dconv.assess_checkpoint(probe)
+        # (2) Boundary validation (Req 4.3-4.5).
+        try:
+            params = dconv.validate_conversion_request(body, assessment)
+        except ValueError as e:
+            return create_response(400, {'error': str(e), 'checkpoint': assessment})
+        # (3) Is conversion deployed for this use case's region? (Req 4.8)
+        region = _usecase_region(usecase)
+        unavailable = dconv.conversion_unavailable_reason(DETECTOR_EXPORT_IMAGE, region)
+        if unavailable:
+            return create_response(503, {'error': unavailable})
+
+        # (4) The fine-tunable sidecar, exactly as the 'pytorch' branch writes
+        # it (same key scheme, same bytes, same fine_tunable shape), plus its
+        # sha256. Its prefix is the job's only input channel.
+        bucket = usecase['s3_bucket']
+        safe_model_name = model_name.replace(' ', '_').replace('-', '_').lower()
+        hex8 = uuid.uuid4().hex[:8]
+        sidecar_prefix = f"converted-models/{safe_model_name}-{hex8}/"
+        checkpoint_key = f"{sidecar_prefix}checkpoint.{source_ext}"
+        checkpoint_s3 = f"s3://{bucket}/{checkpoint_key}"
+        logger.info(f"Keeping fine-tunable {probe.get('kind')} checkpoint at {checkpoint_s3}")
+        s3_client.upload_file(local_model, bucket, checkpoint_key)
+        fine_tunable = {
+            'arch': probe.get('arch'),
+            'kind': probe.get('kind'),
+            'checkpoint_s3': checkpoint_s3,
+            'class_names': probe.get('class_names'),
+            'num_classes': probe.get('num_classes'),
+        }
+        source_sha256 = _sha256_file(local_model)
+
+        # (5) The Conversion_Job, from the same use-case credentials (Req 5).
+        job_name = dconv.conversion_job_name(safe_model_name, datetime.utcnow().strftime('%Y%m%d%H%M%S'))
+        request = dconv.build_conversion_job_request(
+            job_name=job_name,
+            image_uri=DETECTOR_EXPORT_IMAGE,
+            role_arn=f"arn:aws:iam::{usecase['account_id']}:role/DDASageMakerExecutionRole",
+            input_prefix_s3=f"s3://{bucket}/{sidecar_prefix}",
+            output_s3=f"s3://{bucket}/models/conversion/{job_name}/",
+            params=params,
+            source_sha256=source_sha256,
+            tags=[
+                {'Key': 'UseCase', 'Value': _tag_value(usecase_id)},
+                {'Key': 'ModelName', 'Value': _tag_value(model_name)},
+                {'Key': 'CreatedBy', 'Value': _tag_value(user_id)},
+                {'Key': 'Purpose', 'Value': 'detector-checkpoint-conversion'},
+            ],
+        )
+        sagemaker_client = make_usecase_client('sagemaker', credentials, region=region)
+        try:
+            job_arn = sagemaker_client.create_training_job(**request)['TrainingJobArn']
+        except ClientError as e:
+            message = e.response.get('Error', {}).get('Message') or str(e)
+            logger.error(f"create_training_job failed for {job_name}: {message}")
+            try:  # no record will point at the sidecar: remove it (best effort)
+                s3_client.delete_object(Bucket=bucket, Key=checkpoint_key)
+            except Exception as cleanup_error:  # noqa: BLE001
+                logger.warning(f"Could not remove sidecar {checkpoint_s3}: {cleanup_error}")
+            return create_response(502, {'error': f"Could not start the conversion job: {message}"})
+
+        # (6) The Conversion_Record, written here (Req 4.10).
+        training_id = str(uuid.uuid4())
+        record = dconv.build_conversion_record(
+            training_id=training_id,
+            usecase_id=usecase_id,
+            model_name=model_name,
+            model_version=str(body.get('model_version') or '1.0.0'),
+            created_by=user.get('email') or user_id,
+            params=params,
+            assessment=assessment,
+            fine_tunable=fine_tunable,
+            job_name=job_name,
+            job_arn=job_arn,
+            image_uri=DETECTOR_EXPORT_IMAGE,
+            source_s3=model_s3_uri,
+            source_sha256=source_sha256,
+            source_bytes=size,
+            model_file=f"checkpoint.{source_ext}",
+            now_ms=int(time.time() * 1000),
+        )
+        try:
+            dynamodb.Table(TRAINING_JOBS_TABLE).put_item(Item=record)
+        except Exception:
+            # Never leave a job running that no record tracks.
+            try:
+                sagemaker_client.stop_training_job(TrainingJobName=job_name)
+            except Exception as stop_error:  # noqa: BLE001
+                logger.error(f"Could not stop orphaned conversion job {job_name}: {stop_error}")
+            raise
+
+        log_audit_event(
+            user_id=user_id,
+            action='convert_checkpoint',
+            resource_type='model',
+            resource_id=training_id,
+            result='success',
+            details={
+                'source_uri': model_s3_uri,
+                'source_sha256': source_sha256,
+                'job_name': job_name,
+                'export_image': DETECTOR_EXPORT_IMAGE,
+                'detection_arch': params['arch'],
+                'network_input': params['network_input'],
+            },
+        )
+        return create_response(200, {
+            'training_id': training_id,
+            'model_name': model_name,
+            'status': 'InProgress',
+            'conversion': {'status': dconv.CONVERSION_IN_PROGRESS, 'job_name': job_name},
+            'fine_tunable': fine_tunable,
+        })
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 # ── Dependency-free ONNX graph reader ──────────────────────────────────────
@@ -864,6 +1187,14 @@ def convert_model(event: Dict, context: Any) -> Dict:
                 'error': 'model_s3_uri source bucket is not on the trusted-source allowlist'
             })
 
+        # detector-checkpoint-import (Requirement 4): a .pt/.pth asked for as
+        # ONNX is converted by a network-isolated SageMaker job, instead of
+        # being byte-copied into a package as model.onnx. The 'pytorch' and
+        # ONNX-source paths below are unchanged.
+        if export_format == 'onnx' and dconv.is_checkpoint_key(source_key):
+            return convert_checkpoint(body, user, usecase, credentials, s3_client,
+                                      source_bucket, source_key, model_s3_uri)
+
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_convert_")
         
@@ -1097,6 +1428,14 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
         # (input size, task, detection architecture, num_classes) for UI
         # pre-fill instead of the misleading "Could not inspect model".
         is_onnx = key.lower().endswith('.onnx')
+        # .pt / .pth: the Checkpoint_Size_Cap is enforced on HeadObject before
+        # any download (detector-checkpoint-import Requirement 2.7).
+        is_checkpoint = dconv.is_checkpoint_key(key)
+        if is_checkpoint:
+            _size, rejection = checkpoint_size_rejection(s3_client, bucket, key)
+            if rejection is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return rejection
 
         try:
             # Download the model file (extension-matched so the torch path only
@@ -1108,6 +1447,10 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
             # Inspect the model
             if is_onnx:
                 model_info = inspect_onnx_model(local_model)
+            elif is_checkpoint:
+                # Envelope-only classification + conversion assessment
+                # (Requirement 2): never torch, never an unpickle.
+                model_info = inspect_checkpoint_file(local_model, usecase)
             else:
                 # trusted_source is True here (non-allowlisted sources were
                 # rejected above), enabling the full-checkpoint fallback.
@@ -1171,6 +1514,8 @@ def handler(event: Dict, context: Any) -> Dict:
             return convert_model(event, context)
         elif http_method == 'POST' and '/models/inspect' in path:
             return inspect_model_endpoint(event, context)
+        elif http_method == 'POST' and '/models/upload-url' in path:
+            return get_model_upload_url(event, context)
         elif http_method == 'GET' and '/models/types' in path:
             return get_supported_types(event, context)
         else:

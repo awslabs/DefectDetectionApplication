@@ -1,0 +1,20 @@
+# Top-level pins for the Export_Image (detector-checkpoint-import). The image
+# installs requirements.lock (every transitive dependency pinned), which
+# build-and-push.sh --lock regenerates from this file. torch / torchvision are
+# installed separately from the PyTorch CPU index (see the Dockerfile) and are
+# given here as constraints so the resolver keeps them.
+#
+# ultralytics: the exporter pins its OWN version, newer than the trainers'
+# 8.3.40, because checkpoints are not forward-compatible (the PPE checkpoint
+# was saved by 8.4.2; YOLO26 needs >= 8.4). Equivalence with the trainers is
+# proven by the blue-plate-yolo-ft-v3 oracle, not by a shared pin
+# (design.md D4; docs/detector-checkpoint-import-spike.md).
+ultralytics==8.4.162
+# rfdetr: the trainers' pin, so checkpoint_best_total.pth from portal jobs
+# loads through the exact code that wrote it.
+rfdetr[onnx]==1.10.1
+# ultralytics' ONNX exporter requires onnxslim>=0.1.82 when simplify=True and
+# checks for it at export time; with AutoUpdate off it must be pre-installed.
+onnxslim==0.1.96
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
