@@ -413,3 +413,111 @@ def write_metadata(model_dir: Path, metadata: dict) -> Path:
     path = model_dir / "training_metadata.json"
     path.write_text(json.dumps(metadata, indent=2))
     return path
+
+
+# ---------------------------------------------------------------------------
+# ONNX fleet floor
+# ---------------------------------------------------------------------------
+
+#: onnxruntime 1.16.3 (the JP5 GPU build and the CPU / x86 images) loads ONNX
+#: IR version <= 9 and rejects anything newer at load time.
+FLEET_MAX_IR = 9
+# TensorProto.DataType -> the first IR version that defines it: FLOAT8* need
+# IR 9, UINT4 / INT4 IR 10, FLOAT4E2M1 (and anything newer) IR 11.
+_DTYPE_MIN_IR = {17: 9, 18: 9, 19: 9, 20: 9, 21: 10, 22: 10, 23: 11}
+
+
+def _required_ir_for_opset(opset: int) -> int:
+    """Smallest IR version defining a default-domain opset (onnx Versioning.md)."""
+    return 8 if opset <= 18 else 9 if opset <= 20 else 10
+
+
+def _onnx_type_dtypes(type_proto, out: set) -> None:
+    kind = type_proto.WhichOneof("value")
+    if kind in ("tensor_type", "sparse_tensor_type"):
+        out.add(getattr(type_proto, kind).elem_type)
+    elif kind in ("sequence_type", "optional_type"):
+        _onnx_type_dtypes(getattr(type_proto, kind).elem_type, out)
+    elif kind == "map_type":
+        out.add(type_proto.map_type.key_type)
+        _onnx_type_dtypes(type_proto.map_type.value_type, out)
+
+
+def _onnx_graph_dtypes(graph, out: set, depth: int = 0) -> None:
+    if depth > 16:
+        raise ValueError("subgraphs nested too deeply")
+    for tensor in graph.initializer:
+        out.add(tensor.data_type)
+    for sparse in graph.sparse_initializer:
+        out.update((sparse.values.data_type, sparse.indices.data_type))
+    for value_info in list(graph.input) + list(graph.output) + list(graph.value_info):
+        _onnx_type_dtypes(value_info.type, out)
+    for node in graph.node:
+        for attr in node.attribute:
+            if attr.HasField("t"):
+                out.add(attr.t.data_type)
+            for tensor in attr.tensors:
+                out.add(tensor.data_type)
+            if attr.HasField("sparse_tensor"):
+                out.update((attr.sparse_tensor.values.data_type, attr.sparse_tensor.indices.data_type))
+            if attr.HasField("tp"):
+                _onnx_type_dtypes(attr.tp, out)
+            for tp in attr.type_protos:
+                _onnx_type_dtypes(tp, out)
+            if attr.HasField("g"):
+                _onnx_graph_dtypes(attr.g, out, depth + 1)
+            for sub in attr.graphs:
+                _onnx_graph_dtypes(sub, out, depth + 1)
+
+
+def normalize_onnx_ir_version(path: Path) -> Tuple[Optional[int], Optional[int], str]:
+    """Lower an exported graph's ir_version to what its content needs when
+    that brings it within the fleet floor (IR <= 9); returns (before, after,
+    reason) and rewrites the file only when it lowered the version.
+
+    Why: onnxslim (run by ultralytics' `simplify=True`) re-serializes the
+    export with the installed onnx's IR -- 10 for the pinned onnx 1.17.0 --
+    although torch wrote IR 8 for the opset-17 graph and nothing in it needs
+    more. onnxruntime 1.16.3 (JP5, CPU / x86 images) refuses IR 10, so every
+    portal-trained YOLO component failed to load there (found by the
+    detector-checkpoint-import spike; docs/detector-checkpoint-import-spike.md).
+
+    The graph is left alone when something in it does need the newer IR: a
+    default-domain opset >= 21, model-local functions (IR-10 overloads),
+    UINT4 / INT4 / FLOAT4 element types. `onnx.checker` validates the result
+    before it is written. Never fatal: any failure leaves the file untouched
+    and says why (the packager applies the same header fix at packaging time).
+    """
+    try:
+        import onnx
+    except ImportError as e:
+        return None, None, f"onnx is not available ({e}); ir_version left as is"
+    try:
+        model = onnx.load(str(path), load_external_data=False)
+    except Exception as e:  # noqa: BLE001
+        return None, None, f"could not read {path}: {e}"
+    before = int(model.ir_version)
+    if before <= FLEET_MAX_IR:
+        return before, before, f"IR {before} already loads on onnxruntime 1.16.3"
+    opset = next((int(o.version) for o in model.opset_import if o.domain in ("", "ai.onnx")), None)
+    if opset is None:
+        return before, before, "no default-domain opset; left as is"
+    if len(model.functions):
+        return before, before, f"{len(model.functions)} model-local function(s); left as is"
+    try:
+        dtypes: set = set()
+        _onnx_graph_dtypes(model.graph, dtypes)
+    except ValueError as e:
+        return before, before, f"{e}; left as is"
+    needed = max([_required_ir_for_opset(opset)] +
+                 [_DTYPE_MIN_IR.get(t, 11 if t > 23 else 3) for t in dtypes])
+    if needed > FLEET_MAX_IR:
+        return before, before, (f"the graph needs IR {needed} (opset {opset}); "
+                                f"onnxruntime 1.16.3 cannot load it")
+    model.ir_version = needed
+    try:
+        onnx.checker.check_model(model)
+    except Exception as e:  # noqa: BLE001
+        return before, before, f"IR {needed} does not validate ({e}); left as is"
+    onnx.save(model, str(path))
+    return before, needed, f"ir_version {before} -> {needed} (default-domain opset {opset})"

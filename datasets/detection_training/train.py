@@ -9,7 +9,10 @@ Runs entirely inside the training container:
      (same deterministic, leakage-safe split as the local tool)
   4. fine-tune from pretrained weights, letterboxed at a square imgsz
   5. export ONNX with NO in-graph NMS (the device's
-     YoloDetectionPostProcessor does NMS) and verify the output shape
+     YoloDetectionPostProcessor does NMS), lower the IR header onnxslim
+     stamps (13 under onnx 1.22) to what the opset-17 graph needs (8) so
+     onnxruntime 1.16.3 on JP5 / CPU images can load it, and verify the
+     output shape
   6. write model.onnx + metadata to /opt/ml/model
 
 Geometry contract: train letterboxed at IMGSZ square and export at the same
@@ -47,6 +50,7 @@ from _common import (
     cap_onnx_ir_version,
     fetch_base_weights,
     hp,
+    normalize_onnx_ir_version,
     run_converter,
     stage_manifest_and_images,
     write_metadata,
@@ -311,8 +315,15 @@ def export(model, metrics, base=None, class_names=None):
     shutil.copy2(src, dst)
     print(f"exported {src} -> {dst} ({dst.stat().st_size} bytes)", flush=True)
     # onnxslim (simplify=True) re-serialises the graph with the installed
-    # onnx's IR version; keep the IR the edge runtimes load.
-    cap_onnx_ir_version(dst)
+    # onnx's IR version (13 under the pinned onnx 1.22), and onnxruntime
+    # 1.16.3 (JP5, CPU / x86 images) only loads IR <= 9. Lower it to what the
+    # opset-17 graph needs (8).
+    ir_before, ir_after, ir_note = normalize_onnx_ir_version(dst)
+    print(f"ONNX IR version: {ir_note}", flush=True)
+    # A graph the fleet-floor lowering declined still gets the edge ceiling.
+    capped = cap_onnx_ir_version(dst)
+    if capped is not None and capped[0] != capped[1]:
+        ir_after = capped[1]
 
     # Verify the graph matches what the device decoder expects: one input,
     # one output shaped [1, 4+nc, N]. A surprise here (e.g. NMS baked in, or
@@ -343,7 +354,11 @@ def export(model, metrics, base=None, class_names=None):
     except Exception as e:
         print(f"WARN: could not introspect exported ONNX: {e}", flush=True)
 
-    write_metadata(MODEL_DIR, build_metadata(metrics, shape, base, class_names))
+    meta = build_metadata(metrics, shape, base, class_names)
+    if ir_after is not None:
+        meta["ir_version"] = ir_after
+        meta["ir_version_exported"] = ir_before
+    write_metadata(MODEL_DIR, meta)
 
     # Keep the ultralytics .pt too: it is what you re-export from if the
     # input size or opset needs changing later.

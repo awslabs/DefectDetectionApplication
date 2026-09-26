@@ -64,13 +64,17 @@ DETECTION_TRAINING_REL = (
 CHECKPOINT_PROBE_REL = (
     "edge-cv-portal/backend/layers/shared/python/checkpoint_probe.py"
 )
-# Shared-layer module (stdlib only) added by detector-checkpoint-import:
+# Shared-layer modules (stdlib only) added by detector-checkpoint-import:
 # packaging.py does ``import detector_conversion as dconv`` (Conversion_Record
-# routing + artifact validator). Loaded REAL, like detection_training, so the
-# production import resolves under the isolated loader.
+# routing + artifact validator) and ``from onnx_fleet_ir import ...`` (the
+# trainer IR-version header fix), and onnx_fleet_ir itself imports
+# detector_conversion's wire-format helpers. Loaded REAL, like
+# detection_training, so the production imports resolve under the isolated
+# loader.
 DETECTOR_CONVERSION_REL = (
     "edge-cv-portal/backend/layers/shared/python/detector_conversion.py"
 )
+ONNX_FLEET_IR_REL = "edge-cv-portal/backend/layers/shared/python/onnx_fleet_ir.py"
 
 
 def _shared_utils_stub():
@@ -130,8 +134,12 @@ def _make_stubs(lambda_client):
                 ),
             },
         ),
-        # REAL shared-layer module (detector-checkpoint-import).
+        # REAL shared-layer modules (detector-checkpoint-import).
         "detector_conversion": detector_conversion,
+        "onnx_fleet_ir": load_module_from_path(
+            "onnx_fleet_ir_preservation", ONNX_FLEET_IR_REL,
+            injected_modules={"detector_conversion": detector_conversion},
+        ),
     }
 
 

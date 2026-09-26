@@ -53,6 +53,9 @@ from detection_training import (
 # Imported-detector conversions (detector-checkpoint-import): the record
 # predicate, the untrusted-artifact validator and the Finalizing transitions.
 import detector_conversion as dconv
+# Fleet-floor IR header fix for trained detection graphs (onnxruntime 1.16.3
+# on JP5 and the CPU / x86 images loads IR <= 9).
+from onnx_fleet_ir import FLEET_MAX_IR, normalize_fleet_ir_version
 
 # Configure logging
 logger = logging.getLogger()
@@ -408,6 +411,16 @@ def package_trained_detection_component(trained_model_s3: str, training_job: Dic
         if not onnx_src:
             raise FileNotFoundError(
                 "No .onnx model file found in trained detection artifact")
+        # The YOLO trainer's onnx 1.17 re-serialization stamps ir_version 10
+        # on an opset-17 graph, which onnxruntime 1.16.3 (JP5, CPU / x86
+        # images) refuses to load. Lower the header to what the graph needs
+        # (only the ir_version varint changes); a no-op for IR <= 9.
+        ir_fix = normalize_fleet_ir_version(onnx_src)
+        if ir_fix.changed:
+            logger.info(f"Trained detection model.onnx: {ir_fix.reason}")
+        elif ir_fix.before is not None and ir_fix.before > FLEET_MAX_IR:
+            logger.warning(f"Trained detection model.onnx IR {ir_fix.before} left as is "
+                           f"({ir_fix.reason}); it will not load on JP5 / CPU images")
 
         meta = {}
         if meta_path:
