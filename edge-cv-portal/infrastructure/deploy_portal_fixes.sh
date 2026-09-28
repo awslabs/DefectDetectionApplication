@@ -11,10 +11,16 @@
 #      trust fallback), so a value must be supplied. Defaults to the deploying
 #      account (single-account setup); override for cross-account.
 #
+# Portal_Identity enforcement is kept at its deployed value unless
+# PORTAL_REGISTRY_ENFORCED=true|false says otherwise (see
+# ../scripts/portal-registry-enforcement.sh); without it the CDK default
+# would turn enforcement off for every stack deployed here.
+#
 # Usage:
 #   ./deploy_portal_fixes.sh
 #   TRUSTED_USECASE_ACCOUNT_IDS="111111111111,222222222222" ./deploy_portal_fixes.sh
 #   CDK_STACKS="EdgeCVPortalComputeStack" ./deploy_portal_fixes.sh   # subset
+#   PORTAL_REGISTRY_ENFORCED=true ./deploy_portal_fixes.sh           # turn on
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,16 +54,28 @@ CDK_STACKS="${CDK_STACKS:---all}"
 # buckets (arn:aws:s3:::*) on the data plane (default).
 DATA_BUCKET_ALLOWLIST="${DATA_BUCKET_ALLOWLIST:-}"
 
+# Portal_Identity enforcement: keep the deployed value unless asked otherwise.
+. "$SCRIPT_DIR/../scripts/portal-registry-enforcement.sh"
+if ! ENFORCED=$(portal_registry_enforced_for_deploy "$REGION"); then
+  exit 1
+fi
+ENFORCED_ARGS=()
+if [ -n "$ENFORCED" ]; then
+  ENFORCED_ARGS=(-c "portalRegistryEnforced=$ENFORCED")
+fi
+
 echo "=== $(date -u '+%FT%TZ') portal deploy start ==="
 echo "  account=$ACCOUNT region=$REGION"
 echo "  trustedUseCaseAccountIds=$TRUSTED"
 echo "  dataBucketAllowlist=${DATA_BUCKET_ALLOWLIST:-<all buckets (default)>}"
+echo "  portalRegistryEnforced=${ENFORCED:-<CDK default (off)>}"
 echo "  stacks=$CDK_STACKS"
 
 npx cdk deploy $CDK_STACKS \
   --require-approval never \
   -c "trustedUseCaseAccountIds=$TRUSTED" \
-  -c "dataBucketAllowlist=$DATA_BUCKET_ALLOWLIST"
+  -c "dataBucketAllowlist=$DATA_BUCKET_ALLOWLIST" \
+  ${ENFORCED_ARGS[@]+"${ENFORCED_ARGS[@]}"}
 rc=$?
 echo "=== $(date -u '+%FT%TZ') portal deploy END exit=$rc ==="
 exit $rc

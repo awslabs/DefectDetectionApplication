@@ -159,13 +159,27 @@ export AWS_REGION="$CDK_REGION"
 
 TRUSTED="${TRUSTED_USECASE_ACCOUNT_IDS:-$ACCOUNT}"
 
+# Portal_Identity enforcement: this redeploy must carry the flag, or it turns
+# enforcement off for every ComputeStack handler (the CDK default is off).
+# Unset keeps the deployed value; PORTAL_REGISTRY_ENFORCED=true|false changes
+# it. See scripts/portal-registry-enforcement.sh.
+. "$SCRIPT_DIR/scripts/portal-registry-enforcement.sh"
+if ! ENFORCED=$(portal_registry_enforced_for_deploy "$CDK_REGION"); then
+  exit 1
+fi
+ENFORCED_ARGS=()
+if [ -n "$ENFORCED" ]; then
+  ENFORCED_ARGS=(-c "portalRegistryEnforced=$ENFORCED")
+fi
+
 echo "Redeploying compute stack with CloudFront domain: $CLOUDFRONT_URL"
 echo "   Trusted UseCase accounts: $TRUSTED"
 npm run build
 npx cdk deploy EdgeCVPortalComputeStack --require-approval never \
   -c cloudFrontDomain="$CLOUDFRONT_URL" \
   -c "trustedUseCaseAccountIds=$TRUSTED" \
-  -c "dataBucketAllowlist=${DATA_BUCKET_ALLOWLIST:-}"
+  -c "dataBucketAllowlist=${DATA_BUCKET_ALLOWLIST:-}" \
+  ${ENFORCED_ARGS[@]+"${ENFORCED_ARGS[@]}"}
 echo "✅ Backend updated with CloudFront domain for auto-CORS configuration."
 
 echo ""

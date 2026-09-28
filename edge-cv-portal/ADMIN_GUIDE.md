@@ -1058,12 +1058,12 @@ What to check in the plan before applying:
 ### The enforcement flag
 
 `PORTAL_REGISTRY_ENFORCED` is the single switch (design Decision 4). It is a
-Lambda environment variable on every portal handler that resolves roles, and it
-**defaults to off**.
+Lambda environment variable on every portal handler that resolves roles, and a
+fresh install starts with it **off**.
 
 | Flag | Behaviour |
 |------|-----------|
-| off (default, `false`) | Legacy resolution — the `custom:role` claim still grants — **plus** a `would_deny` WARNING naming every request enforcement would have denied. A dry run against real traffic. |
+| off (fresh-install default, `false`) | Legacy resolution — the `custom:role` claim still grants — **plus** a `would_deny` WARNING naming every request enforcement would have denied. A dry run against real traffic. |
 | on (`true`) | The registry is authoritative, per [The registry is the authority](#the-registry-is-the-authority). |
 
 Deploy with it on (only after the backfill):
@@ -1077,9 +1077,31 @@ The script passes this through as the CDK context value
 `-c portalRegistryEnforced=true`. Accepted affirmatives are `1`, `true`, `yes`,
 `on`, `enabled` (trimmed, case-insensitive) — exactly what the Lambda layer
 accepts, so a value that reads "on" at deploy time can never land as "off" in
-the handler. Anything else, including unset, deploys enforcement **off**;
-`cdk.json` deliberately does not carry the key, so a flag-less deploy is always
-off. To turn enforcement back off, redeploy without the variable.
+the handler. Any other value deploys enforcement **off**; to turn it back off,
+deploy with `PORTAL_REGISTRY_ENFORCED=false`.
+
+**Unset keeps the deployed value.** When the variable is unset (or empty),
+`deploy-infrastructure.sh`, `deploy-frontend.sh` (its ComputeStack redeploy)
+and `infrastructure/deploy_portal_fixes.sh` read the value the deployed
+`EdgeCVPortal*` handlers carry and pass that, so a routine deploy never changes
+enforcement. A mixed state resolves to on. With no portal handler deployed yet
+they pass nothing, and the CDK default, off, applies; `cdk.json` deliberately
+does not carry the key. If the deployed value cannot be read (credentials,
+`lambda:ListFunctions` permission), the deploy stops and asks for an explicit
+`PORTAL_REGISTRY_ENFORCED=true` or `=false`. The logic lives in
+`scripts/portal-registry-enforcement.sh`.
+
+A bare `npx cdk deploy` (for example `npm run deploy` in `infrastructure/`)
+bypasses the scripts and still resolves the flag off: pass
+`-c portalRegistryEnforced=true` yourself.
+
+Check what is deployed:
+
+```bash
+aws lambda list-functions --region us-east-1 \
+  --query "Functions[?starts_with(FunctionName, 'EdgeCVPortal')].Environment.Variables.PORTAL_REGISTRY_ENFORCED" \
+  --output text | tr '\t' '\n' | sort | uniq -c
+```
 
 **Size the gap before flipping.** With the flag off, mine the dry-run WARNINGs
 from the deployed logs — each one names a principal the backfill has not
@@ -1106,7 +1128,8 @@ coverage.)
 
 ### Rollout order
 
-1. Deploy with the flag **off** and confirm every portal handler shows
+1. Deploy with the flag **off** (the default on a fresh install, otherwise
+   `PORTAL_REGISTRY_ENFORCED=false`) and confirm every portal handler shows
    `PORTAL_REGISTRY_ENFORCED=false`.
 2. Backfill: dry run → review → `--apply` → dry run again (all `exists`).
 3. Watch the `would_deny` WARNINGs until they stop for real users.
@@ -1122,7 +1145,8 @@ coverage.)
 
 If enforcement locks someone out, the fastest fix is to add their global row
 (User Manager, or the backfill script re-run for a newly created account).
-Redeploying with the flag unset restores the previous behaviour wholesale.
+Redeploying with `PORTAL_REGISTRY_ENFORCED=false` restores the previous
+behaviour wholesale (an unset variable now keeps enforcement on).
 
 ### Verifying an account
 

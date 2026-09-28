@@ -5,6 +5,9 @@
 
 set -e
 
+# This script's directory (edge-cv-portal/), captured before the cd below.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Get AWS account ID
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 AWS_REGION=$(aws configure get region 2>/dev/null)
@@ -46,19 +49,23 @@ if [ -n "$CLOUDFRONT_URL" ] && [ "$CLOUDFRONT_URL" != "None" ]; then
 fi
 
 # Portal_Identity registry enforcement (portal-jwt-role-privilege-escalation
-# Req 2.4). Off unless the operator asks for it, matching the CDK helper's
-# default-OFF resolution: with enforcement on and a registry row missing, the
-# portal denies that principal everything, including the bootstrap `admin`.
-# Flip it only AFTER backfill_portal_registry.py has been applied and the
-# accounts verified:
+# Req 2.4). With enforcement on and a registry row missing, the portal denies
+# that principal everything, including the bootstrap `admin`, so turn it on
+# only AFTER backfill_portal_registry.py has been applied and the accounts
+# verified:
 #
-#   PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh
+#   PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh    # turn on
+#   PORTAL_REGISTRY_ENFORCED=false ./deploy-infrastructure.sh   # turn off
 #
-# Any value the shared layer accepts as true (1/true/yes/on/enabled) is passed
-# through; anything else (including unset) deploys with enforcement off.
-if [ -n "$PORTAL_REGISTRY_ENFORCED" ]; then
-  echo "🔐 Portal_Identity enforcement requested: PORTAL_REGISTRY_ENFORCED=$PORTAL_REGISTRY_ENFORCED"
-  CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c portalRegistryEnforced=$PORTAL_REGISTRY_ENFORCED"
+# Unset keeps the value the deployed handlers carry (on if any is on), so a
+# routine deploy never changes it; a fresh install gets the CDK default, off.
+# See scripts/portal-registry-enforcement.sh.
+. "$SCRIPT_DIR/scripts/portal-registry-enforcement.sh"
+if ! ENFORCED=$(portal_registry_enforced_for_deploy "$AWS_REGION"); then
+  exit 1
+fi
+if [ -n "$ENFORCED" ]; then
+  CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c portalRegistryEnforced=$ENFORCED"
 fi
 
 # The project-local CLI (devDependency aws-cdk, installed by `npm ci` above):

@@ -115,8 +115,10 @@ let authSsoTemplate: Template;
  * asset staging happens once per mode rather than once per stack.
  *
  * `contextValue === undefined` models a plain `cdk deploy` (no
- * `-c portalRegistryEnforced=...`), which is what
- * `deploy-infrastructure.sh` runs when `PORTAL_REGISTRY_ENFORCED` is unset.
+ * `-c portalRegistryEnforced=...`), which is what the deploy scripts run
+ * when `PORTAL_REGISTRY_ENFORCED` is unset and no portal handler is deployed
+ * yet (otherwise they pass the deployed value; see
+ * scripts/portal-registry-enforcement.sh and tests/registry_enforcement.bats).
  */
 function synthesizeStacks(
   mode: 'off' | 'on',

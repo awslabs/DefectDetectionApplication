@@ -22,7 +22,9 @@
 #      DEPLOY_ACCOUNT_ROLE_SH, aws -> AWS, npx -> NPX).
 #   3. For `aws` it additionally serves canned responses for the calls the
 #      orchestrator makes (sts get-caller-identity, configure get region,
-#      ssm get-parameter bootstrap version, cloudformation describe-stacks).
+#      ssm get-parameter bootstrap version, cloudformation describe-stacks)
+#      and for the enforcement lookup the deploy scripts make (lambda
+#      list-functions).
 #
 # Everything runs fully offline; no real AWS account or network is touched.
 
@@ -56,7 +58,7 @@ $a"; fi
   done
 
   # selected env vars (only those that are set) as VAR=value lines
-  local capture="${STUB_ENV_CAPTURE:-AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION CDK_DEFAULT_REGION CDK_DEFAULT_ACCOUNT SSO_ENABLED SSO_METADATA_URL SSO_PROVIDER_NAME COGNITO_DOMAIN_PREFIX TRUSTED_USECASE_ACCOUNT_IDS DATA_BUCKET_ALLOWLIST cloudFrontDomain EXTERNAL_ID PORTAL_ACCOUNT_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN}"
+  local capture="${STUB_ENV_CAPTURE:-AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION CDK_DEFAULT_REGION CDK_DEFAULT_ACCOUNT SSO_ENABLED SSO_METADATA_URL SSO_PROVIDER_NAME COGNITO_DOMAIN_PREFIX TRUSTED_USECASE_ACCOUNT_IDS DATA_BUCKET_ALLOWLIST cloudFrontDomain EXTERNAL_ID PORTAL_ACCOUNT_ID PORTAL_REGISTRY_ENFORCED AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN}"
   local env_joined="" v
   for v in $capture; do
     if [ -n "${!v+x}" ]; then
@@ -158,6 +160,22 @@ _aws_main() {
       value_var="STUB_CFN_${stack_key}_${key}"
       if [ -n "${!value_var+x}" ]; then
         printf '%s\n' "${!value_var}"
+      fi
+      exit 0
+      ;;
+    lambda)
+      # list-functions --query "...PORTAL_REGISTRY_ENFORCED" --output text
+      # (scripts/portal-registry-enforcement.sh). STUB_LAMBDA_ENFORCED_VALUES
+      # holds the deployed handlers' values, space-separated; unset or empty
+      # means no portal handler is deployed. Printed tab-separated on one
+      # line, as the real CLI's text output does. A non-zero
+      # STUB_AWS_LAMBDA_EXIT simulates a failed lookup.
+      if [ -n "${STUB_AWS_LAMBDA_EXIT:-}" ] && [ "${STUB_AWS_LAMBDA_EXIT}" != "0" ]; then
+        printf '%s\n' "${STUB_AWS_LAMBDA_STDERR:-An error occurred (AccessDeniedException) when calling the ListFunctions operation}" >&2
+        exit "$STUB_AWS_LAMBDA_EXIT"
+      fi
+      if [ -n "${STUB_LAMBDA_ENFORCED_VALUES:-}" ]; then
+        printf '%s\n' "$STUB_LAMBDA_ENFORCED_VALUES" | tr ' ' '\t'
       fi
       exit 0
       ;;

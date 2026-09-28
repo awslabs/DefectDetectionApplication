@@ -10,7 +10,8 @@
 #       - seed a fake `edge-cv-portal` working tree (with the five script
 #         stubs at the exact relative paths the orchestrator invokes)
 #   * seed helpers: seed_config_file, set_cfn_output, set_bootstrap_version,
-#     set_account_id, set_region, stub_output / stub_exit
+#     set_account_id, set_region, set_deployed_enforcement,
+#     fail_lambda_list, stub_output / stub_exit
 #   * trace query helpers: stub_calls, stub_called, stub_call_count,
 #     stub_pwd_of, stub_args_of, stub_env_of, stub_env_value, stub_stdin_of,
 #     stub_order_of
@@ -169,6 +170,15 @@ set_region() { export STUB_AWS_CONFIG_REGION="$1"; }
 # set_bootstrap_version <version>  (unset var / "" simulates an absent bootstrap)
 set_bootstrap_version() { export STUB_BOOTSTRAP_VERSION="$1"; }
 unset_bootstrap_version() { unset STUB_BOOTSTRAP_VERSION; }
+
+# set_deployed_enforcement [value ...]
+#   The PORTAL_REGISTRY_ENFORCED values the deployed EdgeCVPortal* handlers
+#   carry (`aws lambda list-functions`). No values simulates a portal with no
+#   handler deployed yet.
+set_deployed_enforcement() { export STUB_LAMBDA_ENFORCED_VALUES="$*"; }
+
+# fail_lambda_list [exit] - simulate a failed `aws lambda list-functions`.
+fail_lambda_list() { export STUB_AWS_LAMBDA_EXIT="${1:-255}"; }
 
 # set_cfn_output <stack-name> <output-key> <value>
 #   Canned `aws cloudformation describe-stacks` output value.

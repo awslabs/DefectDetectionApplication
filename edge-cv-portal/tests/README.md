@@ -34,6 +34,7 @@ bats .                 # run every *.bats file in this directory
 | `helpers/stub.sh` | Single generic stub backing every stubbed executable. Records each invocation (name, order, `$PWD`, args, selected env vars, stdin) to `$STUB_TRACE` and emits caller-controlled stdout/stderr/exit codes. Serves canned `aws` responses. |
 | `test_helper.bash` | `bats` setup helper: builds a temp `bin/` (prepended to `PATH`) with PATH-shadow stubs for `deploy-account-role.sh`, `deploy-auth.sh`, `deploy-infrastructure.sh`, `deploy-frontend.sh`, `configure-bucket-cors.sh` and for `aws`/`node`/`cdk`/`npx`; seeds a fake `edge-cv-portal` working tree; and provides seed + trace-query helpers. |
 | `harness.bats` | Self-tests proving the harness works offline. |
+| `registry_enforcement.bats` | `scripts/portal-registry-enforcement.sh` and the three deploy scripts that use it: an unset `PORTAL_REGISTRY_ENFORCED` keeps the deployed value, an explicit one wins, a fresh install passes nothing, and a failed lookup stops the deploy. |
 
 ## Using the harness in a test
 
@@ -68,6 +69,7 @@ teardown() { portal_harness_teardown; }
 - `set_region <region>` — `aws configure get region` (empty simulates none).
 - `set_bootstrap_version <n>` / `unset_bootstrap_version` — SSM bootstrap version.
 - `set_cfn_output <stack> <key> <value>` — `aws cloudformation describe-stacks`.
+- `set_deployed_enforcement [value ...]` / `fail_lambda_list` — the `PORTAL_REGISTRY_ENFORCED` values `aws lambda list-functions` reports (none = nothing deployed), or a failed lookup.
 - `seed_config_file <usecase|data> <account> [key=value ...]` — fake `*-config.txt`.
 - `stub_output <name> <stdout> [stderr]`, `stub_exit <name> <code>` — per-step output/exit.
 
