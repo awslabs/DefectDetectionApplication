@@ -350,5 +350,6 @@ Preservation-tracked files touched: `src/backend/app.py` and `src/backend/utils/
     - On each device, a device-API pin, replace and unpin reached the camera-registry shadow in 1.8–5.2 s. In each 30-minute soak, 30 of 30 replaces did too, with no health failures and no restarts. See `verification-notes.md` 14.6
     - _Requirements: 4.6_
 
-- [ ] 15. Commit and push (with the user's go-ahead)
+- [x] 15. Commit and push (with the user's go-ahead)
   - Commit on `spec/static-camera-video-loop`, stating the device verification and the two rebaselined hashes; merge or push to `integration/all-specs` as the user directs
+  - Committed as `c403024`, with the multi-source-workflows spec as `fe38356`. `integration/all-specs` was fast-forwarded to them and pushed to origin on 2026-09-28, as the user directed
