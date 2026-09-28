@@ -74,6 +74,17 @@ Key behaviors:
 All collaborators are injectable (the ``EdgeSyncAgent`` testing pattern):
 fake shadow accessor, fake S3 client factory, temp-dir store factory and
 marker path, fake clock/sleep.
+
+Second slot (feature static-camera-video-loop, design Decision 7): the
+same class also serves the Static_Video_Camera's ``staticVideoPin`` slot.
+The slot-specific values are constructor parameters whose defaults are
+exactly the image slot's values, so a worker built without them behaves
+as before: ``section_name`` (the desired/reported section),
+``max_download_bytes`` (the streamed-download cap), ``no_media_marker``
+(the store's "nothing to remove" wording), ``pin_error_type`` (the
+store's validation error), ``reason_max_chars`` (bound on the echoed
+failure reason; unbounded by default), ``marker_path_factory`` (the
+lazily resolved marker location) and ``label`` (log wording).
 """
 import hashlib
 import json
@@ -82,7 +93,7 @@ import os
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Type
 
 from utils.static_image_camera import (
     MAX_PIN_FILE_BYTES,
@@ -95,6 +106,10 @@ logger = logging.getLogger(__name__)
 #: Idempotence marker file name, next to the pin store's files so it
 #: shares the Pinned_Image's lifetime across restarts (design Decision 3).
 MARKER_FILE_NAME = "applied_pin_request.json"
+
+#: The image slot's desired/reported section name — the default
+#: ``section_name`` (the video slot passes ``staticVideoPin``).
+IMAGE_PIN_SECTION = "staticImagePin"
 
 #: Retrieval retry policy (Requirements 2.9, 2.10, 2.11).
 RETRIEVAL_MAX_ATTEMPTS = 3
@@ -172,6 +187,13 @@ class StaticImagePinWorker:
     ``workflow_engine.payload_fetch`` pattern). ``report_inventory`` is the
     agent's inventory-report trigger, invoked after any fresh terminal
     outcome.
+
+    The slot parameters (``section_name`` … ``label``, see the module
+    docstring) default to the image slot; the agent's video worker passes
+    the video slot's values (feature static-camera-video-loop).
+    ``max_download_bytes`` and ``marker_path_factory`` default to ``None``,
+    meaning the module's :data:`MAX_PIN_FILE_BYTES` and
+    :func:`default_marker_path`, looked up when used.
     """
 
     def __init__(
@@ -186,6 +208,13 @@ class StaticImagePinWorker:
         sleep: Callable[[float], None] = time.sleep,
         wall_clock: Callable[[], float] = time.time,
         report_inventory: Optional[Callable[[], None]] = None,
+        section_name: str = IMAGE_PIN_SECTION,
+        max_download_bytes: Optional[int] = None,
+        no_media_marker: str = _NO_IMAGE_PINNED_MARKER,
+        pin_error_type: Type[Exception] = StaticImagePinError,
+        reason_max_chars: Optional[int] = None,
+        marker_path_factory: Optional[Callable[[], str]] = None,
+        label: str = "static-image",
     ):
         self._shadow = iot_shadow_accessor
         self.thing_name = thing_name
@@ -199,6 +228,16 @@ class StaticImagePinWorker:
         #: Invoked after any fresh terminal outcome (settable post-init by
         #: the owning agent).
         self.report_inventory = report_inventory
+
+        #: The desired/reported section this worker consumes and echoes.
+        self.section_name = section_name
+        self._max_download_bytes = max_download_bytes
+        self._no_media_marker = no_media_marker
+        self._pin_error_type = pin_error_type
+        self._reason_max_chars = reason_max_chars
+        self._marker_path_factory = marker_path_factory
+        self._label = label
+        self._label_title = label[:1].upper() + label[1:]
 
         self._s3 = None
         self._cond = threading.Condition()
@@ -214,7 +253,9 @@ class StaticImagePinWorker:
             return
         self._stop_event = threading.Event()
         self._thread = threading.Thread(
-            target=self._run, name="static-image-pin-worker", daemon=True
+            target=self._run,
+            name="{}-pin-worker".format(self._label),
+            daemon=True,
         )
         self._thread.start()
 
@@ -231,7 +272,8 @@ class StaticImagePinWorker:
     # --- desired-document intake (Requirements 5.4, 7.3) --------------------
 
     def on_desired(self, desired: Optional[Mapping]) -> None:
-        """Queue a ``desired.staticImagePin`` document for processing.
+        """Queue a ``desired.<section_name>`` document (by default
+        ``desired.staticImagePin``) for processing.
 
         Single-slot, newest-wins: a newer document replaces any queued
         older one, mirroring the shadow's single desired slot locally so
@@ -266,7 +308,7 @@ class StaticImagePinWorker:
             try:
                 self.process_pending()
             except Exception:  # noqa: BLE001 - worker isolation
-                logger.exception("Static-image pin worker cycle failed")
+                logger.exception("%s pin worker cycle failed", self._label_title)
 
     # --- one full cycle ------------------------------------------------------
 
@@ -280,8 +322,8 @@ class StaticImagePinWorker:
         request_id = desired.get("requestId")
         if not request_id:
             logger.warning(
-                "Ignoring static-image pin desired document without a "
-                "requestId: %s",
+                "Ignoring %s pin desired document without a requestId: %s",
+                self._label,
                 desired,
             )
             return None
@@ -333,8 +375,8 @@ class StaticImagePinWorker:
                 data = self._retrieve_verified(desired)
                 metadata = self._apply_pin(desired, data)
             else:
-                raise StaticImagePinError(
-                    "unsupported static-image pin operation '{}'".format(op)
+                raise self._pin_error_type(
+                    "unsupported {} pin operation '{}'".format(self._label, op)
                 )
         except _PartialDeliveryFailure as exc:
             status = STATUS_FAILED
@@ -342,15 +384,15 @@ class StaticImagePinWorker:
         except _RetrievalFailure as exc:
             status = STATUS_FAILED
             reason = str(exc)
-        except StaticImagePinError as exc:
+        except self._pin_error_type as exc:
             # The store's descriptive validation/storage error, verbatim
-            # (Requirements 3.4, 7.8); the prior Pinned_Image is untouched
+            # (Requirements 3.4, 7.8); the prior pinned media is untouched
             # by the store's own guarantee.
             status = STATUS_FAILED
             reason = str(exc)
         except Exception as exc:  # noqa: BLE001 - apply isolation
             logger.exception(
-                "Applying static-image pin request %s failed", request_id
+                "Applying %s pin request %s failed", self._label, request_id
             )
             status = STATUS_FAILED
             reason = str(exc)
@@ -397,7 +439,7 @@ class StaticImagePinWorker:
     def _resolve_partial_delivery(
         self, delta_doc: Mapping[str, Any], request_id: str
     ) -> Dict[str, Any]:
-        """Fetch the CURRENT full ``desired.staticImagePin`` document
+        """Fetch the CURRENT full ``desired.<section_name>`` document
         through the shadow accessor to fill in the fields a partial delta
         omitted.
 
@@ -425,7 +467,7 @@ class StaticImagePinWorker:
                 "not be read from the shadow".format(request_id)
             )
         desired = state.get("desired")
-        full = desired.get("staticImagePin") if isinstance(desired, Mapping) else None
+        full = desired.get(self.section_name) if isinstance(desired, Mapping) else None
         if not isinstance(full, Mapping) or full.get("requestId") != request_id:
             raise _PartialDeliveryFailure(
                 "incomplete delta delivery for request '{}': required "
@@ -433,8 +475,9 @@ class StaticImagePinWorker:
                 "document does not carry this request".format(request_id)
             )
         logger.info(
-            "Resolved a partial delta delivery for static-image pin "
-            "request %s from the shadow's full desired document",
+            "Resolved a partial delta delivery for %s pin request %s from "
+            "the shadow's full desired document",
+            self._label,
             request_id,
         )
         return dict(full)
@@ -462,8 +505,8 @@ class StaticImagePinWorker:
             except Exception as exc:  # noqa: BLE001 - every cause counts (2.9)
                 last_cause = "retrieval failure: {}".format(exc)
                 logger.warning(
-                    "Static-image pin retrieval attempt %d/%d for s3://%s/%s "
-                    "failed: %s",
+                    "%s pin retrieval attempt %d/%d for s3://%s/%s failed: %s",
+                    self._label_title,
                     attempt,
                     RETRIEVAL_MAX_ATTEMPTS,
                     bucket,
@@ -476,8 +519,9 @@ class StaticImagePinWorker:
                 del data
                 last_cause = "checksum mismatch"
                 logger.warning(
-                    "Static-image pin retrieval attempt %d/%d for s3://%s/%s "
-                    "returned bytes not matching the declared checksum",
+                    "%s pin retrieval attempt %d/%d for s3://%s/%s returned "
+                    "bytes not matching the declared checksum",
+                    self._label_title,
                     attempt,
                     RETRIEVAL_MAX_ATTEMPTS,
                     bucket,
@@ -487,11 +531,20 @@ class StaticImagePinWorker:
             return data
         raise _RetrievalFailure(last_cause)
 
+    def _download_limit(self) -> int:
+        """The streamed-download cap: the injected ``max_download_bytes``,
+        else the image pin limit (looked up at call time)."""
+        if self._max_download_bytes is not None:
+            return int(self._max_download_bytes)
+        return MAX_PIN_FILE_BYTES
+
     def _download_once(self, bucket: str, key: str) -> Tuple[bytes, str]:
         """One streamed GET attempt, bounded by the 120 s wall clock and
-        the 50 MB pin limit; returns ``(bytes, sha256 hex digest)`` with
-        the digest computed over the streamed chunks."""
+        the slot's pin limit (50 MB for images, 100 MB for videos);
+        returns ``(bytes, sha256 hex digest)`` with the digest computed
+        over the streamed chunks."""
         client = self._get_s3_client()
+        limit = self._download_limit()
         deadline = self._clock() + RETRIEVAL_ATTEMPT_TIMEOUT_SECONDS
         body = client.get_object(Bucket=bucket, Key=key)["Body"]
         hasher = hashlib.sha256()
@@ -507,10 +560,10 @@ class StaticImagePinWorker:
             if not chunk:
                 break
             total += len(chunk)
-            if total > MAX_PIN_FILE_BYTES:
+            if total > limit:
                 raise ValueError(
                     "downloaded content exceeds the {}-byte pin size "
-                    "limit".format(MAX_PIN_FILE_BYTES)
+                    "limit".format(limit)
                 )
             hasher.update(chunk)
             chunks.append(chunk)
@@ -552,8 +605,8 @@ class StaticImagePinWorker:
         store = self._store_factory()
         try:
             store.unpin()
-        except StaticImagePinError as exc:
-            if _NO_IMAGE_PINNED_MARKER in str(exc):
+        except self._pin_error_type as exc:
+            if self._no_media_marker in str(exc):
                 return None
             raise
         return None
@@ -562,7 +615,8 @@ class StaticImagePinWorker:
 
     def _marker_file(self) -> str:
         if self._marker_path is None:
-            self._marker_path = default_marker_path()
+            factory = self._marker_path_factory or default_marker_path
+            self._marker_path = factory()
         return self._marker_path
 
     def _read_marker(self) -> Optional[Dict[str, Any]]:
@@ -576,16 +630,16 @@ class StaticImagePinWorker:
             return None
         except Exception as exc:  # noqa: BLE001 - corrupt marker == no marker
             logger.warning(
-                "Static-image pin marker %s is unreadable (%s); treating "
-                "it as absent",
+                "%s pin marker %s is unreadable (%s); treating it as absent",
+                self._label_title,
                 path,
                 exc,
             )
             return None
         if not isinstance(marker, dict) or not marker.get("requestId"):
             logger.warning(
-                "Static-image pin marker %s is malformed; treating it as "
-                "absent",
+                "%s pin marker %s is malformed; treating it as absent",
+                self._label_title,
                 path,
             )
             return None
@@ -614,7 +668,7 @@ class StaticImagePinWorker:
                 raise
         except Exception:  # noqa: BLE001 - marker write is best-effort
             logger.exception(
-                "Could not persist the static-image pin idempotence marker"
+                "Could not persist the %s pin idempotence marker", self._label
             )
 
     # --- reported echo (Requirements 3.6, 7.7) --------------------------------
@@ -628,11 +682,16 @@ class StaticImagePinWorker:
         completed_ms: Optional[int],
     ) -> Dict[str, Any]:
         """Verbatim echo of every desired field plus the outcome fields —
-        the echo equality is what silences the shadow delta (Decision 1)."""
+        the echo equality is what silences the shadow delta (Decision 1).
+
+        With ``reason_max_chars`` set (the video slot), the echoed reason
+        is bounded (:func:`bound_reason`) so both pin slots fit the shadow
+        document limit; the marker keeps the full reason for local
+        diagnostics, and a marker re-report is bounded identically."""
         report: Dict[str, Any] = dict(desired)
         report["status"] = status
         if reason:
-            report["reason"] = reason
+            report["reason"] = bound_reason(reason, self._reason_max_chars)
         if metadata is not None:
             report["metadata"] = dict(metadata)
         if completed_ms is not None:
@@ -641,17 +700,19 @@ class StaticImagePinWorker:
 
     def _write_reported(self, report: Mapping[str, Any]) -> None:
         """Merge-safe top-level shadow write: the pin section never
-        clobbers ``reported.cameras``. A failed write is logged; shadow
-        delta redelivery re-triggers the echo through the marker path."""
-        payload = {"reported": {"staticImagePin": dict(report)}}
+        clobbers ``reported.cameras`` (or the other pin slot). A failed
+        write is logged; shadow delta redelivery re-triggers the echo
+        through the marker path."""
+        payload = {"reported": {self.section_name: dict(report)}}
         try:
             self._shadow.update_thing_shadow_state_request(
                 self.thing_name, self.shadow_name, payload
             )
         except Exception:  # noqa: BLE001 - offline echo retries via redelivery
             logger.exception(
-                "Could not write the static-image pin confirmation to the "
-                "camera-registry shadow"
+                "Could not write the %s pin confirmation to the "
+                "camera-registry shadow",
+                self._label,
             )
 
     def _notify_inventory(self) -> None:
@@ -662,5 +723,36 @@ class StaticImagePinWorker:
             callback()
         except Exception:  # noqa: BLE001 - report trigger isolation
             logger.exception(
-                "Static-image pin inventory report trigger failed"
+                "%s pin inventory report trigger failed", self._label_title
             )
+
+
+#: Suffix marking a bounded (shortened) failure reason.
+_REASON_ELLIPSIS = "..."
+
+
+def bound_reason(reason: str, max_chars: Optional[int]) -> str:
+    """``reason`` shortened so its JSON-escaped form is at most
+    ``max_chars`` characters (``None``: unchanged).
+
+    The bound is on the escaped form (``json.dumps`` with ASCII escapes,
+    minus the quotes) rather than on code points, so it also bounds the
+    encoded byte size: every escaped character is one byte, whichever
+    encoding the shadow transport uses. A shortened reason ends with
+    ``...`` and stays within the bound."""
+    if max_chars is None or reason is None:
+        return reason
+    text = str(reason)
+
+    def escaped_len(value: str) -> int:
+        return len(json.dumps(value)) - 2
+
+    if escaped_len(text) <= max_chars:
+        return text
+    budget = max(0, int(max_chars) - len(_REASON_ELLIPSIS))
+    # Every code point escapes to at least one character, so a prefix of
+    # `budget` code points is the longest candidate; trim until it fits.
+    kept = text[:budget]
+    while kept and escaped_len(kept) > budget:
+        kept = kept[:-1]
+    return kept + _REASON_ELLIPSIS[: int(max_chars) - len(kept)]

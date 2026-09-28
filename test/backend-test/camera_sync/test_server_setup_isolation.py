@@ -420,3 +420,45 @@ class TestServerSetupCameraSyncIsolation(unittest.TestCase):
         self.assertEqual(agent.discovery_changes, [snapshot])
         self.assertIs(self.camera_sync_pkg.get_active_agent(), agent)
         self.assertEqual(agent.applied, [pending])
+
+    def test_agent_reads_the_shadow_manager_size_limit(self):
+        """static-camera-video-loop task 10: the agent gets a size-limit
+        provider that reads ShadowManager's ``shadowDocumentSizeLimitBytes``
+        through the LocalServer's IPC configuration reader."""
+        discovery = _FakeDiscovery()
+        agent = _FakeAgent()
+        constructed = []
+        asked = []
+
+        def _agent_factory(*args, **kwargs):
+            constructed.append(kwargs)
+            return agent
+
+        def _component_config(name):
+            asked.append(name)
+            return {"shadowDocumentSizeLimitBytes": 16384}
+
+        with mock.patch.object(
+            self.camera_discovery_pkg, "CameraDiscovery", lambda **kw: discovery
+        ), mock.patch.object(
+            self.camera_sync_pkg, "EdgeSyncAgent", _agent_factory
+        ), mock.patch.object(
+            self.camera_sync_pkg,
+            "make_shadow_stream_handler",
+            lambda a: mock.Mock(),
+        ), mock.patch(
+            "mqtt.SubscriptionHandler.SubscriptionHandler", _FakeSubscription
+        ), mock.patch.object(
+            self.server_setup, "iot_shadow_accessor", _FakeShadow()
+        ), mock.patch.object(
+            self.server_setup.defect_detection_config,
+            "get_component_config",
+            _component_config,
+        ):
+            self.server_setup._start_camera_registry_sync_isolated()
+            self.assertEqual(len(constructed), 1)
+            provider = constructed[0]["shadow_size_limit_provider"]
+            self.assertEqual(provider(), 16384)
+
+        self.assertEqual(asked, ["aws.greengrass.ShadowManager"])
+        self.assertIs(self.server_setup.camera_sync_agent, agent)

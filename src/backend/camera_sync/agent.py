@@ -61,10 +61,18 @@ The clock, the shadow transport, the state-store path, and the DB session
 factory are all injectable so tests drive the agent deterministically with
 fakes; :meth:`EdgeSyncAgent.pump` exposes one scheduling step for
 fake-clock tests, while the on-device daemon thread simply loops over it.
+
+The shadow carries two cloud-initiated pin slots, each owned by its own
+pin worker: ``staticImagePin`` for the Static_Image_Camera
+(cloud-static-camera-provisioning) and ``staticVideoPin`` for the
+Static_Video_Camera (static-camera-video-loop, :func:`make_video_pin_worker`).
+Both virtual cameras report their own inventory entry with their own
+absence lifecycle.
 """
 import json
 import logging
 import os
+import re
 import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -79,12 +87,19 @@ from camera_sync.inventory import (
     configured_camera_source_id,
 )
 from camera_sync.pin_worker import (
+    MARKER_FILE_NAME,
     OP_REMOVE,
     STATUS_APPLIED,
     StaticImagePinWorker,
 )
 from camera_sync.version_state import CameraSyncStateStore, versions_from_reported
 from utils.static_image_camera import STATIC_IMAGE_CAMERA_ID, get_store
+from utils.static_video_camera import (
+    STATIC_VIDEO_CAMERA_ID,
+    StaticVideoPinError,
+)
+from utils.static_video_camera import get_store as get_video_store
+from utils.video_loop import MAX_PIN_VIDEO_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -102,12 +117,123 @@ DEBOUNCE_SECONDS = 5.0
 #: Requirement 3.1's publication bound, kept here for reference/tests.
 MAX_REPORT_DELAY_SECONDS = 30.0
 
-#: A report exceeding this size gets its capability metadata truncated
-#: (the shadow document limit is 8 KB; 6 KB leaves headroom for the state
-#: wrapper, shadow metadata, and the ``staticImagePin`` desired/reported
-#: sections sharing this shadow — feature cloud-static-camera-provisioning
-#: design Decision 1).
-MAX_REPORT_BYTES = 6 * 1024
+#: The report cap follows the shadow document size limit in effect (feature
+#: static-camera-video-loop, design Decision 7). A report exceeding the cap
+#: gets its capability metadata truncated. The limit covers the whole state
+#: document (desired + reported), so the cap leaves
+#: :data:`PIN_SLOTS_RESERVE_BYTES` for the state wrapper and the two pin
+#: slots sharing this shadow, each a desired section plus its reported
+#: echo: ``staticImagePin`` (cloud-static-camera-provisioning design
+#: Decision 1) and ``staticVideoPin``. Both slots at their measured worst
+#: case (128-character thing name and file name, 63-character bucket, the
+#: video reason at its 256-character bound) take 3,144 bytes; the reserve
+#: adds 440 bytes for an image failure reason.
+#:
+#: The limit is the AWS IoT "Maximum size of a JSON state document" quota
+#: of the device's account (8 KB unless raised). The Portal writes the
+#: account's value into ShadowManager's ``shadowDocumentSizeLimitBytes`` at
+#: deployment time, and the agent reads it from there
+#: (:func:`shadow_manager_size_limit_provider`), so the device's local limit
+#: and the cloud limit agree.
+DEFAULT_SHADOW_DOCUMENT_LIMIT_BYTES = 8192
+PIN_SLOTS_RESERVE_BYTES = 3584
+
+#: The cap for the default 8 KB limit: 8,192 - 3,584 = 4,608 bytes. Also
+#: the ``build_report_document`` default.
+MAX_REPORT_BYTES = DEFAULT_SHADOW_DOCUMENT_LIMIT_BYTES - PIN_SLOTS_RESERVE_BYTES
+
+#: The highest cap, whatever the limit: 10 KB.
+MAX_REPORT_BYTES_CEILING = 10 * 1024
+
+#: The lowest cap a size rejection can back off to.
+MIN_REPORT_BYTES = 1024
+
+#: ShadowManager's component name and its size-limit configuration key.
+SHADOW_MANAGER_COMPONENT = "aws.greengrass.ShadowManager"
+SHADOW_MANAGER_SIZE_LIMIT_KEY = "shadowDocumentSizeLimitBytes"
+
+#: How often the agent re-reads the size limit (a deployment can raise it
+#: without restarting the LocalServer).
+SHADOW_LIMIT_REFRESH_SECONDS = 300.0
+
+
+def report_cap_for_shadow_limit(limit_bytes: Optional[Any]) -> int:
+    """The report cap for a shadow document size limit: the limit minus
+    :data:`PIN_SLOTS_RESERVE_BYTES`, at most
+    :data:`MAX_REPORT_BYTES_CEILING` and at least :data:`MIN_REPORT_BYTES`.
+    An unknown or invalid limit means the 8 KB default."""
+    try:
+        if isinstance(limit_bytes, bool):
+            raise TypeError("a bool is not a size limit")
+        limit = int(limit_bytes)
+    except (TypeError, ValueError, OverflowError):
+        limit = DEFAULT_SHADOW_DOCUMENT_LIMIT_BYTES
+    if limit <= 0:
+        limit = DEFAULT_SHADOW_DOCUMENT_LIMIT_BYTES
+    return max(MIN_REPORT_BYTES,
+               min(MAX_REPORT_BYTES_CEILING, limit - PIN_SLOTS_RESERVE_BYTES))
+
+
+def shadow_manager_size_limit_provider(
+    component_config_reader: Callable[[str], Any],
+) -> Callable[[], Optional[int]]:
+    """A provider of ShadowManager's configured document size limit.
+
+    ``component_config_reader`` is Greengrass IPC GetConfiguration for a
+    component name (``DefectDetectionConfig.get_component_config``), which
+    returns the component's configuration mapping. The provider returns
+    ``shadowDocumentSizeLimitBytes`` as an int, or ``None`` when it is not
+    set (ShadowManager then enforces its 8 KB default) or unreadable."""
+
+    def provider() -> Optional[int]:
+        config = component_config_reader(SHADOW_MANAGER_COMPONENT)
+        if not isinstance(config, Mapping):
+            return None
+        value = config.get(SHADOW_MANAGER_SIZE_LIMIT_KEY)
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    return provider
+
+
+def _is_size_rejection(error: BaseException) -> bool:
+    """Whether a failed shadow update was rejected for its size: the local
+    ShadowManager's ``InvalidArgumentsError`` ("The payload exceeds the
+    maximum size allowed", its error code 413) or a service-style "payload
+    too large" / ``RequestEntityTooLarge``.
+
+    Greengrass IPC errors carry their text in a ``message`` attribute and
+    stringify to an empty string, so both are inspected."""
+    parts = [type(error).__name__, str(error)]
+    message = getattr(error, "message", None)
+    if isinstance(message, str):
+        parts.append(message)
+    text = " ".join(parts).lower()
+    if _SIZE_REJECTION_CODE.search(text):
+        return True
+    return any(marker in text for marker in (
+        "too large", "toolarge", "exceeds the maximum", "size limit"))
+
+
+#: ShadowManager's (and the service's) size-rejection error code, as a
+#: standalone number (not part of, say, a thing name).
+_SIZE_REJECTION_CODE = re.compile(r"(?<![0-9a-z])413(?![0-9a-z])")
+
+#: The Static_Video_Camera's pin slot in this shadow (static-camera-video-
+#: loop design Decision 7); the image slot stays ``staticImagePin``.
+VIDEO_PIN_SECTION = "staticVideoPin"
+
+#: Bound on the echoed failure reason for the video slot (JSON-escaped
+#: characters, see ``pin_worker.bound_reason``), part of the budget above.
+VIDEO_PIN_REASON_MAX_CHARS = 256
+
+#: The video store's "nothing to remove" wording, which the video worker
+#: maps to an applied no-op like the image worker's marker.
+_NO_VIDEO_PINNED_MARKER = "no video is pinned"
 
 #: Exponential backoff for failed shadow writes (offline device). Retries
 #: never give up: the first post-reconnect success is the catch-up state.
@@ -146,6 +272,48 @@ _TRUNCATION_LADDER: Tuple[Tuple[Optional[int], int], ...] = (
     (1, 1),
     (0, 0),
 )
+
+
+def default_video_marker_path() -> str:
+    """The video pin worker's idempotence marker, next to the video
+    store's files (``static_video_camera/applied_pin_request.json``) so it
+    shares the Pinned_Video's lifetime. Resolved lazily, like the image
+    worker's, so constructing the agent never requires
+    ``COMPONENT_WORK_PATH``."""
+    return os.path.join(
+        os.environ["COMPONENT_WORK_PATH"], "static_video_camera", MARKER_FILE_NAME
+    )
+
+
+def make_video_pin_worker(
+    iot_shadow_accessor,
+    thing_name: str,
+    shadow_name: str = SHADOW_NAME,
+    **overrides: Any,
+) -> StaticImagePinWorker:
+    """The Static_Video_Camera's pin worker (static-camera-video-loop,
+    design Decision 7): the image worker class on the ``staticVideoPin``
+    slot, applying through the video store, with its own marker, the
+    100 MB download cap, the video store's error type and "nothing to
+    remove" wording, and a bounded echo reason.
+
+    ``overrides`` replace any constructor argument — the collaborator
+    seams (``store_factory``, ``s3_client_factory``, ``marker_path``,
+    ``clock``, ``sleep``, ``wall_clock``) for tests."""
+    options: Dict[str, Any] = {
+        "store_factory": get_video_store,
+        "section_name": VIDEO_PIN_SECTION,
+        "max_download_bytes": MAX_PIN_VIDEO_BYTES,
+        "no_media_marker": _NO_VIDEO_PINNED_MARKER,
+        "pin_error_type": StaticVideoPinError,
+        "reason_max_chars": VIDEO_PIN_REASON_MAX_CHARS,
+        "marker_path_factory": default_video_marker_path,
+        "label": "static-video",
+    }
+    options.update(overrides)
+    return StaticImagePinWorker(
+        iot_shadow_accessor, thing_name, shadow_name, **options
+    )
 
 
 def delta_topic_prefix(thing_name: str, shadow_name: str = SHADOW_NAME) -> str:
@@ -409,6 +577,9 @@ class EdgeSyncAgent:
         backoff_initial_seconds: float = BACKOFF_INITIAL_SECONDS,
         backoff_max_seconds: float = BACKOFF_MAX_SECONDS,
         pin_worker: Optional[StaticImagePinWorker] = None,
+        video_pin_worker: Optional[StaticImagePinWorker] = None,
+        shadow_size_limit_provider: Optional[Callable[[], Optional[int]]] = None,
+        limit_refresh_seconds: float = SHADOW_LIMIT_REFRESH_SECONDS,
     ):
         self._shadow = iot_shadow_accessor
         self._image_source_accessor = image_source_accessor
@@ -440,6 +611,29 @@ class EdgeSyncAgent:
         self.pin_worker = pin_worker
         self.pin_worker.report_inventory = self.report_inventory
 
+        # Cloud-initiated static-video pin worker (feature
+        # static-camera-video-loop, design Decision 7): a second instance
+        # of the same worker on the `staticVideoPin` slot, applying through
+        # the video store, with its own marker, a 100 MB download cap and a
+        # bounded echo reason. Owned and started exactly like the first.
+        if video_pin_worker is None:
+            video_pin_worker = make_video_pin_worker(
+                iot_shadow_accessor, self.thing_name, shadow_name
+            )
+        self.video_pin_worker = video_pin_worker
+        self.video_pin_worker.report_inventory = self.report_inventory
+
+        # Report cap from the shadow document size limit in effect (see
+        # report_cap_for_shadow_limit). Without a provider the limit is the
+        # 8 KB default, i.e. the MAX_REPORT_BYTES cap. A size rejection
+        # halves the cap until the limit next changes.
+        self._size_limit_provider = shadow_size_limit_provider
+        self._limit_refresh = float(limit_refresh_seconds)
+        self._shadow_limit_bytes: Optional[int] = None
+        self._limit_read_at: Optional[float] = None
+        self._cap_override: Optional[int] = None
+        self._last_report_cap: Optional[int] = None
+
         self._lock = threading.Lock()
         self._dirty = False
         self._not_before = 0.0  # earliest monotonic time of the next write
@@ -454,6 +648,9 @@ class EdgeSyncAgent:
         # when the store is pinned again, so it never churns between
         # reports (a churning timestamp would version-bump every report).
         self._static_absent_since_ms: Optional[int] = None
+        # The same, for the Static_Video_Camera's own absence episode
+        # (static-camera-video-loop, Requirement 4.7).
+        self._video_absent_since_ms: Optional[int] = None
 
         # Portal-change apply state (Requirements 5.3, 5.4). All three are
         # one-shot: retained across failed shadow writes (offline retry)
@@ -501,7 +698,9 @@ class EdgeSyncAgent:
 
         state = self._refresh_reported_versions()
         self.pin_worker.start()
+        self.video_pin_worker.start()
         self._handoff_desired_pin(state)
+        self._handoff_desired_video_pin(state)
         self._stop_event = threading.Event()
         self._wakeup = threading.Event()
         with self._lock:
@@ -519,6 +718,7 @@ class EdgeSyncAgent:
         self._stop_event.set()
         self._wakeup.set()
         self.pin_worker.stop()
+        self.video_pin_worker.stop()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join()
@@ -545,6 +745,27 @@ class EdgeSyncAgent:
         if applied is not None and pin.get("requestId") == applied:
             return
         self.pin_worker.on_desired(pin)
+
+    def _handoff_desired_video_pin(self, state: Optional[Mapping]) -> None:
+        """The same startup catch-up for the video slot: an unprocessed
+        ``desired.staticVideoPin`` goes to the video pin worker, and a
+        request its marker already records is skipped
+        (static-camera-video-loop, Requirement 8.6)."""
+        desired = state.get("desired") if isinstance(state, Mapping) else None
+        pin = desired.get(VIDEO_PIN_SECTION) if isinstance(desired, Mapping) else None
+        if not isinstance(pin, Mapping) or not pin.get("requestId"):
+            return
+        try:
+            applied = self.video_pin_worker.applied_request_id()
+        except Exception:  # noqa: BLE001 - marker read must not break start
+            logger.exception(
+                "Could not read the static-video pin marker at start; "
+                "handing the desired pin document to the worker"
+            )
+            applied = None
+        if applied is not None and pin.get("requestId") == applied:
+            return
+        self.video_pin_worker.on_desired(pin)
 
     # --- report triggers (Requirement 3.1) --------------------------------
 
@@ -583,6 +804,11 @@ class EdgeSyncAgent:
         static_pin = state.get("staticImagePin")
         if isinstance(static_pin, Mapping) and static_pin:
             self.pin_worker.on_desired(static_pin)
+        # Cloud-initiated static-video pin (static-camera-video-loop): the
+        # `staticVideoPin` section routes to the video pin worker.
+        static_video_pin = state.get(VIDEO_PIN_SECTION)
+        if isinstance(static_video_pin, Mapping) and static_video_pin:
+            self.video_pin_worker.on_desired(static_video_pin)
         changes = state.get("changes")
         if isinstance(changes, Mapping) and changes:
             self.apply_desired_changes(changes)
@@ -614,9 +840,12 @@ class EdgeSyncAgent:
         # only cfg- configured sources can be updated or deleted, and a
         # create must not target a disc- discovery id. The literal
         # `static-image-camera` id is likewise discovery-managed (feature
-        # cloud-static-camera-provisioning, Requirement 6.5).
+        # cloud-static-camera-provisioning, Requirement 6.5), and so is
+        # `static-video-camera` (static-camera-video-loop).
         targets_discovered = (
-            csid.startswith(_DISCOVERED_PREFIX) or csid == STATIC_IMAGE_CAMERA_ID
+            csid.startswith(_DISCOVERED_PREFIX)
+            or csid == STATIC_IMAGE_CAMERA_ID
+            or csid == STATIC_VIDEO_CAMERA_ID
         )
         if targets_discovered or (
             op != "create" and not csid.startswith(_CONFIGURED_PREFIX)
@@ -795,6 +1024,7 @@ class EdgeSyncAgent:
         reported = state.get("reported") if isinstance(state, Mapping) else None
         self._reported_versions = versions_from_reported(reported)
         self._seed_static_absence(reported)
+        self._seed_static_video_absence(reported)
         return state if isinstance(state, Mapping) else None
 
     def _seed_static_absence(self, reported: Optional[Mapping]) -> None:
@@ -811,6 +1041,17 @@ class EdgeSyncAgent:
         absent_since = entry.get("absentSince")
         if isinstance(absent_since, (int, float)):
             self._static_absent_since_ms = int(absent_since)
+
+    def _seed_static_video_absence(self, reported: Optional[Mapping]) -> None:
+        """The same restart stability for the Static_Video_Camera's
+        absence timestamp (static-camera-video-loop, Requirement 4.7)."""
+        cameras = (reported or {}).get("cameras") if isinstance(reported, Mapping) else None
+        entry = cameras.get(STATIC_VIDEO_CAMERA_ID) if isinstance(cameras, Mapping) else None
+        if not isinstance(entry, Mapping) or not entry.get("absent"):
+            return
+        absent_since = entry.get("absentSince")
+        if isinstance(absent_since, (int, float)):
+            self._video_absent_since_ms = int(absent_since)
 
     def _build_current_document(self) -> Dict[str, Any]:
         snapshot = (
@@ -843,6 +1084,8 @@ class EdgeSyncAgent:
             entry for entry in inventory
             if entry.camera_source_id not in failures
         ]
+        cap = self.report_cap()
+        self._last_report_cap = cap
         return build_report_document(
             reported_inventory,
             versions,
@@ -852,6 +1095,58 @@ class EdgeSyncAgent:
             acks=acks,
             aliases=aliases,
             retirements=retirements,
+            max_bytes=cap,
+        )
+
+    # --- report cap (static-camera-video-loop design Decision 7) ------------
+
+    def report_cap(self) -> int:
+        """The size cap for the next report: derived from the shadow
+        document size limit in effect (re-read at most every
+        ``limit_refresh_seconds``), lowered by any size-rejection back-off."""
+        self._refresh_shadow_limit()
+        cap = report_cap_for_shadow_limit(self._shadow_limit_bytes)
+        if self._cap_override is not None:
+            cap = min(cap, self._cap_override)
+        return cap
+
+    def _refresh_shadow_limit(self) -> None:
+        provider = self._size_limit_provider
+        if provider is None:
+            return
+        now = self._clock()
+        if (self._limit_read_at is not None
+                and now - self._limit_read_at < self._limit_refresh):
+            return
+        self._limit_read_at = now
+        try:
+            limit = provider()
+        except Exception:  # noqa: BLE001 - keep the last known limit
+            logger.exception(
+                "Could not read the ShadowManager document size limit; "
+                "keeping the last known limit"
+            )
+            return
+        if limit != self._shadow_limit_bytes:
+            logger.info(
+                "Shadow document size limit: %s; camera report cap %d bytes",
+                "{} bytes".format(limit) if limit is not None
+                else "ShadowManager default ({} bytes)".format(
+                    DEFAULT_SHADOW_DOCUMENT_LIMIT_BYTES),
+                report_cap_for_shadow_limit(limit),
+            )
+            self._shadow_limit_bytes = limit
+            # A new limit supersedes an earlier size back-off.
+            self._cap_override = None
+
+    def _back_off_report_cap(self) -> None:
+        """After a size rejection: halve the cap (down to MIN_REPORT_BYTES)
+        for the retry and later reports, until the limit changes."""
+        current = self._last_report_cap or self.report_cap()
+        self._cap_override = max(MIN_REPORT_BYTES, current // 2)
+        logger.warning(
+            "Camera report rejected for its size at a %d-byte cap; retrying "
+            "with a %d-byte cap", current, self._cap_override,
         )
 
     def _collect_retirements(self) -> Tuple[str, ...]:
@@ -925,6 +1220,26 @@ class EdgeSyncAgent:
             self._static_absent_since_ms = None  # absence episode over
         else:
             static_image_absent_since = self._static_image_absent_since()
+        # The Static_Video_Camera (static-camera-video-loop, Requirements
+        # 4.6, 4.7): read and guarded separately, so a video store failure
+        # never drops the image entry or the rest of the report, with its
+        # own absence episode.
+        static_video_pinned = False
+        static_video_metadata = None
+        try:
+            video_status = get_video_store().status()
+            static_video_pinned = bool(video_status.get("pinned"))
+            static_video_metadata = video_status.get("metadata")
+        except Exception:  # noqa: BLE001 - store failure must not break reports
+            logger.exception(
+                "Static video pin state could not be read; reporting the "
+                "inventory without the static video camera entry"
+            )
+        static_video_absent_since: Optional[int] = None
+        if static_video_pinned:
+            self._video_absent_since_ms = None  # absence episode over
+        else:
+            static_video_absent_since = self._static_video_absent_since()
         with self._make_session() as session:
             image_sources = self._image_source_accessor.list_image_sources(
                 None, session
@@ -935,6 +1250,9 @@ class EdgeSyncAgent:
                 static_image_pinned=static_image_pinned,
                 static_image_metadata=static_image_metadata,
                 static_image_absent_since=static_image_absent_since,
+                static_video_pinned=static_video_pinned,
+                static_video_metadata=static_video_metadata,
+                static_video_absent_since=static_video_absent_since,
             )
 
     def _static_image_absent_since(self) -> Optional[int]:
@@ -966,6 +1284,20 @@ class EdgeSyncAgent:
     def _static_previously_reported(self) -> bool:
         return self._previously_reported(STATIC_IMAGE_CAMERA_ID)
 
+    def _static_video_absent_since(self) -> Optional[int]:
+        """The ``absentSince`` to report for the unpinned
+        Static_Video_Camera, or ``None`` when it was never reported —
+        :meth:`_static_image_absent_since` for the video camera, with its
+        own cached episode timestamp and its own worker's marker
+        (Requirement 4.7)."""
+        if not self._previously_reported(STATIC_VIDEO_CAMERA_ID):
+            return None
+        if self._video_absent_since_ms is None:
+            self._video_absent_since_ms = self._derive_absent_since(
+                self.video_pin_worker, "static-video"
+            )
+        return self._video_absent_since_ms
+
     def _previously_reported(self, camera_source_id: str) -> bool:
         """Whether the Portal has already seen ``camera_source_id`` in a
         report, from two independent records (Requirements 6.2, 2.9).
@@ -989,13 +1321,19 @@ class EdgeSyncAgent:
         return bool(state) and camera_source_id in state
 
     def _derive_static_absent_since(self) -> int:
+        return self._derive_absent_since(self.pin_worker, "static-image")
+
+    def _derive_absent_since(self, worker, label: str) -> int:
+        """The absence timestamp for one virtual camera: its pin worker
+        marker's ``completedAtEpochMs`` when the marker records an applied
+        ``remove``, else the wall clock now."""
         marker = None
         try:
-            marker = self.pin_worker.applied_marker()
+            marker = worker.applied_marker()
         except Exception:  # noqa: BLE001 - marker read must not break reports
             logger.exception(
-                "Could not read the static-image pin marker for the "
-                "absence timestamp"
+                "Could not read the %s pin marker for the absence timestamp",
+                label,
             )
         if (
             isinstance(marker, Mapping)
@@ -1040,10 +1378,15 @@ class EdgeSyncAgent:
                 self._consumed_failures = {}
                 self._consumed_retirements = set()
             return True
-        except Exception:  # noqa: BLE001 - offline/transport errors retry
+        except Exception as exc:  # noqa: BLE001 - offline/transport errors retry
             logger.exception(
                 "Camera-registry shadow report failed; retrying with backoff"
             )
+            if _is_size_rejection(exc):
+                # The limit in effect is lower than the one the cap was
+                # derived from (or the pin slots outgrew their reserve):
+                # the retry goes out with half the cap.
+                self._back_off_report_cap()
             return False
 
 

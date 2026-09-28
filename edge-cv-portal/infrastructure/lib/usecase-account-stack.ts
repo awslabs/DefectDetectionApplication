@@ -706,6 +706,19 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
+    // IoT shadow size quota (static-camera-video-loop task 10): the Portal's
+    // deployment path reads this account's "Maximum size of a JSON state
+    // document" quota and carries it into ShadowManager's
+    // shadowDocumentSizeLimitBytes. Read-only, scoped to that one quota.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'IoTShadowSizeQuotaRead',
+        effect: iam.Effect.ALLOW,
+        actions: ['servicequotas:GetServiceQuota'],
+        resources: [`arn:aws:servicequotas:*:${this.account}:iotcore/L-A295A064`],
+      })
+    );
+
     // IoT Jobs - Greengrass CreateDeployment requires these as dependent actions.
     // iot:CreateJob needs both job/* and thing/* resources since the job targets a thing.
     this.role.addToPolicy(

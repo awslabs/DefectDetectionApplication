@@ -114,7 +114,8 @@ from endpoints import (
     streams,
     local_auth,
     health,
-    static_image_camera
+    static_image_camera,
+    static_video_camera
 )
 
 # Workflow Manager engine (additive subsystem, Requirement 13)
@@ -170,6 +171,9 @@ app.include_router(camera.router)
 # Pin_API for the Static_Image_Camera (static-image-camera-source): pin /
 # status / unpin routes backing the virtual camera's Pinned_Image.
 app.include_router(static_image_camera.router)
+# Video_Pin_API for the separate Static_Video_Camera (static-camera-video-
+# loop): pin / status / unpin routes backing its looping Pinned_Video.
+app.include_router(static_video_camera.router)
 app.include_router(system.router)
 app.include_router(feature_config.router)
 app.include_router(workflow.router)

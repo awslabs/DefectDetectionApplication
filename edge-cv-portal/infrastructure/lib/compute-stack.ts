@@ -2330,6 +2330,107 @@ export class ComputeStack extends cdk.Stack {
     // convention (cloud-static-camera-provisioning task 4.1).
     cameraRegistryHandler.addLayers(imagingLayer);
 
+    // Video layer (static-camera-video-loop, design Decision 8): the
+    // LocalServer's OpenCV build (opencv-python-headless 4.11.0.86 with its
+    // bundled FFmpeg, plus numpy) for the Portal_Video_Pin_API, which
+    // validates a staged video by decoding its first and last frames with
+    // the device's own video_loop.py. About 190 MB unzipped (cv2/data
+    // removed), so it is attached only to CameraVideoPinHandler below.
+    // Bundled at synth time like the ImagingLayer: the local step
+    // (build.sh) installs the x86_64 manylinux wheels from a per-requirements
+    // cache and hardlinks them into the asset; the Docker bundling image is
+    // the fallback.
+    const videoLayerSourceDir = path.join(__dirname, '../../backend/layers/video');
+    const videoLayer = new lambda.LayerVersion(this, 'VideoLayer', {
+      code: lambda.Code.fromAsset(videoLayerSourceDir, {
+        bundling: {
+          image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+          command: [
+            'bash',
+            '-c',
+            'pip install -r requirements.txt -t /asset-output/python ' +
+              '--only-binary=:all: --no-compile && ' +
+              'rm -rf /asset-output/python/cv2/data',
+          ],
+          local: {
+            tryBundle(outputDir: string): boolean {
+              try {
+                execFileSync('bash', [path.join(videoLayerSourceDir, 'build.sh'), outputDir], {
+                  stdio: ['ignore', 'pipe', 'pipe'],
+                });
+                return true;
+              } catch {
+                // Fall back to the Docker bundling image.
+                return false;
+              }
+            },
+          },
+        },
+      }),
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
+      compatibleArchitectures: [lambda.Architecture.X86_64],
+      description:
+        'OpenCV video layer (opencv-python-headless 4.11.0.86, numpy 1.26.4) ' +
+        'for the Portal video pin validation (static-camera-video-loop)',
+    });
+
+    // Portal_Video_Pin_API Lambda (static-camera-video-loop, design
+    // Decision 8): the four /cameras/static-video… routes. Same code asset
+    // as CameraRegistryHandler (the route handlers live in
+    // camera_registry.py; camera_video_pin.py narrows this function to the
+    // video routes) and the SAME role: the registry table, devices/audit
+    // tables, use-case STS, and the static-image-pins/ prefix grant (which
+    // covers the video keys under static-image-pins/{deviceId}/video/) all
+    // apply unchanged.
+    //
+    // Video_Validation (up to 60 s of decoding) cannot fit the API Gateway
+    // integration timeout, so the pin route hands it to this same function
+    // as an asynchronous Event invocation (camera_registry.
+    // run_video_validation). Hence the fixed function name (the
+    // environment cannot Ref the function itself; the WorkflowGenerator
+    // pattern), the self-invoke grant below, and no async retries (a job
+    // that dies leaves its record validating, which the status view shows
+    // as expired after 5 minutes).
+    // Sizing: a 100 MB staged video is streamed to /tmp (1 GiB ephemeral
+    // storage) and probed in a child process bounded at 60 s; 2048 MB
+    // gives the decoder CPU headroom, and the 120 s timeout covers the
+    // download before the probe and the copy and shadow write after it.
+    // CameraRegistryHandler is unchanged.
+    const CAMERA_VIDEO_PIN_FUNCTION_NAME = 'dda-portal-camera-video-pin';
+    const cameraVideoPinFunctionArn =
+      `arn:aws:lambda:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}` +
+      `:function:${CAMERA_VIDEO_PIN_FUNCTION_NAME}`;
+    const cameraVideoPinHandler = new lambda.Function(this, 'CameraVideoPinHandler', {
+      functionName: CAMERA_VIDEO_PIN_FUNCTION_NAME,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.X86_64,
+      handler: 'camera_video_pin.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: cameraRegistryHandler.role!,
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-09-26-camera-video-pin',
+        COMPONENT_BUCKET: componentBucketNameForPins,
+        VIDEO_VALIDATION_FUNCTION: CAMERA_VIDEO_PIN_FUNCTION_NAME,
+      },
+      layers: [sharedLayer, videoLayer],
+      timeout: cdk.Duration.seconds(120),
+      memorySize: 2048,
+      ephemeralStorageSize: cdk.Size.gibibytes(1),
+    });
+    // The pin route's Event self-invocation. The fixed-name ARN rather than
+    // grantInvoke(self): the function depends on its role's default policy,
+    // so referencing the function ARN token there would be a cycle.
+    cameraVideoPinHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [cameraVideoPinFunctionArn],
+    }));
+    cameraVideoPinHandler.configureAsyncInvoke({
+      retryAttempts: 0,
+      maxEventAge: cdk.Duration.minutes(5),
+    });
+
     // Auto-label queue + DLQ (camera-shadow queue pattern). The visibility
     // timeout equals the consumer Lambda timeout (300 s) so a message is
     // never redelivered while its Bedrock/SAM inference is still running;
@@ -3173,6 +3274,20 @@ export class ComputeStack extends cdk.Stack {
       resources: ['arn:aws:s3:::dda-inference-results-*'],
     }));
 
+    // Shadow size limit from the account quota (static-camera-video-loop
+    // task 10): deployments.py reads the AWS IoT "Maximum size of a JSON
+    // state document" quota (iotcore/L-A295A064) and carries it into
+    // ShadowManager's shadowDocumentSizeLimitBytes, from which the device
+    // derives its camera report cap. Read-only and scoped to that one
+    // quota; single-account Use_Cases read it with this role (cross-account
+    // ones through DDAPortalAccessRole). Best-effort: without it the limit
+    // stays at ShadowManager's 8 KB default.
+    deploymentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['servicequotas:GetServiceQuota'],
+      resources: [`arn:aws:servicequotas:*:${cdk.Aws.ACCOUNT_ID}:iotcore/L-A295A064`],
+    }));
+
     // Grant SharedComponents Lambda permission to update the GDK component bucket policy
     // This is needed to add new usecase accounts to the bucket policy during onboarding
     const componentBucketName = `dda-component-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}`;
@@ -3502,6 +3617,7 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       stageName: 'v1',
       userPool: props.userPool,
       cameraRegistryHandler,
+      cameraVideoPinHandler,
     });
     // The stage re-pointing deployment inside CameraRegistryApiStack needs
     // the ApiGatewayStack's stage (and its own deployment) to exist first.

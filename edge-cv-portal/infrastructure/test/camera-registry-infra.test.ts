@@ -16,6 +16,8 @@
 import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as fs from 'fs';
+import * as path from 'path';
 import { ComputeStack } from '../lib/compute-stack';
 import { StorageStack } from '../lib/storage-stack';
 import { UseCaseAccountStack } from '../lib/usecase-account-stack';
@@ -31,6 +33,7 @@ let storageTemplate: Template;
 let computeTemplate: Template;
 let cameraApiTemplate: Template;
 let usecaseTemplate: Template;
+let assemblyDir: string;
 
 beforeAll(() => {
   const app = new cdk.App();
@@ -80,6 +83,8 @@ beforeAll(() => {
     compute.node.findChild('CameraRegistryApi') as cdk.NestedStack
   );
   usecaseTemplate = Template.fromStack(usecase);
+  // The already-synthesized (cached) assembly, for staged-asset checks.
+  assemblyDir = app.synth().directory;
 }, 300_000);
 
 /** The single resource of the given type whose properties match `predicate`. */
@@ -298,7 +303,9 @@ describe('camera registry API routes (Requirements 1.1, 3.2)', () => {
       .sort();
   }
 
-  test('exactly the seven Camera_Registry routes plus the four Portal_Pin_API routes are registered', () => {
+  // CONSCIOUS UPDATE (static-camera-video-loop task 8.3): the four
+  // Portal_Video_Pin_API routes join the route table.
+  test('exactly the seven Camera_Registry routes plus the four Portal_Pin_API and four Portal_Video_Pin_API routes are registered', () => {
     expect(routes()).toEqual(
       [
         'GET /devices/{id}/cameras',
@@ -313,6 +320,11 @@ describe('camera registry API routes (Requirements 1.1, 3.2)', () => {
         'POST /devices/{id}/cameras/static-image/upload-url',
         'POST /devices/{id}/cameras/static-image/pin',
         'DELETE /devices/{id}/cameras/static-image/pin',
+        // Portal_Video_Pin_API (static-camera-video-loop task 8.2)
+        'GET /devices/{id}/cameras/static-video',
+        'POST /devices/{id}/cameras/static-video/upload-url',
+        'POST /devices/{id}/cameras/static-video/pin',
+        'DELETE /devices/{id}/cameras/static-video/pin',
       ].sort()
     );
   });
@@ -328,7 +340,9 @@ describe('camera registry API routes (Requirements 1.1, 3.2)', () => {
     )
       .map((m: any) => m.Properties)
       .filter((props) => props.HttpMethod !== 'OPTIONS');
-    expect(methods.length).toBe(11);
+    // CONSCIOUS UPDATE (static-camera-video-loop): 11 -> 15 with the four
+    // Portal_Video_Pin_API routes.
+    expect(methods.length).toBe(15);
     for (const props of methods) {
       expect(props.AuthorizationType).toBe('COGNITO_USER_POOLS');
       expect(props.AuthorizerId).toBeDefined();
@@ -551,5 +565,223 @@ describe('static-image pin infrastructure (cloud-static-camera-provisioning task
     expect(corsStatements).toHaveLength(1);
     expect(JSON.stringify(corsStatements[0].Resource)).toContain('dda-component-');
     expect(JSON.stringify(corsStatements[0].Resource)).not.toContain('/*');
+  });
+});
+
+describe('static-video pin infrastructure (static-camera-video-loop task 8.3, Requirement 8.1)', () => {
+  function videoHandler(): [string, any] {
+    return findResource(
+      computeTemplate,
+      'AWS::Lambda::Function',
+      (props) => props.Handler === 'camera_video_pin.handler'
+    );
+  }
+
+  function layerIds(prefix: string): string[] {
+    return Object.keys(
+      computeTemplate.findResources('AWS::Lambda::LayerVersion')
+    ).filter((logicalId) => logicalId.startsWith(prefix));
+  }
+
+  /** Total size in bytes of every file below `dir`. */
+  function treeBytes(dir: string): number {
+    let total = 0;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        total += treeBytes(full);
+      } else if (entry.isFile()) {
+        total += fs.statSync(full).size;
+      }
+    }
+    return total;
+  }
+
+  test('CameraVideoPinHandler is sized for a 100 MB video probe', () => {
+    const [, handler] = videoHandler();
+    expect(handler.Properties.Runtime).toBe('python3.12');
+    expect(handler.Properties.Architectures).toEqual(['x86_64']);
+    expect(handler.Properties.MemorySize).toBe(2048);
+    // Conscious update (static-camera-video-loop task 11.4): 30 s became
+    // 120 s when Video_Validation moved into the asynchronous job (60 s
+    // probe plus the download before it and the delivery after it).
+    expect(handler.Properties.Timeout).toBe(120);
+    expect(handler.Properties.EphemeralStorage).toEqual({ Size: 1024 });
+    const env = handler.Properties.Environment.Variables;
+    expect(env.CAMERA_REGISTRY_TABLE).toBeDefined();
+    expect(JSON.stringify(env.COMPONENT_BUCKET)).toContain('dda-component-');
+  });
+
+  test('the validation job is an Event self-invocation of the fixed-name function, never retried', () => {
+    const [videoId, handler] = videoHandler();
+    expect(handler.Properties.FunctionName).toBe('dda-portal-camera-video-pin');
+    expect(handler.Properties.Environment.Variables.VIDEO_VALIDATION_FUNCTION).toBe(
+      'dda-portal-camera-video-pin'
+    );
+    const [, config] = findResource(
+      computeTemplate,
+      'AWS::Lambda::EventInvokeConfig',
+      (props) => props.FunctionName?.Ref === videoId
+    );
+    expect(config.Properties.MaximumRetryAttempts).toBe(0);
+    expect(config.Properties.MaximumEventAgeInSeconds).toBe(300);
+
+    // One lambda:InvokeFunction grant, on the video function's own role,
+    // scoped to exactly that function.
+    const roleId = handler.Properties.Role['Fn::GetAtt'][0];
+    const invokeGrants = [
+      ...Object.values(computeTemplate.findResources('AWS::IAM::Policy')),
+      ...Object.values(computeTemplate.findResources('AWS::IAM::ManagedPolicy')),
+    ]
+      .filter((policy: any) =>
+        (policy.Properties.Roles ?? []).some((r: any) => r.Ref === roleId)
+      )
+      .flatMap((policy: any) => policy.Properties.PolicyDocument.Statement)
+      .filter((stmt: any) => [stmt.Action].flat().includes('lambda:InvokeFunction'));
+    expect(invokeGrants).toHaveLength(1);
+    const resource = JSON.stringify(invokeGrants[0].Resource);
+    expect(resource).toContain(':function:dda-portal-camera-video-pin');
+    expect(resource).not.toContain('*');
+  });
+
+  test('CameraVideoPinHandler reuses the CameraRegistryHandler role (no new role or policy)', () => {
+    const [, video] = videoHandler();
+    const [, registry] = findResource(
+      computeTemplate,
+      'AWS::Lambda::Function',
+      (props) => props.Handler === 'camera_registry.handler'
+    );
+    expect(video.Properties.Role).toEqual(registry.Properties.Role);
+    const iamIds = [
+      ...Object.keys(computeTemplate.findResources('AWS::IAM::Role')),
+      ...Object.keys(computeTemplate.findResources('AWS::IAM::Policy')),
+      ...Object.keys(computeTemplate.findResources('AWS::IAM::ManagedPolicy')),
+    ];
+    expect(iamIds.filter((id) => /VideoPin|VideoLayer/.test(id))).toEqual([]);
+  });
+
+  test('the video layer is attached to CameraVideoPinHandler only', () => {
+    const videoLayers = layerIds('VideoLayer');
+    expect(videoLayers).toHaveLength(1);
+    const [videoId] = videoHandler();
+    const holders = Object.entries(
+      computeTemplate.findResources('AWS::Lambda::Function')
+    )
+      .filter(([, fn]: [string, any]) =>
+        (fn.Properties.Layers ?? []).some(
+          (layer: any) => layer.Ref === videoLayers[0]
+        )
+      )
+      .map(([logicalId]) => logicalId);
+    expect(holders).toEqual([videoId]);
+    const [, video] = videoHandler();
+    const refs = (video.Properties.Layers ?? []).map((l: any) => l.Ref ?? '');
+    expect(refs.some((ref: string) => ref.startsWith('SharedLayer'))).toBe(true);
+    expect(refs.some((ref: string) => ref.startsWith('ImagingLayer'))).toBe(false);
+  });
+
+  test('the bundled video layer holds OpenCV and numpy within 200 MB', () => {
+    const [layerId] = layerIds('VideoLayer');
+    const layer: any = computeTemplate.findResources('AWS::Lambda::LayerVersion')[layerId];
+    expect(layer.Properties.CompatibleRuntimes).toEqual(['python3.12']);
+    const s3Key: string = layer.Properties.Content.S3Key;
+    const assetDir = path.join(assemblyDir, `asset.${s3Key.replace(/\.zip$/, '')}`);
+    expect(fs.readdirSync(assetDir)).toEqual(['python']);
+    expect(fs.existsSync(path.join(assetDir, 'python', 'cv2', '__init__.py'))).toBe(true);
+    expect(fs.existsSync(path.join(assetDir, 'python', 'numpy', '__init__.py'))).toBe(true);
+    expect(fs.existsSync(path.join(assetDir, 'python', 'cv2', 'data'))).toBe(false);
+    expect(treeBytes(assetDir)).toBeLessThanOrEqual(200 * 1024 * 1024);
+  });
+
+  test('the video routes integrate the video function under the Cognito authorizer', () => {
+    const resources = cameraApiTemplate.findResources('AWS::ApiGateway::Resource');
+    const videoResourceIds = new Set(
+      Object.entries(resources)
+        .filter(([, r]: [string, any]) =>
+          ['static-video', 'upload-url', 'pin'].includes(r.Properties.PathPart)
+        )
+        .map(([logicalId]) => logicalId)
+    );
+    const methods = Object.values(
+      cameraApiTemplate.findResources('AWS::ApiGateway::Method')
+    )
+      .map((m: any) => m.Properties)
+      .filter(
+        (props) =>
+          props.HttpMethod !== 'OPTIONS' &&
+          videoResourceIds.has(props.ResourceId.Ref) &&
+          JSON.stringify(props.Integration.Uri).includes('VideoPin')
+      );
+    expect(methods).toHaveLength(4);
+    for (const props of methods) {
+      expect(props.AuthorizationType).toBe('COGNITO_USER_POOLS');
+      expect(props.AuthorizerId).toBeDefined();
+      expect(props.Integration.Type).toBe('AWS_PROXY');
+    }
+  });
+});
+
+describe('shadow size quota read (static-camera-video-loop task 10)', () => {
+  const quotaResource = (template: Template) =>
+    JSON.stringify(template.toJSON()).includes(':iotcore/L-A295A064');
+
+  function quotaStatements(policies: any[]): any[] {
+    return policies
+      .flatMap((policy: any) => policy.Properties.PolicyDocument.Statement)
+      .filter((stmt: any) =>
+        [stmt.Action].flat().includes('servicequotas:GetServiceQuota')
+      );
+  }
+
+  test('the Deployments handler may read only the IoT shadow document quota', () => {
+    const [, deploymentsFn] = findResource(
+      computeTemplate,
+      'AWS::Lambda::Function',
+      (props) => props.Handler === 'deployments.handler'
+    );
+    const roleId = deploymentsFn.Properties.Role['Fn::GetAtt'][0];
+    const policies = [
+      ...Object.values(computeTemplate.findResources('AWS::IAM::Policy')),
+      ...Object.values(computeTemplate.findResources('AWS::IAM::ManagedPolicy')),
+    ];
+    const statements = quotaStatements(policies);
+    // Exactly one grant in the compute stack, held by the Deployments role.
+    expect(statements).toHaveLength(1);
+    const [stmt] = statements;
+    expect(stmt.Effect).toBe('Allow');
+    expect(stmt.Action).toBe('servicequotas:GetServiceQuota');
+    expect(stmt.Resource).not.toBe('*');
+    const resource = JSON.stringify(stmt.Resource);
+    expect(resource).toContain('arn:aws:servicequotas:*:');
+    expect(resource).toContain(':iotcore/L-A295A064');
+    const holders = policies.filter(
+      (policy: any) => quotaStatements([policy]).length > 0
+    );
+    expect(holders).toHaveLength(1);
+    expect(
+      (holders[0] as any).Properties.Roles.some((r: any) => r.Ref === roleId)
+    ).toBe(true);
+    expect(quotaResource(computeTemplate)).toBe(true);
+  });
+
+  test('DDAPortalAccessRole may read only the IoT shadow document quota', () => {
+    const [, role] = findResource(
+      usecaseTemplate,
+      'AWS::IAM::Role',
+      (props) => props.RoleName === 'DDAPortalAccessRole'
+    );
+    expect(role).toBeDefined();
+    const policies = [
+      ...Object.values(usecaseTemplate.findResources('AWS::IAM::Policy')),
+      ...Object.values(usecaseTemplate.findResources('AWS::IAM::ManagedPolicy')),
+    ];
+    const statements = quotaStatements(policies);
+    expect(statements).toHaveLength(1);
+    const [stmt] = statements;
+    expect(stmt.Sid).toBe('IoTShadowSizeQuotaRead');
+    expect(stmt.Action).toBe('servicequotas:GetServiceQuota');
+    const resource = JSON.stringify(stmt.Resource);
+    expect(resource).toContain('arn:aws:servicequotas:*:');
+    expect(resource).toContain(':iotcore/L-A295A064');
   });
 });

@@ -8,7 +8,10 @@
  * an explicit "never synced" state (Req 1.6); the conflict event list with
  * a re-apply action (Reqs 6.3, 6.4); create/edit/delete forms for
  * portal-managed sources — discovery-managed sources are read-only
- * (Req 5.6) — and a refresh-now button hitting the refresh route.
+ * (Req 5.6) — and a refresh-now button hitting the refresh route. Below
+ * the table sit the two virtual-camera panels: "Static image camera"
+ * (cloud-static-camera-provisioning) and "Static video camera"
+ * (`StaticVideoPanel`, static-camera-video-loop).
  *
  * The small formatting helpers are exported pure functions so the
  * component tests (task 8.2) can target them directly.
@@ -35,6 +38,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
+import StaticVideoPanel from './StaticVideoPanel';
 import type { UserRole } from '../types';
 import type { JsonValue } from '../pages/workflows/types';
 import {
@@ -549,12 +553,19 @@ interface DeviceCamerasTabProps {
    * Optional: every other call site renders exactly as before.
    */
   focusStaticImage?: boolean;
+  /**
+   * The same for the node panel's "Pin a test video…" shortcut
+   * (`focus=static-video`): the static-video panel is scrolled into view
+   * and flagged (static-camera-video-loop Requirement 9.7).
+   */
+  focusStaticVideo?: boolean;
 }
 
 export default function DeviceCamerasTab({
   deviceId,
   usecaseId,
   focusStaticImage = false,
+  focusStaticVideo = false,
 }: DeviceCamerasTabProps) {
   const { user } = useAuth();
   const [camerasResponse, setCamerasResponse] = useState<DeviceCamerasResponse | null>(null);
@@ -611,6 +622,18 @@ export default function DeviceCamerasTab({
     scrolledToStaticImage.current = true;
     wrapper.scrollIntoView?.({ block: 'start' });
   }, [focusStaticImage, loading, loadError]);
+
+  // The same arrival handling for the "Pin a test video…" shortcut.
+  const staticVideoPanelRef = useRef<HTMLDivElement | null>(null);
+  const scrolledToStaticVideo = useRef(false);
+  useEffect(() => {
+    if (!focusStaticVideo || loading || loadError !== null) return;
+    if (scrolledToStaticVideo.current) return;
+    const wrapper = staticVideoPanelRef.current;
+    if (wrapper === null) return;
+    scrolledToStaticVideo.current = true;
+    wrapper.scrollIntoView?.({ block: 'start' });
+  }, [focusStaticVideo, loading, loadError]);
 
   const handleRefreshNow = async () => {
     try {
@@ -924,6 +947,18 @@ export default function DeviceCamerasTab({
         />
       </div>
 
+      {/* Static video camera provisioning (static-camera-video-loop): a
+          separate panel for the second virtual camera (Req 9.1), the
+          scroll target of the "Pin a test video…" shortcut (Req 9.7). */}
+      <div ref={staticVideoPanelRef}>
+        <StaticVideoPanel
+          deviceId={deviceId}
+          usecaseId={usecaseId}
+          canMutate={canManageDeviceCameras(user?.role)}
+          focused={focusStaticVideo}
+        />
+      </div>
+
       {/* Conflict events (Reqs 6.3, 6.4) */}
       <Table
         data-testid="camera-conflicts-table"
@@ -1029,6 +1064,14 @@ export default function DeviceCamerasTab({
               Looking to pin a static test image? Use the &quot;Static image
               camera&quot; panel further down this tab — that source is
               discovery-managed, so it is not created here.
+            </Box>
+            <Box
+              variant="small"
+              color="text-body-secondary"
+              data-testid="camera-form-static-video-note"
+            >
+              To loop a test video, use the &quot;Static video camera&quot;
+              panel instead; that source is discovery-managed too.
             </Box>
             <FormField label="Name">
               <Input

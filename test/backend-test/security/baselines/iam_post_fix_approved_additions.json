@@ -10,7 +10,9 @@
       "iam:PassRole": "SageMaker job submission; conditioned on iam:PassedToService=sagemaker.amazonaws.com and limited to arn:aws:iam::*:role/DDA*Role",
       "iot / sagemaker / lambda / logs / s3 / tag / execute-api": "device registry, training + labeling, worker invocation, job log viewing, artifact and dataset access",
       "sts:AssumeRole": "cross-account use-case access, scoped to explicit account ids (the fixture renders 222222222222/333333333333) - the I1-I4 pattern, not a wildcard account",
-      "lambda:InvokeFunction on PackagingHandler (2 statements)": "detector-checkpoint-import: TrainingHandler (sync-on-read) and TrainingEventsHandler (SageMaker state change) invoke the Packaging finalize for a Conversion_Record once its job completes (Requirements 7.4, 7.9; packagingHandler.grantInvoke in compute-stack.ts). Scoped to the one PackagingHandler function ARN and its versions/aliases (:*)."
+      "lambda:InvokeFunction on PackagingHandler (2 statements)": "detector-checkpoint-import: TrainingHandler (sync-on-read) and TrainingEventsHandler (SageMaker state change) invoke the Packaging finalize for a Conversion_Record once its job completes (Requirements 7.4, 7.9; packagingHandler.grantInvoke in compute-stack.ts). Scoped to the one PackagingHandler function ARN and its versions/aliases (:*).",
+      "servicequotas:GetServiceQuota (2 statements)": "static-camera-video-loop task 10: deployments.py reads the AWS IoT 'Maximum size of a JSON state document' quota and carries it into ShadowManager's shadowDocumentSizeLimitBytes (the device derives its camera report cap from it). Read-only, scoped to the single quota ARN iotcore/L-A295A064 in the stack's own account: the DeploymentsHandler role (single-account Use_Cases) and DDAPortalAccessRole (cross-account Use_Cases).",
+      "lambda:InvokeFunction on dda-portal-camera-video-pin": "static-camera-video-loop task 11.4: the Portal_Video_Pin_API pin route hands Video_Validation (up to 60 s of decoding, beyond the API Gateway integration timeout) to its own function as an asynchronous Event invocation. Scoped to the one fixed-name function ARN in this account and region; held by the CameraRegistryHandler role the video function shares."
     },
     "follow_up_not_blocking": [
       "s3:GetObject/s3:PutObject on arn:aws:s3:::*/* together with s3:ListAllMyBuckets grants read/write to every object in every bucket in the account; narrow to the portal's own buckets plus registered data-account buckets when that wiring allows it.",
@@ -23,6 +25,18 @@
         "added_on": "2026-09-25",
         "statements": 2,
         "reviewed": "Purely additive: 2 added, 0 removed. lambda:InvokeFunction on a single function ARN; no wildcard resource, no new iam:PassRole or sts:AssumeRole. The spec's ECR repository policy (dda-detector-export, pull-only for the trusted use-case accounts' DDASageMakerExecutionRole) is a resource policy, outside this IAM statement multiset; no ECR pull grant was added (the use-case role already has one)."
+      },
+      {
+        "spec": ".kiro/specs/static-camera-video-loop (tasks.md 10.3)",
+        "added_on": "2026-09-26",
+        "statements": 2,
+        "reviewed": "Purely additive: 2 added, 0 removed. servicequotas:GetServiceQuota (read-only) on one quota ARN per stack, own account only; no wildcard resource, no write action, no new iam:PassRole or sts:AssumeRole. Approved by the repository owner in session (quota request and the quota-derived report cap)."
+      },
+      {
+        "spec": ".kiro/specs/static-camera-video-loop (tasks.md 11.4)",
+        "added_on": "2026-09-26",
+        "statements": 1,
+        "reviewed": "Purely additive: 1 added, 0 removed. lambda:InvokeFunction on a single function ARN (the video pin function invoking itself); no wildcard resource, no new iam:PassRole or sts:AssumeRole. Approved by the repository owner in session (asynchronous 60 s Portal validation)."
       }
     ]
   },
@@ -82,7 +96,14 @@
         "{\"Action\": [\"s3:ListBucket\", \"s3:GetBucketLocation\", \"s3:GetBucketTagging\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*\"}",
         "{\"Action\": [\"sagemaker:CreateTrainingJob\", \"sagemaker:DescribeTrainingJob\", \"sagemaker:ListTrainingJobs\", \"sagemaker:CreateCompilationJob\", \"sagemaker:DescribeCompilationJob\", \"sagemaker:ListCompilationJobs\", \"sagemaker:CreateLabelingJob\", \"sagemaker:DescribeLabelingJob\", \"sagemaker:ListLabelingJobs\", \"sagemaker:StopLabelingJob\", \"sagemaker:DescribeWorkteam\", \"sagemaker:AddTags\"], \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:sagemaker:*:*:training-job/*\", \"arn:aws:sagemaker:*:*:compilation-job/*\", \"arn:aws:sagemaker:*:*:labeling-job/*\", \"arn:aws:sagemaker:*:*:model/*\", \"arn:aws:sagemaker:*:*:workteam/*\"]}",
         "{\"Action\": \"lambda:InvokeFunction\", \"Effect\": \"Allow\", \"Resource\": [{\"Fn::GetAtt\": [\"PackagingHandlerE6BEDE0E\", \"Arn\"]}, {\"Fn::Join\": [\"\", [{\"Fn::GetAtt\": [\"PackagingHandlerE6BEDE0E\", \"Arn\"]}, \":*\"]]}]}",
-        "{\"Action\": \"lambda:InvokeFunction\", \"Effect\": \"Allow\", \"Resource\": [{\"Fn::GetAtt\": [\"PackagingHandlerE6BEDE0E\", \"Arn\"]}, {\"Fn::Join\": [\"\", [{\"Fn::GetAtt\": [\"PackagingHandlerE6BEDE0E\", \"Arn\"]}, \":*\"]]}]}"
+        "{\"Action\": \"lambda:InvokeFunction\", \"Effect\": \"Allow\", \"Resource\": [{\"Fn::GetAtt\": [\"PackagingHandlerE6BEDE0E\", \"Arn\"]}, {\"Fn::Join\": [\"\", [{\"Fn::GetAtt\": [\"PackagingHandlerE6BEDE0E\", \"Arn\"]}, \":*\"]]}]}",
+        "{\"Action\": \"servicequotas:GetServiceQuota\", \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:servicequotas:*:\", {\"Ref\": \"AWS::AccountId\"}, \":iotcore/L-A295A064\"]]}}",
+        "{\"Action\": \"lambda:InvokeFunction\", \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:lambda:\", {\"Ref\": \"AWS::Region\"}, \":\", {\"Ref\": \"AWS::AccountId\"}, \":function:dda-portal-camera-video-pin\"]]}}"
+      ]
+    },
+    "DDAPortalUseCaseAccountStack": {
+      "approved_additions": [
+        "{\"Action\": \"servicequotas:GetServiceQuota\", \"Effect\": \"Allow\", \"Resource\": \"arn:aws:servicequotas:*:111111111111:iotcore/L-A295A064\", \"Sid\": \"IoTShadowSizeQuotaRead\"}"
       ]
     }
   }

@@ -50,6 +50,11 @@ from utils.static_image_camera import (
     StaticImageUnavailableError,
     get_store as get_static_image_store,
 )
+from utils.static_video_camera import (
+    STATIC_VIDEO_CAMERA_ID,
+    StaticVideoUnavailableError,
+    get_store as get_static_video_store,
+)
 
 from threading import RLock
 
@@ -642,6 +647,15 @@ def get_camera_status(camera_id):
             status=CameraStatusEnum.CONNECTED if pinned else CameraStatusEnum.DISCONNECTED,
             lastUpdatedTime=time.time(),
         )
+    # Static_Video_Camera short-circuit (feature: static-camera-video-loop):
+    # "connected" exactly while a Pinned_Video exists; never touches
+    # camera_objects.
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        pinned = get_static_video_store().is_pinned()
+        return CameraStatusModel(
+            status=CameraStatusEnum.CONNECTED if pinned else CameraStatusEnum.DISCONNECTED,
+            lastUpdatedTime=time.time(),
+        )
     camera = camera_objects.get(camera_id) 
     if camera:
         return camera.get_status()
@@ -661,6 +675,17 @@ def connect_camera(camera_id):
             f"Static image camera '{STATIC_IMAGE_CAMERA_ID}' is not available "
             f"because no image is pinned. Pin an image through the static "
             f"image pin API before using this camera."
+        )
+
+    # Static_Video_Camera short-circuit: an existence check on the
+    # Pinned_Video; no device is opened for the virtual camera.
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        if get_static_video_store().is_pinned():
+            return True
+        raise AravisCameraException(
+            f"Static video camera '{STATIC_VIDEO_CAMERA_ID}' is not available "
+            f"because no video is pinned. Pin a video through the static "
+            f"video pin API before using this camera."
         )
 
     # Serialized against every other open/close/grab: overlapping opens make the
@@ -696,6 +721,9 @@ def get_camera_feature_bounds(camera_id):
     # static id must never be "connected on demand" — explicit empty bounds.
     if camera_id == STATIC_IMAGE_CAMERA_ID:
         return {}
+    # Static_Video_Camera: same — no feature map, never connected on demand.
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        return {}
 
     camera = camera_objects.get(camera_id)
     if camera is None:
@@ -720,6 +748,10 @@ def apply_camera_features(camera_id, features):
     # spirit), and never connect anything.
     if camera_id == STATIC_IMAGE_CAMERA_ID:
         return {}
+    # Static_Video_Camera: accepted and ignored the same way (video
+    # Requirement 3.7).
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        return {}
 
     if not features:
         return {}
@@ -742,6 +774,10 @@ def disconnect_camera(camera_id):
     # Static_Image_Camera short-circuit: nothing is ever held open for the
     # static id, so disconnect is a successful no-op.
     if camera_id == STATIC_IMAGE_CAMERA_ID:
+        return True
+    # Static_Video_Camera: nothing is held open here either (the per-process
+    # decoder belongs to the video store), so disconnect is a no-op too.
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
         return True
     # Serialized with opens and grabs: releasing the claim while another thread
     # is opening or grabbing is how the device ends up stranded.
@@ -807,6 +843,17 @@ def get_camera_frame(camera_id, camera_config=None):
         try:
             return get_static_image_store().get_frame()
         except StaticImageUnavailableError as err:
+            raise Exception(
+                f"Unable to get camera frame for camera id: {camera_id}: {err}"
+            ) from err
+    # Static_Video_Camera short-circuit (feature: static-camera-video-loop):
+    # the frame at the current Loop_Position, served BEFORE get_frame_lock
+    # and camera_objects exactly like the image camera (video Requirements
+    # 3.1, 3.7, 4.9). Acquisition config is accepted and ignored.
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        try:
+            return get_static_video_store().get_frame()
+        except StaticVideoUnavailableError as err:
             raise Exception(
                 f"Unable to get camera frame for camera id: {camera_id}: {err}"
             ) from err

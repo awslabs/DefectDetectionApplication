@@ -25,6 +25,7 @@ import DeviceCamerasTab from '../components/DeviceCamerasTab';
 import {
   STATIC_IMAGE_FOCUS_PARAM,
   STATIC_IMAGE_FOCUS_VALUE,
+  STATIC_VIDEO_FOCUS_VALUE,
 } from './workflows/cameraReference';
 import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
 import RemoteAccessTab from '../components/RemoteAccessTab';
@@ -87,6 +88,11 @@ export default function DeviceDetail() {
   // stays router-independent.
   const focusStaticImage =
     searchParams.get(STATIC_IMAGE_FOCUS_PARAM) === STATIC_IMAGE_FOCUS_VALUE;
+  // ?focus=static-video: the same arrival for the "Pin a test video…"
+  // shortcut and the "Static video camera" panel (static-camera-video-loop
+  // Requirement 9.7).
+  const focusStaticVideo =
+    searchParams.get(STATIC_IMAGE_FOCUS_PARAM) === STATIC_VIDEO_FOCUS_VALUE;
 
   // Logs state
   const [logGroups, setLogGroups] = useState<LogGroup[]>([]);
@@ -733,6 +739,7 @@ export default function DeviceDetail() {
                 deviceId={device.device_id}
                 usecaseId={usecaseId || ''}
                 focusStaticImage={focusStaticImage}
+                focusStaticVideo={focusStaticVideo}
               />
             ),
           },

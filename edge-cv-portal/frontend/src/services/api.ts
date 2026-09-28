@@ -25,6 +25,10 @@ import type {
   StaticImagePinStatusResponse,
   StaticImagePinSubmitResponse,
   StaticImageUploadUrlResponse,
+  StaticVideoPinStatusResponse,
+  StaticVideoPinSubmitResponse,
+  StaticVideoUploadUrlResponse,
+  StaticVideoValidationSubmitResponse,
 } from '../pages/workflows/cameraReference';
 import type { CameraBindingContext } from '../pages/deployments/cameraBindings';
 import type {
@@ -2161,6 +2165,79 @@ class ApiService {
     }
     return this.request<StaticImagePinStatusResponse>(
       `/devices/${deviceId}/cameras/static-image?usecase_id=${usecaseId}`
+    );
+  }
+
+  // Static-video pin provisioning (static-camera-video-loop —
+  // Portal_Video_Pin_API routes served by the CameraVideoPinHandler)
+
+  /**
+   * Presigned PUT + staging key for a static-video pin upload (Operator).
+   * The staged object is validated (decoded) and copied server-side by
+   * the video pin submit route.
+   */
+  async getStaticVideoUploadUrl(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticVideoUploadUrlResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticVideoUploadUrlResponse>(
+      `/devices/${deviceId}/cameras/static-video/upload-url?usecase_id=${usecaseId}`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Submit a staged upload to pin (or replace) the device's
+   * Static_Video_Camera video (Operator). The Portal validates the video
+   * asynchronously, decoding its first and last frames (up to a minute):
+   * the response (202) only accepts the submission; poll
+   * `getStaticVideoPinStatus` for `validation` and then `latest`.
+   */
+  async pinStaticVideo(
+    deviceId: string,
+    usecaseId: string,
+    body: { stagingKey: string; fileName: string }
+  ): Promise<StaticVideoValidationSubmitResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticVideoValidationSubmitResponse>(
+      `/devices/${deviceId}/cameras/static-video/pin?usecase_id=${usecaseId}`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Create a removal Video_Pin_Request for the device's Pinned_Video (Operator). */
+  async removeStaticVideoPin(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticVideoPinSubmitResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticVideoPinSubmitResponse>(
+      `/devices/${deviceId}/cameras/static-video/pin?usecase_id=${usecaseId}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * The device's static-video provisioning status: the latest submission's
+   * validation, the latest Video_Pin_Request, device-reported state,
+   * history, and connectivity while pending (Viewer).
+   */
+  async getStaticVideoPinStatus(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticVideoPinStatusResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticVideoPinStatusResponse>(
+      `/devices/${deviceId}/cameras/static-video?usecase_id=${usecaseId}`
     );
   }
 

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -673,6 +674,135 @@ def ensure_shadow_manager_sync(components_map, resolve_version):
         f"the portal synchronize config; namedShadows now: "
         f"{resulting_names}")
     return 'merged'
+
+
+# --- ShadowManager document size limit from the account quota -------------
+#
+# static-camera-video-loop task 10 (design Decision 7): the device's camera
+# report cap is derived from ShadowManager's shadowDocumentSizeLimitBytes
+# (src/backend/camera_sync/agent.py). ShadowManager enforces that limit on
+# local shadows and AWS IoT enforces the account's "Maximum size of a JSON
+# state document" quota on the cloud side, and ShadowManager's docs require
+# the two to be raised together. So the deployment carries the account's
+# quota into ShadowManager's configuration: a raised quota raises the local
+# limit (and with it the device's report cap), and a default quota leaves
+# the configuration exactly as before.
+
+#: AWS IoT Core's "Maximum size of a JSON state document" quota.
+IOT_SHADOW_DOCUMENT_QUOTA_SERVICE = 'iotcore'
+IOT_SHADOW_DOCUMENT_QUOTA_CODE = 'L-A295A064'
+
+#: ShadowManager's size-limit key, its default and its maximum.
+SHADOW_MANAGER_SIZE_LIMIT_KEY = 'shadowDocumentSizeLimitBytes'
+SHADOW_MANAGER_DEFAULT_SIZE_LIMIT_BYTES = 8192
+SHADOW_MANAGER_MAX_SIZE_LIMIT_BYTES = 30720
+
+#: How long a read quota is reused per (account, region). Failures are not
+#: cached, so a missing permission never outlives its fix.
+SHADOW_QUOTA_CACHE_SECONDS = 900
+_shadow_quota_cache = {}
+
+
+def account_shadow_document_limit(usecase, region, session_name=None,
+                                  clock=None):
+    """The Use_Case account's shadow state document size quota, in bytes,
+    or None when it cannot be read (best-effort: a deployment never fails
+    on it).
+
+    Read with Service Quotas GetServiceQuota through the same Use_Case
+    client path as the rest of the deployment (the Lambda's own role for a
+    single-account Use_Case, the assumed DDAPortalAccessRole otherwise)
+    and cached per account and region for SHADOW_QUOTA_CACHE_SECONDS. A
+    value below ShadowManager's 8 KB default (quotas are only ever raised)
+    or in an unknown unit is treated as unreadable."""
+    now = (clock or time.monotonic)()
+    cache_key = (usecase.get('account_id', ''), region)
+    cached = _shadow_quota_cache.get(cache_key)
+    if cached is not None and now - cached[0] < SHADOW_QUOTA_CACHE_SECONDS:
+        return cached[1]
+    try:
+        client = get_usecase_client(
+            'service-quotas', usecase, session_name=session_name,
+            region=region)
+        quota = client.get_service_quota(
+            ServiceCode=IOT_SHADOW_DOCUMENT_QUOTA_SERVICE,
+            QuotaCode=IOT_SHADOW_DOCUMENT_QUOTA_CODE).get('Quota') or {}
+        value = quota.get('Value')
+        unit = quota.get('Unit') or 'Bytes'
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"quota value {value!r} is not a number")
+        if unit == 'Kilobytes':
+            value = value * 1024
+        elif unit != 'Bytes':
+            raise ValueError(f"quota unit {unit!r} is not a byte unit")
+        limit = int(value)
+        if limit < SHADOW_MANAGER_DEFAULT_SIZE_LIMIT_BYTES:
+            raise ValueError(
+                f"quota value {limit} is below the "
+                f"{SHADOW_MANAGER_DEFAULT_SIZE_LIMIT_BYTES}-byte default")
+    except Exception as e:  # noqa: BLE001 - best-effort, never fails a deployment
+        logger.warning(
+            f"Could not read the IoT shadow document size quota "
+            f"({IOT_SHADOW_DOCUMENT_QUOTA_SERVICE}/"
+            f"{IOT_SHADOW_DOCUMENT_QUOTA_CODE}) for account "
+            f"{cache_key[0] or '(portal)'} in {region}; ShadowManager's "
+            f"size limit is left as configured: {e}")
+        return None
+    _shadow_quota_cache[cache_key] = (now, limit)
+    return limit
+
+
+def apply_shadow_document_size_limit(components_map, quota_bytes):
+    """Make the submitted ShadowManager entry's shadowDocumentSizeLimitBytes
+    follow the account's shadow size quota (``quota_bytes``, from
+    account_shadow_document_limit), capped at ShadowManager's 30 KB maximum.
+
+    Runs after ensure_shadow_manager_sync, on the entry it produced; the
+    merge is mutated in place.
+
+    Returns:
+        'set'       — the merge now carries the quota-derived limit (a
+                      raised quota, or an earlier value that no longer
+                      matches the quota).
+        'unchanged' — nothing to do: the merge already carries the limit,
+                      or the quota is the default and the merge sets no
+                      limit (the merge string is left byte-identical).
+        'skipped'   — the quota is unknown or the entry has no parseable
+                      merge: nothing is touched.
+    """
+    component_name = 'aws.greengrass.ShadowManager'
+    if quota_bytes is None:
+        return 'skipped'
+    entry = components_map.get(component_name)
+    config_update = (entry.get('configurationUpdate')
+                     if isinstance(entry, dict) else None)
+    merge = (config_update.get('merge')
+             if isinstance(config_update, dict) else None)
+    if not merge:
+        return 'skipped'
+    try:
+        document = json.loads(merge)
+    except (TypeError, ValueError):
+        return 'skipped'
+    if not isinstance(document, dict):
+        return 'skipped'
+
+    target = min(int(quota_bytes), SHADOW_MANAGER_MAX_SIZE_LIMIT_BYTES)
+    current = document.get(SHADOW_MANAGER_SIZE_LIMIT_KEY)
+    if current is None:
+        if target <= SHADOW_MANAGER_DEFAULT_SIZE_LIMIT_BYTES:
+            return 'unchanged'
+    elif (not isinstance(current, bool)
+          and isinstance(current, (int, float)) and current == target):
+        return 'unchanged'
+
+    document[SHADOW_MANAGER_SIZE_LIMIT_KEY] = target
+    config_update['merge'] = json.dumps(document)
+    logger.info(
+        f"Set {component_name} {SHADOW_MANAGER_SIZE_LIMIT_KEY} to {target} "
+        f"(account shadow document quota {quota_bytes} bytes; previously "
+        f"{current if current is not None else 'the default'})")
+    return 'set'
 
 
 def handler(event, context):
@@ -1417,6 +1547,15 @@ def create_deployment(body, user):
                     f"Auto-included aws.greengrass.ShadowManager {shadow_manager_version} with "
                     f"synchronization for named shadows: {CAMERA_REGISTRY_SHADOW_NAME}, "
                     f"{CAMERA_BINDINGS_SHADOW_NAME}, {MODEL_STATUS_SHADOW_NAME}")
+            # ShadowManager's local shadow size limit follows the account's
+            # IoT shadow document quota (static-camera-video-loop task 10);
+            # a default or unreadable quota leaves the entry as it is.
+            apply_shadow_document_size_limit(
+                components_map,
+                account_shadow_document_limit(
+                    usecase, region,
+                    session_name=f"sq-{user['user_id'][:20]}-"
+                                 f"{int(datetime.utcnow().timestamp())}"[:64]))
         
         # Determine target ARN (iot_client and running_nucleus were resolved above)
         # Greengrass deployments must target thing groups, not individual things
@@ -3229,12 +3368,13 @@ CAMERA_WARNING_LEGACY_PATH = 'COMPILED_PATH_UNREGISTERED'   # 9.5
 #: aravis_camera_source nodes: the device serves the static camera
 #: through the same aravis frame-feed path bus cameras use (see the
 #: static-image-camera-source base spec; cloud-static-camera-provisioning
-#: Requirements 6.3, 6.4).
+#: Requirements 6.3, 6.4). The StaticVideo entry (the Static_Video_Camera,
+#: static-camera-video-loop Requirement 4.8) is served the same way.
 _CAMERA_COMPATIBLE_SOURCE_TYPES = {
     'icam_source': frozenset({'ICam', 'V4L2Discovered', 'Camera'}),
     'csi_camera_source': frozenset({'NvidiaCSI', 'Camera'}),
     'aravis_camera_source': frozenset(
-        {'Camera', 'AravisDiscovered', 'StaticImage'}),
+        {'Camera', 'AravisDiscovered', 'StaticImage', 'StaticVideo'}),
 }
 
 #: Camera_Source types that are never a camera. Custom camera-backed node
@@ -4158,6 +4298,12 @@ def create_workflow_deployment(body, user):
                 components_map,
                 resolve_version=lambda: resolve_shadow_manager_version(
                     greengrass_client, region, None))
+            # The carried-over entry's size limit follows the account's IoT
+            # shadow document quota too (static-camera-video-loop task 10).
+            apply_shadow_document_size_limit(
+                components_map,
+                account_shadow_document_limit(
+                    usecase, region, session_name=session_name))
 
         component_name = workflow_component_name(workflow_id)
         # Setting the entry (re)places the workflow component at the new

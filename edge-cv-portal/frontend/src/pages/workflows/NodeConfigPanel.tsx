@@ -94,6 +94,7 @@ import {
   isV4l2CompatibleCamera,
   STATIC_IMAGE_FOCUS_PARAM,
   STATIC_IMAGE_FOCUS_VALUE,
+  STATIC_VIDEO_FOCUS_VALUE,
   type CameraBindingHint,
   type CameraSourceEntry,
 } from './cameraReference';
@@ -1347,6 +1348,30 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
             data-testid="pin-static-image-shortcut"
           >
             Pin a static test image…
+          </Button>
+          {/* The second virtual camera's shortcut (static-camera-video-
+              loop Requirement 9.7): the same route with the video focus
+              target, so the Cameras tab brings the "Static video camera"
+              panel into view. Same gating as the image shortcut. */}
+          <Button
+            variant="inline-link"
+            iconName="external"
+            disabled={selectedDeviceId === null}
+            onClick={() => {
+              if (selectedDeviceId === null) return;
+              const params = new URLSearchParams();
+              if (selectedUsecaseId) params.set('usecase_id', selectedUsecaseId);
+              params.set('tab', 'cameras');
+              params.set(STATIC_IMAGE_FOCUS_PARAM, STATIC_VIDEO_FOCUS_VALUE);
+              window.open(
+                `/devices/${encodeURIComponent(selectedDeviceId)}?${params.toString()}`,
+                '_blank',
+                'noopener'
+              );
+            }}
+            data-testid="pin-static-video-shortcut"
+          >
+            Pin a test video…
           </Button>
         </SpaceBetween>
         {/* Catalog-served examples stay available as quick manual fills. */}

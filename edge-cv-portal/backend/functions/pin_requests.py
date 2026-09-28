@@ -34,6 +34,13 @@ Lifecycle rules:
 Every helper takes its table / S3 client as a parameter so tests inject
 fakes; boto3 condition builders are imported lazily so importing this
 module never touches AWS.
+
+The Static_Video_Camera's Video_Pin_Requests (static-camera-video-loop)
+use the same lifecycle, reducer, and desired-document shape in a parallel
+item family (``VIDEO_PIN_REQUEST#`` SKs, :data:`SK_VIDEO_PIN_REQUEST_PREFIX`)
+delivered through ``desired.staticVideoPin``. The query, supersede,
+confirmation, and status helpers take ``sk_prefix`` (default: the image
+family), so the two cameras' requests never interact.
 """
 import json
 import logging
@@ -60,10 +67,22 @@ OP_REMOVE = "remove"
 # Item-type SK prefix (dda-portal-camera-registry layout).
 SK_PIN_REQUEST_PREFIX = "PIN_REQUEST#"
 
+# The Static_Video_Camera's parallel Video_Pin_Request family
+# (static-camera-video-loop design Decision 10). The prefix deliberately
+# does not begin with ``PIN_REQUEST#``, so image queries
+# (``begins_with(PIN_REQUEST#)``) never see video requests and supersede,
+# status, and history stay per camera (Req 8.9 of that spec). Every helper
+# below takes ``sk_prefix`` (default: the image family).
+SK_VIDEO_PIN_REQUEST_PREFIX = "VIDEO_PIN_REQUEST#"
+
 # The fixed Static_Image_Camera identifier and its registry entry SK —
 # the device-report-driven record backing ``deviceReported`` (Req 4.6).
 STATIC_IMAGE_CAMERA_ID = "static-image-camera"
 SK_STATIC_IMAGE_CAMERA = f"CAMERA#{STATIC_IMAGE_CAMERA_ID}"
+
+# The same for the Static_Video_Camera.
+STATIC_VIDEO_CAMERA_ID = "static-video-camera"
+SK_STATIC_VIDEO_CAMERA = f"CAMERA#{STATIC_VIDEO_CAMERA_ID}"
 
 # Portal-enforced bound on the serialized desired.staticImagePin section
 # (design Decision 1's 8 KB shadow budget; Reqs 2.3, 2.4).
@@ -110,8 +129,9 @@ def new_pin_request_id(created_at_ms: int) -> str:
     return f"{int(created_at_ms):014d}#{uuid.uuid4().hex[:8]}"
 
 
-def pin_request_sk(pin_request_id: str) -> str:
-    return f"{SK_PIN_REQUEST_PREFIX}{pin_request_id}"
+def pin_request_sk(pin_request_id: str,
+                   sk_prefix: str = SK_PIN_REQUEST_PREFIX) -> str:
+    return f"{sk_prefix}{pin_request_id}"
 
 
 def build_pin_request_item(
@@ -127,14 +147,21 @@ def build_pin_request_item(
     size_bytes: Optional[int] = None,
     image_format: Optional[str] = None,
     file_name: Optional[str] = None,
+    sk_prefix: str = SK_PIN_REQUEST_PREFIX,
+    validated_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """A new ``pending`` Pin_Request item (design "Data Models")."""
+    """A new ``pending`` Pin_Request item (design "Data Models").
+
+    ``sk_prefix`` selects the request family (the Video_Pin_Request family
+    passes :data:`SK_VIDEO_PIN_REQUEST_PREFIX`); ``validated_metadata``
+    (video pins: the Portal probe's codec/width/height/fps/frameCount/
+    durationMs) is stored DynamoDB-safe on pin-type items."""
     if op not in (OP_PIN, OP_REMOVE):
         raise ValueError(f"unknown Pin_Request op: {op!r}")
     pin_request_id = pin_request_id or new_pin_request_id(created_at_ms)
     item: Dict[str, Any] = {
         "device_id": device_id,
-        "sk": pin_request_sk(pin_request_id),
+        "sk": pin_request_sk(pin_request_id, sk_prefix),
         "pin_request_id": pin_request_id,
         "usecase_id": usecase_id,
         "op": op,
@@ -150,6 +177,8 @@ def build_pin_request_item(
             "format": image_format,
             "file_name": file_name,
         })
+        if validated_metadata is not None:
+            item["validated_metadata"] = _dynamo_safe(dict(validated_metadata))
     return item
 
 
@@ -242,15 +271,17 @@ def reduce_pin_confirmation(
 # ---------------------------------------------------------------------------
 
 def query_pin_request_items(
-    table, device_id: str, limit: Optional[int] = None
+    table, device_id: str, limit: Optional[int] = None, *,
+    sk_prefix: str = SK_PIN_REQUEST_PREFIX,
 ) -> List[Dict[str, Any]]:
-    """The device's Pin_Request items, newest first (highest SK first)."""
+    """The device's Pin_Request items of one family (``sk_prefix``,
+    default: image), newest first (highest SK first)."""
     from boto3.dynamodb.conditions import Key
 
     kwargs: Dict[str, Any] = {
         "KeyConditionExpression": (
             Key("device_id").eq(device_id)
-            & Key("sk").begins_with(SK_PIN_REQUEST_PREFIX)
+            & Key("sk").begins_with(sk_prefix)
         ),
         "ScanIndexForward": False,
     }
@@ -269,11 +300,13 @@ def query_pin_request_items(
 
 
 def get_pin_request_item(
-    table, device_id: str, pin_request_id: str
+    table, device_id: str, pin_request_id: str, *,
+    sk_prefix: str = SK_PIN_REQUEST_PREFIX,
 ) -> Optional[Dict[str, Any]]:
     """One Pin_Request item by its id (SK derivable — no scan)."""
     response = table.get_item(
-        Key={"device_id": device_id, "sk": pin_request_sk(pin_request_id)}
+        Key={"device_id": device_id,
+             "sk": pin_request_sk(pin_request_id, sk_prefix)}
     )
     return response.get("Item")
 
@@ -336,17 +369,21 @@ def transition_pin_request(
 
 
 def supersede_pending_requests(
-    table, device_id: str, now_ms: int, s3_client=None
+    table, device_id: str, now_ms: int, s3_client=None, *,
+    sk_prefix: str = SK_PIN_REQUEST_PREFIX,
 ) -> List[str]:
     """Transition the device's ``pending`` Pin_Request (if any) to
     ``superseded`` — called before a new submission's item is written, so
-    at most one Pin_Request is ever ``pending`` (Req 5.3).
+    at most one Pin_Request is ever ``pending`` (Req 5.3). Only the
+    ``sk_prefix`` family is touched (default: image), so a video request
+    never supersedes an image request or vice versa.
 
     Returns the superseded Pin_Request ids (defensively handles more than
     one pending item, though the invariant permits at most one).
     """
     superseded: List[str] = []
-    for item in query_pin_request_items(table, device_id):
+    for item in query_pin_request_items(table, device_id,
+                                        sk_prefix=sk_prefix):
         if item.get("status") != STATUS_PENDING:
             continue
         if transition_pin_request(table, item, STATUS_SUPERSEDED,
@@ -362,9 +399,12 @@ def apply_pin_confirmation(
     reported: Dict[str, Any],
     now_ms: Optional[int] = None,
     s3_client=None,
+    *,
+    sk_prefix: str = SK_PIN_REQUEST_PREFIX,
 ) -> Optional[str]:
-    """Ingest entrypoint: reduce a ``reported.staticImagePin`` document
-    and persist the transition it implies.
+    """Ingest entrypoint: reduce a ``reported.staticImagePin`` (or, with
+    the video ``sk_prefix``, ``reported.staticVideoPin``) document and
+    persist the transition it implies.
 
     Returns the new Sync_Status when a transition was applied, None when
     the confirmation changed nothing (unknown / non-pending request,
@@ -376,7 +416,8 @@ def apply_pin_confirmation(
     if not request_id or not isinstance(request_id, str):
         return None
     now = int(now_ms) if now_ms is not None else int(time.time() * 1000)
-    item = get_pin_request_item(table, device_id, request_id)
+    item = get_pin_request_item(table, device_id, request_id,
+                                sk_prefix=sk_prefix)
     outcome = reduce_pin_confirmation(item, reported, now)
     if outcome.action != ACTION_TRANSITION:
         return None
@@ -429,6 +470,7 @@ def build_status_view(
     camera_entry: Optional[Dict[str, Any]] = None,
     connectivity_provider: Optional[Callable[[], Optional[str]]] = None,
     history_limit: Optional[int] = 50,
+    sk_prefix: str = SK_PIN_REQUEST_PREFIX,
 ) -> Dict[str, Any]:
     """The provisioning status response for one Target_Device.
 
@@ -449,11 +491,15 @@ def build_status_view(
       outcome (Reqs 4.6, 4.8).
 
     ``items`` may be the raw pin-request query result or a full device
-    item list; non-Pin_Request items are ignored.
+    item list; items outside the ``sk_prefix`` family (default: image
+    Pin_Requests) are ignored, so each camera's view shows only its own
+    requests. The caller passes that camera's registry entry as
+    ``camera_entry``. A request carrying Portal-validated metadata (video
+    pins) shows it as ``latest.validatedMetadata``.
     """
     requests = sorted(
         (item for item in items
-         if str(item.get("sk", "")).startswith(SK_PIN_REQUEST_PREFIX)
+         if str(item.get("sk", "")).startswith(sk_prefix)
          and item.get("pin_request_id")),
         key=lambda item: str(item["pin_request_id"]),
         reverse=True,
@@ -507,6 +553,8 @@ def _latest_view(item: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         latest["failureReason"] = item["failure_reason"]
     if item.get("device_metadata"):
         latest["deviceMetadata"] = _clean(item["device_metadata"])
+    if item.get("validated_metadata"):
+        latest["validatedMetadata"] = _clean(item["validated_metadata"])
     return latest
 
 
@@ -531,6 +579,207 @@ def _device_reported_view(
     if camera_entry.get("absent_since") is not None:
         reported["absentSince"] = _to_int(camera_entry["absent_since"])
     return reported
+
+
+# ---------------------------------------------------------------------------
+# Video validation records (static-camera-video-loop, Requirements 8.2–8.5)
+# ---------------------------------------------------------------------------
+#
+# Portal Video_Validation runs asynchronously, outside the API Gateway
+# integration timeout: the pin submission writes a ``VIDEO_VALIDATION#``
+# record in state ``validating`` and returns; the validation job decodes
+# the staged video and then either rejects the record (with the message)
+# or accepts it, recording the Video_Pin_Request it created. The records
+# share the device's registry partition (SK
+# ``VIDEO_VALIDATION#{createdAtMs:014d}#{uuid8}``, so the newest is the
+# highest SK) and never begin with a Pin_Request prefix, so no Pin_Request
+# query, supersede, or status view sees them.
+
+SK_VIDEO_VALIDATION_PREFIX = "VIDEO_VALIDATION#"
+
+VALIDATION_VALIDATING = "validating"
+VALIDATION_ACCEPTED = "accepted"
+VALIDATION_REJECTED = "rejected"
+VALIDATION_SUPERSEDED = "superseded"
+#: View-only: a record still ``validating`` after the expiry window (the
+#: job never ran, or died without recording an outcome).
+VALIDATION_EXPIRED = "expired"
+VALIDATION_TERMINAL_STATUSES = (
+    VALIDATION_ACCEPTED, VALIDATION_REJECTED, VALIDATION_SUPERSEDED)
+
+#: How long a record may stay ``validating`` before the status view shows
+#: it expired (and a late job refuses to start): well past the 60 s decode
+#: budget plus the download and the delivery steps.
+VIDEO_VALIDATION_EXPIRY_MS = 5 * 60 * 1000
+VIDEO_VALIDATION_EXPIRED_MESSAGE = (
+    "Video validation did not complete in time; submit the video again.")
+
+
+def video_validation_sk(validation_id: str) -> str:
+    return f"{SK_VIDEO_VALIDATION_PREFIX}{validation_id}"
+
+
+def build_video_validation_item(
+    device_id: str,
+    usecase_id: str,
+    created_at_ms: int,
+    *,
+    staging_key: str,
+    file_name: str,
+    size_bytes: int,
+    requested_by: str,
+    validation_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """A new ``validating`` record for one staged video submission."""
+    validation_id = validation_id or new_pin_request_id(created_at_ms)
+    return {
+        "device_id": device_id,
+        "sk": video_validation_sk(validation_id),
+        "validation_id": validation_id,
+        "usecase_id": usecase_id,
+        "status": VALIDATION_VALIDATING,
+        "created_at": int(created_at_ms),
+        "staging_key": staging_key,
+        "file_name": file_name,
+        "size_bytes": int(size_bytes),
+        "requested_by": requested_by,
+    }
+
+
+def get_video_validation_item(
+    table, device_id: str, validation_id: str
+) -> Optional[Dict[str, Any]]:
+    response = table.get_item(
+        Key={"device_id": device_id,
+             "sk": video_validation_sk(validation_id)})
+    return response.get("Item")
+
+
+def query_video_validation_items(table, device_id: str) -> List[Dict[str, Any]]:
+    """The device's validation records, newest first."""
+    return query_pin_request_items(
+        table, device_id, sk_prefix=SK_VIDEO_VALIDATION_PREFIX)
+
+
+def transition_video_validation(
+    table,
+    item: Dict[str, Any],
+    to_status: str,
+    *,
+    completed_at_ms: int,
+    error: Optional[str] = None,
+    pin_request_id: Optional[str] = None,
+    validated_metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """The single condition-guarded ``validating -> terminal`` transition;
+    False (record untouched) when the record already left ``validating``
+    (a racing supersede or a second job run)."""
+    if to_status not in VALIDATION_TERMINAL_STATUSES:
+        raise ValueError(f"not a terminal validation status: {to_status!r}")
+    from botocore.exceptions import ClientError
+
+    set_clauses = ["#status = :status", "completed_at = :completed_at"]
+    values: Dict[str, Any] = {
+        ":validating": VALIDATION_VALIDATING,
+        ":status": to_status,
+        ":completed_at": int(completed_at_ms),
+    }
+    if error is not None:
+        set_clauses.append("validation_error = :error")
+        values[":error"] = error
+    if pin_request_id is not None:
+        set_clauses.append("pin_request_id = :pin_request_id")
+        values[":pin_request_id"] = pin_request_id
+    if validated_metadata is not None:
+        set_clauses.append("validated_metadata = :metadata")
+        values[":metadata"] = _dynamo_safe(dict(validated_metadata))
+    try:
+        table.update_item(
+            Key={"device_id": item["device_id"], "sk": item["sk"]},
+            UpdateExpression="SET " + ", ".join(set_clauses),
+            ConditionExpression="#status = :validating",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == \
+                "ConditionalCheckFailedException":
+            return False
+        raise
+    return True
+
+
+def supersede_validating_video_validations(
+    table, device_id: str, now_ms: int
+) -> List[Dict[str, Any]]:
+    """Supersede every record of the device still ``validating`` — called
+    before a newer video submission or removal is recorded. Returns the
+    superseded records (their staged objects are the caller's to clean)."""
+    superseded: List[Dict[str, Any]] = []
+    for item in query_video_validation_items(table, device_id):
+        if item.get("status") != VALIDATION_VALIDATING:
+            continue
+        if transition_video_validation(table, item, VALIDATION_SUPERSEDED,
+                                       completed_at_ms=now_ms):
+            superseded.append(item)
+    return superseded
+
+
+def newer_video_activity(table, device_id: str, validation_id: str) -> bool:
+    """Whether a newer validation record or a newer Video_Pin_Request (a
+    later submission or removal) exists for the device: the record's
+    submission has been superseded."""
+    for prefix in (SK_VIDEO_VALIDATION_PREFIX, SK_VIDEO_PIN_REQUEST_PREFIX):
+        newest = query_pin_request_items(table, device_id, limit=1,
+                                         sk_prefix=prefix)
+        for item in newest:
+            other = item.get("validation_id") or item.get("pin_request_id")
+            if other and str(other) > str(validation_id):
+                return True
+    return False
+
+
+def video_validation_view(
+    items: List[Dict[str, Any]],
+    now_ms: int,
+    *,
+    expiry_ms: int = VIDEO_VALIDATION_EXPIRY_MS,
+) -> Optional[Dict[str, Any]]:
+    """The latest validation record of a device item list, for the video
+    status view (None when the device has none). A record still
+    ``validating`` past ``expiry_ms`` shows as ``expired`` with
+    :data:`VIDEO_VALIDATION_EXPIRED_MESSAGE`."""
+    records = sorted(
+        (item for item in items
+         if str(item.get("sk", "")).startswith(SK_VIDEO_VALIDATION_PREFIX)
+         and item.get("validation_id")),
+        key=lambda item: str(item["validation_id"]),
+        reverse=True,
+    )
+    if not records:
+        return None
+    item = records[0]
+    created_at = _to_int(item.get("created_at"))
+    view: Dict[str, Any] = {
+        "validationId": item["validation_id"],
+        "status": item.get("status"),
+        "createdAt": created_at,
+        "fileName": item.get("file_name"),
+    }
+    if (item.get("status") == VALIDATION_VALIDATING
+            and created_at is not None
+            and int(now_ms) - created_at > expiry_ms):
+        view["status"] = VALIDATION_EXPIRED
+        view["error"] = VIDEO_VALIDATION_EXPIRED_MESSAGE
+    if item.get("completed_at") is not None:
+        view["completedAt"] = _to_int(item["completed_at"])
+    if item.get("validation_error") is not None:
+        view["error"] = item["validation_error"]
+    if item.get("pin_request_id"):
+        view["pinRequestId"] = item["pin_request_id"]
+    if item.get("validated_metadata"):
+        view["validatedMetadata"] = _clean(item["validated_metadata"])
+    return view
 
 
 # ---------------------------------------------------------------------------

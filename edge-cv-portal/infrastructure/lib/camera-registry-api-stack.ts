@@ -16,6 +16,8 @@ export interface CameraRegistryApiStackProps extends cdk.NestedStackProps {
   stageName: string;
   userPool: cognito.IUserPool;
   cameraRegistryHandler: lambda.Function;
+  /** Portal_Video_Pin_API function (static-camera-video-loop). */
+  cameraVideoPinHandler: lambda.IFunction;
 }
 
 /**
@@ -43,6 +45,13 @@ export interface CameraRegistryApiStackProps extends cdk.NestedStackProps {
  * - POST   /devices/{id}/cameras/static-image/upload-url  (Operator)
  * - POST   /devices/{id}/cameras/static-image/pin         (Operator)
  * - DELETE /devices/{id}/cameras/static-image/pin         (Operator)
+ *
+ * Portal_Video_Pin_API routes (static-camera-video-loop), integrated with
+ * the CameraVideoPinHandler function (it carries the video layer):
+ * - GET    /devices/{id}/cameras/static-video             (Viewer)
+ * - POST   /devices/{id}/cameras/static-video/upload-url  (Operator)
+ * - POST   /devices/{id}/cameras/static-video/pin         (Operator)
+ * - DELETE /devices/{id}/cameras/static-video/pin         (Operator)
  */
 export class CameraRegistryApiStack extends cdk.NestedStack {
   constructor(scope: Construct, id: string, props: CameraRegistryApiStackProps) {
@@ -92,10 +101,19 @@ export class CameraRegistryApiStack extends cdk.NestedStack {
       { allowTestInvoke: false },
     );
 
+    const cameraVideoPinIntegration = new apigateway.LambdaIntegration(
+      props.cameraVideoPinHandler,
+      { allowTestInvoke: false },
+    );
+
     const methods: apigateway.Method[] = [];
-    const addMethod = (resource: apigateway.IResource, httpMethod: string) => {
+    const addMethod = (
+      resource: apigateway.IResource,
+      httpMethod: string,
+      integration: apigateway.Integration = cameraRegistryIntegration,
+    ) => {
       methods.push(
-        resource.addMethod(httpMethod, cameraRegistryIntegration, {
+        resource.addMethod(httpMethod, integration, {
           authorizer,
           authorizationType: apigateway.AuthorizationType.COGNITO,
         }),
@@ -144,6 +162,24 @@ export class CameraRegistryApiStack extends cdk.NestedStack {
     const staticImagePinResource = staticImageResource.addResource('pin');
     addMethod(staticImagePinResource, 'POST');
     addMethod(staticImagePinResource, 'DELETE');
+
+    // Portal_Video_Pin_API static-video routes (static-camera-video-loop) —
+    // the same shape as the static-image routes, on the video function.
+    //
+    // GET /devices/{id}/cameras/static-video — provisioning status (Viewer)
+    const staticVideoResource = camerasResource.addResource('static-video');
+    addMethod(staticVideoResource, 'GET', cameraVideoPinIntegration);
+
+    // POST /devices/{id}/cameras/static-video/upload-url — presigned PUT
+    // for a staging key (Operator)
+    addMethod(staticVideoResource.addResource('upload-url'), 'POST',
+      cameraVideoPinIntegration);
+
+    // POST/DELETE /devices/{id}/cameras/static-video/pin — video pin submit
+    // (validated by decoding) / removal (Operator)
+    const staticVideoPinResource = staticVideoResource.addResource('pin');
+    addMethod(staticVideoPinResource, 'POST', cameraVideoPinIntegration);
+    addMethod(staticVideoPinResource, 'DELETE', cameraVideoPinIntegration);
 
     // PUT/DELETE /devices/{id}/cameras/{csid} — update / pending-delete (Operator)
     const cameraResource = camerasResource.addResource('{csid}');

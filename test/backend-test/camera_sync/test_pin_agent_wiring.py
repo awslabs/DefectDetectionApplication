@@ -23,7 +23,8 @@ cloud-static-camera-provisioning, task 7.5).
   no marker — the request re-applies safely (Requirement 3.5).
 - Report-size headroom: a full camera report plus both ``staticImagePin``
   sections stays at or below the 8 KB shadow document limit with
-  ``MAX_REPORT_BYTES = 6144`` (Requirement 2.3).
+  ``MAX_REPORT_BYTES = 6144`` (Requirement 2.3; 4608 since
+  static-camera-video-loop).
 
 _Requirements: 5.2, 3.5, 2.3_
 """
@@ -309,8 +310,14 @@ def _fat_inventory(count=12):
 def test_report_headroom_with_both_pin_sections():
     """A ladder-truncated full camera report plus a worst-case desired
     document AND its reported echo stays within the 8 KB shadow document
-    limit, with ``MAX_REPORT_BYTES`` lowered to 6144."""
-    assert MAX_REPORT_BYTES == 6 * 1024
+    limit, with ``MAX_REPORT_BYTES`` lowered to 6144 — and since
+    static-camera-video-loop, to 4608."""
+    # Conscious update (static-camera-video-loop, design Decision 7,
+    # Requirement 10.5): the cap dropped from 6144 to 4608 to make room for
+    # the second pin slot (`staticVideoPin`) in the same shadow. The
+    # both-slots worst case is asserted in
+    # static_video_camera/test_video_sync_paths.py.
+    assert MAX_REPORT_BYTES == 4608
 
     inventory = _fat_inventory()
     versions = {entry.camera_source_id: 7 for entry in inventory}

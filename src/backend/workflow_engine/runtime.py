@@ -322,6 +322,25 @@ def _camera_binding_dependencies():
                 "bindings without the static camera entry"
             )
 
+        # The Static_Video_Camera (static-camera-video-loop, Requirement
+        # 4.4), guarded exactly like the image state and separately from
+        # it, so a video store failure never drops the image entry or
+        # empties the inventory. `static_video_absent_since` is not passed,
+        # for the same reason as the image one.
+        static_video_pinned = False
+        static_video_metadata = None
+        try:
+            from utils.static_video_camera import get_store as get_video_store
+
+            video_status = get_video_store().status()
+            static_video_pinned = bool(video_status.get("pinned"))
+            static_video_metadata = video_status.get("metadata")
+        except Exception:  # noqa: BLE001 - never empty the inventory
+            logger.exception(
+                "Static video pin state could not be read; resolving camera "
+                "bindings without the static video camera entry"
+            )
+
         camera_discovery = getattr(server_setup, "camera_discovery", None)
         snapshot = (
             camera_discovery.latest_snapshot if camera_discovery is not None else None
@@ -335,6 +354,8 @@ def _camera_binding_dependencies():
                 snapshot,
                 static_image_pinned=static_image_pinned,
                 static_image_metadata=static_image_metadata,
+                static_video_pinned=static_video_pinned,
+                static_video_metadata=static_video_metadata,
             )
 
     return store, inventory_provider

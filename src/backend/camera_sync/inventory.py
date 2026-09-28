@@ -73,6 +73,16 @@ de-duplicates. Retiring the already-published ``arv-`` key from devices
 that reported it is the agent's job (:mod:`camera_sync.agent`), since
 shadow updates MERGE nested maps and omission alone cannot remove a key.
 
+Static_Video_Camera (feature static-camera-video-loop, Requirements 4.6,
+4.7, 6.2): the second virtual camera follows the same pattern with its
+own keyword parameters (``static_video_pinned``,
+``static_video_metadata``, ``static_video_absent_since``), its own
+dedicated entry (type ``StaticVideo``, identity and sidecar metadata under
+``capabilities.staticVideo``), its own absence lifecycle, and the same
+exclusion of its aravis-enumerated duplicate. The two cameras are
+independent: each one's entry depends only on its own arguments, and the
+image parameters and branches are unchanged.
+
 ``build_inventory`` is pure: it accepts plain data (Image_Source model or
 ORM objects — anything attribute- or dict-shaped — and a
 ``DiscoveryResult`` or ``InventorySnapshot``) and returns a deterministic,
@@ -85,6 +95,10 @@ from camera_discovery.aravis import DiscoveredAravisCamera, aravis_stable_id
 from utils.static_image_camera import (
     STATIC_IMAGE_CAMERA_ID,
     STATIC_IMAGE_CAMERA_IDENTITY,
+)
+from utils.static_video_camera import (
+    STATIC_VIDEO_CAMERA_ID,
+    STATIC_VIDEO_CAMERA_IDENTITY,
 )
 
 ORIGIN_EDGE_CONFIGURED = "edge-configured"
@@ -105,6 +119,14 @@ TYPE_STATIC_IMAGE = "StaticImage"
 #: Reported ``name`` for the Static_Image_Camera entry — the fixed
 #: enumeration model name (Requirement 6.1).
 STATIC_IMAGE_CAMERA_NAME = STATIC_IMAGE_CAMERA_IDENTITY["model"]
+
+#: Reported ``type`` for the virtual Static_Video_Camera (feature
+#: static-camera-video-loop, Requirement 4.6).
+TYPE_STATIC_VIDEO = "StaticVideo"
+
+#: Reported ``name`` for the Static_Video_Camera entry — its fixed
+#: enumeration model name.
+STATIC_VIDEO_CAMERA_NAME = STATIC_VIDEO_CAMERA_IDENTITY["model"]
 
 #: The discovery stable id the aravis-enumerated Static_Image_Camera
 #: derives (third hardware finding — feature
@@ -155,6 +177,9 @@ def build_inventory(
     static_image_pinned: bool = False,
     static_image_metadata: Optional[Mapping[str, Any]] = None,
     static_image_absent_since: Optional[int] = None,
+    static_video_pinned: bool = False,
+    static_video_metadata: Optional[Mapping[str, Any]] = None,
+    static_video_absent_since: Optional[int] = None,
 ) -> List[CameraSourceState]:
     """Pure merge of configured Image_Sources with discovered hardware.
 
@@ -198,6 +223,15 @@ def build_inventory(
     one ``static-image-camera`` entry with the fixed identity,
     ``absent=True``, and that timestamp. When false and ``None`` (never
     reported), no entry is appended. Ignored while pinned.
+
+    ``static_video_pinned`` / ``static_video_metadata`` /
+    ``static_video_absent_since`` (feature static-camera-video-loop,
+    Requirements 4.6, 4.7) do the same for the virtual
+    ``static-video-camera``: one ``StaticVideo`` entry while a video is
+    pinned (the video sidecar folded into ``capabilities.staticVideo``),
+    one explicitly absent entry after an unpin of a reported camera, and
+    never the aravis-enumerated duplicate. They are independent of the
+    image parameters.
     """
     tracked = _normalize_discovery(discovery_result)
 
@@ -305,6 +339,12 @@ def build_inventory(
         # ``cameraId`` is ``static-image-camera``) is untouched (3.18).
         if _is_static_image_aravis_camera(camera):
             continue
+        # The Static_Video_Camera's aravis-enumerated duplicate is skipped
+        # for the same reason, in every pin state (static-camera-video-loop,
+        # Requirement 4.6): its dedicated entry below is the single
+        # registration.
+        if _is_static_video_aravis_camera(camera):
+            continue
         # A camera whose merge key merged under a different stable id
         # (absent leftover displaced by a present camera) still reports
         # separately — its stable id is what bindings reference.
@@ -351,6 +391,14 @@ def build_inventory(
         entries.append(_static_image_entry(static_image_metadata))
     elif static_image_absent_since is not None:
         entries.append(_static_image_absent_entry(static_image_absent_since))
+
+    # Static_Video_Camera (static-camera-video-loop, Requirements 4.6,
+    # 4.7): the same present/absent lifecycle, driven only by its own
+    # arguments.
+    if static_video_pinned:
+        entries.append(_static_video_entry(static_video_metadata))
+    elif static_video_absent_since is not None:
+        entries.append(_static_video_absent_entry(static_video_absent_since))
 
     return entries
 
@@ -429,6 +477,70 @@ def _static_image_absent_entry(absent_since: int) -> CameraSourceState:
         origin=ORIGIN_EDGE_DISCOVERED,
         params={},
         capabilities={"staticImage": _static_image_identity()},
+        discovered=True,
+        absent=True,
+        absent_since=int(absent_since),
+    )
+
+
+def _is_static_video_aravis_camera(camera) -> bool:
+    """True for the aravis-enumerated Static_Video_Camera — the synthetic
+    bus entry ``getCameras()`` appends while a Pinned_Video exists
+    (static-camera-video-loop, Requirement 4.6). Matched on ``camera_id``
+    like :func:`_is_static_image_aravis_camera`."""
+    return (
+        isinstance(camera, DiscoveredAravisCamera)
+        and camera.camera_id == STATIC_VIDEO_CAMERA_ID
+    )
+
+
+def _static_video_identity() -> Dict[str, Any]:
+    """The fixed Static_Video_Camera enumeration identity."""
+    return {
+        "id": STATIC_VIDEO_CAMERA_ID,
+        "model": STATIC_VIDEO_CAMERA_IDENTITY["model"],
+        "address": STATIC_VIDEO_CAMERA_IDENTITY["address"],
+        "physicalId": STATIC_VIDEO_CAMERA_IDENTITY["physical_id"],
+        "protocol": STATIC_VIDEO_CAMERA_IDENTITY["protocol"],
+        "serial": STATIC_VIDEO_CAMERA_IDENTITY["serial"],
+        "vendor": STATIC_VIDEO_CAMERA_IDENTITY["vendor"],
+    }
+
+
+def _static_video_entry(
+    video_metadata: Optional[Mapping[str, Any]],
+) -> CameraSourceState:
+    """The virtual Static_Video_Camera inventory entry (Requirement 4.6).
+
+    Fixed id ``static-video-camera``, origin ``edge-discovered`` (so the
+    Portal's discovery-managed mutation rejection covers it), and
+    ``staticVideo`` capabilities carrying the fixed identity plus the
+    video sidecar (format, codec, width, height, fps, frameCount, …)."""
+    static_video = _static_video_identity()
+    if video_metadata:
+        static_video.update(dict(video_metadata))
+    return CameraSourceState(
+        camera_source_id=STATIC_VIDEO_CAMERA_ID,
+        name=STATIC_VIDEO_CAMERA_NAME,
+        type=TYPE_STATIC_VIDEO,
+        origin=ORIGIN_EDGE_DISCOVERED,
+        params={},
+        capabilities={"staticVideo": static_video},
+        discovered=True,
+    )
+
+
+def _static_video_absent_entry(absent_since: int) -> CameraSourceState:
+    """The ABSENT Static_Video_Camera entry for an unpinned, previously
+    reported camera (Requirement 4.7): the identity without sidecar
+    fields, ``absent=True`` and the stable ``absent_since``."""
+    return CameraSourceState(
+        camera_source_id=STATIC_VIDEO_CAMERA_ID,
+        name=STATIC_VIDEO_CAMERA_NAME,
+        type=TYPE_STATIC_VIDEO,
+        origin=ORIGIN_EDGE_DISCOVERED,
+        params={},
+        capabilities={"staticVideo": _static_video_identity()},
         discovered=True,
         absent=True,
         absent_since=int(absent_since),

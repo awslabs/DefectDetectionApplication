@@ -52,6 +52,9 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
+import sys
+import tempfile
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -76,6 +79,12 @@ import camera_sync
 # Pin_Request lifecycle core (cloud-static-camera-provisioning), bundled
 # into the same Lambda code asset like camera_sync.py.
 import pin_requests
+
+# Video_Validation core (static-camera-video-loop): a byte-identical copy of
+# the device's src/backend/utils/video_loop.py. Stdlib-only at import, so
+# importing it here costs nothing on functions without the video layer;
+# only the Portal_Video_Pin_API's child-process probe loads OpenCV.
+import video_loop
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -145,6 +154,51 @@ SUPPORTED_PIN_FORMATS = ('JPEG', 'PNG', 'BMP')
 # the previous one).
 DESIRED_PIN_FIELDS = ('requestId', 'op', 'requestedAtEpochMs', 'bucket',
                       'key', 'sha256', 'sizeBytes', 'format', 'fileName')
+
+# ---------------------------------------------------------------------------
+# Portal_Video_Pin_API constants (static-camera-video-loop)
+# ---------------------------------------------------------------------------
+
+# The Static_Video_Camera's own Sync_Channel slot (design Decision 7). It
+# carries the same field set as the image slot (DESIRED_PIN_FIELDS).
+DESIRED_VIDEO_PIN_SECTION = 'staticVideoPin'
+
+# Canonical video keys live under the existing prefix (design Decision 9):
+# static-image-pins/{deviceId}/video/{pinRequestId}; staging is shared with
+# images (same upload-url issuance, lifecycle rule, and CORS).
+STATIC_VIDEO_PIN_SUBPREFIX = 'video'
+
+# The device's video pin limit (video_loop.MAX_PIN_VIDEO_BYTES, 100 MB),
+# read at call time so tests can inject a small boundary-straddling limit.
+MAX_PIN_VIDEO_BYTES = video_loop.MAX_PIN_VIDEO_BYTES
+
+# Video_Validation runs in a child process so a slow or stuck native decode
+# can be abandoned (Requirement 8.4), inside the asynchronous validation job
+# (the API Gateway integration timeout of 29 s cannot hold a 60 s decode).
+# The function's 120 s timeout leaves room for the download before it and
+# the copy and shadow write after it.
+VIDEO_VALIDATION_TIMEOUT_SECONDS = 60
+VIDEO_VALIDATION_TIMEOUT_MESSAGE = (
+    f'The video took too long to validate (over '
+    f'{VIDEO_VALIDATION_TIMEOUT_SECONDS} seconds); use a lower resolution '
+    f'or more frequent keyframes.')
+
+# The function the pin route hands the validation job to (asynchronous
+# Event invocation): the CameraVideoPinHandler itself, by its fixed name.
+VIDEO_VALIDATION_FUNCTION = os.environ.get('VIDEO_VALIDATION_FUNCTION')
+
+# Event key marking a validation-job invocation of camera_video_pin.handler.
+VIDEO_VALIDATION_EVENT_KEY = 'videoValidation'
+
+STAGED_VIDEO_NOT_FOUND_MESSAGE = (
+    'Staged upload not found; request a new upload URL and upload the '
+    'video again')
+
+# Validated_Metadata fields recorded on a Video_Pin_Request item.
+VALIDATED_VIDEO_METADATA_FIELDS = ('codec', 'width', 'height', 'fps',
+                                   'frameCount', 'durationMs')
+
+_VIDEO_DOWNLOAD_CHUNK_BYTES = 1 << 20
 
 
 def now_ms() -> int:
@@ -1212,6 +1266,531 @@ def get_static_image_status(device_id: str, user: Dict, event: Dict) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# Portal_Video_Pin_API routes (static-camera-video-loop)
+#
+#   POST   /devices/{id}/cameras/static-video/upload-url   (MANAGE_DEVICES)
+#   POST   /devices/{id}/cameras/static-video/pin          (MANAGE_DEVICES)
+#   DELETE /devices/{id}/cameras/static-video/pin          (MANAGE_DEVICES)
+#   GET    /devices/{id}/cameras/static-video              (VIEW_DEVICES)
+#
+# Served by the CameraVideoPinHandler function, which carries the video
+# layer (OpenCV) that Video_Validation needs. They mirror the image routes
+# above, with the same authorization, use-case resolution, and audit
+# behavior, over the parallel VIDEO_PIN_REQUEST# item family and the
+# desired.staticVideoPin slot, so video and image requests never interact
+# (Requirement 8.9). The image routes are unchanged.
+#
+# One difference: Video_Validation (up to 60 s of decoding) runs in an
+# asynchronous job on the same function (run_video_validation), tracked by
+# VIDEO_VALIDATION# records, because the API Gateway integration timeout
+# (29 s) cannot hold it. The pin route answers 202 and the status view
+# reports the validation outcome.
+# ---------------------------------------------------------------------------
+
+
+class VideoProbeTimeout(Exception):
+    """Video_Validation did not finish within the time budget."""
+
+
+def _video_probe_child(path: str) -> Dict[str, Any]:
+    """Run ``video_loop.probe_video`` on ``path`` in a child process.
+
+    The child is ``python video_loop.py probe <path>`` (the vendored
+    module's script entry point), with this interpreter and this process's
+    import path, so it sees the video layer's OpenCV. It prints one JSON
+    object: ``{"ok": true, "info": {...}}`` or ``{"ok": false, "error":
+    "..."}``. Raises :class:`VideoProbeTimeout` after
+    :data:`VIDEO_VALIDATION_TIMEOUT_SECONDS` (the child is killed). A child
+    that crashes or prints no result is reported as undecodable with the
+    codec unknown."""
+    env = dict(os.environ)
+    env['PYTHONPATH'] = os.pathsep.join(
+        entry for entry in sys.path if isinstance(entry, str) and entry)
+    env.setdefault('OPENCV_FFMPEG_LOGLEVEL', '8')
+    try:
+        completed = subprocess.run(
+            [sys.executable, video_loop.__file__, 'probe', path],
+            capture_output=True,
+            timeout=VIDEO_VALIDATION_TIMEOUT_SECONDS,
+            env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise VideoProbeTimeout(str(exc)) from exc
+    try:
+        result = json.loads(completed.stdout.decode('utf-8', 'replace'))
+    except (ValueError, AttributeError):
+        result = None
+    if completed.returncode != 0 or not isinstance(result, dict):
+        logger.error(
+            'Video validation child exited %s without a result; stderr: %s',
+            completed.returncode,
+            completed.stderr.decode('utf-8', 'replace')[-2000:])
+        return {'ok': False, 'error': video_loop.undecodable_message('unknown')}
+    if result.get('internal'):
+        logger.error('Video validation child reported an internal error: %s',
+                     result['internal'])
+    return result
+
+
+#: The Video_Validation runner — a swappable module seam (the
+#: iot_data_client pattern): tests install an in-process or stub runner;
+#: the child-process runner is exercised directly.
+run_video_probe = _video_probe_child
+
+
+def video_validation_verdict(path: str):
+    """(validated_metadata, error_message) for a staged video at ``path``.
+
+    The metadata is what the probe determined (container ``format`` plus
+    codec, displayed width/height, fps, frameCount, durationMs). A
+    rejection carries the Video_Validation message, the timeout message
+    (Requirement 8.4), or the undecodable message for a crashed child."""
+    try:
+        result = run_video_probe(path)
+    except VideoProbeTimeout:
+        return None, VIDEO_VALIDATION_TIMEOUT_MESSAGE
+    except Exception as e:  # noqa: BLE001 — any runner failure rejects
+        logger.error(f"Video validation failed to run: {e}")
+        return None, video_loop.undecodable_message('unknown')
+    if not isinstance(result, dict) or not result.get('ok'):
+        message = (result or {}).get('error') if isinstance(result, dict) \
+            else None
+        return None, message or video_loop.undecodable_message('unknown')
+    info = result.get('info')
+    if not isinstance(info, dict) or not info.get('format'):
+        return None, video_loop.undecodable_message('unknown')
+    return dict(info), None
+
+
+def validate_pin_video(path: str):
+    """(validated_metadata, error_response): :func:`video_validation_verdict`
+    with a rejection as a 400 response."""
+    info, message = video_validation_verdict(path)
+    if message is not None:
+        return None, create_response(400, {'error': message})
+    return info, None
+
+
+def pin_video_size_limit_response(size: int, limit: int) -> Dict:
+    """400 naming the video size limit (Requirement 8.3), in the device
+    store's wording."""
+    return create_response(400, {
+        'error': video_loop.oversize_message(size, limit)})
+
+
+def write_desired_video_pin(usecase_id: str, device_id: str,
+                            section: Dict[str, Any]) -> Optional[Dict]:
+    """Replace the desired.staticVideoPin slot (and clear the stale
+    reported.staticVideoPin echo) — :func:`write_desired_pin` for the video
+    slot, for the same partial-delta reason. Never touches the image slot.
+
+    Returns an error response on failure, None on success."""
+    try:
+        client = iot_data_client(usecase_id)
+        client.update_thing_shadow(
+            thingName=device_id,
+            shadowName=SHADOW_NAME,
+            payload=json.dumps(
+                {'state': {
+                    'desired': {DESIRED_VIDEO_PIN_SECTION: section},
+                    'reported': {DESIRED_VIDEO_PIN_SECTION: None}}},
+                default=lambda o: float(o) if isinstance(o, Decimal) else o,
+            ),
+        )
+        return None
+    except Exception as e:  # noqa: BLE001 — any shadow-path failure is a 502
+        logger.error(f"Video pin desired write failed for {device_id}: {e}")
+        return create_response(502, {
+            'error': 'Failed to initiate delivery of the video pin request '
+                     'through the device sync channel',
+        })
+
+
+def _download_staged_video(s3, staging_key: str, limit: int, handle):
+    """Stream the staged object into ``handle``; returns ``(size, sha256)``,
+    or ``(size, None)`` as soon as the stream exceeds ``limit``."""
+    body = s3.get_object(Bucket=COMPONENT_BUCKET, Key=staging_key)['Body']
+    hasher = hashlib.sha256()
+    size = 0
+    while True:
+        chunk = body.read(_VIDEO_DOWNLOAD_CHUNK_BYTES)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > limit:
+            return size, None
+        hasher.update(chunk)
+        handle.write(chunk)
+    handle.flush()
+    return size, hasher.hexdigest()
+
+
+def get_static_video_upload_url(device_id: str, user: Dict, event: Dict) -> Dict:
+    """POST /devices/{id}/cameras/static-video/upload-url (Operator).
+
+    Staging is shared with images (design Decision 9), so this issues the
+    same presigned staging PUT as the image route."""
+    return get_static_image_upload_url(device_id, user, event)
+
+
+def pin_static_video(device_id: str, user: Dict, event: Dict,
+                     body: Any) -> Dict:
+    """POST /devices/{id}/cameras/static-video/pin (Operator).
+
+    Accepts a staged video for asynchronous Video_Validation (Requirements
+    8.2–8.5): the checks that need no decoding run here (authorization,
+    the body, the 100 MB limit, the staged object's presence) and reject
+    immediately. Then any submission still validating for the device is
+    superseded, a ``validating`` record is written, and the validation job
+    is handed to this function asynchronously (:func:`run_video_validation`,
+    outside the API Gateway integration timeout). The response is a 202
+    with the validation id; the video status view reports the outcome.
+    A rejected upload records no Video_Pin_Request and writes nothing to
+    the transport or the sync channel (Requirement 8.3)."""
+    usecase_id = resolve_pin_usecase_id(device_id)
+    if not usecase_id:
+        return pin_device_not_registered(device_id)
+    error = authorize(user, event, device_id, usecase_id, MUTATE_PERMISSION)
+    if error:
+        return error
+
+    if not isinstance(body, dict):
+        return create_response(400, {'error': 'JSON object body required'})
+    staging_key = body.get('stagingKey')
+    if (not staging_key or not isinstance(staging_key, str)
+            or not staging_key.startswith(STATIC_IMAGE_STAGING_PREFIX)):
+        return create_response(400, {
+            'error': 'stagingKey (a key issued by the upload-url route, '
+                     f'under {STATIC_IMAGE_STAGING_PREFIX}) is required',
+        })
+    file_name = body.get('fileName')
+    if not file_name or not isinstance(file_name, str):
+        return create_response(400, {'error': 'fileName is required'})
+    if not COMPONENT_BUCKET:
+        return create_response(500, {'error': 'Component bucket not configured'})
+
+    s3 = pin_s3_client()
+    limit = MAX_PIN_VIDEO_BYTES
+    try:
+        head = s3.head_object(Bucket=COMPONENT_BUCKET, Key=staging_key)
+    except ClientError:
+        return create_response(400, {'error': STAGED_VIDEO_NOT_FOUND_MESSAGE})
+    declared = int(head.get('ContentLength') or 0)
+    if declared > limit:
+        delete_staged_pin_object(s3, staging_key)
+        return pin_video_size_limit_response(declared, limit)
+
+    table = dynamodb.Table(CAMERA_REGISTRY_TABLE)
+    now = now_ms()
+    supersede_video_validations(table, device_id, now, s3)
+    record = pin_requests.build_video_validation_item(
+        device_id, usecase_id, now,
+        staging_key=staging_key, file_name=file_name, size_bytes=declared,
+        requested_by=user['user_id'],
+    )
+    table.put_item(Item=record)
+    job = {'deviceId': device_id, 'validationId': record['validation_id']}
+    try:
+        dispatch_video_validation(job)
+    except Exception as e:  # noqa: BLE001 — any dispatch failure is a 502
+        logger.error(f"Video validation dispatch failed for {device_id}: {e}")
+        message = 'Video validation could not be started; submit the video again'
+        pin_requests.transition_video_validation(
+            table, record, pin_requests.VALIDATION_REJECTED,
+            completed_at_ms=now_ms(), error=message)
+        delete_staged_pin_object(s3, staging_key)
+        return create_response(502, {'error': message})
+    return create_response(202, {
+        'validationId': record['validation_id'],
+        'deviceId': device_id,
+        'status': pin_requests.VALIDATION_VALIDATING,
+    })
+
+
+def supersede_video_validations(table, device_id: str, now: int, s3) -> None:
+    """Supersede the device's submissions still validating (a newer
+    submission or a removal replaces them) and drop their staged objects;
+    their jobs find the record superseded and stop."""
+    for record in pin_requests.supersede_validating_video_validations(
+            table, device_id, now):
+        if record.get('staging_key'):
+            delete_staged_pin_object(s3, record['staging_key'])
+
+
+_lambda_client = None
+
+
+def _dispatch_video_validation_event(job: Dict[str, Any]) -> None:
+    """Invoke the validation job asynchronously (InvocationType Event) on
+    the CameraVideoPinHandler (VIDEO_VALIDATION_FUNCTION, its fixed name)."""
+    global _lambda_client
+    if not VIDEO_VALIDATION_FUNCTION:
+        raise RuntimeError('VIDEO_VALIDATION_FUNCTION is not configured')
+    if _lambda_client is None:
+        _lambda_client = boto3.client('lambda')
+    _lambda_client.invoke(
+        FunctionName=VIDEO_VALIDATION_FUNCTION,
+        InvocationType='Event',
+        Payload=json.dumps({VIDEO_VALIDATION_EVENT_KEY: job}).encode('utf-8'),
+    )
+
+
+#: Hands a validation job to the asynchronous runner — a swappable module
+#: seam (the run_video_probe pattern): tests run the job inline or queue it.
+dispatch_video_validation = _dispatch_video_validation_event
+
+
+def run_video_validation(job: Any) -> Dict[str, Any]:
+    """The asynchronous validation job for one submission (Requirements
+    8.2–8.5), invoked with ``{"videoValidation": {"deviceId",
+    "validationId"}}``. Returns ``{"status": ...}`` (for logs and tests).
+
+    Idempotent and supersession-aware: a record that already left
+    ``validating`` (a second run, or a newer submission or removal
+    superseded it) is left alone; a record whose submission was replaced
+    since (a newer validation record or Video_Pin_Request exists) is
+    superseded, before the download and again before the submission flow.
+    Otherwise the staged video is downloaded, checked against the limit,
+    and decoded with a 60 s budget. A rejection records the message on the
+    record and deletes the staged object, recording no Video_Pin_Request
+    (8.3, 8.4); an acceptance runs the submission flow
+    (:func:`submit_validated_video`) and records the Video_Pin_Request it
+    created (8.5)."""
+    job = job if isinstance(job, dict) else {}
+    device_id = job.get('deviceId')
+    validation_id = job.get('validationId')
+    if not device_id or not validation_id or not CAMERA_REGISTRY_TABLE:
+        logger.error(f"Malformed video validation job: {job!r}")
+        return {'status': 'ignored'}
+    table = dynamodb.Table(CAMERA_REGISTRY_TABLE)
+    record = pin_requests.get_video_validation_item(table, device_id,
+                                                    validation_id)
+    if record is None or \
+            record.get('status') != pin_requests.VALIDATION_VALIDATING:
+        return {'status': 'ignored'}
+    s3 = pin_s3_client()
+    staging_key = record['staging_key']
+
+    def finish(status: str, **fields) -> Dict[str, Any]:
+        pin_requests.transition_video_validation(
+            table, record, status, completed_at_ms=now_ms(), **fields)
+        if status != pin_requests.VALIDATION_ACCEPTED:
+            delete_staged_pin_object(s3, staging_key)
+        return {'status': status}
+
+    def superseded() -> bool:
+        return pin_requests.newer_video_activity(table, device_id,
+                                                 validation_id)
+
+    try:
+        created_at = int(record.get('created_at') or 0)
+        if now_ms() - created_at > pin_requests.VIDEO_VALIDATION_EXPIRY_MS:
+            return finish(pin_requests.VALIDATION_REJECTED,
+                          error=pin_requests.VIDEO_VALIDATION_EXPIRED_MESSAGE)
+        if superseded():
+            return finish(pin_requests.VALIDATION_SUPERSEDED)
+
+        limit = MAX_PIN_VIDEO_BYTES
+        # OpenCV needs a path: stream the staged object to /tmp (1 GiB
+        # ephemeral storage), hashing as it arrives; always removed.
+        fd, local_path = tempfile.mkstemp(prefix='pin-video-',
+                                          dir=tempfile.gettempdir())
+        try:
+            with os.fdopen(fd, 'wb') as handle:
+                try:
+                    size, sha256 = _download_staged_video(
+                        s3, staging_key, limit, handle)
+                except ClientError:
+                    return finish(pin_requests.VALIDATION_REJECTED,
+                                  error=STAGED_VIDEO_NOT_FOUND_MESSAGE)
+            if sha256 is None:  # grew past the limit since the HeadObject
+                return finish(pin_requests.VALIDATION_REJECTED,
+                              error=video_loop.oversize_message(size, limit))
+            info, message = video_validation_verdict(local_path)
+        finally:
+            try:
+                os.remove(local_path)
+            except OSError:
+                pass
+        if message is not None:
+            return finish(pin_requests.VALIDATION_REJECTED, error=message)
+        # The decode may take up to a minute: re-check before delivering.
+        if superseded():
+            return finish(pin_requests.VALIDATION_SUPERSEDED)
+
+        outcome = submit_validated_video(record, info, size, sha256, s3,
+                                         table)
+        if outcome.get('error') is not None:
+            return finish(pin_requests.VALIDATION_REJECTED,
+                          error=outcome['error'])
+        return finish(pin_requests.VALIDATION_ACCEPTED,
+                      pin_request_id=outcome['pinRequestId'],
+                      validated_metadata=outcome['validatedMetadata'])
+    except Exception:  # noqa: BLE001 — never leave the record validating
+        logger.exception(
+            f"Video validation job failed for {device_id} ({validation_id})")
+        return finish(pin_requests.VALIDATION_REJECTED,
+                      error='Video validation failed unexpectedly; submit '
+                            'the video again')
+
+
+def submit_validated_video(record: Dict[str, Any], info: Dict[str, Any],
+                           size: int, sha256: str, s3, table
+                           ) -> Dict[str, Any]:
+    """The image route's submission flow on the video family, for a
+    validated staged video: supersede pending video requests only, write
+    the pending item with the validated metadata, copy to the canonical
+    key, replace desired.staticVideoPin, delete the staged object, audit
+    (as the submitting user).
+
+    Returns ``{"pinRequestId", "validatedMetadata"}``, or ``{"error"}``
+    when the desired document would exceed its bound (nothing written). A
+    store or delivery failure after the item was written fails that
+    Video_Pin_Request (the status view shows why) and still returns its
+    id."""
+    device_id = record['device_id']
+    usecase_id = record['usecase_id']
+    staging_key = record['staging_key']
+    file_name = record['file_name']
+    container = info['format']
+    validated = {field: info.get(field)
+                 for field in VALIDATED_VIDEO_METADATA_FIELDS}
+    now = now_ms()
+    pin_request_id = pin_requests.new_pin_request_id(now)
+    canonical_key = (f"{STATIC_IMAGE_PIN_PREFIX}/{device_id}/"
+                     f"{STATIC_VIDEO_PIN_SUBPREFIX}/{pin_request_id}")
+    prefix = pin_requests.SK_VIDEO_PIN_REQUEST_PREFIX
+    item = pin_requests.build_pin_request_item(
+        device_id, usecase_id, pin_requests.OP_PIN, now,
+        pin_request_id=pin_request_id,
+        s3_bucket=COMPONENT_BUCKET, s3_key=canonical_key, sha256=sha256,
+        size_bytes=size, image_format=container, file_name=file_name,
+        sk_prefix=prefix, validated_metadata=validated,
+    )
+    section = desired_pin_section(pin_requests.build_desired_document(item))
+    if pin_requests.desired_document_size_bytes(section) > \
+            pin_requests.MAX_DESIRED_SECTION_BYTES:
+        return {'error': 'Pin request sync document would exceed the size '
+                         f'limit of {pin_requests.MAX_DESIRED_SECTION_BYTES} '
+                         'bytes'}
+    metadata = dict(validated, format=container)
+
+    pin_requests.supersede_pending_requests(table, device_id, now,
+                                            s3_client=s3, sk_prefix=prefix)
+    pin_requests.insert_pin_request(table, item)
+
+    try:
+        s3.copy_object(
+            Bucket=COMPONENT_BUCKET, Key=canonical_key,
+            CopySource={'Bucket': COMPONENT_BUCKET, 'Key': staging_key},
+        )
+    except Exception as e:  # noqa: BLE001 — any store failure fails the item
+        logger.error(f"Video pin canonical copy failed for {device_id}: {e}")
+        fail_pin_request(table, item, 'image transport storage failed', s3)
+        delete_staged_pin_object(s3, staging_key)
+        return {'pinRequestId': pin_request_id, 'validatedMetadata': metadata}
+
+    if write_desired_video_pin(usecase_id, device_id, section) is not None:
+        fail_pin_request(table, item,
+                         'sync channel delivery initiation failed', s3)
+        delete_staged_pin_object(s3, staging_key)
+        return {'pinRequestId': pin_request_id, 'validatedMetadata': metadata}
+
+    delete_staged_pin_object(s3, staging_key)
+    # The audit details map is stored as-is, and DynamoDB rejects floats.
+    audited = {key: Decimal(str(value)) if isinstance(value, float) else value
+               for key, value in validated.items()}
+    audit_pin_request({'user_id': record.get('requested_by') or 'unknown'},
+                      'pin_static_video', device_id, usecase_id,
+                      pin_request_id, pin_requests.OP_PIN,
+                      {'file_name': file_name, 'size_bytes': size,
+                       'format': container, 'sha256': sha256,
+                       'validated_metadata': audited,
+                       'validation_id': record['validation_id']})
+    return {'pinRequestId': pin_request_id, 'validatedMetadata': metadata}
+
+
+def remove_static_video_pin(device_id: str, user: Dict, event: Dict) -> Dict:
+    """DELETE /devices/{id}/cameras/static-video/pin (Operator).
+
+    Removal Video_Pin_Request (op: remove) through the same lifecycle and
+    the desired.staticVideoPin slot."""
+    usecase_id = resolve_pin_usecase_id(device_id)
+    if not usecase_id:
+        return pin_device_not_registered(device_id)
+    error = authorize(user, event, device_id, usecase_id, MUTATE_PERMISSION)
+    if error:
+        return error
+
+    now = now_ms()
+    pin_request_id = pin_requests.new_pin_request_id(now)
+    prefix = pin_requests.SK_VIDEO_PIN_REQUEST_PREFIX
+    item = pin_requests.build_pin_request_item(
+        device_id, usecase_id, pin_requests.OP_REMOVE, now,
+        pin_request_id=pin_request_id, sk_prefix=prefix,
+    )
+    section = desired_pin_section(pin_requests.build_desired_document(item))
+
+    s3 = pin_s3_client()
+    table = dynamodb.Table(CAMERA_REGISTRY_TABLE)
+    # A removal also replaces a submission still validating.
+    supersede_video_validations(table, device_id, now, s3)
+    pin_requests.supersede_pending_requests(table, device_id, now,
+                                            s3_client=s3, sk_prefix=prefix)
+    pin_requests.insert_pin_request(table, item)
+
+    error = write_desired_video_pin(usecase_id, device_id, section)
+    if error:
+        fail_pin_request(table, item,
+                         'sync channel delivery initiation failed', s3)
+        return error
+
+    audit_pin_request(user, 'remove_static_video', device_id, usecase_id,
+                      pin_request_id, pin_requests.OP_REMOVE)
+    return create_response(200, {
+        'pinRequestId': pin_request_id,
+        'deviceId': device_id,
+        'status': pin_requests.STATUS_PENDING,
+    })
+
+
+def get_static_video_status(device_id: str, user: Dict, event: Dict) -> Dict:
+    """GET /devices/{id}/cameras/static-video (Viewer).
+
+    The image status view over the video family: latest non-superseded
+    Video_Pin_Request (with its validated metadata), history,
+    deviceReported from CAMERA#static-video-camera, the device-reported
+    metadata once applied, and connectivity while pending. ``validation``
+    reports the latest submission's asynchronous Video_Validation
+    (validating, accepted with its pinRequestId, rejected with the
+    message, superseded, or expired), when there is one."""
+    items = query_device_items(device_id)
+    usecase_id = resolve_pin_usecase_id(device_id, items=items)
+    if not usecase_id:
+        return pin_device_not_registered(device_id)
+    error = authorize(user, event, device_id, usecase_id, VIEW_PERMISSION)
+    if error:
+        return error
+
+    camera_entry = next(
+        (item for item in items
+         if item.get('sk') == pin_requests.SK_STATIC_VIDEO_CAMERA), None)
+    view = pin_requests.build_status_view(
+        device_id, items,
+        usecase_id=usecase_id,
+        camera_entry=camera_entry,
+        connectivity_provider=lambda: device_connectivity_status(
+            usecase_id, device_id),
+        sk_prefix=pin_requests.SK_VIDEO_PIN_REQUEST_PREFIX,
+    )
+    validation = pin_requests.video_validation_view(items, now_ms())
+    if validation is not None:
+        view['validation'] = validation
+    return create_response(200, view)
+
+
+# ---------------------------------------------------------------------------
 # Handler / routing
 # ---------------------------------------------------------------------------
 
@@ -1269,6 +1848,19 @@ def handler(event, context):
             return remove_static_image_pin(device_id, user, event)
         if http_method == 'GET' and path.endswith('/cameras/static-image'):
             return get_static_image_status(device_id, user, event)
+
+        # Portal_Video_Pin_API static-video routes (static-camera-video-loop).
+        if http_method == 'POST' and \
+                path.endswith('/cameras/static-video/upload-url'):
+            return get_static_video_upload_url(device_id, user, event)
+        if http_method == 'POST' and \
+                path.endswith('/cameras/static-video/pin'):
+            return pin_static_video(device_id, user, event, body)
+        if http_method == 'DELETE' and \
+                path.endswith('/cameras/static-video/pin'):
+            return remove_static_video_pin(device_id, user, event)
+        if http_method == 'GET' and path.endswith('/cameras/static-video'):
+            return get_static_video_status(device_id, user, event)
 
         # Static segments before path params (conflicts/refresh), reads
         # before mutations.

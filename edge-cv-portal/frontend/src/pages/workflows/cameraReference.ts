@@ -195,6 +195,98 @@ export interface StaticImagePinStatusResponse {
 }
 
 // --------------------------------------------------------------------------
+// Static-video pin provisioning wire shapes (static-camera-video-loop —
+// camera_registry.py Portal_Video_Pin_API routes)
+// --------------------------------------------------------------------------
+
+/**
+ * Response of `POST /devices/{id}/cameras/static-video/upload-url`. Video
+ * uploads share the image staging prefix, so the shape is the image one.
+ */
+export type StaticVideoUploadUrlResponse = StaticImageUploadUrlResponse;
+
+/**
+ * Video_Metadata: what the Portal's validation determined (container
+ * `format`, codec, displayed size, fps, frame count, loop duration) and,
+ * once applied, what the device reports (additionally the file name, file
+ * size, and the loop epoch).
+ */
+export interface StaticVideoPinMetadata {
+  format?: string | null;
+  codec?: string | null;
+  width?: number | null;
+  height?: number | null;
+  fps?: number | null;
+  frameCount?: number | null;
+  durationMs?: number | null;
+  fileName?: string | null;
+  fileSizeBytes?: number | null;
+  pinnedAtEpochMs?: number | null;
+}
+
+/**
+ * Response of the video pin submit (POST .../static-video/pin, HTTP 202):
+ * the staged video was accepted for Video_Validation, which runs
+ * asynchronously (up to a minute of decoding). The status view's
+ * `validation` reports the outcome.
+ */
+export interface StaticVideoValidationSubmitResponse {
+  validationId: string;
+  deviceId: string;
+  status: 'validating' | string;
+}
+
+/**
+ * Response of the video removal route (DELETE .../static-video/pin): the
+ * new removal Video_Pin_Request, pending.
+ */
+export type StaticVideoPinSubmitResponse = StaticImagePinSubmitResponse;
+
+/**
+ * The latest video submission's asynchronous Video_Validation, as the
+ * status view reports it. `accepted` carries the Video_Pin_Request it
+ * created; `rejected` and `expired` carry the reason; `superseded` means a
+ * newer submission or a removal replaced it.
+ */
+export interface StaticVideoValidation {
+  validationId: string;
+  status: 'validating' | 'accepted' | 'rejected' | 'superseded' | 'expired' | string;
+  createdAt?: number | null;
+  completedAt?: number | null;
+  fileName?: string | null;
+  error?: string | null;
+  pinRequestId?: string | null;
+  validatedMetadata?: StaticVideoPinMetadata | null;
+}
+
+/** The most recent non-superseded Video_Pin_Request. */
+export interface StaticVideoPinLatest
+  extends Omit<StaticImagePinLatest, 'deviceMetadata'> {
+  deviceMetadata?: StaticVideoPinMetadata | null;
+  /** Metadata the Portal's validation determined at submission. */
+  validatedMetadata?: StaticVideoPinMetadata | null;
+}
+
+/** Response of `GET /devices/{id}/cameras/static-video` (status view). */
+export interface StaticVideoPinStatusResponse
+  extends Omit<StaticImagePinStatusResponse, 'latest' | 'deviceMetadata'> {
+  latest: StaticVideoPinLatest | null;
+  /** Present when the most recent video pin request is applied. */
+  deviceMetadata?: StaticVideoPinMetadata;
+  /** The latest submission's validation, when the device has one. */
+  validation?: StaticVideoValidation;
+}
+
+/**
+ * Value of `STATIC_IMAGE_FOCUS_PARAM` targeting the static-video panel
+ * (the node panel's "Pin a test video…" shortcut).
+ */
+export const STATIC_VIDEO_FOCUS_VALUE = 'static-video';
+
+/** The video pin size limit, the device's (and Portal's) 100 MB. */
+export const MAX_PIN_VIDEO_BYTES = 100 * 1024 * 1024;
+
+// --------------------------------------------------------------------------
 // The advisory binding hint stored on the node (Requirements 7.2, 7.5)
 // --------------------------------------------------------------------------
 
@@ -360,12 +452,18 @@ export function isV4l2CompatibleCamera(camera: CameraSourceEntry): boolean {
  * registry-backed Static_Image_Camera entry (type `StaticImage`) — the
  * device serves the static camera through the same aravis frame-feed
  * path bus cameras use (see the static-image-camera-source base spec;
- * cloud-static-camera-provisioning Requirements 6.3, 6.4). Mirrors the
- * deploy-time compatible set {Camera, AravisDiscovered, StaticImage} so
+ * cloud-static-camera-provisioning Requirements 6.3, 6.4). The
+ * Static_Video_Camera entry (type `StaticVideo`) is served the same way
+ * (static-camera-video-loop Requirement 4.8). Mirrors the deploy-time
+ * compatible set {Camera, AravisDiscovered, StaticImage, StaticVideo} so
  * the picker never offers a source the validator would reject.
  */
 export function isAravisCompatibleCamera(camera: CameraSourceEntry): boolean {
-  if (camera.type === 'AravisDiscovered' || camera.type === 'StaticImage') {
+  if (
+    camera.type === 'AravisDiscovered' ||
+    camera.type === 'StaticImage' ||
+    camera.type === 'StaticVideo'
+  ) {
     return true;
   }
   return camera.type === 'Camera' && cameraIdValue(camera) !== null;
@@ -391,7 +489,23 @@ export function isAravisCompatibleCamera(camera: CameraSourceEntry): boolean {
  * instead of throwing.
  */
 function staticImageCapabilityId(camera: CameraSourceEntry): string | null {
-  const block = (camera.capabilities ?? {}).staticImage;
+  return capabilityBlockId(camera, 'staticImage');
+}
+
+/**
+ * The Static_Video_Camera's id from `capabilities.staticVideo.id`, guarded
+ * the same way (static-camera-video-loop Requirement 4.8).
+ */
+function staticVideoCapabilityId(camera: CameraSourceEntry): string | null {
+  return capabilityBlockId(camera, 'staticVideo');
+}
+
+/** `capabilities[family].id` as a non-empty string, else null. */
+function capabilityBlockId(
+  camera: CameraSourceEntry,
+  family: 'staticImage' | 'staticVideo'
+): string | null {
+  const block = (camera.capabilities ?? {})[family];
   if (
     block === null ||
     block === undefined ||
@@ -429,6 +543,12 @@ export function cameraIdValue(camera: CameraSourceEntry): string | null {
   }
   if (camera.type === 'StaticImage') {
     return staticImageCapabilityId(camera);
+  }
+  // The Static_Video_Camera reports the same shape under
+  // `capabilities.staticVideo` (static-camera-video-loop Requirement 4.8),
+  // type-gated for the same reason.
+  if (camera.type === 'StaticVideo') {
+    return staticVideoCapabilityId(camera);
   }
   return null;
 }

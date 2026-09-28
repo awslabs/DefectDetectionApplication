@@ -141,6 +141,9 @@ const typeArb: fc.Arbitrary<string | null | undefined> = fc.oneof(
     'AravisDiscovered',
     'Camera',
     'StaticImage',
+    // Conscious update (static-camera-video-loop Requirement 4.8): the
+    // Static_Video_Camera's registry type joins the domain.
+    'StaticVideo',
     'V4L2Discovered',
     'RTSP',
     'CSI',
@@ -398,10 +401,16 @@ function staticImageCapabilityIdOracle(camera: CameraSourceEntry): string | null
  * `isAravisCompatibleCamera`: `AravisDiscovered` and `StaticImage`
  * unconditionally, plus `Camera` carrying a non-empty string
  * `params.cameraId`. The fix must reproduce this set exactly — no entry
- * gained, none lost (Requirement 3.4).
+ * gained, none lost (Requirement 3.4). Conscious update
+ * (static-camera-video-loop Requirement 4.8): `StaticVideo` joined the
+ * unconditionally compatible types; nothing else changed.
  */
 function aravisCompatibleOracle(camera: CameraSourceEntry): boolean {
-  if (camera.type === 'AravisDiscovered' || camera.type === 'StaticImage') {
+  if (
+    camera.type === 'AravisDiscovered' ||
+    camera.type === 'StaticImage' ||
+    camera.type === 'StaticVideo'
+  ) {
     return true;
   }
   if (camera.type !== 'Camera') {

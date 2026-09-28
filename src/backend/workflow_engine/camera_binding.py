@@ -85,7 +85,11 @@ _CAMERA_ID_KEYS = ("camera_id", "cameraId")
 #: id" (measured on jetson-thor1, 2026-09-22). This is the device-side
 #: counterpart of the Portal's ``cameraIdValue()`` capabilities fallback
 #: (Requirements 2.1-2.4 of that bugfix).
-_CAMERA_ID_CAPABILITY_FAMILIES = ("staticImage",)
+#:
+#: The virtual Static_Video_Camera entry has the same shape, with its
+#: identity under ``capabilities.staticVideo`` (feature
+#: static-camera-video-loop, Requirements 4.4, 4.8).
+_CAMERA_ID_CAPABILITY_FAMILIES = ("staticImage", "staticVideo")
 
 
 @dataclass(frozen=True)

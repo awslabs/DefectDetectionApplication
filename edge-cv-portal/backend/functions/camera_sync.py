@@ -302,6 +302,11 @@ SHADOW_NAME = "dda-camera-registry"
 STATIC_IMAGE_CAMERA_ID = "static-image-camera"
 SK_STATIC_IMAGE_CAMERA = f"{SK_CAMERA_PREFIX}{STATIC_IMAGE_CAMERA_ID}"
 
+# The second virtual camera, the Static_Video_Camera (feature
+# static-camera-video-loop), and its registry SK.
+STATIC_VIDEO_CAMERA_ID = "static-video-camera"
+SK_STATIC_VIDEO_CAMERA = f"{SK_CAMERA_PREFIX}{STATIC_VIDEO_CAMERA_ID}"
+
 
 class MalformedReport(Exception):
     """A shadow-report record that can never be processed (dead-letter it)."""
@@ -385,6 +390,49 @@ def _process_pin_section(table, thing_name: str, reported: Dict[str, Any],
             "section for '%s' (camera reduction unaffected)", thing_name)
 
 
+def _process_video_pin_section(table, thing_name: str,
+                               reported: Dict[str, Any], now_ms: int) -> None:
+    """Route ``reported.staticVideoPin`` to the Video_Pin_Request family
+    (feature static-camera-video-loop, design Decision 10), with the same
+    section isolation as :func:`_process_pin_section`.
+
+    An applied remove marks ``CAMERA#static-video-camera`` absent right
+    away, so the registry converges without waiting for the device's next
+    inventory report. Unlike the image camera, no shadow-key cleanup is
+    needed: every device build that knows the video camera reports it
+    explicitly absent after an unpin, so there is no stale key to clear.
+    """
+    pin_section = reported.get("staticVideoPin")
+    if pin_section is None:
+        return  # absent section: nothing to do (tolerant)
+    try:
+        import pin_requests
+
+        prefix = pin_requests.SK_VIDEO_PIN_REQUEST_PREFIX
+        outcome = pin_requests.apply_pin_confirmation(
+            table, thing_name, pin_section, now_ms=now_ms,
+            s3_client=_pin_s3_client(), sk_prefix=prefix)
+        if outcome != pin_requests.STATUS_APPLIED:
+            return
+        op = pin_section.get("op")
+        if not op:
+            item = pin_requests.get_pin_request_item(
+                table, thing_name, str(pin_section.get("requestId")),
+                sk_prefix=prefix)
+            op = (item or {}).get("op")
+        if op == pin_requests.OP_REMOVE:
+            try:
+                completed = int(pin_section.get("completedAtEpochMs"))
+            except (TypeError, ValueError):
+                completed = int(now_ms)
+            _mark_camera_entry_absent(table, thing_name,
+                                      SK_STATIC_VIDEO_CAMERA, completed)
+    except Exception:  # noqa: BLE001 — section isolation
+        logger.exception(
+            "Skipping malformed/unprocessable reported.staticVideoPin "
+            "section for '%s' (camera reduction unaffected)", thing_name)
+
+
 def _confirmed_op(table, device_id: str,
                   pin_section: Dict[str, Any]) -> Optional[str]:
     """The confirmed Pin_Request's operation type: from the device's echo
@@ -430,11 +478,20 @@ def _mark_static_camera_absent(table, device_id: str,
     absent with the given timestamp — only when the entry exists and is
     not already absent (an existing absence keeps its original
     ``absent_since``). Returns whether the entry was transitioned."""
+    return _mark_camera_entry_absent(table, device_id,
+                                     SK_STATIC_IMAGE_CAMERA, absent_since_ms)
+
+
+def _mark_camera_entry_absent(table, device_id: str, sk: str,
+                              absent_since_ms: int) -> bool:
+    """Mark one registry camera entry (``sk``) absent with the given
+    timestamp, under the same existence / not-already-absent condition as
+    :func:`_mark_static_camera_absent`."""
     from botocore.exceptions import ClientError
 
     try:
         table.update_item(
-            Key={"device_id": device_id, "sk": SK_STATIC_IMAGE_CAMERA},
+            Key={"device_id": device_id, "sk": sk},
             UpdateExpression="SET absent = :true, absent_since = :since",
             ConditionExpression=(
                 "attribute_exists(sk) AND "
@@ -713,6 +770,17 @@ def _process_report(
                     "Could not absence-mark the static-image camera "
                     "registry entry for '%s'", thing_name)
             continue
+        if csid == STATIC_VIDEO_CAMERA_ID:
+            # The Static_Video_Camera is absence-tracked the same way
+            # (static-camera-video-loop): never deleted by omission.
+            try:
+                _mark_camera_entry_absent(table, thing_name,
+                                          SK_STATIC_VIDEO_CAMERA, now_ms)
+            except Exception:  # noqa: BLE001 — isolation, like the pin path
+                logger.exception(
+                    "Could not absence-mark the static-video camera "
+                    "registry entry for '%s'", thing_name)
+            continue
         outcome = reduce_report(entries.get(csid), None, now_ms)
         _persist_outcome(table, thing_name, usecase_id, csid, outcome)
 
@@ -723,6 +791,9 @@ def _process_report(
     # wins over the stale (shadow-merged) present entry within this event.
     _process_pin_section(table, thing_name, reported, now_ms,
                          usecase_id=usecase_id)
+    # Static-video Video_Pin_Request confirmations (static-camera-video-
+    # loop): reported.staticVideoPin, isolated the same way.
+    _process_video_pin_section(table, thing_name, reported, now_ms)
 
     # Every processed report stamps the device META item (Reqs 1.6, 3.2).
     meta_item = stamp_meta(meta, now_ms)

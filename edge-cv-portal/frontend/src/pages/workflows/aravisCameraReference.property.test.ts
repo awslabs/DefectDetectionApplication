@@ -109,6 +109,9 @@ const anyCameraArb: fc.Arbitrary<CameraSourceEntry> = fc.record(
         'AravisDiscovered',
         'Camera',
         'StaticImage',
+        // Conscious update (static-camera-video-loop Requirement 4.8):
+        // the Static_Video_Camera's registry type joins the domain.
+        'StaticVideo',
         'V4L2Discovered',
         'RTSP',
         'CSI',
@@ -167,10 +170,16 @@ const priorParametersArb: fc.Arbitrary<Record<string, JsonValue>> = fc
  * Conscious re-record: cloud-static-camera-provisioning Reqs 6.3/6.4
  * added `StaticImage` (the registry-backed Static_Image_Camera) — the
  * device serves it through the same aravis frame-feed path bus cameras
- * use (static-image-camera-source base spec).
+ * use (static-image-camera-source base spec). Conscious update
+ * (static-camera-video-loop Requirement 4.8): `StaticVideo`, the
+ * Static_Video_Camera, is served the same way and is compatible too.
  */
 function compatibleOracle(camera: CameraSourceEntry): boolean {
-  if (camera.type === 'AravisDiscovered' || camera.type === 'StaticImage') {
+  if (
+    camera.type === 'AravisDiscovered' ||
+    camera.type === 'StaticImage' ||
+    camera.type === 'StaticVideo'
+  ) {
     return true;
   }
   if (camera.type !== 'Camera') {

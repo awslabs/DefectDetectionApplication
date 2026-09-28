@@ -109,6 +109,8 @@ class TestDeploymentsRemoval:
         # aravis_camera_source is unchanged by this feature. Re-recorded
         # consciously: cloud-static-camera-provisioning Reqs 6.3/6.4
         # added StaticImage — the device serves the Static_Image_Camera
-        # through the same aravis frame-feed path bus cameras use.
+        # through the same aravis frame-feed path bus cameras use — and
+        # static-camera-video-loop Req 4.8 added StaticVideo for the
+        # Static_Video_Camera, served the same way.
         assert compat["aravis_camera_source"] == frozenset(
-            {"Camera", "AravisDiscovered", "StaticImage"})
+            {"Camera", "AravisDiscovered", "StaticImage", "StaticVideo"})

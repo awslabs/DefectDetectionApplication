@@ -60,6 +60,11 @@ from utils.static_image_camera import (
     STATIC_IMAGE_CAMERA_IDENTITY,
     get_store,
 )
+from utils.static_video_camera import (
+    STATIC_VIDEO_CAMERA_ID,
+    STATIC_VIDEO_CAMERA_IDENTITY,
+    get_store as get_video_store,
+)
 
 # LOG LEVELS
 # CRITICAL 50
@@ -118,6 +123,19 @@ def getCameras():
             "Static image camera enumeration entry could not be constructed; "
             "returning physical cameras only: %s", err,
         )
+    # Static_Video_Camera (feature: static-camera-video-loop): the same
+    # pattern for the separate video camera — one synthetic entry while a
+    # Pinned_Video exists, in its own try/except so a video-store failure
+    # never affects the physical cameras or the image camera (video
+    # Requirements 2.1, 2.2, 2.4, 2.5, 2.6).
+    try:
+        if get_video_store().is_pinned():
+            cameras.append(Camera(**STATIC_VIDEO_CAMERA_IDENTITY))
+    except Exception as err:
+        log.error(
+            "Static video camera enumeration entry could not be constructed; "
+            "returning the other cameras only: %s", err,
+        )
     return cameras
 
 
@@ -167,6 +185,21 @@ class _StaticImageCameraHandle:
         return STATIC_IMAGE_CAMERA_IDENTITY["model"]
 
 
+class _StaticVideoCameraHandle:
+    """Truthy sentinel for the Static_Video_Camera returned by getCamera().
+
+    Same role as :class:`_StaticImageCameraHandle`: the vendor/model feed the
+    Image_Source default-configuration lookup, which resolves AWS-DDA +
+    an unlisted model to the AWS-DDA ``default`` packed-RGB chain
+    (video Requirement 4.1)."""
+
+    def get_vendor_name(self):
+        return STATIC_VIDEO_CAMERA_IDENTITY["vendor"]
+
+    def get_model_name(self):
+        return STATIC_VIDEO_CAMERA_IDENTITY["model"]
+
+
 def getCamera(cameraId):
     # Static_Image_Camera short-circuit: return a truthy sentinel handle when
     # a Pinned_Image exists and a not-found error mentioning the pin
@@ -179,6 +212,14 @@ def getCamera(cameraId):
             f"Static image camera '{STATIC_IMAGE_CAMERA_ID}' is not available "
             f"because no image is pinned. Pin an image through the static "
             f"image pin API before using this camera."
+        )
+    if cameraId == STATIC_VIDEO_CAMERA_ID:
+        if get_video_store().is_pinned():
+            return _StaticVideoCameraHandle()
+        raise AravisCameraNotFound(
+            f"Static video camera '{STATIC_VIDEO_CAMERA_ID}' is not available "
+            f"because no video is pinned. Pin a video through the static "
+            f"video pin API before using this camera."
         )
 
     # Enable Fake camera
