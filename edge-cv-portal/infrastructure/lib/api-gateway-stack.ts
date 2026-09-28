@@ -458,6 +458,12 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
+    // DELETE /devices/{id} — remove a DDA-managed device (manage_devices),
+    // optionally with its AWS IoT thing (?delete_thing=true).
+    deviceResource.addMethod('DELETE', devicesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
 
     // SSH tunnel (AWS IoT Secure Tunneling) — enable/disable + status + open.
     const sshTunnelResource = deviceResource.addResource('ssh-tunnel');

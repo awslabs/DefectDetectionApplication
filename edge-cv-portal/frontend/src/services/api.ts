@@ -539,6 +539,27 @@ export interface DeviceRegistrationsResponse {
   count: number;
 }
 
+/** Response of `DELETE /devices/{id}` (devices.py delete_device). */
+export interface DeleteDeviceResponse {
+  deleted: boolean;
+  device_id: string;
+  usecase_id: string;
+  delete_thing: boolean;
+  thing_deleted: boolean;
+  certificates_deactivated: string[];
+  certificates_deleted: string[];
+  shadows_deleted: string[];
+  /** Portal rows removed per kind of record. */
+  portal_records_deleted?: {
+    device_record: number;
+    camera_registry: number;
+    account_sync: number;
+    registrations: number;
+  };
+  /** Non-fatal clean-up problems (e.g. a certificate shared with another thing). */
+  warnings: string[];
+}
+
 /**
  * Response of `GET /device-registrations/thing-groups`: existing IoT Thing
  * Group names from the Use_Case account for Device_Group selection
@@ -1980,6 +2001,30 @@ class ApiService {
     return this.request(`/devices/${deviceId}`, {
       method: 'PUT',
       body: JSON.stringify({ usecase_id: usecaseId, ...updates }),
+    });
+  }
+
+  /**
+   * Remove a DDA-managed device (manage_devices: Operator and above; the
+   * backend enforces it). Deletes the device's Greengrass core device record
+   * and the portal's records for it. With `deleteThing`, the device's AWS IoT
+   * thing, certificates and shadows are deleted first, so it can no longer
+   * connect and must be set up again to come back.
+   */
+  async deleteDevice(
+    deviceId: string,
+    usecaseId: string,
+    options: { deleteThing?: boolean } = {}
+  ): Promise<DeleteDeviceResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    const params = new URLSearchParams({ usecase_id: usecaseId });
+    if (options.deleteThing) {
+      params.set('delete_thing', 'true');
+    }
+    return this.request<DeleteDeviceResponse>(`/devices/${deviceId}?${params}`, {
+      method: 'DELETE',
     });
   }
 

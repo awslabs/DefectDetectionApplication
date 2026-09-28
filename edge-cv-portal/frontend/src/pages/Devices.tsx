@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Table,
   Header,
@@ -25,9 +25,15 @@ import { useTableSort } from '../hooks/useTableSort';
 import { getErrorMessage } from '../utils/errorHandling';
 import RegisterDeviceDialog from '../components/RegisterDeviceDialog';
 import SetupCommandDialog from '../components/SetupCommandDialog';
+import RemoveDevicesModal, {
+  RemovalNotice,
+  RemoveDevicesResult,
+  removalNotice,
+} from '../components/RemoveDevicesModal';
 
 export default function Devices() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const { selectedUsecaseId, setSelectedUsecaseId } = useUsecase();
   const [filteringText, setFilteringText] = useState('');
@@ -53,6 +59,29 @@ export default function Devices() {
     null
   );
   const [deleting, setDeleting] = useState(false);
+
+  // Devices (thing names) pending a remove confirmation; empty = closed.
+  const [removeTargets, setRemoveTargets] = useState<string[]>([]);
+  // Outcome of the last device removal. DeviceDetail hands one over in the
+  // navigation state after it removes a device.
+  const [notice, setNotice] = useState<RemovalNotice | null>(
+    () =>
+      (location.state as { removalNotice?: RemovalNotice } | null)
+        ?.removalNotice ?? null
+  );
+
+  // Show a handed-over notice once: drop it from the history entry so a
+  // reload or a back navigation does not show it again.
+  useEffect(() => {
+    if ((location.state as { removalNotice?: RemovalNotice } | null)?.removalNotice) {
+      navigate(`${location.pathname}${location.search}`, {
+        replace: true,
+        state: null,
+      });
+    }
+    // Runs once on mount, for the state the page was opened with.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Use case management
   const [useCases, setUseCases] = useState<UseCase[]>([]);
@@ -126,7 +155,13 @@ export default function Devices() {
       setLoading(true);
       setError(null);
       const response = await apiService.listDevices(selectedUseCase.value);
-      setDevices(response.devices || []);
+      const loaded = response.devices || [];
+      setDevices(loaded);
+      // Keep only devices that are still listed selected (after a refresh,
+      // a removal, or a use case switch), so Remove never targets stale ones.
+      setSelectedItems((items) =>
+        items.filter((item) => loaded.some((d) => d.device_id === item.device_id))
+      );
     } catch (err: any) {
       console.error('Failed to load devices:', err);
       setError(err.message || 'Failed to load devices');
@@ -207,6 +242,27 @@ export default function Devices() {
     }
   };
 
+  // Removal finished: report it, then reload the devices and the
+  // registrations (a removed device's registration is deleted with it).
+  const handleRemoveComplete = (result: RemoveDevicesResult) => {
+    setRemoveTargets([]);
+    setSelectedItems((items) =>
+      items.filter((item) => !result.removed.includes(item.device_id))
+    );
+    setNotice(removalNotice(result));
+    if (result.failed.length > 0) {
+      setError(
+        result.failed
+          .map((failure) => `Could not remove ${failure.deviceId}: ${failure.message}`)
+          .join(' ')
+      );
+    }
+    if (result.removed.length > 0) {
+      loadDevices();
+      loadRegistrations();
+    }
+  };
+
   // A newly created or regenerated registration should refresh the panel.
   const handleRegistered = (result: RegistrationWithCommand) => {
     setShowRegisterDialog(false);
@@ -281,6 +337,23 @@ export default function Devices() {
 
   return (
     <SpaceBetween size="l">
+      {notice && (
+        <Alert
+          type={notice.warnings.length > 0 ? 'warning' : 'success'}
+          dismissible
+          onDismiss={() => setNotice(null)}
+        >
+          {notice.message}
+          {notice.warnings.length > 0 && (
+            <ul>
+              {notice.warnings.map((warning, index) => (
+                <li key={index}>{warning}</li>
+              ))}
+            </ul>
+          )}
+        </Alert>
+      )}
+
       {error && (
         <Alert type="error" dismissible onDismiss={() => setError(null)}>
           {error}
@@ -425,6 +498,15 @@ export default function Devices() {
                   Refresh
                 </Button>
                 <Button
+                  onClick={() =>
+                    setRemoveTargets(selectedItems.map((item) => item.device_id))
+                  }
+                  disabled={!selectedUseCase || selectedItems.length === 0}
+                  data-testid="remove-devices-button"
+                >
+                  Remove
+                </Button>
+                <Button
                   variant="primary"
                   onClick={() => setShowRegisterDialog(true)}
                   disabled={!selectedUseCase}
@@ -440,6 +522,7 @@ export default function Devices() {
         loading={loading}
         items={sortedDevices}
         {...sortingProps}
+        trackBy="device_id"
         selectionType="multi"
         selectedItems={selectedItems}
         onSelectionChange={({ detail }) => setSelectedItems(detail.selectedItems)}
@@ -565,6 +648,16 @@ export default function Devices() {
           </Box>
         </SpaceBetween>
       </Modal>
+
+      {/* Confirm and run the removal of the selected devices. */}
+      {removeTargets.length > 0 && selectedUseCase?.value && (
+        <RemoveDevicesModal
+          deviceIds={removeTargets}
+          usecaseId={selectedUseCase.value}
+          onDismiss={() => setRemoveTargets([])}
+          onComplete={handleRemoveComplete}
+        />
+      )}
     </SpaceBetween>
   );
 }

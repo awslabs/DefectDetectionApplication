@@ -719,6 +719,48 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
+    // Device removal (DELETE /devices/{id}, the portal's devices.py): delete
+    // a DDA-managed Greengrass core device. Conditioned on the
+    // dda-portal:managed tag the portal's device list filters on, so core
+    // devices outside DDA cannot be deleted through this role.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'GreengrassCoreDeviceRemoval',
+        effect: iam.Effect.ALLOW,
+        actions: ['greengrass:DeleteCoreDevice'],
+        resources: [`arn:aws:greengrass:*:${this.account}:coreDevices:*`],
+        conditions: {
+          StringEquals: { 'aws:ResourceTag/dda-portal:managed': 'true' },
+        },
+      })
+    );
+
+    // Device removal with delete_thing=true: take the device's AWS IoT
+    // identity apart. Its certificates are deactivated, detached, and
+    // deleted unless another thing shares them; its shadows are deleted
+    // (DeleteThingShadow is granted above); then the thing is deleted.
+    // DetachThingPrincipal and ListPrincipalThings authorize against the
+    // certificate ARN.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'IoTThingRemoval',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'iot:ListThingPrincipals',
+          'iot:ListPrincipalThings',
+          'iot:DetachThingPrincipal',
+          'iot:UpdateCertificate',
+          'iot:DeleteCertificate',
+          'iot:ListNamedShadowsForThing',
+          'iot:DeleteThing',
+        ],
+        resources: [
+          `arn:aws:iot:*:${this.account}:thing/*`,
+          `arn:aws:iot:*:${this.account}:cert/*`,
+        ],
+      })
+    );
+
     // IoT Jobs - Greengrass CreateDeployment requires these as dependent actions.
     // iot:CreateJob needs both job/* and thing/* resources since the job targets a thing.
     this.role.addToPolicy(

@@ -1053,6 +1053,9 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2024-12-12-fixed-shared-utils', // Force update with fixed shared_utils.py
+        // DELETE /devices/{id} deletes the removed device's
+        // Device_Registrations along with its other portal rows.
+        REGISTRATIONS_TABLE: props.deviceRegistrationsTable.tableName,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(30),
@@ -1082,6 +1085,46 @@ export class ComputeStack extends cdk.Stack {
       // grant. This statement is NOT one of the I1–I17 scanner findings.
       resources: ['*'],
     }));
+
+    // Device removal (DELETE /devices/{id}, devices.delete_device) for
+    // same-account use cases. Cross-account use cases get the same actions
+    // on the use-case account's DDAPortalAccessRole (usecase-account-stack.ts).
+    //
+    // DeleteCoreDevice is conditioned on the dda-portal:managed tag the
+    // device list filters on, so only DDA-managed core devices can be
+    // deleted (the handler checks the tag as well).
+    devicesHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['greengrass:DeleteCoreDevice'],
+      resources: ['arn:aws:greengrass:*:*:coreDevices:*'],
+      conditions: {
+        StringEquals: { 'aws:ResourceTag/dda-portal:managed': 'true' },
+      },
+    }));
+    // With delete_thing=true the handler also takes the device's AWS IoT
+    // identity apart: its certificates (deactivated, detached, and deleted
+    // unless another thing shares them), its shadows (iot:DeleteThingShadow
+    // is already on the base role), then the thing. DetachThingPrincipal and
+    // ListPrincipalThings authorize against the certificate ARN.
+    devicesHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iot:ListThingPrincipals',
+        'iot:ListPrincipalThings',
+        'iot:DetachThingPrincipal',
+        'iot:UpdateCertificate',
+        'iot:DeleteCertificate',
+        'iot:ListNamedShadowsForThing',
+        'iot:DeleteThing',
+      ],
+      resources: ['arn:aws:iot:*:*:thing/*', 'arn:aws:iot:*:*:cert/*'],
+    }));
+    // The removed device's registrations: queried by use case + name on the
+    // usecase-device-index, deleted by id. (The removal's audit trail is two
+    // PutItem entries, pending then outcome, so the base role's
+    // grantWriteData on the audit log suffices: no dynamodb:Query there.)
+    props.deviceRegistrationsTable.grant(
+      devicesHandler, 'dynamodb:Query', 'dynamodb:DeleteItem');
 
     // Device Logs Lambda Handler
     const deviceLogsHandler = new lambda.Function(this, 'DeviceLogsHandler', {
@@ -2039,6 +2082,11 @@ export class ComputeStack extends cdk.Stack {
     // the redrive policy above).
     accountSyncAckDlq.grantSendMessages(accountSyncHandler);
     accountSyncTable.grantReadWriteData(accountSyncHandler);
+
+    // DELETE /devices/{id} drops the removed device's account-sync row, so
+    // the 5-minute pass stops retrying its pending changes.
+    devicesHandler.addEnvironment('ACCOUNT_SYNC_TABLE', accountSyncTable.tableName);
+    accountSyncTable.grant(devicesHandler, 'dynamodb:DeleteItem');
 
     // Retry/timeout driver: WHILE a device has undelivered pending
     // changes, delivery is attempted at intervals not exceeding 5 minutes

@@ -30,6 +30,10 @@ import {
 import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
 import RemoteAccessTab from '../components/RemoteAccessTab';
 import ResultsTab from '../components/ResultsTab';
+import RemoveDevicesModal, {
+  RemoveDevicesResult,
+  removalNotice,
+} from '../components/RemoveDevicesModal';
 
 /** Keep in sync with devices.py TARGET_ARCHITECTURES. */
 const TARGET_ARCHITECTURE_OPTIONS = [
@@ -67,6 +71,8 @@ export default function DeviceDetail() {
   // picker's "Pin a static test image…" shortcut targets tab=cameras).
   const [activeTabId, setActiveTabId] = useState(searchParams.get('tab') || 'overview');
   const [showRestartModal, setShowRestartModal] = useState(false);
+  const [showRemoveModal, setShowRemoveModal] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const [device, setDevice] = useState<Device | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -263,6 +269,20 @@ export default function DeviceDetail() {
     setEditingArch(true);
   };
 
+  // Removed: back to the device list, which shows the outcome. Failed: stay
+  // here and show why.
+  const handleRemoveComplete = (result: RemoveDevicesResult) => {
+    setShowRemoveModal(false);
+    const notice = removalNotice(result);
+    if (notice) {
+      navigate(`/devices?usecase_id=${usecaseId}`, {
+        state: { removalNotice: notice },
+      });
+      return;
+    }
+    setRemoveError(result.failed[0]?.message ?? 'Failed to remove the device');
+  };
+
   const saveTargetArchitecture = async () => {
     if (!deviceId || !usecaseId) return;
     try {
@@ -410,6 +430,12 @@ export default function DeviceDetail() {
         }}
       />
 
+      {removeError && (
+        <Alert type="error" dismissible onDismiss={() => setRemoveError(null)}>
+          {`Could not remove ${device.device_id}: ${removeError}`}
+        </Alert>
+      )}
+
       {/* Header */}
       <Header
         variant="h1"
@@ -418,6 +444,15 @@ export default function DeviceDetail() {
             <Button onClick={() => navigate(`/devices?usecase_id=${usecaseId}`)}>Back to Devices</Button>
             <Button iconName="refresh" onClick={loadDevice}>Refresh</Button>
             <Button onClick={() => setShowRestartModal(true)}>Restart Greengrass</Button>
+            <Button
+              onClick={() => {
+                setRemoveError(null);
+                setShowRemoveModal(true);
+              }}
+              data-testid="remove-device-button"
+            >
+              Remove device
+            </Button>
           </SpaceBetween>
         }
       >
@@ -1039,6 +1074,16 @@ export default function DeviceDetail() {
           </Alert>
         </SpaceBetween>
       </Modal>
+
+      {/* Remove Modal */}
+      {showRemoveModal && usecaseId && (
+        <RemoveDevicesModal
+          deviceIds={[device.device_id]}
+          usecaseId={usecaseId}
+          onDismiss={() => setShowRemoveModal(false)}
+          onComplete={handleRemoveComplete}
+        />
+      )}
     </SpaceBetween>
   );
 }
