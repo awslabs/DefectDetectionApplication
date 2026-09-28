@@ -857,22 +857,25 @@ def get_camera_frame(camera_id, camera_config=None):
             raise Exception(
                 f"Unable to get camera frame for camera id: {camera_id}: {err}"
             ) from err
-    get_frame_lock.acquire()
-    if camera_id not in camera_objects:
-        logger.error("Attempting to create camera object")
-        connect_camera(camera_id)
+    # The lock covers the lazy open too, and a with-block releases it on
+    # every exit. It used to be acquired before the try/finally, so a camera
+    # that could not be opened left it held by the failing thread and every
+    # other thread's open/grab/close blocked until the process restarted
+    # (camera-grab-lock-leak). The exceptions callers see are unchanged.
+    with get_frame_lock:
+        if camera_id not in camera_objects:
+            logger.error("Attempting to create camera object")
+            connect_camera(camera_id)
 
-    camera = camera_objects.get(camera_id)
-    if camera is None:
-        logger.error(f"Camera not found for ID {camera_id}")
-        raise Exception(f"Camera not able to connect for ID {camera_id}")
-    try:
-        frame = _get_camera_frame(camera_id, camera, camera_config)
-        if frame is not None:
-            return frame
-        else:
+        camera = camera_objects.get(camera_id)
+        if camera is None:
+            logger.error(f"Camera not found for ID {camera_id}")
+            raise Exception(f"Camera not able to connect for ID {camera_id}")
+        try:
+            frame = _get_camera_frame(camera_id, camera, camera_config)
+            if frame is not None:
+                return frame
+            else:
+                raise Exception(f"Unable to get camera frame for camera id: {camera_id}")
+        except Exception:
             raise Exception(f"Unable to get camera frame for camera id: {camera_id}")
-    except Exception:
-        raise Exception(f"Unable to get camera frame for camera id: {camera_id}")
-    finally:
-        get_frame_lock.release()
