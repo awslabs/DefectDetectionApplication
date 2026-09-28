@@ -7,13 +7,13 @@ inclusion: always
 ## CRITICAL: never run two component builds at the same time
 
 JP5, JP6, and JP7 (and any other target) builds **must run strictly one at a time**.
-Running two builds concurrently **corrupts the model versioning** (the builds
+Running two builds of the same platform and checkout concurrently **corrupts the model versioning** (the builds on each variant
 share the `NEXT_PATCH` version resolution plus the working directories and
 docker image tags — `greengrass-build/`, `custom-build/`, and the shared
 `edgemlsdk` / `flask-app` / `react-webapp` image tags — so concurrent runs
 clobber each other and produce wrong/duplicate model versions).
 
-**If two builds are ever running at once: STOP BOTH immediately, then restart
+**If two builds are ever running at once with the same architecture and jetpack: STOP BOTH immediately, then restart
 one at a time.** Do not let a second build start until the first has fully
 finished.
 
