@@ -61,7 +61,14 @@ At zero or one source, today's code runs unchanged: the same planners, the same 
   - the Orin AGX (JP6): `Basler-26760165225D-23405149`, attached on 2026-09-27. It was previously used on thor1, which still has an Image_Source for it.
 
   No device has two physical cameras. thor1's camera-registry shadow still lists both Baslers as present. Those entries were last written on 2026-09-22 and were never retired, because the agent doesn't remove keys it stops reporting and shadow updates merge. Registry presence alone is therefore not proof of attachment. Every device also reports the Aravis Fake camera `Fake_1`, which takes the same locked grab path as a physical camera. Source: `lsusb`, `GET /cameras` and the camera-registry reports, 2026-09-27.
-- **A lock leak.** `get_camera_frame` calls `get_frame_lock.acquire()` before its `try`/`finally`. If `connect_camera` raises, or no camera object appears, the lock is never released, and every later grab in the process blocks. With concurrent grabs, one source's connect failure would hang the other source's grab instead of failing the Run.
+- **A lock leak, fixed separately.** `get_camera_frame` called `get_frame_lock.acquire()` before its `try`/`finally`. If `connect_camera` raised, or no camera object appeared, the lock was never released, and every later grab in the process blocked. This was observed on thor1 on 2026-09-28. It is fixed on its own, ahead of this spec, in `.kiro/specs/camera-grab-lock-leak`. This design assumes that fix is merged.
+- **Measured physical grab.** thor1's Basler (14 MP, USB 3, gain 1, exposure 500) holds the camera lock for about 0.3 s per grab:
+  - start acquisition: about 2 ms;
+  - software trigger plus frame transfer (`CameraGetFrameTime`): about 153 ms;
+  - decode across the camera-manager process: about 15 ms;
+  - stop acquisition: about 130 ms.
+
+  One camera after the other, a second physical camera's frame would be taken about 0.3 s after the first. Source: the camera manager's own timing log lines, three previews, 2026-09-28.
 - **Thread safety.** The executor's SQLAlchemy session is not thread-safe, so configuration lookups must stay on the run thread.
 
 ### Pre-existing gap (not changed here)
@@ -166,8 +173,13 @@ The existing refusal (409 `INCOMPATIBLE_LOCAL_SERVER`) already names the device,
 
 1. **Plan** with `frame_feed.plan_frame_feeds(document, resolution)`. It returns one `FeedPlan(node_id, kind, camera_id | handler)` per feed point in binding-point order. It reuses the existing per-point helpers (`_effective_values`, `_camera_id`, the Python feed builder). More than 4 points raises, naming the limit and every node.
 2. **Resolve on the run thread.** For each Aravis plan, `_camera_config_resolver(session, camera_id)` supplies the device Image_Source config, falling back to the plan's gain and exposure. This keeps SQLAlchemy off the worker threads. Python producer bridges are also built here.
-3. **De-duplicate.** Aravis plans are grouped by `camera_id`, giving one grab task per camera (Requirement 5.4). Every node in a group receives the same frame. If the group's configurations differ (possible only when there is no Image_Source), the first node's configuration in binding-point order is used, and a warning names the nodes. Python sources are never merged.
-4. **Grab concurrently.** A per-Run `ThreadPoolExecutor(max_workers=len(tasks))` runs the tasks: `_frame_grabber(camera_id, config)` or `bridge.produce_frame(trigger_context, prefixes)`. Each task is stamped with `grabStartedAtMs` and `grabEndedAtMs` (Requirement 5.3). The executor waits for every task until `FRAME_FEED_GRAB_TIMEOUT_SEC = 60`. A task still running at the deadline counts as failed with "frame grab did not complete within 60 s". Its thread is abandoned, which is the same containment as a hung pipeline.
+3. **De-duplicate.** Aravis plans are grouped by `camera_id`, giving one grab per camera (Requirement 5.4). Every node in a group receives the same frame. If the group's configurations differ (possible only when there is no Image_Source), the first node's configuration in binding-point order is used, and a warning names the nodes. Python sources are never merged.
+4. **Grab concurrently.** A per-Run `ThreadPoolExecutor(max_workers=len(tasks))` runs these tasks:
+   - **one grouped physical grab** for every distinct camera that goes through the camera lock (Decision 6a);
+   - **one task per virtual camera**, the Static_Image_Camera or Static_Video_Camera, through `_frame_grabber`;
+   - **one task per Python producer**, through `bridge.produce_frame(trigger_context, prefixes)`.
+
+   A grouped grab with a single camera is exactly today's `get_camera_frame` call. Each source is stamped with `grabStartedAtMs` and `grabEndedAtMs` (Requirement 5.3). For physical cameras the start is the moment its trigger was sent. The executor waits for every task until `FRAME_FEED_GRAB_TIMEOUT_SEC = 60`. A task still running at the deadline counts as failed with "frame grab did not complete within 60 s". Its thread is abandoned, which is the same containment as a hung pipeline.
 5. **Fail before the pipeline.** If any task failed or timed out, the Run fails with `_finish_failed` before the capture-phase outputs, the bridges and the pipeline (Requirement 5.6). `failing_node_id` is the first failing node in binding-point order.
    - With one failure, `error` is that source's own message, in today's wording, e.g. "Aravis camera source 'n1': frame grab from Aravis camera 'cam1' failed: …".
    - With several, it is "Frame-feed sources failed before the pipeline started: " followed by each message, joined by "; ".
@@ -175,9 +187,33 @@ The existing refusal (409 `INCOMPATIBLE_LOCAL_SERVER`) already names the device,
 7. **Hand off** an ordered `frame_feeds = {"appsrc_{nodeId}": FedFrame(base_caps, frame)}` to the runner (Decision 8). A frame shared by several nodes is copied once per extra consumer, so no two GStreamer buffers wrap the same memory.
 8. **Record** `tag_values["frameFeeds"][nodeId] = {kind, cameraId, grabStartedAtMs, grabEndedAtMs, sharedWith}` and write one run-log line per source.
 
-Physical Aravis cameras still serialize inside `camera_manager`, so the skew between two physical cameras is about one grab duration. Virtual cameras and Python producers do not serialize. This design does not change the global lock model, because a USB3Vision device admits one claim and `Camera.disconnect` calls the process-wide `Aravis.shutdown()`. The recorded grab times make the skew visible. Per-camera locking is a possible follow-up (open question 2).
+### Decision 6a: Grouped physical grab under the one camera lock
 
-This design does fix the lock leak: `get_camera_frame` takes `get_frame_lock` in a `with` block that covers connect and grab. Without that, a connect failure on one source would hang the other source's grab until the 60 s deadline, and then block every later grab in the process.
+Physical cameras keep the single process-wide lock. A USB3 Vision device admits one claim, and `Camera.disconnect` calls the process-wide `Aravis.shutdown()`, so per-camera locks would be a separate, riskier change. Inside that one lock, the cameras are grabbed as a group instead of one after the other:
+
+```python
+def get_camera_frames(requests):   # [(camera_id, config), ...] in binding-point order
+    """One frame per physical camera, taken as close together as the bus
+    allows. Returns [(camera_id, frame or None, error or None)] in order."""
+    with get_frame_lock:
+        connect every camera not in camera_objects      # a failure marks that camera failed
+        start_acquisition(config) on each connected camera
+        software_trigger() on each started camera        # back to back: only IPC between them
+        pop_frame() on each triggered camera             # frames transfer in parallel
+        stop_acquisition() on every camera that started  # always, even after failures
+```
+
+- **New Camera methods.** `Camera` gains `trigger()` and `pop_frame()`, which split today's `get_frame()`.
+  - `trigger()` sends the software trigger.
+  - `pop_frame()` pops the buffer with today's timeout and re-queues it, returning the same `encode_frame` transport. It keeps `get_frame()`'s status updates and its `pixel_format` tag.
+  - `get_frame()` itself stays as it is and is still what single grabs use.
+  - `Camera` objects live in the camera-manager process and are reached by proxy, so a trigger costs one IPC round trip, about 1 ms.
+- **Expected timing.** From the measurement above, the frames of two cameras should be a few milliseconds apart, instead of about 0.3 s. Each frame still arrives after about one transfer time, about 150 ms for these cameras, but the transfers overlap. The Run records the real skew.
+- **Bandwidth.** Two 14 MP frames at once need about 200 MB/s together. That fits one 5 Gb/s USB 3 link. If a pop times out, that camera fails with today's "Timed out waiting for a frame" status, and the Run fails naming it (Requirement 5.6).
+- **Error handling.** Every camera that started is stopped and the lock is released on every path. The error for a camera names it the same way a single grab would: "Unable to get camera frame for camera id: {id}", or the open error. Other cameras' frames are returned, but the executor fails the Run if any source failed (Requirement 5.6).
+- **Single-camera path unchanged.** `get_camera_frame`, the preview, capture and digital-input paths, and single-source Runs do not change. `get_camera_frames` is used only when a Run has two or more distinct physical cameras.
+- **Preservation-tracked file.** `camera_manager.py` changes again, so its hash is rebaselined in this spec's commit.
+- **Measuring it.** A real measurement needs two physical cameras on one device, which means both Baslers on thor1 or both on the Orin. The Aravis Fake camera exercises the ordering and cleanup logic but not the timing.
 
 ### Decision 7: Device ROI per Source_Branch
 
@@ -391,7 +427,7 @@ graph TB
 5. **`workflow_engine/detections.py`**: a per-branch `cache_key` argument (default: today's key), and shared Detection_ID allocation.
 6. **`workflow_engine/run_artifacts.py`**: `branch_stem`, `list_branch_outputs`, `read_run_sources`, and `base_output_image_path(..., fallback=True)`, with the fallback disabled for branch lookups.
 7. **`workflow_engine/api.py`** and **`endpoints/download_file.py`**: the `sources` list, per-branch entries and the `sourceNodeId` parameter.
-8. **`utils/camera_manager.py`**: the `with get_frame_lock:` fix. This file is preservation-tracked (see below).
+8. **`utils/camera_manager.py`**: `get_camera_frames` (the grouped grab, Decision 6a) and `Camera.trigger()` / `Camera.pop_frame()`. `get_camera_frame` and `Camera.get_frame()` are unchanged. This file is preservation-tracked (see below). The lock-leak fix is not part of this spec; it comes from `camera-grab-lock-leak`.
 9. **LocalServer frontend**: `api/WorkflowRegistrationAPI.ts` types and URL builders, `RunResults.tsx`, `RunStatusGraph.tsx` and `previewModel.ts`.
 
 ### Unchanged (verified)
@@ -408,7 +444,7 @@ The following need no change:
 
 ### Preservation-tracked files touched
 
-`src/backend/utils/camera_manager.py` is pinned in `test/backend-test/security/baselines/iam_out_of_scope_baseline.json`. The lock fix changes its hash (currently `3a2b05a8…`). It is rebaselined in the same commit, and the note records the reason.
+`src/backend/utils/camera_manager.py` is pinned in `test/backend-test/security/baselines/iam_out_of_scope_baseline.json`. The grouped grab changes its hash again, after the `camera-grab-lock-leak` rebaseline. It is rebaselined in the same commit as the grouped grab, and the note records the reason.
 
 No Dockerfile, compose file, requirements file, device recipe or station script changes. `deployments.py` and `compute-stack.ts` appear only in the approved-IAM-additions record, and this design adds no IAM.
 
@@ -541,6 +577,16 @@ When F is empty, every source has `grabStartedAtMs ≤ grabEndedAtMs`, and all g
 Single-source requests are unchanged.
 **Validates: Requirements 7.1, 7.2, 7.3**
 
+### Property 14: Grouped physical grab ordering and cleanup
+*For any* list of 1 to 4 distinct physical camera requests, and any mix of open, start, trigger and pop failures across them, `get_camera_frames` behaves as follows:
+- it calls `trigger()` on every started camera before it calls `pop_frame()` on any;
+- it calls `stop_acquisition()` on every camera it started, even after failures;
+- it returns exactly one result per request, in request order, each a frame or an error naming its camera;
+- it leaves `get_frame_lock` free for another thread.
+
+With a single request, it returns what `get_camera_frame` returns, or raises what `get_camera_frame` raises.
+**Validates: Requirements 5.3, 5.6**
+
 ### Preservation (existing suites, unmodified)
 
 These suites keep passing without edits:
@@ -572,7 +618,7 @@ This proves Requirements 8.1 and 8.4.
 | 2 or more feed points without `frameFeedBranches` | executor | Run fails before the pipeline: "…re-package the workflow" | 3.2 |
 | A grab or producer fails | grab pool | Run fails before the pipeline; `failing_node_id` is the first failure; the error names each failing node and camera | 5.6 |
 | A grab exceeds 60 s | grab pool | Treated as a failure: "frame grab did not complete within 60 s"; the worker is abandoned | 5.6 |
-| Camera connect raises | `get_camera_frame` | Lock released by the `with` block; the error surfaces to that source only | 5.6 |
+| A camera in a grouped grab fails to open, start, trigger or deliver a frame | `get_camera_frames` | The others still get their frames. Every started camera is stopped and the lock is released. The Run fails before the pipeline, naming that source and camera | 5.6 |
 | Fed element missing from the launch string | runners | `PipelineExecutionException` naming the element; the Run fails with that node | 5.2 |
 | An `appsrc` never gets EOS | runners | Every fed element gets EOS by construction; the 120 s watchdog stays the backstop | 5.2 |
 | Staging file cannot be placed | `_normalize_branch_artifacts` | Logged and left in place; never overwrites; the Run continues | 6.1 |
@@ -598,7 +644,8 @@ This proves Requirements 8.1 and 8.4.
 - **Device.**
   - Properties 7 to 12 use the executor seams.
   - A real-GStreamer test runs in the flask-app image. It feeds two `appsrc` chains into `fakesink` and `multifilesink`, checks one buffer and one EOS per element, and checks that single-feed `run_pipeline` still works.
-  - An example test checks that `get_camera_frame` releases the lock when `connect_camera` raises.
+  - Property 14 drives `get_camera_frames` against fake `Camera` objects that record the order of calls and inject failures.
+  - A real-Aravis test in the flask-app image runs `get_camera_frames` over two Aravis Fake cameras.
 - **Cross-platform container runs.** The `workflow_engine`, camera and camera_sync suites run in every platform image: arm64 CPU, JP5, JP6 and JP7 on this host, and amd64 on the x86 build server.
 - **Early device spike** (task 6.4). On one Triton-capable device, a hand-packaged two-branch document confirms three things before the executor work builds on them:
   - dotted correlation ids come out verbatim in broker file names;
@@ -611,7 +658,9 @@ This proves Requirements 8.1 and 8.4.
   2. On each device, deploy a two-source workflow with one node bound to the Static_Image_Camera and one to the Static_Video_Camera, each branch ending in a capture node. At least one branch also has a model node and an MQTT output using `{detection_count}`.
   3. Runs repeat, from both a manual trigger and a trigger wired to one source's activation port. The image branch's captures stay identical and the video branch's captures change. Results, API entries, UI sections and MQTT payloads are per branch.
   4. Test a grab failure: unpin the video, and the Run fails before the pipeline, naming the video node and camera.
-  5. On thor1 and on the Orin, a workflow binds one source to the device's Basler and one to a virtual camera (Requirement 9.2). The Basler branch demosaics through its own `bayer2rgb`. A second workflow binds the Basler and the Aravis Fake camera `Fake_1`, which share the global camera lock. It records the serialized grab skew and checks that each branch applies its own camera's Image_Source settings (Requirement 5.5). Measuring two physical USB cameras needs both Baslers on one device.
+  5. On thor1 and on the Orin, a workflow binds one source to the device's Basler and one to a virtual camera (Requirement 9.2). The Basler branch demosaics through its own `bayer2rgb`.
+     - A second workflow binds the Basler and the Aravis Fake camera `Fake_1`. They go through one grouped grab, and each branch must apply its own camera's Image_Source settings (Requirement 5.5).
+     - With both Baslers moved to one device, a workflow with one source per Basler measures the grouped grab's real skew. The target is a few milliseconds, against about 0.3 s one camera after the other.
   6. A 30-minute soak with periodic runs keeps the backend healthy on each device.
   7. Single-source workflows already deployed keep running unchanged.
 
@@ -623,9 +672,10 @@ This proves Requirements 8.1 and 8.4.
 - **`custom-python-source/requirements.md`.** Requirement 8 criteria 1, 2 and 5 gain amendment notes pointing to `multi-source-workflows` Requirement 1 and Decision 6. Criteria 3, 4 and 6 keep holding.
 - **`static-camera-video-loop`.** The Requirement 6.4 deviation note is marked closed once Requirement 9.1 passes on hardware (Requirement 8.3).
 
-## Open Questions for Review
+## Decisions Made in Review
 
-1. **`unified_input(aravis_camera)` in single-source workflows.** It gets no binding point today (Research Findings). Should it be fixed in a follow-up bugfix, which is recommended, or here, which would break byte-identity for those broken packages only?
-2. **Physical camera skew.** Two physical Aravis cameras keep serializing under the global camera lock, and the recorded grab times show the skew. Per-camera locking would need a separate, hardware-heavy change. Task 13.7 measures the lock-induced skew with a Basler plus `Fake_1`; a two-physical-camera measurement needs both Baslers on one device. Is recorded skew acceptable for this spec, with per-camera locking decided later from that measurement?
-
-Resolved in review: four sources per workflow, one Test_Dataset per source, no joins in this spec, and thor1 and the Orin AGX, each with a Basler, as the Requirement 9.2 devices.
+- **Limits and scope.** Four sources per workflow, one Test_Dataset per source, and no joins in this spec.
+- **Test devices.** thor1 and the Orin AGX, each with a Basler, are the Requirement 9.2 devices.
+- **Unified Input set to a camera.** The single-source binding gap is fixed in its own follow-up bugfix, `.kiro/specs/unified-input-camera-binding`, so this spec's single-source byte-identity holds.
+- **Two or more physical cameras.** They are grabbed as a group under the one camera lock (Decision 6a) instead of one after the other. Per-camera locks are not planned.
+- **The camera-lock leak.** It is fixed on its own, ahead of this spec, in `.kiro/specs/camera-grab-lock-leak`.

@@ -11,7 +11,7 @@ A workflow may contain two to four Frame_Feed_Sources, and each feeds its own So
 5. **Portal results and test runner.** The ResultsViewer source label and one Test_Dataset per source.
 6. **Verification.** Container suites, component builds, the Portal deploy, and on-device runs on all four lab devices.
 
-Property tests implement the design's 13 properties with Hypothesis on the Python side and fast-check on the TypeScript side:
+Property tests implement the design's 14 properties with Hypothesis on the Python side and fast-check on the TypeScript side:
 
 - one test per property, in its own module;
 - tagged `**Feature: multi-source-workflows, Property {N}: {property_text}**`;
@@ -21,9 +21,9 @@ Portal backend tests take function modules from the `aws_stack` fixture instead 
 
 Existing suites keep passing unmodified. The exceptions are the tests that pin the one-source rule itself, which task 1.1 lists and which are updated on purpose.
 
-**Preservation-tracked files touched:** only `src/backend/utils/camera_manager.py`, for the lock fix in task 6.1. Its hash is rebaselined in `test/backend-test/security/baselines/iam_out_of_scope_baseline.json` in the same change. No Dockerfile, compose file, requirements file, device recipe or IAM statement changes.
+**Preservation-tracked files touched:** only `src/backend/utils/camera_manager.py`, for the grouped grab in task 6.1. Its hash is rebaselined in `test/backend-test/security/baselines/iam_out_of_scope_baseline.json` in the same change. No Dockerfile, compose file, requirements file, device recipe or IAM statement changes.
 
-**Branch.** Work on `spec/multi-source-workflows`, created from `integration/all-specs` after `static-camera-video-loop` is merged.
+**Branch.** Work on `spec/multi-source-workflows`, created from `integration/all-specs` after `static-camera-video-loop` and the `camera-grab-lock-leak` fix are merged. This spec builds on that fix and does not repeat it.
 
 ## Tasks
 
@@ -90,10 +90,18 @@ Existing suites keep passing unmodified. The exceptions are the tests that pin t
   - _Requirements: 3.3_
 
 - [ ] 6. Device feed stage (design Decisions 6, 7, 8)
-  - [ ] 6.1 Fix the camera lock
-    - `camera_manager.get_camera_frame` holds `get_frame_lock` in a `with` block that covers connect and grab.
-    - Example test: `connect_camera` raises, and a second thread's grab still proceeds.
+  - [ ] 6.1 Add the grouped physical grab (design Decision 6a)
+    - Add `Camera.trigger()` and `Camera.pop_frame()`, which split `get_frame()`. `get_frame()` stays unchanged.
+    - Add `camera_manager.get_camera_frames(requests)`, under the one `get_frame_lock`:
+      - open the cameras that aren't connected;
+      - start every camera;
+      - trigger every camera back to back;
+      - pop each frame;
+      - stop every camera that started, and return one result per camera.
+    - `get_camera_frame` stays unchanged.
+    - Property 14 runs against recording fakes. A real-Aravis test runs over two Fake cameras in the flask-app image.
     - Rebaseline `camera_manager.py` in `iam_out_of_scope_baseline.json` with a note entry, then run the guard pair.
+    - Prerequisite: the `camera-grab-lock-leak` fix is merged.
   - [ ] 6.2 Add `frame_feeds` and `tag_sink` to both runners
     - Add the keywords to `GstPipelineManager.run_pipeline` and `python_bridge.run_bridged_pipeline`. The `frame_data` path stays byte-identical.
     - Real-GStreamer test in the flask-app image: two `appsrc` chains get one buffer and one EOS each, a missing element is named, and single-feed runs are unchanged.
@@ -207,7 +215,8 @@ Existing suites keep passing unmodified. The exceptions are the tests that pin t
     - Where the InferenceUploader runs, the Portal ResultsViewer shows both branches labeled by source.
   - [ ] 13.7 Physical cameras on thor1 (JP7, `Basler-267601652282-23405186`) and the Orin AGX (JP6, `Basler-26760165225D-23405149`). Both are Basler acA4600-10uc cameras on USB3 Vision with the BGGR Bayer chain. Cameras have moved between devices, so first confirm each one with `lsusb -d 2676:` and `GET /cameras`, and give it an Image_Source on the device it is attached to.
     - Requirement 9.2, on both devices: a workflow with one source bound to the Basler and one to the Static_Video_Camera. The Basler branch demosaics through its own `bayer2rgb`, and the video branch's captures change between runs.
-    - Serialized grabs: a workflow with one source on the Basler and one on the Aravis Fake camera `Fake_1`, run repeatedly. Both take the global camera lock. Record the grab skew (open question 2), and check that each branch applies its own camera's Image_Source settings, including a configured ROI (Requirement 5.5). A two-physical-camera measurement needs both Baslers on one device; ask the user if it is wanted.
+    - Grouped grab on one device: a workflow with one source on the Basler and one on the Aravis Fake camera `Fake_1`, run repeatedly. Both go through one grouped grab (design Decision 6a). Record the grab times, and check that each branch applies its own camera's Image_Source settings, including a configured ROI (Requirement 5.5).
+    - Two physical cameras: ask the user to move both Baslers to one device. Then run a workflow with one source per Basler and measure the grouped grab's skew. The target is a few milliseconds, against about 0.3 s one camera after the other.
   - [ ] 13.8 Soak each device for 30 minutes with periodic runs: the backend stays healthy, with no restart and no OOM kill.
   - [ ] 13.9 Write `verification-notes.md`: what was verified on which device and version, timings (including grab skew), and deviations. Restore every device and remove the verification workflows afterwards.
   - _Requirements: 4.2, 5.1–5.8, 6.1–6.5, 8.3, 8.4, 9.1–9.3_

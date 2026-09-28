@@ -97,7 +97,7 @@ Workflows with one source keep validating, compiling, packaging and running exac
 
 1. WHEN a Run of a Multi_Source_Workflow starts, THE Workflow_Executor SHALL grab one frame from every Frame_Feed_Source before it starts the pipeline.
 2. THE Workflow_Executor SHALL push each frame into its own source's `appsrc_{nodeId}` element with caps matching that frame, then end the stream on every source element.
-3. THE Workflow_Executor SHALL start the grabs for all sources concurrently rather than one after another, and SHALL record each source's grab start and end times in the Run metadata.
+3. THE Workflow_Executor SHALL start the grabs for all sources concurrently rather than one after another, and SHALL record each source's grab start and end times in the Run metadata. Physical cameras SHALL be grabbed as one group: every camera is started and triggered before any frame is read, so their frames are taken as close together as the bus allows. (Amended in design review, 2026-09-28.)
 4. WHEN two Frame_Feed_Sources in one workflow reference the same camera, THE Workflow_Executor SHALL grab that camera once per Run and feed the same frame to both sources.
 5. THE Workflow_Executor SHALL apply each source's own device Image_Source configuration, including its gain, exposure and region of interest, to that source's frame. An explicit Crop node SHALL suppress the device region of interest only in its own Source_Branch.
 6. IF any source's grab fails, THEN THE Workflow_Executor SHALL fail the Run without starting the pipeline, and the Run SHALL name the failing source node and camera.
