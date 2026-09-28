@@ -4,10 +4,10 @@ inclusion: always
 
 # Greengrass Component Builds (JP5 / JP6 / JP7)
 
-## CRITICAL: never run two component builds at the same time
+## CRITICAL: never run two component build variants at the same time
 
-JP5, JP6, and JP7 (and any other target) builds **must run strictly one at a time**.
-Running two builds of the same platform and checkout concurrently **corrupts the model versioning** (the builds on each variant
+JP5, JP6, and JP7 (and any other target) builds **must run strictly one variant at a time**.
+Running two builds of the same platform and checkout/variant concurrently **corrupts the model versioning** (the builds on each variant
 share the `NEXT_PATCH` version resolution plus the working directories and
 docker image tags — `greengrass-build/`, `custom-build/`, and the shared
 `edgemlsdk` / `flask-app` / `react-webapp` image tags — so concurrent runs
