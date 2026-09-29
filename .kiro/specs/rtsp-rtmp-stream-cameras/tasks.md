@@ -33,51 +33,76 @@ Property test conventions:
 
 ## Resume Here (handoff, 2026-09-29)
 
-At the owner's request, the work was committed and pushed to `integration/all-specs` before task 25 finished. JP7 has a real build; JP6 and JP5 still need theirs. Remaining work, in order:
+At the owner's request, the work was committed and pushed to `integration/all-specs` before task 25 finished.
 
-1. **JP6 real build and verification (25.2, 25.3, 25.5).** Build `aws.edgeml.dda.LocalServer.arm64JP6` from `spec/rtsp-rtmp-stream-cameras` on the portal's dedicated server `srv-aac90870-033e-4e9c-9994-29ee895da421` ("JP6 Build Server"), after the build steering's pre-build checks. Deploy it to the Orin (`ryanorinagxdevkithomelabjp622`), then run the per-device matrix below.
-2. **JP5 real build and verification.** Only after the JP6 build has finished. `JP5-Build-Server1` is terminated; JP5 builds have succeeded on `srv-aac90870` and as ephemeral jobs. Deploy to the MIC-730 (`mic730jp513-ryvanlabhome`); this replaces its hot-patch.
-3. **JP7 leftovers.** See the JP7 lines in 25.2 and 25.3 for what the real build has and has not been through yet.
-4. **26.3 feature floor: owner decision needed.** `test_stream_camera_feature_floor_coverage.py` requires the map to cover all six `ARCH_TO_LOCAL_SERVER_COMPONENT` architectures, but only the three Jetson ones can be built and verified here (the portal has no plain `arm64` build target, and there is no x86 test device). The options:
+**Status at handoff:**
+- JP7 has a verified real build, `aws.edgeml.dda.LocalServer.arm64JP7` `1.0.51`. It runs on jetson-thor1 and passed the harness stream stage (7/7) and the Amcrest checks. Its 2-hour soak was left running.
+- `1.0.50` is a broken build: it lacks `stream_ingest` (fix 13). Never deploy it.
+- JP6 and JP5 still need their real builds.
+
+Remaining work, in order:
+
+1. **JP7 soak results.** Read `~/rtsp-verify/results/soak-thor-real-1.0.51.jsonl` and `leak-thor-real-1.0.51.jsonl`, started 20:47Z, and check them against the pass criteria below. Then record the outcome in 25.3.
+2. **JP6 real build and verification (25.2, 25.3, 25.5).**
+   - Build `aws.edgeml.dda.LocalServer.arm64JP6` from `integration/all-specs`, or from `spec/rtsp-rtmp-stream-cameras` while it is still equal, on the portal's dedicated server `srv-aac90870-033e-4e9c-9994-29ee895da421` ("JP6 Build Server"). Run the build steering's pre-build checks first.
+   - Expect about 2.5–3.5 h, because onnxruntime and the vLLM wheel are built from scratch.
+   - Deploy it to the Orin (`ryanorinagxdevkithomelabjp622`), then run the per-device matrix below.
+3. **JP5 real build and verification.**
+   - Start it only after the JP6 build has finished. `JP5-Build-Server1` is terminated; JP5 builds have succeeded on `srv-aac90870` and as ephemeral jobs.
+   - Deploy it to the MIC-730 (`mic730jp513-ryvanlabhome`); this replaces its hot-patch. Its database is already at `c7e3a9f15d42`.
+4. **26.3 feature floor: owner decision needed.** `test_stream_camera_feature_floor_coverage.py` requires the map to cover all six `ARCH_TO_LOCAL_SERVER_COMPONENT` architectures. Only the three Jetson ones can be built and verified here: the portal has no plain `arm64` build target, and there is no x86 test device. The options:
    - (a) Recommended: amend Requirement 9.7 and the coverage test to allow a map of verified architectures only. The gate already rejects every other architecture with `STREAM_CAMERAS_UNSUPPORTED_ARCH`.
    - (b) Build and verify the `amd64` and `arm64` LocalServer variants first.
 
    Until then the map is empty and fails closed: no workflow with stream or scene-analytics nodes can be packaged.
-5. **Portal deploy, then an end-to-end Portal check.** Never during a component build. The next Portal deploy from `integration/all-specs`, by any session, ships this spec's Portal changes (Camera_Registry stream cameras with Secrets Manager credentials, sync, deployments, packaging, IAM, frontend). After 26.3 and the deploy: add a stream camera from the Portal with credentials, package a stream workflow, deploy it with a camera binding, and watch it run on a device.
-6. **Task 27**, then the cleanup list below.
+5. **Portal deploy, then an end-to-end Portal check.** Never during a component build.
+   - The next Portal deploy from `integration/all-specs`, by any session, ships this spec's Portal changes: Camera_Registry stream cameras with Secrets Manager credentials, sync, deployments, packaging, IAM and frontend.
+   - After 26.3 and the deploy: add a stream camera from the Portal with credentials, package a stream workflow, deploy it with a camera binding, and watch it run on a device.
+6. **Minor follow-up, not fixed.** On the first start after an upgrade, the Edge_Sync_Agent's first report can run before the database migrations finish. It fails once with `no such column: image_source_configuration.streamSettings`, then succeeds on its backoff retry (seen on thor1, see 25.2).
+7. **Task 27**, then the cleanup list below.
 
-**Per-device matrix** (25.3, 25.5). The scripts are in `~/rtsp-verify/` on the build host. `ssh_config` reaches thor1 by its public port, and the LAN hosts (Orin `.91`, MIC-730 `.100`, Dell `.237`) through thor1; the Orin's secure tunnel has expired.
+**Per-device matrix** (25.3, 25.5). The scripts are in `~/rtsp-verify/` on the build host.
+- Access: `ssh_config` reaches thor1 by its public port, and the LAN hosts (Orin `.91`, MIC-730 `.100`, Dell `.237`) through thor1; the Orin's secure tunnel has expired.
 - API forwards: `ssh -F ssh_config -O forward -L 15000:localhost:5000 orin` (MIC-730 on 15001, thor1 on 15002).
 - Portal access:
   - Run `~/.venvs/dda-portal-tests/bin/python portal_temp_user.py create`, then `... token`. This makes a temp Cognito user with one global DataScientist row. Delete it with `... delete` when done.
-  - Submit a build with `OUT=/tmp/x.json python3 portal_api.py POST /builds '{"targets":["JP6"],"execution_mode":"dedicated","server_id":"srv-aac90870-033e-4e9c-9994-29ee895da421","source_ref":"spec/rtsp-rtmp-stream-cameras"}'`, and follow it with `python3 build_watch.py <job-id> <log>`.
+  - Submit a build with `OUT=/tmp/x.json python3 portal_api.py POST /builds '{"targets":["JP6"],"execution_mode":"dedicated","server_id":"srv-aac90870-033e-4e9c-9994-29ee895da421","source_ref":"integration/all-specs"}'`, and follow it with `python3 build_watch.py <job-id> <log>`.
   - A portal build cancel does not stop the build on the server (memory `build-cancel-orphan`). Kill the orphan over SSM (`ssm_run.py`) before resubmitting to the same server.
-- Deploy: `python3 deploy_localserver.py <thing> <version>` is a dry run; add `--apply` to deploy. It revises the device's current deployment and changes only the LocalServer version. The previous revision is saved under `results/deployments/`, and `--restore <file> --apply` puts it back.
-- Then:
+- Deploy: `python3 deploy_localserver.py <thing> <version>` is a dry run; add `--apply` to deploy.
+  - It revises the device's current deployment and changes only the LocalServer version.
+  - The previous revision is saved under `results/deployments/`; `--restore <file> --apply` puts it back.
+  - If a deployment fails, read the backend's own log, `/aws_dda/greengrass/v2/work/aws.edgeml.dda.LocalServer.arm64JP<N>/logs/application.log`, through `docker exec` into the backend container: the component logs are root-only, and a failure is often reported as another component going BROKEN.
+- Then run:
   - `install_test_workflows.sh <host> <jp5|jp6|jp7>` file-drops the `rtsp-verify-*` workflows.
-  - Harness: `DDA_HARNESS_STREAM_SECRET="ddatest:$(cat ~/rtsp-verify/mediamtx-secure-pass)" DDA_HARNESS_CONFIG=~/rtsp-verify/devices.yaml DDA_HARNESS_DEVICE=<orin-jp6|mic730-jp5|thor-jp7> ~/.venvs/dda-edge-tests/bin/python -m pytest test/on-hardware/harness/stages/test_35_stream_cameras.py -p no:cacheprovider -q`
+  - Harness: `DDA_HARNESS_STREAM_SECRET="ddatest:$(cat ~/rtsp-verify/mediamtx-secure-pass)" DDA_HARNESS_CONFIG=~/rtsp-verify/devices.yaml DDA_HARNESS_DEVICE=<orin-jp6|mic730-jp5|thor-jp7> ~/.venvs/dda-edge-tests/bin/python -m pytest test/on-hardware/harness/stages/test_35_stream_cameras.py -p no:cacheprovider -q`. Copy `test/on-hardware/harness/harness-results/` elsewhere before deleting it.
   - Amcrest: `CAM_USER=... CAM_PASS=... python3 camera_check.py http://localhost:<port> <label> "rtsp://192.168.88.80:554/cam/realmonitor?channel=1&subtype=0" results/amcrest` for the main stream, then again with `subtype=1`. Never write the camera password to a file.
   - 2-hour soak: `soak_sampler.py <host> http://localhost:<port> 125 results/<name>.jsonl --registrations rtsp-verify-cont-people:1,rtsp-verify-cont-people-max:1 --outage-at 20 --outage-s 90 --outage-container dda-src-rtsp-people`, with `leak_watch.py <host> <jp> http://localhost:<port> 150 results/<name>-leak.jsonl` running beside it.
-- Pass:
-  - no restart (RestartCount unchanged)
+- Pass criteria:
+  - no restart beyond the start-up one (RestartCount unchanged)
   - no failed runs
-  - the 10 fps workflow steady at about 3 runs/s
+  - the 10 fps workflow steady (about 3 runs/s on JP5 and JP6, about 6 on JP7)
   - recovery after the outage
   - a flat `AwsEventLoop` thread count
-  - backend RSS flat after warm-up
+  - backend RSS flat after warm-up, which is where the native fix shows (see 25.3)
 - The camera-registry shadow should stay small, and deleted test cameras should leave it (fix 10). Check with `aws iot-data get-thing-shadow --thing-name <thing> --shadow-name dda-camera-registry <out-file>`.
 
 **Device state at handoff:**
-- thor1 runs the JP7 real build (see 25.2), with the `rtsp-verify-*` test workflows installed.
+- thor1 runs the real JP7 build `1.0.51`, with the `rtsp-verify-*` test workflows installed. The continuous ones keep running and publish over MQTT until removed.
 - The Orin is stock (`1.0.72`, database at alembic `e9f2a6c31b84`).
-- The MIC-730 runs the stock `1.0.49` image, hot-patched with the committed backend since 2026-09-29 14:03Z, with its continuous test workflows running. `results/leak-mic730-fix12.jsonl` records fix 12's effect there.
+- The MIC-730 runs the stock `1.0.49` image. Since 2026-09-29 14:03Z its backend has been hot-patched with the committed code, and its continuous test workflows are running. `results/leak-mic730-fix12.jsonl` records fix 12's effect there.
 - The Dell runs MediaMTX and its publishers (`~/dda-mediamtx`, with `start.sh` and `stop.sh`) and has UFW rules commented `dda-rtsp-verify`.
 
 **Cleanup when 25–27 are done:**
-- `restore_stock_state.sh <host>` removes a device's test workflows, stream rows, staging and credential store, and downgrades alembic. Use it only on a device that runs a pre-feature build; a device on a supporting build keeps its database.
+- Test workflows and state:
+  - On a device that runs a supporting build (thor1 now; the Orin and the MIC-730 after their builds), keep the database. Remove only the `rtsp-verify-*` directories under `/aws_dda/workflows`, the leftover test image sources, and `/dev/shm/dda-continuous`.
+  - `restore_stock_state.sh` also downgrades alembic, so use it only on a device that runs a pre-feature build.
 - On the Dell: run `~/dda-mediamtx/stop.sh` and delete the `dda-rtsp-verify` UFW rules.
 - On thor1: remove the `kiro-rtsp-verify@dda-build-host` key and the `aws` docker-group membership.
-- Delete the `wip/rtsp-rtmp-stream-cameras-verify` branch (source of the JP7 verify build, `9e4df80`), any temp Cognito user, and the `/tmp` worktrees.
+- Delete:
+  - the `wip/rtsp-rtmp-stream-cameras-verify` branch (the source of the broken `1.0.50`, `9e4df80`)
+  - any temp Cognito user
+  - the `/tmp` worktrees
+  - optionally, the broken `aws.edgeml.dda.LocalServer.arm64JP7` `1.0.50` component version
 - Security follow-ups for the owner:
   - thor1's public SSH port still accepts passwords.
   - The device and camera passwords shared in chat should be rotated (the Amcrest and the Dell share one).
@@ -1465,6 +1490,10 @@ graph TD
         - Fix 13: add `COPY stream_ingest ./stream_ingest` to all five Dockerfiles and rebaseline their preservation goldens. Two new checks guard it: `test_backend_image_package_coverage.py` (every top-level backend package has a COPY line in every Dockerfile) and two in-image gate checks in `test_image_stream_components.py`.
         - Proven both ways in the local `flask-app` image: without the package the gate check fails, and with it all 22 gate checks pass.
         - thor1's deployment was put back to revision 108's components (a new COMPLETED revision), so no later revision builds on the broken one. The JP6 build started meanwhile (`4f701187`) was cancelled, and its orphaned docker build was stopped over SSM.
+    - **JP7 rebuild (2026-09-29)**: job `a30b281a-8151-4d73-a73b-9343124d4252` built `9bfd7b5` (`spec/rtsp-rtmp-stream-cameras`, with fix 13) and published `aws.edgeml.dda.LocalServer.arm64JP7` `1.0.51`. It took 2 h 30 min: the vLLM wheel was rebuilt again. The two new in-image checks passed in the real image.
+      - Deployed to jetson-thor1 as a revision of its existing deployment; it COMPLETED, and the vLLM model component stayed healthy.
+      - The first start migrated the database from the stock `e9f2a6c31b84` to `c7e3a9f15d42`. The backend then restarted once in an orderly way (`Local server shutdown complete`, exit 0), the same single restart the stock build shows on thor1, and has been healthy since.
+      - Follow-up (minor, not fixed): on that first start the Edge_Sync_Agent's first report ran 25 ms before the migration added `streamSettings`, failed with `no such column`, and succeeded on its backoff retry. The agent starts before the migrations finish.
 
   - [ ] 25.3 Run the verification matrix on each device
     - All four protocol × codec sources, recording the decoder in use per codec
@@ -1505,6 +1534,13 @@ graph TD
     - **Current code, hot-patched on the MIC-730 (JP5), 2026-09-29**: the Amcrest check passes. The harness stream stage passes 7 of 7, including the triggered stream workflow and the continuous rate, pause and resume. Every source the harness and the Amcrest check deleted left the shadow (8 retirements, no rejected report).
       - The 2-hour soak at 1 fps and 10 fps passed: 30,276 runs, none failed, no restart, the 10 fps workflow steady at 3.0–3.2 runs/s (it fell to 0.95 before fix 6), and the 90 s source outage recovered by the next 1-minute sample.
       - The backend still grew about 2.3 KB per run. Left running for 12 hours, that turned out to be fix 12 (a leaked IPC connection per MQTT message), not a per-run cost.
+      - With fix 12 hot-patched (from 14:03Z), four more hours on the MIC-730 gave 57,741 runs, none failed, no restart, and 762 MQTT messages. The thread count stayed at 117, with one `AwsEventLoop` thread throughout; before the fix, every message had added one.
+      - RSS still grows about 1.7 KB per run. `/proc/1/smaps` shows the growth only in glibc per-thread arenas (native allocations off the main thread); Python's pymalloc arenas and the main heap stay flat. That size matches the `TRITONSERVER_Message` that edgemlsdk's `_getModelIndex` leaked on every call, which the native fix in the real builds deletes. Check on a real build that RSS is flat after warm-up.
+    - **JP7 real build `1.0.51` on jetson-thor1 (2026-09-29)**:
+      - The test workflows (file-dropped) registered and ran at once: 1 fps, and the 10 fps workflow at about 6 runs/s (Thor is faster than the JP5 and JP6 devices).
+      - Amcrest main and sub streams connect on `nvv4l2decoder` in 0.7–1.3 s and preview. A wrong password gives `authentication_failed`, and the right one streams again. No response carries the password. This is fix 8 in a real build: no `videorate` abort.
+      - Every source the harness and the Amcrest check deleted left the shadow: 9 retirements, no rejected report, 5 KB shadow with `deviceCapabilities.streamIngest`.
+      - A 2-hour soak (`results/soak-thor-real-1.0.51.jsonl`, with a 90 s outage at minute 20) and a leak watch (`results/leak-thor-real-1.0.51.jsonl`) started at 20:47Z, when this session ended. Read their results first when resuming. The baseline at the start: 154 threads, 8 `AwsEventLoop` threads, backend RSS 1.46 GB.
 
   - [x] 25.4 Decide JP7 hardware decoding
     - If `nvv4l2decoder` is unreachable in the JP7 container, bring the measurements and both options to the owner before changing the image:
@@ -1521,6 +1557,7 @@ graph TD
       - The client now resends a read (GET/HEAD only) once after a connection error. Over the device tunnel, the device closed keep-alive connections while a large preview was still in transit.
       - Its non-workflow checks pass on both hot-patched devices (JP6: 4 passed after the fixes above; JP5: 4 passed). The workflow checks still need their `expected.*` workflow ids.
     - **PROGRESS (2026-09-29)**: With the workflow ids configured, the stage passes 7 of 7 on jetson-thor1 (JP7, hot-patched before fixes 8–10) and on the MIC-730 (JP5, current code). It still has to run on each device from a real build; for JP6 that is the first full run.
+    - **JP7 real build (2026-09-29)**: the stage passes 7 of 7 on jetson-thor1 running `1.0.51`. JP6 and JP5 real builds remain.
 
 - [ ] 26. Prepare the release
   - [x] 26.1 Review third-party licenses
