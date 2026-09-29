@@ -932,6 +932,13 @@ class TestCatalogCoverage:
         # workflow-manager-gaps: the Metadata passthrough node appended
         # last (Requirement 6.1).
         "metadata",
+        # rtsp-rtmp-stream-cameras: the two stream camera sources and the
+        # three scene analytics nodes appended after metadata
+        # (Requirements 1.1, 1.7, 13.1, 14.1, 15.1). Their descriptor
+        # content and the additivity of the append are pinned by
+        # test_catalog_stream_and_analytics.py.
+        "rtsp_camera_source", "rtmp_stream_source",
+        "detection_counter", "object_association", "event_gate",
     }
 
     def test_catalog_contains_exactly_the_expected_types(self):

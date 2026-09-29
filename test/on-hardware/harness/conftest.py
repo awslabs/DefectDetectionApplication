@@ -15,10 +15,11 @@ this file wires the session together:
 * **Capability gating** (Reqs 2.1, 2.2, 2.3): ``pytest_collection_modifyitems``
   skips ``@pytest.mark.capability(name)`` items the selected Device_Profile
   does not grant, with a reason naming the capability and the device.
-* **Declared-but-absent probes** (Req 2.4): ``vllm_surface`` and
-  ``workflows_surface`` verify the granted capability is observable on the
-  device, raising :class:`CapabilityMismatchError` — a distinct diagnostic
-  contrasting the profile claim with the device observation — otherwise.
+* **Declared-but-absent probes** (Req 2.4): ``vllm_surface``,
+  ``workflows_surface`` and ``stream_cameras_surface`` verify the granted
+  capability is observable on the device, raising
+  :class:`CapabilityMismatchError` — a distinct diagnostic contrasting the
+  profile claim with the device observation — otherwise.
 * **Run budget** (Req 8.4): a monotonic deadline armed from
   ``timeouts.run_budget_s``; ``pytest_runtest_setup`` fails every remaining
   test with a budget-exceeded message once past it, so a hung device degrades
@@ -368,4 +369,27 @@ def workflows_surface(
             "workflows",
             harness_target.name,
             f"GET /workflows did not answer: {err}",
+        ) from err
+
+
+@pytest.fixture(scope="session")
+def stream_cameras_surface(
+    harness_target: DeviceTarget, edge_client: EdgeApiClient
+) -> Dict[str, Any]:
+    """Probe the granted ``stream_cameras`` capability against the device
+    (Req 2.4): ``GET /streams/capabilities`` must answer, retried while the
+    device reports its startup probe still running (503). A LocalServer
+    without the stream camera feature answers 404, which fails the stage
+    with :class:`CapabilityMismatchError`.
+
+    :returns: the Device_Stream_Capabilities document for reuse by the
+        stream camera stage.
+    """
+    try:
+        return edge_client.wait_for_stream_capabilities()
+    except (DeviceApiError, requests.exceptions.RequestException) as err:
+        raise CapabilityMismatchError(
+            "stream_cameras",
+            harness_target.name,
+            f"GET /streams/capabilities did not answer: {err}",
         ) from err

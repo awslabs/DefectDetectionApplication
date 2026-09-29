@@ -192,3 +192,27 @@ class TestMultiFedSourceRejection:
         assert excinfo.value.node_id is None
         assert "'cam-1'" in str(excinfo.value)
         assert "'cam-2'" in str(excinfo.value)
+
+    @pytest.mark.parametrize("other", ["python", "aravis"])
+    def test_a_stream_point_joins_the_union(self, other):
+        """rtsp-rtmp-stream-cameras Requirement 10.6: a stream camera feeds
+        the same single appsrc, so it counts toward the union."""
+        stream_point = {
+            "nodeId": "dock-cam", "nodeType": "rtsp_camera_source",
+            "parameters": {"url": "rtsp://192.168.1.64/stream"},
+            "slots": [], "streamBinding": True, "streamProtocol": "rtsp"}
+        other_point = (make_python_point(node_id="src-1") if other == "python"
+                       else make_aravis_point(node_id="src-1"))
+        document = make_document(other_point, stream_point)
+        with pytest.raises(PythonSourceError) as excinfo:
+            plan_python_sources(document)
+        assert excinfo.value.node_id is None
+        assert "'src-1'" in str(excinfo.value)
+        assert "'dock-cam'" in str(excinfo.value)
+
+    def test_a_lone_stream_point_plans_no_python_source(self):
+        document = make_document({
+            "nodeId": "dock-cam", "nodeType": "rtmp_stream_source",
+            "parameters": {"url": "rtmp://media.local/live/line1"},
+            "slots": [], "streamBinding": True, "streamProtocol": "rtmp"})
+        assert plan_python_sources(document) == []

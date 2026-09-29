@@ -84,6 +84,7 @@ devices:
       generate_s: 120
       workflow_output_s: 180
       run_budget_s: 2400
+      continuous_window_s: 30  # stream stage: continuous workflow sampling window
 ```
 
 Field reference:
@@ -92,11 +93,12 @@ Field reference:
 | --- | --- |
 | `base_url` | The device Backend_API root, e.g. `http://192.168.1.42:5000` or a tunnel-forwarded `http://localhost:5000`. Required. |
 | `profile.architecture` | One of `x86_64`, `arm64_cpu`, `arm64_jp5`, `arm64_jp6`, `arm64_jp7`. Unknown values are rejected (fail closed). Required. |
-| `profile.capabilities` | Any of `vllm`, `dlr_models`, `onnx_models`, `workflows`, `auth_enabled`. Unknown names are rejected. Stages gate on these (see below). |
+| `profile.capabilities` | Any of `vllm`, `dlr_models`, `onnx_models`, `workflows`, `auth_enabled`, `stream_cameras`. Unknown names are rejected. Stages gate on these (see below). |
 | `credentials` | A credential **reference** (never a value) — see [Credentials](#credentials). Required only with `auth_enabled`. |
 | `expected.vision_models` | Vision model names the device must report (asserted present). Empty list = enumerate-only. |
 | `expected.vllm_models` | vLLM model names the device must report and bring to READY. Empty list = exercise whatever `VllmModel` entries the device reports. |
 | `expected.workflows` | Workflow names the device must report. Empty list = enumerate-only. |
+| `expected.stream_*`, `expected.continuous_workflow` | Optional inputs of the stream camera stage — see [Stream cameras stage](#stream-cameras-stage). |
 | `timeouts.*` | Per-stage bounds in seconds; defaults shown above. `run_budget_s` bounds the whole run — once exceeded, remaining tests fail with a budget-exceeded message instead of stalling on a hung device. |
 
 Capability → stage gating:
@@ -106,6 +108,7 @@ Capability → stage gating:
 | `vllm` | vLLM lifecycle + text generation (`test_20`) and coexistence (`test_40`). Grant on `arm64_jp6` (and JP5 targets where vLLM is enabled). |
 | `dlr_models` | DLR/Neo vision-model assertions inside `test_10`. Do **not** grant on JP6 (TensorRT 10, no TRT8 `libnvinfer.so.8`) — those checks then skip with a recorded reason instead of failing. |
 | `workflows` | Workflow execution stage (`test_30`). |
+| `stream_cameras` | RTSP/RTMP stream camera stage (`test_35`). Grant on devices whose LocalServer has the stream camera feature; a granted device answering 404 on `/streams/capabilities` fails the stage with `CapabilityMismatchError`. |
 | `auth_enabled` | The login handshake at session start and the authenticated-surface check in `test_00`. |
 | `onnx_models` | Declarative profile information (ONNX-backed vision expectations). |
 
@@ -122,8 +125,12 @@ Every field can be overridden per run — highest precedence wins
 | `DDA_HARNESS_ARCHITECTURE` | `profile.architecture` |
 | `DDA_HARNESS_CAPABILITIES` | `profile.capabilities` (comma-separated) |
 | `DDA_HARNESS_CREDENTIALS` | `credentials` reference |
-| `DDA_HARNESS_MODEL_READY_S`, `DDA_HARNESS_VLLM_READY_S`, `DDA_HARNESS_GENERATE_S`, `DDA_HARNESS_WORKFLOW_OUTPUT_S`, `DDA_HARNESS_RUN_BUDGET_S` | The matching `timeouts.*` entry |
-| `DDA_HARNESS_EXPECTED_VISION_MODELS`, `DDA_HARNESS_EXPECTED_VLLM_MODELS`, `DDA_HARNESS_EXPECTED_WORKFLOWS` | The matching `expected.*` list (comma-separated) |
+| `DDA_HARNESS_MODEL_READY_S`, `DDA_HARNESS_VLLM_READY_S`, `DDA_HARNESS_GENERATE_S`, `DDA_HARNESS_WORKFLOW_OUTPUT_S`, `DDA_HARNESS_RUN_BUDGET_S`, `DDA_HARNESS_CONTINUOUS_WINDOW_S` | The matching `timeouts.*` entry |
+| `DDA_HARNESS_EXPECTED_VISION_MODELS`, `DDA_HARNESS_EXPECTED_VLLM_MODELS`, `DDA_HARNESS_EXPECTED_WORKFLOWS`, `DDA_HARNESS_EXPECTED_STREAM_URLS` | The matching `expected.*` list (comma-separated) |
+| `DDA_HARNESS_EXPECTED_STREAM_SECURE_URL`, `DDA_HARNESS_EXPECTED_STREAM_CREDENTIALS`, `DDA_HARNESS_EXPECTED_STREAM_WORKFLOW`, `DDA_HARNESS_EXPECTED_CONTINUOUS_WORKFLOW` | The matching single-valued `expected.*` entry (an empty value unsets it) |
+
+`expected.stream_failures` is a mapping and is **file-only**: setting
+`DDA_HARNESS_EXPECTED_STREAM_FAILURES` is rejected.
 
 A device can be defined **entirely from the environment** (no file at all):
 
@@ -188,6 +195,7 @@ The stages, in run order (module naming keeps health first):
 | `test_20_vllm_textgen.py` | `vllm_textgen` | `vllm` | expected vLLM models READY, non-streaming generate, SSE streaming, metrics |
 | `test_25_vlm_image_generate.py` | `vlm_image_generate` | `vllm` (+ skips unless a Qwen VL / multimodal model is deployed) | image-carrying generate → `image_used: true` + non-empty answer; text-only generate unchanged |
 | `test_30_workflows.py` | `workflows` | `workflows` | expected workflows present, run → observable output, `llm_inference` metadata |
+| `test_35_stream_cameras.py` | `stream_cameras` | `stream_cameras` (+ each check skips when its `expected.*` input is unset) | stream capabilities, RTSP/RTMP connection test + preview + health, credentials, failure categories, triggered and continuous stream workflows |
 | `test_40_coexistence.py` | `coexistence` | `vllm` | vision + vLLM READY simultaneously through a completed generate |
 
 Selection uses standard pytest mechanisms — no test-code edits:
@@ -253,7 +261,8 @@ harness-results/jp6-orinagx-20250115-142530/
 - **metrics** are informational (generate latency, token counts) — no
   thresholds asserted;
 - **failure captures** under `failures/` carry the bounded (≤ 8 KB) failing
-  request/response diagnostics with the `Authorization` header redacted;
+  request/response diagnostics with the `Authorization` header redacted
+  (and stream camera passwords scrubbed; request bodies are never captured);
 - **restoration_warnings** records any teardown stop that failed — the device
   state to double-check by hand.
 
@@ -295,6 +304,81 @@ with non-empty text and a token-by-token SSE stream terminated by a `done`
 event; deployed workflows enumerated (and any expected ones executed to
 observable output); vision + vLLM READY simultaneously through a completed
 generate. Everything the harness started is stopped again on the way out.
+
+## Stream cameras stage
+
+`test_35_stream_cameras.py` checks the RTSP/RTMP stream camera feature end to
+end through the Backend_API. It runs only when the profile grants
+`stream_cameras`, and each check skips, naming the missing key, when its input
+is not configured:
+
+| Check | Input | Passes when |
+| --- | --- | --- |
+| Capabilities | — | `/streams/capabilities` reports RTSP and RTMP ingest and a software decoder for H.264 and H.265. Each codec's hardware decoder and the PyAV, FFmpeg and GStreamer versions are recorded as metrics. |
+| Stream URLs | `stream_urls` | Each URL, created as an Image_Source with the `auto` decoder policy, passes the connection test, previews an image and reports `streaming`. Codec, resolution, source rate and decoder are recorded per URL (`stream_source[<url>]`). All failing URLs are reported in one message. |
+| Credentials | `stream_secure_url`, `stream_credentials` | The credentialed source connects; no connection-test, GET or stream-health response carries the password or URL user information; after a wrong password is PATCHed, the connection test fails with `authentication_failed`. |
+| Failure categories | `stream_failures` | Each URL's connection test answers `ok: false` with exactly its category. All mismatches are reported in one message. |
+| Triggered run | `stream_workflow` | A trigger of its highest registered version completes within `timeouts.workflow_output_s`, and the run metadata has a `stream` entry with `seq` and `acquiredAtMs`. |
+| Continuous run | `continuous_workflow` | Over `timeouts.continuous_window_s` the workflow stays `running` with `effectiveFps > 0` and a rising `counters.completed`; a pause reports `paused` and no run starts or completes; a resume reports `running`. A workflow found paused is left alone and both checks skip. |
+
+The inputs, all optional and under `expected`:
+
+| Key | Meaning |
+| --- | --- |
+| `stream_urls` | Credential-free `rtsp://`, `rtsps://`, `rtmp://` or `rtmps://` URLs that must connect. The Image_Source type comes from the scheme. |
+| `stream_secure_url` | A URL that needs credentials. |
+| `stream_credentials` | A credential reference (`env:VAR` or `file:path`) resolving to `username:password` for `stream_secure_url`. |
+| `stream_failures` | File-only mapping of connection-test failure category to a URL or a list of URLs. Categories are checked against the device vocabulary (`not_found`, `unsupported_codec`, `tls_verification_failed`, `authentication_failed`, `decoder_unavailable`, `timeout`, `network_error`, …). |
+| `stream_workflow` | workflowId of an installed on_trigger stream workflow. |
+| `continuous_workflow` | workflowId of an installed continuous stream workflow. |
+
+A configured URL with user information (`user:pass@`) or a secret query
+parameter (`pass=`, `token=`, …) is rejected at load time, and the error does
+not echo it. Use a distinctive test password of 8 or more characters that is
+not part of any URL or name the device returns (not `secure`, say): the leak
+check matches it as a substring anywhere in the responses. The password is
+scrubbed from failure diagnostics and never written to results.
+
+Example against a MediaMTX test server (RTSP on 8554, RTSPS on 8322 with a
+self-signed certificate, RTMP on 1935, RTMPS on 1936; `nosuchpath` is
+readable but never published):
+
+```yaml
+devices:
+  jp7-thor:
+    base_url: http://localhost:5000
+    profile:
+      architecture: arm64_jp7
+      capabilities: [onnx_models, workflows, stream_cameras]
+    expected:
+      stream_urls:
+        - rtsp://192.168.88.237:8554/h264
+        - rtsp://192.168.88.237:8554/h265
+        - rtmp://192.168.88.237:1935/live/h264
+        - rtmp://192.168.88.237:1935/live/h265      # Enhanced RTMP
+      stream_secure_url: rtsp://192.168.88.237:8554/secure
+      stream_credentials: env:DDA_HARNESS_STREAM_SECRET  # "username:password"
+      stream_failures:
+        not_found: rtsp://192.168.88.237:8554/nosuchpath
+        unsupported_codec: rtsp://192.168.88.237:8554/vp9
+        tls_verification_failed:                    # self-signed certificates
+          - rtsps://192.168.88.237:8322/h264
+          - rtmps://192.168.88.237:1936/live/h264
+      stream_workflow: <workflowId of an on_trigger stream workflow>
+      continuous_workflow: <workflowId of a continuous stream workflow>
+    timeouts:
+      continuous_window_s: 30
+```
+
+State_Restoration: every Image_Source the stage creates is deleted when its
+check finishes, and by restoration at teardown if the check was cut short.
+The continuous pause is recorded before it is issued, so it is resumed however
+the check ends. Triggered runs leave their registration untouched.
+
+Out of scope: the soak sampling of task 25.3 (backend and worker RSS every
+minute, `docker inspect` RestartCount) needs shell access to the device, which
+this HTTP-only harness does not have. Sample those on the device alongside a
+long run.
 
 ## Harness selftests (no device required)
 

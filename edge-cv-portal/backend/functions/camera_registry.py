@@ -47,6 +47,37 @@ Storage (design "Data Models"): DynamoDB table ``dda-portal-camera-registry``
 with PK ``device_id`` and item-type-prefixed SK — ``CAMERA#{csid}``,
 ``META``, ``CONFLICT#{ts}#{uuid}`` — written by the Portal_Sync_Service
 (camera_sync.py).
+
+Stream Camera_Sources (rtsp-rtmp-stream-cameras task 8.1). The ``RTSP``
+and ``RTMP`` types are typed rather than free-form:
+``validate_stream_camera_body`` checks their ``params`` against the
+settings and value domains of Requirement 4.1 and their ``url`` against
+the shared Stream_URL rules, and rejects credential material and
+server-managed keys inside ``params`` with a 400 naming the field
+(Req 5.2). Validation of every other type is untouched. On the way out,
+``camera_view`` never returns credential material (Reqs 5.7, 6.1): a
+stored ``url`` is redacted, the Credential_Reference is omitted, and a
+stream entry reports ``credentials: {configured, updatedAt}`` instead.
+
+Portal-managed Stream_Credentials (task 8.2). A stream create or update
+may carry a write-only top-level ``credentials`` object (and a
+``clearCredentials`` flag); the credentials themselves go to the
+Credential_Vault of the device's Use_Case_Account through
+``stream_credentials.py``, and only the Credential_Reference reaches the
+desired change, the registry item, the pending content, and the audit
+event (Req 5.3). The route order is design component 7's: authorize and
+validate, ensure the device read grant, store the credentials, set the
+reference, write the desired change, and only then mark the entry pending
+and audit. A desired-change failure withdraws the stored version before
+returning the existing 502, so nothing references it (Req 5.4), and
+``clearCredentials`` or a delete schedules the secret's deletion *after*
+the change is delivered (Req 5.8). If the Use_Case_Account does not grant
+the Portal those capabilities, the credentialed create or update is
+rejected with 409 ``STREAM_CREDENTIALS_UNAVAILABLE`` naming the missing
+capability, with the registry, the shadow, and the audit log untouched;
+credential-free stream cameras are still accepted (Req 5.9, task 8.3).
+Authorization and the audit events are the existing camera registry ones
+throughout (Req 5.10).
 """
 import hashlib
 import json
@@ -85,6 +116,11 @@ import pin_requests
 # importing it here costs nothing on functions without the video layer;
 # only the Portal_Video_Pin_API's child-process probe loads OpenCV.
 import video_loop
+# Portal-managed Stream_Credentials (rtsp-rtmp-stream-cameras task 8.2),
+# bundled into the same Lambda code asset. It imports nothing beyond
+# boto3 and shared_utils, so it is safe at module scope on the camera_sync
+# ingest path too (unlike workflow_core, which stays a lazy import).
+import stream_credentials
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -119,8 +155,70 @@ SHADOW_NAME = 'dda-camera-registry'
 # sources (Req 5.6).
 DISCOVERY_MANAGED = 'DISCOVERY_MANAGED'
 
+# Machine-readable rejection code for a credentialed stream mutation the
+# Use_Case_Account does not let the Portal carry out (Req 5.9, design
+# component 7 "Missing permissions" and the error-handling table).
+STREAM_CREDENTIALS_UNAVAILABLE = 'STREAM_CREDENTIALS_UNAVAILABLE'
+
+# The remediation the 409 names, alongside the missing capability itself.
+STREAM_CREDENTIALS_REMEDIATION = (
+    'update the use-case account stack to enable Portal-managed stream '
+    'camera credentials')
+
 ORIGIN_EDGE_DISCOVERED = 'edge-discovered'
 ORIGIN_PORTAL_CREATED = 'portal-created'
+
+# ---------------------------------------------------------------------------
+# Stream Camera_Source constants (rtsp-rtmp-stream-cameras task 8.1)
+# ---------------------------------------------------------------------------
+
+# The ``params`` keys a stream Camera_Source of each type may carry, in
+# the order Requirement 4.1 lists them. Transport and latency are RTSP
+# only: nothing in the RTMP ingest path has either notion.
+#
+# These are literals rather than a projection of
+# ``workflow_core.stream_url.SCHEMES_BY_SOURCE_TYPE`` for the reason
+# deployments.py keeps its compatibility map literal: this module is
+# bundled with the SQS sync path and stays importable without the
+# workflow_core layer, so workflow_core is imported lazily, at the one
+# call site that needs it. Membership of this map is what makes a type a
+# *stream* type here; the accepted schemes of that type always come from
+# the shared module, so the scheme rule cannot drift from the catalog,
+# validator rule V11, the Deployment_Service or the device.
+STREAM_PARAMS_BY_TYPE: Dict[str, tuple] = {
+    'RTSP': ('url', 'transport', 'latencyMs', 'decoder',
+             'maxFrameDimension', 'stallTimeoutS'),
+    'RTMP': ('url', 'decoder', 'maxFrameDimension', 'stallTimeoutS'),
+}
+
+# Server-managed ``params`` keys: the Portal writes these itself when it
+# stores Stream_Credentials (task 8.2), so a request may never set them
+# (Req 5.3 — the registry carries only the Credential_Reference, and only
+# one the Portal itself produced).
+STREAM_SERVER_MANAGED_PARAMS = ('credentialRef', 'credentialsConfigured',
+                                'credentialsUpdatedAt')
+
+# Credential-like ``params`` keys. Stream_Credentials travel in the
+# write-only top-level ``credentials`` object and are stored in the
+# Credential_Vault, never in ``params`` — which is echoed into the
+# desired shadow, the registry item, the pending content and audit
+# events (Reqs 5.2, 6.1).
+STREAM_CREDENTIAL_PARAMS = ('username', 'user', 'password', 'secret',
+                            'token', 'urlSecret')
+
+# Value domains of Requirement 4.1.
+STREAM_TRANSPORTS = ('tcp', 'udp', 'auto')
+STREAM_DECODER_POLICIES = ('auto', 'hardware', 'software')
+STREAM_LATENCY_MS_RANGE = (0, 5000)
+STREAM_MAX_FRAME_DIMENSION_RANGE = (320, 4096)
+STREAM_STALL_TIMEOUT_S_RANGE = (2, 60)
+
+# The single ``params`` key that holds a Stream_URL, and the
+# Credential_Reference key the view omits (Req 5.7).
+PARAM_URL = 'url'
+PARAM_CREDENTIAL_REF = 'credentialRef'
+PARAM_CREDENTIALS_CONFIGURED = 'credentialsConfigured'
+PARAM_CREDENTIALS_UPDATED_AT = 'credentialsUpdatedAt'
 
 # ---------------------------------------------------------------------------
 # Portal_Pin_API constants (cloud-static-camera-provisioning task 2.1)
@@ -328,6 +426,104 @@ def device_connectivity_status(usecase_id: str, device_id: str) -> str:
 # Views
 # ---------------------------------------------------------------------------
 
+def is_stream_camera_type(source_type: Any) -> bool:
+    """Whether ``source_type`` is a stream Camera_Source type.
+
+    The single spelling of "this is an RTSP or RTMP Camera_Source", used
+    by the body validation and by the view (rtsp-rtmp-stream-cameras
+    Reqs 5.2, 5.7). Total: a non-string type is not a stream type.
+    """
+    return isinstance(source_type, str) and source_type in STREAM_PARAMS_BY_TYPE
+
+
+#: What a credential-like ``params`` value of a stream row is shown as:
+#: the mask ``redact`` puts in place of URL user information.
+CREDENTIAL_VALUE_MASK = '***'
+
+
+def view_params(params: Any, source_type: Any = None) -> Any:
+    """The ``params`` of a camera view: redacted URL, no reference.
+
+    Two rules, for Camera_Sources of *every* type, including stream rows
+    the device reported and legacy rows created before this feature
+    (rtsp-rtmp-stream-cameras Reqs 5.7, 6.1):
+
+    - ``url`` is passed through the shared redaction filter, so a stored
+      URL that embeds user information is returned with the user
+      information masked. ``redact`` preserves secret-free text byte for
+      byte, so the overwhelming majority of rows — every URL that holds
+      no secret, and every entry with no ``url`` at all — are returned
+      exactly as before (Req 18.3). It also masks a
+      Secret_Query_Parameter *value*, which Requirement 6.1 forbids in a
+      Portal API response and which a legacy row can hold even though
+      ``validate_stream_camera_body`` now rejects one on the way in.
+    - ``credentialRef`` is omitted: the Credential_Reference is an
+      internal pointer into the Credential_Vault, and the view reports
+      the credential *state* instead (see :func:`camera_view`).
+
+    And one rule for a stream row (``source_type`` ``RTSP`` or ``RTMP``):
+    the value of every credential-like key (``STREAM_CREDENTIAL_PARAMS``)
+    is masked in place, like URL user information. The body validation
+    rejects those keys on the way in, but a row written before this
+    feature, when the Cameras tab took any JSON, can still hold one, and
+    Requirement 5.7 forbids returning a credential value. Every other
+    type keeps them exactly as before (Req 18.3): a ``password`` on a
+    ``Camera`` is not a Stream_Credential.
+
+    Total over malformed storage: a non-dict ``params`` and a non-string
+    ``url`` are returned untouched rather than raising.
+    """
+    if not isinstance(params, dict):
+        return params
+    view = {key: value for key, value in params.items()
+            if key != PARAM_CREDENTIAL_REF}
+    url = view.get(PARAM_URL)
+    if isinstance(url, str) and url:
+        # Imported lazily: only the stream rules need the workflow_core
+        # layer, so every other camera_registry path (and the camera_sync
+        # ingest path bundled beside it) stays importable without it.
+        from workflow_core.stream_url import redact
+        view[PARAM_URL] = redact(url)
+    if is_stream_camera_type(source_type):
+        for key in STREAM_CREDENTIAL_PARAMS:
+            if key in view:
+                view[key] = CREDENTIAL_VALUE_MASK
+    return view
+
+
+def version_view(version: Any) -> Any:
+    """A conflict event's recorded version in API shape.
+
+    Its ``params`` go through :func:`view_params` with the version's own
+    type, so a conflict read never returns what a camera read would not:
+    a version recorded from a legacy stream row can hold a credentialed
+    URL or a credential-like key, and a stream version holds the
+    Credential_Reference (Reqs 5.7, 6.1). Secret-free content is returned
+    unchanged. A version without ``params`` (a deletion is None) is
+    returned as it is.
+    """
+    if not isinstance(version, dict) or 'params' not in version:
+        return version
+    return {**version,
+            'params': view_params(version['params'], version.get('type'))}
+
+
+def credentials_view(params: Any) -> Dict[str, Any]:
+    """The credential *state* of a stream Camera_Source (Req 5.7).
+
+    Never a credential value: only whether credentials are configured and
+    when they were last updated, read from the non-secret flags the
+    Portal writes when it stores them (task 8.2) and the device echoes
+    back in its report.
+    """
+    if not isinstance(params, dict):
+        params = {}
+    return {
+        'configured': bool(params.get(PARAM_CREDENTIALS_CONFIGURED, False)),
+        'updatedAt': params.get(PARAM_CREDENTIALS_UPDATED_AT),
+    }
+
+
 def camera_view(item: Dict[str, Any], now: int,
                 threshold_ms: float) -> Dict[str, Any]:
     """One registry camera item in API shape, with computed ``stale``."""
@@ -338,12 +534,15 @@ def camera_view(item: Dict[str, Any], now: int,
     # last-reported timestamp and staleness does not apply to them.
     stale = (last_reported_at is not None
              and (now - int(last_reported_at)) > threshold_ms)
+    params = item.get('params') or {}
+    source_type = item.get('type')
     view = {
         'camera_source_id': item.get('camera_source_id')
                             or sk[len(SK_CAMERA_PREFIX):],
         'name': item.get('name'),
-        'type': item.get('type'),
-        'params': item.get('params') or {},
+        'type': source_type,
+        # Credential-free and URL-redacted (Reqs 5.7, 6.1).
+        'params': view_params(params, source_type),
         'capabilities': item.get('capabilities') or {},
         'origin': item.get('origin'),
         'version': item.get('version'),
@@ -352,6 +551,11 @@ def camera_view(item: Dict[str, Any], now: int,
         'absent': bool(item.get('absent', False)),
         'stale': stale,
     }
+    # The credential state, for the stream types only: no other type has
+    # Stream_Credentials, and adding the key for them would change a view
+    # Requirement 18.3 keeps as it was.
+    if is_stream_camera_type(source_type):
+        view['credentials'] = credentials_view(params)
     if item.get('failure_reason') is not None:
         view['failure_reason'] = item['failure_reason']
     if view['absent'] and item.get('absent_since') is not None:
@@ -367,8 +571,9 @@ def conflict_view(item: Dict[str, Any]) -> Dict[str, Any]:
         # URL-safe identifier (the {cid} of the re-apply route).
         'conflict_id': sk.rsplit('#', 1)[-1],
         'camera_source_id': item.get('camera_source_id'),
-        'edge_version': item.get('edge_version'),
-        'portal_version': item.get('portal_version'),
+        # Redacted like a camera view (Reqs 5.7, 6.1).
+        'edge_version': version_view(item.get('edge_version')),
+        'portal_version': version_view(item.get('portal_version')),
         'resolution': item.get('resolution'),
         'created_at': item.get('created_at'),
     }
@@ -403,7 +608,7 @@ def get_cameras(device_id: str, user: Dict, event: Dict,
     ]
     cameras.sort(key=lambda c: (c.get('name') or '', c['camera_source_id']))
 
-    return create_response(200, {
+    body = {
         'device_id': device_id,
         'usecase_id': usecase_id,
         # Never-completed synchronization is an explicit state, never a
@@ -416,7 +621,14 @@ def get_cameras(device_id: str, user: Dict, event: Dict,
         'device_status': device_connectivity_status(usecase_id, device_id),
         'cameras': cameras,
         'count': len(cameras),
-    })
+    }
+    # Device_Stream_Capabilities, stored by the sync reducer from the
+    # device's report (rtsp-rtmp-stream-cameras Req 16.5). Present only for
+    # a device that reported them, so every other response is unchanged.
+    stream_capabilities = (meta or {}).get('stream_capabilities')
+    if isinstance(stream_capabilities, dict):
+        body['stream_capabilities'] = stream_capabilities
+    return create_response(200, body)
 
 
 def get_conflicts(device_id: str, user: Dict, event: Dict,
@@ -458,6 +670,37 @@ def iot_data_client(usecase_id: str):
                               region=get_usecase_region(usecase))
 
 
+#: Every ``params`` key a stream change can carry, across both stream
+#: types, including the server-managed credential keys.
+STREAM_PARAM_KEYS = tuple(sorted(
+    set().union(*STREAM_PARAMS_BY_TYPE.values())
+    | set(STREAM_SERVER_MANAGED_PARAMS)))
+
+
+def shadow_change_payload(change: Dict[str, Any]) -> Dict[str, Any]:
+    """The desired change as written to the shadow.
+
+    AWS IoT merges a desired update into the stored document field by
+    field, and only an explicit ``null`` removes a field. While the device
+    has not yet consumed an earlier change for the same Camera_Source, a
+    key the new change leaves out would therefore survive from the old
+    one. For a stream camera that could bring back a ``credentialRef``
+    the new change cleared (Req 5.8). So for the stream types, every
+    stream ``params`` key the change does not carry is written as
+    ``null``, which removes it from the merged document; the device never
+    sees the ``null``. Every other type's change is written exactly as
+    before (Req 18.3).
+    """
+    params = change.get('params')
+    if not (is_stream_camera_type(change.get('type'))
+            and isinstance(params, dict)):
+        return change
+    tombstoned = dict(params)
+    for key in STREAM_PARAM_KEYS:
+        tombstoned.setdefault(key, None)
+    return {**change, 'params': tombstoned}
+
+
 def write_desired_change(usecase_id: str, device_id: str, csid: str,
                          change: Dict[str, Any]) -> Optional[Dict]:
     """Write one desired.changes entry to the device's registry shadow.
@@ -473,7 +716,8 @@ def write_desired_change(usecase_id: str, device_id: str, csid: str,
             thingName=device_id,
             shadowName=SHADOW_NAME,
             payload=json.dumps(
-                {'state': {'desired': {'changes': {csid: change}}}},
+                {'state': {'desired': {'changes': {
+                    csid: shadow_change_payload(change)}}}},
                 default=lambda o: float(o) if isinstance(o, Decimal) else o,
             ),
         )
@@ -519,6 +763,367 @@ def validate_camera_body(body: Any) -> Optional[Dict]:
         return create_response(400, {'error': 'type is required'})
     if 'params' in body and not isinstance(body['params'], dict):
         return create_response(400, {'error': 'params must be an object'})
+    return None
+
+
+def _stream_field_rejection(field: str, message: str,
+                            code: Optional[str] = None) -> Dict:
+    """A 400 that identifies the offending field (Reqs 4.2, 5.2).
+
+    The message names the field and, for a URL problem, what is wrong
+    with it — never the offending *value*, so a rejection can never echo
+    credential material back into a response or a log (Req 6.1).
+    """
+    body = {'error': message, 'field': field}
+    if code is not None:
+        body['code'] = code
+    return create_response(400, body)
+
+
+def _is_stream_integer(value: Any, low: int, high: int) -> bool:
+    """Whether ``value`` is an integer within ``[low, high]`` inclusive.
+
+    ``bool`` is not an integer here (``isinstance(True, int)`` is True in
+    Python, and ``latencyMs: true`` is not a latency). A float or Decimal
+    that is exactly integral is accepted, because a JSON body may spell
+    ``200`` as ``200.0``. Total over every value a parsed body can hold:
+    a non-number, and the non-integral floats ``nan`` and ``inf``, are
+    rejected rather than raising.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float):
+        if not value.is_integer():  # False for nan and inf
+            return False
+        number = int(value)
+    elif isinstance(value, Decimal):
+        if not value.is_finite() or value != value.to_integral_value():
+            return False
+        number = int(value)
+    else:
+        return False
+    return low <= number <= high
+
+
+def validate_stream_camera_body(body: Any) -> Optional[Dict]:
+    """Validate a stream Camera_Source create/update body.
+
+    Applies to the stream types only (Req 5.2 — "validation of every
+    other type SHALL stay unchanged"): a body of any other type, or a
+    body :func:`validate_camera_body` would already reject, returns
+    ``None`` here, so callers can run this unconditionally after the
+    existing check and every non-stream flow keeps exactly the validation
+    it had (Req 18.3).
+
+    For an ``RTSP`` or ``RTMP`` body it enforces, in order:
+
+    1. No credential-like ``params`` key (Req 5.2). ``params`` is echoed
+       into the desired shadow, the registry item, the pending content
+       and audit events, so credential material must never enter it;
+       Stream_Credentials travel in the write-only top-level
+       ``credentials`` object, which task 8.2 stores in the
+       Credential_Vault.
+    2. No server-managed ``params`` key: the Portal writes
+       ``credentialRef``, ``credentialsConfigured`` and
+       ``credentialsUpdatedAt`` itself, so a request cannot forge a
+       Credential_Reference or a credential state.
+    3. Only the settings the type has (Requirement 4.1): transport and
+       latency are RTSP only.
+    4. ``url`` is a Stream_URL for the type's schemes, checked with the
+       shared ``check_stream_url`` — the same function the catalog
+       constraint, validator rule V11, the Deployment_Service override
+       check and the device use, so the rule cannot drift between them.
+       It is required: a body with no ``url`` is rejected as an invalid
+       Stream_URL naming the field.
+    5. The value domains of Requirement 4.1 for each supplied setting.
+       A setting a body omits is left absent rather than defaulted: the
+       device applies its own documented defaults.
+
+    Returns an error response, or ``None`` when the body is acceptable.
+    Keys are examined in sorted order, so the reported field is a
+    deterministic function of the body rather than of dict ordering.
+    """
+    if not isinstance(body, dict):
+        return None  # validate_camera_body owns the body shape
+    source_type = body.get('type')
+    allowed = (STREAM_PARAMS_BY_TYPE.get(source_type)
+               if is_stream_camera_type(source_type) else None)
+    if allowed is None:
+        return None  # not a stream type: nothing here applies
+    params = body.get('params')
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        return create_response(400, {'error': 'params must be an object'})
+
+    credential_keys = {key.lower() for key in STREAM_CREDENTIAL_PARAMS}
+    server_managed_keys = {key.lower() for key in STREAM_SERVER_MANAGED_PARAMS}
+    for key in sorted(params):
+        lowered = key.lower() if isinstance(key, str) else key
+        if lowered in credential_keys:
+            return _stream_field_rejection(
+                f'params.{key}',
+                f"params.{key} must not carry credential material; stream "
+                "camera credentials are submitted in the write-only "
+                "'credentials' object and are never stored in the registry")
+        if lowered in server_managed_keys:
+            return _stream_field_rejection(
+                f'params.{key}',
+                f"params.{key} is managed by the Portal and cannot be set on "
+                "a request")
+        if key not in allowed:
+            return _stream_field_rejection(
+                f'params.{key}',
+                f"params.{key} is not a {source_type} camera setting; the "
+                f"accepted settings are {', '.join(allowed)}")
+
+    # The Stream_URL rules, from the shared module: imported lazily so
+    # that every non-stream path stays importable without the
+    # workflow_core layer.
+    from workflow_core.stream_url import (
+        SCHEMES_BY_SOURCE_TYPE, check_stream_url,
+    )
+    problem = check_stream_url(params.get(PARAM_URL),
+                               SCHEMES_BY_SOURCE_TYPE[source_type])
+    if problem is not None:
+        return _stream_field_rejection(f'params.{PARAM_URL}',
+                                       problem.message, problem.code)
+
+    if 'transport' in params and params['transport'] not in STREAM_TRANSPORTS:
+        return _stream_field_rejection(
+            'params.transport',
+            "params.transport must be one of {0}".format(
+                ', '.join(STREAM_TRANSPORTS)))
+    if 'decoder' in params and params['decoder'] not in STREAM_DECODER_POLICIES:
+        return _stream_field_rejection(
+            'params.decoder',
+            "params.decoder must be one of {0}".format(
+                ', '.join(STREAM_DECODER_POLICIES)))
+    for key, (low, high) in (
+            ('latencyMs', STREAM_LATENCY_MS_RANGE),
+            ('maxFrameDimension', STREAM_MAX_FRAME_DIMENSION_RANGE),
+            ('stallTimeoutS', STREAM_STALL_TIMEOUT_S_RANGE)):
+        if key in params and not _is_stream_integer(params[key], low, high):
+            return _stream_field_rejection(
+                f'params.{key}',
+                f"params.{key} must be an integer between {low} and {high}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Portal-managed Stream_Credentials (task 8.2 — Reqs 5.3, 5.4, 5.8)
+# ---------------------------------------------------------------------------
+
+def validate_stream_credentials_body(body: Any) -> Optional[Dict]:
+    """Validate the write-only ``credentials`` object and the
+    ``clearCredentials`` flag of a stream create/update body (Req 5.2).
+
+    Applies to the stream types only, so every other type keeps exactly
+    the validation it had (Req 18.3) and a ``credentials`` key on a
+    non-stream body is ignored exactly as it was before this feature.
+    Returns an error response naming the offending field — never its
+    value — or ``None``.
+    """
+    if not isinstance(body, dict) or not is_stream_camera_type(
+            body.get('type')):
+        return None
+    problem = stream_credentials.validate_credentials_request(body)
+    if problem is None:
+        return None
+    field, message = problem
+    return _stream_field_rejection(field, message)
+
+
+def credentials_usecase(usecase_id: str) -> Dict[str, Any]:
+    """The Use_Case record the Credential_Vault calls are made against.
+
+    Resolved before anything is stored: a Use_Case that cannot be read
+    raises here, so a credential can never be written into the wrong
+    account (the same lookup ``iot_data_client`` makes for the shadow).
+    """
+    usecase = get_usecase(usecase_id)
+    if isinstance(usecase, dict) and not usecase.get('usecase_id'):
+        usecase = {**usecase, 'usecase_id': usecase_id}
+    return usecase
+
+
+def carried_credential_params(existing: Optional[Dict[str, Any]]
+                             ) -> Dict[str, Any]:
+    """The credential bookkeeping an update that does not mention
+    credentials must carry forward.
+
+    An update replaces ``params`` wholesale, and a request may not set the
+    server-managed keys itself, so an unrelated settings edit would
+    otherwise silently drop a working Credential_Reference and leave the
+    camera unable to authenticate. The latest portal intent wins over the
+    last reported state, so two updates in a row keep the reference the
+    first one delivered.
+    """
+    if not isinstance(existing, dict):
+        return {}
+
+    def credential_keys(source):
+        return {key: source[key]
+                for key in (PARAM_CREDENTIAL_REF,
+                            PARAM_CREDENTIALS_CONFIGURED,
+                            PARAM_CREDENTIALS_UPDATED_AT)
+                if key in source}
+
+    pending = existing.get('pending_content')
+    pending_params = pending.get('params') if isinstance(pending, dict) \
+        else None
+    if isinstance(pending_params, dict):
+        if pending_params.get(PARAM_CREDENTIAL_REF):
+            return credential_keys(pending_params)
+        if pending_params.get(PARAM_CREDENTIALS_CONFIGURED) is False:
+            # The latest portal intent cleared the credentials. The
+            # reference the device last reported must not come back just
+            # because the device has not acknowledged the clear yet.
+            return {}
+    reported = existing.get('params')
+    if isinstance(reported, dict) and reported.get(PARAM_CREDENTIAL_REF):
+        return credential_keys(reported)
+    return {}
+
+
+def prepare_stream_params(body: Any, usecase_id: str, device_id: str,
+                          csid: str,
+                          existing: Optional[Dict[str, Any]] = None):
+    """The ``params`` a stream change delivers, plus the credential work
+    the route must finish afterwards.
+
+    Steps 2 to 4 of design component 7, run *before* the desired change is
+    written:
+
+    2. ``ensure_device_read_grant`` so the device can read what is about
+       to be stored (Reqs 6.6, 6.7).
+    3. ``store_stream_credentials`` writes the value to the
+       Credential_Vault of the device's Use_Case_Account (Req 5.3).
+    4. ``params`` gains the Credential_Reference and the non-secret
+       ``credentialsConfigured`` / ``credentialsUpdatedAt`` flags.
+
+    Returns ``(params, stored, cleared)``: ``stored`` is the vault write to
+    withdraw if delivery fails (Req 5.4), and ``cleared`` marks a
+    ``clearCredentials`` request whose secret is scheduled for deletion
+    once the change is delivered (Req 5.8). Raises
+    ``stream_credentials.CredentialStorageUnavailable`` when the
+    Use_Case_Account does not grant the Portal the capability (Req 5.9);
+    the routes turn that into the 409 of
+    :func:`credentials_unavailable_rejection`, before anything is written.
+
+    Every non-stream body returns its own ``params`` untouched, so no
+    other type's flow changes (Req 18.3).
+    """
+    params = dict((body or {}).get('params') or {}) \
+        if isinstance(body, dict) else {}
+    if not (isinstance(body, dict)
+            and is_stream_camera_type(body.get('type'))):
+        return params, None, False
+
+    credentials = stream_credentials.credentials_from_body(body)
+    if credentials:
+        usecase = credentials_usecase(usecase_id)
+        stream_credentials.ensure_device_read_grant(usecase)
+        stored = stream_credentials.store_stream_credentials(
+            usecase, device_id, csid, credentials)
+        params[PARAM_CREDENTIAL_REF] = \
+            stream_credentials.credential_reference(stored)
+        params[PARAM_CREDENTIALS_CONFIGURED] = True
+        params[PARAM_CREDENTIALS_UPDATED_AT] = now_ms()
+        return params, stored, False
+
+    if stream_credentials.clear_requested(body):
+        # Delivered without a reference: the device drops the credentials
+        # it holds, and the secret is scheduled for deletion afterwards.
+        params[PARAM_CREDENTIALS_CONFIGURED] = False
+        params[PARAM_CREDENTIALS_UPDATED_AT] = now_ms()
+        return params, None, True
+
+    carried = carried_credential_params(existing)
+    if carried:
+        params.update(carried)
+    return params, None, False
+
+
+def credentials_unavailable_rejection(
+        error: 'stream_credentials.CredentialStorageUnavailable',
+        csid: Optional[str] = None) -> Dict:
+    """Reject a credentialed stream mutation the Use_Case_Account does not
+    let the Portal carry out: 409 ``STREAM_CREDENTIALS_UNAVAILABLE``
+    (Req 5.9, design component 7 "Missing permissions").
+
+    The message names the missing capability and the remediation, and
+    carries no credential material: ``CredentialStorageUnavailable`` holds
+    only the capability and the AWS error *code* that denied it, never a
+    value from the request (Req 6.1).
+
+    The caller returns this *before* writing anything — no shadow desired
+    change, no registry item, no audit event — so the registry and the
+    shadow are left exactly as they were, and a credential-free stream
+    camera (which never reaches the Credential_Vault) is still accepted.
+    """
+    capability = getattr(error, 'capability', None) \
+        or 'permission to manage stream camera credentials'
+    body: Dict[str, Any] = {
+        'error': f"The use-case account does not grant the Portal "
+                 f"{capability}; {STREAM_CREDENTIALS_REMEDIATION}",
+        'code': STREAM_CREDENTIALS_UNAVAILABLE,
+        'capability': capability,
+    }
+    if csid is not None:
+        body['camera_source_id'] = csid
+    logger.warning(
+        f"Rejected a credentialed stream camera mutation: the use-case "
+        f"account does not grant the Portal {capability}")
+    return create_response(409, body)
+
+
+def entry_is_stream_camera(entry: Optional[Dict[str, Any]]) -> bool:
+    """Whether a stored registry entry is a stream Camera_Source, from its
+    reported type or, for an entry the device has not reported yet, from
+    the pending portal content."""
+    if not isinstance(entry, dict):
+        return False
+    if is_stream_camera_type(entry.get('type')):
+        return True
+    pending = entry.get('pending_content')
+    return isinstance(pending, dict) and is_stream_camera_type(
+        pending.get('type'))
+
+
+def schedule_credential_deletion(usecase_id: str, device_id: str,
+                                 csid: str) -> None:
+    """Schedule the Camera_Source's Credential_Vault secret for deletion
+    (Req 5.8), after its change has been delivered.
+
+    Best-effort and never raising: the change is already written, so a
+    vault failure must not turn a delivered clear or delete into an error
+    response. A camera that never had credentials simply has no secret.
+    """
+    try:
+        stream_credentials.schedule_secret_deletion(
+            credentials_usecase(usecase_id), device_id, csid)
+    except Exception as e:  # noqa: BLE001 — the change is already delivered
+        logger.warning(
+            f"Could not schedule credential deletion for "
+            f"{device_id}/{csid}: {e}")
+
+
+def credential_audit_details(stored: Optional[Dict[str, Any]],
+                             cleared: bool) -> Optional[Dict[str, Any]]:
+    """Audit details for a mutation that touched credentials (Req 5.3).
+
+    Never credential material: only whether the request configured or
+    cleared them. A mutation that did not mention credentials — every
+    non-stream mutation, and every stream mutation without them — adds
+    nothing, so its audit event stays exactly as it was (Req 18.3).
+    """
+    if stored is not None:
+        return {'credentials_configured': True}
+    if cleared:
+        return {'credentials_configured': False}
     return None
 
 
@@ -594,6 +1199,12 @@ def create_camera(device_id: str, user: Dict, event: Dict,
     error = validate_camera_body(body)
     if error:
         return error
+    error = validate_stream_camera_body(body)
+    if error:
+        return error
+    error = validate_stream_credentials_body(body)
+    if error:
+        return error
 
     csid = body.get('camera_source_id') or f"portal-{uuid.uuid4().hex[:12]}"
     if find_camera_item(items, csid) is not None:
@@ -601,26 +1212,45 @@ def create_camera(device_id: str, user: Dict, event: Dict,
             'error': f"Camera source '{csid}' already exists",
         })
 
+    # Steps 2-4: the device read grant, the Credential_Vault write, and
+    # the Credential_Reference in params (task 8.2). A Use_Case_Account
+    # that does not grant the Portal those capabilities is a 409 here,
+    # before the shadow, the registry, or the audit log is touched
+    # (Req 5.9, task 8.3).
+    try:
+        params, stored, cleared = prepare_stream_params(
+            body, usecase_id, device_id, csid, existing=None)
+    except stream_credentials.CredentialStorageUnavailable as e:
+        return credentials_unavailable_rejection(e, csid)
+
     portal_change_id = new_change_id()
     change = {
         'op': 'create',
         'portalChangeId': portal_change_id,
         'name': body['name'],
         'type': body['type'],
-        'params': body.get('params') or {},
+        'params': params,
     }
-    # Shadow FIRST; a failure returns 502 with the registry untouched.
+    # Shadow FIRST; a failure returns 502 with the registry untouched and
+    # the stored credential version withdrawn (Req 5.4).
     error = write_desired_change(usecase_id, device_id, csid, change)
     if error:
+        if stored is not None:
+            stream_credentials.withdraw_stream_credentials(
+                credentials_usecase(usecase_id), stored)
         return error
 
     pending_content = {'op': 'create', 'name': body['name'],
                        'type': body['type'],
-                       'params': body.get('params') or {}}
+                       'params': params}
     mark_pending(device_id, usecase_id, csid, portal_change_id,
-                 pending_content, existing=None, body=body)
+                 pending_content, existing=None,
+                 body={**body, 'params': params})
     audit_mutation(user, 'create_camera_source', device_id, csid,
-                   usecase_id, portal_change_id)
+                   usecase_id, portal_change_id,
+                   credential_audit_details(stored, cleared))
+    if cleared:
+        schedule_credential_deletion(usecase_id, device_id, csid)
     return create_response(201, {
         'device_id': device_id,
         'camera_source_id': csid,
@@ -647,6 +1277,24 @@ def update_camera(device_id: str, csid: str, user: Dict, event: Dict,
     error = validate_camera_body(body)
     if error:
         return error
+    error = validate_stream_camera_body(body)
+    if error:
+        return error
+    error = validate_stream_credentials_body(body)
+    if error:
+        return error
+
+    # Steps 2-4: an update with credentials writes a new secret version
+    # and delivers the new reference (Req 5.8); one that mentions neither
+    # credentials nor clearCredentials carries the reference it already
+    # delivered forward. A Use_Case_Account that does not grant the
+    # Portal the credential capabilities is a 409 with the entry, the
+    # shadow, and the audit log untouched (Req 5.9, task 8.3).
+    try:
+        params, stored, cleared = prepare_stream_params(
+            body, usecase_id, device_id, csid, existing=entry)
+    except stream_credentials.CredentialStorageUnavailable as e:
+        return credentials_unavailable_rejection(e, csid)
 
     portal_change_id = new_change_id()
     change = {
@@ -655,19 +1303,25 @@ def update_camera(device_id: str, csid: str, user: Dict, event: Dict,
         'baseVersion': entry.get('version'),
         'name': body['name'],
         'type': body['type'],
-        'params': body.get('params') or {},
+        'params': params,
     }
     error = write_desired_change(usecase_id, device_id, csid, change)
     if error:
+        if stored is not None:
+            stream_credentials.withdraw_stream_credentials(
+                credentials_usecase(usecase_id), stored)
         return error
 
     pending_content = {'op': 'update', 'name': body['name'],
                        'type': body['type'],
-                       'params': body.get('params') or {}}
+                       'params': params}
     mark_pending(device_id, usecase_id, csid, portal_change_id,
                  pending_content, existing=entry)
     audit_mutation(user, 'update_camera_source', device_id, csid,
-                   usecase_id, portal_change_id)
+                   usecase_id, portal_change_id,
+                   credential_audit_details(stored, cleared))
+    if cleared:
+        schedule_credential_deletion(usecase_id, device_id, csid)
     return create_response(200, {
         'device_id': device_id,
         'camera_source_id': csid,
@@ -705,6 +1359,12 @@ def delete_camera(device_id: str, csid: str, user: Dict, event: Dict,
                  {'op': 'delete'}, existing=entry)
     audit_mutation(user, 'delete_camera_source', device_id, csid,
                    usecase_id, portal_change_id)
+    # Req 5.8: the secret is scheduled for deletion only after the delete
+    # change has been delivered, so a delivery failure never destroys
+    # credentials the device is still using. A stream camera that never
+    # had credentials has no secret, which is not an error.
+    if entry_is_stream_camera(entry):
+        schedule_credential_deletion(usecase_id, device_id, csid)
     return create_response(200, {
         'device_id': device_id,
         'camera_source_id': csid,

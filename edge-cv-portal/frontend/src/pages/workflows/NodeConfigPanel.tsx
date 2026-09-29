@@ -84,6 +84,7 @@ import type { BuilderNode } from './builderGraph';
 import {
   applyAravisCameraSelection,
   applyCameraSelection,
+  applyStreamCameraSelection,
   cameraDeviceValue,
   cameraDisplayName,
   cameraIdValue,
@@ -91,13 +92,17 @@ import {
   getCameraBindingHint,
   isAravisCompatibleCamera,
   isCameraReferenceParameter,
+  isStreamCompatibleCamera,
   isV4l2CompatibleCamera,
   STATIC_IMAGE_FOCUS_PARAM,
   STATIC_IMAGE_FOCUS_VALUE,
   STATIC_VIDEO_FOCUS_VALUE,
+  streamCameraDetails,
+  streamUrlValue,
   type CameraBindingHint,
   type CameraSourceEntry,
 } from './cameraReference';
+import { checkStreamUrl, schemesForNodeType } from './streamUrl';
 import {
   deriveRequirements,
   extractImports,
@@ -824,6 +829,62 @@ interface ParameterFieldProps {
   value: JsonValue | null | undefined;
   onChange: (value: JsonValue | null) => void;
   modelOptions: ModelOptionsState;
+  /**
+   * The accepted schemes when the parameter is a stream node's `url`
+   * (stream node types, and unified nodes of a stream kind): the field
+   * then reports the Stream_URL problem instead of the generic pattern
+   * message (rtsp-rtmp-stream-cameras Requirement 3.5).
+   */
+  streamSchemes?: readonly string[];
+}
+
+/** The node parameter a Stream_URL lives in. */
+const STREAM_URL_PARAMETER = 'url';
+
+/** The protocol a stream node type pulls, for picker texts. */
+const STREAM_PROTOCOL_LABELS: Record<string, string> = {
+  rtsp_camera_source: 'RTSP',
+  rtmp_stream_source: 'RTMP',
+};
+
+/**
+ * The Stream_URL problem of a typed stream URL, stated the way the
+ * validator states it: embedded credentials "belong in the camera's
+ * configuration" (rtsp-rtmp-stream-cameras Requirement 3.5). An empty
+ * value is left to the required-parameter message.
+ */
+export function streamUrlErrorText(
+  schemes: readonly string[],
+  value: JsonValue | null | undefined
+): string | undefined {
+  if (value === null || value === undefined || value === '') {
+    return undefined;
+  }
+  return checkStreamUrl(value, schemes)?.message;
+}
+
+/**
+ * The accepted Stream_URL schemes for a node's `url` parameter: the
+ * stream node types', and a unified node's when its effective
+ * `source_kind` is a stream kind; undefined for every other node.
+ */
+export function streamSchemesForNode(node: BuilderNode): readonly string[] | undefined {
+  const typeId = node.data.descriptor.typeId;
+  // Own-property lookups throughout: a type id or source_kind such as
+  // 'constructor' must resolve to "not a stream node", not to an
+  // Object.prototype member the Stream_URL check cannot iterate.
+  const direct = schemesForNodeType(typeId);
+  if (direct !== undefined) {
+    return direct;
+  }
+  const sourceKind = unifiedSourceKind(node);
+  if (
+    sourceKind === null ||
+    !Object.prototype.hasOwnProperty.call(SOURCE_KIND_TO_SOURCE_TYPE, sourceKind)
+  ) {
+    return undefined;
+  }
+  return schemesForNodeType((SOURCE_KIND_TO_SOURCE_TYPE as Record<string, string>)[sourceKind]);
 }
 
 function ParameterControl({ typeId, descriptor, value, onChange, modelOptions }: ParameterFieldProps) {
@@ -951,8 +1012,12 @@ function ParameterControl({ typeId, descriptor, value, onChange, modelOptions }:
 }
 
 function ParameterField(props: ParameterFieldProps) {
-  const { typeId, descriptor, value, onChange } = props;
+  const { typeId, descriptor, value, onChange, streamSchemes } = props;
   const violation = checkParameterValue(descriptor, value === undefined ? null : value);
+  const streamError =
+    streamSchemes !== undefined && descriptor.name === STREAM_URL_PARAMETER
+      ? streamUrlErrorText(streamSchemes, value)
+      : undefined;
   const label = parameterLabel(descriptor);
   const help = parameterHelp(typeId, descriptor);
   // The catalog-served description is authoritative; the PARAMETER_HELP
@@ -981,7 +1046,7 @@ function ParameterField(props: ParameterFieldProps) {
         )
       }
       description={fieldDescription}
-      errorText={violation?.message}
+      errorText={streamError ?? violation?.message}
       stretch
     >
       <ParameterControl {...props} />
@@ -1070,6 +1135,32 @@ export function cameraOption(camera: CameraSourceEntry, aravis = false): SelectP
   };
 }
 
+/**
+ * The camera dropdown option for one stream Camera_Source
+ * (rtsp-rtmp-stream-cameras Requirement 3.3): name and Stream_URL, the
+ * reported codec and resolution when available, Stream_Health, sync
+ * status, staleness, and whether credentials are configured. The URL is
+ * the registry's view, whose user information is already redacted.
+ */
+export function streamCameraOption(camera: CameraSourceEntry): SelectProps.Option {
+  const details = streamCameraDetails(camera);
+  const tags = [
+    details.codec,
+    details.resolution,
+    details.health,
+    camera.sync_status,
+    details.credentialsConfigured ? 'Credentials configured' : 'No credentials',
+    camera.absent ? 'absent' : null,
+  ].filter((tag): tag is string => typeof tag === 'string' && tag !== '');
+  return {
+    value: camera.camera_source_id,
+    label: cameraDisplayName(camera),
+    labelTag: camera.stale ? 'Stale' : undefined,
+    description: streamUrlValue(camera) ?? undefined,
+    tags,
+  };
+}
+
 interface CameraReferenceFieldProps {
   typeId: string;
   /** The `device` parameter descriptor. */
@@ -1106,6 +1197,12 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
   // applyCameraSelection (csi-icam-input-nodes Requirement 5.2).
   const isAravis = typeId === 'aravis_camera_source';
   const isIcam = typeId === 'icam_source';
+  // The stream flavor (rtsp-rtmp-stream-cameras Requirements 3.3-3.5):
+  // options filtered to the node's protocol, described by Stream_URL and
+  // health, applied through applyStreamCameraSelection (url only), and the
+  // typed URL checked with the Stream_URL rules.
+  const streamSchemes = schemesForNodeType(typeId);
+  const isStream = streamSchemes !== undefined;
 
   const [manual, setManual] = useState(() =>
     defaultManualEntry(parameters, descriptor.name, descriptor.default, hint)
@@ -1197,6 +1294,8 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
   // both modes (the same constraint predicate as every parameter).
   const effective = effectiveParameterValue(parameters, descriptor);
   const violation = checkParameterValue(descriptor, effective === undefined ? null : effective);
+  const errorText =
+    (isStream ? streamUrlErrorText(streamSchemes, effective) : undefined) ?? violation?.message;
   const label = parameterLabel(descriptor);
 
   const manualToggle = (
@@ -1223,6 +1322,7 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
             onParametersChange({ ...parameters, [descriptor.name]: value })
           }
           modelOptions={props.modelOptions}
+          streamSchemes={streamSchemes}
         />
       </SpaceBetween>
     );
@@ -1240,12 +1340,16 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
   // The Aravis node offers only Aravis-compatible sources (Requirement
   // 3.2); the ICAM node offers only V4L2-compatible sources
   // (csi-icam-input-nodes Requirement 5.2).
-  const offeredCameras = isAravis
-    ? cameras.items.filter(isAravisCompatibleCamera)
-    : isIcam
-      ? cameras.items.filter(isV4l2CompatibleCamera)
-      : cameras.items;
-  const cameraOptions = offeredCameras.map((camera) => cameraOption(camera, isAravis));
+  const offeredCameras = isStream
+    ? cameras.items.filter((camera) => isStreamCompatibleCamera(typeId, camera))
+    : isAravis
+      ? cameras.items.filter(isAravisCompatibleCamera)
+      : isIcam
+        ? cameras.items.filter(isV4l2CompatibleCamera)
+        : cameras.items;
+  const cameraOptions = offeredCameras.map((camera) =>
+    isStream ? streamCameraOption(camera) : cameraOption(camera, isAravis)
+  );
   const selectedCameraOption =
     cameraOptions.find((option) => option.value === selectedCameraId) ?? null;
 
@@ -1255,9 +1359,11 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
       return;
     }
     setSelectedCameraId(camera.camera_source_id);
-    const result = isAravis
-      ? applyAravisCameraSelection(parameters, camera, selectedDeviceId)
-      : applyCameraSelection(parameters, camera, selectedDeviceId);
+    const result = isStream
+      ? applyStreamCameraSelection(parameters, camera, selectedDeviceId)
+      : isAravis
+        ? applyAravisCameraSelection(parameters, camera, selectedDeviceId)
+        : applyCameraSelection(parameters, camera, selectedDeviceId);
     onCameraSelection(result.parameters, result.hint);
   };
 
@@ -1275,7 +1381,7 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
           )
         }
         description={descriptor.description ?? undefined}
-        errorText={violation?.message}
+        errorText={errorText}
         stretch
       >
         <SpaceBetween size="xxs">
@@ -1307,7 +1413,9 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
             empty={
               cameras.neverSynced === true
                 ? 'This device has never synced its cameras'
-                : 'No cameras registered for this device'
+                : isStream
+                  ? `No ${STREAM_PROTOCOL_LABELS[typeId]} cameras registered for this device`
+                  : 'No cameras registered for this device'
             }
             triggerVariant="option"
             ariaLabel={`Camera source for ${descriptor.name}`}
@@ -1324,6 +1432,8 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
               chosen. No picker listing logic changes: once pinned, the
               static camera appears in the registry-backed list like any
               camera. */}
+          {!isStream && (
+          <>
           <Button
             variant="inline-link"
             iconName="external"
@@ -1373,6 +1483,8 @@ function CameraReferenceField(props: CameraReferenceFieldProps) {
           >
             Pin a test video…
           </Button>
+          </>
+          )}
         </SpaceBetween>
         {/* Catalog-served examples stay available as quick manual fills. */}
         <ExampleChips
@@ -1846,6 +1958,7 @@ export default function NodeConfigPanel({
                       onParametersChange(node.id, { ...parameters, [parameter.name]: value })
                     }
                     modelOptions={modelOptions}
+                    streamSchemes={streamSchemesForNode(node)}
                   />
                   {codeAssistContract !== undefined &&
                     parameter.name === REQUIREMENTS_PARAMETER && (

@@ -45,6 +45,8 @@ import os
 from logging.handlers import RotatingFileHandler
 from typing import Optional, Sequence
 
+from dda_logging.redaction import install_redaction
+
 logger = logging.getLogger(__name__)
 
 #: The loggers whose records a run's log should capture. ``workflow_engine``
@@ -118,6 +120,9 @@ class RunLogCapture:
             )
             handler.setLevel(logging.DEBUG)
             handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+            # Run logs are downloadable, so they are redacted like every
+            # other log (rtsp-rtmp-stream-cameras Requirements 6.1, 6.3).
+            install_redaction([handler])
             for name in self._logger_names:
                 lg = logging.getLogger(name)
                 lg.addHandler(handler)

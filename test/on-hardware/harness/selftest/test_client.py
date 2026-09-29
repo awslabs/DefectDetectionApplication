@@ -2,24 +2,35 @@
 
 All transport is mocked (a FakeSession standing in for requests.Session):
 bearer token attach after login, token never in error reprs, body excerpt
-bounding, poll-loop terminal states, and streaming event decoding.
+bounding, poll-loop terminal states, and streaming event decoding; for the
+stream camera stage, every new endpoint's method/path/timeout, stream
+credentials never in error diagnostics, and the capability and execution
+pollers.
 """
 
 import json
 
 import pytest
+import requests
 from harnesslib.client import (
     BODY_EXCERPT_LIMIT,
+    CONNECTION_TEST_TIMEOUT_S,
     REDACTED,
+    STREAM_CAPABILITIES_TIMEOUT_S,
     DeviceApiError,
     EdgeApiClient,
+    ExecutionWaitError,
     ModelWaitError,
+    credential_secrets,
     redact_headers,
+    redact_secrets,
 )
-from harnesslib.config import Timeouts
+from harnesslib.config import SecretStr, Timeouts
 from harnesslib.sse import SseStreamError
 
 SECRET_TOKEN = "sekrit-token-value"
+STREAM_PASSWORD = "stream-pass-SECRET"
+STREAM_URL_SECRET = "live-key-SECRET"
 
 
 class FakeResponse:
@@ -58,12 +69,36 @@ class FakeSession:
         self.calls.append({"method": method, "url": url, **kwargs})
         if not self.responses:
             raise AssertionError(f"Unexpected request: {method} {url}")
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 def make_client(session, **kwargs):
     kwargs.setdefault("sleep", lambda seconds: None)
     return EdgeApiClient("http://device:5000", session=session, **kwargs)
+
+
+def make_clocked_client(responses, **kwargs):
+    """Client over queued responses with a fake clock that advances by each
+    sleep; returns ``(client, session, sleeps)``."""
+    session = FakeSession(responses)
+    clock = {"now": 0.0}
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    client = EdgeApiClient(
+        "http://device:5000",
+        session=session,
+        sleep=sleep,
+        monotonic=lambda: clock["now"],
+        **kwargs,
+    )
+    return client, session, sleeps
 
 
 def feature_entry(name, status, reason=None):
@@ -100,6 +135,32 @@ class TestTransport:
         assert err.path == "/system-health"
         assert err.status == 502
         assert err.body_excerpt == "bad gateway"
+
+    def test_a_read_on_a_stale_connection_is_sent_once_more(self):
+        # Found over the device tunnel (task 25.3): the device closed a
+        # keep-alive connection while a large preview was still in transit.
+        stale = requests.exceptions.ConnectionError("Remote end closed connection without response")
+        session = FakeSession([stale, FakeResponse(body={"state": "streaming"})])
+        assert make_client(session).stream_health("src1") == {"state": "streaming"}
+        assert [call["method"] for call in session.calls] == ["GET", "GET"]
+
+    def test_a_second_connection_error_is_raised(self):
+        stale = requests.exceptions.ConnectionError("closed")
+        session = FakeSession([stale, stale])
+        with pytest.raises(requests.exceptions.ConnectionError):
+            make_client(session).system_health()
+        assert len(session.calls) == 2
+
+    @pytest.mark.parametrize("call", [
+        lambda client: client.connection_test("src1"),
+        lambda client: client.delete_image_source("src1"),
+        lambda client: client.create_image_source({"type": "RTSP"}),
+    ])
+    def test_nothing_but_a_read_is_sent_twice(self, call):
+        session = FakeSession([requests.exceptions.ConnectionError("closed")])
+        with pytest.raises(requests.exceptions.ConnectionError):
+            call(make_client(session))
+        assert len(session.calls) == 1
 
 
 class TestAuth:
@@ -346,3 +407,248 @@ class TestGenerateStream:
         events = make_client(session).generate_stream("m", "hi")
         with pytest.raises(SseStreamError, match="mid-event"):
             list(events)
+
+
+class TestStreamCameraEndpoints:
+    def test_stream_capabilities_path_and_timeout(self):
+        session = FakeSession([FakeResponse(body={"rtsp": True})])
+        assert make_client(session).stream_capabilities() == {"rtsp": True}
+        call = session.calls[0]
+        assert call["method"] == "GET"
+        assert call["url"].endswith("/streams/capabilities")
+        # The device blocks up to 30 s while probing: the call outlasts it.
+        assert call["timeout"] == STREAM_CAPABILITIES_TIMEOUT_S > 30.0
+
+    def test_create_image_source_returns_the_new_id(self):
+        body = {
+            "type": "RTSP",
+            "name": "cam",
+            "location": "rtsp://cam:8554/h264",
+            "streamSettings": {"decoder": "auto"},
+        }
+        session = FakeSession([FakeResponse(body={"imageSourceId": "src-1"})])
+        assert make_client(session).create_image_source(body) == "src-1"
+        call = session.calls[0]
+        assert call["method"] == "POST"
+        assert call["url"].endswith("/image-sources")
+        assert call["json"] == body
+
+    def test_create_without_an_id_in_the_response_fails(self):
+        session = FakeSession([FakeResponse(body={"unexpected": True})])
+        with pytest.raises(DeviceApiError, match="no imageSourceId"):
+            make_client(session).create_image_source({"type": "RTSP"})
+
+    def test_image_source_crud_paths(self):
+        session = FakeSession(
+            [
+                FakeResponse(body={"imageSourceId": "src-1"}),
+                FakeResponse(body={"imageSourceId": "src-1"}),
+                FakeResponse(body={"imageSourceId": "src-1", "credentialsConfigured": True}),
+                FakeResponse(body=[]),
+                FakeResponse(body=[]),
+            ]
+        )
+        client = make_client(session)
+        client.update_image_source("src-1", {"streamSettings": {"latencyMs": 100}})
+        client.delete_image_source("src-1")
+        client.image_source("src-1")
+        client.image_sources("RTMP")
+        client.image_sources()
+        methods_urls = [(call["method"], call["url"]) for call in session.calls]
+        assert methods_urls == [
+            ("PATCH", "http://device:5000/image-sources/src-1"),
+            ("DELETE", "http://device:5000/image-sources/src-1"),
+            ("GET", "http://device:5000/image-sources/src-1"),
+            ("GET", "http://device:5000/image-sources"),
+            ("GET", "http://device:5000/image-sources"),
+        ]
+        assert session.calls[0]["json"] == {"streamSettings": {"latencyMs": 100}}
+        assert session.calls[3]["params"] == {"type": "RTMP"}
+        assert session.calls[4]["params"] is None
+
+    def test_stream_session_paths(self):
+        session = FakeSession(
+            [
+                FakeResponse(body={"ok": True, "category": None}),
+                FakeResponse(body={"state": "streaming"}),
+                FakeResponse(body={"image": "aGk=", "imageFileName": None}),
+            ]
+        )
+        client = make_client(session)
+        assert client.connection_test("src-1")["ok"] is True
+        assert client.stream_health("src-1")["state"] == "streaming"
+        assert client.preview_image_source("src-1")["image"] == "aGk="
+        test, health, preview = session.calls
+        assert (test["method"], test["url"]) == (
+            "POST",
+            "http://device:5000/image-sources/src-1/test-connection",
+        )
+        # The device answers within 20 s; the call waits a little longer.
+        assert test["timeout"] == CONNECTION_TEST_TIMEOUT_S > 20.0
+        assert (health["method"], health["url"]) == (
+            "GET",
+            "http://device:5000/image-sources/src-1/stream-health",
+        )
+        assert (preview["method"], preview["url"]) == (
+            "POST",
+            "http://device:5000/image-sources/src-1/preview",
+        )
+        assert preview["json"] == {}
+
+    def test_workflow_engine_paths(self):
+        session = FakeSession([FakeResponse(body=[])] + [FakeResponse(body={}) for _ in range(7)])
+        client = make_client(session)
+        client.workflow_registrations()
+        client.trigger_registration("reg-1")
+        client.workflow_execution("exec-1")
+        client.workflow_execution_metadata("exec-1")
+        client.continuous_status("reg-1")
+        client.pause_continuous("reg-1")
+        client.resume_continuous("reg-1")
+        client.workflow_registrations(include_inactive=True)
+        base = "http://device:5000/workflows"
+        assert [(call["method"], call["url"]) for call in session.calls] == [
+            ("GET", f"{base}/registrations"),
+            ("POST", f"{base}/registrations/reg-1/trigger"),
+            ("GET", f"{base}/executions/exec-1"),
+            ("GET", f"{base}/executions/exec-1/metadata"),
+            ("GET", f"{base}/registrations/reg-1/continuous"),
+            ("POST", f"{base}/registrations/reg-1/continuous/pause"),
+            ("POST", f"{base}/registrations/reg-1/continuous/resume"),
+            ("GET", f"{base}/registrations"),
+        ]
+        assert session.calls[0]["params"] is None
+        assert session.calls[7]["params"] == {"includeInactive": "true"}
+
+
+class TestStreamCredentialRedaction:
+    def credentialed_body(self):
+        return {
+            "type": "RTMP",
+            "name": "cam",
+            "location": "rtmp://cam:1935/live",
+            "credentials": {
+                "username": "camuser",
+                "password": SecretStr(STREAM_PASSWORD),
+                "urlSecret": STREAM_URL_SECRET,
+            },
+        }
+
+    def echoing_error(self):
+        """A 400 whose body echoes the credentials (a device bug)."""
+        return FakeResponse(
+            status_code=400,
+            text=json.dumps({"detail": f"rejected {STREAM_PASSWORD} / {STREAM_URL_SECRET}"}),
+        )
+
+    def assert_redacted(self, err: DeviceApiError):
+        for secret in (STREAM_PASSWORD, STREAM_URL_SECRET):
+            assert secret not in str(err)
+            assert secret not in repr(err)
+            assert secret not in json.dumps(err.diagnostic())
+        assert REDACTED in err.body_excerpt
+
+    def test_create_failure_never_carries_the_credentials(self):
+        session = FakeSession([self.echoing_error()])
+        with pytest.raises(DeviceApiError) as excinfo:
+            make_client(session).create_image_source(self.credentialed_body())
+        self.assert_redacted(excinfo.value)
+        # The request itself carried the real values.
+        assert session.calls[0]["json"]["credentials"]["password"] == STREAM_PASSWORD
+
+    def test_patch_failure_never_carries_the_credentials(self):
+        session = FakeSession([self.echoing_error()])
+        with pytest.raises(DeviceApiError) as excinfo:
+            make_client(session).update_image_source(
+                "src-1", {"credentials": self.credentialed_body()["credentials"]}
+            )
+        self.assert_redacted(excinfo.value)
+
+    def test_request_body_never_reaches_a_diagnostic(self):
+        session = FakeSession([FakeResponse(status_code=500, text="boom")])
+        with pytest.raises(DeviceApiError) as excinfo:
+            make_client(session).create_image_source(self.credentialed_body())
+        assert STREAM_PASSWORD not in json.dumps(excinfo.value.diagnostic())
+        assert excinfo.value.body_excerpt == "boom"
+
+    def test_json_escaped_secret_redacted(self):
+        secret = 'pa"ss\\wörd-SECRET'
+        for ensure_ascii in (True, False):
+            text = json.dumps({"detail": secret}, ensure_ascii=ensure_ascii)
+            assert redact_secrets(text, [secret]) == json.dumps({"detail": REDACTED})
+
+    def test_containing_secret_masked_whole(self):
+        assert redact_secrets("key=abcdef", ["abc", "abcdef"]) == f"key={REDACTED}"
+
+    def test_empty_secrets_ignored(self):
+        assert redact_secrets("unchanged", ["", None]) == "unchanged"
+
+    def test_credential_secrets_are_password_and_url_secret(self):
+        body = {"credentials": {"username": "u", "password": "p", "urlSecret": "k"}}
+        assert credential_secrets(body) == ["p", "k"]
+        assert credential_secrets({"credentials": {"username": "u", "password": ""}}) == []
+        assert credential_secrets({"name": "no credentials"}) == []
+        assert credential_secrets(None) == []
+
+
+class TestWaitForStreamCapabilities:
+    def probing(self):
+        return FakeResponse(status_code=503, text='{"detail": "probe still running"}')
+
+    def test_retries_503_until_the_probe_answers(self):
+        client, session, sleeps = make_clocked_client(
+            [self.probing(), self.probing(), FakeResponse(body={"rtsp": True})]
+        )
+        assert client.wait_for_stream_capabilities(timeout_s=60.0, interval_s=2.0) == {
+            "rtsp": True
+        }
+        assert len(session.calls) == 3
+        assert sleeps == [2.0, 2.0]
+
+    def test_other_errors_raise_at_once(self):
+        client, session, _ = make_clocked_client([FakeResponse(status_code=404, text="nope")])
+        with pytest.raises(DeviceApiError) as excinfo:
+            client.wait_for_stream_capabilities(timeout_s=60.0)
+        assert excinfo.value.status == 404
+        assert len(session.calls) == 1
+
+    def test_503_past_the_deadline_raises(self):
+        client, _, sleeps = make_clocked_client([self.probing() for _ in range(20)])
+        with pytest.raises(DeviceApiError) as excinfo:
+            client.wait_for_stream_capabilities(timeout_s=5.0, interval_s=2.0)
+        assert excinfo.value.status == 503
+        assert sum(sleeps) == pytest.approx(5.0)
+
+
+def execution(status):
+    return FakeResponse(body={"executionId": "exec-1", "status": status})
+
+
+class TestWaitForExecution:
+    def test_returns_the_terminal_execution(self):
+        client, session, sleeps = make_clocked_client(
+            [execution("pending"), execution("running"), execution("completed")]
+        )
+        assert client.wait_for_execution("exec-1", timeout_s=60.0)["status"] == "completed"
+        assert all(call["url"].endswith("/workflows/executions/exec-1") for call in session.calls)
+        assert sleeps == [1.0, 1.5]
+
+    def test_failed_is_terminal(self):
+        client, _, _ = make_clocked_client([execution("running"), execution("failed")])
+        assert client.wait_for_execution("exec-1", timeout_s=60.0)["status"] == "failed"
+
+    def test_timeout_raises_with_the_last_status(self):
+        client, _, _ = make_clocked_client([execution("running") for _ in range(50)])
+        with pytest.raises(ExecutionWaitError) as excinfo:
+            client.wait_for_execution("exec-1", timeout_s=10.0)
+        assert excinfo.value.status == "running"
+        assert "running" in str(excinfo.value)
+        assert "exec-1" in str(excinfo.value)
+
+    def test_defaults_to_the_workflow_output_timeout(self):
+        client, _, sleeps = make_clocked_client(
+            [execution("pending") for _ in range(50)], timeouts=Timeouts(workflow_output_s=4.0)
+        )
+        with pytest.raises(ExecutionWaitError):
+            client.wait_for_execution("exec-1")
+        assert sum(sleeps) == pytest.approx(4.0)

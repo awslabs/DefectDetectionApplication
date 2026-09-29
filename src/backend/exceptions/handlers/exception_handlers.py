@@ -46,15 +46,45 @@ def get_request_id():
     return correlation_id.get()
  
 
+#: Request body keys whose values are never logged: stream camera
+#: credentials and the like (rtsp-rtmp-stream-cameras Requirement 6.1).
+_SENSITIVE_BODY_KEYS = frozenset({"credentials", "password", "passwd", "urlsecret", "secret", "token"})
+
+
+def _body_for_log(body):
+    """``body`` with the values of sensitive keys masked. A raw (unparsed)
+    body naming one of those keys is not logged at all, since its values
+    cannot be told apart from the rest."""
+    if isinstance(body, dict):
+        return {key: ("***" if str(key).lower() in _SENSITIVE_BODY_KEYS and value not in (None, "", {})
+                      else _body_for_log(value))
+                for key, value in body.items()}
+    if isinstance(body, (list, tuple)):
+        return [_body_for_log(item) for item in body]
+    if isinstance(body, (bytes, str)):
+        text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
+        if any(key in text.lower() for key in _SENSITIVE_BODY_KEYS):
+            return "[body withheld: it may contain credentials]"
+    return body
+
+
 async def request_validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """
     This is a wrapper to the default RequestValidationException handler of FastAPI.
     This function will be called when client input is not valid.
     """
     query_params = request.query_params  # pylint: disable=protected-access
-    detail = {"errors": exc.errors(), "body": exc.body, "query_params": query_params}
+    errors = exc.errors()
+    safe_errors = [dict(error, input=_body_for_log(error["input"])) if "input" in error else error
+                   for error in errors]
+    detail = {"errors": safe_errors, "body": _body_for_log(exc.body), "query_params": query_params}
     logger.error(detail)
-    return JSONResponse({'message':str(exc), 'request_id': get_request_id()}, status_code = 400)
+    # An error whose input carries a credential would echo it in str(exc);
+    # only then is the message rebuilt from the masked errors, so every
+    # other response keeps its exact text.
+    message = str(exc) if safe_errors == errors else "{} validation error(s): {}".format(
+        len(safe_errors), safe_errors)
+    return JSONResponse({'message': message, 'request_id': get_request_id()}, status_code = 400)
 
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> Union[JSONResponse, Response]:

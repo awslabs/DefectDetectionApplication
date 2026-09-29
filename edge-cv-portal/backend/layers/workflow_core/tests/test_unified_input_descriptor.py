@@ -42,13 +42,18 @@ class TestUnifiedInputIdentity:
 
     def test_source_kind_enum_parameterization(self):
         # Requirement 3.1: required source_kind enum selecting among the
-        # four retained (non-digital) sources.
+        # retained (non-digital) sources. The four original kinds keep
+        # their position as a prefix; rtsp-rtmp-stream-cameras
+        # Requirement 1.6 appends the two stream kinds after them.
         params = _params_by_name(get_node_type("unified_input"))
         source_kind = params["source_kind"]
         assert source_kind.required is True
         assert source_kind.param_type == "enum"
-        assert source_kind.constraints["values"] == [
+        assert source_kind.constraints["values"][:4] == [
             "csi_camera", "icam", "aravis_camera", "folder"]
+        assert source_kind.constraints["values"] == [
+            "csi_camera", "icam", "aravis_camera", "folder",
+            "rtsp_camera", "rtmp_stream"]
         # NOTE: the implemented descriptor defaults to "folder" (the
         # refined requirement text for 3.1 says "csi_camera"; the code
         # deliberately uses "folder" — asserting the implemented value

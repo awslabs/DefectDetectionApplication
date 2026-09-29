@@ -1896,6 +1896,133 @@
     ],
     "type_id": "custom_python_source"
   },
+  "detection_counter": {
+    "category": "post_processing",
+    "display_name": "Detection Counter",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Comma-separated detection labels to always report (up to 32), e.g. person, hardhat. Each listed label is present in the counts, zero when it was not detected; labels that are detected but not listed are still counted.",
+        "examples": [
+          "person, hardhat",
+          "bottle"
+        ],
+        "multiline": false,
+        "name": "classes",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1.0,
+          "min": 0.0
+        },
+        "default": 0.0,
+        "depends_on": null,
+        "description": "Ignore detections whose confidence is below this value (0 to 1), e.g. 0.5. 0 counts every detection.",
+        "examples": [
+          0.0,
+          0.5
+        ],
+        "multiline": false,
+        "name": "min_confidence",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional region of interest, as a JSON list of 3 to 32 [x, y] points in normalized frame coordinates (0 to 1), e.g. [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]. Leave empty to use the whole frame. Only detections that pass zone_rule are counted.",
+        "examples": [
+          "[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]"
+        ],
+        "multiline": false,
+        "name": "zone",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "center",
+            "overlap"
+          ]
+        },
+        "default": "center",
+        "depends_on": null,
+        "description": "How a detection passes the zone: center counts a detection when its box center lies inside the zone, overlap when its box intersects the zone. Ignored when no zone is set.",
+        "examples": [
+          "center",
+          "overlap"
+        ],
+        "multiline": false,
+        "name": "zone_rule",
+        "param_type": "enum",
+        "required": false
+      }
+    ],
+    "type_id": "detection_counter"
+  },
   "dewarp": {
     "category": "preprocessing",
     "display_name": "Dewarp",
@@ -2379,6 +2506,160 @@
       }
     ],
     "type_id": "digital_output"
+  },
+  "event_gate": {
+    "category": "post_processing",
+    "display_name": "Event Gate",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "A run counts as true for this gate while this condition holds; dotted field paths reach an upstream analytics node's values, e.g. association.ppe.violations > 0 or counter.people.total > 5. Rule expression over the inference metadata fields is_anomalous (true/false; for object-detection models true when at least one object was detected) and confidence (number; the model's confidence score, for object detection the top detection's confidence). Supports the comparisons ==, !=, >=, <=, >, <, the logic operators && (and), || (or), ! (not), and parentheses; values are numbers (e.g. 0.8), 'quoted strings', or true/false; a bare field name is tested for truth. E.g. is_anomalous == true && confidence >= 0.8",
+        "examples": [
+          "is_anomalous == true",
+          "confidence >= 0.8 && is_anomalous == true",
+          "is_anomalous == true || confidence < 0.5",
+          "!(is_anomalous == true)"
+        ],
+        "multiline": false,
+        "name": "condition",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 1
+        },
+        "default": 3,
+        "depends_on": null,
+        "description": "How many consecutive runs whose condition is true make the gate active (1-1000), e.g. 3. A condition that cannot be evaluated counts as false.",
+        "examples": [
+          3,
+          10
+        ],
+        "multiline": false,
+        "name": "activate_after",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 1
+        },
+        "default": 3,
+        "depends_on": null,
+        "description": "How many consecutive runs whose condition is false make the gate inactive again (1-1000), e.g. 3.",
+        "examples": [
+          3,
+          10
+        ],
+        "multiline": false,
+        "name": "clear_after",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "on_activate",
+            "on_change",
+            "while_active"
+          ]
+        },
+        "default": "on_activate",
+        "depends_on": null,
+        "description": "Which runs continue to the nodes downstream of the gate: on_activate only the run that activates it, on_change the activating and the clearing run, while_active every run while it is active.",
+        "examples": [
+          "on_activate",
+          "on_change",
+          "while_active"
+        ],
+        "multiline": false,
+        "name": "emit",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 86400000,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": "emit=while_active",
+        "description": "While the gate is active, let a run through at most once per this many milliseconds (0-86400000), e.g. 60000 for at most once a minute. 0 lets every active run through.",
+        "examples": [
+          0,
+          60000
+        ],
+        "multiline": false,
+        "name": "repeat_interval_ms",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "event_gate"
   },
   "folder_source": {
     "category": "input",
@@ -4409,6 +4690,148 @@
     ],
     "type_id": "mqtt_subscribe"
   },
+  "object_association": {
+    "category": "post_processing",
+    "display_name": "Object Association",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "The detection label of the subjects being checked, e.g. person. Every required class is matched against these detections.",
+        "examples": [
+          "person"
+        ],
+        "multiline": false,
+        "name": "subject_class",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "1 to 10 comma-separated labels every subject must have, e.g. hardhat, vest. A subject is compliant only when each of these classes has a detection matched to it.",
+        "examples": [
+          "hardhat",
+          "hardhat, vest"
+        ],
+        "multiline": false,
+        "name": "required_classes",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 1.0,
+          "min": 0.05
+        },
+        "default": 0.5,
+        "depends_on": null,
+        "description": "How much of a required-class detection's own box area must lie inside a subject's box for the two to match (0.05 to 1), e.g. 0.5.",
+        "examples": [
+          0.5,
+          0.8
+        ],
+        "multiline": false,
+        "name": "min_overlap",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1.0,
+          "min": 0.0
+        },
+        "default": 0.0,
+        "depends_on": null,
+        "description": "Ignore subject detections whose confidence is below this value (0 to 1), e.g. 0.5. 0 takes every subject detection.",
+        "examples": [
+          0.0,
+          0.5
+        ],
+        "multiline": false,
+        "name": "min_confidence",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional region of interest, as a JSON list of 3 to 32 [x, y] points in normalized frame coordinates (0 to 1), e.g. [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]. Leave empty to use the whole frame. Only subjects whose box center lies inside the zone are checked.",
+        "examples": [
+          "[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]"
+        ],
+        "multiline": false,
+        "name": "zone",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "object_association"
+  },
   "opcua_subscribe": {
     "category": "trigger",
     "display_name": "OPC UA Subscribe",
@@ -5112,6 +5535,556 @@
     ],
     "type_id": "rotate"
   },
+  "rtmp_stream_source": {
+    "category": "input",
+    "display_name": "RTMP Stream",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "max_length": 2048,
+          "min_length": 1,
+          "regex": "^(rtsps?|rtmps?)://[^\\s/@?#]+([/?][^\\s#]*)?$"
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Credential-free stream URL of the camera, e.g. rtsp://192.168.1.64:554/Streaming/Channels/101 or rtmp://media.local/live/line1. Credentials are set on the camera, never in the URL.",
+        "examples": [
+          "rtsp://192.168.1.64:554/Streaming/Channels/101",
+          "rtmp://media.local/live/line1"
+        ],
+        "multiline": false,
+        "name": "url",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            "continuous",
+            "on_trigger"
+          ]
+        },
+        "default": "continuous",
+        "depends_on": null,
+        "description": "How runs of this workflow start: continuous samples the stream at frames per second without any trigger, on_trigger runs once per external trigger (a subscription trigger or a manual run) on the camera's latest frame.",
+        "examples": [
+          "continuous",
+          "on_trigger"
+        ],
+        "multiline": false,
+        "name": "processing_mode",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 10.0,
+          "min": 0.05
+        },
+        "default": 1.0,
+        "depends_on": "processing_mode=continuous",
+        "description": "Continuous sampling rate in runs per second (0.05-10), e.g. 1.0 for one run a second. A tick is skipped when the previous run is still in flight or no newer frame has arrived, so the achievable rate is bounded by run duration.",
+        "examples": [
+          1.0,
+          5.0
+        ],
+        "multiline": false,
+        "name": "frames_per_second",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 100
+        },
+        "default": 2000,
+        "depends_on": null,
+        "description": "How old the frame a run analyzes may be, in milliseconds (100-60000), e.g. 2000. A run waits up to this long for a frame no older than this, and fails on this node if none arrives.",
+        "examples": [
+          2000
+        ],
+        "multiline": false,
+        "name": "max_frame_age_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 200,
+          "min": 1
+        },
+        "default": 20,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many of the most recent continuous runs of any kind to keep (1-200), e.g. 20. Older runs that are not notable are deleted with their artifacts.",
+        "examples": [
+          20
+        ],
+        "multiline": false,
+        "name": "keep_recent_runs",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 5000,
+          "min": 0
+        },
+        "default": 200,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many notable continuous runs to keep (0-5000), e.g. 200. A run is notable when it failed, sent an output, or recorded an event gate transition.",
+        "examples": [
+          200
+        ],
+        "multiline": false,
+        "name": "keep_notable_runs",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "rtmp_stream_source"
+  },
+  "rtsp_camera_source": {
+    "category": "input",
+    "display_name": "RTSP Camera",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "max_length": 2048,
+          "min_length": 1,
+          "regex": "^(rtsps?|rtmps?)://[^\\s/@?#]+([/?][^\\s#]*)?$"
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Credential-free stream URL of the camera, e.g. rtsp://192.168.1.64:554/Streaming/Channels/101 or rtmp://media.local/live/line1. Credentials are set on the camera, never in the URL.",
+        "examples": [
+          "rtsp://192.168.1.64:554/Streaming/Channels/101",
+          "rtmp://media.local/live/line1"
+        ],
+        "multiline": false,
+        "name": "url",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            "continuous",
+            "on_trigger"
+          ]
+        },
+        "default": "continuous",
+        "depends_on": null,
+        "description": "How runs of this workflow start: continuous samples the stream at frames per second without any trigger, on_trigger runs once per external trigger (a subscription trigger or a manual run) on the camera's latest frame.",
+        "examples": [
+          "continuous",
+          "on_trigger"
+        ],
+        "multiline": false,
+        "name": "processing_mode",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 10.0,
+          "min": 0.05
+        },
+        "default": 1.0,
+        "depends_on": "processing_mode=continuous",
+        "description": "Continuous sampling rate in runs per second (0.05-10), e.g. 1.0 for one run a second. A tick is skipped when the previous run is still in flight or no newer frame has arrived, so the achievable rate is bounded by run duration.",
+        "examples": [
+          1.0,
+          5.0
+        ],
+        "multiline": false,
+        "name": "frames_per_second",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 100
+        },
+        "default": 2000,
+        "depends_on": null,
+        "description": "How old the frame a run analyzes may be, in milliseconds (100-60000), e.g. 2000. A run waits up to this long for a frame no older than this, and fails on this node if none arrives.",
+        "examples": [
+          2000
+        ],
+        "multiline": false,
+        "name": "max_frame_age_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 200,
+          "min": 1
+        },
+        "default": 20,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many of the most recent continuous runs of any kind to keep (1-200), e.g. 20. Older runs that are not notable are deleted with their artifacts.",
+        "examples": [
+          20
+        ],
+        "multiline": false,
+        "name": "keep_recent_runs",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 5000,
+          "min": 0
+        },
+        "default": 200,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many notable continuous runs to keep (0-5000), e.g. 200. A run is notable when it failed, sent an output, or recorded an event gate transition.",
+        "examples": [
+          200
+        ],
+        "multiline": false,
+        "name": "keep_notable_runs",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "rtsp_camera_source"
+  },
   "unified_input": {
     "category": "input",
     "display_name": "Input Source",
@@ -5136,7 +6109,9 @@
             "csi_camera",
             "icam",
             "aravis_camera",
-            "folder"
+            "folder",
+            "rtsp_camera",
+            "rtmp_stream"
           ]
         },
         "default": "folder",
@@ -5246,6 +6221,108 @@
         "multiline": false,
         "name": "file_pattern",
         "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max_length": 2048,
+          "min_length": 1,
+          "regex": "^(rtsps?|rtmps?)://[^\\s/@?#]+([/?][^\\s#]*)?$"
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Credential-free stream URL of the camera, e.g. rtsp://192.168.1.64:554/Streaming/Channels/101 or rtmp://media.local/live/line1. Credentials are set on the camera, never in the URL.",
+        "examples": [
+          "rtsp://192.168.1.64:554/Streaming/Channels/101",
+          "rtmp://media.local/live/line1"
+        ],
+        "multiline": false,
+        "name": "url",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "continuous",
+            "on_trigger"
+          ]
+        },
+        "default": "continuous",
+        "depends_on": null,
+        "description": "How runs of this workflow start: continuous samples the stream at frames per second without any trigger, on_trigger runs once per external trigger (a subscription trigger or a manual run) on the camera's latest frame.",
+        "examples": [
+          "continuous",
+          "on_trigger"
+        ],
+        "multiline": false,
+        "name": "processing_mode",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 10.0,
+          "min": 0.05
+        },
+        "default": 1.0,
+        "depends_on": "processing_mode=continuous",
+        "description": "Continuous sampling rate in runs per second (0.05-10), e.g. 1.0 for one run a second. A tick is skipped when the previous run is still in flight or no newer frame has arrived, so the achievable rate is bounded by run duration.",
+        "examples": [
+          1.0,
+          5.0
+        ],
+        "multiline": false,
+        "name": "frames_per_second",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 100
+        },
+        "default": 2000,
+        "depends_on": null,
+        "description": "How old the frame a run analyzes may be, in milliseconds (100-60000), e.g. 2000. A run waits up to this long for a frame no older than this, and fails on this node if none arrives.",
+        "examples": [
+          2000
+        ],
+        "multiline": false,
+        "name": "max_frame_age_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 200,
+          "min": 1
+        },
+        "default": 20,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many of the most recent continuous runs of any kind to keep (1-200), e.g. 20. Older runs that are not notable are deleted with their artifacts.",
+        "examples": [
+          20
+        ],
+        "multiline": false,
+        "name": "keep_recent_runs",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 5000,
+          "min": 0
+        },
+        "default": 200,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many notable continuous runs to keep (0-5000), e.g. 200. A run is notable when it failed, sent an output, or recorded an event gate transition.",
+        "examples": [
+          200
+        ],
+        "multiline": false,
+        "name": "keep_notable_runs",
+        "param_type": "int",
         "required": false
       }
     ],

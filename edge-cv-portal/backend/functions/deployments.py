@@ -151,18 +151,27 @@ WORKFLOW_MIN_LOCAL_SERVER_VERSION = os.environ.get(
 # _fill_missing_arch_floors below so every known arch resolves a per-lineage
 # floor; only an empty/unconfigured map (or an arch-undetermined device)
 # falls back to the scalar default above.
-def _parse_min_versions_map():
-    """Per-arch minimum LocalServer versions from WORKFLOW_MIN_LOCAL_SERVER_
-    VERSIONS (JSON object). Malformed or non-object values yield {}."""
-    raw = os.environ.get('WORKFLOW_MIN_LOCAL_SERVER_VERSIONS', '')
+def _parse_min_versions_map(env_name='WORKFLOW_MIN_LOCAL_SERVER_VERSIONS'):
+    """Per-arch minimum LocalServer versions from ``env_name`` (a JSON
+    object). Malformed or non-object values yield {}.
+
+    The env var name is a parameter because the same ``{arch: version}``
+    shape carries two independent floors: the per-architecture floor
+    (WORKFLOW_MIN_LOCAL_SERVER_VERSIONS) and the stream/scene-analytics
+    FEATURE floor (WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS,
+    rtsp-rtmp-stream-cameras Requirement 9.7) — the same parameterization
+    workflow_packaging._parse_min_versions_map carries, so the two modules
+    read the identical configuration the identical way. The default keeps
+    every existing zero-argument call site and test unchanged."""
+    raw = os.environ.get(env_name, '')
     if not raw:
         return {}
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
         logger.warning(
-            'WORKFLOW_MIN_LOCAL_SERVER_VERSIONS is not valid JSON; falling '
-            'back to the scalar minimum for every arch')
+            '%s is not valid JSON; falling back to the scalar minimum for '
+            'every arch', env_name)
         return {}
     if not isinstance(data, dict):
         return {}
@@ -216,6 +225,30 @@ def _fill_missing_arch_floors(by_arch):
 
 WORKFLOW_MIN_LOCAL_SERVER_VERSIONS = _fill_missing_arch_floors(
     _parse_min_versions_map())
+
+# The stream camera / scene analytics FEATURE floor (rtsp-rtmp-stream-
+# cameras Requirement 9.7, design D14): the minimum LocalServer version
+# per architecture that understands Stream_Camera_Source_Nodes and
+# Scene_Analytics_Nodes. An older LocalServer reads a `streamBinding`
+# point as a slot point with no slots and then stalls on an unfed
+# `appsrc` for 120 s, so a workflow using those node types must never be
+# deployed to a device below this floor.
+#
+# Read from the SAME environment map the Component_Packager reads
+# (workflow_packaging.STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS), set in
+# compute-stack.ts on both Lambdas, so the pre-submit gate here and the
+# floor stamped into manifest.json agree by construction.
+#
+# Deliberately NOT passed through _fill_missing_arch_floors: filling a
+# missing arch with SAFE_LINEAGE_FLOOR is right for the per-lineage
+# architecture floor (every field build satisfies it) but would be exactly
+# wrong here — an arch with no entry has NO LocalServer build known to
+# support the feature, so it must FAIL CLOSED (reject) rather than resolve
+# a floor every device satisfies. Until the map is configured (task 26.3)
+# it is empty and every stream/analytics workflow is rejected on every
+# device, which is the intended pre-enablement state.
+WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
+    'WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS')
 
 # Minimum Greengrass Nucleus version required for DDA components
 # Nucleus is already installed on the device — we don't pin versions in deployments.
@@ -3220,9 +3253,24 @@ def get_device_local_server_version(greengrass_client, thing_name):
     return get_device_local_server(greengrass_client, thing_name)[1]
 
 
+def stream_feature_floor_for(arch):
+    """The stream/scene-analytics FEATURE floor for ``arch``, or None when
+    that architecture has no LocalServer build known to support the new node
+    types (rtsp-rtmp-stream-cameras Requirement 9.7).
+
+    None is a rejection, never a pass: unlike the per-lineage architecture
+    floor there is no safe substitute value, because "no entry" means "no
+    supporting build exists for this lineage". Mirrors the packager's
+    min_local_server_version_for(arch, stream_features=True), which raises
+    PackagingError in the same situation.
+    """
+    return WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS.get(arch)
+
+
 def check_local_server_compatibility(greengrass_client, thing_names,
                                      min_local_server_version,
-                                     min_versions_by_arch=None):
+                                     min_versions_by_arch=None,
+                                     stream_features=False):
     """
     Pre-submit compatibility check (Requirement 8.4): compare each target
     device's installed LocalServer component version against the
@@ -3238,6 +3286,24 @@ def check_local_server_compatibility(greengrass_client, thing_names,
     the map (and for devices whose variant cannot be determined), and also
     takes precedence for every device when a per-version override is in
     effect (the caller passes an empty map in that case).
+
+    ``stream_features=True`` (the workflow contains a
+    Stream_Camera_Source_Node or a Scene_Analytics_Node — the packager
+    records this on the version item as ``has_stream_features``,
+    rtsp-rtmp-stream-cameras Requirement 9.7, design D14) raises each
+    device's effective minimum to the MAXIMUM of the resolved floor above
+    and the FEATURE floor for the device's own arch
+    (WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS), so a device running
+    a LocalServer that predates stream support is rejected with the
+    required version named. A device whose arch carries no feature-floor
+    entry — including a device whose variant cannot be determined — is
+    rejected outright: no build of that lineage is known to support the
+    feature, and a workflow that stalls on an unfed `appsrc` for 120 s must
+    never reach it. The feature floor applies even under a per-version
+    override, which is a floor pin and cannot license an unsupported
+    device. ``stream_features=False`` (the default) resolves exactly as
+    before, so every workflow without the new node types is gated
+    identically to pre-feature behaviour (Requirement 18.1).
     """
     incompatible = []
     by_arch = min_versions_by_arch or {}
@@ -3265,7 +3331,29 @@ def check_local_server_compatibility(greengrass_client, thing_names,
                 'min_local_server_version': effective_min,
                 'reason': 'No LocalServer component is installed on this device'
             })
-        elif _version_key(installed) < _version_key(effective_min):
+            continue
+        if stream_features:
+            feature_floor = stream_feature_floor_for(arch)
+            if feature_floor is None:
+                # No supporting build for this lineage: there is no version
+                # to name, so the reason names the architecture instead.
+                incompatible.append({
+                    'device': thing_name,
+                    'local_server_version': installed,
+                    'min_local_server_version': None,
+                    'reason': (
+                        'This workflow uses stream camera or scene analytics '
+                        'nodes, which require a LocalServer build that '
+                        'supports them; no supported LocalServer version is '
+                        'configured for this device'
+                        + (f" (architecture '{arch}')" if arch else
+                           ' (its LocalServer architecture could not be '
+                           'determined)'))
+                })
+                continue
+            effective_min = max(effective_min, feature_floor,
+                                key=_version_key)
+        if _version_key(installed) < _version_key(effective_min):
             incompatible.append({
                 'device': thing_name,
                 'local_server_version': installed,
@@ -3354,6 +3442,15 @@ CAMERA_WARNING_SOURCE_DEGRADED = 'CAMERA_SOURCE_DEGRADED'   # 9.3
 CAMERA_WARNING_NEVER_SYNCED = 'DEVICE_NEVER_SYNCED'         # 8.8
 CAMERA_WARNING_LEGACY_PATH = 'COMPILED_PATH_UNREGISTERED'   # 9.5
 
+#: The Stream_Health state that degrades a bound stream Camera_Source,
+#: and the condition name it contributes to the degraded-source warning
+#: (rtsp-rtmp-stream-cameras Requirement 9.5). The other reported states
+#: (streaming, reconnecting, idle) are not degraded: a reconnecting
+#: camera is expected to recover on its own, and an idle one has simply
+#: not been leased yet.
+STREAM_HEALTH_STATE_FAILED = 'failed'
+CAMERA_CONDITION_STREAM_FAILED = 'stream-failed'
+
 #: Camera_Source types (registry ``type`` attribute) compatible with each
 #: built-in Camera_Input_Node type. icam_source captures a V4L2 smart
 #: camera directly (v4l2src device=…), so it binds to an ICam, a
@@ -3370,12 +3467,29 @@ CAMERA_WARNING_LEGACY_PATH = 'COMPILED_PATH_UNREGISTERED'   # 9.5
 #: static-image-camera-source base spec; cloud-static-camera-provisioning
 #: Requirements 6.3, 6.4). The StaticVideo entry (the Static_Video_Camera,
 #: static-camera-video-loop Requirement 4.8) is served the same way.
+#:
+#: The two Stream_Camera_Source_Node types bind to a network stream of
+#: their own protocol only — an RTSP node to an RTSP Camera_Source and an
+#: RTMP node to an RTMP one (rtsp-rtmp-stream-cameras Requirement 9.3).
+#: The split is the deploy-time twin of the per-node-type scheme split
+#: the catalog and validator rule V11 enforce on the node's ``url``:
+#: nothing else can decode the node's transport, and crossing the two
+#: rejects with CAMERA_TYPE_INCOMPATIBLE like every other mismatch.
 _CAMERA_COMPATIBLE_SOURCE_TYPES = {
     'icam_source': frozenset({'ICam', 'V4L2Discovered', 'Camera'}),
     'csi_camera_source': frozenset({'NvidiaCSI', 'Camera'}),
     'aravis_camera_source': frozenset(
         {'Camera', 'AravisDiscovered', 'StaticImage', 'StaticVideo'}),
+    'rtsp_camera_source': frozenset({'RTSP'}),
+    'rtmp_stream_source': frozenset({'RTMP'}),
 }
+
+#: The ``url`` parameter of a Stream_Camera_Source_Node, whose manual
+#: override value is a Stream_URL (rtsp-rtmp-stream-cameras Requirement
+#: 9.4). The accepted schemes per node type come from the shared
+#: ``workflow_core.stream_url.SCHEMES_BY_NODE_TYPE``, imported lazily in
+#: _override_errors, which is also the set of stream node types.
+_STREAM_URL_PARAMETER = 'url'
 
 #: Camera_Source types that are never a camera. Custom camera-backed node
 #: types declare no backing transport, so only the categorically
@@ -3410,9 +3524,38 @@ def _camera_source_type_compatible(node_type, source_type):
     return source_type not in _NEVER_CAMERA_SOURCE_TYPES
 
 
+def _stream_health_state(entry):
+    """The last reported Stream_Health state of a Camera_Source, or None.
+
+    Only a stream entry (an RTSP/RTMP Camera_Source) carries the
+    ``capabilities.stream`` section the Edge_Sync_Agent reports, so every
+    other Camera_Source type resolves to None here and its degraded
+    conditions — and therefore its warning ids — are exactly what they
+    were before this feature (rtsp-rtmp-stream-cameras Requirement 9.6).
+    Total over malformed input: a non-dict capabilities or stream section
+    is read as "no state reported" rather than raising.
+    """
+    capabilities = entry.get('capabilities')
+    if not isinstance(capabilities, dict):
+        return None
+    stream = capabilities.get('stream')
+    if not isinstance(stream, dict):
+        return None
+    state = stream.get('state')
+    return state if isinstance(state, str) else None
+
+
 def _degraded_source_conditions(entry):
     """The Requirement 9.3 warning conditions a registry entry is in:
-    absent, stale, and/or sync status pending/failed."""
+    absent, stale, and/or sync status pending/failed, plus a failed
+    Stream_Health state for a stream Camera_Source
+    (rtsp-rtmp-stream-cameras Requirement 9.5).
+
+    ``stream-failed`` is appended last, so the '+'-joined condition list
+    of every entry that reports no failed stream — which is every entry
+    of every other Camera_Source type — is unchanged, and with it the
+    warning id an operator may already have confirmed.
+    """
     conditions = []
     if entry.get('absent'):
         conditions.append('absent')
@@ -3420,6 +3563,8 @@ def _degraded_source_conditions(entry):
         conditions.append('stale')
     if entry.get('sync_status') in ('pending', 'failed'):
         conditions.append(entry['sync_status'])
+    if _stream_health_state(entry) == STREAM_HEALTH_STATE_FAILED:
+        conditions.append(CAMERA_CONDITION_STREAM_FAILED)
     return conditions
 
 
@@ -3441,7 +3586,20 @@ def _override_errors(thing_name, node_id, node_type, override, descriptors):
     supplied value is checked against the node type's declared parameter
     constraints with the workflow_core parameter validator. Values are
     validated as supplied — the compiled document keeps rendered defaults
-    for parameters an override omits."""
+    for parameters an override omits.
+
+    For a Stream_Camera_Source_Node the ``url`` value is additionally
+    checked as a Stream_URL for that node type
+    (rtsp-rtmp-stream-cameras Requirement 9.4): the declared ``regex``
+    constraint is one pattern shared by both stream types, so only
+    ``check_stream_url`` with the type's accepted schemes rejects an
+    rtmp:// URL on an RTSP node, and only it names embedded user
+    information or a Secret_Query_Parameter as the reason. Both checks
+    report, exactly as catalog constraint V4 and validator rule V11 both
+    report on a workflow graph: the two carry different ``violation``
+    values, and the Stream_URL message is the one that tells the operator
+    what to fix.
+    """
     descriptor = _camera_node_descriptor(node_type, descriptors)
     if descriptor is None:
         # Fail closed, matching the plugin gates' unresolvable-record rule.
@@ -3455,6 +3613,11 @@ def _override_errors(thing_name, node_id, node_type, override, descriptors):
                         f"'{node_type}'"),
         }]
     from workflow_core.validator import check_parameter_value
+    # The stream node types and their accepted schemes come from the
+    # shared Stream_URL module, so this rule cannot drift from the
+    # catalog, the validator, the registry or the device.
+    from workflow_core.stream_url import SCHEMES_BY_NODE_TYPE, check_stream_url
+    stream_schemes = SCHEMES_BY_NODE_TYPE.get(node_type)
     parameters = {p.name: p for p in descriptor.parameters}
     errors = []
     for name in sorted(override):
@@ -3482,6 +3645,19 @@ def _override_errors(thing_name, node_id, node_type, override, descriptors):
                 'message': (f"Override for camera input node '{node_id}' on "
                             f"device '{thing_name}': {violation.message}"),
             })
+        if stream_schemes is not None and name == _STREAM_URL_PARAMETER:
+            problem = check_stream_url(override[name], stream_schemes)
+            if problem is not None:
+                errors.append({
+                    'code': CAMERA_ERROR_OVERRIDE_INVALID,
+                    'device': thing_name,
+                    'nodeId': node_id,
+                    'parameter': name,
+                    'violation': problem.code,
+                    'message': (f"Override for camera input node '{node_id}' "
+                                f"on device '{thing_name}': "
+                                f"{problem.message}"),
+                })
     return errors
 
 
@@ -3783,6 +3959,24 @@ def load_camera_registry_snapshot(thing_names):
     return snapshot
 
 
+def _binding_params_view(entry):
+    """A registry entry's ``params`` exactly as the Camera_Registry serves
+    them: URL user information redacted, no Credential_Reference, and the
+    credential-like keys of a legacy stream row masked
+    (rtsp-rtmp-stream-cameras Requirements 5.7, 6.1). The binding matrix
+    shows each option's URL, so this read must never return what the
+    Cameras tab would not; reusing the registry's own view_params keeps the
+    two from drifting.
+
+    Imported lazily, like the workflow_core imports above: only the
+    binding context read needs it, and view_params itself imports the
+    shared redaction filter from the workflow_core layer only when an
+    entry has a URL.
+    """
+    from camera_registry import view_params
+    return view_params(entry.get('params') or {}, entry.get('type'))
+
+
 def _binding_camera_view(csid, entry):
     """One registry entry as a selectable binding option (Reqs 8.1, 7.4
     display fields plus the degraded-condition inputs of 9.3)."""
@@ -3790,7 +3984,7 @@ def _binding_camera_view(csid, entry):
         'camera_source_id': csid,
         'name': entry.get('name'),
         'type': entry.get('type'),
-        'params': entry.get('params') or {},
+        'params': _binding_params_view(entry),
         'capabilities': entry.get('capabilities') or {},
         'origin': entry.get('origin'),
         'sync_status': entry.get('sync_status'),
@@ -4161,22 +4355,44 @@ def create_workflow_deployment(body, user):
         version_override = version_item.get('min_local_server_version')
         min_local_server = version_override or WORKFLOW_MIN_LOCAL_SERVER_VERSION
         by_arch = {} if version_override else WORKFLOW_MIN_LOCAL_SERVER_VERSIONS
+        # Stream camera / scene analytics feature floor (rtsp-rtmp-stream-
+        # cameras Requirement 9.7, design D14): the packager records
+        # has_stream_features on the version item when the graph contains a
+        # Stream_Camera_Source_Node or a Scene_Analytics_Node, exactly as it
+        # records has_llm_inference for the vLLM gate below. When set, each
+        # device's floor is raised to the feature floor for its own arch, so
+        # a device on a LocalServer that predates stream support is rejected
+        # here with the required version named rather than stalling on an
+        # unfed appsrc for 120 s. Absent/false (every pre-feature workflow)
+        # resolves the gate exactly as before (Requirement 18.1).
+        stream_features = bool(version_item.get('has_stream_features'))
         resolved_devices = resolve_target_thing_names(
             iot_client, target_devices, target_thing_group)
         incompatible = check_local_server_compatibility(
-            greengrass_client, resolved_devices, min_local_server, by_arch)
+            greengrass_client, resolved_devices, min_local_server, by_arch,
+            stream_features=stream_features)
         if incompatible:
+            details = {
+                'workflow_id': workflow_id,
+                'workflow_version': workflow_version,
+                'min_local_server_version': min_local_server,
+                'incompatible_devices': incompatible
+            }
+            if stream_features:
+                # Only added for a stream/analytics workflow, so the
+                # rejection payload of every pre-feature workflow is
+                # unchanged (Requirement 18.1). The per-device entries
+                # above carry the required version each device must reach;
+                # this is the configured feature floor that produced them.
+                details['stream_features'] = True
+                details['stream_camera_min_local_server_versions'] = dict(
+                    WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS)
             return _workflow_error(
                 409, 'INCOMPATIBLE_LOCAL_SERVER',
                 'One or more target devices do not have a LocalServer '
                 'component version compatible with this workflow component; '
                 'the deployment was not submitted',
-                {
-                    'workflow_id': workflow_id,
-                    'workflow_version': workflow_version,
-                    'min_local_server_version': min_local_server,
-                    'incompatible_devices': incompatible
-                })
+                details)
 
         # Plugin lifecycle + architecture gates over the dependency closure
         # (custom-node-designer 9.7, 9.8, 9.11, 16.3, 16.6), alongside the

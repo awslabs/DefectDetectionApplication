@@ -18,6 +18,7 @@
 import axios from "axios";
 import { Connection } from "config/Interface";
 import { MaskBackground } from "api/WorkflowAPI";
+import type { StreamHealth } from "components/image-source/types";
 
 // Endpoint constants are built locally from the read-only Connection export
 // so config/Interface.tsx stays untouched.
@@ -165,6 +166,119 @@ export async function triggerWorkflowRegistration(
 ): Promise<WorkflowExecution> {
   const { data } = await axios.post<WorkflowExecution>(
     `${REGISTRATIONS_ENDPOINT}/${id}/trigger`,
+  );
+  return data;
+}
+
+/** The bounds of the recent-executions list (the API clamps to 1..50). */
+export const REGISTRATION_EXECUTIONS_LIMIT_MAX = 50;
+
+export interface ListRegistrationExecutionsOptions {
+  /** At most this many executions, 1 to 50; the API's default is 10. */
+  limit?: number;
+  /**
+   * Only the Notable_Runs of a continuous workflow: those that failed, sent
+   * an output, or recorded an event gate transition (rtsp-rtmp-stream-cameras
+   * Requirement 16.2).
+   */
+  notable?: boolean;
+}
+
+/** The newest executions of one registration, newest first. */
+export async function listRegistrationExecutions(
+  id: string,
+  { limit, notable }: ListRegistrationExecutionsOptions = {},
+): Promise<WorkflowExecution[]> {
+  const { data } = await axios.get<WorkflowExecution[]>(
+    `${REGISTRATIONS_ENDPOINT}/${id}/executions`,
+    {
+      params: {
+        ...(limit !== undefined && { limit }),
+        ...(notable && { notable: true }),
+      },
+    },
+  );
+  return data;
+}
+
+/** The state of a continuous workflow (rtsp-rtmp-stream-cameras Req. 16.2). */
+export type ContinuousState = "running" | "paused" | "waiting_for_stream";
+
+/**
+ * The per-registration counters of a continuous workflow, which survive run
+ * deletion (Requirement 12.5).
+ */
+export interface ContinuousCounters {
+  started: number;
+  completed: number;
+  failed: number;
+  skippedBusy: number;
+  skippedNoNewFrame: number;
+  notable: number;
+  outputsSent: number;
+  streamUnavailable: number;
+}
+
+/**
+ * The Continuous status of a registration whose Stream_Camera_Source_Node
+ * runs in `continuous` mode (GET /workflows/registrations/{id}/continuous).
+ */
+export interface ContinuousStatus {
+  registrationId: string;
+  state: ContinuousState;
+  configuredFps: number;
+  /** Runs per second over the last 60 seconds; 0 while paused. */
+  effectiveFps: number;
+  counters: Partial<ContinuousCounters>;
+  streamHealth: StreamHealth | null;
+  /** Epoch milliseconds; null unless paused. */
+  pausedAtMs: number | null;
+  cameraSourceId: string;
+  runInProgress: boolean;
+}
+
+function isNotFound(error: unknown): boolean {
+  return (
+    (error as { response?: { status?: number } })?.response?.status === 404
+  );
+}
+
+/**
+ * The Continuous status of a registration, or null when it does not run
+ * continuously (the API answers 404 for those).
+ */
+export async function getContinuousStatus(
+  id: string,
+): Promise<ContinuousStatus | null> {
+  try {
+    const { data } = await axios.get<ContinuousStatus>(
+      `${REGISTRATIONS_ENDPOINT}/${id}/continuous`,
+    );
+    return data;
+  } catch (error) {
+    if (isNotFound(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/** Pause a continuous workflow; the pause persists across restarts. */
+export async function pauseContinuousWorkflow(
+  id: string,
+): Promise<ContinuousStatus> {
+  const { data } = await axios.post<ContinuousStatus>(
+    `${REGISTRATIONS_ENDPOINT}/${id}/continuous/pause`,
+  );
+  return data;
+}
+
+/** Resume a paused continuous workflow. */
+export async function resumeContinuousWorkflow(
+  id: string,
+): Promise<ContinuousStatus> {
+  const { data } = await axios.post<ContinuousStatus>(
+    `${REGISTRATIONS_ENDPOINT}/${id}/continuous/resume`,
   );
   return data;
 }

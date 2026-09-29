@@ -224,8 +224,14 @@ private:
         CHECKNULL(server, E_INVALIDARG);
         CHECKNULL_OR_EMPTY(modelName.c_str(), E_INVALIDARG);
         
-        const char* metadata = server->ModelMetadata(modelName.c_str());
-        CHECKNULL(metadata, E_FAIL);
+        const char* metadata_text = server->ModelMetadata(modelName.c_str());
+        CHECKNULL(metadata_text, E_FAIL);
+        // Copied at once: the check and the parse below read this copy, never
+        // the server's result buffer, which another thread's call could
+        // replace between the two (found on hardware, rtsp-rtmp-stream-cameras
+        // task 25.3: an uncaught nlohmann parse_error "attempting to parse an
+        // empty input" aborted the backend when two pipelines started at once).
+        const std::string metadata(metadata_text);
         CHECKIF(nlohmann::json::accept(metadata) == false, E_FAIL);
 
         _model_name = modelName;

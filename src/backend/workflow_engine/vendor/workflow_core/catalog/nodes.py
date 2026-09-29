@@ -42,6 +42,16 @@ from .models import (
     PORT_TYPE_INFERENCE_META,
     PORT_TYPE_VIDEO_FRAMES,
 )
+from ..stream_url import STREAM_URL_PATTERN
+from ..analytics.scene import (
+    DEFAULT_ACTIVATE_AFTER,
+    DEFAULT_CLEAR_AFTER,
+    DEFAULT_EMIT,
+    DEFAULT_MIN_OVERLAP,
+    DEFAULT_ZONE_RULE,
+    EMIT_MODES,
+    ZONE_RULES,
+)
 
 
 def _element(factory, **args_template):
@@ -1544,6 +1554,144 @@ CAPTURE = NodeTypeDescriptor(
 )
 
 # --------------------------------------------------------------------------
+# Stream camera input node types (additive — rtsp-rtmp-stream-cameras
+# Requirements 1.1-1.4) — live network video sources: an RTSP camera the
+# device pulls from, and an RTMP endpoint a publisher pushes to.
+#
+# Both node types share ONE parameter family, the module-level
+# ``_STREAM_SOURCE_PARAMETERS`` tuple below. They reference the very same
+# ``ParameterDescriptor`` objects (not copies), so the unified-input
+# parameter union de-duplicates them exactly once and the two descriptors
+# cannot drift from each other (design D1).
+#
+# Acquisition happens in the LocalServer process (the Stream_Ingest_Service
+# decodes the stream and hands frames to the executor), exactly like
+# aravis_camera_source: every physical architecture compiles the
+# appsrc-headed chain ``appsrc name=appsrc_{nodeId} ! videoconvert`` that
+# the Frame_Feed pushes the Latest_Frame into. No parameter appears in any
+# element argument (Requirement 1.4), so there are no binding slots and the
+# packaged binding point carries the rendered parameters instead. Both
+# plugin dependencies (``app``, ``videoconvertscale``) are already
+# LocalServer-bundled, so the compiled pluginDependencies stay empty.
+# Simulation: fed from the Test_Dataset like every other frame source.
+# --------------------------------------------------------------------------
+
+#: The shared Stream_Camera_Source_Node parameter family (Requirement 1.2),
+#: built once so ``rtsp_camera_source`` and ``rtmp_stream_source`` share the
+#: identical descriptor objects. ``url`` carries the shared Stream_URL
+#: contract as its ``regex`` constraint (``STREAM_URL_PATTERN``, the single
+#: source of truth also mirrored by the Portal frontend), which rejects a
+#: foreign scheme, a missing host and embedded user information
+#: (Requirement 1.3); the per-node-type scheme split (rtsp/rtsps vs
+#: rtmp/rtmps) is a validator rule (V11), because one regex serves both
+#: types. ``frames_per_second``, ``keep_recent_runs`` and
+#: ``keep_notable_runs`` only apply to continuous processing, so they are
+#: gated on ``processing_mode=continuous`` (the ``"name=value"``
+#: depends_on form).
+_STREAM_SOURCE_PARAMETERS = (
+    ParameterDescriptor("url", "string", required=True, default=None,
+                        constraints={"min_length": 1, "max_length": 2048,
+                                     "regex": STREAM_URL_PATTERN},
+                        description="Credential-free stream URL of the "
+                                    "camera, e.g. "
+                                    "rtsp://192.168.1.64:554/Streaming/Channels/101 "
+                                    "or rtmp://media.local/live/line1. "
+                                    "Credentials are set on the camera, "
+                                    "never in the URL.",
+                        examples=["rtsp://192.168.1.64:554/Streaming/Channels/101",
+                                  "rtmp://media.local/live/line1"]),
+    ParameterDescriptor("processing_mode", "enum", required=False,
+                        default="continuous",
+                        constraints={"values": ["continuous", "on_trigger"]},
+                        description="How runs of this workflow start: "
+                                    "continuous samples the stream at "
+                                    "frames per second without any "
+                                    "trigger, on_trigger runs once per "
+                                    "external trigger (a subscription "
+                                    "trigger or a manual run) on the "
+                                    "camera's latest frame.",
+                        examples=["continuous", "on_trigger"]),
+    ParameterDescriptor("frames_per_second", "float", required=False, default=1.0,
+                        constraints={"min": 0.05, "max": 10.0},
+                        depends_on="processing_mode=continuous",
+                        description="Continuous sampling rate in runs per "
+                                    "second (0.05-10), e.g. 1.0 for one run "
+                                    "a second. A tick is skipped when the "
+                                    "previous run is still in flight or no "
+                                    "newer frame has arrived, so the "
+                                    "achievable rate is bounded by run "
+                                    "duration.",
+                        examples=[1.0, 5.0]),
+    ParameterDescriptor("max_frame_age_ms", "int", required=False, default=2000,
+                        constraints={"min": 100, "max": 60000},
+                        description="How old the frame a run analyzes may "
+                                    "be, in milliseconds (100-60000), e.g. "
+                                    "2000. A run waits up to this long for "
+                                    "a frame no older than this, and fails "
+                                    "on this node if none arrives.",
+                        examples=[2000]),
+    ParameterDescriptor("keep_recent_runs", "int", required=False, default=20,
+                        constraints={"min": 1, "max": 200},
+                        depends_on="processing_mode=continuous",
+                        description="How many of the most recent continuous "
+                                    "runs of any kind to keep (1-200), e.g. "
+                                    "20. Older runs that are not notable "
+                                    "are deleted with their artifacts.",
+                        examples=[20]),
+    ParameterDescriptor("keep_notable_runs", "int", required=False, default=200,
+                        constraints={"min": 0, "max": 5000},
+                        depends_on="processing_mode=continuous",
+                        description="How many notable continuous runs to "
+                                    "keep (0-5000), e.g. 200. A run is "
+                                    "notable when it failed, sent an "
+                                    "output, or recorded an event gate "
+                                    "transition.",
+                        examples=[200]),
+)
+
+
+def _stream_source_mappings():
+    """The shared Stream_Camera_Source_Node mappings (Requirement 1.4):
+    the appsrc-headed chain on every physical device architecture, plus
+    the dataset-fed simulation stub."""
+    return _same_on_device_archs(
+        element_chain=[
+            _element("appsrc", name="appsrc_{nodeId}"),
+            _element("videoconvert"),
+        ],
+        plugin_dependencies=["app", "videoconvertscale"],
+    ) + [_dataset_fed_sim_source()]
+
+
+RTSP_CAMERA_SOURCE = NodeTypeDescriptor(
+    type_id="rtsp_camera_source",
+    category=CATEGORY_INPUT,
+    display_name="RTSP Camera",
+    # Optional activation scaffolding port, like every other frame source
+    # (Requirement 1.1): inert at compile time for a continuous node, and
+    # the seam a subscription trigger drives an on_trigger node through.
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
+    outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
+    parameters=list(_STREAM_SOURCE_PARAMETERS),
+    mappings=_stream_source_mappings(),
+    hardware_dependent=True,
+)
+
+RTMP_STREAM_SOURCE = NodeTypeDescriptor(
+    type_id="rtmp_stream_source",
+    category=CATEGORY_INPUT,
+    display_name="RTMP Stream",
+    inputs=[PortDescriptor("activation", PORT_TYPE_EVENT_SIGNAL)],
+    outputs=[PortDescriptor("out", PORT_TYPE_VIDEO_FRAMES)],
+    # The very same ParameterDescriptor objects as RTSP_CAMERA_SOURCE, so
+    # the two node types cannot drift and the unified union de-duplicates
+    # them exactly (design D1).
+    parameters=list(_STREAM_SOURCE_PARAMETERS),
+    mappings=_stream_source_mappings(),
+    hardware_dependent=True,
+)
+
+# --------------------------------------------------------------------------
 # Unified input node (Requirements 3.1-3.5, 3.7, 3.9) — a single palette
 # entry whose ``source_kind`` selects which underlying frame source it
 # represents. It never compiles directly: the compiler's
@@ -1562,9 +1710,16 @@ SOURCE_KIND_TO_SOURCE_TYPE = {
     "icam": "icam_source",
     "aravis_camera": "aravis_camera_source",
     "folder": "folder_source",
+    # Appended (additive — rtsp-rtmp-stream-cameras Requirement 1.6): the
+    # two stream kinds expand to the stream source descriptors. Appended
+    # last so every pre-existing kind keeps its position and every
+    # pre-existing unified parameter keeps its position and object (the
+    # stream family's parameter names are all new).
+    "rtsp_camera": "rtsp_camera_source",
+    "rtmp_stream": "rtmp_stream_source",
 }
 
-#: The four retained source descriptors, keyed by their type id. Referenced
+#: The retained source descriptors, keyed by their type id. Referenced
 #: directly (not via ``get_node_type``, which is defined below) so the union
 #: can be built at module import time.
 _UNIFIED_SOURCE_DESCRIPTORS = {
@@ -1572,19 +1727,24 @@ _UNIFIED_SOURCE_DESCRIPTORS = {
     "icam_source": ICAM_SOURCE,
     "aravis_camera_source": ARAVIS_CAMERA_SOURCE,
     "folder_source": FOLDER_SOURCE,
+    # Appended (additive — rtsp-rtmp-stream-cameras Requirement 1.6).
+    "rtsp_camera_source": RTSP_CAMERA_SOURCE,
+    "rtmp_stream_source": RTMP_STREAM_SOURCE,
 }
 
 
 def _unified_source_parameters():
-    """Union of the four source descriptors' parameters, required-relaxed.
+    """Union of the source descriptors' parameters, required-relaxed.
 
     Reuses the live ``ParameterDescriptor`` objects via
     ``dataclasses.replace(p, required=False)`` so the unified node's
     names/types/defaults/constraints cannot drift from the originals
     (Requirement 3.4). Parameters are concatenated in source-kind order and
     de-duplicated by name (only the identical ``gain``/``exposure`` collide,
-    between ``csi_camera_source`` and ``aravis_camera_source``; the first is
-    kept). The only overridden field is ``required`` → ``False``: V4 has no
+    between ``csi_camera_source`` and ``aravis_camera_source``, plus the
+    whole stream family, shared object-for-object between
+    ``rtsp_camera_source`` and ``rtmp_stream_source``; the first is kept).
+    The only overridden field is ``required`` → ``False``: V4 has no
     notion of "required only when source_kind == X", so keeping the
     underlying required flags would fail every unified node; genuine
     required-ness is enforced at compile time by expansion into the
@@ -2197,6 +2357,182 @@ METADATA = NodeTypeDescriptor(
 )
 
 # --------------------------------------------------------------------------
+# Scene analytics node types (additive — rtsp-rtmp-stream-cameras
+# Requirements 13.1, 14.1, 15.1) — executor-level post-processing over a
+# run's Detection_List: counting detections (optionally inside a zone),
+# associating required-class detections with subjects (PPE compliance),
+# and gating runs on a condition that must hold for several consecutive
+# runs.
+#
+# All three are architecture-independent executor bindings
+# (``_same_on_all_archs(executor_binding=<type id>)``, no GStreamer
+# elements): the shared implementation lives in
+# ``workflow_core.analytics.scene`` and runs identically on the device and
+# in the test sandbox. Enum value sets and numeric defaults are imported
+# from that module, so the catalog and the implementation cannot drift.
+# --------------------------------------------------------------------------
+
+#: Shared description prefix for the two ``zone`` parameters (Requirements
+#: 13.1, 14.1): the same JSON polygon shape and bounds, with a per-node
+#: tail stating what the zone gates.
+_ZONE_DESCRIPTION_PREFIX = (
+    "Optional region of interest, as a JSON list of 3 to 32 [x, y] points "
+    "in normalized frame coordinates (0 to 1), e.g. "
+    "[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]. Leave empty to use "
+    "the whole frame. "
+)
+
+#: Shared working example for the two ``zone`` parameters.
+_ZONE_EXAMPLES = ["[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]"]
+
+DETECTION_COUNTER = NodeTypeDescriptor(
+    type_id="detection_counter",
+    category=CATEGORY_POST_PROCESSING,
+    display_name="Detection Counter",
+    inputs=[PortDescriptor("in", PORT_TYPE_INFERENCE_META)],
+    outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
+    parameters=[
+        ParameterDescriptor("classes", "string", required=False, default="",
+                            description="Comma-separated detection labels to "
+                                        "always report (up to 32), e.g. "
+                                        "person, hardhat. Each listed label "
+                                        "is present in the counts, zero when "
+                                        "it was not detected; labels that are "
+                                        "detected but not listed are still "
+                                        "counted.",
+                            examples=["person, hardhat", "bottle"]),
+        ParameterDescriptor("min_confidence", "float", required=False, default=0.0,
+                            constraints={"min": 0.0, "max": 1.0},
+                            description="Ignore detections whose confidence "
+                                        "is below this value (0 to 1), e.g. "
+                                        "0.5. 0 counts every detection.",
+                            examples=[0.0, 0.5]),
+        ParameterDescriptor("zone", "string", required=False, default="",
+                            description=_ZONE_DESCRIPTION_PREFIX
+                            + "Only detections that pass zone_rule are "
+                              "counted.",
+                            examples=list(_ZONE_EXAMPLES)),
+        ParameterDescriptor("zone_rule", "enum", required=False,
+                            default=DEFAULT_ZONE_RULE,
+                            constraints={"values": list(ZONE_RULES)},
+                            description="How a detection passes the zone: "
+                                        "center counts a detection when its "
+                                        "box center lies inside the zone, "
+                                        "overlap when its box intersects the "
+                                        "zone. Ignored when no zone is set.",
+                            examples=list(ZONE_RULES)),
+    ],
+    mappings=_same_on_all_archs(executor_binding="detection_counter"),
+    hardware_dependent=False,
+)
+
+OBJECT_ASSOCIATION = NodeTypeDescriptor(
+    type_id="object_association",
+    category=CATEGORY_POST_PROCESSING,
+    display_name="Object Association",
+    inputs=[PortDescriptor("in", PORT_TYPE_INFERENCE_META)],
+    outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
+    parameters=[
+        ParameterDescriptor("subject_class", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="The detection label of the subjects "
+                                        "being checked, e.g. person. Every "
+                                        "required class is matched against "
+                                        "these detections.",
+                            examples=["person"]),
+        ParameterDescriptor("required_classes", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="1 to 10 comma-separated labels every "
+                                        "subject must have, e.g. hardhat, "
+                                        "vest. A subject is compliant only "
+                                        "when each of these classes has a "
+                                        "detection matched to it.",
+                            examples=["hardhat", "hardhat, vest"]),
+        ParameterDescriptor("min_overlap", "float", required=False,
+                            default=DEFAULT_MIN_OVERLAP,
+                            constraints={"min": 0.05, "max": 1.0},
+                            description="How much of a required-class "
+                                        "detection's own box area must lie "
+                                        "inside a subject's box for the two "
+                                        "to match (0.05 to 1), e.g. 0.5.",
+                            examples=[0.5, 0.8]),
+        ParameterDescriptor("min_confidence", "float", required=False, default=0.0,
+                            constraints={"min": 0.0, "max": 1.0},
+                            description="Ignore subject detections whose "
+                                        "confidence is below this value (0 to "
+                                        "1), e.g. 0.5. 0 takes every subject "
+                                        "detection.",
+                            examples=[0.0, 0.5]),
+        ParameterDescriptor("zone", "string", required=False, default="",
+                            description=_ZONE_DESCRIPTION_PREFIX
+                            + "Only subjects whose box center lies inside the "
+                              "zone are checked.",
+                            examples=list(_ZONE_EXAMPLES)),
+    ],
+    mappings=_same_on_all_archs(executor_binding="object_association"),
+    hardware_dependent=False,
+)
+
+EVENT_GATE = NodeTypeDescriptor(
+    type_id="event_gate",
+    category=CATEGORY_POST_PROCESSING,
+    display_name="Event Gate",
+    inputs=[PortDescriptor("in", PORT_TYPE_INFERENCE_META)],
+    outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
+    parameters=[
+        # The condition reuses the shared Condition_Language description and
+        # examples (Requirement 15.1), prefixed with the dotted analytics
+        # paths an upstream counter / association node contributes.
+        ParameterDescriptor("condition", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="A run counts as true for this gate "
+                                        "while this condition holds; dotted "
+                                        "field paths reach an upstream "
+                                        "analytics node's values, e.g. "
+                                        "association.ppe.violations > 0 or "
+                                        "counter.people.total > 5. "
+                            + CONDITION_LANGUAGE_DESCRIPTION,
+                            examples=list(CONDITION_EXAMPLES)),
+        ParameterDescriptor("activate_after", "int", required=False,
+                            default=DEFAULT_ACTIVATE_AFTER,
+                            constraints={"min": 1, "max": 1000},
+                            description="How many consecutive runs whose "
+                                        "condition is true make the gate "
+                                        "active (1-1000), e.g. 3. A condition "
+                                        "that cannot be evaluated counts as "
+                                        "false.",
+                            examples=[3, 10]),
+        ParameterDescriptor("clear_after", "int", required=False,
+                            default=DEFAULT_CLEAR_AFTER,
+                            constraints={"min": 1, "max": 1000},
+                            description="How many consecutive runs whose "
+                                        "condition is false make the gate "
+                                        "inactive again (1-1000), e.g. 3.",
+                            examples=[3, 10]),
+        ParameterDescriptor("emit", "enum", required=False, default=DEFAULT_EMIT,
+                            constraints={"values": list(EMIT_MODES)},
+                            description="Which runs continue to the nodes "
+                                        "downstream of the gate: on_activate "
+                                        "only the run that activates it, "
+                                        "on_change the activating and the "
+                                        "clearing run, while_active every run "
+                                        "while it is active.",
+                            examples=list(EMIT_MODES)),
+        ParameterDescriptor("repeat_interval_ms", "int", required=False, default=0,
+                            constraints={"min": 0, "max": 86400000},
+                            depends_on="emit=while_active",
+                            description="While the gate is active, let a run "
+                                        "through at most once per this many "
+                                        "milliseconds (0-86400000), e.g. "
+                                        "60000 for at most once a minute. 0 "
+                                        "lets every active run through.",
+                            examples=[0, 60000]),
+    ],
+    mappings=_same_on_all_archs(executor_binding="event_gate"),
+    hardware_dependent=False,
+)
+
+# --------------------------------------------------------------------------
 # Catalog access
 # --------------------------------------------------------------------------
 
@@ -2239,6 +2575,15 @@ NODE_CATALOG = (
     # Appended (additive — workflow-manager-gaps Requirement 6.1): every
     # pre-existing descriptor keeps its position and content.
     METADATA,
+    # Appended (additive — rtsp-rtmp-stream-cameras Requirement 1.7): every
+    # pre-existing descriptor keeps its position and content.
+    RTSP_CAMERA_SOURCE,
+    RTMP_STREAM_SOURCE,
+    # Appended (additive — rtsp-rtmp-stream-cameras Requirements 13.1, 14.1,
+    # 15.1): every pre-existing descriptor keeps its position and content.
+    DETECTION_COUNTER,
+    OBJECT_ASSOCIATION,
+    EVENT_GATE,
 )
 
 _CATALOG_BY_ID = {descriptor.type_id: descriptor for descriptor in NODE_CATALOG}

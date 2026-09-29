@@ -154,6 +154,11 @@ def start_camera_registry_sync():
     # The agent reads Image_Sources only through the existing accessors
     # (11.3/11.4); shadow I/O goes through the existing IoTShadowAccessor
     # (device IoT identity, 12.4). Thing name defaults to AWS_IOT_THING_NAME.
+    # Stream cameras (rtsp-rtmp-stream-cameras): the agent reports their
+    # health and the device's stream capabilities, and applies Portal
+    # changes that carry credentials.
+    from stream_ingest.manager import get_stream_ingest_manager
+
     # The report cap follows ShadowManager's configured document size limit,
     # read through IPC GetConfiguration (uncached, so a deployment raising
     # the limit takes effect at the agent's next refresh).
@@ -165,6 +170,7 @@ def start_camera_registry_sync():
         shadow_size_limit_provider=shadow_manager_size_limit_provider(
             defect_detection_config.get_component_config
         ),
+        stream_ingest=get_stream_ingest_manager(),
     )
 
     # Build the delta subscription pieces before starting anything, so a

@@ -1785,13 +1785,17 @@ def run_bridged_pipeline(
     )
     from gi.repository.GLib import GError
     from gstreamer.frame_stride import reconcile_to_caps_stride
-    from gstreamer.gst_pipeline import PIPELINE_TIMEOUT_SEC, GstPipelineManager
+    from dda_triton.native_calls import TRITON_NATIVE_LOCK
+    from gstreamer.gst_pipeline import PIPELINE_TIMEOUT_SEC, GstPipelineManager, release_bus_watch
 
     manager = GstPipelineManager()  # reused for its parse_msg tag parsing
     parsed_tag_values: dict = {}
     pipeline_error: dict = {}
     pipeline = None
     loop = None
+    # Released in ``finally`` (see gst_pipeline.release_bus_watch).
+    watched_bus = None
+    bus_handler_id = None
 
     def fail(message, error=None):
         if "message" not in pipeline_error:
@@ -2003,7 +2007,8 @@ def run_bridged_pipeline(
 
         bus = pipeline.get_bus()
         bus.add_signal_watch()
-        bus.connect("message", on_message)
+        watched_bus = bus
+        bus_handler_id = bus.connect("message", on_message)
 
         def _watchdog():
             if loop.is_running():
@@ -2015,7 +2020,9 @@ def run_bridged_pipeline(
 
         watchdog_id = GLib.timeout_add_seconds(PIPELINE_TIMEOUT_SEC, _watchdog)
 
-        ret = pipeline.set_state(Gst.State.PLAYING)
+        # emltriton initializes during this call; see TRITON_NATIVE_LOCK.
+        with TRITON_NATIVE_LOCK:
+            ret = pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
             # Synchronous failure: the loop never ran, so drain any ERROR the
             # failing element already posted to the bus (e.g. a Triton
@@ -2059,6 +2066,7 @@ def run_bridged_pipeline(
     finally:
         if pipeline is not None:
             pipeline.set_state(Gst.State.NULL)
+        release_bus_watch(watched_bus, bus_handler_id)
         for bridge in bridges:
             bridge.stop()
     return parsed_tag_values

@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 _watcher: Optional[WorkflowWatcher] = None
 _executor_instance = None
 _trigger_manager = None
+# Stream cameras (rtsp-rtmp-stream-cameras design components 13, 14): the
+# StreamLeaseKeeper and the ContinuousRunnerManager, both None until
+# started (and on a device where they could not start).
+_stream_lease_keeper = None
+_continuous_manager = None
 _lock = threading.Lock()
 
 
@@ -44,7 +49,8 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
     LocalServer starts normally and devices without Workflow_Components
     behave exactly as before.
     """
-    global _watcher, _executor_instance, _trigger_manager
+    global _watcher, _executor_instance, _trigger_manager, _stream_lease_keeper
+    global _continuous_manager
     with _lock:
         if _watcher is not None:
             return _watcher
@@ -126,6 +132,21 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
                 "Tuning job runner could not start; workflow runs and sample "
                 "export are unaffected"
             )
+        # Continuous run retention (rtsp-rtmp-stream-cameras Requirement
+        # 12). Its own contained block, created before the executor so the
+        # executor can stage continuous runs in RAM. It does no I/O until a
+        # continuous run exists: every other run keeps the capture root,
+        # and its housekeeping starts with the first continuous runner.
+        retention = None
+        try:
+            from workflow_engine.run_retention import RunRetention
+
+            retention = RunRetention()
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "Continuous run retention unavailable; continuous runs write "
+                "to the capture root"
+            )
         # Register the pipeline executor so triggered runs execute instead
         # of staying pending. Contained separately: a broken executor still
         # leaves discovery/registration/status reporting functional.
@@ -142,6 +163,9 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
             _executor_instance = register_workflow_executor(
                 post_run_handler=OutputBindingProcessor(),
                 binding_resolution_provider=watcher.binding_resolution,
+                capture_root_for=(
+                    retention.capture_root_for if retention is not None else None
+                ),
             )
         except Exception:  # noqa: BLE001 - never take LocalServer down
             logger.exception(
@@ -182,6 +206,56 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
             logger.exception(
                 "TriggerSubscriptionManager failed to start; trigger-driven "
                 "workflows will not activate"
+            )
+        # Stream leases (rtsp-rtmp-stream-cameras Requirement 10.3). Its
+        # OWN contained block: a registered workflow that reads a stream
+        # camera holds a Stream_Lease on it, so the camera stays connected
+        # and a triggered run finds a fresh frame; a lease refused at the
+        # device session limit reports the registration invalid until
+        # capacity frees. A device without stream workflows never creates
+        # the Stream_Ingest_Service, and a failure here leaves every other
+        # workflow path untouched.
+        try:
+            from workflow_engine.stream_leases import StreamLeaseKeeper
+
+            keeper = StreamLeaseKeeper(
+                resolution_provider=watcher.binding_resolution,
+                resync=watcher._resync_for_bindings,
+            )
+            watcher.lease_refusal_lookup = keeper.refusal_reason
+            watcher.registrations_listeners.append(
+                keeper.on_registrations_changed
+            )
+            keeper.on_registrations_changed()
+            _stream_lease_keeper = keeper
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "StreamLeaseKeeper failed to start; stream workflows connect "
+                "their camera only when a run starts"
+            )
+        # Continuous stream workflows (rtsp-rtmp-stream-cameras Requirement
+        # 11). Its OWN contained block, after the keeper so a runner's
+        # camera is already leased: one runner thread per registered
+        # workflow whose stream node runs in continuous mode. With none
+        # registered, no thread starts.
+        try:
+            from workflow_engine.continuous_runner import ContinuousRunnerManager
+
+            continuous = ContinuousRunnerManager(
+                resolution_provider=watcher.binding_resolution,
+                retention=retention,
+            )
+            if retention is not None:
+                retention.add_housekeeping_task(continuous.persist_counters)
+            watcher.registrations_listeners.append(
+                continuous.on_registrations_changed
+            )
+            continuous.on_registrations_changed()
+            _continuous_manager = continuous
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "ContinuousRunnerManager failed to start; continuous stream "
+                "workflows will not run"
             )
     return _watcher
 
@@ -431,3 +505,33 @@ def invalid_reason(registration_id: str) -> Optional[str]:
     if watcher is None:
         return None
     return watcher.invalid_reason(registration_id)
+
+
+def get_stream_lease_keeper():
+    """The process-wide StreamLeaseKeeper, or None (mirrors
+    :func:`get_trigger_manager`)."""
+    return _stream_lease_keeper
+
+
+def get_continuous_manager():
+    """The process-wide ContinuousRunnerManager, or None."""
+    return _continuous_manager
+
+
+def notable_execution_ids(registration_id: str) -> list:
+    """A continuous registration's retained Notable_Runs, newest first;
+    empty for any other registration or without run retention."""
+    manager = get_continuous_manager()
+    if manager is None:
+        return []
+    return manager.notable_execution_ids(registration_id) or []
+
+
+def continuous_status(registration_id: str) -> Optional[dict]:
+    """The Continuous status document of a registration whose stream node
+    runs in ``continuous`` mode (design "Continuous status"), or None for
+    any other registration and when the runner manager is not running."""
+    manager = get_continuous_manager()
+    if manager is None:
+        return None
+    return manager.status(registration_id)

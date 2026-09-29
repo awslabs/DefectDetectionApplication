@@ -12,10 +12,25 @@
  * parsing the structured 409/503/502 rejections of the submission path
  * (deployments.py). Kept free of React/DOM so the task 12.2 component
  * and property tests can target the logic directly.
+ *
+ * Stream_Camera_Source_Nodes (rtsp-rtmp-stream-cameras task 11.6 —
+ * Requirements 9.3, 9.4, 9.5): an override carries the node's Stream_URL
+ * as `url`, checked with the shared Stream_URL rules, and a failed
+ * Stream_Health state is a degraded condition.
  */
 import type { JsonValue } from '../workflows/types';
 import type { CameraSourceEntry } from '../workflows/cameraReference';
-import { cameraDeviceValue, cameraDisplayName } from '../workflows/cameraReference';
+import {
+  cameraDeviceValue,
+  cameraDisplayName,
+  streamCameraDetails,
+} from '../workflows/cameraReference';
+import {
+  checkStreamUrl,
+  pyStrip,
+  SCHEMES_BY_NODE_TYPE,
+  STREAM_SOURCE_TYPES,
+} from '../workflows/streamUrl';
 
 /** Keep in sync with deployments.py WORKFLOW_COMPONENT_PREFIX. */
 export const WORKFLOW_COMPONENT_PREFIX = 'dda.workflow.';
@@ -107,6 +122,11 @@ export interface CameraBindingContext {
  * (`suggested` marks an unconfirmed hint pre-selection the user can see
  * and change, 8.5), a manual override carrying explicit parameter values
  * (device path at minimum, 8.4), or still unbound (8.7).
+ *
+ * An override's `device` holds the value of the node type's identity
+ * parameter (`overrideIdentityParameter`): the device path for camera
+ * nodes, and the Stream_URL for a Stream_Camera_Source_Node
+ * (rtsp-rtmp-stream-cameras Requirement 9.4).
  */
 export type BindingCell =
   | { mode: 'camera'; cameraSourceId: string; suggested: boolean }
@@ -117,6 +137,72 @@ export type BindingCell =
 export type BindingSelections = Record<string, Record<string, BindingCell>>;
 
 const UNBOUND: BindingCell = { mode: 'unbound' };
+
+// ---------------------------------------------------------------------------
+// Manual override identity parameter (rtsp-rtmp-stream-cameras 9.4)
+// ---------------------------------------------------------------------------
+
+/** The override parameter of every node type without an entry below. */
+export const DEFAULT_OVERRIDE_PARAMETER = 'device';
+
+/**
+ * The node parameter a manual override value sets, per node type: a
+ * Stream_Camera_Source_Node is identified by its Stream_URL (`url`),
+ * which deployments.py validates as a Stream_URL for the node's protocol.
+ * Every other node type keeps `device` (design component 6), including
+ * the Aravis node, whose pre-existing `device` override gap is out of
+ * scope.
+ */
+export const OVERRIDE_IDENTITY_PARAMETERS: Readonly<Record<string, string>> = {
+  rtsp_camera_source: 'url',
+  rtmp_stream_source: 'url',
+};
+
+/** Whether `nodeType` is a Stream_Camera_Source_Node type. */
+export function isStreamBindingNode(nodeType: string | null | undefined): boolean {
+  return typeof nodeType === 'string' && STREAM_SOURCE_TYPES.has(nodeType);
+}
+
+/** The parameter a manual override sets on a node of `nodeType`. */
+export function overrideIdentityParameter(nodeType: string | null | undefined): string {
+  if (
+    typeof nodeType === 'string' &&
+    Object.prototype.hasOwnProperty.call(OVERRIDE_IDENTITY_PARAMETERS, nodeType)
+  ) {
+    return OVERRIDE_IDENTITY_PARAMETERS[nodeType];
+  }
+  return DEFAULT_OVERRIDE_PARAMETER;
+}
+
+/**
+ * The value an override cell submits, or '' when it has none. A
+ * Stream_URL is stripped with Python's whitespace set, so the value the
+ * matrix checks is exactly the value deployments.py checks; a device
+ * path keeps the existing `trim()`.
+ */
+export function overrideValue(nodeType: string | null | undefined, cell: BindingCell): string {
+  if (cell.mode !== 'override') {
+    return '';
+  }
+  return isStreamBindingNode(nodeType) ? pyStrip(cell.device) : cell.device.trim();
+}
+
+/**
+ * The Stream_URL problem of a stream override value, or null when the
+ * value is valid or empty (an empty override is unbound, not invalid).
+ * Uses the node type's accepted schemes, as deployments.py
+ * _override_errors does.
+ */
+export function streamOverrideProblem(
+  nodeType: string | null | undefined,
+  value: string
+): string | null {
+  if (!isStreamBindingNode(nodeType) || pyStrip(value) === '') {
+    return null;
+  }
+  const problem = checkStreamUrl(pyStrip(value), SCHEMES_BY_NODE_TYPE[nodeType as string] ?? []);
+  return problem === null ? null : problem.message;
+}
 
 /** The cell of one node on one device, defaulting to unbound. */
 export function getBindingCell(
@@ -184,15 +270,23 @@ export function withBindingCell(
 
 /**
  * The `camera_bindings` request payload (deployments.py contract):
- * {thing: {node_id: {cameraSourceId} | {override: {device}}}}. A
+ * {thing: {node_id: {cameraSourceId} | {override: {param: value}}}}. A
  * suggested pre-selection counts as a selection (8.5 — the user saw it
  * in the matrix and left it in place); unbound cells and overrides
- * without a device path are omitted (the backend rejects them as
- * unbound, 8.7).
+ * without a value are omitted (the backend rejects them as unbound, 8.7).
+ *
+ * `nodes` (the context's `camera_input_nodes`) gives each node's type,
+ * so an override of a Stream_Camera_Source_Node emits `{override: {url}}`
+ * (rtsp-rtmp-stream-cameras Requirement 9.4). Every other node, and every
+ * node when `nodes` is omitted, emits `{override: {device}}` as before.
  */
 export function buildCameraBindings(
-  selections: BindingSelections
+  selections: BindingSelections,
+  nodes?: readonly BindingContextNode[]
 ): Record<string, Record<string, { cameraSourceId: string } | { override: Record<string, JsonValue> }>> {
+  const nodeTypes = new Map<string, string>(
+    (nodes ?? []).map((node) => [node.node_id, node.node_type])
+  );
   const payload: Record<
     string,
     Record<string, { cameraSourceId: string } | { override: Record<string, JsonValue> }>
@@ -201,8 +295,14 @@ export function buildCameraBindings(
     for (const [nodeId, cell] of Object.entries(cells)) {
       if (cell.mode === 'camera' && cell.cameraSourceId !== '') {
         (payload[device] ??= {})[nodeId] = { cameraSourceId: cell.cameraSourceId };
-      } else if (cell.mode === 'override' && cell.device.trim() !== '') {
-        (payload[device] ??= {})[nodeId] = { override: { device: cell.device.trim() } };
+      } else if (cell.mode === 'override') {
+        const nodeType = nodeTypes.get(nodeId);
+        const value = overrideValue(nodeType, cell);
+        if (value !== '') {
+          (payload[device] ??= {})[nodeId] = {
+            override: { [overrideIdentityParameter(nodeType)]: value },
+          };
+        }
       }
     }
   }
@@ -228,15 +328,48 @@ export function unboundCells(
   for (const device of Object.keys(context.targets)) {
     for (const node of context.camera_input_nodes) {
       const cell = getBindingCell(selections, device, node.node_id);
+      // The same value test buildCameraBindings applies, so a cell is
+      // reported unbound exactly when its binding would be omitted.
       const bound =
         (cell.mode === 'camera' && cell.cameraSourceId !== '') ||
-        (cell.mode === 'override' && cell.device.trim() !== '');
+        overrideValue(node.node_type, cell) !== '';
       if (!bound) {
         unbound.push({ device, nodeId: node.node_id });
       }
     }
   }
   return unbound;
+}
+
+/** A stream override whose Stream_URL the backend would reject (9.4). */
+export interface InvalidOverrideCell {
+  device: string;
+  nodeId: string;
+  message: string;
+}
+
+/**
+ * The manual overrides of Stream_Camera_Source_Nodes whose Stream_URL
+ * fails the rules of Requirements 2.1 and 2.2, with the message the
+ * backend would return. The submission path checks these before
+ * submitting anything, as it does unbound cells, so a rejected workflow
+ * deployment never follows an already-created one.
+ */
+export function invalidOverrideCells(
+  context: CameraBindingContext,
+  selections: BindingSelections
+): InvalidOverrideCell[] {
+  const invalid: InvalidOverrideCell[] = [];
+  for (const device of Object.keys(context.targets)) {
+    for (const node of context.camera_input_nodes) {
+      const cell = getBindingCell(selections, device, node.node_id);
+      const message = streamOverrideProblem(node.node_type, overrideValue(node.node_type, cell));
+      if (message !== null) {
+        invalid.push({ device, nodeId: node.node_id, message });
+      }
+    }
+  }
+  return invalid;
 }
 
 // ---------------------------------------------------------------------------
@@ -258,17 +391,26 @@ export interface CameraBindingWarning {
   message: string;
 }
 
+/** The degraded condition of a failed Stream_Health state (deployments.py). */
+export const CAMERA_CONDITION_STREAM_FAILED = 'stream-failed';
+
 /**
  * The Requirement 9.3 degraded conditions of a registry entry, in the
  * backend's order. Keep in sync with deployments.py
- * _degraded_source_conditions.
+ * _degraded_source_conditions: a last reported Stream_Health state of
+ * `failed` adds `stream-failed` last (rtsp-rtmp-stream-cameras
+ * Requirement 9.5), so the warning id of every entry without one is
+ * unchanged.
  */
-function degradedConditions(entry: CameraSourceEntry): string[] {
+export function degradedConditions(entry: CameraSourceEntry): string[] {
   const conditions: string[] = [];
   if (entry.absent) conditions.push('absent');
   if (entry.stale) conditions.push('stale');
   if (entry.sync_status === 'pending' || entry.sync_status === 'failed') {
     conditions.push(entry.sync_status);
+  }
+  if (streamCameraDetails(entry).health === 'failed') {
+    conditions.push(CAMERA_CONDITION_STREAM_FAILED);
   }
   return conditions;
 }
@@ -453,13 +595,37 @@ export function cameraOptionDescription(camera: CameraSourceEntry): string {
   return parts.join(' • ');
 }
 
-/** Status tags of a Camera_Source option (stale/absent/sync status). */
+/** The tag of each coarse Stream_Health state; a failure names the stream. */
+const STREAM_HEALTH_TAGS: Readonly<Record<string, string>> = {
+  streaming: 'streaming',
+  reconnecting: 'reconnecting',
+  failed: 'stream failed',
+  idle: 'idle',
+};
+
+/**
+ * Status tags of a Camera_Source option (stale/absent/sync status), then,
+ * for a stream camera, its reported codec, resolution and coarse
+ * Stream_Health (rtsp-rtmp-stream-cameras Requirement 16.4). Only stream
+ * entries carry `capabilities.stream`, so every other entry's tags are
+ * unchanged.
+ */
 export function cameraOptionTags(camera: CameraSourceEntry): string[] {
   const tags: string[] = [];
   if (camera.absent) tags.push('absent');
   if (camera.stale) tags.push('stale');
   if (camera.sync_status && camera.sync_status !== 'synced') {
     tags.push(camera.sync_status);
+  }
+  const stream = streamCameraDetails(camera);
+  if (stream.codec !== null) tags.push(stream.codec);
+  if (stream.resolution !== null) tags.push(stream.resolution);
+  if (stream.health !== null) {
+    tags.push(
+      Object.prototype.hasOwnProperty.call(STREAM_HEALTH_TAGS, stream.health)
+        ? STREAM_HEALTH_TAGS[stream.health]
+        : stream.health
+    );
   }
   return tags;
 }

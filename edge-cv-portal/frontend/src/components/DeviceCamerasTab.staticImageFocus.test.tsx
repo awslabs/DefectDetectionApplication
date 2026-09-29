@@ -382,7 +382,8 @@ describe('Property 1 (Bug Condition, Defect 2): arriving through the pin shortcu
  *   `device-cameras-table`: all present
  *
  * Create-form type options: exactly
- * `["Camera (V4L2)", "NVIDIA CSI", "RTSP", "Folder", "ICam"]`, with
+ * `["Camera (V4L2)", "NVIDIA CSI", "RTSP", "Folder", "ICam", "RTMP"]`
+ * (RTMP appended by rtsp-rtmp-stream-cameras), with
  * `Camera (V4L2)` preselected — no `StaticImage` entry.
  *
  * Role gate: `DEVICE_MUTATION_ROLES` is `["Operator", "UseCaseAdmin", "PortalAdmin"]`;
@@ -427,7 +428,7 @@ describe('Property 2 (Preservation, Defect 2): arriving without the focus flag',
     expect(screen.getByTestId('static-image-panel')).toBeInTheDocument();
   });
 
-  it('offers exactly the five existing create-form types, without StaticImage (Requirement 3.8)', async () => {
+  it('offers exactly the existing create-form types plus RTMP, without StaticImage (Requirement 3.8)', async () => {
     render(<FocusableDeviceCamerasTab deviceId={DEVICE_ID} usecaseId={USECASE_ID} />);
     await waitForLoaded();
 
@@ -447,8 +448,9 @@ describe('Property 2 (Preservation, Defect 2): arriving without the focus flag',
       .map((option) => option.getElement().textContent);
 
     // The recorded option list, in order. StaticImage stays absent: the
-    // backend rejects manual creation of discovery-managed sources.
-    expect(options).toEqual(['Camera (V4L2)', 'NVIDIA CSI', 'RTSP', 'Folder', 'ICam']);
+    // backend rejects manual creation of discovery-managed sources. RTMP
+    // is appended last by rtsp-rtmp-stream-cameras (Requirement 5.1).
+    expect(options).toEqual(['Camera (V4L2)', 'NVIDIA CSI', 'RTSP', 'Folder', 'ICam', 'RTMP']);
     expect(options).not.toContain('StaticImage');
     expect(options).not.toContain('Static Image Camera');
   });

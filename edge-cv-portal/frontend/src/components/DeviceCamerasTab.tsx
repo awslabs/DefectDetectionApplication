@@ -22,6 +22,7 @@ import {
   Badge,
   Box,
   Button,
+  Checkbox,
   Container,
   FileUpload,
   FormField,
@@ -45,10 +46,14 @@ import {
   cameraDisplayName,
   CameraConflictEvent,
   CameraSourceEntry,
+  CameraSourceMutationBody,
   DeviceCameraConflictsResponse,
   DeviceCamerasResponse,
   StaticImagePinStatusResponse,
+  streamCameraDetails,
+  StreamCredentialsInput,
 } from '../pages/workflows/cameraReference';
+import { checkStreamUrl, SCHEMES_BY_SOURCE_TYPE } from '../pages/workflows/streamUrl';
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for the task 8.2 component tests)
@@ -159,6 +164,175 @@ export function parseParamsInput(
     return { params: parsed as Record<string, JsonValue> };
   } catch {
     return { error: 'Parameters must be valid JSON' };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stream cameras (rtsp-rtmp-stream-cameras Requirements 5.1, 5.7, 16.4)
+// ---------------------------------------------------------------------------
+
+/** The Camera_Source types with the typed stream form. */
+export const STREAM_CAMERA_TYPES: readonly string[] = ['RTSP', 'RTMP'];
+
+export function isStreamCameraType(type?: string | null): boolean {
+  return typeof type === 'string' && STREAM_CAMERA_TYPES.includes(type);
+}
+
+/** Stream settings and their domains (Requirement 4.1); '' = device default. */
+export const STREAM_TRANSPORTS = ['tcp', 'udp', 'auto'] as const;
+export const STREAM_DECODER_POLICIES = ['auto', 'hardware', 'software'] as const;
+const STREAM_INTEGER_SETTINGS: {
+  key: 'latencyMs' | 'maxFrameDimension' | 'stallTimeoutS';
+  label: string;
+  min: number;
+  max: number;
+  rtspOnly: boolean;
+}[] = [
+  { key: 'latencyMs', label: 'Latency (ms)', min: 0, max: 5000, rtspOnly: true },
+  { key: 'maxFrameDimension', label: 'Maximum frame dimension', min: 320, max: 4096, rtspOnly: false },
+  { key: 'stallTimeoutS', label: 'Stall timeout (s)', min: 2, max: 60, rtspOnly: false },
+];
+
+/** The typed form of a stream Camera_Source. Credential inputs are write-only. */
+export interface StreamFormFields {
+  url: string;
+  transport: string;
+  latencyMs: string;
+  decoder: string;
+  maxFrameDimension: string;
+  stallTimeoutS: string;
+  username: string;
+  password: string;
+  urlSecret: string;
+  clearCredentials: boolean;
+  /** Whether the stored entry already has credentials (edit mode). */
+  credentialsConfigured: boolean;
+}
+
+export function emptyStreamForm(): StreamFormFields {
+  return {
+    url: '',
+    transport: '',
+    latencyMs: '',
+    decoder: '',
+    maxFrameDimension: '',
+    stallTimeoutS: '',
+    username: '',
+    password: '',
+    urlSecret: '',
+    clearCredentials: false,
+    credentialsConfigured: false,
+  };
+}
+
+/**
+ * The stream form of an existing entry: its (already redacted) URL and
+ * settings. The credential inputs always start empty: the registry never
+ * returns a credential value (Requirement 5.7).
+ */
+export function streamFormFromCamera(camera: CameraSourceEntry): StreamFormFields {
+  const params = camera.params ?? {};
+  const text = (value: JsonValue | undefined) =>
+    value === undefined || value === null ? '' : String(value);
+  return {
+    ...emptyStreamForm(),
+    url: text(params.url),
+    transport: text(params.transport),
+    latencyMs: text(params.latencyMs),
+    decoder: text(params.decoder),
+    maxFrameDimension: text(params.maxFrameDimension),
+    stallTimeoutS: text(params.stallTimeoutS),
+    credentialsConfigured: streamCameraDetails(camera).credentialsConfigured,
+  };
+}
+
+/**
+ * The create/update body of a stream Camera_Source, or the first problem
+ * with the form. `params` carries only the URL and the settings the
+ * operator set (the device applies its defaults for the rest); typed
+ * credentials go in the write-only `credentials` object, and an empty
+ * credential input keeps what is stored.
+ */
+export function buildStreamCameraBody(
+  name: string,
+  type: string,
+  form: StreamFormFields
+): { body?: CameraSourceMutationBody; error?: string } {
+  const url = form.url.trim();
+  const problem = checkStreamUrl(url, SCHEMES_BY_SOURCE_TYPE[type] ?? []);
+  if (problem !== null) {
+    return { error: problem.message };
+  }
+  const params: Record<string, JsonValue> = { url };
+  const rtsp = type === 'RTSP';
+  if (rtsp && form.transport !== '') {
+    if (!(STREAM_TRANSPORTS as readonly string[]).includes(form.transport)) {
+      return { error: `Transport must be one of ${STREAM_TRANSPORTS.join(', ')}.` };
+    }
+    params.transport = form.transport;
+  }
+  if (form.decoder !== '') {
+    if (!(STREAM_DECODER_POLICIES as readonly string[]).includes(form.decoder)) {
+      return { error: `Decoder must be one of ${STREAM_DECODER_POLICIES.join(', ')}.` };
+    }
+    params.decoder = form.decoder;
+  }
+  for (const setting of STREAM_INTEGER_SETTINGS) {
+    const raw = form[setting.key].trim();
+    if (raw === '' || (setting.rtspOnly && !rtsp)) {
+      continue;
+    }
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < setting.min || value > setting.max) {
+      return {
+        error: `${setting.label} must be a whole number from ${setting.min} to ${setting.max}.`,
+      };
+    }
+    params[setting.key] = value;
+  }
+
+  const credentials: StreamCredentialsInput = {};
+  if (form.username !== '') credentials.username = form.username;
+  if (form.password !== '') credentials.password = form.password;
+  if (form.urlSecret !== '') credentials.urlSecret = form.urlSecret;
+  const typed = Object.keys(credentials).length > 0;
+  if (typed && form.clearCredentials) {
+    return { error: 'Either enter new credentials or remove the stored ones, not both.' };
+  }
+  const body: CameraSourceMutationBody = { name, type, params };
+  if (typed) {
+    body.credentials = credentials;
+  } else if (form.clearCredentials) {
+    body.clearCredentials = true;
+  }
+  return { body };
+}
+
+/** The stream settings a table row shows: URL first, credential flags never. */
+export function summarizeStreamParams(params?: Record<string, JsonValue> | null): string {
+  if (!params) return '-';
+  const keys = ['url', 'transport', 'latencyMs', 'decoder', 'maxFrameDimension', 'stallTimeoutS'];
+  const parts = keys
+    .filter((key) => params[key] !== undefined && params[key] !== null && params[key] !== '')
+    .map((key) => `${key}: ${String(params[key])}`);
+  return parts.length > 0 ? parts.join(', ') : '-';
+}
+
+/** The coarse Stream_Health state as a status indicator type (Req 16.4). */
+export function streamHealthIndicator(
+  health: string | null
+): { type: 'success' | 'in-progress' | 'error' | 'stopped' | 'pending'; label: string } | null {
+  switch (health) {
+    case 'streaming':
+      return { type: 'success', label: 'Streaming' };
+    case 'reconnecting':
+      return { type: 'in-progress', label: 'Reconnecting' };
+    case 'failed':
+      return { type: 'error', label: 'Failed' };
+    case 'idle':
+      return { type: 'stopped', label: 'Idle' };
+    default:
+      return null;
   }
 }
 
@@ -530,6 +704,8 @@ const CAMERA_TYPE_OPTIONS = [
   { label: 'RTSP', value: 'RTSP' },
   { label: 'Folder', value: 'Folder' },
   { label: 'ICam', value: 'ICam' },
+  // rtsp-rtmp-stream-cameras Requirement 5.1
+  { label: 'RTMP', value: 'RTMP' },
 ];
 
 interface CameraFormState {
@@ -538,6 +714,170 @@ interface CameraFormState {
   name: string;
   type: string;
   paramsText: string;
+  /** The typed form, used instead of `paramsText` for RTSP and RTMP. */
+  stream: StreamFormFields;
+}
+
+/**
+ * The typed RTSP/RTMP form (rtsp-rtmp-stream-cameras Requirement 5.1):
+ * the Stream_URL, transport and latency (RTSP only), decoder, maximum
+ * frame dimension and stall timeout, and a write-only credentials
+ * section — masked inputs, left blank to keep what is stored, and a
+ * "remove credentials" option. A stored credential is never displayed.
+ */
+function StreamCameraFields({
+  type,
+  mode,
+  fields,
+  onChange,
+}: {
+  type: string;
+  mode: 'create' | 'edit';
+  fields: StreamFormFields;
+  onChange: (fields: StreamFormFields) => void;
+}) {
+  const set = (patch: Partial<StreamFormFields>) => onChange({ ...fields, ...patch });
+  const rtsp = type === 'RTSP';
+  const optionSelect = (
+    value: string,
+    values: readonly string[],
+    onSelect: (value: string) => void,
+    testId: string
+  ) => {
+    const options = [{ label: 'Device default', value: '' }, ...values.map((v) => ({ label: v, value: v }))];
+    return (
+      <Select
+        selectedOption={options.find((o) => o.value === value) ?? options[0]}
+        onChange={({ detail }) => onSelect(detail.selectedOption.value ?? '')}
+        options={options}
+        data-testid={testId}
+      />
+    );
+  };
+  const example = rtsp
+    ? 'rtsp://192.168.1.64:554/Streaming/Channels/101'
+    : 'rtmp://media.local/live/line1';
+  return (
+    <SpaceBetween size="m">
+      <FormField
+        label="Stream URL"
+        description={`Without credentials, e.g. ${example}. Credentials go in the section below.`}
+      >
+        <Input
+          value={fields.url}
+          onChange={({ detail }) => set({ url: detail.value })}
+          placeholder={example}
+          data-testid="stream-form-url"
+        />
+      </FormField>
+      {rtsp && (
+        <FormField label="Transport" description="Default tcp">
+          {optionSelect(fields.transport, STREAM_TRANSPORTS, (transport) => set({ transport }), 'stream-form-transport')}
+        </FormField>
+      )}
+      {rtsp && (
+        <FormField label="Latency (ms)" description="0 to 5000, default 200">
+          <Input
+            type="number"
+            value={fields.latencyMs}
+            onChange={({ detail }) => set({ latencyMs: detail.value })}
+            data-testid="stream-form-latency"
+          />
+        </FormField>
+      )}
+      <FormField label="Decoder" description="Default auto: hardware when available">
+        {optionSelect(fields.decoder, STREAM_DECODER_POLICIES, (decoder) => set({ decoder }), 'stream-form-decoder')}
+      </FormField>
+      <FormField label="Maximum frame dimension" description="320 to 4096 pixels, default 1920">
+        <Input
+          type="number"
+          value={fields.maxFrameDimension}
+          onChange={({ detail }) => set({ maxFrameDimension: detail.value })}
+          data-testid="stream-form-max-dimension"
+        />
+      </FormField>
+      <FormField label="Stall timeout (s)" description="2 to 60 seconds, default 10">
+        <Input
+          type="number"
+          value={fields.stallTimeoutS}
+          onChange={({ detail }) => set({ stallTimeoutS: detail.value })}
+          data-testid="stream-form-stall-timeout"
+        />
+      </FormField>
+      <Container
+        header={
+          <Header
+            variant="h3"
+            description={
+              mode === 'edit' && fields.credentialsConfigured
+                ? 'Credentials are configured. Leave these blank to keep them.'
+                : 'Optional. Stored in the use-case account and delivered to the device, never shown again.'
+            }
+          >
+            Credentials
+          </Header>
+        }
+      >
+        <SpaceBetween size="s">
+          <FormField label="Username">
+            <Input
+              value={fields.username}
+              onChange={({ detail }) => set({ username: detail.value })}
+              disabled={fields.clearCredentials}
+              autoComplete={false}
+              data-testid="stream-form-username"
+            />
+          </FormField>
+          <FormField label="Password">
+            <Input
+              type="password"
+              value={fields.password}
+              onChange={({ detail }) => set({ password: detail.value })}
+              disabled={fields.clearCredentials}
+              autoComplete={false}
+              data-testid="stream-form-password"
+            />
+          </FormField>
+          {/* The URL secret suffix (glossary Stream_Credentials): an RTMP
+              stream key or a secret query string, appended to the URL
+              only when the device connects. */}
+          <FormField
+            label={rtsp ? 'URL secret' : 'Stream key'}
+            description={
+              rtsp
+                ? 'A secret query string, appended to the URL only when connecting'
+                : 'The stream key or a secret query string, appended to the URL only when connecting'
+            }
+          >
+            <Input
+              type="password"
+              value={fields.urlSecret}
+              onChange={({ detail }) => set({ urlSecret: detail.value })}
+              disabled={fields.clearCredentials}
+              autoComplete={false}
+              data-testid="stream-form-url-secret"
+            />
+          </FormField>
+          {mode === 'edit' && fields.credentialsConfigured && (
+            <Checkbox
+              checked={fields.clearCredentials}
+              onChange={({ detail }) =>
+                set({
+                  clearCredentials: detail.checked,
+                  username: '',
+                  password: '',
+                  urlSecret: '',
+                })
+              }
+              data-testid="stream-form-clear-credentials"
+            >
+              Remove the stored credentials
+            </Checkbox>
+          )}
+        </SpaceBetween>
+      </Container>
+    </SpaceBetween>
+  );
 }
 
 interface DeviceCamerasTabProps {
@@ -655,7 +995,13 @@ export default function DeviceCamerasTab({
 
   const openCreateForm = () => {
     setFormError(null);
-    setForm({ mode: 'create', name: '', type: 'Camera', paramsText: '{\n  "devicePath": "/dev/video0"\n}' });
+    setForm({
+      mode: 'create',
+      name: '',
+      type: 'Camera',
+      paramsText: '{\n  "devicePath": "/dev/video0"\n}',
+      stream: emptyStreamForm(),
+    });
   };
 
   const openEditForm = (camera: CameraSourceEntry) => {
@@ -666,6 +1012,7 @@ export default function DeviceCamerasTab({
       name: camera.name ?? '',
       type: camera.type ?? 'Camera',
       paramsText: JSON.stringify(camera.params ?? {}, null, 2),
+      stream: streamFormFromCamera(camera),
     });
   };
 
@@ -675,15 +1022,25 @@ export default function DeviceCamerasTab({
       setFormError('Name is required');
       return;
     }
-    const parsed = parseParamsInput(form.paramsText);
-    if (parsed.error) {
-      setFormError(parsed.error);
-      return;
+    let body: CameraSourceMutationBody;
+    if (isStreamCameraType(form.type)) {
+      const built = buildStreamCameraBody(form.name.trim(), form.type, form.stream);
+      if (built.error || !built.body) {
+        setFormError(built.error ?? 'Invalid stream camera');
+        return;
+      }
+      body = built.body;
+    } else {
+      const parsed = parseParamsInput(form.paramsText);
+      if (parsed.error) {
+        setFormError(parsed.error);
+        return;
+      }
+      body = { name: form.name.trim(), type: form.type, params: parsed.params };
     }
     try {
       setSaving(true);
       setFormError(null);
-      const body = { name: form.name.trim(), type: form.type, params: parsed.params };
       if (form.mode === 'create') {
         await apiService.createDeviceCamera(deviceId, usecaseId, body);
       } else {
@@ -890,12 +1247,44 @@ export default function DeviceCamerasTab({
           {
             id: 'params',
             header: 'Parameters',
-            cell: (item: CameraSourceEntry) => summarizeRecord(item.params),
+            cell: (item: CameraSourceEntry) => {
+              if (!isStreamCameraType(item.type)) return summarizeRecord(item.params);
+              // Stream cameras: URL and settings, and the credential state
+              // as a badge — never a value (Requirement 5.7).
+              const details = streamCameraDetails(item);
+              return (
+                <SpaceBetween size="xxs">
+                  <span>{summarizeStreamParams(item.params)}</span>
+                  <Badge color={details.credentialsConfigured ? 'green' : 'grey'}>
+                    {details.credentialsConfigured ? 'Credentials configured' : 'No credentials'}
+                  </Badge>
+                </SpaceBetween>
+              );
+            },
           },
           {
             id: 'capabilities',
             header: 'Capabilities',
-            cell: (item: CameraSourceEntry) => summarizeCapabilities(item.capabilities),
+            cell: (item: CameraSourceEntry) => {
+              if (!isStreamCameraType(item.type)) return summarizeCapabilities(item.capabilities);
+              // Reported codec, resolution, decoder and coarse health
+              // (Requirement 16.4).
+              const details = streamCameraDetails(item);
+              const health = streamHealthIndicator(details.health);
+              const reported = [details.codec, details.resolution, details.decoder]
+                .filter((part): part is string => part !== null)
+                .join(' · ');
+              return (
+                <SpaceBetween size="xxs">
+                  {health ? (
+                    <StatusIndicator type={health.type}>{health.label}</StatusIndicator>
+                  ) : (
+                    <span>No stream health reported yet</span>
+                  )}
+                  {reported !== '' && <span>{reported}</span>}
+                </SpaceBetween>
+              );
+            },
           },
           {
             id: 'origin',
@@ -1095,17 +1484,26 @@ export default function DeviceCamerasTab({
                 options={CAMERA_TYPE_OPTIONS}
               />
             </FormField>
-            <FormField
-              label="Parameters"
-              description='Type-specific parameters as a JSON object, e.g. {"devicePath": "/dev/video0"}'
-            >
-              <Textarea
-                value={form.paramsText}
-                onChange={({ detail }) => setForm({ ...form, paramsText: detail.value })}
-                rows={6}
-                data-testid="camera-form-params"
+            {isStreamCameraType(form.type) ? (
+              <StreamCameraFields
+                type={form.type}
+                mode={form.mode}
+                fields={form.stream}
+                onChange={(stream) => setForm({ ...form, stream })}
               />
-            </FormField>
+            ) : (
+              <FormField
+                label="Parameters"
+                description='Type-specific parameters as a JSON object, e.g. {"devicePath": "/dev/video0"}'
+              >
+                <Textarea
+                  value={form.paramsText}
+                  onChange={({ detail }) => setForm({ ...form, paramsText: detail.value })}
+                  rows={6}
+                  data-testid="camera-form-params"
+                />
+              </FormField>
+            )}
           </SpaceBetween>
         )}
       </Modal>

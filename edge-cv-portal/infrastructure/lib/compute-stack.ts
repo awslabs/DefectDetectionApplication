@@ -190,7 +190,14 @@ export class ComputeStack extends cdk.Stack {
           'README.md',
         ],
       }),
-      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
+      // PYTHON_3_12 is listed for the CameraRegistryHandler (3.12 for its
+      // imaging layer), which imports only the stdlib-only
+      // workflow_core.stream_url (rtsp-rtmp-stream-cameras design
+      // component 7). The layer's jsonschema dependency carries a
+      // cp311-only native rpds module, so a 3.12 function must not import
+      // workflow_core.serializer; camera-registry-stream-credentials-infra
+      // .test.ts pins camera_registry.py to workflow_core.stream_url.
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11, lambda.Runtime.PYTHON_3_12],
       description: 'workflow_core shared package (catalog, serializer, validator, compiler) for Workflow Manager',
     });
 
@@ -745,6 +752,21 @@ export class ComputeStack extends cdk.Stack {
       COMPONENT_BUCKET_PREFIX: 'dda-component',
     };
 
+    // The stream camera / scene analytics FEATURE floor
+    // (rtsp-rtmp-stream-cameras Requirement 9.7, design D14): per arch, the
+    // minimum LocalServer version that understands Stream_Camera_Source_Nodes
+    // and Scene_Analytics_Nodes. The Component_Packager
+    // (WorkflowPackagingHandler) and the pre-submit deployment gate
+    // (DeploymentsHandler) read this one literal, so they cannot disagree.
+    // Empty until the first supporting LocalServer builds are published
+    // (spec task 26.3). The empty map FAILS CLOSED: every workflow that uses
+    // the new node types is rejected with STREAM_CAMERAS_UNSUPPORTED_ARCH.
+    // Once filled it must cover exactly ARCH_TO_LOCAL_SERVER_COMPONENT
+    // (test_stream_camera_feature_floor_coverage.py).
+    const streamCameraFeatureFloorEnvironment = {
+      WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({}),
+    };
+
     // Per-model Model_Image_Limit overrides for `llm:` auto-label requests
     // (llm-autolabel-prompt-tuning Req 7.1): a JSON object keyed by model
     // identifier, e.g. {"us.amazon.nova-pro-v1:0": 20, "tighter.model": 4}.
@@ -1163,6 +1185,7 @@ export class ComputeStack extends cdk.Stack {
       role: createLambdaRole('Deployments'),
       environment: {
         ...lambdaEnvironment,
+        ...streamCameraFeatureFloorEnvironment,
         CODE_VERSION: '2025-01-04-deployments',
       },
       // workflow_core: the manual-override path of validate_camera_bindings
@@ -1771,7 +1794,10 @@ export class ComputeStack extends cdk.Stack {
         CODE_VERSION: '2025-02-14-camera-registry',
         COMPONENT_BUCKET: componentBucketNameForPins,
       },
-      layers: [sharedLayer],
+      // workflow_core: the stream camera body validation and view
+      // redaction import workflow_core.stream_url (rtsp-rtmp-stream-cameras
+      // design component 7), so the rules are shared, not copied.
+      layers: [sharedLayer, workflowCoreLayer],
       timeout: cdk.Duration.seconds(30),
       // ≥ 1024 MB for the 50 MB staged-image download + Pillow decode of
       // the pin submit route (design Decision 2).
@@ -1789,6 +1815,36 @@ export class ComputeStack extends cdk.Stack {
       actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
       resources: [
         `arn:aws:s3:::${componentBucketNameForPins}/${staticImagePinPrefix}/*`,
+      ],
+    }));
+
+    // Portal-managed stream camera credentials in single-account setups
+    // (rtsp-rtmp-stream-cameras Requirements 5.3, 5.9, 6.6). The same two
+    // grants as the DDAPortalAccessRole in usecase-account-stack.ts, used
+    // when the Use_Case lives in the Portal account itself. The Secrets
+    // Manager grant is write-only: GetSecretValue is deliberately absent.
+    cameraRegistryHandler.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'StreamCameraCredentialWrite',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'secretsmanager:CreateSecret',
+        'secretsmanager:PutSecretValue',
+        'secretsmanager:UpdateSecretVersionStage',
+        'secretsmanager:DescribeSecret',
+        'secretsmanager:DeleteSecret',
+        'secretsmanager:RestoreSecret',
+        'secretsmanager:TagResource',
+      ],
+      resources: [
+        `arn:aws:secretsmanager:*:${cdk.Aws.ACCOUNT_ID}:secret:dda-portal/stream-camera-credentials/*`,
+      ],
+    }));
+    cameraRegistryHandler.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'StreamCameraDeviceReadGrant',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:GetRolePolicy', 'iam:PutRolePolicy'],
+      resources: [
+        `arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/GreengrassV2TokenExchangeRole`,
       ],
     }));
 
@@ -2962,6 +3018,7 @@ export class ComputeStack extends cdk.Stack {
       role: createLambdaRole('WorkflowPackaging'),
       environment: {
         ...lambdaEnvironment,
+        ...streamCameraFeatureFloorEnvironment,
         CODE_VERSION: '2025-01-25-workflow-packaging',
       },
       layers: [sharedLayer, workflowCoreLayer],

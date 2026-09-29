@@ -286,6 +286,24 @@ class NodeStatusCollector:
             if detail:
                 self._details[node_id] = detail
 
+    def mark_warning(self, node_id: Optional[str], detail: Optional[str] = None) -> None:
+        """Mark ONE tracked node ``warning`` with its ``detail``, exactly as
+        an element warning does (rtsp-rtmp-stream-cameras: a scene
+        analytics node that ran without a Detection_List). Never overrides
+        a ``failure``; a warning is kept by :meth:`mark_success_all`. A
+        None/untracked node marks nothing. Fully contained (R8.5)."""
+        try:
+            if node_id is None:
+                return
+            with self._lock:
+                if node_id not in self._statuses or self._statuses.get(node_id) == STATUS_FAILURE:
+                    return
+                self._set_status(node_id, STATUS_WARNING)
+                if detail:
+                    self._details[node_id] = detail
+        except Exception:  # noqa: BLE001 - collector is best-effort (R8.5)
+            logger.debug("NodeStatusCollector.mark_warning ignored an error", exc_info=True)
+
     def set_detail(self, node_id: Optional[str], detail: Optional[str]) -> None:
         """Record ``detail`` for ``node_id`` WITHOUT changing its status.
 

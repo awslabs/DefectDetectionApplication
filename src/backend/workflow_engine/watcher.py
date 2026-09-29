@@ -133,6 +133,13 @@ class WorkflowWatcher:
         # registered trigger-driven artifact sets. Each listener is
         # contained: a failure never disturbs the scan or LocalServer.
         self.registrations_listeners: List[Callable[[], None]] = []
+        # Stream lease refusals (rtsp-rtmp-stream-cameras Requirement
+        # 10.3): ``(registration_id) -> reason or None``, the
+        # StreamLeaseKeeper's view of the registrations whose stream camera
+        # lease the device session limit refused. A refused registration is
+        # reported invalid with that reason until a later pass leases it.
+        # None (unwired) leaves every status exactly as before.
+        self.lease_refusal_lookup: Optional[Callable[[str], Optional[str]]] = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -300,6 +307,13 @@ class WorkflowWatcher:
         status, reason, resolution = self._resolve_camera_bindings(
             artifact_set, validation
         )
+        if status != STATUS_INVALID:
+            # A stream lease refused at the device session limit makes an
+            # otherwise valid registration unrunnable (rtsp-rtmp-stream-
+            # cameras Requirement 10.3).
+            refusal = self._lease_refusal(registration_id)
+            if refusal:
+                status, reason = STATUS_INVALID, refusal
         is_valid = status != STATUS_INVALID
 
         with self._reasons_lock:
@@ -402,6 +416,18 @@ class WorkflowWatcher:
         if resolution.status != STATUS_RESOLVED:
             return STATUS_INVALID, "; ".join(resolution.errors), resolution
         return validation.status, validation.reason, resolution
+
+    def _lease_refusal(self, registration_id: str) -> Optional[str]:
+        """The stream lease refusal reason for a registration, or None
+        (no lookup wired, nothing refused, or a failing lookup)."""
+        lookup = self.lease_refusal_lookup
+        if lookup is None:
+            return None
+        try:
+            return lookup(registration_id)
+        except Exception:  # noqa: BLE001 - lookup isolation
+            logger.exception("Stream lease refusal lookup failed")
+            return None
 
     def _local_inventory(self):
         """The device-local Camera_Source inventory from the injected

@@ -30,7 +30,10 @@ device with no AWS IoT connectivity), fake Image_Source data behind a fake
 accessor, a fake Camera_Discovery snapshot holder, and a tmp state-store
 path. The fake shadow captures, at the instant of every *successful* write,
 what ``build_inventory`` produces over the then-current device state — the
-oracle each published document is compared against.
+oracle each published document is compared against. It also models the
+merge semantics of a real shadow update (a key omitted from a report stays;
+only an explicit null removes it), so a source deleted while offline must
+be retired by the catch-up, not merely omitted.
 
 Runs with the hypothesis profiles registered in the root conftest
 (``fast`` = 25 examples locally, ``HYPOTHESIS_PROFILE=ci`` = 100).
@@ -49,6 +52,7 @@ from camera_sync import (
     EdgeSyncAgent,
     build_inventory,
 )
+from camera_sync.agent import ABSENCE_TRACKED_IDS, ABSENCE_TRACKED_PREFIXES
 
 # --- generators --------------------------------------------------------------
 
@@ -159,8 +163,12 @@ class _FakeShadowAccessor:
 
     def __init__(self, oracle):
         self.failing = False
-        self.events = []  # ("fail",) | ("ok", document, expected_inventory)
+        self.events = []  # ("fail",) | ("ok", document, expected_inventory, held_before)
         self._oracle = oracle
+        # The camera keys the shadow document holds. A real shadow update
+        # MERGES nested maps: a key omitted from a report stays, and only
+        # an explicit null removes it.
+        self.held = set()
 
     @property
     def successful_writes(self):
@@ -173,7 +181,13 @@ class _FakeShadowAccessor:
         if self.failing:
             self.events.append(("fail",))
             raise ConnectionError("shadow offline")
-        self.events.append(("ok", state["reported"], self._oracle()))
+        held_before = set(self.held)
+        for csid, entry in state["reported"]["cameras"].items():
+            if entry is None:
+                self.held.discard(csid)
+            else:
+                self.held.add(csid)
+        self.events.append(("ok", state["reported"], self._oracle(), held_before))
 
 
 class _FakeImageSourceAccessor:
@@ -220,12 +234,27 @@ def _drive(agent, clock, max_iterations: int) -> bool:
     return False
 
 
-def _assert_complete_current_inventory(document, expected) -> None:
+def _deletable(keys):
+    """The keys a vanished source is deleted under. Discovered hardware is
+    out of scope: this fake discovery drops a vanished camera, where the
+    real Camera_Discovery keeps reporting it absent (Requirement 2.4)."""
+    return {
+        csid for csid in keys
+        if csid not in ABSENCE_TRACKED_IDS and not csid.startswith(ABSENCE_TRACKED_PREFIXES)
+    }
+
+
+def _assert_complete_current_inventory(document, expected, held_before) -> None:
     """The published document is the complete inventory as of publish time:
-    exactly the oracle's entries, each with its full reported content."""
+    exactly the oracle's entries, each with its full reported content, plus
+    an explicit null for each key the shadow held that the inventory no
+    longer has (a source deleted meanwhile) — and for no other key."""
     assert document["schemaVersion"] == SCHEMA_VERSION
     cameras = document["cameras"]
-    assert set(cameras) == {entry.camera_source_id for entry in expected}
+    live = {csid for csid, entry in cameras.items() if entry is not None}
+    retired = {csid for csid, entry in cameras.items() if entry is None}
+    assert live == {entry.camera_source_id for entry in expected}
+    assert retired == _deletable(held_before - live)
     for entry in expected:
         reported = cameras[entry.camera_source_id]
         assert reported["name"] == entry.name
@@ -294,5 +323,14 @@ def test_reconnect_publishes_complete_current_state(steps):
         # Every successful write — in particular the first one after each
         # failure streak — carries the complete current inventory as of the
         # moment it was published, so no change made while offline is lost.
-        for _, document, expected in shadow.successful_writes:
-            _assert_complete_current_inventory(document, expected)
+        for _, document, expected, held_before in shadow.successful_writes:
+            _assert_complete_current_inventory(document, expected, held_before)
+
+        # After the catch-up the shadow itself holds exactly the current
+        # inventory: no source deleted while offline lingers in it.
+        current = {
+            entry.camera_source_id
+            for entry in build_inventory(list(state["sources"].values()), state["snapshot"])
+        }
+        assert current <= shadow.held
+        assert _deletable(shadow.held - current) == set()

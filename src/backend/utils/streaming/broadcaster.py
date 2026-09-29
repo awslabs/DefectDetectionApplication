@@ -63,7 +63,7 @@ import time
 import uuid
 from typing import Callable, Optional
 
-from utils.streaming.backends import AravisBackend, CameraBackend, GStreamerBackend
+from utils.streaming.backends import AravisBackend, CameraBackend, GStreamerBackend, StreamIngestBackend
 from utils.streaming.models import (
     FrameResult,
     FrameStatus,
@@ -159,6 +159,9 @@ def _describe_failed_controls(features) -> str:
 # to Aravis; NVIDIA CSI and ICAM smart cameras map to the GStreamer pipeline path.
 _ARAVIS_SOURCE_TYPE = "Camera"
 _GSTREAMER_SOURCE_TYPES = ("NvidiaCSI", "ICam")
+#: Network stream cameras (rtsp-rtmp-stream-cameras): served from the shared
+#: Stream_Ingest_Service session rather than a device claim of their own.
+_STREAM_SOURCE_TYPES = ("RTSP", "RTMP")
 
 
 class StreamBroadcaster:
@@ -435,6 +438,8 @@ class StreamBroadcaster:
         supply a mock backend.
         """
         source_type = (config or {}).get("type")
+        if getattr(source_type, "value", source_type) in _STREAM_SOURCE_TYPES:
+            return StreamIngestBackend(camera_id, image_source=config, stream_config=self.stream_config)
         if source_type in _GSTREAMER_SOURCE_TYPES:
             return GStreamerBackend(camera_id, image_source=config, stream_config=self.stream_config)
         return AravisBackend(

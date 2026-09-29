@@ -44,12 +44,14 @@ network.
 
 Validates: Requirements 1.3 (expected behavior 2.2)
 """
+import contextlib
 import sys
 import types
 from unittest.mock import patch
 
 import pytest
 
+import utils.ipc_client  # noqa: F401 - imported before any sys.modules fake
 from workflow_engine import output_bindings
 from workflow_engine.output_bindings import (
     OutputBindingError,
@@ -117,6 +119,20 @@ def _fake_awsiot(raise_error):
     }
 
 
+@contextlib.contextmanager
+def _faked_ipc(modules):
+    """``modules`` in ``sys.modules`` for the publisher's lazy imports, and
+    their ``connect`` as the shared IPC client: the publisher reuses the
+    process-wide client (``utils.ipc_client``) rather than connecting per
+    message. The shared-client patches go on first, so ``utils.ipc_client``
+    stays bound to the real ``awsiot`` it was imported with."""
+    connect = modules["awsiot.greengrasscoreipc"].connect
+    with patch("utils.ipc_client.get_ipc_client", connect), \
+            patch("utils.ipc_client.reset_ipc_client", lambda: None), \
+            patch.dict(sys.modules, modules):
+        yield
+
+
 def _unauthorized(cls):
     """The live-device denial: the nucleus rejects the publish and the IPC
     future resolves to a bare UnauthorizedError."""
@@ -136,7 +152,7 @@ class TestDefaultGreengrassPublisherDiagnostics:
         Validates: Requirements 1.3 (expected behavior 2.2)
         """
         modules = _fake_awsiot(_unauthorized)
-        with patch.dict(sys.modules, modules):
+        with _faked_ipc(modules):
             with pytest.raises(Exception) as exc_info:
                 output_bindings._default_greengrass_publisher(
                     TOPIC, '{"is_anomalous": true}', 1)
@@ -178,7 +194,7 @@ class TestRunMqttPublishDenialSurfacing:
         processor = OutputBindingProcessor()  # default greengrass publisher
 
         modules = _fake_awsiot(_unauthorized)
-        with patch.dict(sys.modules, modules):
+        with _faked_ipc(modules):
             with pytest.raises(OutputBindingError) as exc_info:
                 processor.process(None, document, {"is_anomalous": True})
 

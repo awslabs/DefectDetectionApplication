@@ -170,7 +170,12 @@ class TestMappings:
 
 class TestCatalogDiscipline:
     def test_not_a_unified_input_source_kind(self):
-        # Requirement 1.8: SOURCE_KIND_TO_SOURCE_TYPE is unchanged.
+        # Requirement 1.8: SOURCE_KIND_TO_SOURCE_TYPE never offers the
+        # Custom Python source as a unified kind. The literal below is the
+        # whole map; later additive features append to it (the two stream
+        # kinds came with rtsp-rtmp-stream-cameras Requirement 1.6), so the
+        # durable assertion is that the four pre-existing kinds keep their
+        # position and target and that this type id appears nowhere.
         assert TYPE_ID not in SOURCE_KIND_TO_SOURCE_TYPE
         assert TYPE_ID not in SOURCE_KIND_TO_SOURCE_TYPE.values()
         assert SOURCE_KIND_TO_SOURCE_TYPE == {
@@ -178,7 +183,11 @@ class TestCatalogDiscipline:
             "icam": "icam_source",
             "aravis_camera": "aravis_camera_source",
             "folder": "folder_source",
+            "rtsp_camera": "rtsp_camera_source",
+            "rtmp_stream": "rtmp_stream_source",
         }
+        assert list(SOURCE_KIND_TO_SOURCE_TYPE)[:4] == [
+            "csi_camera", "icam", "aravis_camera", "folder"]
 
     def test_catalog_addition_is_a_pure_append(self):
         # Requirement 11.4: additivity as a prefix-order assertion — every

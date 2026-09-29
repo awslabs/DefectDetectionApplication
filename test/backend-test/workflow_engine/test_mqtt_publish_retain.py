@@ -28,6 +28,7 @@ any IPC call, and the nucleus-denial ``RuntimeError`` names
 ``iot:RetainPublish`` only for a retained publish.
 """
 
+import contextlib
 import json
 import sys
 import types
@@ -38,6 +39,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import workflow_engine_test_utils  # noqa: F401 - sets COMPONENT_WORK_PATH
+import utils.ipc_client  # noqa: F401,E402 - imported before any sys.modules fake
 from workflow_engine.output_bindings import (
     AWS_IOT_MAX_QOS,
     AWS_IOT_TLS_PORT,
@@ -436,12 +438,26 @@ def _fake_awsiot(*, with_retain_field, raise_unauthorized=False):
     return modules, state
 
 
+@contextlib.contextmanager
+def _faked_ipc(modules):
+    """``modules`` in ``sys.modules`` for the publisher's lazy imports, and
+    their ``connect`` as the shared IPC client: the publisher reuses the
+    process-wide client (``utils.ipc_client``) rather than connecting per
+    message. The shared-client patches go on first, so ``utils.ipc_client``
+    stays bound to the real ``awsiot`` it was imported with."""
+    connect = modules["awsiot.greengrasscoreipc"].connect
+    with patch("utils.ipc_client.get_ipc_client", connect), \
+            patch("utils.ipc_client.reset_ipc_client", lambda: None), \
+            patch.dict(sys.modules, modules):
+        yield
+
+
 class TestDefaultGreengrassPublisherRetain:
     """# Validates: Requirements 4.4, 4.5, 4.8, 6.1, 6.2"""
 
     def test_retain_true_sets_retain_on_request(self):
         modules, state = _fake_awsiot(with_retain_field=True)
-        with patch.dict(sys.modules, modules):
+        with _faked_ipc(modules):
             _default_greengrass_publisher(_TOPIC, "payload", 1, retain=True)
         request = state["request"]
         assert request.topic_name == _TOPIC
@@ -454,7 +470,7 @@ class TestDefaultGreengrassPublisherRetain:
     @pytest.mark.parametrize("kwargs", [{}, {"retain": False}])
     def test_retain_off_never_assigns_retain(self, kwargs):
         modules, state = _fake_awsiot(with_retain_field=True)
-        with patch.dict(sys.modules, modules):
+        with _faked_ipc(modules):
             _default_greengrass_publisher(_TOPIC, "payload", 0, **kwargs)
         request = state["request"]
         # Exactly the pre-feature three assignments; the SDK default
@@ -466,14 +482,14 @@ class TestDefaultGreengrassPublisherRetain:
     def test_retain_off_on_sdk_without_field_still_publishes(self):
         # Pre-feature behaviour on an old SDK is unaffected by the guard.
         modules, state = _fake_awsiot(with_retain_field=False)
-        with patch.dict(sys.modules, modules):
+        with _faked_ipc(modules):
             _default_greengrass_publisher(_TOPIC, "payload", 0)
         assert state["operations"] == 1
         assert not hasattr(state["request"], "retain")
 
     def test_retain_true_on_sdk_without_field_fails_before_ipc(self):
         modules, state = _fake_awsiot(with_retain_field=False)
-        with patch.dict(sys.modules, modules):
+        with _faked_ipc(modules):
             with pytest.raises(RuntimeError) as excinfo:
                 _default_greengrass_publisher(
                     _TOPIC, "payload", 0, retain=True)
@@ -489,13 +505,13 @@ class TestDefaultGreengrassPublisherRetain:
     def test_denial_text_names_retain_publish_only_when_retained(self):
         retained_modules, _ = _fake_awsiot(
             with_retain_field=True, raise_unauthorized=True)
-        with patch.dict(sys.modules, retained_modules):
+        with _faked_ipc(retained_modules):
             with pytest.raises(RuntimeError) as retained:
                 _default_greengrass_publisher(
                     _TOPIC, "payload", 0, retain=True)
         plain_modules, _ = _fake_awsiot(
             with_retain_field=True, raise_unauthorized=True)
-        with patch.dict(sys.modules, plain_modules):
+        with _faked_ipc(plain_modules):
             with pytest.raises(RuntimeError) as plain:
                 _default_greengrass_publisher(_TOPIC, "payload", 0)
 

@@ -32,7 +32,8 @@ from starlette.status import HTTP_500_INTERNAL_SERVER_ERROR
 
 from exceptions.api.unexpected_type_exception import UnexpectedTypeException
 from model.PipelineConfiguration import PluginDefinition, PipelineConfiguration, PluginArg
-from model.image_source import ImageSourceType
+from model.image_source import ImageSourceType, is_stream_source_type
+from model.stream_source import STREAM_FRAME_PIPELINE
 from model.workflow import Workflow
 from model.output_configuration import OutputConfigurationSchema
 from utils import utils, captured_images_utils, constants
@@ -337,6 +338,11 @@ class GstPipelineBuilder:
             else:
                 file_path = captured_images_utils.get_oldest_image_file_path(self.image_source.get('location'))
                 self._add_file_image_source(file_path)
+        elif is_stream_source_type(source_type):
+            # rtsp-rtmp-stream-cameras Requirement 4.4: a stream frame is
+            # packed RGB pushed into appsrc like a camera frame; there is no
+            # camera processing pipeline to apply.
+            self._add_camera_image_source({}, STREAM_FRAME_PIPELINE)
 
         else:
             raise UnexpectedTypeException(f"Unexpected type: {source_type}", status_code=HTTP_500_INTERNAL_SERVER_ERROR)

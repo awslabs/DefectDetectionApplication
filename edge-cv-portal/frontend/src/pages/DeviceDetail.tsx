@@ -22,7 +22,11 @@ import {
 import { apiService } from '../services/api';
 import { Device, InstalledComponent, DeviceDeployment, ModelProviderStatus } from '../types';
 import DeviceCamerasTab from '../components/DeviceCamerasTab';
+import DeviceStreamCapabilitiesPanel, {
+  isStreamCapabilities,
+} from '../components/DeviceStreamCapabilitiesPanel';
 import {
+  DeviceStreamCapabilities,
   STATIC_IMAGE_FOCUS_PARAM,
   STATIC_IMAGE_FOCUS_VALUE,
   STATIC_VIDEO_FOCUS_VALUE,
@@ -121,6 +125,32 @@ export default function DeviceDetail() {
       setError('Use case ID is required');
       setLoading(false);
     }
+  }, [deviceId, usecaseId]);
+
+  // Device_Stream_Capabilities (rtsp-rtmp-stream-cameras Requirement 16.5)
+  // come with the camera registry read, and only once the device has
+  // reported them. A failed read hides the panel and nothing else: the
+  // rest of the page does not depend on it.
+  const [streamCapabilities, setStreamCapabilities] =
+    useState<DeviceStreamCapabilities | null>(null);
+  useEffect(() => {
+    if (!deviceId || !usecaseId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await apiService.getDeviceCameras(deviceId, usecaseId);
+        const reported = response?.stream_capabilities;
+        if (!cancelled) {
+          setStreamCapabilities(isStreamCapabilities(reported) ? reported : null);
+        }
+      } catch (err) {
+        console.warn('Failed to load the device stream capabilities:', err);
+        if (!cancelled) setStreamCapabilities(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [deviceId, usecaseId]);
 
   // Load log groups when switching to logs tab
@@ -631,6 +661,10 @@ export default function DeviceDetail() {
                       />
                     </SpaceBetween>
                   </Container>
+                )}
+
+                {streamCapabilities && (
+                  <DeviceStreamCapabilitiesPanel capabilities={streamCapabilities} />
                 )}
 
                 {device.tags && Object.keys(device.tags).length > 0 && (

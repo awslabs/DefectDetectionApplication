@@ -38,6 +38,13 @@ import { getEditPath } from "./helpers";
 import { formLayoutStyle } from "styles/common";
 import { setHashValuesInUrl } from "components/utils";
 import { DynamicRouterHashKey } from "components/layout/constants";
+import StreamFields from "../stream/StreamFields";
+import {
+  apiErrorMessage,
+  buildStreamEdit,
+  isStreamType,
+  streamFormDefaults,
+} from "../stream/streamForm";
 
 export default function EditImageSource(): JSX.Element {
   const navigate = useNavigate();
@@ -92,6 +99,12 @@ export default function EditImageSource(): JSX.Element {
               description: values.editDescription,
             }),
           });
+        case ImageSourceType.RTSP:
+        case ImageSourceType.RTMP:
+          return editImageSource(
+            imageSourceId,
+            buildStreamEdit(values, getQuery.data),
+          );
         case ImageSourceType.Folder:
         default:
           return editImageSource(imageSourceId, {
@@ -125,7 +138,8 @@ export default function EditImageSource(): JSX.Element {
       addError({
         content: (
           <>
-            Failed to edit <strong>{values.editName}</strong>. {error.message}
+            Failed to edit <strong>{values.editName}</strong>.{" "}
+            {isStreamType(values.type) ? apiErrorMessage(error) : error.message}
           </>
         ),
         action: (
@@ -144,12 +158,20 @@ export default function EditImageSource(): JSX.Element {
   const form = useForm<SchemaType>({
     resolver: yupResolver(schema),
     mode: "onSubmit",
+    // The stream number fields start as the strings the inputs show; the
+    // resolver casts them to numbers on submit.
     values: {
       editName: getQuery.data?.name ?? "",
       editDescription: getQuery.data?.description ?? "",
       path: getEditPath(getQuery.data?.location) ?? "",
       type: getQuery.data?.type ?? ImageSourceType.Camera,
-    },
+      ...(isStreamType(getQuery.data?.type)
+        ? streamFormDefaults(
+            getQuery.data?.location,
+            getQuery.data?.imageSourceConfiguration?.streamSettings,
+          )
+        : {}),
+    } as unknown as SchemaType,
   });
 
   const type = form.watch("type");
@@ -182,6 +204,16 @@ export default function EditImageSource(): JSX.Element {
         >
           <SpaceBetween direction="vertical" size="l">
             <DetailsInput namePrefix="edit" isLoading={getQuery.isLoading} />
+
+            {(type === ImageSourceType.RTSP ||
+              type === ImageSourceType.RTMP) &&
+              !getQuery.isLoading && (
+                <StreamFields
+                  type={type}
+                  editing
+                  credentialsConfigured={!!getQuery.data?.credentialsConfigured}
+                />
+              )}
 
             {type === ImageSourceType.Folder && (
               <Container>

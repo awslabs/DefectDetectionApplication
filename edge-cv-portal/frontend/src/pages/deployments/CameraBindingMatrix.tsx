@@ -13,6 +13,10 @@
  * confirmation checkboxes feeding `confirmed_warnings` (9.3), and
  * submission rejections are surfaced next to the matrix identifying the
  * node and device (8.7, 9.2).
+ *
+ * A Stream_Camera_Source_Node row offers only the Camera_Sources of its
+ * protocol, and its manual override collects a Stream_URL, checked as it
+ * is typed (rtsp-rtmp-stream-cameras Requirements 9.3, 9.4).
  */
 import {
   Alert,
@@ -20,6 +24,7 @@ import {
   Box,
   Button,
   Checkbox,
+  FormField,
   Header,
   Input,
   Select,
@@ -39,8 +44,16 @@ import {
   describeBindingIssue,
   getBindingCell,
   BindingSelections,
+  isStreamBindingNode,
+  streamOverrideProblem,
 } from './cameraBindings';
-import { isAravisCompatibleCamera, isV4l2CompatibleCamera } from '../workflows/cameraReference';
+import {
+  isAravisCompatibleCamera,
+  isStreamCompatibleCamera,
+  isV4l2CompatibleCamera,
+  STREAM_CAMERA_SOURCE_TYPES,
+} from '../workflows/cameraReference';
+import { SCHEMES_BY_NODE_TYPE } from '../workflows/streamUrl';
 
 export interface CameraBindingMatrixProps {
   context: CameraBindingContext;
@@ -52,6 +65,56 @@ export interface CameraBindingMatrixProps {
   onToggleWarning: (warningId: string, confirmed: boolean) => void;
   /** Validation errors from a rejected submission (409). */
   errors: CameraBindingIssue[];
+}
+
+/** An example Stream_URL for a stream node's override placeholder. */
+function streamUrlExample(nodeType: string): string {
+  const scheme = SCHEMES_BY_NODE_TYPE[nodeType]?.[0] ?? 'rtsp';
+  return scheme.startsWith('rtmp')
+    ? `${scheme}://media.local/live/line1`
+    : `${scheme}://192.168.1.64:554/Streaming/Channels/101`;
+}
+
+/**
+ * The manual-override input of one cell. Camera nodes take a device path
+ * (8.4). A Stream_Camera_Source_Node takes a Stream_URL for its `url`
+ * parameter, checked as it is typed with the rules deployments.py applies
+ * (rtsp-rtmp-stream-cameras Requirement 9.4), so a URL with credentials or
+ * the other protocol's scheme is flagged before submission.
+ */
+function OverrideInput({
+  device,
+  node,
+  value,
+  onChange,
+}: {
+  device: string;
+  node: BindingContextNode;
+  value: string;
+  onChange: (cell: BindingCell) => void;
+}) {
+  if (!isStreamBindingNode(node.node_type)) {
+    return (
+      <Input
+        value={value}
+        onChange={({ detail }) => onChange({ mode: 'override', device: detail.value })}
+        placeholder="Device path, e.g. /dev/video0"
+        ariaLabel={`Manual override device path for node ${node.node_id} on device ${device}`}
+      />
+    );
+  }
+  const problem = streamOverrideProblem(node.node_type, value);
+  return (
+    <FormField errorText={problem ?? undefined} stretch>
+      <Input
+        value={value}
+        onChange={({ detail }) => onChange({ mode: 'override', device: detail.value })}
+        placeholder={`Stream URL, e.g. ${streamUrlExample(node.node_type)}`}
+        ariaLabel={`Manual override Stream URL for node ${node.node_id} on device ${device}`}
+        invalid={problem !== null}
+      />
+    </FormField>
+  );
 }
 
 function BindingCellControl({
@@ -74,15 +137,23 @@ function BindingCellControl({
   // an icam_source row only V4L2-compatible sources — the same predicates
   // the Workflow_Builder picker uses — so users are not offered bindings
   // the validator would reject (aravis-camera-input Requirement 5.1,
-  // csi-icam-input-nodes Requirement 5.2). Hint pre-selection is
-  // unaffected: the cell state is seeded upstream by
-  // initialBindingSelections.
+  // csi-icam-input-nodes Requirement 5.2). A stream node row offers only
+  // the Camera_Sources of its own protocol (rtsp-rtmp-stream-cameras
+  // Requirement 9.3). Hint pre-selection is unaffected: the cell state is
+  // seeded upstream by initialBindingSelections.
   const cameras =
     node.node_type === 'aravis_camera_source'
       ? allCameras.filter(isAravisCompatibleCamera)
       : node.node_type === 'icam_source'
         ? allCameras.filter(isV4l2CompatibleCamera)
-        : allCameras;
+        : isStreamBindingNode(node.node_type)
+          ? allCameras.filter((camera) => isStreamCompatibleCamera(node.node_type, camera))
+          : allCameras;
+  // The Camera_Source type a stream row binds to ('RTSP' / 'RTMP'), named
+  // in the empty-list text; null for every other node type.
+  const streamProtocol = isStreamBindingNode(node.node_type)
+    ? STREAM_CAMERA_SOURCE_TYPES[node.node_type] ?? null
+    : null;
 
   // Never-synced targets are restricted to manual override (8.8).
   if (neverSynced) {
@@ -91,11 +162,11 @@ function BindingCellControl({
         <Box color="text-status-warning" fontSize="body-s">
           Never synced — manual override only
         </Box>
-        <Input
+        <OverrideInput
+          device={device}
+          node={node}
           value={cell.mode === 'override' ? cell.device : ''}
-          onChange={({ detail }) => onChange({ mode: 'override', device: detail.value })}
-          placeholder="Device path, e.g. /dev/video0"
-          ariaLabel={`Manual override device path for node ${node.node_id} on device ${device}`}
+          onChange={onChange}
         />
       </SpaceBetween>
     );
@@ -104,12 +175,7 @@ function BindingCellControl({
   if (cell.mode === 'override') {
     return (
       <SpaceBetween size="xxs">
-        <Input
-          value={cell.device}
-          onChange={({ detail }) => onChange({ mode: 'override', device: detail.value })}
-          placeholder="Device path, e.g. /dev/video0"
-          ariaLabel={`Manual override device path for node ${node.node_id} on device ${device}`}
-        />
+        <OverrideInput device={device} node={node} value={cell.device} onChange={onChange} />
         <Button
           variant="inline-link"
           onClick={() => onChange({ mode: 'unbound' })}
@@ -150,9 +216,19 @@ function BindingCellControl({
           }
         }}
         options={options}
-        placeholder={cameras.length === 0 ? 'No cameras registered' : 'Select camera'}
+        placeholder={
+          cameras.length > 0
+            ? 'Select camera'
+            : streamProtocol !== null
+              ? `No ${streamProtocol} cameras registered`
+              : 'No cameras registered'
+        }
         disabled={cameras.length === 0}
-        empty="No cameras registered for this device"
+        empty={
+          streamProtocol !== null
+            ? `No ${streamProtocol} cameras registered for this device`
+            : 'No cameras registered for this device'
+        }
         ariaLabel={`Camera binding for node ${node.node_id} on device ${device}`}
         // The matrix renders inside a Table whose horizontally scrollable
         // wrapper establishes a clipping context, so an inline-rendered

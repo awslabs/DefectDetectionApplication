@@ -46,12 +46,20 @@ public:
      HRESULT _getModelIndex(std::string& buffer) {
         HRESULT hr = S_OK;
         const char* local_buffer;
-        TRITONSERVER_Message* repoMetaData;
+        TRITONSERVER_Message* repoMetaData = nullptr;
         size_t sz;
         CHECK_TRITON_RES(TRITONSERVER_ServerModelIndex(this->_server, 0,&repoMetaData));
         CHECK_TRITON_RES(TRITONSERVER_MessageSerializeToJson(repoMetaData, &local_buffer, &sz));
-        buffer = local_buffer;
+        buffer.assign(local_buffer, sz);
         Cleanup:
+            // The message owns the serialized buffer, copied above. It was
+            // never deleted, and every pipeline start asks for the index
+            // (ModelMetadata), so each workflow run leaked a copy of it
+            // (found on hardware, rtsp-rtmp-stream-cameras task 25.3).
+            if (repoMetaData != nullptr)
+            {
+                TRITONSERVER_MessageDelete(repoMetaData);
+            }
             return hr;
     }
 
@@ -321,8 +329,16 @@ public:
                 }
             }
         }
-        this->_model_meta_dump = _modelMetadata[modelName].dump();
-        return this->_model_meta_dump.c_str();
+        // The returned text lives in a per-thread buffer, valid until this
+        // thread's next call. A member buffer was replaced by ANY thread's
+        // next call, so a caller parsing what it got back could read freed
+        // memory: an uncaught nlohmann parse_error ("attempting to parse an
+        // empty input") aborted the backend when two workflow pipelines
+        // started at once (found on hardware, rtsp-rtmp-stream-cameras task
+        // 25.3). The same holds for ListModels, GetMetrics and GetModelStatus.
+        thread_local std::string model_meta_dump;
+        model_meta_dump = _modelMetadata[modelName].dump();
+        return model_meta_dump.c_str();
     }
 
     const char* ListModels() override
@@ -340,16 +356,20 @@ public:
                     _modelMetadata[name.c_str()]["state"] = j["state"];
             }
         }
-        this->_list_models_dump = _modelMetadata.dump();
-        return this->_list_models_dump.c_str();
+        // Per-thread, as in ModelMetadata.
+        thread_local std::string list_models_dump;
+        list_models_dump = _modelMetadata.dump();
+        return list_models_dump.c_str();
     }
 
     const char* GetMetrics() override {
         HRESULT hr = S_OK;
         std::string index_buffer;
         CHECK_FAIL_MSG(_getMetrics(index_buffer),nullptr, "getting Triton Metrics failed.");
-        this->_prometheus_formatted_string_metrics = std::move(index_buffer);
-        return this->_prometheus_formatted_string_metrics.c_str();
+        // Per-thread, as in ModelMetadata.
+        thread_local std::string prometheus_formatted_string_metrics;
+        prometheus_formatted_string_metrics = std::move(index_buffer);
+        return prometheus_formatted_string_metrics.c_str();
     }
 
     HRESULT GetStatus(IBuffer** ppObj) override
@@ -379,15 +399,18 @@ public:
         HRESULT hr = S_OK;
         std::unique_lock<std::mutex> lock(_metadata_mutex);
         CHECKNULL(modelName, nullptr);
+        // Per-thread, as in ModelMetadata: emltriton asks for the status on
+        // every buffer, from each pipeline's streaming thread.
+        thread_local std::string model_status_dump;
         if(!_modelMetadata.contains(modelName))
         {
             TraceVerbose("Could not find metadata for model %s", modelName);
-            _model_status_dump = "UNKNOWN";
-            return _model_status_dump.c_str();
+            model_status_dump = "UNKNOWN";
+            return model_status_dump.c_str();
         }
-        _model_status_dump = _modelMetadata[modelName]["state"];
-        TraceInfo("Model %s status is %s", modelName, _model_status_dump.c_str());
-        return _model_status_dump.c_str();
+        model_status_dump = _modelMetadata[modelName]["state"];
+        TraceInfo("Model %s status is %s", modelName, model_status_dump.c_str());
+        return model_status_dump.c_str();
     }
 
     HRESULT ProcessRequest(IInferenceRequest* request) override
@@ -504,10 +527,7 @@ private:
     fs::path _tritonServerPath;
     TRITONSERVER_Server* _server = nullptr;
     nlohmann::json _modelMetadata;
-    std::string _list_models_dump;
-    std::string _model_meta_dump;
-    std::string _model_status_dump;
-    std::string _prometheus_formatted_string_metrics;
+
     std::unordered_map<std::string, bool> _loaded_models;
     MultiThreadedJobQueue<std::string> _load_model_job_queue;
     std::mutex _metadata_mutex;

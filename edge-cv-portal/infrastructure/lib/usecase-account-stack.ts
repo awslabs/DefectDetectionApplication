@@ -12,7 +12,7 @@ import { Construct } from 'constructs';
  * - MINOR: New features (new permissions, new resources)
  * - PATCH: Bug fixes
  */
-const STACK_VERSION = '1.6.0';
+const STACK_VERSION = '1.7.0';
 
 export interface UseCaseAccountStackProps extends cdk.StackProps {
   /**
@@ -827,6 +827,48 @@ export class UseCaseAccountStack extends cdk.Stack {
           'ecr:BatchGetImage',
         ],
         resources: ['*'],
+      })
+    );
+
+    // Portal-managed stream camera credentials (rtsp-rtmp-stream-cameras,
+    // Requirements 5.3, 5.8, 5.9, 6.6). The Camera_Registry keeps one secret
+    // per device and camera source under a dedicated prefix in this account,
+    // and withdraws, restores, or schedules deletion of it. Write-only:
+    // GetSecretValue is deliberately NOT granted, so the Portal can never
+    // read a credential back. Devices read their own secrets through the
+    // DDAStreamCameraCredentialRead policy the Portal writes on their
+    // token-exchange role (statement below).
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'StreamCameraCredentialWrite',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'secretsmanager:CreateSecret',
+          'secretsmanager:PutSecretValue',
+          'secretsmanager:UpdateSecretVersionStage',
+          'secretsmanager:DescribeSecret',
+          'secretsmanager:DeleteSecret',
+          'secretsmanager:RestoreSecret',
+          'secretsmanager:TagResource',
+        ],
+        resources: [
+          `arn:aws:secretsmanager:*:${this.account}:secret:dda-portal/stream-camera-credentials/*`,
+        ],
+      })
+    );
+
+    // The inline policies the Portal owns on the devices' token-exchange
+    // role: DDAStreamCameraCredentialRead (each thing reads only its own
+    // stream camera secrets, through ${credentials-iot:ThingName},
+    // Requirement 6.7) and DDAWorkflowTuningSampleAccess
+    // (quality-prompt-tuning). Both are written get-then-put, idempotently.
+    // Inline policies on that one role only: no attach, create, or PassRole.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'DeviceRoleInlinePolicyGrants',
+        effect: iam.Effect.ALLOW,
+        actions: ['iam:GetRolePolicy', 'iam:PutRolePolicy'],
+        resources: [`arn:aws:iam::${this.account}:role/GreengrassV2TokenExchangeRole`],
       })
     );
 

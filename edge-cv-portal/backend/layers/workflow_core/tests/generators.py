@@ -18,6 +18,14 @@ compiler property tests (tasks 2.4, 2.5, 3.4, 4.3-4.8):
    cases; a single node can never satisfy validator check V1, so these
    are intentionally *not* validator-valid.
 
+   ``modbus_write_graph_strategy`` and ``stream_graph_strategy`` are the
+   opt-in per-node-type variants: graphs guaranteed to contain Modbus
+   write nodes, respectively Stream_Camera_Source_Nodes (spelled
+   directly or through the unified ``Input Source`` node) with valid
+   credential-free Stream_URLs. Node types with a single-instance
+   runtime contract stay out of the shared ``graph_strategy`` corpus and
+   are reached through these strategies instead.
+
 2. Defect-seeding combinators - ``seeded_graph_strategy`` produces
    controlled *invalid* graphs for a drawn (or caller-fixed) set of
    defect classes: missing input/output nodes, incompatible-port
@@ -53,6 +61,12 @@ from workflow_core.catalog import (
     get_node_type,
 )
 from workflow_core.catalog.models import ParameterDescriptor
+from workflow_core.catalog.nodes import SOURCE_KIND_TO_SOURCE_TYPE
+from workflow_core.stream_url import (
+    DEFAULT_PORTS,
+    SCHEMES_BY_NODE_TYPE,
+    STREAM_URL_PATTERN,
+)
 from workflow_core.serializer import (
     Connection,
     Node,
@@ -81,6 +95,12 @@ __all__ = [
     "single_node_graph_strategy",
     "valid_parameter_value_strategy",
     "node_parameters_strategy",
+    "STREAM_SOURCE_TYPES",
+    "STREAM_SOURCE_KINDS",
+    "stream_url_strategy",
+    "StreamFeed",
+    "StreamGraph",
+    "stream_graph_strategy",
     "DEFECT_MISSING_INPUT_NODE",
     "DEFECT_MISSING_OUTPUT_NODE",
     "DEFECT_INCOMPATIBLE_CONNECTION",
@@ -136,6 +156,39 @@ _DETACHED_SAFE_INTERMEDIATE_TYPES = (
 
 #: Output-category node types.
 _OUTPUT_TYPES = ("digital_output", "mqtt_publish", "opcua_write", "capture")
+
+# ---------------------------------------------------------------------------
+# Stream camera sources (rtsp-rtmp-stream-cameras Requirements 1.1-1.6)
+# ---------------------------------------------------------------------------
+#
+# The two stream source types are deliberately NOT added to the tuples
+# above. They are Frame_Feed_Source_Nodes: at most one frame-feed source
+# may exist per workflow (the device runtime serves a single Frame_Feed),
+# and Requirement 2.7 pins that a document with no stream node produces
+# exactly the pre-feature findings. Injecting them into the shared
+# ``graph_strategy`` corpus would therefore both break that preservation
+# promise and make previously-valid generated graphs V7-invalid, so the
+# stream types are reached through the dedicated opt-in
+# :func:`stream_graph_strategy` below (the same shape
+# ``modbus_write_graph_strategy`` uses for its node type).
+
+#: The two Stream_Camera_Source_Node types (Requirement 1.1).
+STREAM_SOURCE_TYPES = ("rtsp_camera_source", "rtmp_stream_source")
+
+#: The unified ``Input Source`` kinds that expand to them (Requirement 1.6),
+#: in the same order as :data:`STREAM_SOURCE_TYPES`.
+STREAM_SOURCE_KINDS = ("rtsp_camera", "rtmp_stream")
+
+#: Input types that are not Frame_Feed_Source_Nodes, so they may share a
+#: graph with a stream node without engaging the frame-feed coexistence
+#: rule (Requirement 2.4): the GStreamer-native frame sources and the
+#: digital trigger input.
+_NON_FRAME_FEED_INPUT_TYPES = (
+    "csi_camera_source",
+    "icam_source",
+    "folder_source",
+    "digital_input",
+)
 
 #: Per-instance port typing parameters (custom_python). Clearing these
 #: would change port resolution and cascade into V2 findings, so the
@@ -228,6 +281,117 @@ def _string_value_strategy(constraints: Dict[str, Any]) -> st.SearchStrategy:
     return base.filter(satisfies_lengths)
 
 
+# ---------------------------------------------------------------------------
+# Stream_URL values (rtsp-rtmp-stream-cameras Requirements 1.3, 2.1, 2.2)
+# ---------------------------------------------------------------------------
+
+#: Hosts a Stream_URL may carry: DNS names, IPv4, the bracketed IPv6 form,
+#: and unicode names. None contains whitespace, '@', '/', '?' or '#', so an
+#: assembled URL always satisfies ``STREAM_URL_PATTERN``'s authority class.
+_STREAM_HOSTS = (
+    "cam.local",
+    "camera-7",
+    "192.168.1.64",
+    "10.0.0.7",
+    "media.example.com",
+    "[2001:db8::64]",
+    "[::1]",
+    "caméra.local",
+    "видео.local",
+    "カメラ.local",
+)
+
+#: Paths, each starting with '/' (the pattern's ``[/?][^\s#]*`` tail) and
+#: free of whitespace and '#'.
+_STREAM_PATHS = (
+    "",
+    "/",
+    "/Streaming/Channels/101",
+    "/live/line1",
+    "/axis-media/media.amp",
+    "/cam/realmonitor",
+    "/поток/1",
+    "/ライン-2/stream",
+    "/deep" * 12,
+)
+
+#: Query strings carrying no Secret_Query_Parameter name — a Stream_URL is
+#: credential-free (Requirement 2.2).
+_STREAM_QUERIES = (
+    "",
+    "transport=tcp",
+    "latency=200&profile=main",
+    "subtype=0&channel=1",
+    "codec=h265",
+    "профиль=1",
+)
+
+#: Every stream scheme, for a ``url`` whose node type is not one of the two
+#: stream source types (the unified node's union carries the parameter for
+#: every source kind).
+_ALL_STREAM_SCHEMES = tuple(
+    scheme
+    for schemes in SCHEMES_BY_NODE_TYPE.values()
+    for scheme in schemes
+)
+
+
+@st.composite
+def stream_url_strategy(draw, schemes: Sequence[str] = _ALL_STREAM_SCHEMES):
+    """Valid, credential-free Stream_URLs with a scheme drawn from ``schemes``.
+
+    Covers DNS / IPv4 / bracketed-IPv6 / unicode hosts, an absent, default
+    and non-default port, an absent, root, deep and unicode path, and
+    non-secret query strings. Every produced value is accepted both by the
+    catalog constraint (``STREAM_URL_PATTERN``) and by
+    ``stream_url.check_stream_url`` for the node types those schemes belong
+    to — the property test pins that, since the generated graphs are only
+    "valid workflow definitions" if their URLs are valid.
+    """
+    scheme = draw(st.sampled_from(tuple(schemes)))
+    host = draw(st.sampled_from(_STREAM_HOSTS))
+    port = draw(st.one_of(
+        st.none(),
+        st.just(DEFAULT_PORTS[scheme]),
+        st.integers(min_value=1, max_value=65535),
+    ))
+    path = draw(st.sampled_from(_STREAM_PATHS))
+    query = draw(st.sampled_from(_STREAM_QUERIES))
+    return "{0}://{1}{2}{3}{4}".format(
+        scheme,
+        host,
+        "" if port is None else ":{0}".format(port),
+        path,
+        "" if not query else "?" + query,
+    )
+
+
+def _stream_url_schemes(descriptor, parameters: Dict[str, Any]):
+    """Accepted schemes for ``descriptor``'s Stream_URL parameter.
+
+    ``None`` when the descriptor carries no Stream_URL parameter (detected
+    by the shared ``STREAM_URL_PATTERN`` constraint rather than by name, so
+    a future renaming cannot silently disable this). A stream source type
+    accepts only its own two schemes (Requirement 2.1); the unified
+    ``Input Source`` node is read through its effective ``source_kind``
+    (Requirement 1.6), falling back to every stream scheme when the kind
+    is not a stream kind (the union parameter is then dropped on
+    expansion, so its value is inert).
+    """
+    carries_stream_url = any(
+        parameter.name == "url"
+        and (parameter.constraints or {}).get("regex") == STREAM_URL_PATTERN
+        for parameter in descriptor.parameters
+    )
+    if not carries_stream_url:
+        return None
+    type_id = getattr(descriptor, "type_id", None)
+    if type_id in SCHEMES_BY_NODE_TYPE:
+        return SCHEMES_BY_NODE_TYPE[type_id]
+    source_type = SOURCE_KIND_TO_SOURCE_TYPE.get(parameters.get("source_kind"))
+    return SCHEMES_BY_NODE_TYPE.get(source_type, _ALL_STREAM_SCHEMES)
+
+
 @st.composite
 def node_parameters_strategy(draw, descriptor, forced: Optional[Dict[str, Any]] = None):
     """Valid parameter values for one node of type ``descriptor``.
@@ -244,6 +408,23 @@ def node_parameters_strategy(draw, descriptor, forced: Optional[Dict[str, Any]] 
         if parameter.name in forced:
             parameters[parameter.name] = forced[parameter.name]
             continue
+        # rtsp-rtmp-stream-cameras (Requirements 1.3, 2.1): a Stream_URL is
+        # not just "any string matching the catalog regex" — one regex
+        # serves both stream node types, so drawing from it would produce
+        # rtmp URLs on an RTSP node (a V11 error), and the regex is applied
+        # with ``re.search`` by the parameter predicate but with
+        # ``fullmatch`` by ``check_stream_url``, so a trailing newline would
+        # pass the descriptor and fail the URL rules. The Stream_URL
+        # parameter therefore gets a purpose-built, node-type-correct value,
+        # and is never omitted (the underlying source descriptor requires
+        # it, including after unified expansion).
+        if parameter.name == "url":
+            schemes = _stream_url_schemes(descriptor, parameters)
+            if schemes is not None:
+                value = draw(stream_url_strategy(schemes))
+                assert is_parameter_value_valid(parameter, value)
+                parameters[parameter.name] = value
+                continue
         omission_valid = check_parameter_value(parameter, parameter.default) is None
         if omission_valid and draw(st.booleans()):
             continue
@@ -543,6 +724,113 @@ def modbus_write_graph_strategy(draw, max_modbus_nodes=3, max_intermediates=2):
         builder.add_wired_consumer("modbus_write", hub)
 
     return builder.build()
+
+
+@dataclass(frozen=True)
+class StreamFeed:
+    """One generated stream feed node and how it was spelled.
+
+    ``node_type`` is the type the document carries — either a stream source
+    type directly, or ``unified_input`` when the feed is spelled as the
+    unified ``Input Source`` node. ``source_type`` is the effective stream
+    source type in both cases (Requirement 1.6), i.e. the descriptor whose
+    mappings the node compiles through. ``parameters`` is a snapshot of the
+    node's generated parameters.
+    """
+
+    node_id: str
+    node_type: str
+    source_type: str
+    parameters: Dict[str, Any]
+
+    @property
+    def is_unified(self) -> bool:
+        return self.node_type == "unified_input"
+
+
+@dataclass(frozen=True, eq=False)
+class StreamGraph:
+    """A generated graph plus its stream feed nodes."""
+
+    graph: WorkflowGraph
+    feeds: Tuple[StreamFeed, ...]
+
+
+@st.composite
+def stream_graph_strategy(
+    draw,
+    stream_nodes: int = 1,
+    max_intermediates: int = 2,
+    max_extra_inputs: int = 1,
+    max_extra_outputs: int = 1,
+    unified: Optional[bool] = None,
+):
+    """Random graphs containing exactly ``stream_nodes`` stream feed nodes
+    (rtsp-rtmp-stream-cameras Requirements 1.1-1.6).
+
+    Each feed is spelled either as an ``rtsp_camera_source`` /
+    ``rtmp_stream_source`` node or as a ``unified_input`` node carrying the
+    matching stream ``source_kind``; every feed's ``url`` is a valid,
+    credential-free, node-type-correct Stream_URL, and every feed drives its
+    own ``capture`` sink so no feed is left dangling. Structure otherwise
+    mirrors :func:`graph_strategy`: 0..``max_extra_inputs`` additional
+    non-frame-feed inputs, 0..``max_intermediates`` wired intermediate
+    nodes, and 0..``max_extra_outputs`` further wired outputs, with a drawn
+    hub mode for maximal fan-out.
+
+    ``unified`` fixes the spelling (``True`` unified, ``False`` direct);
+    ``None``, the default, draws it per feed.
+
+    With the default ``stream_nodes=1`` every produced graph is
+    validator-valid (no error-severity findings): one frame-feed source, no
+    subscription trigger, and no continuous-activation conflict. Asking for
+    two or more feeds deliberately breaks the single-Frame_Feed contract, so
+    those graphs are for the validation-independent paths (serialization)
+    only.
+    """
+    if stream_nodes < 1:
+        raise ValueError("stream_nodes must be at least 1")
+
+    builder = _GraphBuilder(draw)
+    hub = draw(st.booleans())
+
+    feeds: List[StreamFeed] = []
+    for _ in range(stream_nodes):
+        as_unified = draw(st.booleans()) if unified is None else unified
+        if as_unified:
+            kind = draw(st.sampled_from(STREAM_SOURCE_KINDS))
+            source_type = SOURCE_KIND_TO_SOURCE_TYPE[kind]
+            node = builder.add_node("unified_input", {"source_kind": kind})
+        else:
+            source_type = draw(st.sampled_from(STREAM_SOURCE_TYPES))
+            node = builder.add_node(source_type)
+        feeds.append(StreamFeed(
+            node_id=node.id,
+            node_type=node.type,
+            source_type=source_type,
+            parameters=dict(node.parameters),
+        ))
+
+    for _ in range(draw(st.integers(min_value=0, max_value=max_extra_inputs))):
+        builder.add_node(
+            draw(st.sampled_from(builder.coexistence_safe(_NON_FRAME_FEED_INPUT_TYPES)))
+        )
+
+    for _ in range(draw(st.integers(min_value=0, max_value=max_intermediates))):
+        feasible = builder.feasible_consumer_types(_INTERMEDIATE_TYPES)
+        builder.add_wired_consumer(draw(st.sampled_from(feasible)), hub)
+
+    # One capture sink per feed, wired from that feed: V1 is satisfied and
+    # every stream node's VideoFrames output is consumed.
+    for feed in feeds:
+        sink = builder.add_node("capture")
+        builder.connect((feed.node_id, "out"), sink.id, "in")
+
+    for _ in range(draw(st.integers(min_value=0, max_value=max_extra_outputs))):
+        feasible = builder.feasible_consumer_types(_OUTPUT_TYPES)
+        builder.add_wired_consumer(draw(st.sampled_from(feasible)), hub)
+
+    return StreamGraph(graph=builder.build(), feeds=tuple(feeds))
 
 
 @st.composite

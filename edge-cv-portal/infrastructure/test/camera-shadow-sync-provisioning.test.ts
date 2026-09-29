@@ -592,7 +592,8 @@ describe('fix checking: single-account rule provisioning and collision avoidance
       [roleLogicalId, policyLogicalId, ruleLogicalId].sort()
     );
 
-    // Version bump: 1.5.0 → 1.6.0 with the new conditional behavior.
-    usecaseTemplate.hasOutput('StackVersion', { Value: '1.6.0' });
+    // Version bump: 1.5.0 → 1.6.0 with the new conditional behavior, then
+    // 1.6.0 → 1.7.0 for the rtsp-rtmp-stream-cameras credential grants.
+    usecaseTemplate.hasOutput('StackVersion', { Value: '1.7.0' });
   });
 });

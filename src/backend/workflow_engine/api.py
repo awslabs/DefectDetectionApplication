@@ -50,6 +50,7 @@ from sqlalchemy.orm import Session
 from dao.sqlite_db.sqlite_db_operations import SessionLocal
 from endpoints.route.access_log_router import get_api_router
 from workflow_engine import executor, run_artifacts, runtime
+from workflow_engine.continuous_runner import STATE_PAUSED as CONTINUOUS_PAUSED
 from workflow_engine.discovery import (
     ACTIVE_STATUSES,
     STATUS_REGISTERED,
@@ -65,6 +66,14 @@ router = get_api_router()
 #: Initial status of a triggered run; the WorkflowExecutor (task 12.3)
 #: picks pending executions up through the executor hook.
 EXECUTION_STATUS_PENDING = "pending"
+
+#: The prefix of the 409 detail refusing a manual trigger of a continuous
+#: workflow that is not paused (rtsp-rtmp-stream-cameras Requirement 11.7).
+#: The detail stays a string, as every other 409 here, so existing clients
+#: render it unchanged.
+CONTINUOUS_WORKFLOW_RUNNING = "CONTINUOUS_WORKFLOW_RUNNING"
+#: The Continuous status ``state`` in which a manual trigger is accepted.
+CONTINUOUS_STATE_PAUSED = CONTINUOUS_PAUSED
 
 
 # Dependency (mirrors endpoints/workflow.py)
@@ -190,12 +199,15 @@ def get_workflow_registration(
 EXECUTIONS_LIMIT_DEFAULT = 10
 EXECUTIONS_LIMIT_MIN = 1
 EXECUTIONS_LIMIT_MAX = 50
+#: How many of the newest Notable_Run ids the ``notable`` filter considers.
+NOTABLE_IDS_MAX = 500
 
 
 @router.get("/workflows/registrations/{registration_id}/executions")
 def list_registration_executions(
     registration_id: str,
     limit: int = EXECUTIONS_LIMIT_DEFAULT,
+    notable: bool = False,
     db: Session = Depends(get_db),
 ) -> List[dict]:
     """Most recent executions of one registration, newest first.
@@ -205,14 +217,28 @@ def list_registration_executions(
     ``id`` DESC as tiebreak, at most ``limit`` entries (default 10, clamped
     to 1..50). Reuses ``execution_to_dict`` — no new response shape. 404
     for an unknown registration. No existing route or shape changes.
+
+    ``notable=true`` (rtsp-rtmp-stream-cameras Requirement 16.2) keeps only
+    the Notable_Runs of a continuous workflow: those that failed, sent an
+    output, or recorded an event gate transition. It is empty for any
+    other registration.
     """
     _get_registration_or_404(registration_id, db)
     bounded_limit = max(
         EXECUTIONS_LIMIT_MIN, min(limit, EXECUTIONS_LIMIT_MAX)
     )
+    query = db.query(WorkflowExecution).filter(
+        WorkflowExecution.registration_id == registration_id
+    )
+    if notable:
+        # Newest first; a bounded id list keeps the query well under
+        # SQLite's bound-parameter limit.
+        notable_ids = runtime.notable_execution_ids(registration_id)[:NOTABLE_IDS_MAX]
+        if not notable_ids:
+            return []
+        query = query.filter(WorkflowExecution.id.in_(notable_ids))
     executions = (
-        db.query(WorkflowExecution)
-        .filter(WorkflowExecution.registration_id == registration_id)
+        query
         .order_by(
             WorkflowExecution.started_at.desc(), WorkflowExecution.id.desc()
         )
@@ -241,6 +267,21 @@ def trigger_workflow(registration_id: str, db: Session = Depends(get_db)) -> dic
             detail += f": {reason}"
         raise HTTPException(status_code=409, detail=detail)
 
+    # A continuous workflow runs on its own Sampling_Ticks; a manual run is
+    # accepted only while it is paused (rtsp-rtmp-stream-cameras
+    # Requirement 11.7). Registrations without a continuous stream node
+    # have no continuous status and trigger exactly as before.
+    continuous = runtime.continuous_status(registration_id)
+    if continuous is not None and continuous.get("state") != CONTINUOUS_STATE_PAUSED:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{CONTINUOUS_WORKFLOW_RUNNING}: workflow registration "
+                f"'{registration_id}' processes its stream camera "
+                f"continuously; pause it before triggering a run manually"
+            ),
+        )
+
     execution = WorkflowExecution(
         id=new_execution_id(),
         registration_id=registration_id,
@@ -253,6 +294,49 @@ def trigger_workflow(registration_id: str, db: Session = Depends(get_db)) -> dic
 
     executor.dispatch(execution.id)
     return execution_to_dict(execution)
+
+
+def _continuous_or_404(registration_id: str, status) -> dict:
+    if status is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Workflow registration '{registration_id}' does not process "
+                f"a stream camera continuously"
+            ),
+        )
+    return status
+
+
+@router.get("/workflows/registrations/{registration_id}/continuous")
+def get_continuous_status(registration_id: str, db: Session = Depends(get_db)) -> dict:
+    """The Continuous status of a registration whose stream node runs in
+    ``continuous`` mode (rtsp-rtmp-stream-cameras Requirements 11.6, 12.5):
+    its state (``running``, ``paused`` or ``waiting_for_stream``), the
+    configured and effective rates, the counters, the camera's
+    Stream_Health and ``pausedAtMs``. 404 for any other registration."""
+    _get_registration_or_404(registration_id, db)
+    return _continuous_or_404(registration_id, runtime.continuous_status(registration_id))
+
+
+@router.post("/workflows/registrations/{registration_id}/continuous/pause")
+def pause_continuous_workflow(registration_id: str, db: Session = Depends(get_db)) -> dict:
+    """Pause a continuous workflow (Requirement 11.6). The pause persists
+    across backend restarts until resumed; while paused, a manual trigger
+    is accepted (Requirement 11.7)."""
+    _get_registration_or_404(registration_id, db)
+    manager = runtime.get_continuous_manager()
+    return _continuous_or_404(
+        registration_id, manager.pause(registration_id) if manager is not None else None)
+
+
+@router.post("/workflows/registrations/{registration_id}/continuous/resume")
+def resume_continuous_workflow(registration_id: str, db: Session = Depends(get_db)) -> dict:
+    """Resume a paused continuous workflow (Requirement 11.6)."""
+    _get_registration_or_404(registration_id, db)
+    manager = runtime.get_continuous_manager()
+    return _continuous_or_404(
+        registration_id, manager.resume(registration_id) if manager is not None else None)
 
 
 @router.get("/workflows/executions/{execution_id}")

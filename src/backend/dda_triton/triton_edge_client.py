@@ -34,6 +34,7 @@ import json
 import threading
 import time
 from dda_triton.constants import TRITON_MODEL_DIR, TRITON_INSTALLATION_DIR
+from dda_triton.native_calls import TRITON_NATIVE_LOCK
 import traceback
 
 # The native ListModels() binding is not safe to call concurrently: overlapping
@@ -118,7 +119,9 @@ class TritonEdgeClient:
 
     def get_model_description(self, model_id):
         try:
-            describe_reponse = json.loads(self.triton_instance.model_metadata(model_id))
+            with TRITON_NATIVE_LOCK:
+                metadata = self.triton_instance.model_metadata(model_id)
+            describe_reponse = json.loads(metadata)
             model_component = describe_reponse.get("name", " ")
             status = describe_reponse.get("state", " ")
             return {
@@ -140,7 +143,8 @@ class TritonEdgeClient:
             raise e
 
     def get_model_status(self, model_id: str) -> str:
-        return self.triton_instance.get_model_status(model_id)
+        with TRITON_NATIVE_LOCK:
+            return self.triton_instance.get_model_status(model_id)
 
     def stop_triton_model(self, model_id):
         try:

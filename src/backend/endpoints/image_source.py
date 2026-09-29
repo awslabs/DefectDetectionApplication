@@ -39,7 +39,7 @@ from utils import utils
 # Fast api
 from fastapi import HTTPException, APIRouter, Depends
 from pydantic import conint, BaseModel, RootModel, validator
-from typing import List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 from typing_extensions import Annotated
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND, HTTP_500_INTERNAL_SERVER_ERROR
 
@@ -47,8 +47,13 @@ from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND, HTTP_500_
 from exceptions.api.unexpected_type_exception import UnexpectedTypeException
 from utils.server_setup import gst_pipeline_executor, image_source_accessor, image_src_cfg_accessor
 from model.image_source_configuration import ImageSourceConfigurationSchema
-from model.image_source import ImageSource, ImageSourceType
+from model.image_source import ImageSource, ImageSourceType, is_stream_source_type
 from utils import captured_images_utils, utils
+from utils.stream_frames import get_stream_frame
+from stream_ingest import health as stream_health
+from stream_ingest.connection_test import run_connection_test
+from stream_ingest.credentials import get_credential_store
+from stream_ingest.manager import camera_key_for_image_source, get_stream_ingest_manager
 from utils.constants import CAPTURED_IMAGE_FOLDER_PATTHERN, CAPTURED_IMAGE_FILE_PATH_PATTHERN
 import logging
 logger = logging.getLogger(__name__)
@@ -105,7 +110,8 @@ class GetPreviewImageResponse(BaseModel):
 def get_frame(image_source_dict, image_source_config_override=None):
     # Uses AravisSDK to fetch the frame from the camera
     # Only works with GenICam cameras
-    if image_source_dict.get('type') in [ImageSourceType.ICAM, ImageSourceType.NVIDIA_CSI, ImageSourceType.FOLDER]:
+    if image_source_dict.get('type') in [ImageSourceType.ICAM, ImageSourceType.NVIDIA_CSI, ImageSourceType.FOLDER] \
+            or is_stream_source_type(image_source_dict.get('type')):
         raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"The server cannot get frame for {image_source_dict.get('type')} using AravisSDK method.",
@@ -120,8 +126,82 @@ def get_frame(image_source_dict, image_source_config_override=None):
     return get_camera_frame(camera_id, camera_config)
 
 
+def _stream_preview_or_capture(image_source_dict, is_preview, file_prefix=None):
+    """Preview or capture of an RTSP/RTMP Image_Source: the Latest_Frame of
+    its shared session through the StreamBroadcaster, into the same appsrc
+    pipeline a camera frame takes (rtsp-rtmp-stream-cameras Requirement
+    4.4). Camera configuration overrides do not apply to streams."""
+    frame = get_stream_frame(image_source_dict)
+    return gst_pipeline_executor.execute_image_source_pipeline(
+        ImageSource(**image_source_dict), is_preview=is_preview, file_prefix=file_prefix,
+        frame_data=frame)
+
+
+def _stream_image_source_or_400(imageSourceId, db):
+    """The stream Image_Source ``imageSourceId`` (404 when absent, 400 when
+    it is not RTSP or RTMP)."""
+    image_source = image_source_accessor.get_image_source(imageSourceId, db)
+    if not is_stream_source_type(image_source.type):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"The image source {imageSourceId} is not a stream camera; this applies to RTSP and RTMP image sources only.",
+        )
+    return image_source
+
+
+class StreamConnectionTestResponse(BaseModel):
+    ok: bool
+    category: Optional[str] = None
+    message: str
+    streamHealth: Dict[str, Any]
+    # The first frame through the Image_Source's pipeline, base64, on success.
+    image: Optional[str] = None
+    imageError: Optional[str] = None
+
+
+@router.post("/image-sources/{imageSourceId}/test-connection")
+def test_stream_connection(imageSourceId: str, db: Session = Depends(get_db)) -> StreamConnectionTestResponse:
+    """Connect to a stream camera and report the outcome within 20 s
+    (rtsp-rtmp-stream-cameras Requirement 4.3): a failure category and a
+    redacted message, or a preview of the first frame."""
+    image_source = _stream_image_source_or_400(imageSourceId, db)
+    image_source_dict = utils.convert_sqlalchemy_object_to_dict(image_source)
+    result = run_connection_test(get_stream_ingest_manager(), camera_key_for_image_source(imageSourceId))
+    response = StreamConnectionTestResponse(ok=result.ok, category=result.category, message=result.message,
+                                            streamHealth=result.health)
+    if result.ok and result.frame is not None:
+        frame = result.frame
+        try:
+            preview = gst_pipeline_executor.execute_image_source_pipeline(
+                ImageSource(**image_source_dict), is_preview=True,
+                frame_data={"data": frame.data, "height": frame.height, "width": frame.width})
+            response.image = preview.get("image") if isinstance(preview, dict) else getattr(preview, "image", None)
+        except Exception as err:  # noqa: BLE001 - the connection itself succeeded
+            logger.warning("Connection test preview of %s failed: %s", imageSourceId, type(err).__name__)
+            response.imageError = "The camera is streaming, but the preview image could not be rendered through the image source's pipeline."
+    return response
+
+
+@router.get("/image-sources/{imageSourceId}/stream-health")
+def get_stream_health(imageSourceId: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """The Stream_Health of a stream camera (rtsp-rtmp-stream-cameras
+    Requirement 8.8); ``stopped`` when no session runs."""
+    _stream_image_source_or_400(imageSourceId, db)
+    document = get_stream_ingest_manager().health_for_image_source(imageSourceId)
+    if document is None:
+        document = stream_health.empty_health(camera_key_for_image_source(imageSourceId), stream_health.STOPPED)
+    document["credentialsConfigured"] = get_credential_store().configured(imageSourceId)
+    return document
+
+
 @router.post("/image-sources/{imageSourceId}/preview")
 def preview_image(imageSourceId, request: GetPreviewImageRequest = GetPreviewImageRequest(), db: Session = Depends(get_db)) -> GetPreviewImageResponse:
+    image_source = image_source_accessor.get_image_source(imageSourceId, db)
+    if is_stream_source_type(image_source.type):
+        # Outside the generic handler below, so a 503 "no frame" keeps its
+        # status instead of becoming a 500.
+        return _stream_preview_or_capture(
+            utils.convert_sqlalchemy_object_to_dict(image_source), is_preview=True)
     try:
         image_source = image_source_accessor.get_image_source(imageSourceId, db)
         image_source_dict = utils.convert_sqlalchemy_object_to_dict(image_source)
@@ -194,6 +274,8 @@ def capture(
             ImageSource(**image_source_dict), is_preview=False, file_prefix=capture.filePrefix
         )
         return r
+    elif is_stream_source_type(image_source_dict.get("type")):
+        return _stream_preview_or_capture(image_source_dict, is_preview=False, file_prefix=capture.filePrefix)
     else:
         raise UnexpectedTypeException(f"Unexpected image source type: {image_source_dict.get('type')}", status_code=HTTP_500_INTERNAL_SERVER_ERROR)
 
@@ -227,11 +309,20 @@ def delete_captured_images(filePath: str = Query(..., pattern=CAPTURED_IMAGE_FIL
 
 
 class AddImageSourceRequest(BaseModel):
-    type: Optional[Literal["Camera", "Folder", "ICam", "NvidiaCSI"]] = None
+    type: Optional[Literal["Camera", "Folder", "ICam", "NvidiaCSI", "RTSP", "RTMP"]] = None
     name: Optional[str] = None
     description: Optional[str] = None
     cameraId: Optional[str] = None
+    # The folder path, or the Stream_URL of an RTSP/RTMP camera.
     location: Optional[str] = None
+    # RTSP/RTMP only (rtsp-rtmp-stream-cameras Requirement 4.1): the
+    # settings are validated by model.stream_source, which names the field.
+    streamSettings: Optional[Dict[str, Any]] = None
+    # Write-only Stream_Credentials ({username, password, urlSecret}). Typed
+    # loosely on purpose: a request validation error would echo the value,
+    # so the fields are checked by model.stream_source, whose messages never
+    # contain it. They are stored in the Credential_Store and never returned.
+    credentials: Optional[Any] = None
 
 
 class AddImageSourceResponse(RootModel):
@@ -251,6 +342,12 @@ class EditImageSourceRequest(BaseModel):
     description: Optional[str] = None
     imageSourceConfiguration: Optional[ImageSourceConfigurationsInputModel] = {}
     location: Optional[str] = None
+    # RTSP/RTMP only; see AddImageSourceRequest. Settings merge over the
+    # stored ones, blank credentials keep what is stored, and
+    # clearCredentials removes it.
+    streamSettings: Optional[Dict[str, Any]] = None
+    credentials: Optional[Any] = None
+    clearCredentials: Optional[bool] = None
 
 
 class UpdateImageSourceResponse(RootModel):
@@ -275,7 +372,7 @@ class ListImageSourcesResponse(RootModel):
 
 @router.get("/image-sources")
 def list_image_sources(
-    type: Optional[Literal['Folder', 'Camera', 'ICam']] = None, db: Session = Depends(get_db)
+    type: Optional[Literal['Folder', 'Camera', 'ICam', 'RTSP', 'RTMP']] = None, db: Session = Depends(get_db)
 ):
     # TODO: Add ListImageSourcesResponse to response validation
     image_sources = image_source_accessor.list_image_sources(type, db)

@@ -22,6 +22,7 @@ sides of the system agree on the node catalog.
 
 Validates: Requirements 1.6, 3.10 (custom-python-frames)
 Validates: Requirements 1.3, 6.5 (triggers-stage-and-unified-input)
+Validates: Requirements 1.7, 13.9, 14.6, 15.6 (rtsp-rtmp-stream-cameras)
 """
 
 import hashlib
@@ -56,6 +57,34 @@ VENDORED_PACKAGE_RELATIVE = Path(
 # — so a hand edit under ``vendor/`` (or a forgotten ``re_vendor.sh``) has
 # to fail the suite.
 MIRRORED_PACKAGE_FILENAMES = ("anomaly_invocation.py",)
+
+# Shared rule modules that must stay byte-identical, given as paths relative to
+# the package root (``workflow_core/``) so sub-packages are covered too.
+#
+# rtsp-rtmp-stream-cameras keeps its rules in workflow_core precisely so that
+# the Portal and the LocalServer cannot disagree:
+#   * ``stream_url.py`` — the Stream_URL checker, normalizer and redactor. The
+#     Portal validates a URL before it is stored and the device validates the
+#     same URL again before it connects (Requirements 1.7, 6.1, 6.3).
+#   * ``analytics/`` — the detection counter, the association matcher and the
+#     event-gate automaton. The device and the Portal's cloud test sandbox must
+#     produce identical metadata for identical inputs (Requirements 13.9, 14.6,
+#     15.6), which only holds while both trees run the same code.
+#   * ``validator/checks.py`` and ``validator/__init__.py`` — the validator
+#     rules (the generalized V7 plus V11, V12, V13 and W3) and the codes they
+#     are re-exported under. The device re-validates a compiled document, so a
+#     drifted copy would accept on one side what the other side rejects.
+#
+# Re-sync these with a per-file ``cp``, not with ``re_vendor.sh``: a wholesale
+# re-vendor would also copy the portal-only ``catalog/platforms.py``, which the
+# vendor tree deliberately omits.
+MIRRORED_SHARED_MODULE_RELPATHS = (
+    "stream_url.py",
+    "analytics/__init__.py",
+    "analytics/scene.py",
+    "validator/checks.py",
+    "validator/__init__.py",
+)
 
 
 def _repo_root() -> Path:
@@ -125,4 +154,40 @@ def test_vendored_package_module_is_byte_identical_to_portal_copy(filename):
         f"copy.\n  portal   sha256={portal_sha} ({portal_relative})\n"
         f"  vendored sha256={vendored_sha} ({vendored_relative})\n"
         "Re-sync with: src/backend/workflow_engine/vendor/re_vendor.sh"
+    )
+
+
+# Feature: rtsp-rtmp-stream-cameras, Requirement 1.7 (both mirrored copies carry
+# the new node types and rules identically) and the precondition for Property 27
+# (analytics parity between the device and the sandbox)
+@pytest.mark.parametrize("relpath", MIRRORED_SHARED_MODULE_RELPATHS)
+def test_vendored_shared_module_is_byte_identical_to_portal_copy(relpath):
+    root = _repo_root()
+    portal_relative = PORTAL_PACKAGE_RELATIVE / relpath
+    vendored_relative = VENDORED_PACKAGE_RELATIVE / relpath
+
+    portal_path = root / portal_relative
+    vendored_path = root / vendored_relative
+    assert portal_path.is_file(), portal_path
+    assert vendored_path.is_file(), (
+        f"{vendored_relative} is missing — copy it from the portal layer: "
+        f"cp {portal_relative} {vendored_relative}"
+    )
+
+    portal_bytes = portal_path.read_bytes()
+    vendored_bytes = vendored_path.read_bytes()
+
+    portal_sha = hashlib.sha256(portal_bytes).hexdigest()
+    vendored_sha = hashlib.sha256(vendored_bytes).hexdigest()
+
+    assert portal_bytes == vendored_bytes, (
+        "Vendored workflow_core shared rule module is out of sync with the "
+        "portal layer copy, so the Portal and the LocalServer no longer apply "
+        "the same rules.\n"
+        f"  portal   sha256={portal_sha} ({portal_relative})\n"
+        f"  vendored sha256={vendored_sha} ({vendored_relative})\n"
+        "Re-sync with: cp "
+        f"{portal_relative} {vendored_relative}\n"
+        "(Do not run re_vendor.sh: it would also copy the portal-only "
+        "catalog/platforms.py.)"
     )

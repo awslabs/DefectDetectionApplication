@@ -181,7 +181,17 @@ _names = st.text(
     max_size=24,
 )
 
-_types = st.sampled_from(["Camera", "Folder", "ICam", "NvidiaCSI", "RTSP"])
+# Non-stream Camera_Source types only. "RTSP" was in this pool until the
+# rtsp-rtmp-stream-cameras feature retyped `RTSP`/`RTMP` from free-form
+# entries into typed stream Camera_Sources: their `params` are now
+# validated (Stream_URL rules and the Requirement 4.1 value domains), so
+# an arbitrary generated params dict under type "RTSP" is a 400 by design
+# rather than the 200/201 this property asserts. That feature's
+# Requirement 18.3 protects "every *other* type", which is exactly what
+# this pool now draws; the stream types' own mutation behaviour is
+# covered by that feature's registry tests (its tasks 8.4-8.6).
+_types = st.sampled_from(["Camera", "Folder", "ICam", "NvidiaCSI",
+                          "V4L2Discovered"])
 
 _param_keys = st.one_of(
     st.sampled_from(["devicePath", "cameraId", "url", "gain", "exposure"]),

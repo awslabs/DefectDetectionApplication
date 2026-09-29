@@ -41,6 +41,28 @@ export interface CameraSourceEntry {
   absent_since?: number | null;
   /** Computed against the Staleness_Threshold by the read route (Req 4.1). */
   stale?: boolean;
+  /**
+   * Credential state of a stream Camera_Source (`RTSP` / `RTMP` only;
+   * rtsp-rtmp-stream-cameras Requirement 5.7). Never a credential value.
+   */
+  credentials?: { configured: boolean; updatedAt?: number | null } | null;
+}
+
+/**
+ * Device_Stream_Capabilities as the Portal stores them from the device's
+ * report (rtsp-rtmp-stream-cameras Requirement 16.5): which protocols the
+ * LocalServer can pull, the decoder element per codec and path (a path the
+ * device cannot decode with is absent), and the library versions.
+ */
+export interface DeviceStreamCapabilities {
+  rtsp?: boolean;
+  rtmp?: boolean;
+  tls?: boolean;
+  codecs?: Record<string, { hardware?: string; software?: string }>;
+  gstreamer?: string;
+  pyav?: string;
+  ffmpeg?: string;
+  probedAtMs?: number;
 }
 
 /** Response of `GET /devices/{device_id}/cameras`. */
@@ -56,6 +78,8 @@ export interface DeviceCamerasResponse {
   device_status?: string;
   cameras: CameraSourceEntry[];
   count?: number;
+  /** Present once the device has reported them (Requirement 16.5). */
+  stream_capabilities?: DeviceStreamCapabilities | null;
 }
 
 /**
@@ -81,11 +105,27 @@ export interface DeviceCameraConflictsResponse {
   count?: number;
 }
 
+/**
+ * Write-only Stream_Credentials of a stream Camera_Source
+ * (rtsp-rtmp-stream-cameras Requirement 5.3). Sent only when the operator
+ * typed a value; the Portal stores them in the Credential_Vault and never
+ * returns them.
+ */
+export interface StreamCredentialsInput {
+  username?: string;
+  password?: string;
+  urlSecret?: string;
+}
+
 /** Create/update body for portal-managed Camera_Sources (Req 5.1). */
 export interface CameraSourceMutationBody {
   name: string;
   type: string;
   params?: Record<string, JsonValue>;
+  /** Stream types only: new credentials (Requirement 5.3). */
+  credentials?: StreamCredentialsInput;
+  /** Stream types only: remove the stored credentials (Requirement 5.8). */
+  clearCredentials?: boolean;
 }
 
 /**
@@ -345,7 +385,10 @@ export function getCameraBindingHint(
 export function isCameraReferenceParameter(typeId: string, parameterName: string): boolean {
   return (
     (typeId === 'icam_source' && parameterName === 'device') ||
-    (typeId === 'aravis_camera_source' && parameterName === 'camera_id')
+    (typeId === 'aravis_camera_source' && parameterName === 'camera_id') ||
+    // rtsp-rtmp-stream-cameras Requirement 3.2: a stream node's `url`.
+    (Object.prototype.hasOwnProperty.call(STREAM_CAMERA_SOURCE_TYPES, typeId) &&
+      parameterName === 'url')
   );
 }
 
@@ -586,6 +629,119 @@ export function applyAravisCameraSelection(
       cameraName: cameraDisplayName(camera),
       sourceDeviceId,
     },
+  };
+}
+
+// --------------------------------------------------------------------------
+// Stream camera picker helpers (rtsp-rtmp-stream-cameras Requirements
+// 3.3, 3.4, 3.6; Properties 7 and 8)
+// --------------------------------------------------------------------------
+
+/**
+ * The Camera_Source type each Stream_Camera_Source_Node type binds to:
+ * the protocol must match (Requirement 3.3), mirroring the deploy-time
+ * compatible sets in `deployments.py`.
+ */
+export const STREAM_CAMERA_SOURCE_TYPES: Readonly<Record<string, string>> = {
+  rtsp_camera_source: 'RTSP',
+  rtmp_stream_source: 'RTMP',
+};
+
+/** Whether `camera` may be offered for a stream node of type `typeId`. */
+export function isStreamCompatibleCamera(typeId: string, camera: CameraSourceEntry): boolean {
+  if (!Object.prototype.hasOwnProperty.call(STREAM_CAMERA_SOURCE_TYPES, typeId)) {
+    return false;
+  }
+  return camera.type === STREAM_CAMERA_SOURCE_TYPES[typeId];
+}
+
+/** A stream Camera_Source's Stream_URL (`params.url`), or null. */
+export function streamUrlValue(camera: CameraSourceEntry): string | null {
+  const url = (camera.params ?? {}).url;
+  return typeof url === 'string' && url !== '' ? url : null;
+}
+
+/**
+ * Apply a stream Camera_Source selection to a Stream_Camera_Source_Node
+ * (Requirement 3.4): sets `url` to the entry's Stream_URL and nothing
+ * else, and produces the standard binding hint. No other key or value is
+ * copied from the entry, so no credential material, reference, or
+ * setting can reach the workflow (Requirement 3.6). Pure over its inputs.
+ */
+export function applyStreamCameraSelection(
+  parameters: Record<string, JsonValue>,
+  camera: CameraSourceEntry,
+  sourceDeviceId: string
+): CameraSelectionResult {
+  const next: Record<string, JsonValue> = { ...parameters };
+  const url = streamUrlValue(camera);
+  if (url !== null) {
+    next.url = url;
+  }
+  return {
+    parameters: next,
+    hint: {
+      cameraSourceId: camera.camera_source_id,
+      cameraName: cameraDisplayName(camera),
+      sourceDeviceId,
+    },
+  };
+}
+
+/** What the picker and the Cameras tab show about a stream camera. */
+export interface StreamCameraDetails {
+  /** `H.264` / `H.265` (or the reported codec as written), when reported. */
+  codec: string | null;
+  /** `width×height`, when reported. */
+  resolution: string | null;
+  /** Coarse Stream_Health: streaming, reconnecting, failed or idle. */
+  health: string | null;
+  /** The decoder path in use: hardware or software. */
+  decoder: string | null;
+  credentialsConfigured: boolean;
+}
+
+const CODEC_LABELS: Readonly<Record<string, string>> = { h264: 'H.264', h265: 'H.265' };
+
+/**
+ * The display label of a reported codec name: `H.264` / `H.265`, or the
+ * name as written. Own-property lookup, so a reported name such as
+ * `constructor` displays as written rather than resolving to an
+ * Object.prototype member.
+ */
+export function streamCodecLabel(codec: string): string {
+  return Object.prototype.hasOwnProperty.call(CODEC_LABELS, codec) ? CODEC_LABELS[codec] : codec;
+}
+
+function positiveInteger(value: JsonValue | undefined): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/**
+ * The reported stream details of a Camera_Source, read from
+ * `capabilities.stream` (Requirement 16.4) and the credential state
+ * (Requirement 5.7). Registry payloads are external input, so malformed
+ * values resolve to null instead of throwing.
+ */
+export function streamCameraDetails(camera: CameraSourceEntry): StreamCameraDetails {
+  const raw = (camera.capabilities ?? {}).stream;
+  const stream =
+    raw !== null && raw !== undefined && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, JsonValue>)
+      : {};
+  const text = (value: JsonValue | undefined) =>
+    typeof value === 'string' && value !== '' ? value : null;
+  const codec = text(stream.codec);
+  const width = positiveInteger(stream.width);
+  const height = positiveInteger(stream.height);
+  const configured =
+    camera.credentials?.configured ?? (camera.params ?? {}).credentialsConfigured === true;
+  return {
+    codec: codec === null ? null : streamCodecLabel(codec),
+    resolution: width !== null && height !== null ? `${width}\u00d7${height}` : null,
+    health: text(stream.state),
+    decoder: text(stream.decoder),
+    credentialsConfigured: configured === true,
   };
 }
 

@@ -92,6 +92,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from camera_discovery.aravis import DiscoveredAravisCamera, aravis_stable_id
+from model.stream_source import RTSP_ONLY_SETTINGS, SETTING_DEFAULTS, STREAM_SOURCE_TYPE_VALUES
+from stream_ingest.health import COARSE_IDLE, coarse_health
 from utils.static_image_camera import (
     STATIC_IMAGE_CAMERA_ID,
     STATIC_IMAGE_CAMERA_IDENTITY,
@@ -148,6 +150,39 @@ STATIC_IMAGE_ARAVIS_STABLE_ID = aravis_stable_id(
 #: Aravis camera (merge key for Requirement 2.4).
 _ARAVIS_BACKED_SOURCE_TYPE = "Camera"
 
+#: The stream settings a stream camera reports, per type, in Requirement
+#: 4.1 order (rtsp-rtmp-stream-cameras); transport and latency are RTSP only.
+STREAM_REPORTED_SETTINGS = {
+    source_type: tuple(name for name in SETTING_DEFAULTS
+                       if source_type == "RTSP" or name not in RTSP_ONLY_SETTINGS)
+    for source_type in STREAM_SOURCE_TYPE_VALUES
+}
+
+#: The device-managed keys a stream camera echoes to the Portal.
+STREAM_CREDENTIAL_REF = "credentialRef"
+STREAM_CREDENTIALS_CONFIGURED = "credentialsConfigured"
+STREAM_CREDENTIALS_UPDATED_AT = "credentialsUpdatedAt"
+
+
+def stream_capabilities(health: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The reported ``capabilities`` of a stream camera: the coarse
+    Stream_Health state (``streaming``, ``reconnecting``, ``failed`` or
+    ``idle``) and the codec, resolution and decoder in use
+    (Requirement 4.5). Idempotent, so an already-projected section passes
+    through unchanged; an idle camera has nothing in use."""
+    health = health or {}
+    state = coarse_health(health)
+    in_use = state != COARSE_IDLE
+    return {
+        "stream": {
+            "state": state,
+            "codec": health.get("codec") if in_use else None,
+            "width": health.get("width") if in_use else None,
+            "height": health.get("height") if in_use else None,
+            "decoder": health.get("decoder") if in_use else None,
+        }
+    }
+
 
 @dataclass(frozen=True)
 class CameraSourceState:
@@ -180,6 +215,8 @@ def build_inventory(
     static_video_pinned: bool = False,
     static_video_metadata: Optional[Mapping[str, Any]] = None,
     static_video_absent_since: Optional[int] = None,
+    stream_health: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    stream_credentials_configured: Optional[Mapping[str, bool]] = None,
 ) -> List[CameraSourceState]:
     """Pure merge of configured Image_Sources with discovered hardware.
 
@@ -232,6 +269,19 @@ def build_inventory(
     one explicitly absent entry after an unpin of a reported camera, and
     never the aravis-enumerated duplicate. They are independent of the
     image parameters.
+
+    Stream cameras (rtsp-rtmp-stream-cameras Requirement 4.5): each ``RTSP``
+    or ``RTMP`` Image_Source becomes one ``edge-configured`` entry, never
+    merged with discovered hardware, whose ``params`` carry the Stream_URL
+    (``url``), its non-secret settings, ``credentialsConfigured`` and the
+    device-managed ``credentialRef`` / ``credentialsUpdatedAt``, and whose
+    ``capabilities.stream`` carry the coarse state, codec, resolution and
+    decoder (:func:`stream_capabilities`). ``stream_health`` maps an
+    Image_Source id to its Stream_Health (or an already-projected
+    section), and ``stream_credentials_configured`` to whether the
+    Credential_Store holds its credentials. Neither ever holds a
+    credential. Inputs without stream sources produce exactly the output
+    they did before.
     """
     tracked = _normalize_discovery(discovery_result)
 
@@ -257,6 +307,14 @@ def build_inventory(
 
     for source in sorted(image_sources, key=_image_source_sort_key):
         image_source_id = _get(source, "imageSourceId")
+        if _source_type(source) in STREAM_SOURCE_TYPE_VALUES:
+            key = str(image_source_id)
+            entries.append(_stream_entry(
+                source,
+                (stream_health or {}).get(key),
+                bool((stream_credentials_configured or {}).get(key)),
+            ))
+            continue
         device_path = _resolve_device_path(source)
 
         match = None
@@ -621,6 +679,40 @@ def _configured_params(source, device_path: Optional[str]) -> Dict[str, Any]:
         if value is not None:
             params[param_key] = value
     return params
+
+
+def stream_params(source, credentials_configured: bool) -> Dict[str, Any]:
+    """The reported ``params`` of a stream Image_Source: the Stream_URL, its
+    stored settings, ``credentialsConfigured``, and the device-managed
+    Credential_Reference and update time. Never a credential: those live
+    only in the Credential_Store, and the stored settings hold none."""
+    source_type = _source_type(source)
+    configuration = _get(source, "imageSourceConfiguration") or {}
+    settings = dict(_get(configuration, "streamSettings") or {})
+    params: Dict[str, Any] = {"url": _get(source, "location")}
+    for name in STREAM_REPORTED_SETTINGS.get(source_type, ()):
+        if settings.get(name) is not None:
+            params[name] = settings[name]
+    params[STREAM_CREDENTIALS_CONFIGURED] = bool(credentials_configured)
+    reference = settings.get(STREAM_CREDENTIAL_REF)
+    if isinstance(reference, Mapping) and reference:
+        params[STREAM_CREDENTIAL_REF] = {
+            key: reference[key] for key in ("secretArn", "versionId") if key in reference}
+    updated_at = settings.get(STREAM_CREDENTIALS_UPDATED_AT)
+    if isinstance(updated_at, int) and not isinstance(updated_at, bool):
+        params[STREAM_CREDENTIALS_UPDATED_AT] = updated_at
+    return params
+
+
+def _stream_entry(source, health, credentials_configured: bool) -> CameraSourceState:
+    return CameraSourceState(
+        camera_source_id=configured_camera_source_id(_get(source, "imageSourceId")),
+        name=_get(source, "name") or "",
+        type=_source_type(source),
+        origin=ORIGIN_EDGE_CONFIGURED,
+        params=stream_params(source, credentials_configured),
+        capabilities=stream_capabilities(health),
+    )
 
 
 def _aravis_identity(camera) -> Dict[str, Any]:

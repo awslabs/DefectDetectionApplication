@@ -27,6 +27,7 @@ import {
   ContentLayout,
   Header,
   Link,
+  SegmentedControl,
   SpaceBetween,
   StatusIndicator,
   Table,
@@ -35,10 +36,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 
 import {
+  REGISTRATION_EXECUTIONS_LIMIT_MAX,
   WorkflowExecution,
+  getContinuousStatus,
   getWorkflowRegistration,
+  listRegistrationExecutions,
   triggerWorkflowRegistration,
 } from "api/WorkflowRegistrationAPI";
+import ContinuousStatusPanel, {
+  continuousStatusQueryKey,
+} from "./ContinuousStatusPanel";
 import {
   canTrigger,
   canViewResults,
@@ -54,6 +61,11 @@ import EmptyTable from "components/empty-table/EmptyTable";
 import { AppLayoutContext } from "components/layout/AppLayoutContext";
 
 export const EXECUTION_POLL_INTERVAL_MS = 2000;
+/** How often a continuous workflow's status refreshes. */
+export const CONTINUOUS_STATUS_POLL_INTERVAL_MS = 2000;
+
+/** Which runs of a continuous workflow the executions table shows. */
+type RunsFilter = "recent" | "notable";
 
 function formatEpochSeconds(epochSeconds: number | null): string {
   return epochSeconds ? format(epochSeconds * 1000, DATE_WITHOUT_TZ) : "-";
@@ -64,13 +76,45 @@ export default function DeployedWorkflowDetails(): JSX.Element {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { addError } = React.useContext(AppLayoutContext);
+  const [runsFilter, setRunsFilter] = React.useState<RunsFilter>("recent");
+
+  // A registration whose stream node runs in continuous mode has a
+  // Continuous status (rtsp-rtmp-stream-cameras Requirement 16.2); any other
+  // has none (null), and a failed lookup is treated the same way.
+  const continuousQuery = useQuery({
+    queryKey: continuousStatusQueryKey(registrationId),
+    queryFn: () => getContinuousStatus(registrationId),
+    refetchInterval: (data) =>
+      data ? CONTINUOUS_STATUS_POLL_INTERVAL_MS : false,
+  });
+  const continuous = continuousQuery.data ?? null;
+  const isContinuous = continuous !== null;
 
   const detailQuery = useQuery({
     queryKey: ["getWorkflowRegistration", registrationId],
     queryFn: () => getWorkflowRegistration(registrationId),
-    // Poll while any execution is active; stop once all are terminal.
+    // Poll while any execution is active; stop once all are terminal. A
+    // continuous workflow always has a run in flight, so its runs come from
+    // the bounded list below instead of re-reading its whole history.
     refetchInterval: (data) =>
-      data && shouldPoll(data.executions) ? EXECUTION_POLL_INTERVAL_MS : false,
+      !isContinuous && data && shouldPoll(data.executions)
+        ? EXECUTION_POLL_INTERVAL_MS
+        : false,
+  });
+
+  // The newest runs, or the newest Notable_Runs, of a continuous workflow.
+  const runsQuery = useQuery({
+    queryKey: ["listRegistrationExecutions", registrationId, runsFilter],
+    queryFn: () =>
+      listRegistrationExecutions(registrationId, {
+        limit: REGISTRATION_EXECUTIONS_LIMIT_MAX,
+        notable: runsFilter === "notable",
+      }),
+    enabled: isContinuous,
+    refetchInterval: (data) =>
+      continuous?.state !== "paused" || (data && shouldPoll(data))
+        ? EXECUTION_POLL_INTERVAL_MS
+        : false,
   });
 
   const triggerMutation = useMutation({
@@ -81,20 +125,30 @@ export default function DeployedWorkflowDetails(): JSX.Element {
       queryClient.invalidateQueries({
         queryKey: ["getWorkflowRegistration", registrationId],
       });
+      if (isContinuous) {
+        queryClient.invalidateQueries({
+          queryKey: ["listRegistrationExecutions", registrationId],
+        });
+      }
     },
     // Surface the backend rejection (e.g. the 409 for invalid registrations)
     // rather than masking it.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     onError: (err: any) => {
       const detail =
-        err?.response?.data?.detail || "Failed to trigger workflow run.";
+        err?.response?.data?.detail ||
+        err?.response?.data?.message ||
+        "Failed to trigger workflow run.";
       addError({ content: <>{detail}</> });
     },
   });
 
   const registration = detailQuery.data;
   const timezoneLabel = format(new Date(), DATE_TZ_OFFSET);
-  const executions = sortExecutions(registration?.executions ?? []);
+  const executions = sortExecutions(
+    (isContinuous ? runsQuery.data : registration?.executions) ?? [],
+  );
+  const showingNotable = isContinuous && runsFilter === "notable";
 
   if (!registration) {
     return (
@@ -120,7 +174,10 @@ export default function DeployedWorkflowDetails(): JSX.Element {
         <Header
           variant="h1"
           actions={
-            canTrigger(registration) && (
+            // A continuous workflow takes a manual run only while paused
+            // (rtsp-rtmp-stream-cameras Requirement 11.7).
+            canTrigger(registration) &&
+            (!continuous || continuous.state === "paused") && (
               <Button
                 variant="primary"
                 loading={triggerMutation.isLoading}
@@ -178,10 +235,43 @@ export default function DeployedWorkflowDetails(): JSX.Element {
           </ColumnLayout>
         </Container>
 
+        {continuous && (
+          <ContinuousStatusPanel
+            registrationId={registrationId}
+            status={continuous}
+          />
+        )}
+
         <Table
           wrapLines
+          loading={isContinuous && runsQuery.isLoading}
+          loadingText="Loading runs"
           header={
-            <Header variant="h2" counter={`(${executions.length})`}>
+            <Header
+              variant="h2"
+              counter={`(${executions.length})`}
+              description={
+                isContinuous &&
+                (showingNotable
+                  ? "The newest notable runs: runs that failed, sent an output, or changed an event gate."
+                  : `The ${REGISTRATION_EXECUTIONS_LIMIT_MAX} newest runs. Older runs are kept only when they are notable.`)
+              }
+              actions={
+                isContinuous && (
+                  <SegmentedControl
+                    label="Runs to show"
+                    selectedId={runsFilter}
+                    onChange={({ detail }): void =>
+                      setRunsFilter(detail.selectedId as RunsFilter)
+                    }
+                    options={[
+                      { id: "recent", text: "Recent runs" },
+                      { id: "notable", text: "Notable runs" },
+                    ]}
+                  />
+                )
+              }
+            >
               Executions
             </Header>
           }
@@ -287,10 +377,17 @@ export default function DeployedWorkflowDetails(): JSX.Element {
           ]}
           items={executions}
           empty={
-            <EmptyTable
-              header="No executions"
-              message="This workflow has not been run yet."
-            />
+            showingNotable ? (
+              <EmptyTable
+                header="No notable runs"
+                message="No run has failed, sent an output, or changed an event gate yet."
+              />
+            ) : (
+              <EmptyTable
+                header="No executions"
+                message="This workflow has not been run yet."
+              />
+            )
           }
         />
       </SpaceBetween>

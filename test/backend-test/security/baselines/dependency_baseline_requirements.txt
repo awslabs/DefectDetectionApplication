@@ -56,3 +56,10 @@ asyncua==2.0.1
 # on device with ModuleNotFoundError (found verifying iot_endpoint on JP7 1.0.32). Pure
 # Python; 2.x needs CallbackAPIVersion, which trigger_runtime already handles.
 paho-mqtt==2.1.0
+# av (PyAV) demuxes RTMP/RTMPS FLV, E-RTMP H.265 included, in the stream camera
+# workers (rtsp-rtmp-stream-cameras Requirement 7.2). 17.1.0 is the newest release
+# with manylinux_2_28 wheels for cp310 (JP6) and cp311 (JP5, JP7, x86_64) on both
+# aarch64 and x86_64; 18.x ships cp311+ abi3 wheels only. Its bundled FFmpeg 8.1.1
+# has the flv demuxer, the rtmp/rtmps protocols, the h264/hevc parsers and the
+# h264/hevc_mp4toannexb bitstream filters (verified per wheel, task 14.1).
+av==17.1.0

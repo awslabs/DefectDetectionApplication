@@ -28,10 +28,10 @@ Planning failures follow the executor's contained-failure discipline
 :class:`PythonSourceError` carries the ``node_id`` so the executor can
 set ``failing_node_id`` directly; it is ``None`` for document-level
 failures no single node owns. A document carrying more than one fed
-frame source — counted across the UNION of ``pythonSourceBinding`` and
-``aravisBinding`` points — violates the single-frame appsrc Frame_Feed
-contract and fails with a reason naming every offending node
-(Requirement 8.5).
+frame source — counted across the UNION of ``pythonSourceBinding``,
+``aravisBinding`` and ``streamBinding`` points — violates the
+single-frame appsrc Frame_Feed contract and fails with a reason naming
+every offending node (Requirement 8.5).
 
 Documents with no Python source binding points — including every
 pre-feature document without a ``bindingPoints`` section and documents
@@ -51,7 +51,9 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 #: The frame-feed markers the packager stamps on binding points; a
 #: document may carry at most one point across the union (8.5).
-_FEED_MARKERS = ("pythonSourceBinding", "aravisBinding")
+#: ``streamBinding`` joins them (rtsp-rtmp-stream-cameras Requirement
+#: 10.6): a stream camera feeds the same single appsrc.
+_FEED_MARKERS = ("pythonSourceBinding", "aravisBinding", "streamBinding")
 
 
 class PythonSourceError(Exception):
@@ -93,8 +95,8 @@ def plan_python_sources(document: Dict[str, Any]) -> List[PythonSourceFeed]:
 
     Raises :class:`PythonSourceError` (``node_id=None``) when the
     document carries more than one fed frame source across the union of
-    ``pythonSourceBinding`` and ``aravisBinding`` points, naming every
-    offending node (8.5).
+    ``pythonSourceBinding``, ``aravisBinding`` and ``streamBinding``
+    points, naming every offending node (8.5).
     """
     binding_points = document.get("bindingPoints") if isinstance(document, dict) else None
     if not binding_points:

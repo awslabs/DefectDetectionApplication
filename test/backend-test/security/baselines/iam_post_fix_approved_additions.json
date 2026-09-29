@@ -44,6 +44,13 @@
         "added_on": "2026-09-28",
         "statements": 6,
         "reviewed": "Purely additive: 6 added, 0 removed (EdgeCVPortalComputeStack DevicesRole: 4; DDAPortalUseCaseAccountStack DDAPortalAccessRole: 2). No wildcard resource and no wildcard action: greengrass:DeleteCoreDevice only on coreDevices:* carrying the dda-portal:managed=true tag; IoT removal actions only on thing/* and cert/* (the use-case role pins its own account); DynamoDB grants are single tables. No new iam:PassRole or sts:AssumeRole. Deployed with the repository owner's go-ahead."
+      },
+      {
+        "spec": ".kiro/specs/rtsp-rtmp-stream-cameras (tasks.md 9.3)",
+        "added_on": "2026-09-26",
+        "statements": 4,
+        "status": "Recorded by the spec implementation; needs the repository owner's review before the commit (task 26.4).",
+        "reviewed": "Purely additive: 4 added (2 per stack), 0 removed. (1) StreamCameraCredentialWrite on the DDAPortalAccessRole (use-case account) and on the CameraRegistry Lambda role (single-account setups): secretsmanager Create/PutSecretValue/UpdateSecretVersionStage/DescribeSecret/DeleteSecret/RestoreSecret/TagResource on arn:aws:secretsmanager:*:<account>:secret:dda-portal/stream-camera-credentials/* only. GetSecretValue is not granted, so the Portal can never read a credential back (Requirement 6.6). (2) iam:GetRolePolicy/PutRolePolicy on arn:aws:iam::<account>:role/GreengrassV2TokenExchangeRole only: the Portal writes its own inline policies there (DDAStreamCameraCredentialRead, and DDAWorkflowTuningSampleAccess, whose grant had no such permission before). No attach/create/PassRole, no wildcard resource, no new sts:AssumeRole."
       }
     ]
   },
@@ -109,14 +116,18 @@
         "{\"Action\": \"greengrass:DeleteCoreDevice\", \"Condition\": {\"StringEquals\": {\"aws:ResourceTag/dda-portal:managed\": \"true\"}}, \"Effect\": \"Allow\", \"Resource\": \"arn:aws:greengrass:*:*:coreDevices:*\"}",
         "{\"Action\": [\"iot:DeleteCertificate\", \"iot:DeleteThing\", \"iot:DetachThingPrincipal\", \"iot:ListNamedShadowsForThing\", \"iot:ListPrincipalThings\", \"iot:ListThingPrincipals\", \"iot:UpdateCertificate\"], \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:iot:*:*:cert/*\", \"arn:aws:iot:*:*:thing/*\"]}",
         "{\"Action\": [\"dynamodb:DeleteItem\", \"dynamodb:Query\"], \"Effect\": \"Allow\", \"Resource\": [{\"Fn::ImportValue\": \"EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeviceRegistrationsTableA5AE63AFArn6AE0897B\"}, {\"Fn::Join\": [\"\", [{\"Fn::ImportValue\": \"EdgeCVPortalStorageStack:ExportsOutputFnGetAttDeviceRegistrationsTableA5AE63AFArn6AE0897B\"}, \"/index/*\"]]}]}",
-        "{\"Action\": \"dynamodb:DeleteItem\", \"Effect\": \"Allow\", \"Resource\": {\"Fn::GetAtt\": [\"AccountSyncTable789D4162\", \"Arn\"]}}"
+        "{\"Action\": \"dynamodb:DeleteItem\", \"Effect\": \"Allow\", \"Resource\": {\"Fn::GetAtt\": [\"AccountSyncTable789D4162\", \"Arn\"]}}",
+        "{\"Action\": [\"iam:GetRolePolicy\", \"iam:PutRolePolicy\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:iam::\", {\"Ref\": \"AWS::AccountId\"}, \":role/GreengrassV2TokenExchangeRole\"]]}}",
+        "{\"Action\": [\"secretsmanager:CreateSecret\", \"secretsmanager:DeleteSecret\", \"secretsmanager:DescribeSecret\", \"secretsmanager:PutSecretValue\", \"secretsmanager:RestoreSecret\", \"secretsmanager:TagResource\", \"secretsmanager:UpdateSecretVersionStage\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:secretsmanager:*:\", {\"Ref\": \"AWS::AccountId\"}, \":secret:dda-portal/stream-camera-credentials/*\"]]}}"
       ]
     },
     "DDAPortalUseCaseAccountStack": {
       "approved_additions": [
         "{\"Action\": \"servicequotas:GetServiceQuota\", \"Effect\": \"Allow\", \"Resource\": \"arn:aws:servicequotas:*:111111111111:iotcore/L-A295A064\", \"Sid\": \"IoTShadowSizeQuotaRead\"}",
         "{\"Action\": \"greengrass:DeleteCoreDevice\", \"Condition\": {\"StringEquals\": {\"aws:ResourceTag/dda-portal:managed\": \"true\"}}, \"Effect\": \"Allow\", \"Resource\": \"arn:aws:greengrass:*:111111111111:coreDevices:*\", \"Sid\": \"GreengrassCoreDeviceRemoval\"}",
-        "{\"Action\": [\"iot:ListThingPrincipals\", \"iot:ListPrincipalThings\", \"iot:DetachThingPrincipal\", \"iot:UpdateCertificate\", \"iot:DeleteCertificate\", \"iot:ListNamedShadowsForThing\", \"iot:DeleteThing\"], \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:iot:*:111111111111:thing/*\", \"arn:aws:iot:*:111111111111:cert/*\"], \"Sid\": \"IoTThingRemoval\"}"
+        "{\"Action\": [\"iot:ListThingPrincipals\", \"iot:ListPrincipalThings\", \"iot:DetachThingPrincipal\", \"iot:UpdateCertificate\", \"iot:DeleteCertificate\", \"iot:ListNamedShadowsForThing\", \"iot:DeleteThing\"], \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:iot:*:111111111111:thing/*\", \"arn:aws:iot:*:111111111111:cert/*\"], \"Sid\": \"IoTThingRemoval\"}",
+        "{\"Action\": [\"iam:GetRolePolicy\", \"iam:PutRolePolicy\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:iam::111111111111:role/GreengrassV2TokenExchangeRole\"}",
+        "{\"Action\": [\"secretsmanager:CreateSecret\", \"secretsmanager:DeleteSecret\", \"secretsmanager:DescribeSecret\", \"secretsmanager:PutSecretValue\", \"secretsmanager:RestoreSecret\", \"secretsmanager:TagResource\", \"secretsmanager:UpdateSecretVersionStage\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:secretsmanager:*:111111111111:secret:dda-portal/stream-camera-credentials/*\"}"
       ]
     }
   }

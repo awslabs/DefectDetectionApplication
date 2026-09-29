@@ -251,6 +251,18 @@ else
         test/backend-test/utils/test_dda_user_management_utils.py \
         test/backend-test/host_scripts/test_docker_profile_selection.py -v
 
+      # ── Stream camera components gate ─────────────────────────────────────
+      # (spec: rtsp-rtmp-stream-cameras, Requirements 17.2, 17.3). Fails the
+      # build when this image lacks a GStreamer element of the RTSP or RTMP
+      # ingest heads or of the decode tail, PyAV with FFmpeg 6.1 or later and
+      # its flv demuxer and rtmp protocol, or H.264/H.265 software decoding,
+      # RTMP H.265 over Enhanced FLV included. --noconftest: the suite
+      # conftest mocks gi, and this gate needs the real GStreamer.
+      echo "Running stream camera components gate..."
+      DDA_STREAM_COMPONENT_GATE=1 python${PYTHON_VERSION} -m pytest --noconftest \
+        test/backend-test/stream_ingest/test_image_stream_components.py -v
+      echo "Stream camera components gate passed."
+
       # ── Security injection / deserialization gate ─────────────────────────
       # (spec: security-injection-deserialization-fixes). A single green gate:
       #   1. repo_audit.py — pattern gate; exits non-zero if a disallowed

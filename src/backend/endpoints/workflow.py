@@ -53,7 +53,8 @@ from metrics.collector import Timer
 from utils.camera_manager import get_camera_frame
 from utils.common import DIOProcessHealthStatusEnum
 from resources.accessors.image_source_accessor import ImageSourceAccessor
-from model.image_source import ImageSourceType
+from model.image_source import ImageSourceType, is_stream_source_type
+from model.stream_source import CLASSIC_PIPELINE_REJECTION
 from metrics.latency_metrics import LatencyMetrics
 from endpoints.route.access_log_router import get_api_router
 from utils.server_setup import workflow_metadata_accessor
@@ -164,6 +165,10 @@ def configure_image_source_and_run_pipeline(workflow:Workflow, db: Session, late
     ## DD-18130: Add support for smart cameras
     elif image_source_dict.get("type") == ImageSourceType.ICAM or image_source_dict.get("type") == ImageSourceType.NVIDIA_CSI:
         return gst_pipeline_executor.execute_workflow_pipeline(workflow, db, latency_metrics=latency_metrics)
+    elif is_stream_source_type(image_source_dict.get("type")):
+        # rtsp-rtmp-stream-cameras Requirement 4.8 (the configuration is
+        # already rejected; this guards a record that predates the check).
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=CLASSIC_PIPELINE_REJECTION)
     return "", {}
 
 def _identifier(source, key):
@@ -292,6 +297,8 @@ async def run_inference_for_stream(
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"Server cannot start capture task for folder type image source",
             )
+        if is_stream_source_type(image_source_dict.get("type")):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=CLASSIC_PIPELINE_REJECTION)
 
         # Add capture task
         image_count = data.get("captureImageCount")

@@ -29,6 +29,7 @@ import os
 from utils import utils
 from utils.constants import INFERENCE_RECEIVED_TIMESTAMP
 from exceptions.api.gst_pipeline_exception import PipelineExecutionException, PipelineSyntaxException
+from dda_triton.native_calls import TRITON_NATIVE_LOCK
 from gstreamer.frame_stride import reconcile_to_caps_stride
 from resources.accessors.latency_time_accessor import LatencyTimeAccessor
 
@@ -53,6 +54,31 @@ logger = logging.getLogger(__name__)
 # watchdog force-quits the GLib main loop. Prevents a stalled pipeline (no
 # EOS/ERROR) from hanging the flask worker indefinitely.
 PIPELINE_TIMEOUT_SEC = 120
+
+def release_bus_watch(bus, handler_id=None) -> None:
+    """Undo ``bus.add_signal_watch()`` and ``bus.connect("message", ...)``
+    once a run's pipeline is in NULL.
+
+    ``add_signal_watch`` attaches a GSource to the default GLib main context
+    that holds a reference on the bus, and every later ``loop.run()`` on that
+    context polls it. Left in place, each run leaked its bus, its message
+    handler and everything the handler's closure holds (the run's tag values
+    and status collector), and made every later run's main loop a little
+    slower. Found on hardware (rtsp-rtmp-stream-cameras task 25.3):
+    continuous workflows grew the backend by 25-40 KB per run and slowed
+    from 3 to 1 run/s over 2 hours. Safe with ``bus`` None; never raises."""
+    if bus is None:
+        return
+    if handler_id is not None:
+        try:
+            bus.disconnect(handler_id)
+        except Exception:  # noqa: BLE001 - already disconnected
+            pass
+    try:
+        bus.remove_signal_watch()
+    except Exception:  # noqa: BLE001 - best effort at teardown
+        pass
+
 
 class GstPipelineManager:
 
@@ -111,6 +137,10 @@ class GstPipelineManager:
         
         pipeline = None
         loop = None
+        # The bus once its signal watch is added, and the message handler's
+        # id: released in ``finally`` (see ``release_bus_watch``).
+        watched_bus = None
+        bus_handler_id = None
         # ERROR messages arrive on the GStreamer bus inside a GLib signal
         # callback. Raising a Python exception from within that C callback does
         # NOT propagate out to loop.run() — GLib prints the traceback to stderr
@@ -187,7 +217,8 @@ class GstPipelineManager:
 
             bus = pipeline.get_bus()
             bus.add_signal_watch()
-            bus.connect("message", on_message)
+            watched_bus = bus
+            bus_handler_id = bus.connect("message", on_message)
 
             # Safety watchdog: guarantee the loop terminates even if the
             # pipeline stalls without ever posting EOS or ERROR (otherwise
@@ -208,7 +239,9 @@ class GstPipelineManager:
             watchdog_id = GLib.timeout_add_seconds(PIPELINE_TIMEOUT_SEC, _watchdog)
 
             logger.warning("Setting pipeline to PLAYING state")
-            ret = pipeline.set_state(Gst.State.PLAYING)
+            # emltriton initializes during this call; see TRITON_NATIVE_LOCK.
+            with TRITON_NATIVE_LOCK:
+                ret = pipeline.set_state(Gst.State.PLAYING)
             if ret == Gst.StateChangeReturn.FAILURE:
                 logger.error("Pipeline failed to start")
                 # The state change failed synchronously, so the main loop never
@@ -267,6 +300,7 @@ class GstPipelineManager:
             if pipeline:
                 pipeline.set_state(Gst.State.NULL)
                 logger.info("Pipeline set to NULL state")
+            release_bus_watch(watched_bus, bus_handler_id)
         return parsed_tag_values
 
     def parse_msg(self, msg, latency_metrics = None) -> dict:

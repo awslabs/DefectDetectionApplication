@@ -55,7 +55,8 @@ from utils.constants import (
     INFERENCE,
 )
 from utils.camera_manager import get_camera_frame
-from model.image_source import ImageSourceType
+from model.image_source import ImageSourceType, is_stream_source_type
+from model.stream_source import CLASSIC_PIPELINE_REJECTION
 import concurrent.futures
 from metrics.collector import Timer
 
@@ -133,6 +134,9 @@ class DigitalInputThread(Thread):
             raise TypeError(
                 f"Image capture is not available because the image source is set to retrieve images from a folder"
             )
+        elif is_stream_source_type(self.image_source.get("type")):
+            # rtsp-rtmp-stream-cameras Requirement 4.8.
+            raise TypeError(CLASSIC_PIPELINE_REJECTION)
         elif self.image_source.get("type") == ImageSourceType.CAMERA:
             r = self.gst_pipeline_executor.execute_image_source_pipeline(
                 ImageSource(**self.image_source),

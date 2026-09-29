@@ -61,6 +61,7 @@ import {
   buildCameraBindings,
   expectedBindingWarnings,
   initialBindingSelections,
+  invalidOverrideCells,
   parseCameraBindingRejection,
   parseWorkflowComponent,
   unboundCells,
@@ -1315,6 +1316,19 @@ export default function CreateDeployment() {
               .join('; ')
           );
         }
+        // A stream override with a Stream_URL the backend would reject
+        // (rtsp-rtmp-stream-cameras Requirement 9.4) is caught here too,
+        // before anything is submitted.
+        const invalidOverrides = invalidOverrideCells(
+          context, bindingSelections[workflowId] || {});
+        if (invalidOverrides.length > 0) {
+          throw new Error(
+            `Workflow '${workflowId}' has invalid Stream URL override(s): ` +
+            invalidOverrides
+              .map(i => `node '${i.nodeId}' on device '${i.device}': ${i.message}`)
+              .join('; ')
+          );
+        }
         const unconfirmed = bindingWarningsFor(workflowId)
           .filter(w => !confirmedWarningIds.has(w.id));
         if (unconfirmed.length > 0) {
@@ -1389,7 +1403,12 @@ export default function CreateDeployment() {
               target_thing_group: deploymentData.target_thing_group,
               deployment_name: deploymentData.deployment_name,
               rollout_config: deploymentData.rollout_config,
-              camera_bindings: buildCameraBindings(bindingSelections[workflowId] || {}),
+              // The node types make stream overrides emit {url}
+              // (rtsp-rtmp-stream-cameras Requirement 9.4).
+              camera_bindings: buildCameraBindings(
+                bindingSelections[workflowId] || {},
+                context.camera_input_nodes
+              ),
               confirmed_warnings: Array.from(confirmedWarningIds),
               acknowledged_retained_components: acknowledgedRetained,
             });

@@ -127,6 +127,10 @@ export const SOURCE_KIND_TO_SOURCE_TYPE = {
   icam: 'icam_source',
   aravis_camera: 'aravis_camera_source',
   folder: 'folder_source',
+  // Appended (rtsp-rtmp-stream-cameras Requirement 1.6), in the Python
+  // catalog's order.
+  rtsp_camera: 'rtsp_camera_source',
+  rtmp_stream: 'rtmp_stream_source',
 } as const;
 
 // --------------------------------------------------------------------------

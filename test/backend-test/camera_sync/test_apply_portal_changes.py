@@ -320,13 +320,18 @@ def test_create_applies_and_mirrors_placeholder_csid(tmp_path):
     assert document["cameras"]["portal-abc"] == document["cameras"][new_csid]
     assert shadow.desired_writes == [{"changes": {"portal-abc": None}}]
 
-    # The mirror disappears from the next report so the registry converges
-    # to the real cfg- entry.
+    # The next report retires the mirror with an explicit null (shadow
+    # updates merge nested maps, so omitting it would keep it in the
+    # shadow), so the registry converges to the real cfg- entry; the
+    # retirement is one-shot.
     agent.report_inventory()
     _flush(agent, clock)
     later = shadow.reported_writes[-1]
-    assert "portal-abc" not in later["cameras"]
+    assert later["cameras"]["portal-abc"] is None
     assert new_csid in later["cameras"]
+    agent.report_inventory()
+    _flush(agent, clock)
+    assert "portal-abc" not in shadow.reported_writes[-1]["cameras"]
 
 
 # --- delete (Requirement 5.2) ---------------------------------------------------

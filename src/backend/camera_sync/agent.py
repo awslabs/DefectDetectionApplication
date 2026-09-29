@@ -31,6 +31,17 @@ written ONCE with an explicit ``null``, which removes it — the same
 mechanism the Portal already uses in ``_clear_static_camera_shadow_key``.
 Only keys the device really published are retired, and only once.
 
+The same merge semantics apply to every configured camera deleted on the
+device and to every one-shot create alias (rtsp-rtmp-stream-cameras
+hardware finding): each previously published key that the current
+inventory no longer holds is retired the same way
+(:func:`deleted_source_retirements`). Without that, deleted cameras live
+on in the shadow and the Portal forever, and their accumulated entries
+push the merged document past the shadow size limit, after which every
+camera report of the device is rejected. Keys whose disappearance is
+reported as absence (discovered hardware, the virtual static cameras)
+are never retired this way.
+
 Report triggers (all funnel through :meth:`EdgeSyncAgent.report_inventory`):
 
 - LocalServer start: :meth:`EdgeSyncAgent.start` schedules an immediate
@@ -75,11 +86,12 @@ import os
 import re
 import threading
 import time
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from fastapi import HTTPException
 from marshmallow import ValidationError
 
+from camera_discovery.aravis import STABLE_ID_PREFIX as ARAVIS_STABLE_ID_PREFIX
 from camera_sync.inventory import (
     STATIC_IMAGE_ARAVIS_STABLE_ID,
     CameraSourceState,
@@ -91,6 +103,12 @@ from camera_sync.pin_worker import (
     OP_REMOVE,
     STATUS_APPLIED,
     StaticImagePinWorker,
+)
+from camera_sync.stream_reporting import (
+    StreamReportDebouncer,
+    is_stream_change,
+    stream_change_parts,
+    stream_ingest_section,
 )
 from camera_sync.version_state import CameraSyncStateStore, versions_from_reported
 from utils.static_image_camera import STATIC_IMAGE_CAMERA_ID, get_store
@@ -258,6 +276,36 @@ _DISCOVERED_PREFIX = "disc-"
 #: in :mod:`camera_sync.inventory` (third hardware finding). Derived from
 #: the shipped enumeration identity, never hardcoded (Requirement 2.11).
 RETIRED_CAMERA_SOURCE_IDS: Tuple[str, ...] = (STATIC_IMAGE_ARAVIS_STABLE_ID,)
+
+#: Camera keys whose disappearance is reported as ABSENCE and that are
+#: therefore never retired as deleted sources: discovered hardware
+#: (Camera_Discovery marks a vanished ``disc-``/``arv-`` camera absent,
+#: camera-registry-sync Requirement 2.4) and the two virtual static cameras
+#: (reported explicitly absent, cloud-static-camera-provisioning
+#: Requirement 6.2 and static-camera-video-loop Requirement 4.7).
+ABSENCE_TRACKED_PREFIXES: Tuple[str, ...] = (_DISCOVERED_PREFIX, ARAVIS_STABLE_ID_PREFIX)
+ABSENCE_TRACKED_IDS = frozenset({STATIC_IMAGE_CAMERA_ID, STATIC_VIDEO_CAMERA_ID})
+
+
+def deleted_source_retirements(
+    previously_published: Iterable[str], live_keys: Iterable[str]
+) -> Set[str]:
+    """The previously published camera keys a report must delete from the
+    shadow with an explicit ``null``: every one the current report does not
+    carry (a configured camera deleted on the device, a one-shot create
+    alias after its report), except the absence-tracked keys.
+
+    Shadow updates merge nested maps, so omitting such a key from a full
+    report leaves it in the shadow, and the Portal's missing-from-report
+    deletion path never fires (rtsp-rtmp-stream-cameras hardware finding).
+    """
+    live = set(live_keys)
+    return {
+        key for key in previously_published
+        if key not in live
+        and key not in ABSENCE_TRACKED_IDS
+        and not key.startswith(ABSENCE_TRACKED_PREFIXES)
+    }
 
 #: Capability-truncation ladder: (max formats per camera, max resolutions
 #: per format). ``None`` means unlimited. Tried in order until the document
@@ -440,6 +488,7 @@ def build_report_document(
     aliases: Optional[Mapping[str, str]] = None,
     retirements: Optional[Iterable[str]] = None,
     max_bytes: int = MAX_REPORT_BYTES,
+    device_capabilities: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Pure builder of the complete reported document (design section 3).
 
@@ -452,8 +501,9 @@ def build_report_document(
     the create produced (``cfg-{imageSourceId}``): the alias key mirrors
     the created entry (including its ``ack``) so the Portal reducer can
     match the pending create entry's ``portal_change_id`` (Requirement
-    5.3). Aliases are one-shot — omitted from the next report, they age
-    out of the registry through the reducer's deletion path.
+    5.3). Aliases are one-shot — the next report retires them (see
+    ``retirements``), so they age out of the registry through the
+    reducer's deletion path.
 
     ``retirements`` are already-published camera keys that must cease to
     exist in the shadow (feature
@@ -466,6 +516,10 @@ def build_report_document(
     always wins), and the null never reaches the Portal parser: the
     documents event carries the post-merge state, from which the key is
     gone. Retirements are one-shot, driven by the caller.
+
+    ``device_capabilities`` (rtsp-rtmp-stream-cameras Requirement 16.5) is
+    the ``deviceCapabilities.streamIngest`` section; when None the document
+    has no ``deviceCapabilities`` key, exactly as before the feature.
     """
     acks = acks or {}
     cameras: Dict[str, Any] = {
@@ -489,6 +543,8 @@ def build_report_document(
         "failures": {k: dict(v) for k, v in (failures or {}).items()},
         "discoveryErrors": [dict(e) for e in (discovery_errors or [])],
     }
+    if device_capabilities is not None:
+        document["deviceCapabilities"] = {"streamIngest": dict(device_capabilities)}
     if _encoded_size(document) <= max_bytes:
         return document
 
@@ -517,7 +573,14 @@ def change_to_image_source_data(change: Mapping[str, Any]) -> Dict[str, Any]:
     every other params key (``gain``, ``exposure``, ``deviceName``, …) is
     passed through to ``imageSourceConfiguration`` so the accessors'
     schema validation judges it unchanged (Requirements 5.2, 11.3).
+
+    A stream camera (``RTSP``/``RTMP``, rtsp-rtmp-stream-cameras) maps
+    ``url`` to ``location`` and its settings to ``streamSettings`` (see
+    ``camera_sync.stream_reporting.stream_change_parts``); its credential
+    bookkeeping keys are handled by the apply path, never passed on.
     """
+    if is_stream_change(change):
+        return stream_change_parts(change)[0]
     data: Dict[str, Any] = {}
     if change.get("name") is not None:
         data["name"] = change["name"]
@@ -534,6 +597,23 @@ def change_to_image_source_data(change: Mapping[str, Any]) -> Dict[str, Any]:
     if configuration:
         data["imageSourceConfiguration"] = configuration
     return data
+
+
+def _managed_settings(credential_ref, updated_at) -> Dict[str, Any]:
+    """The device-managed stream settings a Portal change sets: the
+    delivered Credential_Reference (None removes it) and, when the Portal
+    sent one, the time the credentials changed."""
+    managed: Dict[str, Any] = {"credentialRef": credential_ref}
+    if updated_at is not None:
+        managed["credentialsUpdatedAt"] = updated_at
+    return managed
+
+
+def _record_field(record, key: str):
+    """``key`` of an Image_Source record, dict- or attribute-shaped."""
+    if isinstance(record, Mapping):
+        return record.get(key)
+    return getattr(record, key, None)
 
 
 def _error_reason(err: Exception) -> str:
@@ -580,6 +660,10 @@ class EdgeSyncAgent:
         video_pin_worker: Optional[StaticImagePinWorker] = None,
         shadow_size_limit_provider: Optional[Callable[[], Optional[int]]] = None,
         limit_refresh_seconds: float = SHADOW_LIMIT_REFRESH_SECONDS,
+        stream_ingest=None,
+        stream_timer: Optional[Callable[[float, Callable[[], None]], None]] = None,
+        credential_fetcher: Optional[Callable[[Mapping[str, Any]], Dict[str, str]]] = None,
+        credential_store=None,
     ):
         self._shadow = iot_shadow_accessor
         self._image_source_accessor = image_source_accessor
@@ -682,10 +766,28 @@ class EdgeSyncAgent:
         self._pending_retirements: set = set()
         self._consumed_retirements: set = set()
         self._retired_registrations: set = set()
+        # The camera keys the shadow holds from this device: seeded from the
+        # start-time shadow GET (so keys earlier builds or processes left
+        # behind are known), else from the version state store, and kept
+        # current by every successful write. Deleted sources are retired
+        # from it (deleted_source_retirements); None until seeded.
+        self._published_keys: Optional[Set[str]] = None
 
         self._stop_event = threading.Event()
         self._wakeup = threading.Event()
         self._thread: Optional[threading.Thread] = None
+
+        # Stream cameras (rtsp-rtmp-stream-cameras, design component 12).
+        # ``stream_ingest`` is the StreamIngestManager, or None for no
+        # stream reporting at all (the documents are then exactly as
+        # before). Coarse health changes re-report at most once per camera
+        # per 30 s (Requirement 4.6).
+        self._stream_ingest = stream_ingest
+        self._stream_reports = StreamReportDebouncer(
+            clock=clock, on_publish=self.report_inventory,
+            **({"timer": stream_timer} if stream_timer is not None else {}))
+        self._credential_fetcher = credential_fetcher
+        self._credential_store = credential_store
 
     # --- lifecycle -------------------------------------------------------
 
@@ -711,6 +813,31 @@ class EdgeSyncAgent:
             target=self._run, name="camera-sync-agent", daemon=True
         )
         self._thread.start()
+        self._attach_stream_ingest()
+
+    def _attach_stream_ingest(self) -> None:
+        """Listen to stream health, and report the Device_Stream_Capabilities
+        once the startup probe has them (Requirement 16.5). The probe starts
+        here, so every device reports its capabilities, even before its
+        first stream camera is added."""
+        manager = self._stream_ingest
+        if manager is None:
+            return
+        try:
+            manager.add_health_listener(self._on_stream_health)
+            manager.on_capabilities(lambda _capabilities: self.report_inventory())
+        except Exception:  # noqa: BLE001 - stream reporting must not break the agent
+            logger.exception("Could not attach stream camera reporting")
+
+    def _on_stream_health(self, camera_key: str, health: Mapping[str, Any]) -> None:
+        """A stream session's state changed: re-report when the camera's
+        coarse state, codec, resolution or decoder changed, at most once
+        per camera per 30 s (Requirement 4.6)."""
+        from stream_ingest.manager import image_source_id_for_key
+
+        image_source_id = image_source_id_for_key(camera_key)
+        if image_source_id is not None and self._stream_reports.offer(image_source_id, health):
+            self.report_inventory()
 
     def stop(self) -> None:
         """Stop the report worker (and the owned pin worker) and wait for
@@ -853,9 +980,15 @@ class EdgeSyncAgent:
             self._record_failure(csid, REASON_DISCOVERY_MANAGED, portal_change_id)
             return
 
+        from stream_ingest.credential_fetch import CredentialFetchError
+
         try:
-            if op == "create":
+            if op == "create" and is_stream_change(change):
+                self._apply_stream_create(csid, change, portal_change_id)
+            elif op == "create":
                 self._apply_create(csid, change, portal_change_id)
+            elif op == "update" and is_stream_change(change):
+                self._apply_stream_update(csid, change, portal_change_id)
             elif op == "update":
                 self._apply_update(csid, change, portal_change_id)
             elif op == "delete":
@@ -864,6 +997,11 @@ class EdgeSyncAgent:
                 self._record_failure(
                     csid, "unsupported operation '{}'".format(op), portal_change_id
                 )
+        except CredentialFetchError as err:
+            # Requirement 5.6: the change fails with a reason that holds no
+            # secret ("credential retrieval failed: AccessDenied"), and the
+            # device is left unchanged.
+            self._record_failure(csid, str(err), portal_change_id)
         except (ValidationError, HTTPException) as err:
             # Accessor validation rejected the change: the message travels
             # verbatim as the failure reason (Requirement 5.4).
@@ -922,6 +1060,81 @@ class EdgeSyncAgent:
             self._image_source_accessor.update_image_source(
                 image_source_id, data, session
             )
+        with self._lock:
+            self._apply_failures.pop(csid, None)
+            if portal_change_id:
+                self._pending_acks[csid] = str(portal_change_id)
+
+    # --- stream cameras (rtsp-rtmp-stream-cameras Requirements 5.5, 5.6) ----
+
+    def _fetch_credentials(self, credential_ref: Mapping[str, Any]) -> Dict[str, str]:
+        if self._credential_fetcher is not None:
+            return self._credential_fetcher(credential_ref)
+        from stream_ingest.credential_fetch import fetch
+
+        return fetch(credential_ref)
+
+    def _credentials(self):
+        if self._credential_store is not None:
+            return self._credential_store
+        from stream_ingest.credentials import get_credential_store
+
+        return get_credential_store()
+
+    def _apply_stream_create(
+        self, csid: str, change: Mapping[str, Any], portal_change_id: Optional[str]
+    ) -> None:
+        """Create a stream camera from a Portal change (design component 12):
+
+        1. fetch the credentials a Credential_Reference names, failing fast
+           with a reason that holds no secret;
+        2. create the Image_Source, recording the reference and its time;
+        3. write the Credential_Store — the accessor deletes the just-created
+           Image_Source again when this fails, so no half-configured camera
+           remains.
+        """
+        data, credential_ref, _clear, updated_at = stream_change_parts(change)
+        managed: Dict[str, Any] = {}
+        if credential_ref is not None:
+            data["credentials"] = self._fetch_credentials(credential_ref)
+            managed = _managed_settings(credential_ref, updated_at)
+        with self._make_session() as session:
+            result = self._image_source_accessor.create_image_source(
+                data, session, managed_stream_settings=managed)
+        new_csid = configured_camera_source_id(str(result["imageSourceId"]))
+        with self._lock:
+            self._apply_failures.pop(csid, None)
+            if portal_change_id:
+                self._pending_acks[new_csid] = str(portal_change_id)
+                if csid != new_csid:
+                    self._create_aliases[csid] = new_csid
+
+    def _apply_stream_update(
+        self, csid: str, change: Mapping[str, Any], portal_change_id: Optional[str]
+    ) -> None:
+        """Update a stream camera from a Portal change. A delivered
+        Credential_Reference is fetched only when it is not the one the
+        device already holds; a delivered clear removes the credentials.
+        The accessor writes the Credential_Store before the Image_Source and
+        restores it if the Image_Source write fails."""
+        image_source_id = csid[len(_CONFIGURED_PREFIX):]
+        data, credential_ref, clear, updated_at = stream_change_parts(change)
+        data.pop("type", None)  # the stored type is authoritative
+        managed: Dict[str, Any] = {}
+        with self._make_session() as session:
+            if credential_ref is not None:
+                current = self._image_source_accessor.get_image_source(image_source_id, session)
+                configuration = getattr(current, "imageSourceConfiguration", None)
+                stored = dict(getattr(configuration, "streamSettings", None) or {})
+                if (stored.get("credentialRef") != credential_ref
+                        or not self._credentials().configured(image_source_id)):
+                    data["credentials"] = self._fetch_credentials(credential_ref)
+                managed = _managed_settings(credential_ref, updated_at)
+            elif clear:
+                data["clearCredentials"] = True
+                managed = _managed_settings(None, updated_at)
+            self._image_source_accessor.update_image_source(
+                image_source_id, data, session, managed_stream_settings=managed)
         with self._lock:
             self._apply_failures.pop(csid, None)
             if portal_change_id:
@@ -1025,6 +1238,17 @@ class EdgeSyncAgent:
         self._reported_versions = versions_from_reported(reported)
         self._seed_static_absence(reported)
         self._seed_static_video_absence(reported)
+        if isinstance(state, Mapping):
+            # The shadow's own record of the camera keys it holds (for the
+            # deleted-source retirement); without a readable shadow the
+            # first report seeds a fallback instead.
+            cameras = reported.get("cameras") if isinstance(reported, Mapping) else None
+            if not isinstance(cameras, Mapping):
+                cameras = {}
+            with self._lock:
+                self._published_keys = {
+                    str(key) for key, entry in cameras.items() if isinstance(entry, Mapping)
+                }
         return state if isinstance(state, Mapping) else None
 
     def _seed_static_absence(self, reported: Optional[Mapping]) -> None:
@@ -1059,9 +1283,11 @@ class EdgeSyncAgent:
         )
         # Collected BEFORE the state store is advanced: `advance` rewrites
         # the state file from the current inventory, which is one of the
-        # two records answering "previously reported".
-        retirements = self._collect_retirements()
+        # two records answering "previously reported". Both collections
+        # add to the pending retirements this document carries.
+        self._collect_retirements()
         inventory = self._load_inventory(snapshot)
+        previously_published = self._previously_published_keys()
         versions = self._state_store.advance(inventory, self._reported_versions)
         discovery_errors = [
             {"devicePath": f.get("device_path"), "error": f.get("error")}
@@ -1071,6 +1297,10 @@ class EdgeSyncAgent:
             failures = {k: dict(v) for k, v in self._apply_failures.items()}
             acks = dict(self._pending_acks)
             aliases = dict(self._create_aliases)
+            retirements = self._collect_deleted_sources(
+                previously_published,
+                [entry.camera_source_id for entry in inventory] + list(aliases),
+            )
             # Acks, aliases, and failures are one-shot: remember what this
             # document carries so a successful write clears exactly that.
             self._consumed_acks = dict(acks)
@@ -1096,6 +1326,7 @@ class EdgeSyncAgent:
             aliases=aliases,
             retirements=retirements,
             max_bytes=cap,
+            device_capabilities=self._device_stream_capabilities(),
         )
 
     # --- report cap (static-camera-video-loop design Decision 7) ------------
@@ -1181,6 +1412,45 @@ class EdgeSyncAgent:
         self._pending_retirements.update(newly)
         return tuple(sorted(self._pending_retirements))
 
+    def _previously_published_keys(self) -> Set[str]:
+        """The camera keys the shadow holds from this device. Seeded, when
+        no start-time shadow GET did it, from the start-time reported
+        versions and the version state store (the inventory of the last
+        report built) — read BEFORE the state store is advanced."""
+        with self._lock:
+            if self._published_keys is not None:
+                return set(self._published_keys)
+        keys = set(self._reported_versions)
+        try:
+            state = self._state_store.load()
+        except Exception:  # noqa: BLE001 - state read must not break reports
+            logger.exception("Camera sync state store read failed")
+            state = None
+        if state:
+            keys.update(str(key) for key in state)
+        with self._lock:
+            if self._published_keys is None:
+                self._published_keys = keys
+            return set(self._published_keys)
+
+    def _collect_deleted_sources(
+        self, previously_published: Iterable[str], live_keys: Iterable[str]
+    ) -> Tuple[str, ...]:
+        """Add the deleted sources' keys to the pending retirements and
+        return every retirement the next document carries (called with
+        ``self._lock`` held). A pending retirement whose key is live again
+        is dropped: a live entry always wins."""
+        live = set(live_keys)
+        newly = deleted_source_retirements(previously_published, live) - self._pending_retirements
+        if newly:
+            logger.info(
+                "Retiring deleted camera source(s) %s from the camera-registry "
+                "shadow (explicit null delete)", ", ".join(sorted(newly)),
+            )
+        self._pending_retirements.update(newly)
+        self._pending_retirements.difference_update(live)
+        return tuple(sorted(self._pending_retirements))
+
     def _make_session(self):
         """A DB session from the injected factory (default: the LocalServer
         ``SessionLocal``), usable as a context manager."""
@@ -1241,8 +1511,11 @@ class EdgeSyncAgent:
         else:
             static_video_absent_since = self._static_video_absent_since()
         with self._make_session() as session:
-            image_sources = self._image_source_accessor.list_image_sources(
+            image_sources = list(self._image_source_accessor.list_image_sources(
                 None, session
+            ))
+            stream_health, credentials_configured = self._stream_inventory_inputs(
+                image_sources
             )
             return build_inventory(
                 image_sources,
@@ -1253,7 +1526,54 @@ class EdgeSyncAgent:
                 static_video_pinned=static_video_pinned,
                 static_video_metadata=static_video_metadata,
                 static_video_absent_since=static_video_absent_since,
+                stream_health=stream_health,
+                stream_credentials_configured=credentials_configured,
             )
+
+    def _stream_inventory_inputs(self, image_sources):
+        """The published stream health and ``credentialsConfigured`` of each
+        stream Image_Source (Requirement 4.5); both empty, and nothing
+        consulted, when there is none."""
+        from model.stream_source import is_stream_source_type
+
+        stream_ids = [
+            str(_record_field(source, "imageSourceId"))
+            for source in image_sources
+            if is_stream_source_type(_record_field(source, "type"))
+        ]
+        self._stream_reports.forget_except(stream_ids)
+        if not stream_ids:
+            return {}, {}
+        health: Dict[str, Any] = {}
+        configured: Dict[str, bool] = {}
+        store = None
+        try:
+            store = self._credentials()
+        except Exception:  # noqa: BLE001 - reported as not configured
+            logger.exception("The stream Credential_Store could not be opened")
+        for image_source_id in stream_ids:
+            live = None
+            if self._stream_ingest is not None:
+                try:
+                    live = self._stream_ingest.health_for_image_source(image_source_id)
+                except Exception:  # noqa: BLE001 - reported as idle
+                    live = None
+            health[image_source_id] = self._stream_reports.published(image_source_id, live)["stream"]
+            try:
+                configured[image_source_id] = bool(store is not None and store.configured(image_source_id))
+            except Exception:  # noqa: BLE001
+                configured[image_source_id] = False
+        return health, configured
+
+    def _device_stream_capabilities(self) -> Optional[Dict[str, Any]]:
+        """``deviceCapabilities.streamIngest`` once the probe finished."""
+        if self._stream_ingest is None:
+            return None
+        try:
+            return stream_ingest_section(self._stream_ingest.capabilities(wait_s=0))
+        except Exception:  # noqa: BLE001 - reported without the section
+            logger.exception("Device stream capabilities could not be read")
+            return None
 
     def _static_image_absent_since(self) -> Optional[int]:
         """The ``absentSince`` to report for the unpinned
@@ -1360,6 +1680,15 @@ class EdgeSyncAgent:
                 for alias, target in self._consumed_aliases.items():
                     if self._create_aliases.get(alias) == target:
                         del self._create_aliases[alias]
+                # What the shadow now holds: every key written with an
+                # entry, minus every key written with a null.
+                if self._published_keys is None:
+                    self._published_keys = set()
+                for csid, entry in (document.get("cameras") or {}).items():
+                    if isinstance(entry, Mapping):
+                        self._published_keys.add(csid)
+                    else:
+                        self._published_keys.discard(csid)
                 for csid, failure in self._consumed_failures.items():
                     if self._apply_failures.get(csid) == failure:
                         del self._apply_failures[csid]

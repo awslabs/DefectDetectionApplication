@@ -38,6 +38,14 @@ import { AppLayoutContext } from "components/layout/AppLayoutContext";
 import { FOLDER_PREFIX } from "../constants";
 import FormPathInput from "components/form/FormPathInput";
 import { formLayoutStyle } from "styles/common";
+import StreamFields from "../stream/StreamFields";
+import {
+  apiErrorMessage,
+  buildStreamCredentials,
+  buildStreamSettings,
+  isStreamType,
+  streamFormDefaults,
+} from "../stream/streamForm";
 
 export default function AddImageSource(): JSX.Element {
   const navigate = useNavigate();
@@ -88,6 +96,18 @@ export default function AddImageSource(): JSX.Element {
             name: values.icamName ?? "",
             description: values.icamDescription,
           });
+        case ImageSourceType.RTSP:
+        case ImageSourceType.RTMP: {
+          const credentials = buildStreamCredentials(values);
+          return createImageSource({
+            type: values.type,
+            name: values.streamName ?? "",
+            description: values.streamDescription,
+            location: (values.streamUrl ?? "").trim(),
+            streamSettings: buildStreamSettings(values.type, values),
+            ...(credentials && { credentials }),
+          });
+        }
         case ImageSourceType.Folder:
         default:
           return createImageSource({
@@ -112,6 +132,8 @@ export default function AddImageSource(): JSX.Element {
                 ? values.nvidiaCSIName
                 : values.type === ImageSourceType.ICam
                 ? values.icamName
+                : isStreamType(values.type)
+                ? values.streamName
                 : values.folderName}
             </strong>
             .
@@ -135,9 +157,12 @@ export default function AddImageSource(): JSX.Element {
                 ? values.nvidiaCSIName
                 : values.type === ImageSourceType.ICam
                 ? values.icamName
+                : isStreamType(values.type)
+                ? values.streamName
                 : values.folderName}
             </strong>
-            . {error.message}
+            .{" "}
+            {isStreamType(values.type) ? apiErrorMessage(error) : error.message}
           </>
         ),
         action: (
@@ -156,10 +181,13 @@ export default function AddImageSource(): JSX.Element {
   const form = useForm<SchemaType>({
     resolver: yupResolver(schema),
     mode: "onSubmit",
+    // The stream number fields start as the strings the inputs show; the
+    // resolver casts them to numbers on submit.
     values: {
       type: ImageSourceType.Camera,
       cameraName: cameras.length > 0 ? cameras[0].id : "",
-    },
+      ...streamFormDefaults(),
+    } as unknown as SchemaType,
   });
 
   const type = form.watch("type");
@@ -209,6 +237,8 @@ export default function AddImageSource(): JSX.Element {
                   { value: ImageSourceType.Camera, label: "GigEVision/USBVision Camera" },
                   { value: ImageSourceType.ICam, label: "ICAM 520/540" },
                   { value: ImageSourceType.NvidiaCSI, label: "Nvidia CSI" },
+                  { value: ImageSourceType.RTSP, label: "RTSP camera" },
+                  { value: ImageSourceType.RTMP, label: "RTMP stream" },
                   { value: ImageSourceType.Folder, label: "Folder" },
                 ]}
               />
@@ -327,6 +357,14 @@ export default function AddImageSource(): JSX.Element {
 
             {type === ImageSourceType.ICam && (
               <DetailsInput namePrefix="icam" isLoading={false} />
+            )}
+
+            {(type === ImageSourceType.RTSP ||
+              type === ImageSourceType.RTMP) && (
+              <>
+                <StreamFields type={type} />
+                <DetailsInput namePrefix="stream" isLoading={false} />
+              </>
             )}
           </SpaceBetween>
         </Form>

@@ -61,6 +61,20 @@ _CONTENT_FIELDS = ("name", "type", "params")
 # Portal-originated change operation carried in pending_content.
 _OP_DELETE = "delete"
 
+# The device-side defaults of the stream Camera_Source settings
+# (rtsp-rtmp-stream-cameras design "Stream Camera_Source params"). The
+# Portal leaves an unset setting absent and the device applies its default,
+# so a converged stream entry reports these values for settings the pending
+# portal content never mentioned. Conflict classification treats an absent
+# setting and its default as equal; stored content is never rewritten.
+_STREAM_PARAM_DEFAULTS = {
+    "RTSP": {"transport": "tcp", "latencyMs": 200, "decoder": "auto",
+             "maxFrameDimension": 1920, "stallTimeoutS": 10,
+             "credentialsConfigured": False},
+    "RTMP": {"decoder": "auto", "maxFrameDimension": 1920,
+             "stallTimeoutS": 10, "credentialsConfigured": False},
+}
+
 
 @dataclass(frozen=True)
 class ConflictEvent:
@@ -99,6 +113,22 @@ def _content_of(source: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not source:
         return {}
     return {field: source.get(field) for field in _CONTENT_FIELDS}
+
+
+def _comparable_content(source: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The content conflict classification compares (Req 6.1).
+
+    Equal to :func:`_content_of` for every type except the stream types,
+    whose ``params`` are completed with the device-side setting defaults
+    (``_STREAM_PARAM_DEFAULTS``) so a device that applied a pending change
+    and reports its effective settings compares equal to that change.
+    """
+    content = _content_of(source)
+    defaults = _STREAM_PARAM_DEFAULTS.get(content.get("type"))
+    params = content.get("params")
+    if defaults and isinstance(params, dict):
+        content["params"] = {**defaults, **params}
+    return content
 
 
 def _is_failure_entry(incoming: Dict[str, Any]) -> bool:
@@ -235,7 +265,8 @@ def reduce_report(
             # Device acknowledged the pending portal change (Req 5.3).
             return SyncOutcome(ACTION_UPSERT, entry)
         pending_content = registry_entry.get("pending_content") or {}
-        if _content_of(incoming) != _content_of(pending_content):
+        if _comparable_content(incoming) != _comparable_content(
+                pending_content):
             # Unacknowledged pending change and diverging edge content:
             # Conflict (Req 6.1). Edge wins (Req 6.2); both versions are
             # preserved in the event (Req 6.3).
@@ -431,6 +462,104 @@ def _process_video_pin_section(table, thing_name: str,
         logger.exception(
             "Skipping malformed/unprocessable reported.staticVideoPin "
             "section for '%s' (camera reduction unaffected)", thing_name)
+
+
+# Device_Stream_Capabilities (rtsp-rtmp-stream-cameras Requirement 16.5,
+# design components 8 and 12): the device reports them under
+# ``reported.deviceCapabilities.streamIngest`` and the reducer keeps a
+# sanitized copy on the device META item.
+DEVICE_CAPABILITIES_SECTION = "deviceCapabilities"
+STREAM_INGEST_CAPABILITIES = "streamIngest"
+META_STREAM_CAPABILITIES = "stream_capabilities"
+
+_CAPABILITY_FLAGS = ("rtsp", "rtmp", "tls")
+_CAPABILITY_VERSIONS = ("gstreamer", "pyav", "ffmpeg")
+_DECODER_KINDS = ("hardware", "software")
+#: Bounds on what a device can make the Portal store: at most this many
+#: codecs, and version / decoder-element strings of at most this length.
+_MAX_CAPABILITY_CODECS = 16
+_MAX_CAPABILITY_TEXT = 64
+_CODEC_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
+
+
+def _capability_text(value: Any) -> Optional[str]:
+    if isinstance(value, str) and 0 < len(value) <= _MAX_CAPABILITY_TEXT:
+        return value
+    return None
+
+
+def sanitize_stream_capabilities(section: Any) -> Dict[str, Any]:
+    """The Device_Stream_Capabilities the Portal stores and shows.
+
+    A projection onto the documented shape: boolean ``rtsp`` / ``rtmp`` /
+    ``tls`` flags, ``codecs`` mapping a lowercase codec name to its
+    ``hardware`` / ``software`` decoder element (a path the device cannot
+    decode with is absent), the ``gstreamer`` / ``pyav`` / ``ffmpeg``
+    versions, and ``probedAtMs``. Unknown keys, wrongly typed values and oversized strings
+    are dropped, so a device can never make the Portal store arbitrary or
+    unbounded data. Raises ``ValueError`` when the section is not an object.
+    """
+    if not isinstance(section, dict):
+        raise ValueError("deviceCapabilities.streamIngest is not an object")
+    capabilities: Dict[str, Any] = {}
+    for flag in _CAPABILITY_FLAGS:
+        if isinstance(section.get(flag), bool):
+            capabilities[flag] = section[flag]
+    for key in _CAPABILITY_VERSIONS:
+        text = _capability_text(section.get(key))
+        if text is not None:
+            capabilities[key] = text
+    probed = section.get("probedAtMs")
+    if isinstance(probed, (int, Decimal)) and not isinstance(probed, bool) \
+            and probed >= 0:
+        capabilities["probedAtMs"] = int(probed)
+    codecs = section.get("codecs")
+    if isinstance(codecs, dict):
+        kept: Dict[str, Any] = {}
+        for name in sorted(codecs, key=str):
+            if len(kept) >= _MAX_CAPABILITY_CODECS:
+                break
+            decoders = codecs[name]
+            if not (isinstance(name, str)
+                    and 0 < len(name) <= _MAX_CAPABILITY_TEXT
+                    and set(name) <= _CODEC_NAME_CHARS
+                    and isinstance(decoders, dict)):
+                continue
+            elements = {kind: _capability_text(decoders.get(kind))
+                        for kind in _DECODER_KINDS}
+            kept[name] = {kind: element for kind, element in elements.items()
+                          if element is not None}
+        capabilities["codecs"] = kept
+    return capabilities
+
+
+def _process_capabilities_section(meta_item: Dict[str, Any],
+                                  thing_name: str,
+                                  reported: Dict[str, Any]) -> None:
+    """Store ``reported.deviceCapabilities.streamIngest`` on the META item
+    as ``stream_capabilities`` (Req 16.5).
+
+    Isolated like :func:`_process_pin_section`: a malformed section is
+    logged and skipped, and never affects the camera reduction (already
+    persisted when this runs) or the META stamp. An absent section leaves
+    the stored value as it was: a report from a LocalServer without stream
+    support simply carries none.
+    """
+    section = reported.get(DEVICE_CAPABILITIES_SECTION)
+    if section is None:
+        return
+    try:
+        if not isinstance(section, dict):
+            raise ValueError("deviceCapabilities is not an object")
+        stream_ingest = section.get(STREAM_INGEST_CAPABILITIES)
+        if stream_ingest is None:
+            return
+        meta_item[META_STREAM_CAPABILITIES] = \
+            sanitize_stream_capabilities(stream_ingest)
+    except Exception:  # noqa: BLE001 — section isolation, like the pin path
+        logger.exception(
+            "Skipping malformed reported.deviceCapabilities section for "
+            "'%s' (camera reduction unaffected)", thing_name)
 
 
 def _confirmed_op(table, device_id: str,
@@ -797,6 +926,9 @@ def _process_report(
 
     # Every processed report stamps the device META item (Reqs 1.6, 3.2).
     meta_item = stamp_meta(meta, now_ms)
+    # Device_Stream_Capabilities ride on the same META write (rtsp-rtmp-
+    # stream-cameras Req 16.5), isolated from everything above.
+    _process_capabilities_section(meta_item, thing_name, reported)
     meta_item["device_id"] = thing_name
     meta_item["sk"] = SK_META
     meta_item["usecase_id"] = usecase_id

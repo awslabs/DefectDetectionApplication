@@ -114,6 +114,16 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: order preserved as a prefix; ports, mappings, and every non-parameter
 #: field byte-identical to the previous recording) — the additivity is
 #: pinned by ``test_catalog_detection_inspection.py``.
+#:
+#: The rtsp-rtmp-stream-cameras feature appended five descriptors
+#: (``rtsp_camera_source``, ``rtmp_stream_source``, ``detection_counter``,
+#: ``object_association``, ``event_gate``) and additively extended
+#: ``unified_input`` — its ``source_kind`` enum ``values`` gained the two
+#: stream kinds by appending, and the shared stream parameter family was
+#: appended to the union. Those six entries were regenerated per the same
+#: maintenance path; every other recording (``mqtt_publish`` included) is
+#: untouched, and the additivity is pinned by
+#: ``test_catalog_stream_and_analytics.py``.
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",

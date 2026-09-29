@@ -138,12 +138,25 @@ def make_hard_watchdog(store: ResultsStore,
 #: absent or malformed (matches the start endpoint's default).
 DEFAULT_SIMULATED_INFERENCE = {"is_anomalous": False, "confidence": 0.9}
 
+#: Upper bound on the simulated Detection_List a test configuration may
+#: supply for the Scene_Analytics_Nodes (rtsp-rtmp-stream-cameras 13.9):
+#: far above any real frame, and small enough to keep a run bounded.
+MAX_SIMULATED_DETECTIONS = 1000
+
 
 def parse_simulated_inference(raw: Optional[str]) -> Dict[str, Any]:
     """The simulated inference outcome from the SIMULATED_INFERENCE env
     JSON, falling back to :data:`DEFAULT_SIMULATED_INFERENCE` field by
     field on absent/malformed input (the start endpoint validates the
-    shape, so this is defensive only)."""
+    shape, so this is defensive only).
+
+    Two optional fields feed the Scene_Analytics_Nodes and are present in
+    the result only when supplied and usable: ``detections``, the
+    simulated Detection_List (a list; its non-object entries are
+    dropped, and it is capped at :data:`MAX_SIMULATED_DETECTIONS`), and
+    ``frame``, the ``{width, height}`` of the frame the detections were
+    made on. Without them the analytics see an empty Detection_List and
+    an unknown frame size."""
     values = dict(DEFAULT_SIMULATED_INFERENCE)
     if not raw:
         return values
@@ -162,6 +175,23 @@ def parse_simulated_inference(raw: Optional[str]) -> Dict[str, Any]:
     if (isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
             and 0.0 <= confidence <= 1.0):
         values["confidence"] = float(confidence)
+    detections = parsed.get("detections")
+    if isinstance(detections, list):
+        entries = [entry for entry in detections if isinstance(entry, dict)]
+        if len(entries) > MAX_SIMULATED_DETECTIONS:
+            logger.warning("SIMULATED_INFERENCE has %d detections; keeping "
+                           "the first %d", len(entries),
+                           MAX_SIMULATED_DETECTIONS)
+        values["detections"] = entries[:MAX_SIMULATED_DETECTIONS]
+    elif detections is not None:
+        logger.warning("SIMULATED_INFERENCE detections is not a list; "
+                       "ignoring it")
+    frame = bindings_module.frame_metadata(parsed.get("frame"))
+    if frame is not None:
+        values["frame"] = frame
+    elif parsed.get("frame") is not None:
+        logger.warning("SIMULATED_INFERENCE frame is not {width, height}; "
+                       "ignoring it")
     return values
 
 
@@ -935,8 +965,15 @@ def execute(s3, bucket: str, results_key: str, dataset_prefix: str,
     store.set_statuses(gst_nodes, STATUS_COMPLETED)
 
     # 5. Executor bindings as recording stubs, flushed per node (12.6).
+    #    Scene_Analytics_Nodes read the configured simulated detections and
+    #    frame size (an empty Detection_List and an unknown frame size when
+    #    the test configuration supplies none); a document without one
+    #    runs exactly as before (rtsp-rtmp-stream-cameras 13.9, 18.1).
+    configured = simulated_inference_from_env()
     bindings_module.execute_bindings(
-        document.get("executorBindings", []), tag_values, store)
+        document.get("executorBindings", []), tag_values, store,
+        detections=configured.get("detections"),
+        frame_size=configured.get("frame"))
 
     store.flush()
     if store.has_failure():

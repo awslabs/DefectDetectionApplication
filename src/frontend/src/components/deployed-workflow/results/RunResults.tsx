@@ -28,11 +28,12 @@ import {
   StatusIndicator,
 } from "@cloudscape-design/components";
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import {
   getWorkflowExecutionMetadata,
+  getWorkflowExecutionNodeStatus,
   getWorkflowExecutionOverlay,
   getWorkflowExecutionResults,
   workflowExecutionNodeImageUrl,
@@ -52,7 +53,13 @@ import {
 } from "components/live-result/helpers";
 import { resultLayoutStyle } from "components/live-result/styles";
 import { runDetections } from "../detections";
+import {
+  hasSceneAnalytics,
+  runSceneAnalytics,
+  violatingDetectionIds,
+} from "../sceneAnalytics";
 import DetectedObjectsTable from "./DetectedObjectsTable";
+import SceneAnalyticsSections from "./SceneAnalyticsSections";
 
 /** Overlay toggle labels for a server-rendered overlay image (R1.3). */
 export const BOUNDING_BOXES_TOGGLE_LABEL = "Show bounding boxes";
@@ -291,6 +298,10 @@ function NodeSection({
  * boxes and labels) behind the same toggle, whose "off" position shows the
  * original frame, and every run whose metadata carries a Detection_List gets
  * the detected-objects table below the image.
+ *
+ * rtsp-rtmp-stream-cameras Requirement 16.3 adds a section per detection
+ * counter, object association and event gate in the run metadata, and marks
+ * the detections an association found in violation in that table.
  */
 export default function RunResults(): JSX.Element {
   const { executionId = "" } = useParams();
@@ -332,15 +343,39 @@ export default function RunResults(): JSX.Element {
     queryFn: () => getWorkflowExecutionMetadata(executionId),
   });
   const detections = runDetections(metadataQuery.data);
+  // Detection counter, object association and event gate outputs
+  // (rtsp-rtmp-stream-cameras Requirement 16.3). Their node status is read
+  // only when there are any, for the detail of a failed evaluation.
+  const analytics = useMemo(
+    () => runSceneAnalytics(metadataQuery.data),
+    [metadataQuery.data],
+  );
+  const showAnalytics = hasSceneAnalytics(analytics);
+  const violatingIds = useMemo(
+    () => violatingDetectionIds(analytics),
+    [analytics],
+  );
+  const nodeStatusQuery = useQuery({
+    queryKey: ["getWorkflowExecutionNodeStatus", executionId],
+    queryFn: () => getWorkflowExecutionNodeStatus(executionId),
+    enabled: showAnalytics,
+  });
   const detectionsSection =
     detections !== null ? (
-      <DetectedObjectsTable detections={detections} />
+      <DetectedObjectsTable detections={detections} violatingIds={violatingIds} />
     ) : null;
+  const analyticsSection = showAnalytics ? (
+    <SceneAnalyticsSections
+      analytics={analytics}
+      nodeStatus={nodeStatusQuery.data}
+    />
+  ) : null;
 
   const header = <Header variant="h1">Run results</Header>;
 
-  // The detected-objects table also renders beside a no-results or error
-  // message: a run can carry detections without viewable images (R2.7).
+  // The detected-objects table and the analytics sections also render
+  // beside a no-results or error message: a run can carry detections
+  // without viewable images (R2.7), as a continuous run often does.
   const renderState = (content: JSX.Element): JSX.Element => (
     <ContentLayout header={header}>
       <SpaceBetween size="l">
@@ -348,6 +383,7 @@ export default function RunResults(): JSX.Element {
           {content}
         </Container>
         {detectionsSection}
+        {analyticsSection}
       </SpaceBetween>
     </ContentLayout>
   );
@@ -455,6 +491,7 @@ export default function RunResults(): JSX.Element {
           </Container>
         )}
         {detectionsSection}
+        {analyticsSection}
         {nodeGroups.map((group) => (
           <NodeSection
             key={group.nodeId}

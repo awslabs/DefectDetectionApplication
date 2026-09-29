@@ -6,13 +6,22 @@
 #   DDA_HARNESS_BASE_URL, DDA_HARNESS_ARCHITECTURE, DDA_HARNESS_CAPABILITIES,
 #   DDA_HARNESS_CREDENTIALS, DDA_HARNESS_MODEL_READY_S, DDA_HARNESS_VLLM_READY_S,
 #   DDA_HARNESS_GENERATE_S, DDA_HARNESS_WORKFLOW_OUTPUT_S, DDA_HARNESS_RUN_BUDGET_S,
+#   DDA_HARNESS_CONTINUOUS_WINDOW_S,
 #   DDA_HARNESS_EXPECTED_VISION_MODELS, DDA_HARNESS_EXPECTED_VLLM_MODELS,
-#   DDA_HARNESS_EXPECTED_WORKFLOWS
+#   DDA_HARNESS_EXPECTED_WORKFLOWS, DDA_HARNESS_EXPECTED_STREAM_URLS,
+#   DDA_HARNESS_EXPECTED_STREAM_SECURE_URL, DDA_HARNESS_EXPECTED_STREAM_CREDENTIALS,
+#   DDA_HARNESS_EXPECTED_STREAM_WORKFLOW, DDA_HARNESS_EXPECTED_CONTINUOUS_WORKFLOW
+# expected.stream_failures is a mapping and is set in this file only.
 #
 # Credentials are declared as references, never as values:
 #   env:VAR_NAME     -- read the token from an environment variable at use time
 #   file:~/path      -- read the token from a file at use time
 # The harness never writes credential values into logs or results (Req 3.3).
+# The same holds for expected.stream_credentials ("username:password" of a
+# stream camera); stream URLs must never embed credentials.
+#
+# Capabilities: vllm, dlr_models, onnx_models, workflows, auth_enabled,
+# stream_cameras (the RTSP/RTMP stage, test_35; see README "Stream cameras stage").
 
 devices:
   jp6-orinagx:
@@ -44,3 +53,35 @@ devices:
       vision_models: []
       vllm_models: []
       workflows: []
+
+  # Stream cameras against a MediaMTX test server: RTSP 8554, RTSPS 8322 and
+  # RTMPS 1936 with a self-signed certificate, RTMP 1935; "secure" needs
+  # credentials; "nosuchpath" is readable but never published. Every stream
+  # input is optional: a check whose input is unset skips, naming the key.
+  jp7-thor:
+    base_url: http://localhost:5000
+    profile:
+      architecture: arm64_jp7
+      capabilities: [onnx_models, workflows, stream_cameras]
+    expected:
+      workflows: []
+      stream_urls:                         # credential-free; type from the scheme
+        - rtsp://192.168.88.237:8554/h264
+        - rtsp://192.168.88.237:8554/h265
+        - rtsp://192.168.88.237:8554/people
+        - rtmp://192.168.88.237:1935/live/h264
+        - rtmp://192.168.88.237:1935/live/h265    # Enhanced RTMP
+        - rtmp://192.168.88.237:1935/live/people
+      stream_secure_url: rtsp://192.168.88.237:8554/secure
+      stream_credentials: env:DDA_HARNESS_STREAM_SECRET   # resolves to username:password
+      stream_failures:                     # category -> URL or list of URLs
+        not_found: rtsp://192.168.88.237:8554/nosuchpath
+        unsupported_codec: rtsp://192.168.88.237:8554/vp9
+        tls_verification_failed:
+          - rtsps://192.168.88.237:8322/h264
+          - rtmps://192.168.88.237:1936/live/h264
+      # workflowIds of installed stream workflows (see GET /workflows/registrations):
+      # stream_workflow: <on_trigger stream workflowId>
+      # continuous_workflow: <continuous stream workflowId>
+    timeouts:
+      continuous_window_s: 30              # continuous workflow sampling window

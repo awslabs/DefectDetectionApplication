@@ -17,7 +17,7 @@
  */
 
 import * as React from "react";
-import { Box, Header, Table } from "@cloudscape-design/components";
+import { Badge, Box, Header, Table, TableProps } from "@cloudscape-design/components";
 import { useCollection } from "@cloudscape-design/collection-hooks";
 
 import {
@@ -30,9 +30,14 @@ import type { RunDetection } from "../detections";
 /** Empty-state message for a detection run that found nothing (R2.5). */
 export const NO_OBJECTS_MESSAGE = "No objects were detected in this run.";
 
+/** The badge on a detection an object association found in violation. */
+export const VIOLATION_BADGE = "Violation";
+
 /** One table row: a detection plus its 0-based Detection_List position. */
 interface DetectionRow extends RunDetection {
   index: number;
+  /** Whether an object association of the run found it in violation. */
+  violating: boolean;
 }
 
 /**
@@ -44,18 +49,49 @@ interface DetectionRow extends RunDetection {
  * entry's 0-based list position, which is what `detections.N` template paths
  * and Bedrock's `crop_detection_index` refer to (design D7), so it stays
  * attached to its row under any sort.
+ *
+ * `violatingIds`, the Detection_IDs the run's object associations found in
+ * violation (rtsp-rtmp-stream-cameras Requirement 16.3), adds a column that
+ * badges those rows. Without any, the table is unchanged.
  */
 export default function DetectedObjectsTable({
   detections,
+  violatingIds,
 }: {
   detections: RunDetection[];
+  violatingIds?: ReadonlySet<string>;
 }): JSX.Element {
+  const highlight = !!violatingIds && violatingIds.size > 0;
   const rows = React.useMemo<DetectionRow[]>(
-    () => detections.map((detection, index) => ({ ...detection, index })),
-    [detections],
+    () =>
+      detections.map((detection, index) => ({
+        ...detection,
+        index,
+        violating:
+          highlight && detection.id !== undefined && !!violatingIds?.has(detection.id),
+      })),
+    [detections, highlight, violatingIds],
   );
   const { items, collectionProps } = useCollection(rows, { sorting: {} });
   const summary = detectionLabelSummary(detections);
+  const violatingCount = rows.filter((row) => row.violating).length;
+  const description = [
+    summary,
+    highlight ? `${violatingCount} in violation` : "",
+  ]
+    .filter((part) => part.length > 0)
+    .join(" · ");
+  const violationColumn: TableProps.ColumnDefinition<DetectionRow>[] = highlight
+    ? [
+        {
+          id: "violation",
+          header: "Association",
+          cell: (row: DetectionRow): React.ReactNode =>
+            row.violating ? <Badge color="red">{VIOLATION_BADGE}</Badge> : "-",
+          sortingField: "violating",
+        },
+      ]
+    : [];
 
   return (
     <Table
@@ -68,7 +104,7 @@ export default function DetectedObjectsTable({
         <Header
           variant="h2"
           counter={`(${detections.length})`}
-          description={summary.length > 0 ? summary : undefined}
+          description={description.length > 0 ? description : undefined}
         >
           Objects detected
         </Header>
@@ -99,6 +135,7 @@ export default function DetectedObjectsTable({
           header: "Bounding box (px)",
           cell: (row: DetectionRow): React.ReactNode => formatBox(row.box),
         },
+        ...violationColumn,
       ]}
       empty={
         <Box textAlign="center" color="inherit" data-testid="no-detected-objects">

@@ -98,6 +98,24 @@ from workflow_core.catalog import (
 )
 from workflow_core.catalog.custom import resolve_catalog
 from workflow_core.catalog.models import PARAM_TYPE_MODEL_REF
+# Unified-input expansion vocabulary (unified-input-node): the source-kind
+# map the compiler's expand_unified_inputs rewrites a unified node with, so
+# the feature floor evaluates a unified stream source through the type the
+# device will actually run (rtsp-rtmp-stream-cameras Requirement 9.7).
+# SOURCE_KIND_TO_SOURCE_TYPE is exported by catalog.nodes, not re-exported
+# by catalog/__init__.py.
+from workflow_core.catalog.nodes import SOURCE_KIND_TO_SOURCE_TYPE
+# The Scene_Analytics_Node family (rtsp-rtmp-stream-cameras Requirements
+# 13.1, 14.1, 15.1), read from the shared validator vocabulary so the
+# packager's feature-floor family cannot drift from the catalog's.
+from workflow_core.validator import SCENE_ANALYTICS_TYPES
+# The unified-input type id and its source-kind parameter name, taken from
+# the module that defines the effective-type rule this packager mirrors
+# (validator.checks._effective_node_type) rather than re-spelled here.
+from workflow_core.validator.checks import (
+    SOURCE_KIND_PARAMETER,
+    TYPE_UNIFIED_INPUT as UNIFIED_INPUT_TYPE_ID,
+)
 
 # Merged-catalog resolution + Plugin_Record persistence (same bundle)
 from node_catalog_resolution import (
@@ -175,19 +193,27 @@ MIN_LOCAL_SERVER_VERSION = os.environ.get(
 SAFE_LINEAGE_FLOOR = '1.0.0'
 
 
-def _parse_min_versions_map():
-    """Per-arch minimum LocalServer versions from WORKFLOW_MIN_LOCAL_SERVER_
-    VERSIONS (JSON object). Malformed or non-object values yield {} so the
-    scalar default is used for every arch."""
-    raw = os.environ.get('WORKFLOW_MIN_LOCAL_SERVER_VERSIONS', '')
+def _parse_min_versions_map(
+        env_name: str = 'WORKFLOW_MIN_LOCAL_SERVER_VERSIONS') -> Dict[str, str]:
+    """Per-arch minimum LocalServer versions from ``env_name`` (a JSON
+    object). Malformed or non-object values yield {} so the scalar default
+    is used for every arch.
+
+    The env var name is a parameter because the same ``{arch: version}``
+    shape carries two independent floors: the per-architecture floor
+    (WORKFLOW_MIN_LOCAL_SERVER_VERSIONS) and the stream/scene-analytics
+    FEATURE floor (WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS,
+    rtsp-rtmp-stream-cameras Requirement 9.7). The default keeps every
+    existing zero-argument call site and test unchanged."""
+    raw = os.environ.get(env_name, '')
     if not raw:
         return {}
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
         logging.warning(
-            'WORKFLOW_MIN_LOCAL_SERVER_VERSIONS is not valid JSON; '
-            'falling back to the scalar minimum for every arch')
+            '%s is not valid JSON; '
+            'falling back to the scalar minimum for every arch', env_name)
         return {}
     if not isinstance(data, dict):
         return {}
@@ -196,8 +222,40 @@ def _parse_min_versions_map():
 
 MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map()
 
+#: The FEATURE floor (rtsp-rtmp-stream-cameras Requirement 9.7, design
+#: D14): the minimum LocalServer version per architecture that understands
+#: Stream_Camera_Source_Nodes and Scene_Analytics_Nodes. An older
+#: LocalServer would read a ``streamBinding`` point as a slot point with no
+#: slots and then stall on an unfed ``appsrc`` for 120 s, so a workflow
+#: using those node types must never resolve a floor below this one.
+#:
+#: Same ``{arch: version}`` shape and env-map discipline as
+#: WORKFLOW_MIN_LOCAL_SERVER_VERSIONS, and set in compute-stack.ts once the
+#: first supporting LocalServer builds are published. Until then it is the
+#: empty map, which FAILS CLOSED: a workflow that uses the new node types
+#: is rejected with STREAM_CAMERAS_UNSUPPORTED_ARCH for every architecture
+#: rather than packaged against a LocalServer that cannot run it. Its key
+#: set, once configured, must cover exactly ARCH_TO_LOCAL_SERVER_COMPONENT
+#: (pinned by test_stream_camera_feature_floor_coverage.py).
+STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS = _parse_min_versions_map(
+    'WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS')
 
-def min_local_server_version_for(arch):
+
+def _version_sort_key(version) -> tuple:
+    """Comparison key for a plain ``N.N.N`` floor — the same digit-wise
+    tuple ``local_server_component_dependencies`` compares floors with, so
+    '1.0.10' sorts above '1.0.9' (a string compare would not)."""
+    return tuple(int(token) if token.isdigit() else 0
+                 for token in str(version).split('.'))
+
+
+def _max_version(*versions):
+    """The highest of ``versions`` by numeric version order (ties keep the
+    first argument, which for equal versions is the same string)."""
+    return max(versions, key=_version_sort_key)
+
+
+def min_local_server_version_for(arch, stream_features: bool = False):
     """The minimum LocalServer version for a Workflow_Component targeting
     ``arch``: the per-arch entry when mapped; for a KNOWN arch missing
     from a configured (non-empty) map, the safe per-lineage floor
@@ -205,12 +263,25 @@ def min_local_server_version_for(arch):
     scalar (design Decision 2, jp7-workflow-min-localserver-floor); else
     the scalar default (empty map, None, or unknown arch). Keeps each
     independently-versioned LocalServer variant lineage self-consistent
-    (a JP6 package is gated against JP6 builds, not the arm64 lineage)."""
+    (a JP6 package is gated against JP6 builds, not the arm64 lineage).
+
+    ``stream_features=True`` (the workflow contains a
+    Stream_Camera_Source_Node or a Scene_Analytics_Node,
+    rtsp-rtmp-stream-cameras Requirement 9.7) resolves the MAXIMUM of that
+    architecture floor and the feature floor
+    STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS[arch]. An architecture absent
+    from the feature floor map raises PackagingError: the handler's
+    pre-compile gate (``stream_feature_arch_gate_findings``) rejects such a
+    request with STREAM_CAMERAS_UNSUPPORTED_ARCH long before this point, so
+    this is the fail-closed backstop for any caller that skipped it — never
+    a silently un-raised floor. ``stream_features=False`` (the default)
+    resolves exactly as before, so every workflow without the new node
+    types keeps its floors unchanged (Requirement 18.1)."""
     if arch and arch in MIN_LOCAL_SERVER_VERSIONS:
-        return MIN_LOCAL_SERVER_VERSIONS[arch]
+        resolved = MIN_LOCAL_SERVER_VERSIONS[arch]
     # ARCH_TO_LOCAL_SERVER_COMPONENT is defined below; module-level name
     # resolution at call time makes this forward reference valid.
-    if MIN_LOCAL_SERVER_VERSIONS and arch in ARCH_TO_LOCAL_SERVER_COMPONENT:
+    elif MIN_LOCAL_SERVER_VERSIONS and arch in ARCH_TO_LOCAL_SERVER_COMPONENT:
         logging.warning(
             'WORKFLOW_MIN_LOCAL_SERVER_VERSIONS is configured but has no '
             'entry for known arch %r; substituting the safe per-lineage '
@@ -219,8 +290,51 @@ def min_local_server_version_for(arch):
             '(pinned by test_workflow_min_localserver_floor_coverage.py) - '
             'add the missing key to compute-stack.ts.',
             arch, SAFE_LINEAGE_FLOOR)
-        return SAFE_LINEAGE_FLOOR
-    return MIN_LOCAL_SERVER_VERSION
+        resolved = SAFE_LINEAGE_FLOOR
+    else:
+        resolved = MIN_LOCAL_SERVER_VERSION
+    if not stream_features:
+        return resolved
+    feature_floor = STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS.get(arch)
+    if feature_floor is None:
+        # PackagingError is defined below; module-level name resolution at
+        # call time makes this forward reference valid.
+        raise PackagingError(
+            f"stream-feature-floor/{arch}",
+            f"This workflow uses stream camera or scene analytics nodes, "
+            f"which require a LocalServer build that supports them, but "
+            f"architecture '{arch}' has no entry in "
+            f"WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS "
+            f"({GATE_STREAM_ARCH_UNSUPPORTED}). Supported architectures: "
+            f"{', '.join(sorted(STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS)) or 'none'}")
+    return _max_version(resolved, feature_floor)
+
+
+def min_local_server_versions_map(stream_features: bool = False) -> Dict[str, str]:
+    """The full per-arch floor map stamped into manifest.json as
+    ``minLocalServerVersions`` — the map a variant-aware device reads IN
+    PREFERENCE to the scalar (``discovery.validate_artifact`` selects the
+    entry for its own arch and only falls back to
+    ``minLocalServerVersion``).
+
+    ``stream_features=False`` returns WORKFLOW_MIN_LOCAL_SERVER_VERSIONS
+    unchanged, so a workflow without the new node types stamps a
+    byte-identical manifest (Requirement 18.1).
+
+    ``stream_features=True`` raises every feature-floor architecture's
+    entry to the same value ``min_local_server_version_for(arch,
+    stream_features=True)`` resolves, so the map cannot under-cut the
+    scalar for the package's own ``targetArch``: leaving the map unraised
+    would let an older LocalServer accept a stream workflow through the
+    map branch, which is exactly the bypass the feature floor exists to
+    prevent (Requirement 9.7, design D14)."""
+    effective = dict(MIN_LOCAL_SERVER_VERSIONS)
+    if not stream_features:
+        return effective
+    for arch in STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS:
+        effective[arch] = min_local_server_version_for(
+            arch, stream_features=True)
+    return effective
 
 # Greengrass component naming (design section 6)
 WORKFLOW_COMPONENT_PREFIX = 'dda.workflow.'
@@ -683,6 +797,107 @@ ARAVIS_CAMERA_SOURCE_TYPE_ID = 'aravis_camera_source'
 #: into the binding point.
 CUSTOM_PYTHON_SOURCE_TYPE_ID = 'custom_python_source'
 
+#: The RTSP Stream_Camera_Source_Node type (rtsp-rtmp-stream-cameras
+#: Requirement 9.1). Stream decoding happens in the LocalServer process
+#: (the Stream_Ingest_Service hands the Latest_Frame to the executor's
+#: Frame_Feed), so — exactly like aravis_camera_source — the binding never
+#: lands in an element argument: the binding point carries
+#: ``streamBinding: true`` with empty slots on every architecture.
+RTSP_CAMERA_SOURCE_TYPE_ID = 'rtsp_camera_source'
+
+#: The RTMP Stream_Camera_Source_Node type, handled identically to
+#: ``rtsp_camera_source`` and distinguished only by ``streamProtocol``.
+RTMP_STREAM_SOURCE_TYPE_ID = 'rtmp_stream_source'
+
+#: The ``streamProtocol`` discriminator each Stream_Camera_Source_Node's
+#: binding point carries, so the Deployment_Service's binding matrix can
+#: offer only Camera_Sources of the matching type without re-deriving the
+#: protocol from the node type (Requirement 9.1). Keyed by node type id,
+#: and its key set is exactly the Stream_Camera_Source_Node types.
+STREAM_SOURCE_PROTOCOLS = {
+    RTSP_CAMERA_SOURCE_TYPE_ID: 'rtsp',
+    RTMP_STREAM_SOURCE_TYPE_ID: 'rtmp',
+}
+
+#: The node types whose execution needs a feature-floor LocalServer build
+#: (Requirement 9.7, design D14): the two Stream_Camera_Source_Node types
+#: and the three Scene_Analytics_Node types. Both halves come from the
+#: shared vocabulary — the stream half from STREAM_SOURCE_PROTOCOLS above
+#: (itself the packager's single source of truth for stream types) and the
+#: analytics half from workflow_core's SCENE_ANALYTICS_TYPES — so a new
+#: member of either family cannot join the catalog without joining the
+#: floor (pinned by test_stream_camera_feature_floor_coverage.py).
+STREAM_FEATURE_TYPE_IDS = frozenset(STREAM_SOURCE_PROTOCOLS) | SCENE_ANALYTICS_TYPES
+
+#: Packaging gate code for a workflow that uses the new node types on an
+#: architecture the feature floor map does not cover (Requirement 9.7).
+GATE_STREAM_ARCH_UNSUPPORTED = 'STREAM_CAMERAS_UNSUPPORTED_ARCH'
+
+
+def effective_node_type(node) -> str:
+    """The node type the feature floor evaluates ``node`` as.
+
+    A ``unified_input`` node is evaluated through its effective
+    ``source_kind`` — the source type the compiler's
+    ``expand_unified_inputs`` rewrites it into — so a stream source spelled
+    as a unified node raises the floor exactly like one spelled as
+    ``rtsp_camera_source``. This mirrors the validator's ``_effective_node_
+    type`` (workflow_core.validator.checks), and matters here because the
+    device runs the EXPANDED graph: leaving the unified spelling unraised
+    would let a genuine stream workflow reach a LocalServer that stalls on
+    its unfed appsrc. Every other node, and a unified node whose
+    ``source_kind`` is missing or unknown, is evaluated as its own type."""
+    if node.type != UNIFIED_INPUT_TYPE_ID:
+        return node.type
+    source_kind = node.parameters.get(SOURCE_KIND_PARAMETER)
+    if not isinstance(source_kind, str):
+        return node.type
+    return SOURCE_KIND_TO_SOURCE_TYPE.get(source_kind, node.type)
+
+
+def gather_stream_feature_node_ids(graph) -> List[str]:
+    """Ids of the graph's Stream_Camera_Source_Nodes and
+    Scene_Analytics_Nodes (including stream sources spelled as
+    ``unified_input``), in graph node order. Empty for every workflow
+    without the new node types, which is what keeps their floors — and
+    their packaged output — unchanged (Requirements 9.2, 18.1)."""
+    return [node.id for node in graph.nodes
+            if effective_node_type(node) in STREAM_FEATURE_TYPE_IDS]
+
+
+def stream_feature_arch_gate_findings(graph, requested_archs) -> List[Dict]:
+    """The feature-floor architecture gate (Requirement 9.7, design D14):
+    one finding ``{code: 'STREAM_CAMERAS_UNSUPPORTED_ARCH', arch, nodeIds}``
+    per requested architecture missing from
+    STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS, when the graph uses the new
+    node types. Empty for a workflow without them (whatever the floor map
+    holds), and empty when every requested architecture is covered.
+
+    Structural twin of ``llm_arch_gate_findings``: evaluated before
+    compilation so the request is rejected with the complete finding list
+    and no component version is registered. Until the floor map is
+    configured this rejects every architecture — the deliberate fail-closed
+    state, because no LocalServer build supports the node types yet."""
+    node_ids = gather_stream_feature_node_ids(graph)
+    if not node_ids:
+        return []
+    supported = sorted(STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS)
+    findings: List[Dict] = []
+    for arch in requested_archs:
+        if arch in STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS:
+            continue
+        findings.append({
+            'code': GATE_STREAM_ARCH_UNSUPPORTED,
+            'message': (f"Architecture '{arch}' has no LocalServer version "
+                        f"known to support stream camera or scene analytics "
+                        f"nodes, so node(s) {', '.join(node_ids)} cannot be "
+                        f"packaged for it. Architectures with a supporting "
+                        f"LocalServer version: {', '.join(supported) or 'none'}"),
+            'arch': arch,
+            'nodeIds': list(node_ids),
+        })
+    return findings
+
 
 def gather_python_source_nodes(graph) -> List:
     """The graph's Custom Python source nodes, in graph node order: each
@@ -718,13 +933,19 @@ def camera_backed_type_ids(node_type_items: List[Dict]) -> set:
 
 
 def gather_camera_input_nodes(graph, camera_backed_types: set) -> List:
-    """The graph's Camera_Input_Nodes: csi_camera_source, icam_source and
-    aravis_camera_source nodes plus nodes of any Custom_Node_Type declared
-    camera-backed, in graph node order."""
+    """The graph's Camera_Input_Nodes: csi_camera_source, icam_source,
+    aravis_camera_source, rtsp_camera_source and rtmp_stream_source nodes
+    plus nodes of any Custom_Node_Type declared camera-backed, in graph
+    node order. The two stream types are Camera_Input_Nodes because a
+    Stream_Camera_Source_Node is bound at deploy time to one of the target
+    device's registered Stream_Cameras (rtsp-rtmp-stream-cameras
+    Requirement 9.1), which is also what makes the version item's
+    ``has_binding_points`` discriminator true for such a workflow."""
     return [node for node in graph.nodes
             if node.type == CSI_CAMERA_SOURCE_TYPE_ID
             or node.type == ICAM_SOURCE_TYPE_ID
             or node.type == ARAVIS_CAMERA_SOURCE_TYPE_ID
+            or node.type in STREAM_SOURCE_PROTOCOLS
             or node.type in camera_backed_types]
 
 
@@ -809,7 +1030,15 @@ def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
     empty slots) with ONLY the rendered ``allowed_uri_prefixes`` value in
     ``parameters`` — ``code``/``requirements`` ship as artifact files and
     are never duplicated into the binding point (custom-python-source
-    Requirements 9.1, 9.2)."""
+    Requirements 9.1, 9.2). rtsp_camera_source and rtmp_stream_source are
+    executor-feed-bound as well (``streamBinding: true``, empty slots) and
+    additionally carry ``streamProtocol`` (``rtsp``/``rtmp``) so the
+    binding matrix can offer only Camera_Sources of the matching type;
+    their rendered parameters — the credential-free ``url``, the
+    processing mode and the sampling/retention values — are all non-secret
+    by construction, because a Stream_Camera_Source_Node's credentials
+    live on the registered camera and never in the URL
+    (rtsp-rtmp-stream-cameras Requirements 9.1, 9.2)."""
     binding_points: List[Dict] = []
     for node in camera_nodes:
         descriptor = descriptors_by_id[node.type]
@@ -827,6 +1056,9 @@ def build_binding_points(camera_nodes: List, compiled_doc: Dict, arch: str,
             entry['parameters'] = {
                 'allowed_uri_prefixes':
                     entry['parameters'].get('allowed_uri_prefixes') or ''}
+        elif node.type in STREAM_SOURCE_PROTOCOLS:
+            entry['streamBinding'] = True
+            entry['streamProtocol'] = STREAM_SOURCE_PROTOCOLS[node.type]
         elif node.type == ARAVIS_CAMERA_SOURCE_TYPE_ID:
             entry['aravisBinding'] = True
         elif node.type == CSI_CAMERA_SOURCE_TYPE_ID:
@@ -1740,7 +1972,7 @@ def _model_arch_contradiction_guard(greengrass, resolved: Dict[str, Any],
                 f"for the selected architecture(s)")
 
 
-def local_server_component_dependencies(archs) -> Dict:
+def local_server_component_dependencies(archs, stream_features: bool = False) -> Dict:
     """The HARD LocalServer ComponentDependencies entry for the selected
     architectures — emitted ONLY when they collapse to exactly one distinct
     LocalServer variant (edge-deploy-reliability Defect F, 2.15/2.16/2.17).
@@ -1756,6 +1988,14 @@ def local_server_component_dependencies(archs) -> Dict:
     TARGET_TO_LOCAL_SERVER naming discipline): the bare '.arm64' name is
     emitted only for arm64_cpu (the generic arm64 CPU build) and no
     variant is guessed.
+
+    ``stream_features=True`` (the workflow contains a
+    Stream_Camera_Source_Node or a Scene_Analytics_Node) resolves each
+    arch's floor as the maximum of its architecture floor and the feature
+    floor, so Greengrass itself refuses to install the workflow beside a
+    LocalServer that cannot run those nodes (rtsp-rtmp-stream-cameras
+    Requirement 9.7). The default False leaves every other workflow's
+    dependency entry unchanged (Requirement 18.1).
 
     Multiple distinct variants: return {} and log a warning naming the
     omitted variants. Greengrass ComponentDependencies is recipe-GLOBAL,
@@ -1786,7 +2026,7 @@ def local_server_component_dependencies(archs) -> Dict:
                 f"architectures: "
                 f"{', '.join(sorted(ARCH_TO_LOCAL_SERVER_COMPONENT))}")
         variant_floors.setdefault(component_name, []).append(
-            min_local_server_version_for(arch))
+            min_local_server_version_for(arch, stream_features=stream_features))
     if not variant_floors:
         return {}
     if len(variant_floors) > 1:
@@ -1921,7 +2161,8 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
                    plugin_components: Optional[Dict[str, str]] = None,
                    component_version: Optional[str] = None,
                    workflow_name: Optional[str] = None,
-                   subscribed_topics: Optional[List[str]] = None) -> Dict:
+                   subscribed_topics: Optional[List[str]] = None,
+                   stream_features: bool = False) -> Dict:
     """manifest.json content: what WorkflowWatcher needs to register the
     workflow and what the deployment compatibility check reads (8.4).
 
@@ -1933,7 +2174,14 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
 
     ``subscribed_topics`` (trigger-activation-runtime 10.1, 10.4): the
     greengrass mqtt_subscribe topic filters, recorded ONLY when non-empty
-    so trigger-less manifests stay byte-identical to pre-feature output."""
+    so trigger-less manifests stay byte-identical to pre-feature output.
+
+    ``stream_features`` (rtsp-rtmp-stream-cameras Requirement 9.7): the
+    workflow contains a Stream_Camera_Source_Node or a
+    Scene_Analytics_Node, so BOTH version floors this manifest carries —
+    the arch-scoped scalar and the per-arch map the device prefers — are
+    raised to the maximum of the architecture floor and the feature floor.
+    False (the default) stamps both exactly as before (18.1)."""
     manifest = {
         'componentName': component_name_for(workflow_id),
         # The resolved (possibly patch-bumped) version when provided, else the
@@ -1949,10 +2197,16 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
         'targetArch': arch,
         # Arch-scoped minimum: this package targets `arch`, so the scalar is
         # the minimum for that variant's lineage (backward-compatible field).
-        'minLocalServerVersion': min_local_server_version_for(arch),
+        'minLocalServerVersion': min_local_server_version_for(
+            arch, stream_features=stream_features),
         # Full per-arch map so a variant-aware device selects the floor for
         # its own arch rather than comparing across incomparable lineages.
-        'minLocalServerVersions': dict(MIN_LOCAL_SERVER_VERSIONS),
+        # Raised together with the scalar for a stream/analytics workflow:
+        # the device reads THIS map in preference to the scalar, so an
+        # unraised map would re-open the very bypass the feature floor
+        # closes (Requirement 9.7).
+        'minLocalServerVersions': min_local_server_versions_map(
+            stream_features=stream_features),
         'pluginDependencies': gst_plugins,
         'pythonDependencies': python_packages,
         'pluginChecksums': dict(plugin_checksums or {}),
@@ -2372,6 +2626,24 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
             {'findings': llm_findings, 'version': version,
              'architectures': architectures})
 
+    # Stream camera / scene analytics feature floor (rtsp-rtmp-stream-
+    # cameras Requirement 9.7, design D14): a workflow using the new node
+    # types needs a LocalServer build that understands them, so every
+    # requested architecture must carry a feature floor. Evaluated here —
+    # alongside the LLM arch gate, before compilation — so an architecture
+    # with no supporting LocalServer is rejected with the complete finding
+    # list (409) and no component version is registered. A workflow without
+    # the new node types contributes zero findings and resolves its floors
+    # exactly as before (Requirement 18.1).
+    stream_feature_node_ids = gather_stream_feature_node_ids(graph)
+    stream_features = bool(stream_feature_node_ids)
+    stream_findings = stream_feature_arch_gate_findings(graph, architectures)
+    if stream_findings:
+        return error_response(
+            409, GATE_STREAM_ARCH_UNSUPPORTED, stream_findings[0]['message'],
+            {'findings': stream_findings, 'version': version,
+             'architectures': architectures})
+
     # Merged Node_Type_Catalog resolving the Custom_Node_Type versions
     # pinned at workflow save (custom-node-designer 14.2; built-in-only
     # workflows resolve to the built-in catalog unchanged).
@@ -2497,7 +2769,8 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
         component_dependencies = {
             **plugin_component_dependencies(dep_records),
             **model_component_dependencies(resolved_models),
-            **local_server_component_dependencies(architectures),
+            **local_server_component_dependencies(
+                architectures, stream_features=stream_features),
         }
 
         # Verify every custom Plugin_Artifact per selected architecture
@@ -2560,7 +2833,8 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                 plugin_components=arch_plugin_components[arch],
                 component_version=resolved_component_version,
                 workflow_name=item.get('name'),
-                subscribed_topics=subscribed_topics)
+                subscribed_topics=subscribed_topics,
+                stream_features=stream_features)
             zip_path = os.path.join(work_dir, zip_artifact_name(arch))
             build_arch_zip(zip_path, arch, manifest, packaged_definition_json,
                            arch_compiled_json[arch], gst_plugins,
@@ -2645,12 +2919,22 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # 10.1, 10.4): the attribute is written ONLY when the set is non-empty,
     # keeping the version item byte-identical to pre-feature output for
     # every workflow without a greengrass-enabled mqtt_subscribe node.
+    # The version-item stream/scene-analytics discriminator (rtsp-rtmp-
+    # stream-cameras Requirement 9.7, design D14), written the way the LLM
+    # discriminator above is: has_stream_features activates the
+    # Deployment_Service's pre-submit FEATURE floor gate for this workflow
+    # component, so a device on a LocalServer that predates stream support
+    # is rejected before submission instead of stalling on an unfed appsrc.
+    # Written unconditionally (like has_llm_inference, unlike
+    # subscribed_topics) so re-packaging a version that no longer uses the
+    # new node types clears the flag rather than leaving a stale True.
     update_expression = ('SET component_arn = :arn, component_version = :cv, '
                          'compiled_arch_keys = :keys, '
                          'plugin_components = :pc, '
                          'has_binding_points = :hbp, '
                          'camera_input_nodes = :cin, '
                          'has_llm_inference = :hli, '
+                         'has_stream_features = :hsf, '
                          'packaged_architectures = :pa, '
                          'packaged_at = :at, packaged_by = :by')
     update_values = {
@@ -2661,6 +2945,7 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
         ':hbp': bool(camera_nodes),
         ':cin': _dynamo_safe(camera_input_nodes),
         ':hli': bool(llm_node_ids),
+        ':hsf': stream_features,
         ':pa': architectures,
         ':at': now_ms(),
         ':by': user['user_id']

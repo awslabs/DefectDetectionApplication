@@ -93,6 +93,14 @@ from workflow_engine.python_source import (
     PythonSourceError,
     plan_python_sources,
 )
+from workflow_engine.stream_feed import (
+    FRAME_HANDOFF,
+    StreamFeedError,
+    continuous_frame_seq,
+    document_has_stream_or_analytics,
+    load_configured_stream_cameras,
+    plan_stream_feeds,
+)
 from workflow_engine.output_bindings import (
     BINDING_BEDROCK_INFERENCE,
     BINDING_LLM_INFERENCE,
@@ -100,7 +108,9 @@ from workflow_engine.output_bindings import (
     LlmInferenceProcessor,
     OutputBindingError,
     RunContext,
+    _capture_record_source_dimensions,
 )
+from workflow_engine import scene_analytics
 from workflow_engine.discovery import (
     COMPILED_PIPELINE_FILE,
     MANIFEST_FILE,
@@ -294,7 +304,14 @@ _CAPTURE_META_PLACEHOLDER = "{capture_meta}"
 #: to a bare trailing ``emlcapture``, leaving its src pad unlinked so the
 #: pipeline fails with GST_FLOW_NOT_LINKED right after inference. The
 #: executor appends the same fakesink (see ``_ensure_terminal_sink``).
-_SRC_PAD_TERMINAL_FACTORIES = ("emlcapture",)
+#:
+#: ``emltriton`` ends the branch when a model's results go only to
+#: executor bindings (a counter, an event gate, an MQTT or digital output)
+#: and no capture node follows it, as in a PPE or counting workflow on a
+#: stream camera: the Marshal_Model writes the detections, nothing
+#: downstream needs the frame. Found on hardware (rtsp-rtmp-stream-cameras
+#: task 25.3): every such run failed with GST_FLOW_NOT_LINKED.
+_SRC_PAD_TERMINAL_FACTORIES = ("emlcapture", "emltriton")
 
 
 class FrameSourceError(Exception):
@@ -735,6 +752,10 @@ class WorkflowExecutor:
         binding_resolution_provider: Optional[Callable] = None,
         frame_grabber: Optional[Callable] = None,
         camera_config_resolver: Optional[Callable] = None,
+        stream_ingest_manager=None,
+        stream_camera_resolver: Optional[Callable] = None,
+        capture_root_for: Optional[Callable] = None,
+        frame_handoff=None,
     ) -> None:
         if session_factory is None:
             # Imported lazily so the module is importable without the
@@ -811,6 +832,46 @@ class WorkflowExecutor:
         self._camera_config_resolver = (
             camera_config_resolver or _default_camera_config_resolver
         )
+        # Stream cameras (rtsp-rtmp-stream-cameras Requirements 10.4-10.6):
+        # the StreamIngestManager the stream feed reads Latest_Frames
+        # from, and (session) -> {normalized Stream_URL: cfg-<id>} of the
+        # device's configured stream cameras, for URL matching. Both
+        # injectable for tests; neither is touched for documents without
+        # a stream node.
+        self._stream_ingest_manager = stream_ingest_manager
+        self._stream_camera_resolver = (
+            stream_camera_resolver or load_configured_stream_cameras
+        )
+        # Continuous runs (rtsp-rtmp-stream-cameras design components 14,
+        # 15): ``(registration, trigger_context) -> root or None`` picks the
+        # run's artifact root — the RAM-backed staging root for a
+        # continuous run, None (the persistent capture root) for every
+        # other run — and the FrameHandoff carries the frame a
+        # Continuous_Runner tick chose into its run. Without a
+        # capture_root_for every run uses the capture root exactly as
+        # before.
+        self._capture_root_for = capture_root_for
+        self._frame_handoff = (
+            frame_handoff if frame_handoff is not None else FRAME_HANDOFF
+        )
+
+    def _capture_root(self, registration, trigger_context) -> str:
+        """The run's artifact root: ``capture_root_for``'s answer, else
+        the persistent capture root. Contained: a failing or empty answer
+        keeps the capture root."""
+        if self._capture_root_for is not None:
+            try:
+                root = self._capture_root_for(registration, trigger_context)
+            except Exception:  # noqa: BLE001 - never fail a run over it
+                logger.exception(
+                    "Could not choose the artifact root for a run of %s; "
+                    "using the capture root",
+                    getattr(registration, "id", None),
+                )
+                root = None
+            if isinstance(root, str) and root:
+                return root
+        return _WORKFLOW_CAPTURE_ROOT
 
     def set_post_run_handler(self, handler: Optional[PostRunHandler]) -> None:
         """Register the post-pipeline output-binding processor (task 12.4)."""
@@ -1507,15 +1568,21 @@ class WorkflowExecutor:
                 self._finish_failed(session, execution, error=failure)
                 return
 
+            # The run's artifact root: the persistent capture root, or the
+            # RAM-backed staging root for a continuous stream run
+            # (rtsp-rtmp-stream-cameras Requirement 12.3). Chosen once, so
+            # the log and the artifacts always share one directory.
+            capture_root = self._capture_root(registration, trigger_context)
+
             # Capture this run's log from as early as possible now that the
             # registration (and therefore the workflow id) is known. The log
             # lives alongside the run's artifacts at
-            # {_WORKFLOW_CAPTURE_ROOT}/{workflow_id}/{execution_id}/run.log
+            # {capture_root}/{workflow_id}/{execution_id}/run.log
             # so every started run — capture or not — has a retrievable log
             # (Requirements 2.1, 2.5). Best-effort and contained: capture
             # setup never fails the run (Requirement 2.6).
             log_capture = self._begin_log_capture(
-                session, execution, registration
+                session, execution, registration, capture_root
             )
 
             document, load_error = self._load_compiled_document(registration)
@@ -1595,6 +1662,41 @@ class WorkflowExecutor:
                 return
             if python_frame_data is not None:
                 frame_data = python_frame_data
+
+            # Stream camera feed (rtsp-rtmp-stream-cameras Requirements
+            # 10.4-10.6): plan the document's stream node, take its
+            # camera's Latest_Frame (no older than max_frame_age_ms,
+            # waiting up to that long) and point the compiled appsrc at
+            # the Frame_Feed — the same single-frame model as the Aravis
+            # and Python feeds (the single-feed contract checked above
+            # makes the three exclusive). No fresh frame fails this run on
+            # the stream node, naming the camera and its health state.
+            # Stream-free documents plan zero feeds and take the exact
+            # pre-feature path (Requirement 10.7).
+            try:
+                stream_frame_data, stream_metadata = (
+                    self._prepare_stream_frame_feed(
+                        session, document, resolution, trigger_context,
+                        execution_id,
+                    )
+                )
+            except StreamFeedError as e:
+                logger.error(
+                    "Workflow execution %s failed in the stream camera feed "
+                    "(node %s): %s",
+                    execution_id,
+                    e.node_id or "unidentified",
+                    e,
+                )
+                self._finish_failed(
+                    session,
+                    execution,
+                    error=str(e),
+                    failing_node_id=e.node_id,
+                )
+                return
+            if stream_frame_data is not None:
+                frame_data = stream_frame_data
 
             # Capture-phase outputs (capture-phase-outputs): the run's
             # frame is now in hand (Aravis grab or Custom Python
@@ -1750,7 +1852,7 @@ class WorkflowExecutor:
             # so the marshal model's workflow-id derivation and the written
             # artifacts agree (design §2).
             output_dir = os.path.join(
-                _WORKFLOW_CAPTURE_ROOT, registration.workflow_id, execution_id
+                capture_root, registration.workflow_id, execution_id
             )
             capture_id = "{0}-{1}".format(
                 registration.workflow_id, execution_id
@@ -2032,6 +2134,18 @@ class WorkflowExecutor:
             if "trigger" not in tag_values:
                 tag_values["trigger"] = trigger_context
 
+            # Stream frame metadata (rtsp-rtmp-stream-cameras design
+            # component 13): ``stream.<nodeId>`` records the fed frame's
+            # sequence number, acquisition time, size and camera; ``frame``
+            # carries the analyzed frame size for zone scaling, seeded only
+            # when the document reads a stream or runs a
+            # Scene_Analytics_Node. Neither overwrites a pipeline key, and
+            # a document with neither leaves the metadata untouched
+            # (Requirement 10.7).
+            self._seed_stream_metadata(
+                tag_values, document, stream_metadata, frame_data
+            )
+
             # Pipeline processing succeeded: consume every
             # directory-resolved source image (staged PNG + original JPEG)
             # NOW — before the Bedrock/LLM/output-binding steps — so the
@@ -2072,6 +2186,17 @@ class WorkflowExecutor:
                     "the run metadata; the run continues without them",
                     execution_id,
                 )
+
+            # Scene analytics (rtsp-rtmp-stream-cameras Requirements 13,
+            # 14): the counters and associations evaluate over the merged
+            # Detection_List now, before the Bedrock and LLM processors
+            # (so prompts can reference them) and before any gate or
+            # output. Documents without them take the exact pre-feature
+            # path; a failure is contained and gates nothing.
+            self._apply_scene_analytics(
+                document, tag_values, output_dir, capture_id, collector,
+                execution_id,
+            )
 
             # Bedrock comparison inference: runs BEFORE the run is
             # finalized and before the gating/output bindings evaluate.
@@ -2276,6 +2401,7 @@ class WorkflowExecutor:
         session,
         execution: WorkflowExecution,
         registration: WorkflowRegistration,
+        capture_root: Optional[str] = None,
     ) -> Optional[RunLogCapture]:
         """Start per-execution log capture and record ``log_path`` on the row.
 
@@ -2290,7 +2416,7 @@ class WorkflowExecutor:
         (returning None)."""
         try:
             log_path = os.path.join(
-                _WORKFLOW_CAPTURE_ROOT,
+                capture_root or _WORKFLOW_CAPTURE_ROOT,
                 registration.workflow_id,
                 execution.id,
                 "run.log",
@@ -3293,6 +3419,165 @@ class WorkflowExecutor:
         )
         return frame_data, ({feed.node_id: metadata} if metadata else {})
 
+    def _stream_manager(self):
+        if self._stream_ingest_manager is None:
+            from stream_ingest.manager import get_stream_ingest_manager
+
+            self._stream_ingest_manager = get_stream_ingest_manager()
+        return self._stream_ingest_manager
+
+    def _prepare_stream_frame_feed(
+        self, session, document: dict, resolution, trigger_context, execution_id
+    ):
+        """Plan the document's stream feed, take its frame, and point the
+        compiled appsrc at the Frame_Feed (rtsp-rtmp-stream-cameras
+        Requirements 10.4-10.6).
+
+        The frame is the camera's newest one no older than the node's
+        ``max_frame_age_ms``, waiting up to that long. A continuous run
+        analyzes the frame its tick chose, handed over through the
+        FrameHandoff; without a handoff it asks for that frame or a newer
+        one. The run holds its own lease while it waits, so a camera
+        nobody else holds open is connected for it (and kept for the idle
+        grace).
+
+        Returns ``(frame_data, metadata)`` — ``frame_data`` as packed RGB
+        ``{'data','width','height','format'}`` and ``metadata`` the
+        ``stream`` entry keyed by the node id — or ``(None, None)`` when
+        the document has no stream node. Raises :class:`StreamFeedError`
+        carrying the node id.
+        """
+        from stream_ingest.health import clean_message
+
+        feeds = plan_stream_feeds(
+            document, resolution,
+            configured_cameras=lambda: self._stream_camera_resolver(session),
+        )
+        frame_seq = continuous_frame_seq(trigger_context)
+        # The frame a Continuous_Runner tick chose for this run, if any:
+        # taken first so it never outlives the run, even when the
+        # document no longer reads a stream.
+        handed = self._frame_handoff.take(execution_id) if frame_seq else None
+        if not feeds:
+            return None, None
+        feed = feeds[0]
+        camera = feed.camera_source_id or clean_message(feed.url)
+        if handed is not None and getattr(handed, "seq", None) == frame_seq:
+            frame = handed
+        else:
+            frame, health = self._read_stream_frame(
+                feed, camera, execution_id, frame_seq
+            )
+        if frame is None:
+            state = health.get("state") or "not streaming"
+            last_error = (health.get("lastError") or {}).get("message")
+            raise StreamFeedError(
+                feed.node_id,
+                "stream camera {0} delivered no frame newer than {1} ms "
+                "(state {2}{3})".format(
+                    camera, feed.max_frame_age_ms, state,
+                    ": " + last_error if last_error else ""),
+            )
+        frame_data = {
+            "data": frame.data,
+            "width": frame.width,
+            "height": frame.height,
+            "format": "RGB",
+        }
+        self._point_appsrc_at_frame_feed(
+            document, feed, frame_data, error_cls=StreamFeedError
+        )
+        logger.info(
+            "Stream frame %d from %s fed to node %s (%dx%d, selected by %s)",
+            frame.seq, camera, feed.node_id, frame.width, frame.height,
+            feed.selected_by,
+        )
+        return frame_data, {feed.node_id: {
+            "seq": frame.seq,
+            "acquiredAtMs": frame.acquired_at_ms,
+            "width": frame.width,
+            "height": frame.height,
+            "cameraSourceId": feed.camera_source_id,
+        }}
+
+    def _read_stream_frame(self, feed, camera, execution_id, frame_seq):
+        """Read the feed's frame from its camera session under the run's
+        own lease: ``(frame or None, the camera's Stream_Health)``."""
+        from stream_ingest.health import StreamError
+        from stream_ingest.sources import anonymous_source
+
+        manager = self._stream_manager()
+        source = None
+        if feed.camera_source_id is None:
+            try:
+                source = anonymous_source(feed.source_type, feed.url, feed.settings)
+            except StreamError as e:
+                raise StreamFeedError(feed.node_id, "stream camera {0}: {1}".format(camera, e.message))
+        try:
+            lease = manager.acquire_lease(
+                feed.camera_key, "run:{0}".format(execution_id), source=source
+            )
+        except StreamError as e:
+            raise StreamFeedError(
+                feed.node_id,
+                "stream camera {0} is unavailable: {1}".format(camera, e.message),
+            )
+        try:
+            frame = manager.latest_frame(
+                feed.camera_key,
+                after_seq=max(0, frame_seq - 1) if frame_seq else 0,
+                max_age_ms=feed.max_frame_age_ms,
+                wait_ms=feed.max_frame_age_ms,
+            )
+            health = manager.health(feed.camera_key) or {}
+        finally:
+            manager.release_lease(lease)
+        return frame, health
+
+    @staticmethod
+    def _apply_scene_analytics(
+        document, tag_values, output_dir, capture_id, collector, execution_id
+    ) -> None:
+        """Run the document's counters and associations (design component
+        16). The frame size a zone is scaled by is the one the detector
+        processed — the capture record's source dimensions — falling back
+        to the seeded ``frame``; it is only looked up when a zone is set."""
+        if not scene_analytics.has_scene_analytics(document):
+            return
+        try:
+            frame_size = None
+            if scene_analytics.needs_frame_size(document):
+                frame_size = scene_analytics.frame_dimensions(
+                    _capture_record_source_dimensions(output_dir, capture_id)
+                ) or scene_analytics.frame_dimensions(tag_values.get("frame"))
+            scene_analytics.apply_scene_analytics(
+                document, tag_values, frame_size=frame_size,
+                collector=collector,
+            )
+        except Exception:  # noqa: BLE001 - contained per 13.7
+            logger.exception(
+                "Workflow execution %s: scene analytics failed; the run "
+                "continues without them",
+                execution_id,
+            )
+
+    @staticmethod
+    def _seed_stream_metadata(tag_values, document, stream_metadata, frame_data) -> None:
+        """Seed ``stream`` and ``frame`` (see the call site); never
+        overwrites a key the pipeline produced."""
+        if stream_metadata:
+            stream = tag_values.setdefault("stream", {})
+            if isinstance(stream, dict):
+                for node_id, value in stream_metadata.items():
+                    stream.setdefault(node_id, value)
+        if ("frame" not in tag_values and isinstance(frame_data, dict)
+                and frame_data.get("width") and frame_data.get("height")
+                and (stream_metadata or document_has_stream_or_analytics(document))):
+            tag_values["frame"] = {
+                "width": frame_data["width"],
+                "height": frame_data["height"],
+            }
+
     @staticmethod
     def _apply_device_roi(
         document: dict, feed, grab_config, frame_data: dict
@@ -3739,17 +4024,21 @@ def register_workflow_executor(
     pipeline_manager_factory: Optional[Callable] = None,
     post_run_handler: Optional[PostRunHandler] = None,
     binding_resolution_provider: Optional[Callable] = None,
+    capture_root_for: Optional[Callable] = None,
 ) -> WorkflowExecutor:
     """Create a WorkflowExecutor and register it as THE executor hook.
 
     Called from ``runtime.start_workflow_engine`` so triggered runs stop
-    staying pending once the engine is up.
+    staying pending once the engine is up. ``capture_root_for`` (the run
+    retention's staging-root choice) is optional; without it every run
+    writes to the capture root exactly as before.
     """
     instance = WorkflowExecutor(
         session_factory=session_factory,
         pipeline_manager_factory=pipeline_manager_factory,
         post_run_handler=post_run_handler,
         binding_resolution_provider=binding_resolution_provider,
+        capture_root_for=capture_root_for,
     )
     executor_hook.set_executor(instance.execute)
     logger.info("WorkflowExecutor registered as the workflow executor")

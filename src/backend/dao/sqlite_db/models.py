@@ -51,6 +51,10 @@ class ImageSourceConfiguration(Base):
     # Persisted advanced GenICam controls (safe set: reverseX, reverseY,
     # balanceWhiteAuto). Stored as JSON so new controls don't need a migration.
     advancedSettings = Column(JSON)
+    # Stream camera settings of an RTSP/RTMP Image_Source (rtsp-rtmp-stream-
+    # cameras; model.stream_source). Null for every other type. Holds no
+    # credential: those live in the Credential_Store only.
+    streamSettings = Column(JSON)
 
 
 class InputConfiguration(Base):

@@ -122,6 +122,12 @@ class ResolutionResult:
     #: (csi-icam-input-nodes Requirement 7.1).
     csi_assignments: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     errors: Tuple[str, ...] = ()
+    #: Stream-fed node ids -> the bound Stream_Camera (same shape as
+    #: ``aravis_assignments``; rtsp-rtmp-stream-cameras Requirement 10.1).
+    #: Stream points carry ``streamBinding: true`` with empty slots: the
+    #: executor's stream feed reads the camera's session, so a binding never
+    #: substitutes into an element argument.
+    stream_assignments: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 def resolve_bindings(document: Dict[str, Any],
@@ -147,6 +153,7 @@ def resolve_bindings(document: Dict[str, Any],
     adapter_assignments: Dict[str, Dict[str, Any]] = {}
     aravis_assignments: Dict[str, Dict[str, Any]] = {}
     csi_assignments: Dict[str, Dict[str, Any]] = {}
+    stream_assignments: Dict[str, Dict[str, Any]] = {}
 
     for point in binding_points:
         if not isinstance(point, Mapping):
@@ -168,11 +175,23 @@ def resolve_bindings(document: Dict[str, Any],
                                 "cameraSourceId": camera_source_id})
                 errors.append("missing camera source {0}".format(camera_source_id))
                 continue
+            if point.get("streamBinding") is True:
+                mismatch = _stream_type_mismatch(point, entry, camera_source_id)
+                if mismatch is not None:
+                    # Requirement 10.2: a binding to a camera of the other
+                    # protocol (or no stream camera at all) is as unusable
+                    # as a missing one.
+                    missing.append({"nodeId": node_id,
+                                    "cameraSourceId": camera_source_id})
+                    errors.append(mismatch)
+                    continue
             values = _resolved_parameter_values(entry)
         elif isinstance(binding.get("override"), Mapping):
             override = dict(binding["override"])
             violations = _override_violations(
                 node_id, point.get("nodeType"), override)
+            if not violations and point.get("streamBinding") is True:
+                violations = _stream_override_violations(node_id, point, override)
             if violations:
                 errors.extend(violations)
                 continue
@@ -181,7 +200,15 @@ def resolve_bindings(document: Dict[str, Any],
             # Unrecognized binding shape: leave the compiled defaults.
             continue
 
-        if point.get("aravisBinding") is True:
+        if point.get("streamBinding") is True:
+            # Stream cameras: the executor's stream feed reads the bound
+            # camera's session; never an element argument
+            # (rtsp-rtmp-stream-cameras Requirement 10.1).
+            stream_assignments[node_id] = {
+                "cameraSourceId": camera_source_id,
+                "params": values,
+            }
+        elif point.get("aravisBinding") is True:
             # Aravis: the executor's frame feed grabs from the camera
             # manager; the binding selects which camera id it grabs, not
             # an element arg (aravis-camera-input Requirements 6.1, 6.2).
@@ -218,7 +245,53 @@ def resolve_bindings(document: Dict[str, Any],
         aravis_assignments=aravis_assignments,
         csi_assignments=csi_assignments,
         errors=tuple(errors),
+        stream_assignments=stream_assignments,
     )
+
+
+#: A stream binding point's protocol -> the Camera_Source type it binds to.
+_STREAM_TYPE_BY_PROTOCOL = {"rtsp": "RTSP", "rtmp": "RTMP"}
+#: The stream node types -> their protocol, for points without
+#: ``streamProtocol``.
+_STREAM_PROTOCOL_BY_NODE_TYPE = {"rtsp_camera_source": "rtsp", "rtmp_stream_source": "rtmp"}
+
+
+def stream_point_protocol(point) -> Optional[str]:
+    """``rtsp`` or ``rtmp`` for a stream binding point, else None."""
+    protocol = point.get("streamProtocol")
+    if protocol in _STREAM_TYPE_BY_PROTOCOL:
+        return protocol
+    return _STREAM_PROTOCOL_BY_NODE_TYPE.get(point.get("nodeType"))
+
+
+def _stream_type_mismatch(point, entry, camera_source_id) -> Optional[str]:
+    """Why ``entry`` cannot feed the stream ``point``, or None."""
+    protocol = stream_point_protocol(point)
+    expected = _STREAM_TYPE_BY_PROTOCOL.get(protocol)
+    actual = _get(entry, "type")
+    if expected is not None and actual == expected:
+        return None
+    return ("camera source {0} is a {1} camera, but node '{2}' needs an {3} "
+            "stream camera".format(camera_source_id, actual or "untyped",
+                                   point.get("nodeId"), expected or "RTSP or RTMP"))
+
+
+def _stream_override_violations(node_id, point, override) -> List[str]:
+    """The stream-specific rule the catalog regex cannot state: the
+    override URL must use the node's own schemes (rtsp/rtsps or
+    rtmp/rtmps) — validator rule V11 on the device."""
+    if "url" not in override:
+        return []
+    from workflow_engine.vendor.workflow_core.stream_url import (
+        SCHEMES_BY_SOURCE_TYPE,
+        check_stream_url,
+    )
+
+    expected = _STREAM_TYPE_BY_PROTOCOL.get(stream_point_protocol(point))
+    problem = check_stream_url(override["url"], SCHEMES_BY_SOURCE_TYPE.get(expected, ()))
+    if problem is None:
+        return []
+    return ["override for node '{0}': {1}".format(node_id, problem.message)]
 
 
 # --- helpers -----------------------------------------------------------------

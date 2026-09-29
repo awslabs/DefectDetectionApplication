@@ -185,7 +185,7 @@ DDA consists of several key components:
 - Advantech ICAM-520/ICAM-540
 - JAI/Zebra GO-X GigE Cameras
 - Basler/Cognex Ace GigE Cameras
-- RTSP/ONVIF Cameras (via folder input)
+- RTSP cameras (`rtsp://`, `rtsps://`), including ONVIF cameras through their RTSP stream, and RTMP streams (`rtmp://`, `rtmps://`), with H.264 or H.265 video. H.265 over RTMP needs an Enhanced RTMP source, such as FFmpeg 6.1 or later, or a recent OBS. Stream cameras work in deployed workflows, triggered or continuous, and in live preview and image capture. Credentials are stored on the device and never placed in the stream URL.
 
 **Input Sensors**:
 - NVIDIA Jetson sysfs compatible beam/presence sensors, etc
@@ -583,8 +583,24 @@ gst-inspect-1.0 emlcapture
 # Test camera connectivity (if using USB camera)
 gst-launch-1.0 v4l2src device=/dev/video0 ! videoconvert ! autovideosink
 
-# Test RTSP camera connectivity
-gst-launch-1.0 rtspsrc location=rtsp://camera-ip:554/stream ! decodebin ! autovideosink
+# Test an RTSP or RTMP camera: open its image source in the LocalServer UI and
+# choose "Test connection". It reports the codec, resolution, frame rate and
+# decoder, or a failure category such as authentication_failed, not_found,
+# unsupported_codec or tls_verification_failed. The same test and the
+# camera's stream health from the API (with station login enabled, add
+# -H "Authorization: Bearer <token>"):
+curl -X POST http://localhost:5000/image-sources/<image-source-id>/test-connection
+curl http://localhost:5000/image-sources/<image-source-id>/stream-health
+
+# Decode a few seconds of an RTSP stream inside the backend container, with no
+# display needed (add user-id=<user> user-pw=<password> to rtspsrc for a
+# camera that requires credentials):
+docker exec -it <backend-container-name> gst-launch-1.0 -e \
+  rtspsrc location=rtsp://camera-ip:554/stream protocols=tcp ! \
+  decodebin ! videoconvert ! fakesink num-buffers=100
+
+# A camera's most recent failure stays in its stream health (lastError, with
+# credentials redacted) after the camera recovers.
 ```
 
 **Pipeline Crashes and Debugging**:

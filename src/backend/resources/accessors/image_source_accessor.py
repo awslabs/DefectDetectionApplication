@@ -25,7 +25,10 @@ import json
 from .image_source_configuration_accessor import ImageSourceConfigurationAccessor
 from dao.sqlite_db import image_source_dao
 from dao.sqlite_db import image_source_configuration_dao
-from model.image_source import ImageSourceSchema, ImageSourceType
+from model import stream_source
+from model.image_source import ImageSourceSchema, ImageSourceType, is_stream_source_type
+from stream_ingest.credentials import CredentialStoreError, get_credential_store
+from stream_ingest.manager import get_stream_ingest_manager
 from utils import utils, constants, dda_user_management_utils
 from edge_ml1_p_camera_management import aravis_functions
 
@@ -37,6 +40,7 @@ from utils.camera_manager import (
     get_camera_feature_bounds,
     CameraStatusEnum
 )
+from data_models.common import CameraStatusModel
 
 import logging
 logger = logging.getLogger(__name__)
@@ -48,7 +52,14 @@ class ImageSourceAccessor:
             self.default_camera_config = json.load(jsonFile)
         self.image_source_config_accessor = ImageSourceConfigurationAccessor()
 
-    def create_image_source(self, data, db: Session):
+    def create_image_source(self, data, db: Session, managed_stream_settings=None):
+        """Create an Image_Source.
+
+        ``managed_stream_settings`` (stream types only, never from the API)
+        carries the device-managed ``credentialRef`` / ``credentialsUpdatedAt``
+        the Edge_Sync_Agent applies with a Portal change.
+        """
+        stream_credentials = None
         try:
             # TODO: make image source name unique
             image_source_id = utils.gen_uuid()
@@ -57,6 +68,12 @@ class ImageSourceAccessor:
             data["creationTime"] = current_ts
             data["lastUpdateTime"] = current_ts
             data["imageCapturePath"] = ""
+            if not is_stream_source_type(data.get("type")):
+                # Only stream Image_Sources have these (rtsp-rtmp-stream-cameras).
+                for key in ("streamSettings", "credentials", "clearCredentials"):
+                    if data.get(key) is not None:
+                        raise ValidationError({key: ["applies to RTSP and RTMP image sources only"]})
+                    data.pop(key, None)
 
             # Create image src config and output path for Camera type
             # Create directory for Folder type
@@ -96,10 +113,16 @@ class ImageSourceAccessor:
                 data["imageCapturePath"] = imageCapturePath
                 logger.warning(f"NVIDIA CSI CREATE DEBUG: imageSourceId={image_source_id}, imageCapturePath={imageCapturePath}")
                 self.__create_folder(imageCapturePath)
+            elif is_stream_source_type(data.get("type")):
+                stream_credentials = self.__prepare_stream_image_source(
+                    image_source_id, data, db, managed_stream_settings, current_ts)
             result = self.schema.load(data)
             image_source_dao.create_image_source(db, self.schema.dump(result))
             logger.info("Stored image source with id:" + str(image_source_id))
 
+            if is_stream_source_type(data.get("type")):
+                self.__store_new_stream_credentials(image_source_id, stream_credentials, db)
+                self.__notify_stream_config_changed(image_source_id)
             return {"imageSourceId": getattr(result, "imageSourceId")}
         except ValidationError as err:
             logger.error(err.messages)
@@ -127,7 +150,7 @@ class ImageSourceAccessor:
         else:
             return image_source
 
-    def update_image_source(self, id, data, db: Session):
+    def update_image_source(self, id, data, db: Session, managed_stream_settings=None):
         try:
             original_image_source = image_source_dao.get_image_source(db, id)
             if not original_image_source:
@@ -135,6 +158,19 @@ class ImageSourceAccessor:
                     status_code=HTTP_404_NOT_FOUND,
                     detail=f"The server can't find the image source. Error: 'The image source {id} doesn't exist'. Check the image source ID and try again.",
                 )
+            if is_stream_source_type(original_image_source.type):
+                # Stream cameras have their own path: ``location`` is a
+                # Stream_URL, not a folder, and credentials go to the
+                # Credential_Store (rtsp-rtmp-stream-cameras).
+                return self.__update_stream_image_source(
+                    id, original_image_source, data, db, managed_stream_settings)
+            for key in ("streamSettings", "credentials", "clearCredentials"):
+                if data.get(key) is not None:
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail=f"The server can't update the image source. Error: '{key} applies to RTSP and RTMP image sources only'. Check the request and try again.",
+                    )
+                data.pop(key, None)
             
             # Remove the original camera object, this will disconnect the camera and remove the object
             original_image_source_dict = utils.convert_sqlalchemy_object_to_dict(original_image_source)
@@ -212,6 +248,10 @@ class ImageSourceAccessor:
                 connected_image_sources = self.list_image_source_ids_by_camera(original_camera_id, db)
                 if not connected_image_sources:
                     disconnect_camera(original_camera_id)
+            if image_source_dict and is_stream_source_type(image_source_dict.get("type")):
+                # Requirement 4.7: the session stops and the credentials go.
+                get_stream_ingest_manager().notify_deleted(id)
+                get_credential_store().delete(id)
             return {"imageSourceId": id}
 
         except ValueError as err:
@@ -226,6 +266,171 @@ class ImageSourceAccessor:
                 status_code=HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"The server can't delete the image source. Error: 'The image source {id} cannot be deleted. Restart the application to cleanup resources"
             )
+
+    # -- stream Image_Sources (rtsp-rtmp-stream-cameras, design component 10) --
+
+    @staticmethod
+    def __stream_settings_with_managed(base, managed_stream_settings):
+        """``base`` settings with the device-managed keys the Edge_Sync_Agent
+        supplied: a key given as None is removed (a cleared reference)."""
+        settings = dict(base or {})
+        for key, value in (managed_stream_settings or {}).items():
+            if key not in stream_source.MANAGED_SETTINGS:
+                continue
+            if value is None:
+                settings.pop(key, None)
+            else:
+                settings[key] = value
+        return settings
+
+    def __create_stream_configuration(self, settings, db: Session):
+        """A configuration row for a stream Image_Source. The camera fields
+        hold inert values, so the existing schema needs no relaxation."""
+        return self.image_source_config_accessor.create_image_source_configuration(
+            db, {"gain": 0, "exposure": 0, "processingPipeline": "", "streamSettings": settings})
+
+    def __prepare_stream_image_source(self, image_source_id, data, db: Session,
+                                      managed_stream_settings, current_ts):
+        """Validate and stage a new stream Image_Source in ``data``; returns
+        the credentials to store once the row exists. Raises
+        ValidationError naming the field (Requirement 4.2)."""
+        source_type = data.get("type")
+        requested_settings = data.pop("streamSettings", None)
+        raw_credentials = data.pop("credentials", None)
+        data.pop("clearCredentials", None)
+        data.pop("imageSourceConfiguration", None)
+        try:
+            data["location"] = stream_source.validate_stream_url(source_type, data.get("location"))
+            credentials = stream_source.validate_credentials(raw_credentials)
+            settings = stream_source.normalize_stream_settings(
+                source_type, requested_settings,
+                base=self.__stream_settings_with_managed({}, managed_stream_settings))
+        except stream_source.StreamSourceError as error:
+            raise ValidationError(error.as_messages())
+        if credentials and managed_stream_settings is None:
+            # Credentials set at the station: stamp when they changed.
+            settings["credentialsUpdatedAt"] = current_ts
+        data["imageSourceConfigId"] = self.__create_stream_configuration(settings, db)
+        image_capture_path = constants.IMAGE_CAPTURE_DIR + "/" + image_source_id
+        data["imageCapturePath"] = image_capture_path
+        self.__create_folder(image_capture_path)
+        return credentials
+
+    def __store_new_stream_credentials(self, image_source_id, credentials, db: Session):
+        """Write a new stream Image_Source's credentials; when that fails the
+        just-created row is removed, so no camera exists half-configured."""
+        if not credentials:
+            return
+        try:
+            get_credential_store().put(image_source_id, credentials)
+        except CredentialStoreError as error:
+            logger.error("Removing image source %s: its credentials could not be stored: %s",
+                         image_source_id, error)
+            try:
+                image_source_dao.delete_image_source(db, image_source_id)
+            except Exception as cleanup_error:  # noqa: BLE001 - best effort
+                logger.error("Could not remove image source %s after the credential "
+                             "failure: %s", image_source_id, cleanup_error)
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="The server can't create the image source. Error: 'The camera credentials could not be stored on the device'. Check the device storage and try again.",
+            )
+
+    def __notify_stream_config_changed(self, image_source_id):
+        """Restart a running session with the new configuration (Requirement
+        8.11). A failure here never fails the CRUD request."""
+        try:
+            get_stream_ingest_manager().notify_config_changed(image_source_id)
+        except Exception as error:  # noqa: BLE001 - the change is already stored
+            logger.error("Stream session of image source %s could not be restarted: %s",
+                         image_source_id, error)
+
+    def __update_stream_image_source(self, id, original_image_source, data, db: Session,
+                                     managed_stream_settings=None):
+        """PATCH of an RTSP/RTMP Image_Source: a new Stream_URL, settings
+        merged over the stored ones, and write-only credentials."""
+        source_type = original_image_source.type
+        requested_settings = data.pop("streamSettings", None)
+        raw_credentials = data.pop("credentials", None)
+        clear_credentials = bool(data.pop("clearCredentials", False))
+        data.pop("imageSourceConfiguration", None)
+        stored_configuration = original_image_source.imageSourceConfiguration
+        stored_settings = (getattr(stored_configuration, "streamSettings", None) or {}) \
+            if stored_configuration is not None else {}
+        try:
+            if data.get("location") is not None:
+                data["location"] = stream_source.validate_stream_url(source_type, data["location"])
+            credentials = stream_source.validate_credentials(raw_credentials)
+            if credentials and clear_credentials:
+                raise stream_source.StreamSourceError(
+                    "credentials", "cannot be set while clearCredentials is true")
+            base = self.__stream_settings_with_managed(stored_settings, managed_stream_settings)
+            settings = stream_source.normalize_stream_settings(source_type, requested_settings, base=base)
+        except stream_source.StreamSourceError as error:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="The server can't update the image source. Error: '{}'. Check the request and try again.".format(
+                    error.as_messages()),
+            )
+        current_ts = int(time.time() * 1000)
+        if (credentials or clear_credentials) and managed_stream_settings is None:
+            # A change made at the station no longer matches a Portal
+            # Credential_Reference, so the reference is dropped.
+            settings.pop("credentialRef", None)
+            settings["credentialsUpdatedAt"] = current_ts
+
+        store = get_credential_store()
+        previous_credentials = store.get(id)
+        try:
+            if credentials:
+                store.put(id, credentials)
+            elif clear_credentials:
+                store.delete(id)
+        except CredentialStoreError as error:
+            logger.error("Image source %s: the credentials could not be stored: %s", id, error)
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="The server can't update the image source. Error: 'The camera credentials could not be stored on the device'. Check the device storage and try again.",
+            )
+
+        try:
+            data["imageSourceId"] = id
+            data["lastUpdateTime"] = current_ts
+            data["imageSourceConfigId"] = self.__create_stream_configuration(settings, db)
+            errors = self.schema.validate(data, partial=True)
+            if errors:
+                raise ValidationError(errors)
+            image_source_dao.update_image_source(db, data, id)
+        except Exception:
+            # Keep the store consistent with the unchanged row.
+            if credentials or clear_credentials:
+                try:
+                    if previous_credentials:
+                        store.put(id, previous_credentials)
+                    else:
+                        store.delete(id)
+                except CredentialStoreError as error:
+                    logger.error("Image source %s: the previous credentials could not be "
+                                 "restored: %s", id, error)
+            raise
+        logger.info("Updated stream image source with id:" + str(id))
+        self.__notify_stream_config_changed(id)
+        return {"imageSourceId": id}
+
+    @staticmethod
+    def stream_camera_status(health):
+        """``cameraStatus`` of a stream Image_Source from its Stream_Health:
+        connected while streaming, otherwise disconnected with the last
+        (redacted) error."""
+        health = health or {}
+        streaming = health.get("state") == "streaming"
+        last_error = health.get("lastError") or {}
+        stamp_ms = health.get("lastFrameAtMs") or last_error.get("atMs")
+        return CameraStatusModel(
+            status=CameraStatusEnum.CONNECTED if streaming else CameraStatusEnum.DISCONNECTED,
+            lastUpdatedTime=(stamp_ms / 1000.0) if stamp_ms else time.time(),
+            error=None if streaming else (last_error.get("message") or health.get("state")),
+        )
 
     def __create_folder(self, folder_path):
         # Require folder path to be absolute path
@@ -313,7 +518,15 @@ class ImageSourceAccessor:
         return new_image_sources
 
     def update_image_source_with_camera_status(self, image_source_dict):
-        if image_source_dict.get('type') == ImageSourceType.FOLDER or image_source_dict.get('type') == ImageSourceType.NVIDIA_CSI or image_source_dict.get('type') == ImageSourceType.ICAM:
+        if is_stream_source_type(image_source_dict.get('type')):
+            # rtsp-rtmp-stream-cameras: the status comes from the session's
+            # Stream_Health, and the credentials are reported only as a flag.
+            image_source_id = image_source_dict.get('imageSourceId')
+            health = get_stream_ingest_manager().health_for_image_source(image_source_id)
+            image_source_dict["cameraStatus"] = self.stream_camera_status(health)
+            image_source_dict["streamHealth"] = health
+            image_source_dict["credentialsConfigured"] = get_credential_store().configured(image_source_id)
+        elif image_source_dict.get('type') == ImageSourceType.FOLDER or image_source_dict.get('type') == ImageSourceType.NVIDIA_CSI or image_source_dict.get('type') == ImageSourceType.ICAM:
             image_source_dict["cameraStatus"] = None
         else:
             camera_id = image_source_dict.get('cameraId', None)

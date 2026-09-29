@@ -7,7 +7,9 @@ so a typo cannot silently reduce coverage (Req 2.1 support).
 
 Credentials are handled as *references* (``env:VAR`` / ``file:path``) — the
 secret value is never read into configuration objects, so reprs, logs, and
-the results bundle can never leak it (Req 3.3 support).
+the results bundle can never leak it (Req 3.3 support). That holds for the
+stream camera stage's ``expected.stream_credentials`` too, and configured
+stream URLs are rejected when they embed a credential.
 """
 
 from __future__ import annotations
@@ -15,14 +17,70 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from urllib.parse import parse_qsl, urlsplit
 
 import yaml
 
 # Known Device_Profile vocabulary (design: Data Models).
 KNOWN_ARCHITECTURES = frozenset(
     {"x86_64", "arm64_cpu", "arm64_jp5", "arm64_jp6", "arm64_jp7"})
-KNOWN_CAPABILITIES = frozenset({"vllm", "dlr_models", "onnx_models", "workflows", "auth_enabled"})
+KNOWN_CAPABILITIES = frozenset(
+    {"vllm", "dlr_models", "onnx_models", "workflows", "auth_enabled", "stream_cameras"}
+)
+
+#: Stream URL schemes and the Image_Source type each one maps to (device:
+#: ``workflow_core.stream_url.SCHEMES_BY_SOURCE_TYPE``). The stream camera
+#: stage infers an Image_Source's type from its URL's scheme.
+STREAM_URL_SCHEMES: Dict[str, str] = {
+    "rtsp": "RTSP",
+    "rtsps": "RTSP",
+    "rtmp": "RTMP",
+    "rtmps": "RTMP",
+}
+
+#: Connection-test failure categories the device reports (device:
+#: ``stream_ingest.health.ALL_CATEGORIES``). ``expected.stream_failures`` keys
+#: are checked against it fail-closed, so a typo'd category is a
+#: configuration error instead of a confusing mismatch on the device.
+KNOWN_STREAM_FAILURE_CATEGORIES = frozenset(
+    {
+        "authentication_failed",
+        "decoder_unavailable",
+        "hardware_decoder_failed",
+        "network_error",
+        "not_found",
+        "server_error",
+        "session_limit",
+        "stall",
+        "timeout",
+        "tls_verification_failed",
+        "unsupported_codec",
+        "worker_exit",
+    }
+)
+
+#: Query parameter names that carry secrets (device:
+#: ``workflow_core.stream_url.SECRET_QUERY_PARAMETERS``). A configured stream
+#: URL carrying one is rejected, so no secret sits in the configuration.
+_SECRET_QUERY_PARAMETERS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "auth",
+        "key",
+        "pass",
+        "passwd",
+        "password",
+        "pwd",
+        "secret",
+        "sig",
+        "signature",
+        "stream_key",
+        "streamkey",
+        "token",
+    }
+)
 
 # Environment variable names.
 ENV_CONFIG = "DDA_HARNESS_CONFIG"
@@ -53,12 +111,20 @@ class CredentialRef:
     locator: str
 
     @classmethod
-    def parse(cls, raw: str) -> "CredentialRef":
+    def parse(cls, raw: str, context: str = "credentials reference") -> "CredentialRef":
+        """Parse a reference; ``context`` names the key in the error.
+
+        The rejected value is never echoed: a malformed reference is most
+        often the secret itself pasted in place of a reference (for
+        example ``user:pass``), and the error becomes a skip reason in the
+        terminal output and the JUnit XML.
+        """
         scheme, sep, locator = raw.partition(":")
         if not sep or scheme not in ("env", "file") or not locator:
             raise HarnessConfigError(
-                f"Invalid credentials reference {raw!r}: expected 'env:VAR_NAME' "
-                "or 'file:/path/to/token'"
+                f"Invalid {context}: expected 'env:VAR_NAME' or "
+                "'file:/path/to/token', a reference and never the value itself "
+                "(the configured value is not shown because it may be a secret)"
             )
         return cls(scheme=scheme, locator=locator)
 
@@ -84,6 +150,57 @@ class CredentialRef:
         return f"{self.scheme}:{self.locator}"
 
 
+class SecretStr(str):
+    """A resolved secret. It is the ``str`` it holds for JSON encoding and
+    comparison, but its ``repr`` is redacted, so the value never shows in a
+    repr, in pytest's assertion introspection, or in ``--showlocals``
+    output (for example a request body dict in a failing frame)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "'<redacted>'"
+
+
+@dataclass(frozen=True)
+class StreamCredentials:
+    """Stream_Credentials resolved from ``expected.stream_credentials``.
+    Only the username shows in the repr."""
+
+    username: str
+    password: SecretStr = field(repr=False)
+
+    def request_body(self) -> Dict[str, str]:
+        """The write-only ``credentials`` object of an Image_Source request."""
+        return {"username": self.username, "password": self.password}
+
+
+def resolve_stream_credentials(
+    ref: CredentialRef, environ: Optional[Mapping[str, str]] = None
+) -> StreamCredentials:
+    """Resolve ``expected.stream_credentials`` to ``username:password``.
+
+    The value is wrapped as soon as it is read, and no error names it; only
+    the reference appears in messages. Callers must not log the password.
+    """
+    raw = SecretStr(ref.resolve(environ))
+    username, sep, password = raw.partition(":")
+    password = SecretStr(password)
+    if not sep or not username or not password:
+        raise HarnessConfigError(
+            f"expected.stream_credentials ({ref}) must resolve to "
+            "'username:password' with both parts non-empty (the resolved "
+            "value is not shown)"
+        )
+    return StreamCredentials(username=username, password=password)
+
+
+def stream_source_type(url: str) -> str:
+    """The Image_Source type (``RTSP`` or ``RTMP``) of a validated stream
+    URL, from its scheme."""
+    return STREAM_URL_SCHEMES[url.partition("://")[0]]
+
+
 @dataclass(frozen=True)
 class DeviceProfile:
     """Declared characteristics of a Target_Device used for stage selection."""
@@ -104,15 +221,33 @@ class Timeouts:
     generate_s: float = 120.0
     workflow_output_s: float = 180.0
     run_budget_s: float = 2400.0
+    #: How long the stream stage samples a continuous workflow's counters.
+    continuous_window_s: float = 30.0
 
 
 @dataclass(frozen=True)
 class ExpectedComponents:
-    """Components the Harness_Configuration expects present on the device."""
+    """Components the Harness_Configuration expects present on the device,
+    plus the stream camera stage's inputs. Every stream input is optional:
+    a check whose input is absent skips with a reason naming the key."""
 
     vision_models: tuple = ()
     vllm_models: tuple = ()
     workflows: tuple = ()
+    #: Credential-free stream URLs that must connect; the type comes from
+    #: the scheme (rtsp/rtsps -> RTSP, rtmp/rtmps -> RTMP).
+    stream_urls: tuple = ()
+    #: A stream URL that needs credentials, and the reference they resolve
+    #: from (``username:password``).
+    stream_secure_url: Optional[str] = None
+    stream_credentials: Optional[CredentialRef] = None
+    #: ``(category, url)`` pairs: each URL's connection test must fail with
+    #: exactly that category. File-only (a mapping in devices.yaml).
+    stream_failures: tuple = ()
+    #: workflowIds of installed stream workflows: an on_trigger one and a
+    #: continuous one.
+    stream_workflow: Optional[str] = None
+    continuous_workflow: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -206,19 +341,157 @@ def _parse_timeouts(raw: Dict, environ: Mapping[str, str], device_name: str) -> 
     return Timeouts(**values)
 
 
+#: ``expected.*`` keys holding lists of component names (env: comma-separated).
+_EXPECTED_NAME_LISTS = ("vision_models", "vllm_models", "workflows")
+
+#: ``expected.*`` keys holding one workflowId each.
+_EXPECTED_WORKFLOW_IDS = ("stream_workflow", "continuous_workflow")
+
+
+def _expected_env_name(key: str) -> str:
+    return f"DDA_HARNESS_EXPECTED_{key.upper()}"
+
+
+def _validate_stream_url(value: Any, context: str, device_name: str) -> str:
+    """A configured stream URL, validated without ever echoing it, since it
+    may carry a credential: an rtsp/rtsps/rtmp/rtmps scheme, a host, and no
+    user information or secret query parameter (credentials belong in
+    ``expected.stream_credentials``). Returns it stripped."""
+    prefix = f"Device {device_name!r}: {context}"
+    if not isinstance(value, str) or not value.strip():
+        raise HarnessConfigError(f"{prefix} must be a non-empty stream URL")
+    url = value.strip()
+    scheme, sep, _ = url.partition("://")
+    if not sep or scheme not in STREAM_URL_SCHEMES:
+        schemes = ", ".join(f"{name}://" for name in sorted(STREAM_URL_SCHEMES))
+        raise HarnessConfigError(f"{prefix} must be a stream URL starting with one of {schemes}")
+    if any(character.isspace() for character in url):
+        raise HarnessConfigError(f"{prefix} must not contain whitespace")
+    try:
+        parts = urlsplit(url)
+        _ = parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        raise HarnessConfigError(f"{prefix} is not a valid URL (the URL is not shown)") from None
+    if "@" in parts.netloc:
+        raise HarnessConfigError(
+            f"{prefix} embeds user information (user:password@); stream "
+            "credentials go in expected.stream_credentials, never in a URL "
+            "(the URL is not shown)"
+        )
+    if not parts.hostname:
+        raise HarnessConfigError(f"{prefix} has no host")
+    for name, _ in parse_qsl(parts.query, keep_blank_values=True):
+        if name.lower() in _SECRET_QUERY_PARAMETERS:
+            raise HarnessConfigError(
+                f"{prefix} carries the secret query parameter {name!r}; stream "
+                "credentials go in expected.stream_credentials (the URL is not shown)"
+            )
+    return url
+
+
+def _optional_scalar(raw: Dict, environ: Mapping[str, str], key: str, device_name: str):
+    """An optional single-valued ``expected.<key>``: the environment wins
+    over the file, and an empty value (either source) means unset."""
+    value = environ.get(_expected_env_name(key))
+    if value is None:
+        value = raw.get(key)
+    if value is None:
+        return None
+    if isinstance(value, (dict, list, tuple)):
+        raise HarnessConfigError(f"Device {device_name!r}: expected.{key} must be a single value")
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_stream_urls(raw: Dict, environ: Mapping[str, str], device_name: str) -> tuple:
+    env_name = _expected_env_name("stream_urls")
+    env_override = environ.get(env_name)
+    if env_override is not None:
+        urls, context = _split_csv(env_override), env_name
+    else:
+        candidate = raw.get("stream_urls")
+        if candidate is None:
+            return ()
+        if not isinstance(candidate, (list, tuple)):
+            raise HarnessConfigError(f"Device {device_name!r}: expected.stream_urls must be a list")
+        urls, context = list(candidate), "expected.stream_urls"
+    return tuple(
+        _validate_stream_url(url, f"{context}[{index}]", device_name)
+        for index, url in enumerate(urls)
+    )
+
+
+def _parse_stream_failures(raw: Dict, environ: Mapping[str, str], device_name: str) -> tuple:
+    """``expected.stream_failures`` — a mapping of failure category to one
+    URL or a list of URLs — as ``(category, url)`` pairs in file order."""
+    env_name = _expected_env_name("stream_failures")
+    if env_name in environ:
+        raise HarnessConfigError(
+            f"Device {device_name!r}: {env_name} is not supported; "
+            "expected.stream_failures is a mapping and is configured in "
+            "devices.yaml only"
+        )
+    candidate = raw.get("stream_failures")
+    if candidate is None:
+        return ()
+    if not isinstance(candidate, dict):
+        raise HarnessConfigError(
+            f"Device {device_name!r}: expected.stream_failures must be a mapping "
+            "of connection-test failure category to a URL or a list of URLs"
+        )
+    pairs: List[Tuple[str, str]] = []
+    for category, urls in candidate.items():
+        category = str(category)
+        if category not in KNOWN_STREAM_FAILURE_CATEGORIES:
+            # Fail closed, as for capability names.
+            raise HarnessConfigError(
+                f"Device {device_name!r}: unknown stream failure category "
+                f"{category!r} in expected.stream_failures; known: "
+                f"{', '.join(sorted(KNOWN_STREAM_FAILURE_CATEGORIES))}"
+            )
+        if isinstance(urls, str):
+            urls = [urls]
+        if not isinstance(urls, (list, tuple)) or not urls:
+            raise HarnessConfigError(
+                f"Device {device_name!r}: expected.stream_failures.{category} "
+                "must be a URL or a non-empty list of URLs"
+            )
+        for index, url in enumerate(urls):
+            context = f"expected.stream_failures.{category}[{index}]"
+            pairs.append((category, _validate_stream_url(url, context, device_name)))
+    return tuple(pairs)
+
+
 def _parse_expected(raw: Dict, environ: Mapping[str, str], device_name: str) -> ExpectedComponents:
-    values = {}
-    for f in fields(ExpectedComponents):
-        env_override = environ.get(f"DDA_HARNESS_EXPECTED_{f.name.upper()}")
+    values: Dict[str, Any] = {}
+    for key in _EXPECTED_NAME_LISTS:
+        env_override = environ.get(_expected_env_name(key))
         if env_override is not None:
-            values[f.name] = tuple(_split_csv(env_override))
+            values[key] = tuple(_split_csv(env_override))
             continue
-        candidate = raw.get(f.name)
+        candidate = raw.get(key)
         if candidate is None:
             continue
         if not isinstance(candidate, (list, tuple)):
-            raise HarnessConfigError(f"Device {device_name!r}: expected.{f.name} must be a list")
-        values[f.name] = tuple(str(item) for item in candidate)
+            raise HarnessConfigError(f"Device {device_name!r}: expected.{key} must be a list")
+        values[key] = tuple(str(item) for item in candidate)
+
+    values["stream_urls"] = _parse_stream_urls(raw, environ, device_name)
+    secure_url = _optional_scalar(raw, environ, "stream_secure_url", device_name)
+    if secure_url is not None:
+        values["stream_secure_url"] = _validate_stream_url(
+            secure_url, "expected.stream_secure_url", device_name
+        )
+    credentials = _optional_scalar(raw, environ, "stream_credentials", device_name)
+    if credentials is not None:
+        values["stream_credentials"] = CredentialRef.parse(
+            credentials,
+            context=f"expected.stream_credentials reference for device {device_name!r}",
+        )
+    values["stream_failures"] = _parse_stream_failures(raw, environ, device_name)
+    for key in _EXPECTED_WORKFLOW_IDS:
+        values[key] = _optional_scalar(raw, environ, key, device_name)
+
     unknown = set(raw) - {f.name for f in fields(ExpectedComponents)}
     if unknown:
         raise HarnessConfigError(
@@ -309,7 +582,13 @@ def load_config(
     capabilities = _validate_capabilities(capabilities_raw, name)
 
     credentials_raw = env.get(ENV_CREDENTIALS, entry.get("credentials"))
-    credentials_ref = CredentialRef.parse(str(credentials_raw)) if credentials_raw else None
+    credentials_ref = (
+        CredentialRef.parse(
+            str(credentials_raw), context=f"credentials reference for device {name!r}"
+        )
+        if credentials_raw
+        else None
+    )
 
     expected = _parse_expected(
         _require_mapping(entry.get("expected"), f"Device {name!r} expected"), env, name

@@ -28,7 +28,7 @@
 from marshmallow import Schema, fields, post_load, EXCLUDE
 
 class ImageSourceConfiguration:
-    def __init__(self, imageSourceConfigId, gain, exposure, processingPipeline, creationTime, imageCrop=None, device=None, deviceName=None, advancedSettings=None):
+    def __init__(self, imageSourceConfigId, gain, exposure, processingPipeline, creationTime, imageCrop=None, device=None, deviceName=None, advancedSettings=None, streamSettings=None):
         self.imageSourceConfigId = imageSourceConfigId
         self.gain = gain
         self.exposure = exposure
@@ -40,6 +40,11 @@ class ImageSourceConfiguration:
         # Persisted safe advanced GenICam controls (reverseX, reverseY,
         # balanceWhiteAuto).
         self.advancedSettings = advancedSettings
+        # Stream camera settings of an RTSP/RTMP Image_Source
+        # (rtsp-rtmp-stream-cameras, model.stream_source): transport,
+        # latencyMs, decoder, maxFrameDimension, stallTimeoutS, and the
+        # managed credentialRef / credentialsUpdatedAt. Never a credential.
+        self.streamSettings = streamSettings
 
     def get(self, attr_name, default=None):
         return getattr(self, attr_name, default)
@@ -71,6 +76,8 @@ class ImageSourceConfigurationSchema(Schema):
     device = fields.Str(required=False, allow_none=True)
     deviceName = fields.Str(required=False, allow_none=True)
     advancedSettings = fields.Dict(required=False, allow_none=True)
+    # Stream camera settings (rtsp-rtmp-stream-cameras); null for other types.
+    streamSettings = fields.Dict(required=False, allow_none=True)
 
     @post_load
     def make_source(self, data, **kwargs):

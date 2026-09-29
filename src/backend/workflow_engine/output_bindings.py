@@ -98,6 +98,7 @@ from workflow_engine.tuning.sample_export import (
 # implementation. Everything else — image resolution, ``render_prompt``,
 # the fail-closed rules, artifact persistence, metadata assembly and the
 # transports themselves — stays here.
+from workflow_engine import scene_analytics
 from workflow_engine.vendor.workflow_core.anomaly_invocation import (
     BEDROCK_DEFAULT_MODEL,
     BEDROCK_JSON_INSTRUCTION,
@@ -723,9 +724,22 @@ def _default_greengrass_publisher(
     actionable instead of a bare ``UnauthorizedError``. For a retained
     publish the message additionally names ``iot:RetainPublish``, which
     AWS IoT Core evaluates separately from ``iot:Publish`` in the core
-    device's IoT policy."""
-    import awsiot.greengrasscoreipc
+    device's IoT policy.
+
+    The publish goes through the process-wide shared IPC client
+    (``utils.ipc_client``), never a connection of its own. Found on
+    hardware (rtsp-rtmp-stream-cameras task 25.3): the publisher used to
+    call ``awsiot.greengrasscoreipc.connect()`` for every message and never
+    close the client, and each connection kept its ``AwsEventLoop`` thread
+    and buffers for the life of the process. A continuous workflow whose
+    event gate publishes every few seconds left 2,700 such threads and
+    about 175 KB per message behind in 12 hours on a JP5 device. A failed
+    publish other than a denial reconnects the shared client and retries
+    once, like ``utils.ipc_client.call_with_ipc_retry``; a denial is final
+    and says nothing about the connection."""
     import awsiot.greengrasscoreipc.model as model
+
+    from utils import ipc_client as shared_ipc
 
     qos_value = model.QOS.AT_LEAST_ONCE if int(qos) >= GREENGRASS_MAX_QOS \
         else model.QOS.AT_MOST_ONCE
@@ -742,11 +756,22 @@ def _default_greengrass_publisher(
                 "field".format(topic))
         request.retain = True
 
-    ipc_client = awsiot.greengrasscoreipc.connect()
-    operation = ipc_client.new_publish_to_iot_core()
-    operation.activate(request)
-    try:
+    def publish() -> None:
+        operation = shared_ipc.get_ipc_client().new_publish_to_iot_core()
+        operation.activate(request)
         operation.get_response().result(timeout=10.0)
+
+    try:
+        try:
+            publish()
+        except model.UnauthorizedError:
+            raise
+        except Exception as error:  # noqa: BLE001 - a broken shared connection
+            logger.warning(
+                "Greengrass IPC publish to '%s' failed (%s); reconnecting the "
+                "shared IPC client and retrying once", topic, error)
+            shared_ipc.reset_ipc_client()
+            publish()
     except model.UnauthorizedError as error:
         message = (
             "Greengrass IPC denied PublishToIoTCore for topic "
@@ -3423,6 +3448,8 @@ class OutputBindingProcessor:
         opcua_writer: Optional[Callable] = None,
         greengrass_publisher: Optional[Callable] = None,
         modbus_writer: Optional[Callable] = None,
+        event_gate_store=None,
+        clock_ms: Optional[Callable[[], int]] = None,
     ) -> None:
         self._dio_actuator = dio_actuator or _default_dio_actuator
         self._mqtt_publisher = mqtt_publisher or _default_mqtt_publisher
@@ -3431,6 +3458,14 @@ class OutputBindingProcessor:
             greengrass_publisher or _default_greengrass_publisher
         )
         self._modbus_writer = modbus_writer or _default_modbus_writer
+        # Event gates (rtsp-rtmp-stream-cameras Requirement 15): their
+        # per-registration state, in memory, and the clock their
+        # repeat interval reads. Injectable for tests.
+        self._event_gate_store = (
+            event_gate_store if event_gate_store is not None
+            else scene_analytics.EVENT_GATE_STATES
+        )
+        self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
 
     def __call__(
         self,
@@ -3451,6 +3486,15 @@ class OutputBindingProcessor:
         ):
             kwargs["duration_sink"] = duration_sink
         self.process(registration, document, tag_values, **kwargs)
+
+    def _gate_store(self):
+        # getattr: subclasses predating event gates may skip __init__.
+        store = getattr(self, "_event_gate_store", None)
+        return store if store is not None else scene_analytics.EVENT_GATE_STATES
+
+    def _gate_clock_ms(self) -> int:
+        clock = getattr(self, "_clock_ms", None)
+        return clock() if clock is not None else int(time.time() * 1000)
 
     @staticmethod
     def _emit_detail(
@@ -3558,7 +3602,22 @@ class OutputBindingProcessor:
         attached_by_output = attached_metadata_by_output(
             bindings, metadata.get("trigger") or {}
         )
+        # Scene analytics gating (rtsp-rtmp-stream-cameras Requirements
+        # 13.6, 14.6, 15.2-15.4): event gates step first, in topological
+        # order over the full run metadata, and merge ``event.<nodeId>``
+        # before the filters and conditionals evaluate (they may reference
+        # it). A counter or association with an error outcome, and a gate
+        # that did not pass, gate their direct downstream nodes exactly
+        # like a failed inference filter. Documents without analytics
+        # bindings add nothing here.
+        gate_passed = scene_analytics.evaluate_event_gates(
+            document, bindings, metadata, tag_values,
+            evaluate=evaluate_condition, store=self._gate_store(),
+            now_ms=self._gate_clock_ms(), detail_sink=detail_sink,
+        )
         filter_outcomes = self._evaluate_filters(bindings, metadata)
+        filter_outcomes.update(scene_analytics.analytics_gating(document))
+        filter_outcomes.update(gate_passed)
         conditional_allowed = self._evaluate_conditionals(bindings, metadata)
 
         # Collected (node_id, error) for every binding that raised. A
@@ -3581,6 +3640,8 @@ class OutputBindingProcessor:
                     continue  # ran before this processor; fields merged
                 if kind == BINDING_METADATA:
                     continue  # resolved before the loop; attaches, no action
+                if kind in scene_analytics.SCENE_ANALYTICS_BINDINGS:
+                    continue  # evaluated above (or by the executor); gates
                 if kind == BINDING_DIGITAL_OUTPUT:
                     runner = self._run_digital_output
                 elif kind == BINDING_MQTT_PUBLISH:

@@ -52,6 +52,7 @@ Runs with the hypothesis profiles registered in the root conftest
 deadline is disabled because every example builds a real database.
 """
 import contextlib
+import copy
 import importlib.util
 import os
 import pathlib
@@ -196,6 +197,16 @@ class _FakeShadowAccessor:
             self.reported_writes.append(state["reported"])
         if "desired" in state:
             self.desired_writes.append(state["desired"])
+
+
+def _as_documents_event(document):
+    """A report as the Portal's documents event shows it: a camera key the
+    report deleted with an explicit null is gone from the shadow."""
+    shown = copy.deepcopy(document)
+    shown["cameras"] = {
+        csid: entry for csid, entry in shown.get("cameras", {}).items() if entry is not None
+    }
+    return shown
 
 
 class _FakeDiscovery:
@@ -564,7 +575,9 @@ def _assert_valid_round_trip(portal, registry, document, session_factory,
     if change["op"] == "delete":
         image_source_id = csid[len("cfg-"):]
         assert image_source_id not in db_after  # applied on the device (5.2)
-        assert csid not in document["cameras"]
+        # The report deletes the key with an explicit null: shadow updates
+        # merge nested maps, so omitting it would leave it in the shadow.
+        assert csid in document["cameras"] and document["cameras"][csid] is None
         assert csid not in document["failures"]
         assert csid not in registry  # portal agreement: entry removed
         return
@@ -677,7 +690,7 @@ def test_portal_change_apply_report_round_trip(scenario):
             agent.report_inventory()
             _flush(agent, clock)
             registry = {}
-            _reduce_document(portal, registry, shadow.reported_writes[-1])
+            _reduce_document(portal, registry, _as_documents_event(shadow.reported_writes[-1]))
 
             # Materialize the portal changes (distinct targets per batch)
             # and mark each one pending in the registry (5.1).
@@ -700,7 +713,7 @@ def test_portal_change_apply_report_round_trip(scenario):
             agent.on_delta({"state": {"changes": changes}})
             _flush(agent, clock)
             document = shadow.reported_writes[-1]
-            _reduce_document(portal, registry, document)
+            _reduce_document(portal, registry, _as_documents_event(document))
 
             db_after = _dump_db(session_factory)
 
@@ -732,7 +745,8 @@ def test_portal_change_apply_report_round_trip(scenario):
             applied_creates = {
                 other[len("cfg-"):]
                 for other, entry in document["cameras"].items()
-                if other.startswith("cfg-") and other[len("cfg-"):] not in db_before
+                if entry is not None
+                and other.startswith("cfg-") and other[len("cfg-"):] not in db_before
             }
             applied_deletes = {
                 csid[len("cfg-"):]

@@ -946,3 +946,96 @@ class GStreamerBackend:
             pipeline.set_state(self._rt.Gst.State.NULL)
         except Exception as e:  # pragma: no cover - best-effort cleanup
             logger.warning(f"GStreamerBackend {self.camera_id}: error cleaning up failed open: {e}")
+
+
+class StreamIngestBackend:
+    """``CameraBackend`` over a Stream_Ingest_Service session
+    (rtsp-rtmp-stream-cameras task 17.1; Requirements 4.4, 8.1, 18.5).
+
+    An RTSP or RTMP camera already has one shared, supervised session in the
+    ``StreamIngestManager``; this adapter only holds it open:
+
+    * ``open`` acquires a Stream_Lease (the session starts on the first one,
+      and a refusal at the device session limit is raised, so the
+      broadcaster reports the camera unavailable);
+    * ``grab(timeout)`` returns the newest frame newer than the last one it
+      returned, waiting up to ``timeout_ms``;
+    * ``close`` releases the lease. The session then keeps running for its
+      idle grace, so a viewer disconnecting never tears down a session that
+      a workflow or another viewer leases.
+
+    Frames are packed RGB. Stream cameras have no camera controls, so
+    ``apply_features`` applies nothing.
+    """
+
+    def __init__(self, camera_id, image_source=None, stream_config=None, manager=None):
+        self.camera_id = camera_id
+        self._image_source = dict(image_source or {})
+        self._stream_config = stream_config or StreamConfig()
+        self._manager = manager
+        self._lease = None
+        self._last_seq = 0
+
+    def _ingest(self):
+        if self._manager is None:
+            from stream_ingest.manager import get_stream_ingest_manager
+            self._manager = get_stream_ingest_manager()
+        return self._manager
+
+    def camera_key(self) -> str:
+        """The session key: ``cfg-<imageSourceId>`` for a configured camera,
+        or the ``camera_id`` when it already is a session key."""
+        from stream_ingest.manager import CONFIGURED_KEY_PREFIX, URL_KEY_PREFIX, camera_key_for_image_source
+
+        image_source_id = self._image_source.get("imageSourceId")
+        if image_source_id:
+            return camera_key_for_image_source(image_source_id)
+        camera_id = str(self.camera_id or "")
+        if camera_id.startswith((CONFIGURED_KEY_PREFIX, URL_KEY_PREFIX)):
+            return camera_id
+        raise ValueError(f"stream camera {camera_id!r} has no Image_Source id")
+
+    def _anonymous_source(self):
+        """The source of a ``url-`` key, from the config's type and URL."""
+        from stream_ingest.sources import anonymous_source
+
+        url = self._image_source.get("location") or self._image_source.get("url")
+        if not url:
+            return None
+        return anonymous_source(self._image_source.get("type"), url, self._image_source.get("streamSettings"))
+
+    def open(self) -> None:
+        if self._lease is not None:
+            return
+        key = self.camera_key()
+        source = self._anonymous_source() if key.startswith("url-") else None
+        self._lease = self._ingest().acquire_lease(key, f"broadcaster:{self.camera_id}", source=source)
+        # Frames after the session's newest one only: a cached frame can
+        # predate an outage, and a preview or capture taken while the camera
+        # reconnects must fail rather than show it.
+        self._last_seq = self._ingest().newest_seq(key)
+
+    def start_stream(self) -> None:
+        """Nothing to start: the session streams while it is leased."""
+
+    def grab(self, timeout_ms: int) -> "RawFrame | None":
+        if self._lease is None:
+            return None
+        frame = self._ingest().latest_frame(self._lease.camera_key, after_seq=self._last_seq,
+                                            wait_ms=max(0, int(timeout_ms)))
+        if frame is None:
+            return None
+        self._last_seq = frame.seq
+        return RawFrame(data=frame.data, width=frame.width, height=frame.height)
+
+    def apply_features(self, features: dict) -> dict:
+        """Stream cameras have no gain, exposure or GenICam controls."""
+        return {}
+
+    def stop_stream(self) -> None:
+        """Nothing to stop: releasing the lease in ``close`` is enough."""
+
+    def close(self) -> None:
+        lease, self._lease = self._lease, None
+        if lease is not None:
+            self._ingest().release_lease(lease)

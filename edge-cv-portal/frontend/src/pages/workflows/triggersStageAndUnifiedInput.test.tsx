@@ -136,10 +136,54 @@ const FOLDER_SOURCE: NodeTypeDescriptor = {
   hardwareDependent: false,
 };
 
-/** Union of the four source descriptors' parameters, de-duplicated by name. */
+/** The stream source parameter family both stream descriptors share. */
+const STREAM_SOURCE_PARAMETERS: ParameterDescriptor[] = [
+  param('url', 'string', {
+    required: true,
+    constraints: {
+      minLength: 1,
+      maxLength: 2048,
+      regex: '^(rtsps?|rtmps?)://[^\\s/@?#]+([/?][^\\s#]*)?$',
+    },
+  }),
+  param('processing_mode', 'enum', {
+    default: 'continuous',
+    constraints: { values: ['continuous', 'on_trigger'] },
+  }),
+  param('frames_per_second', 'float', { default: 1.0, constraints: { min: 0.05, max: 10 } }),
+  param('max_frame_age_ms', 'int', { default: 2000, constraints: { min: 100, max: 60000 } }),
+  param('keep_recent_runs', 'int', { default: 20, constraints: { min: 1, max: 200 } }),
+  param('keep_notable_runs', 'int', { default: 200, constraints: { min: 0, max: 5000 } }),
+];
+
+const RTSP_CAMERA_SOURCE: NodeTypeDescriptor = {
+  typeId: 'rtsp_camera_source',
+  category: CATEGORY_INPUT,
+  displayName: 'RTSP camera',
+  inputs: [{ name: 'activation', portType: PORT_TYPE_EVENT_SIGNAL }],
+  outputs: [{ name: 'out', portType: PORT_TYPE_VIDEO_FRAMES }],
+  parameters: STREAM_SOURCE_PARAMETERS,
+  mappings: [],
+  hardwareDependent: true,
+};
+
+const RTMP_STREAM_SOURCE: NodeTypeDescriptor = {
+  ...RTSP_CAMERA_SOURCE,
+  typeId: 'rtmp_stream_source',
+  displayName: 'RTMP stream',
+};
+
+/** Union of the source descriptors' parameters, de-duplicated by name. */
 const UNION_PARAMETERS: ParameterDescriptor[] = (() => {
   const seen = new Map<string, ParameterDescriptor>();
-  for (const source of [CSI_CAMERA_SOURCE, ICAM_SOURCE, ARAVIS_CAMERA_SOURCE, FOLDER_SOURCE]) {
+  for (const source of [
+    CSI_CAMERA_SOURCE,
+    ICAM_SOURCE,
+    ARAVIS_CAMERA_SOURCE,
+    FOLDER_SOURCE,
+    RTSP_CAMERA_SOURCE,
+    RTMP_STREAM_SOURCE,
+  ]) {
     for (const parameter of source.parameters) {
       if (!seen.has(parameter.name)) {
         seen.set(parameter.name, { ...parameter, required: false });
@@ -217,6 +261,8 @@ const CATALOG: NodeTypeDescriptor[] = [
   ICAM_SOURCE,
   ARAVIS_CAMERA_SOURCE,
   FOLDER_SOURCE,
+  RTSP_CAMERA_SOURCE,
+  RTMP_STREAM_SOURCE,
   UNIFIED_INPUT,
   CROP,
   MODEL_INFERENCE,
@@ -270,7 +316,20 @@ describe('types.ts catalog mirror (Requirement 1.4)', () => {
       icam: 'icam_source',
       aravis_camera: 'aravis_camera_source',
       folder: 'folder_source',
+      // rtsp-rtmp-stream-cameras Requirement 1.6
+      rtsp_camera: 'rtsp_camera_source',
+      rtmp_stream: 'rtmp_stream_source',
     });
+    // Same order as the Python map: the pre-feature kinds keep their
+    // positions and the stream kinds are appended.
+    expect(Object.keys(SOURCE_KIND_TO_SOURCE_TYPE)).toEqual([
+      'csi_camera',
+      'icam',
+      'aravis_camera',
+      'folder',
+      'rtsp_camera',
+      'rtmp_stream',
+    ]);
   });
 });
 

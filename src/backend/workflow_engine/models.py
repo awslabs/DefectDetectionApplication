@@ -89,3 +89,28 @@ class WorkflowExecution(Base):
     # the additive alembic migration
     # ``e9f2a6c31b84_add_workflow_execution_trigger_context``.
     trigger_context_json = Column(Text)
+
+
+class WorkflowContinuousState(Base):
+    """The operator pause and the counter snapshot of one continuous
+    registration (rtsp-rtmp-stream-cameras design component 14).
+
+    One row per registration whose stream node runs in ``continuous``
+    mode, written by the ContinuousRunnerManager: ``paused`` survives
+    backend restarts until the operator resumes (Requirement 11.6), and
+    ``counters_json`` holds the latest counter snapshot so the counters
+    survive run deletion and restarts (Requirement 12.5). The row is
+    deleted when the registration is superseded. Created on existing
+    devices by the additive alembic migration
+    ``c7e3a9f15d42_create_workflow_continuous_state``.
+    """
+
+    __tablename__ = "workflow_continuous_state"
+
+    registration_id = Column(String, primary_key=True)
+    paused = Column(Boolean, nullable=False, default=False)
+    #: Epoch milliseconds of the pause, None while running.
+    paused_at = Column(Integer, nullable=True)
+    counters_json = Column(Text, nullable=True)
+    #: Epoch seconds of the last write.
+    updated_at = Column(Integer, nullable=False)

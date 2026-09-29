@@ -303,3 +303,27 @@ def apply_stream_settings(camera_id: str, features: dict = Body(default={})) -> 
             detail=f"Failed to apply control(s) [{exc.control}] for camera {camera_id}: {exc}",
         )
     return accepted if isinstance(accepted, dict) else {"accepted": accepted}
+
+
+#: How long ``GET /streams/capabilities`` waits for a probe that is still
+#: running (the first request of a backend starts it).
+CAPABILITIES_WAIT_S = 30.0
+
+
+@router.get("/streams/capabilities")
+def get_stream_capabilities() -> dict:
+    """The Device_Stream_Capabilities (rtsp-rtmp-stream-cameras Requirement
+    16.1): the ingest protocols, TLS, and the hardware and software decoder
+    of each codec that decoded a sample on this device.
+
+    503 while the startup probe is still running; retry shortly.
+    """
+    from stream_ingest.manager import get_stream_ingest_manager
+
+    capabilities = get_stream_ingest_manager().capabilities(wait_s=CAPABILITIES_WAIT_S)
+    if capabilities is None or capabilities.get("probeError") == "the capability probe has not finished":
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The stream capability probe is still running on this device. Try again in a few seconds.",
+        )
+    return capabilities
