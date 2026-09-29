@@ -1165,7 +1165,11 @@ export class ComputeStack extends cdk.Stack {
         ...lambdaEnvironment,
         CODE_VERSION: '2025-01-04-deployments',
       },
-      layers: [sharedLayer],
+      // workflow_core: the manual-override path of validate_camera_bindings
+      // lazily imports the catalog, the parameter validator, and (for the
+      // stream node types) stream_url (rtsp-rtmp-stream-cameras
+      // Requirement 9.4). Without the layer that import fails at run time.
+      layers: [sharedLayer, workflowCoreLayer],
       timeout: cdk.Duration.seconds(60),
     });
 
