@@ -884,6 +884,10 @@ At first use, existing continuous runs are indexed in `tickAtMs` order and class
 
 **Build gate.** `build-custom.sh`'s in-image test phase adds `test/backend-test/stream_ingest/test_image_stream_components.py`. The test fails the build when any of these is missing: a required element, PyAV, the `flv` demuxer, the `rtmp` protocol, or H.264/H.265 software decoding (Requirement 17.3).
 
+**Backend packages in the image** (found on hardware, task 25.2). The backend Dockerfiles copy `src/backend` package by package, so the new `stream_ingest` package needs its own `COPY stream_ingest ./stream_ingest` line in all five (`Dockerfile`, `.jp5`, `.jp6`, `.jp7`, `.x86_64_nvidia`). The first JP7 build lacked it. It passed every gate, because the gate imports the package from the mounted repository (`PYTHONPATH=/repo/src/backend`). On the device the backend then crash-looped with `ModuleNotFoundError: No module named 'stream_ingest'`, and Greengrass rolled the deployment back. Two checks now guard this:
+- `test_backend_image_package_coverage.py`, with no image: every top-level Python package of `src/backend` has a COPY line in every backend Dockerfile.
+- The in-image gate: `test_image_stream_components.py` also fails the build when the image root lacks a backend package, or cannot import `stream_ingest` with the repository off the path.
+
 **JP7 hardware decoding**
 - This is verified on jetson-thor1: `gst-inspect-1.0 nvv4l2decoder` inside `flask-app`, then a probe decode.
 - If hardware decoding is unreachable, the choice goes back to the owner with measurements. The options are adding the L4T multimedia userspace to `Dockerfile.jp7` (a masked-baseline update) or shipping JP7 with software decoding.

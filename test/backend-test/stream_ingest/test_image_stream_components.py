@@ -97,6 +97,48 @@ def samples(pyav):
     return {codec: capabilities.sample(codec) for codec in CODECS}
 
 
+#: Where the backend's own code lives in the image (``app.py`` at the root).
+APP_ROOT = os.environ.get("DDA_IMAGE_APP_ROOT", "/")
+
+
+def backend_packages():
+    """The top-level directories of the repository's ``src/backend`` that
+    hold Python code: every one must be in the image."""
+    return sorted(name for name in os.listdir(_BACKEND)
+                  if not name.startswith((".", "__")) and os.path.isdir(os.path.join(_BACKEND, name))
+                  and any(file.endswith(".py") for _, _, files in os.walk(os.path.join(_BACKEND, name))
+                          for file in files))
+
+
+def test_every_backend_package_is_in_the_image():
+    """Found on hardware (task 25.2): the JP7 ``1.0.50`` image had no
+    ``/stream_ingest``, because the Dockerfiles copy the backend package by
+    package and had no line for it. This gate imports its modules from the
+    mounted repository, so it passed, and the backend crash-looped on the
+    device with ``ModuleNotFoundError``. The image's own root must hold every
+    package."""
+    if not os.path.isfile(os.path.join(APP_ROOT, "app.py")):
+        missing(f"the backend application at {APP_ROOT} (no app.py)")
+    absent = [name for name in backend_packages() if not os.path.isdir(os.path.join(APP_ROOT, name))]
+    if absent:
+        missing(f"the backend package(s) {absent} under {APP_ROOT} (a Dockerfile COPY line is missing)")
+
+
+def test_the_image_imports_the_stream_ingest_service_from_its_own_root():
+    """``stream_ingest`` imports from the image's root with the repository
+    off the path, as the backend itself imports it."""
+    import subprocess
+
+    if not os.path.isfile(os.path.join(APP_ROOT, "app.py")):
+        missing(f"the backend application at {APP_ROOT} (no app.py)")
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    result = subprocess.run(
+        [sys.executable, "-c", "import stream_ingest, stream_ingest.credentials, stream_ingest.pipeline"],
+        cwd=APP_ROOT, env=environment, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        missing(f"an importable stream_ingest under {APP_ROOT}: {result.stderr.strip()[-600:]}")
+
+
 @pytest.mark.parametrize("element", REQUIRED_ELEMENTS)
 def test_gstreamer_element_is_present(gst, element):
     if gst.ElementFactory.find(element) is None:

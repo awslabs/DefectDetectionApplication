@@ -417,6 +417,10 @@ COPY data_models ./data_models
 COPY camera_discovery ./camera_discovery
 COPY camera_sync ./camera_sync
 COPY workflow_engine ./workflow_engine
+# rtsp-rtmp-stream-cameras: the Stream_Ingest_Service package. A new module
+# needs its own COPY: resources/accessors/image_source_accessor.py imports it
+# at module load, so without this line the backend cannot start.
+COPY stream_ingest ./stream_ingest
 # vllm-triton-inference (Requirements 4.1, 8.7): the companion vLLM runtime
 # package — new module, needs its own COPY (missing COPY lines have caused
 # startup regressions). The feature's other modules ride existing COPYs:
