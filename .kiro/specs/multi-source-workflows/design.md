@@ -71,11 +71,11 @@ At zero or one source, today's code runs unchanged: the same planners, the same 
   One camera after the other, a second physical camera's frame would be taken about 0.3 s after the first. Source: the camera manager's own timing log lines, three previews, 2026-09-28.
 - **Thread safety.** The executor's SQLAlchemy session is not thread-safe, so configuration lookups must stay on the run thread.
 
-### Pre-existing gap (not changed here)
+### Dependency: the Unified Input camera-binding fix
 
-Packaging reads the unexpanded graph (`workflow_packaging.py` 2345). `gather_camera_input_nodes` keys on the raw type. As a result, a `unified_input` with `source_kind: aravis_camera` gets no `aravisBinding` point and no `camera_input_nodes` record. On the device its `appsrc` would then never be fed, and the run would end at the 120 s watchdog. This is inferred from the code; it has not been reproduced on a device.
+Until 2026-09-29, packaging gathered camera nodes from the unexpanded graph, so a `unified_input` with `source_kind: aravis_camera` got no `aravisBinding` point and no `camera_input_nodes` record. On the device its `appsrc` was never fed, and the run ended at the 120 s watchdog. This was reproduced on thor1 and the Orin.
 
-Requirement 3.4 keeps single-source packages byte-identical, so this design leaves that single-source case alone. Multi-source packages bind every Frame_Feed_Source by effective type (Decision 4). The single-source fix belongs in a follow-up bugfix (open question 1).
+It is fixed on its own in `.kiro/specs/unified-input-camera-binding`, which this design assumes is merged. `package_workflow` now gathers Camera_Input_Nodes from `expand_unified_inputs(graph, catalog)`, so every package, single-source included, binds a camera-kind Input Source by its effective type. Single-source byte-identity (Requirement 3.4) is measured against that fixed baseline.
 
 ## Key Decisions
 
@@ -149,7 +149,7 @@ A device document with two or more feed points but no `frameFeedBranches` fails 
 
 For a Multi_Source_Workflow only:
 
-- **Binding points.** One point per Frame_Feed_Source by effective type. A `unified_input(aravis_camera)` gets `aravisBinding: true`, with its rendered Aravis parameters and `nodeType: "aravis_camera_source"`. Such nodes also join the version item's `camera_input_nodes` record, so the deployment camera check covers them.
+- **Binding points.** One point per Frame_Feed_Source by effective type. Every package already does this for camera-kind Input Sources since the unified-input-camera-binding fix: a `unified_input(aravis_camera)` gets `aravisBinding: true`, its rendered Aravis parameters and `nodeType: "aravis_camera_source"`, and joins the version item's `camera_input_nodes` record, so the deployment camera check covers it. This design adds nothing to that; its multi-source work is the sections below.
 - **Manifest.** Gains `frameFeedSourceCount: n`. It follows the `subscribed_topics` pattern: the key exists only when n ≥ 2.
 - **Floor.** A new per-architecture map sets the floor, `WORKFLOW_MULTI_SOURCE_MIN_LOCAL_SERVER_VERSIONS`. It is an environment JSON map set in `compute-stack.ts` beside `WORKFLOW_MIN_LOCAL_SERVER_VERSIONS`, on the packaging and deployments functions, with the same coverage test. Its values are the first LocalServer version of each variant that contains this feature. They are filled in when those builds are published (task 13.4).
   - `minLocalServerVersion` becomes `max(base floor, multi floor)`.
@@ -165,7 +165,7 @@ For a Multi_Source_Workflow only:
 - the version's recorded `multi_source_min_local_server_versions[arch]`;
 - today's minimum for that architecture, which is either the version override or the base map.
 
-The existing refusal (409 `INCOMPATIBLE_LOCAL_SERVER`) already names the device, the installed version and the minimum (Requirement 4.2). `validate_camera_bindings` needs no change because it already checks each camera node per device (Requirement 4.1). It covers `unified_input(aravis)` sources through the record from Decision 4. `custom_python_source` nodes have no camera.
+The existing refusal (409 `INCOMPATIBLE_LOCAL_SERVER`) already names the device, the installed version and the minimum (Requirement 4.2). `validate_camera_bindings` needs no change because it already checks each camera node per device (Requirement 4.1). It covers `unified_input(aravis)` sources through the `camera_input_nodes` record the unified-input-camera-binding fix already writes. `custom_python_source` nodes have no camera.
 
 ### Decision 6: Device feed stage with concurrent grabs
 
@@ -676,6 +676,6 @@ This proves Requirements 8.1 and 8.4.
 
 - **Limits and scope.** Four sources per workflow, one Test_Dataset per source, and no joins in this spec.
 - **Test devices.** thor1 and the Orin AGX, each with a Basler, are the Requirement 9.2 devices.
-- **Unified Input set to a camera.** The single-source binding gap is fixed in its own follow-up bugfix, `.kiro/specs/unified-input-camera-binding`, so this spec's single-source byte-identity holds.
+- **Unified Input set to a camera.** The binding gap is fixed in its own bugfix, `.kiro/specs/unified-input-camera-binding` (deployed to the Portal 2026-09-29), ahead of this spec. This spec's single-source byte-identity is measured against that fixed baseline.
 - **Two or more physical cameras.** They are grabbed as a group under the one camera lock (Decision 6a) instead of one after the other. Per-camera locks are not planned.
 - **The camera-lock leak.** It is fixed on its own, ahead of this spec, in `.kiro/specs/camera-grab-lock-leak`.

@@ -85,6 +85,9 @@ from shared_utils import (
 )
 from workflow_core.serializer import parse as parse_definition
 from workflow_core.compiler import compile as compile_workflow, CompileContext
+# The compiler's unified_input pre-pass (not re-exported by the package):
+# Camera_Input_Nodes are gathered from the graph compile() compiles.
+from workflow_core.compiler.compiler import expand_unified_inputs
 from workflow_core.catalog import (
     ARCH_ARM64_CPU,
     ARCH_ARM64_JP5,
@@ -641,6 +644,11 @@ def split_plugin_dependencies(plugin_dependencies: List[str]
 # compiled elements keep their fully rendered default values, so an unbound
 # document behaves byte-identically to pre-feature output, and workflows
 # without Camera_Input_Nodes produce byte-identical documents (11.5).
+#
+# Camera_Input_Nodes are read from the unified-input-expanded graph, the
+# graph compile() compiles: an Input Source (unified_input) set to a camera
+# kind is the dedicated camera node it stands for, under the same node id
+# (unified-input-camera-binding 2.1, 2.2).
 # --------------------------------------------------------------------------
 
 #: The built-in NVIDIA CSI Camera_Input_Node type. CSI capture is host-
@@ -2396,8 +2404,16 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # camera-binding discriminator and camera_input_nodes record are
     # untouched. Workflows without camera or source nodes serialize
     # byte-identically to the plain compiler output.
+    #
+    # Camera_Input_Nodes come from the graph compile() compiled:
+    # expand_unified_inputs rewrites each unified_input into the source
+    # node it stands for, under the same id, so an Input Source set to a
+    # camera gets the dedicated node's binding point and camera_input_nodes
+    # record (unified-input-camera-binding 2.1, 2.2). Every other node is
+    # an equal copy in the same order, so nothing else changes.
     camera_nodes = gather_camera_input_nodes(
-        graph, camera_backed_type_ids(resolved_items))
+        expand_unified_inputs(graph, catalog),
+        camera_backed_type_ids(resolved_items))
     python_source_nodes = gather_python_source_nodes(graph)
     binding_hints = binding_hints_from_definition(definition_dict)
     descriptors_by_id = {descriptor.type_id: descriptor for descriptor in catalog}

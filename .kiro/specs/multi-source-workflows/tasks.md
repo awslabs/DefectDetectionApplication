@@ -64,10 +64,9 @@ Existing suites keep passing unmodified. The exceptions are the tests that pin t
 - [ ] 3. Packaging (design Decisions 3, 4)
   - [ ] 3.1 Before any packaging change, generate the golden corpus at the base commit
     - Compiled documents and packages, excluding `packagedAt`, for the existing single-source packaging and compilation fixtures.
-    - Also one fixture per source type, and one `unified_input(aravis_camera)` single-source example that records today's gap.
+    - Also one fixture per source type, and one `unified_input(aravis_camera)` single-source example. The base commit includes the unified-input-camera-binding fix, so this golden records the fixed output: an `aravisBinding` point and a `camera_input_nodes` record.
   - [ ] 3.2 Add `gather_frame_feed_source_nodes(graph)` (by effective type)
-    - For Multi_Source_Workflows only: binding points by effective type, where `unified_input(aravis_camera)` gets `aravisBinding: true` and `nodeType: "aravis_camera_source"`.
-    - Also add those nodes to `camera_input_nodes_record`.
+    - Build it on the expanded graph (`expand_unified_inputs(graph, catalog)`), which `package_workflow` already uses for Camera_Input_Nodes since the unified-input-camera-binding fix. A `unified_input(aravis_camera)` therefore already gets `aravisBinding: true`, `nodeType: "aravis_camera_source"` and a `camera_input_nodes` record in every package; nothing is added for it here.
   - [ ] 3.3 Add `frame_feed_branches_section(graph)` and emit `frameFeedBranches` in `compiled_document_json`. Add the `frameFeedSourceCount` manifest key. Both are multi-source only.
   - [ ] 3.4 Add the Multi_Source_Floor
     - `multi_source_min_local_server_version_for(arch)` reads `WORKFLOW_MULTI_SOURCE_MIN_LOCAL_SERVER_VERSIONS`.
