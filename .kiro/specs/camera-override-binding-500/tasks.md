@@ -8,7 +8,7 @@ The fix is one line in `edge-cv-portal/infrastructure/lib/compute-stack.ts`: the
 2. preservation checks that pass on the unfixed code;
 3. the fix, after which both pass.
 
-The symptom is in the deployed Portal, so the fix is verified there, and on lab devices, before the commit. Results go in `verification-notes.md`.
+The symptom is in the deployed Portal, so the fix is verified there and on lab devices. Another session deploys from `integration/all-specs` after this one, so the fix was pushed right before the deploy, after the local checks (task 8). Results are in `verification-notes.md`.
 
 **Approved on 2026-09-29:**
 - a temporary Portal principal for tasks 3 and 7: a throwaway app client, a temp user and scoped role rows, all deleted afterwards;
@@ -45,10 +45,14 @@ The symptom is in the deployed Portal, so the fix is verified there, and on lab 
     - With `SharedLayer` and then `WorkflowCoreLayer` in `/opt`, a valid override has no errors. `gain: 500` gives one `CAMERA_OVERRIDE_INVALID` (`PARAM_MAX`) naming the device, the node and `gain`, and an undeclared parameter gives one too.
   - _Requirements: 3.1, 3.2, 3.3_
 
-- [ ] 3. Reproduce with today's Portal
-  - [ ] 3.1 Create the temporary Portal principal. Portal_Identity enforcement is on, so it needs a global and a use-case role row.
-  - [ ] 3.2 Create a test workflow with an `aravis_camera_source` feeding a capture, and package it for arm64_jp6 and arm64_jp7 only.
-  - [ ] 3.3 On the Orin, a valid override (`camera_id: Fake_1`) and an invalid one (`gain: 500`) both answer 500, and no deployment is created.
+- [x] 3. Reproduce with today's Portal
+  - [x] 3.1 Created the temporary Portal principal, `kiro-cob500-verify-1790685494`. Portal_Identity enforcement is on, so it got a global Viewer row and a use-case UseCaseAdmin row.
+  - [x] 3.2 Created two test workflows, each an `aravis_camera_source` (`Fake_1`) feeding a capture, one per device.
+    - `cob500-override-orin` was packaged for arm64_jp6 only, and `cob500-control-thor1` for arm64_jp7 only.
+    - Both validated with no findings.
+  - [x] 3.3 On the Orin, the valid override and the `gain: 500` one both answered 500 `INTERNAL_ERROR` (12:39:55 and 12:39:57).
+    - The log shows `No module named 'workflow_core'` at `deployments.py` line 4240.
+    - No Greengrass deployment, no deployment record and no shadow change were created.
   - _Requirements: 1.1, 1.2_
 
 - [x] 4. Fix
@@ -64,33 +68,35 @@ The symptom is in the deployed Portal, so the fix is verified there, and on lab 
   - The IAM synth gate (11) and the guard pair plus the IAM and S3 out-of-scope guards (7 passed, 4 skipped) passed on the host, as did `test_iam_bug_condition_exploration.py` (24).
   - The 13 Python camera-binding and override modules (97) passed. So did the seven backend modules that read `compute-stack.ts` (103).
 
-- [ ] 6. Deploy the Portal backend
-  - [ ] 6.1 Pre-checks. Build processes and stack status are checked again right before the deploy.
-    - No component build running on this host. `EdgeCVPortalComputeStack` is `UPDATE_COMPLETE`; it was last updated at 01:01Z by the `unified-input-camera-binding` deploy.
-    - `origin/integration/all-specs` is `62bb176`, this checkout's HEAD, so there is nothing to merge.
-      - `origin/wip/rtsp-rtmp-stream-cameras-verify` (WIP, unverified, not deployed) makes the same `DeploymentsHandler` change, among others. Merging it later conflicts in that one hunk, where both sides agree.
+- [x] 6. Deploy the Portal backend
+  - [x] 6.1 Pre-checks, repeated right before the deploy.
+    - No component build or Portal stack update was in progress. `EdgeCVPortalComputeStack` was last updated at 01:01Z, by the `unified-input-camera-binding` deploy.
+    - `origin/integration/all-specs` was `76c6d9b`, this fix, pushed at 12:33Z; this checkout is the same commit.
+      - `origin/wip/rtsp-rtmp-stream-cameras-verify` (WIP, unverified, not deployed) makes the same `DeploymentsHandler` change, among others. See 4.1: it merges cleanly.
     - The deployed `DeploymentsHandler` and `WorkflowPackagingHandler` code, `SharedLayer27DFABF0:89` and `WorkflowCoreLayer9FCF191C:40` equal this checkout: `diff -rq`, excluding `__pycache__` and the layer asset's excludes.
     - The function and both layers total 16.9 MiB unzipped, against Lambda's 250 MiB limit.
   - [x] 6.2 `cdk diff --all` with the deploy script's context (`cloudFrontDomain=d23v4ltibogb5x.cloudfront.net`, `portalRegistryEnforced=true`). One stack differs, `EdgeCVPortalComputeStack`:
     - `DeploymentsHandler70E83D88` `Layers` gains `WorkflowCoreLayer9FCF191C`;
     - `LambdaEnvUpdater` and `SageMakerEventBridgeIntegration` get their per-deploy `Timestamp`.
     - No IAM or security-group change, no function code or layer change, and the quick-setup bundle is unchanged.
-  - [ ] 6.3 Run `deploy-infrastructure.sh`. Portal_Identity enforcement stays on, and the deployed `DeploymentsHandler` lists the `WorkflowCoreLayer`.
-  - [ ] 6.4 Move `cdk.out` aside; the guard pair passes.
+  - [x] 6.3 Ran `deploy-infrastructure.sh` from 12:41 to 12:50Z. All 8 stacks succeeded, and only `EdgeCVPortalComputeStack` changed.
+    - Enforcement stayed on: 54 handlers `true`.
+    - `DeploymentsHandler` lists `SharedLayer27DFABF0:89` and `WorkflowCoreLayer9FCF191C:40`, the same as `WorkflowPackagingHandler`, and its code is unchanged.
+  - [x] 6.4 Moved `cdk.out` to `cdk.out.bak-20260929T125137Z`; the guard pair passes.
 
-- [ ] 7. Verify on the Portal and devices
-  - [ ] 7.1 The invalid override answers 409 `CAMERA_BINDINGS_INVALID`, with one `CAMERA_OVERRIDE_INVALID` naming the device, the node and `gain`. No deployment is created.
-  - [ ] 7.2 The valid override answers 201 on the Orin, and its `dda-camera-bindings` shadow carries the override.
-  - [ ] 7.3 On the Orin, the workflow registers and a Run grabs `Fake_1`.
-  - [ ] 7.4 Preservation: on thor1, a `cameraSourceId` binding answers 201, the shadow carries the source, and a Run completes.
-  - [ ] 7.5 Cleanup:
-    - both devices' deployments restored;
-    - test workflow, components, S3 zips, shadow keys and device directories removed;
-    - the temporary principal removed;
-    - models as found.
-  - [ ] 7.6 Write `verification-notes.md`.
+- [x] 7. Verify on the Portal and devices
+  - [x] 7.1 `gain: 500` answers 409 `CAMERA_BINDINGS_INVALID`, with one `CAMERA_OVERRIDE_INVALID` (`PARAM_MAX`) naming the device, `cam` and `gain`. An undeclared `shutter` answers the same way, and neither creates a deployment.
+  - [x] 7.2 The valid override answers 201 on the Orin: deployment `f4a2b8f9`, rev 94, which adds only the workflow component. The `dda-camera-bindings` shadow carries `{"cam": {"override": {"camera_id": "Fake_1"}}}`.
+  - [x] 7.3 On the Orin, the workflow registers, and 3 of 3 Runs complete: "Aravis frame feed planned for node cam: camera 'Fake_1' (512x512)".
+  - [x] 7.4 Preservation, on thor1: `cameraSourceId: cfg-o70qz7ci` answers 201 (`1e22af7a`, rev 107), and the shadow carries the source. 3 of 3 Runs complete on its Basler, at 4608×3288.
+  - [x] 7.5 Cleanup:
+    - both devices' saved deployments were redeployed (the Orin rev 95, thor1 rev 108); component maps, policies and `desired` bindings are identical to the pre-test state;
+    - the test workflows, component versions, S3 zips, shadow keys, device directories and registrations were removed;
+    - the temporary principal was removed, and its files and the device password file were shredded;
+    - models as found: thor1 9 of 9 READY; the Orin's `yolo-test` and vLLM model READY, and its two unloaded Triton models UNAVAILABLE again.
+  - [x] 7.6 Wrote `verification-notes.md`.
   - _Requirements: 2.1, 2.2, 2.3, 3.1_
 
-- [ ] 8. Commit and push (approved 2026-09-29)
-  - Another session deploys the Portal from the latest `integration/all-specs` after this deploy. So the fix is committed on `fix/camera-override-binding-500` and pushed to `integration/all-specs` before the deploy, stating what was verified locally.
-  - `verification-notes.md` and the task outcomes follow in a second commit.
+- [x] 8. Commit and push (approved 2026-09-29)
+  - Another session deploys the Portal from the latest `integration/all-specs` after this deploy. So the fix was committed on `fix/camera-override-binding-500` and pushed to `integration/all-specs` before the deploy, as `76c6d9b` at 12:33Z. The commit message states what had been verified locally.
+  - `verification-notes.md` and these outcomes follow in a second commit.
