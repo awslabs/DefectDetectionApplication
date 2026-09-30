@@ -235,8 +235,16 @@ RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
 # still reads it, so every model load fails on-device with
 # "GPT2Tokenizer has no attribute all_special_tokens_extended" (observed on
 # jp6-orinagx with transformers 5.14.1). The >=4.51.1 floor is vllm 0.9.3's
-# own minimum. triton (the OpenAI GPU-kernel compiler, NOT the NVIDIA
-# inference server) is installed from the Jetson index in a follow-up step:
+# own minimum. protobuf is co-pinned to grpcio-tools 1.71.2's range
+# (>=5.26.1,<6, requirements.txt): left floating, googleapis-common-protos
+# 1.75.5 (pulled in through vllm's opentelemetry/ray deps) requires
+# protobuf>=6.33.5, so pip upgrades protobuf to 7.x, breaks grpcio-tools,
+# and the pip check below fails the build (observed 2026-09-30, job
+# 33434303). With the cap pip keeps protobuf 5.29.6, as in LocalServer
+# 1.0.72, and takes googleapis-common-protos 1.75.0. The edge-agent stubs
+# are generated with grpc_tools.protoc AFTER this layer, so the protobuf
+# grpcio-tools needs must still be installed then. triton (the OpenAI
+# GPU-kernel compiler, NOT the NVIDIA inference server) is installed from the Jetson index in a follow-up step:
 # the Jetson vllm wheel does not declare it as a dependency, but vLLM's CUDA
 # execution path imports it at engine init — without it every model load
 # fails on-device with "No module named 'triton'" (observed on jp6-orinagx).
@@ -276,7 +284,8 @@ RUN if [ "$VLLM_ENABLE" = "1" ] && [ -n "$VLLM_SPEC" ]; then \
         fi && \
         pip install --no-cache-dir \
             ${VLLM_INDEX_URL:+--extra-index-url ${VLLM_INDEX_URL}} \
-            ${VLLM_SPEC} "torch==2.8.0" "numpy>=1.26,<2" "transformers>=4.51.1,<5" && \
+            ${VLLM_SPEC} "torch==2.8.0" "numpy>=1.26,<2" "transformers>=4.51.1,<5" \
+            "protobuf>=5.26.1,<6" && \
         if [ -n "$VLLM_INDEX_URL" ]; then \
             pip install --no-cache-dir --index-url ${VLLM_INDEX_URL} "triton==3.6.0"; \
             # torchvision is required by transformers' AutoVideoProcessor for
