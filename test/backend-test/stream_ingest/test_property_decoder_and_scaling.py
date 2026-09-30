@@ -30,12 +30,14 @@ from stream_ingest.pipeline import (  # noqa: E402
     DECODER_POLICIES,
     HARDWARE,
     SOFTWARE,
+    SOFTWARE_DECODER_MAX_THREADS,
     RateLimiter,
     available_decoders,
     decoder_chain,
     fit_within,
     normalize_codec,
     select_decoder,
+    software_decoder_threads,
     tail_description,
 )
 
@@ -208,11 +210,57 @@ class TestChains:
         assert "nvvidconv ! capsfilter name=scale caps=video/x-raw,format=RGBA,width=1280,height=720" in chain
         assert chain.endswith("video/x-raw,format=RGB")
 
-    def test_the_software_chain_scales_before_converting(self):
+    def test_the_software_chain_scales_before_converting(self, monkeypatch):
+        monkeypatch.setattr(os, "cpu_count", lambda: 4)
         selection = select_decoder("software", "h264", {"codecs": {"h264": {"software": "avdec_h264"}}})
         chain = decoder_chain("h264", selection, None, publish_fps=5)
-        assert chain == ("avdec_h264 name=decoder ! identity name=rate silent=true ! "
+        assert chain == ("avdec_h264 name=decoder max-threads=4 ! identity name=rate silent=true ! "
                          "videoscale ! videoconvert ! capsfilter name=scale caps=video/x-raw,format=RGB")
+
+
+class TestSoftwareDecoderThreads:
+    """Fix 15 (found on hardware, task 25.3): with automatic threads,
+    gst-libav used one frame thread per CPU, and FFmpeg 4.2's HEVC decoder
+    crashed the worker on an 80-CPU host (16 threads held, 24 crashed)."""
+
+    @pytest.mark.parametrize("cpus, expected", [(1, 1), (2, 2), (8, 8), (9, 8), (80, 8), (512, 8),
+                                                (0, 1), (-3, 1), (True, 1), ("16", 1)])
+    def test_one_thread_per_cpu_up_to_the_cap_and_never_automatic(self, cpus, expected):
+        assert software_decoder_threads(cpus) == expected
+
+    def test_the_cap_stays_below_the_measured_crash_threshold(self):
+        # 24 frame threads crashed the worker; FFmpeg warns above 16.
+        assert 1 <= SOFTWARE_DECODER_MAX_THREADS <= 16
+
+    def test_the_default_is_the_host_cpu_count(self, monkeypatch):
+        monkeypatch.setattr(os, "cpu_count", lambda: 80)
+        assert software_decoder_threads() == SOFTWARE_DECODER_MAX_THREADS
+        monkeypatch.setattr(os, "cpu_count", lambda: None)
+        assert software_decoder_threads() == 1
+
+    @settings(max_examples=25, deadline=None)
+    @given(policy=st.sampled_from(DECODER_POLICIES), codec=codec_names,
+           capabilities=capability_sets(), failed_hardware=st.booleans(),
+           cpus=st.integers(min_value=1, max_value=1024))
+    def test_only_software_decoders_get_bounded_threads(self, policy, codec, capabilities,
+                                                        failed_hardware, cpus):
+        try:
+            selection = select_decoder(policy, codec, capabilities, failed_hardware)
+        except StreamError:
+            return
+        original = os.cpu_count
+        os.cpu_count = lambda: cpus
+        try:
+            description = tail_description(selection.codec, selection, (640, 360))
+        finally:
+            os.cpu_count = original
+        decoder_token = next(token for token in description.split(" ! ")
+                             if token.split()[0] == selection.element)
+        if selection.element in SOFTWARE_ELEMENTS:
+            assert f"max-threads={min(cpus, SOFTWARE_DECODER_MAX_THREADS)}" in decoder_token.split()
+            assert "max-threads=0" not in description
+        else:
+            assert "max-threads" not in description
 
 
 class TestRateLimiter:

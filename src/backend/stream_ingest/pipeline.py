@@ -43,6 +43,7 @@ cameras send H.264 without VUI timing (an Amcrest PTZ did), so their
 decoded frames have no duration.
 """
 from dataclasses import dataclass
+import os
 import re
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -64,6 +65,29 @@ DECODER_POLICIES = ("auto", HARDWARE, SOFTWARE)
 #: The Jetson hardware decoder; its output is NVMM memory that
 #: ``nvvidconv`` (the VIC) scales and copies to system memory.
 JETSON_DECODER = "nvv4l2decoder"
+
+#: The GStreamer libav (FFmpeg) software decoders are ``avdec_*``.
+SOFTWARE_DECODER_PREFIX = "avdec_"
+
+#: Decoding threads a software decoder may use at most. This was found on
+#: hardware (task 25.3, fix 15). With ``max-threads`` left at 0
+#: (automatic), gst-libav starts one frame thread per CPU. On the 80-CPU
+#: amd64 test host, FFmpeg 4.2's HEVC decoder (GStreamer 1.16, the Ubuntu
+#: 20.04 base) then crashed the worker with SIGSEGV, SIGABRT or SIGFPE on
+#: every H.265 stream. 16 threads held and 24 crashed, and FFmpeg itself
+#: warns above 16. One thread already decoded 1080p15 H.265 in real time
+#: there, and fewer frame threads also mean less decode latency.
+SOFTWARE_DECODER_MAX_THREADS = 8
+
+
+def software_decoder_threads(cpu_count: Optional[int] = None) -> int:
+    """The ``max-threads`` a software decoder gets: one per CPU, at most
+    :data:`SOFTWARE_DECODER_MAX_THREADS`, and never 0 (automatic).
+    ``cpu_count`` defaults to :func:`os.cpu_count`."""
+    count = os.cpu_count() if cpu_count is None else cpu_count
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+        count = 1
+    return min(count, SOFTWARE_DECODER_MAX_THREADS)
 
 #: Frames published per second at most (the node maximum).
 DEFAULT_PUBLISH_FPS = 10
@@ -258,10 +282,14 @@ def decoder_chain(codec: str, decoder: DecoderSelection, scale: Optional[Tuple[i
     decoder carries the worker's :class:`RateLimiter` probe, which drops
     frames above ``publish_fps`` (see the module docstring for why this is
     not ``videorate``). ``publish_fps`` is the probe's; it does not appear
-    in the description.
+    in the description. A software decoder gets a bounded ``max-threads``
+    (:func:`software_decoder_threads`).
     """
     rate = f"identity name={RATE_NAME} silent=true"
     decode = f"{decoder.element} name={DECODER_NAME}"
+    if decoder.element.startswith(SOFTWARE_DECODER_PREFIX):
+        # Bounded frame threads (fix 15, see SOFTWARE_DECODER_MAX_THREADS).
+        decode += f" max-threads={software_decoder_threads()}"
     if decoder.element == JETSON_DECODER:
         # The VIC scales while copying out of NVMM memory; it outputs RGBA.
         return (f"{decode} ! {rate} ! nvvidconv ! capsfilter name={SCALE_CAPSFILTER_NAME} "
