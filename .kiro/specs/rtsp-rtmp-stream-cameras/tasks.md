@@ -42,17 +42,19 @@ At the owner's request, the work was committed and pushed to `integration/all-sp
 
 Remaining work, in order:
 
-1. **JP7 soak results.** Read `~/rtsp-verify/results/soak-thor-real-1.0.51.jsonl` and `leak-thor-real-1.0.51.jsonl`, started 20:47Z, and check them against the pass criteria below. Then record the outcome in 25.3.
-2. **JP6 real build and verification (25.2, 25.3, 25.5).**
+1. **JP7 soak results: done (2026-09-30), recorded in 25.3.** No restart, no failed run, recovery 36 s after the outage, and a flat `AwsEventLoop` count. The 10 fps workflow dipped from 9.3 to 7.0 runs/s late in the soak and then recovered.
+   - **Owner decision (2026-09-30): accepted for release.** Backend RSS still grows about 0.2 KB per run (7 MB/h), an eighth of the pre-native-fix rate. `results/smaps-thor-real-1.0.51.jsonl` holds `/proc/1/smaps` class snapshots of the backend, for anyone who looks into it later.
+2. **JP6 real build and verification (25.2, 25.3, 25.5).** The owner approved the temp Cognito user and this build on 2026-09-30.
    - Build `aws.edgeml.dda.LocalServer.arm64JP6` from `integration/all-specs`, or from `spec/rtsp-rtmp-stream-cameras` while it is still equal, on the portal's dedicated server `srv-aac90870-033e-4e9c-9994-29ee895da421` ("JP6 Build Server"). Run the build steering's pre-build checks first.
    - Expect about 2.5–3.5 h, because onnxruntime and the vLLM wheel are built from scratch.
    - Deploy it to the Orin (`ryanorinagxdevkithomelabjp622`), then run the per-device matrix below.
 3. **JP5 real build and verification.**
    - Start it only after the JP6 build has finished. `JP5-Build-Server1` is terminated; JP5 builds have succeeded on `srv-aac90870` and as ephemeral jobs.
    - Deploy it to the MIC-730 (`mic730jp513-ryvanlabhome`); this replaces its hot-patch. Its database is already at `c7e3a9f15d42`.
-4. **26.3 feature floor: owner decision needed.** `test_stream_camera_feature_floor_coverage.py` requires the map to cover all six `ARCH_TO_LOCAL_SERVER_COMPONENT` architectures. Only the three Jetson ones can be built and verified here: the portal has no plain `arm64` build target, and there is no x86 test device. The options:
+4. **26.3 feature floor: the owner chose (b) on 2026-09-30.** Build and verify the `amd64` LocalServer on the Dell after the JP5 build (one build at a time), and find a path for plain `arm64` (see 26.3). `test_stream_camera_feature_floor_coverage.py` requires the map to cover all six `ARCH_TO_LOCAL_SERVER_COMPONENT` architectures. Only the three Jetson ones can be built and verified here: the portal has no plain `arm64` build target, and there is no x86 test device. The options:
    - (a) Recommended: amend Requirement 9.7 and the coverage test to allow a map of verified architectures only. The gate already rejects every other architecture with `STREAM_CAMERAS_UNSUPPORTED_ARCH`.
    - (b) Build and verify the `amd64` and `arm64` LocalServer variants first.
+   - Correction (2026-09-30): there is an amd64 test device. The Dell is the HEALTHY Greengrass core `ryanhomelabdellworkstation` and runs an amd64 LocalServer, and the portal build system has an `amd64` target (`recipe-amd64.yaml`, on an x86_64 build server). So `x86_64` can be verified. Plain `arm64` still has no build target, and `x86_64_nvidia` needs an NVIDIA x86 device (not checked), so the coverage test cannot pass as written either way.
 
    Until then the map is empty and fails closed: no workflow with stream or scene-analytics nodes can be packaged.
 5. **Portal deploy, then an end-to-end Portal check.** Never during a component build.
@@ -100,7 +102,7 @@ Remaining work, in order:
 - On thor1: remove the `kiro-rtsp-verify@dda-build-host` key and the `aws` docker-group membership.
 - Delete:
   - the `wip/rtsp-rtmp-stream-cameras-verify` branch (the source of the broken `1.0.50`, `9e4df80`)
-  - any temp Cognito user
+  - any temp Cognito user (checked 2026-09-30, before the JP6 build: `kiro-rtsp-build-temp` and its role rows were already gone)
   - the `/tmp` worktrees
   - optionally, the broken `aws.edgeml.dda.LocalServer.arm64JP7` `1.0.50` component version
 - Security follow-ups for the owner:
@@ -1540,7 +1542,17 @@ graph TD
       - The test workflows (file-dropped) registered and ran at once: 1 fps, and the 10 fps workflow at about 6 runs/s (Thor is faster than the JP5 and JP6 devices).
       - Amcrest main and sub streams connect on `nvv4l2decoder` in 0.7–1.3 s and preview. A wrong password gives `authentication_failed`, and the right one streams again. No response carries the password. This is fix 8 in a real build: no `videorate` abort.
       - Every source the harness and the Amcrest check deleted left the shadow: 9 retirements, no rejected report, 5 KB shadow with `deviceCapabilities.streamIngest`.
-      - A 2-hour soak (`results/soak-thor-real-1.0.51.jsonl`, with a 90 s outage at minute 20) and a leak watch (`results/leak-thor-real-1.0.51.jsonl`) started at 20:47Z, when this session ended. Read their results first when resuming. The baseline at the start: 154 threads, 8 `AwsEventLoop` threads, backend RSS 1.46 GB.
+      - **2-hour soak, 2026-09-29 20:47–22:52Z** (`results/soak-thor-real-1.0.51.jsonl`: 124 one-minute samples, a 90 s outage at minute 20), with the leak watch (`results/leak-thor-real-1.0.51.jsonl`) to 23:16Z and a spot check at 2026-09-30 00:54Z, 4 h 13 min after the backend started. Five of the six pass criteria pass. Backend RSS is not flat.
+        - No restart: RestartCount stayed at the start-up 1 (StartedAt 20:40:53Z) and health at `healthy`, through the spot check.
+        - No failed run: 73,863 runs in the soak (7,313 at 1 fps, 66,550 at 10 fps) and 147,368 by the spot check, none failed.
+        - Rate: the 1 fps workflow held 1.0 runs/s. The 10 fps workflow ran 9.3–9.4 runs/s for 70 minutes, then fell to 7.0 by the end of the soak, as both `skippedNoNewFrame` (0 → 1.7/s) and `skippedBusy` (0.6 → 1.3/s) rose. It averaged 9.1 runs/s from 23:16Z to the spot check, so this is a dip, not a decline like fix 6's. Its cause is not established; the Dell (80 cores, load 10) had CPU headroom. The rate stayed above the expected ~6 runs/s throughout.
+        - Outage: `dda-src-rtsp-people` was stopped at 21:07:42Z for 94 s. The 1 fps stream went `reconnecting` (`network_error`, then `not_found` from the relay's 404), streamed again 36 s after the publisher returned (21:09:52Z), and its runs resumed at once. The RTMP 10 fps workflow kept streaming throughout.
+        - `AwsEventLoop` threads: 8 throughout, with 150–154 threads in all, while 1,248 MQTT messages went out during the watch (2,126 in all by the spot check). Fix 12 holds in the real build.
+        - Retention: 17–21 staged runs per workflow for `keep_recent_runs` 20. The 10 fps workflow held 50–53 promoted runs for `keep_notable_runs` 50: the 50 older Notable_Runs plus those still inside the recent window, as Requirement 12.1 allows.
+        - Camera-registry shadow: 5.0 KB of state, and its six `cfg-` keys match the device's six image sources.
+        - **Backend RSS is not flat.** It grew from 1,425 MB to 1,440 MB during the soak and to 1,453 MB by the spot check: about 7 MB/h, or 0.2 KB per run, at a steady rate. That is about an eighth of the 1.7 KB per run the MIC-730 hot-patch showed without the native fix, so the native fix shows, but a residual remains. The Triton stub (2,167 MB from minute 40) and the Stream_Workers (237–279 MB) stayed flat.
+        - In a 6-minute `/proc/1/smaps` window (00:55–01:01Z, `results/smaps-thor-real-1.0.51.jsonl`), all of the growth was in small anonymous mappings (+224 KB, three new regions). The pymalloc arenas, the heap and the large glibc arenas did not change. The window is short, so treat this as a lead, not a finding.
+        - **Owner decision (2026-09-30)**: the residual is accepted for release.
 
   - [x] 25.4 Decide JP7 hardware decoding
     - If `nvv4l2decoder` is unreachable in the JP7 container, bring the measurements and both options to the owner before changing the image:
@@ -1585,6 +1597,7 @@ graph TD
     - Set `WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS` to the verified LocalServer version for each architecture
     - Redeploy the Portal, but never during a component build
     - _Requirements: 9.7_
+    - **Owner decision (2026-09-30)**: option (b). Requirement 9.7 and the coverage test stay as they are, and every architecture in `ARCH_TO_LOCAL_SERVER_COMPONENT` is built and verified before the floor is set. `x86_64` and `x86_64_nvidia` both map to `aws.edgeml.dda.LocalServer.amd64`, so they are built with the portal's `amd64` target and verified on the Dell. Plain `arm64` (`aws.edgeml.dda.LocalServer.arm64`) has no portal build target, so it still needs a build path and a device.
 
   - [x] 26.4 Commit and integrate
     - Commit with per-device verification notes
