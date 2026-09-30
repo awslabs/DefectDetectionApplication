@@ -40,11 +40,29 @@ At the owner's request, the work was committed and pushed to `integration/all-sp
 - `1.0.50` is a broken build: it lacks `stream_ingest` (fix 13). Never deploy it.
 - JP6 and JP5 still need their real builds.
 
+**Progress on 2026-09-30** (see 25.2, 25.3 and 25.5 for detail):
+- **JP6:** `arm64JP6` `1.0.73`, built from `wip/rtsp-rtmp-stream-cameras-jp6-verify` (`26417d1`, fix 14), runs on the Orin. The harness stage passes 7 of 7. Its 2-hour soak and leak watch started at 03:11Z (`results/soak-orin-real-1.0.73.jsonl`, `leak-orin-real-1.0.73.jsonl`).
+- **amd64:** `1.0.45` crashed on every H.265 stream on the Dell. Fix 15 was hot-patched first (harness 7 of 7, and a 35-minute soak with no restart and a flat thread count). It was then rebuilt from `wip/rtsp-rtmp-stream-cameras-amd64-verify` (`c8072f1`, fixes 14 and 15) with `~/rtsp-verify/amd64_build_rebuild.sh` over `ssm_run.py` on `i-0ae8ec99335683610`.
+- **JP5:** `arm64JP5` `1.0.50`, from job `7c4b0130` (`6b3325f`), runs on the MIC-730. After a restart for finding 16, the harness passes 7 of 7.
+- **amd64 update:** `1.0.46`, built from `c8072f1` with fix 15, runs on the Dell, and the harness passes 7 of 7.
+- **Soaks:** the MIC-730 and Dell soaks started together at 04:29Z (`results/soak-mic730-real-1.0.50.jsonl`, `soak-dell-real-1.0.46.jsonl`, and their `leak-*` files). Their outages coincide at minute 20, and the Orin soak sees that outage as a second one.
+- **Soak results:** the Orin and Dell soaks passed. The MIC-730 soak passed everything except retention, which failed because of finding 17. The Amcrest checks passed on all three devices (25.3).
+- **Owner decisions (2026-09-30, second round):**
+  - Commit fixes 14 and 15 once the soaks pass.
+  - Fix finding 16 in this spec. Finding 17 is fixed along with it.
+  - Skip plain `arm64` for now (26.3).
+  - The owner supplied the Amcrest credentials in chat. Pass them only through the environment. **They should be rotated**, since they were shared in chat again.
+- **Uncommitted in the worktree until their device checks pass:** fix 14 (`Dockerfile.jp6` and its two goldens) and fix 15 (`stream_ingest/pipeline.py` and its tests).
+- The temp Cognito user `kiro-rtsp-build-temp` was deleted at 04:33Z, with its registry row and local files, once the JP6 and JP5 portal builds were done. Recreate it only with the owner's OK.
+- The Amcrest checks on the Orin, the MIC-730 and the Dell need the camera credentials from the owner. They are never written to a file.
+
 Remaining work, in order:
 
 1. **JP7 soak results: done (2026-09-30), recorded in 25.3.** No restart, no failed run, recovery 36 s after the outage, and a flat `AwsEventLoop` count. The 10 fps workflow dipped from 9.3 to 7.0 runs/s late in the soak and then recovered.
    - **Owner decision (2026-09-30): accepted for release.** Backend RSS still grows about 0.2 KB per run (7 MB/h), an eighth of the pre-native-fix rate. `results/smaps-thor-real-1.0.51.jsonl` holds `/proc/1/smaps` class snapshots of the backend, for anyone who looks into it later.
 2. **JP6 real build and verification (25.2, 25.3, 25.5).** The owner approved the temp Cognito user and this build on 2026-09-30.
+   - The first attempt, job `33434303` from `6b3325f`, failed after 57 minutes at the vLLM layer's `pip check`, with protobuf 7.36.2 against grpcio-tools 1.71.2. Fix 14 in 25.2 describes it. It is uncommitted in the worktree and snapshotted as `wip/rtsp-rtmp-stream-cameras-jp6-verify` (`26417d1`, pushed).
+   - **In flight**: portal job `a2f044fa-ce5d-4185-b0a2-9a26e7e6d879`, submitted 02:36Z on `srv-aac90870` (`i-07c2ca92f3a526c93`), source synced to `26417d1`. The onnxruntime layer came from the cache, and the vLLM layer's checks passed. `~/rtsp-verify/build_watch.py` logs it to `results/build-jp6-3.log`. The temp user `kiro-rtsp-build-temp` was recreated for this build and the JP5 one, and deleted again at 04:33Z.
    - Build `aws.edgeml.dda.LocalServer.arm64JP6` from `integration/all-specs`, or from `spec/rtsp-rtmp-stream-cameras` while it is still equal, on the portal's dedicated server `srv-aac90870-033e-4e9c-9994-29ee895da421` ("JP6 Build Server"). Run the build steering's pre-build checks first.
    - Expect about 2.5–3.5 h, because onnxruntime and the vLLM wheel are built from scratch.
    - Deploy it to the Orin (`ryanorinagxdevkithomelabjp622`), then run the per-device matrix below.
@@ -1496,6 +1514,32 @@ graph TD
       - Deployed to jetson-thor1 as a revision of its existing deployment; it COMPLETED, and the vLLM model component stayed healthy.
       - The first start migrated the database from the stock `e9f2a6c31b84` to `c7e3a9f15d42`. The backend then restarted once in an orderly way (`Local server shutdown complete`, exit 0), the same single restart the stock build shows on thor1, and has been healthy since.
       - Follow-up (minor, not fixed): on that first start the Edge_Sync_Agent's first report ran 25 ms before the migration added `streamSettings`, failed with `no such column`, and succeeded on its backoff retry. The agent starts before the migrations finish.
+    - **JP6 real build, first attempt (2026-09-30)**: job `33434303-cfad-4a6a-a252-01bc29fd4de3` built `6b3325f` on `srv-aac90870`. It failed after 57 minutes at `Dockerfile.jp6`'s vLLM verification (`pip check`): "grpcio-tools 1.71.2 has requirement protobuf<6.0dev,>=5.26.1, but you have protobuf 7.36.2".
+      - This spec's `requirements.txt` change invalidated the layer cache, so onnxruntime and the vLLM layer were built from scratch for the first time since upstream moved.
+      - A cp310 aarch64 dry-run resolution showed the cause. `googleapis-common-protos` 1.75.5, pulled in through vllm's opentelemetry and ray dependencies, requires `protobuf>=6.33.5`, so pip upgraded protobuf from 5.29.6 to 7.36.2.
+      - JP7 is unaffected: its gate allowlists this pair. thor1's `1.0.51` runs protobuf 7.36.2 and imports the 5.29-generated edge-agent stubs without a warning.
+      - Fix 14: co-pin `"protobuf>=5.26.1,<6"` in the JP6 vLLM `pip install`, like its numpy and transformers co-constraints. The dry run then keeps protobuf 5.29.6, as in `1.0.72`, and takes `googleapis-common-protos` 1.75.0. Rebaselined `docker_baseline_backend_Dockerfile.jp6_masked.txt` (its diff equals the Dockerfile diff) and `backend_Dockerfile.jp6.sha256.txt`.
+      - Checks: the security preservation and Docker audit suites (159 passed, 6 skipped), `backend_jammy_pkgs` (46 passed), the Docker base-image audit (0 disallowed), and the guard suite pass on the host. The preservation suite passes in the `flask-app` container (138 passed, 8 skipped).
+    - **JP6 real build (2026-09-30)**: job `a2f044fa-ce5d-4185-b0a2-9a26e7e6d879` built `26417d1` (`wip/rtsp-rtmp-stream-cameras-jp6-verify`: `6b3325f` plus fix 14) in 23 minutes, with the onnxruntime layer from the cache. It published `aws.edgeml.dda.LocalServer.arm64JP6` `1.0.73`. The vLLM checks passed, and every in-image gate passed under Python 3.10, including the stream components gate (22 passed).
+      - Deployed to the Orin as a revision of its existing deployment (`07a8867c`, 1.0.72 → 1.0.73). It COMPLETED at 03:07Z. The backend started at 03:04:12Z with no restart. The first start migrated the database from the stock `e9f2a6c31b84` to `c7e3a9f15d42`.
+      - The same minor follow-up as on thor1: the first camera-registry report ran 0.6 s before the `streamSettings` migration and failed once, then succeeded on retry.
+      - In the image: PyAV 17.1.0 on Python 3.10.12 (libavformat 62.12.101). The reported capabilities are RTSP, RTMP and TLS on GStreamer 1.20.3, FFmpeg 8.1.1, and `nvv4l2decoder` hardware decoding for H.264 and H.265.
+    - **amd64 build (2026-09-30, 26.3 option b)**: `6b3325f` was built on the x86 build host `i-0ae8ec99335683610` with `./portal-build.sh x86_64` in `/home/ubuntu/dda-rtsp-amd64`.
+      - The image has an Ubuntu 20.04 base: GStreamer 1.16.3, gst-libav 1.16.2 on FFmpeg 4.2, and PyAV 17.1.0 on Python 3.11.9.
+      - Every in-image gate passed, including the stream components gate. It published `aws.edgeml.dda.LocalServer.amd64` `1.0.45` through the GDK path.
+      - Two host problems came up on the way:
+        - The ubuntu user's cached `aws login` session had expired. The build uses the instance role (`dda-build-role`) through `AWS_CONFIG_FILE=/dev/null`, without touching `~/.aws`.
+        - The first start was killed when its SSM command timed out, because the build shared the command's process group. `~/rtsp-verify/amd64_build_restart.sh` detaches it with `setsid`.
+      - Deployed to the Dell (`4d296005`, 1.0.44 → 1.0.45). It COMPLETED at 03:22Z. The database migrated to `c7e3a9f15d42`, and the backend is healthy with no restart.
+      - Pre-existing, not from this spec: for 0.2 s after start, `GET /feature-configurations` answered 500 four times. Triton's model index was still `null`, and `list_triton_models` calls `.items()` on it.
+      - Fix 15 (below) came from this build.
+    - **amd64 rebuild (2026-09-30)**: `c8072f1` (`wip/rtsp-rtmp-stream-cameras-amd64-verify`: `26417d1` plus fix 15) was built on the same host and passed every in-image gate (stream components 22 passed). It published `aws.edgeml.dda.LocalServer.amd64` `1.0.46`.
+      - Deployed to the Dell (`c993d654`, 1.0.45 → 1.0.46). It COMPLETED at 04:23Z. The backend started at 04:22:06Z.
+      - About 26 s after start, the model component rewrote its Triton model repository (finding 16). 97 continuous runs failed in that window ("Failed to initialize underlying triton server"), and then the workflows recovered by themselves.
+    - **JP5 real build (2026-09-30)**: portal job `7c4b0130-367a-45ee-83fb-c381c70e9323` built `6b3325f` (`integration/all-specs`) on `srv-aac90870` in 43 minutes. Every in-image gate passed, including the stream components gate. It published `aws.edgeml.dda.LocalServer.arm64JP5` `1.0.50`.
+      - Fixes 14 and 15 are not in it. Fix 14 is JP6-only. Fix 15 cannot trigger on the MIC-730: it has 8 CPUs, and it decodes H.265 on `nvv4l2decoder`.
+      - Deployed to the MIC-730 as a revision of its existing deployment (`951dbbe9`, 1.0.49 → 1.0.50). This replaced its hot-patch, and it COMPLETED at 04:10Z. The backend started at 04:03:21Z with no restart. The database was already at `c7e3a9f15d42`. PyAV 17.1.0.
+      - The continuous test workflows, still `running` from the hot-patch, resumed at 04:03:32Z and hit finding 16. They made no progress until the backend was restarted at 04:22:48Z. After that restart they run normally.
 
   - [ ] 25.3 Run the verification matrix on each device
     - All four protocol × codec sources, recording the decoder in use per codec
@@ -1532,12 +1576,61 @@ graph TD
       11. **The publish cap passed too many frames.** A worker run inside the JP6 and JP7 backend containers (the running backends untouched) streamed the Amcrest without an abort, which confirms fix 8. But the camera's 30 fps sub stream published at 17–21 fps instead of the 10 fps cap. A third of its decoded frames carry no PTS, and the probe timed those by the clock and the rest by PTS: two timebases, so every switch restarted the limiter. `RateLimiter` is now a token bucket timed by arrival only, with a burst of 2. The sub stream now publishes at 10.0 fps on both devices, and the 7 fps main stream keeps every frame (6.99/s).
       12. **Every MQTT output leaked a Greengrass IPC connection.** The continuous workflows kept running on the MIC-730 after the 2-hour soak ended. After 12 hours (208,000 runs, none failed, still 3 runs/s), the backend had grown from 361 MB to 836 MB and had 2,833 threads, 2,719 of them `AwsEventLoop1`: one per MQTT message sent since the container started. The Greengrass publisher opened a new IPC connection per message and never closed it (this predates the feature). It now reuses the process-wide shared IPC client, reconnecting once on a broken connection but never on a denial.
       13. **The backend images lacked the `stream_ingest` package.** The Dockerfiles copy the backend package by package, and the new package had no COPY line. The first real JP7 build crash-looped on the device (see 25.2). Each Dockerfile now copies it, and a static check plus an in-image gate check guard every backend package.
+      14. **The JP6 vLLM layer upgraded protobuf past grpcio-tools.** The first real JP6 build failed its `pip check`. See 25.2.
+      15. **Software H.265 decoding crashed the worker on a many-core host.** On the Dell (80 CPUs, amd64 `1.0.45`), every H.265 source failed its connection test with `worker_exit`: SIGABRT for RTSP, and SIGSEGV for RTMP. The continuous RTMP H.265 workflow's worker died with SIGFPE.
+          - A plain `gst-launch-1.0 rtspsrc ! rtph265depay ! h265parse ! avdec_h265 ! fakesink` in the same container crashed the same way. gst-libav's automatic `max-threads` starts one frame thread per CPU, and FFmpeg 4.2's HEVC decoder (the Ubuntu 20.04 base) crashes with that many. With 1, 2, 4, 8 and 16 threads it held and kept the source's 15 fps; with 24 and 80 it crashed.
+          - The worker now gives software decoders `max-threads=min(CPUs, 8)` (`pipeline.software_decoder_threads`). The regression tests fail without it.
+          - The Jetsons were not affected: they decode H.265 on `nvv4l2decoder` and have 8–14 CPUs. The in-image gate did not catch it, because its few-frame samples never reach frame threading.
+          - Hot-patched onto the Dell's `1.0.45` backend, the harness stage passes 7 of 7 with no worker exit. The 1 fps RTSP H.264 workflow runs on `avdec_h264`, and the RTMP H.265 one on `avdec_h265` at about 2.35 runs/s (CPU inference). A 2-hour soak of the hot-patch, without an outage, started at 03:36Z (`results/soak-dell-hotpatch-fix15.jsonl`, `leak-dell-hotpatch-fix15.jsonl`).
+          - The real amd64 build with the fix, `1.0.46` (25.2), passes the harness stage 7 of 7 on the Dell.
+      16. **Not fixed; owner decision needed. Continuous workflows resume before the model components re-provision Triton.** After a LocalServer deployment, Greengrass restarts the dependent model components, and each one's Startup (`model_convertor.py`) rewrites its entries in `/aws_dda/dda_triton/triton_model_repo`. Continuous workflows persisted as `running` resume within seconds of the backend's start, and their first runs load the model while those files are missing or being rewritten.
+          - **MIC-730 (JP5 `1.0.50`)**: the first load, at 04:03:36Z, found no `base_model-yolo-test-jetson-xavier-jp5/8/model.py` ("Failed to preinitialize Python stub: Python model file not found"). The component wrote it at 04:03:52Z.
+            - The ensemble then stayed `LOADING`, since edgemlsdk's cached state is never refreshed after the failed load. Every run hung, and the harness workflow tests failed (4 of 7).
+            - For 19 minutes both workflows reported `running` with `effectiveFps` 0 and no error, until a backend restart. After it, the model loaded, the workflows ran, and the harness passed 7 of 7.
+          - **Dell (amd64 `1.0.46`)**: the model loaded before the rewrite at 04:22:32Z. Runs failed for about a second during the rewrite (97 failures), then recovered by themselves.
+          - Earlier devices escaped it only because their test workflows were file-dropped after the deployment.
+          - It belongs to the same class as the specced, unimplemented `cold-model-first-run-failure`, which waits for model readiness and reloads. Continuous resume makes it likely, and the hang makes it worse.
+          - Two ways to fix it:
+            - here: the Continuous_Runner waits for its models to be `READY` before resuming, and reports a stall in its status;
+            - there: fix it in `cold-model-first-run-failure`.
+          - Workaround meanwhile: restart the backend once the model components report RUNNING after a LocalServer deployment.
+          - **Owner decision (2026-09-30)**: fix it in this spec.
+      17. **Runs interrupted by a backend restart are never finished.** On the MIC-730, after the deployment and the restart for finding 16, `workflow_executions` held continuous runs left `running` (7) or `pending` (3) by the previous backend process. Their `/dev/shm/dda-continuous` staging was never evicted, so 23–27 runs stayed staged per workflow instead of 20.
+          - The count stays bounded between restarts, but it grows with every restart. It is being fixed together with finding 16.
     - **Real camera (Amcrest PTZ, `rtsp://192.168.88.80:554/cam/realmonitor?channel=1&subtype=0|1`)**: H.264 Main, 1280x720 (main) and 640x480 (sub), no VUI timing, with an audio track. On JP5 with the current code, both streams connect with `nvv4l2decoder` and preview: the main stream (about 7 fps) in 7–9 s, the sub stream (30 fps) in 2–5 s. A wrong password gives `authentication_failed`, and the right one streams again. No response carries the password.
     - **Current code, hot-patched on the MIC-730 (JP5), 2026-09-29**: the Amcrest check passes. The harness stream stage passes 7 of 7, including the triggered stream workflow and the continuous rate, pause and resume. Every source the harness and the Amcrest check deleted left the shadow (8 retirements, no rejected report).
       - The 2-hour soak at 1 fps and 10 fps passed: 30,276 runs, none failed, no restart, the 10 fps workflow steady at 3.0–3.2 runs/s (it fell to 0.95 before fix 6), and the 90 s source outage recovered by the next 1-minute sample.
       - The backend still grew about 2.3 KB per run. Left running for 12 hours, that turned out to be fix 12 (a leaked IPC connection per MQTT message), not a per-run cost.
       - With fix 12 hot-patched (from 14:03Z), four more hours on the MIC-730 gave 57,741 runs, none failed, no restart, and 762 MQTT messages. The thread count stayed at 117, with one `AwsEventLoop` thread throughout; before the fix, every message had added one.
       - RSS still grows about 1.7 KB per run. `/proc/1/smaps` shows the growth only in glibc per-thread arenas (native allocations off the main thread); Python's pymalloc arenas and the main heap stay flat. That size matches the `TRITONSERVER_Message` that edgemlsdk's `_getModelIndex` leaked on every call, which the native fix in the real builds deletes. Check on a real build that RSS is flat after warm-up.
+    - **JP6 real build `1.0.73` on the Orin, 2-hour soak (2026-09-30 03:11–05:15Z)**: all six pass criteria pass (`results/soak-orin-real-1.0.73.jsonl`, `leak-orin-real-1.0.73.jsonl`).
+      - No restart: RestartCount stayed at 0, and health at `healthy`.
+      - No failed run among 28,461 (7,187 at 1 fps, 21,274 at 10 fps).
+      - The 10 fps workflow ran at 2.86 runs/s on average, and between 2.71 and 2.98 in every 20-minute window.
+      - Outage: its own 94 s outage at 03:31Z recovered 37 s after the publisher returned. The MIC-730 and Dell soaks' shared outage at 04:49Z recovered by the next sample.
+      - 2 `AwsEventLoop` threads throughout (309–312 threads in all), while 387 MQTT messages went out.
+      - Retention: 19–21 staged runs, and 50–52 promoted for the 10 fps workflow.
+      - Backend RSS includes the resident Qwen2.5-VL vLLM model (11.1 GB). It grew 165 MB over the first 80 minutes, then held flat: −22 MB/h over minutes 80–124. The Triton stubs and Stream_Workers stayed flat.
+      - The leak watch ran on to 05:40Z, and RSS stayed flat (−2.8 MB/h over minutes 80–148).
+    - **JP5 `1.0.50` on the MIC-730, 2-hour soak (2026-09-30 04:29–06:33Z)**: five criteria pass, and retention does not (finding 17). Files: `results/soak-mic730-real-1.0.50.jsonl` and `leak-mic730-real-1.0.50.jsonl`.
+      - No restart, and no failed run among 31,457.
+      - The 10 fps workflow ran 3.22–3.25 runs/s.
+      - The outage recovered 5 s after the publisher returned.
+      - 1 `AwsEventLoop` thread and 114–117 threads throughout, while 563 MQTT messages went out.
+      - RSS grew from 338 to 351 MB over 149 minutes, at 0.17 KB per run in the last 50 minutes. The hot-patch without the native fix grew 1.7 KB per run, so this is the same kind of small residual the owner accepted for JP7.
+      - Retention: 23–27 staged runs per workflow, above the 20 of `keep_recent_runs`. The extra ones are runs interrupted by the two backend restarts (finding 17).
+    - **amd64 `1.0.46` on the Dell, 2-hour soak (2026-09-30 04:29–06:33Z)**: all six criteria pass. Files: `results/soak-dell-real-1.0.46.jsonl` and `leak-dell-real-1.0.46.jsonl`.
+      - No restart, and no failed run among 25,316.
+      - The 10 fps workflow ran 2.40–2.44 runs/s, limited by CPU inference. H.265 decodes on `avdec_h265` with 8 threads (fix 15).
+      - The outage recovered in 36 s.
+      - 1 `AwsEventLoop` thread and 334–336 threads throughout, while 507 MQTT messages went out.
+      - RSS flattened after warm-up: 356 to 364 MB, at 0.5 MB/h (98 B per run) in the last 50 minutes.
+      - Retention: 17–22 staged runs and 50–54 promoted.
+    - **Amcrest PTZ on the real builds (2026-09-30)**: the main stream (1280x720) and the sub stream (640x480) connect and preview in 0.7–1.7 s on all three devices.
+      - Decoders: `nvv4l2decoder` on the Orin (JP6 `1.0.73`) and the MIC-730 (JP5 `1.0.50`), and `avdec_h264` on the Dell (amd64 `1.0.46`).
+      - A wrong password gives `authentication_failed`, and the right one streams again. No response carries the password, and no result file holds it.
+      - Previews are in `results/amcrest/*-real-*`.
+      - The credentials came from the owner in chat and were passed only through the environment.
     - **JP7 real build `1.0.51` on jetson-thor1 (2026-09-29)**:
       - The test workflows (file-dropped) registered and ran at once: 1 fps, and the 10 fps workflow at about 6 runs/s (Thor is faster than the JP5 and JP6 devices).
       - Amcrest main and sub streams connect on `nvv4l2decoder` in 0.7–1.3 s and preview. A wrong password gives `authentication_failed`, and the right one streams again. No response carries the password. This is fix 8 in a real build: no `videorate` abort.
@@ -1570,6 +1663,13 @@ graph TD
       - Its non-workflow checks pass on both hot-patched devices (JP6: 4 passed after the fixes above; JP5: 4 passed). The workflow checks still need their `expected.*` workflow ids.
     - **PROGRESS (2026-09-29)**: With the workflow ids configured, the stage passes 7 of 7 on jetson-thor1 (JP7, hot-patched before fixes 8–10) and on the MIC-730 (JP5, current code). It still has to run on each device from a real build; for JP6 that is the first full run.
     - **JP7 real build (2026-09-29)**: the stage passes 7 of 7 on jetson-thor1 running `1.0.51`. JP6 and JP5 real builds remain.
+    - **amd64 (2026-09-30)**: the new harness device `dell-amd64` (`~/rtsp-verify/devices.yaml`, `localhost:15003`).
+      - On the real `1.0.45` build, 6 of 7 passed: the three H.265 sources failed with `worker_exit` (fix 15).
+      - With fix 15 hot-patched, 7 of 7 passed in 78 s.
+      - On the real `1.0.46` build with fix 15, 7 of 7 passed in 77 s.
+      - Results are in `~/rtsp-verify/results/dell-1.0.45-real/`, `dell-1.0.45-hotpatch-fix15/` and `dell-real-1.0.46/`.
+    - **JP5 real build (2026-09-30)**: on the MIC-730 running `1.0.50`, the first run passed 4 of 7. The three workflow tests failed because the model was stuck `LOADING` (finding 16). After a backend restart, 7 of 7 passed in 84 s. Results are in `~/rtsp-verify/results/mic730-real-1.0.50/`.
+    - **JP6 real build (2026-09-30)**: the stage passes 7 of 7 on the Orin running `1.0.73`, the first full JP6 run, in 79 s. Results are in `~/rtsp-verify/results/orin-real-1.0.73/`. The 8 sources it deleted left the camera-registry shadow (8 retirements, no rejected report). The shadow holds 4.2 KB of state, and its five `cfg-` keys match the device's five image sources.
 
 - [ ] 26. Prepare the release
   - [x] 26.1 Review third-party licenses
@@ -1598,6 +1698,15 @@ graph TD
     - Redeploy the Portal, but never during a component build
     - _Requirements: 9.7_
     - **Owner decision (2026-09-30)**: option (b). Requirement 9.7 and the coverage test stay as they are, and every architecture in `ARCH_TO_LOCAL_SERVER_COMPONENT` is built and verified before the floor is set. `x86_64` and `x86_64_nvidia` both map to `aws.edgeml.dda.LocalServer.amd64`, so they are built with the portal's `amd64` target and verified on the Dell. Plain `arm64` (`aws.edgeml.dda.LocalServer.arm64`) has no portal build target, so it still needs a build path and a device.
+    - **amd64 plan (2026-09-30).** The portal's dedicated X86 server (`srv-5b214096`) is terminated, so build as `amd64` 1.0.42–1.0.44 were built: `./portal-build.sh x86_64` in its own directory (`/home/ubuntu/dda-rtsp-amd64`, a clone at the JP6 build's commit) on the x86 build host `i-0ae8ec99335683610` (Ubuntu 20.04, so the image base is 20.04). Run it after the JP6 build, one build at a time (`~/rtsp-verify/amd64_build_start.sh` and `amd64_build_status.sh` over `ssm_run.py`). Deploy it to the Dell (currently `1.0.44`) with `deploy_localserver.py`.
+      - The Dell already holds `model-yolo-test-x86-64-cpu`. The test workflows are compiled for `x86_64` in `~/rtsp-verify/workflows/out/hotpatch-amd64`. The harness device is `dell-amd64` on `localhost:15003`. `backend_generic` uses host networking, so the Dell's own MediaMTX URLs work unchanged.
+      - Expect software decoding (`avdec_*`) on x86.
+    - **x86_64_nvidia.** `get_nvidia_libs_versions.sh` always picks the `generic` profile on x86_64, so an NVIDIA x86 device running `aws.edgeml.dda.LocalServer.amd64` runs the same image and profile as the Dell. The Dell's verification therefore covers what those devices run. No NVIDIA x86 device was checked, and the separate `amd64Nvidia` component is outside the arch map.
+    - **arm64_cpu: needs an owner decision.** It needs three things, and none exists yet:
+      - a build: `./portal-build.sh aarch64 cpu` on an arm64 Ubuntu 22.04 host, since there is no portal ARM64 target;
+      - a non-Jetson arm64 Greengrass core without CUDA, for example a temporary Graviton EC2 instance;
+      - an arm64-cpu `yolo-test` model component (none is published), plus a stream source that the device can reach.
+      - The bare `.arm64` name is also the JetPack 4 lineage: `jp4mic730ai-ryanlabhome` runs `1.0.124` and classifies as `arm64_cpu`. The existing `arm64` `1.1.0` (2026-09-25) is a generic CPU build that was probed as an image only.
 
   - [x] 26.4 Commit and integrate
     - Commit with per-device verification notes
