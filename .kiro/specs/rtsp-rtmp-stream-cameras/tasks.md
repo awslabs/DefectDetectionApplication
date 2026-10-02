@@ -32,6 +32,17 @@ Property test conventions:
 - Each property test is tagged `**Feature: rtsp-rtmp-stream-cameras, Property {number}: {property_text}**`.
 
 ## Resume Here (handoff, 2026-09-29)
+**End-to-end Portal check done (2026-10-02, 19:24–20:52Z). Resume here.**
+- **Result.** The check passed on the Orin. A stream camera with credentials, added from the Portal, reached the device and streamed. A stream workflow then packaged, deployed with the camera binding, and ran. Remaining-work item 5 has the details.
+- **Two new findings in this spec (25.3).** Both need the owner's decision: fix them before task 27, or as a follow-up.
+  - 21: the first stream camera with credentials can fail for good on an IAM propagation race, and the Portal can neither retry nor remove the failed entry.
+  - 22: deleting a stream camera with credentials leaves its secret in Secrets Manager.
+- **State.** Nothing from the check is still deployed. The temp Cognito user `kiro-rtsp-build-temp` still exists, with only its global DataScientist row, for the vllm-jp7-engine-lifecycle builds. Delete it when those are done (`portal_temp_user.py delete`).
+- **Build servers.** Both arm64 build servers lost SSM on 2026-10-01, because an org StackSet added VPC endpoints without subnets to BuildVpc. A boot-time DNS workaround brought them back on 2026-10-02. The `build-vpc-dns-blackhole` memory has the details.
+- **Next, in order:**
+  1. The owner's decision on findings 21 and 22.
+  2. Task 27, then the cleanup list.
+  3. Rotate the Amcrest/Dell password.
 
 **Handoff to the kiro-cli harness (2026-09-30).** The owner paused interactive work for the day.
 - Everything below is committed at `8e8f845`, on both `origin/spec/rtsp-rtmp-stream-cameras` and `origin/integration/all-specs`.
@@ -41,7 +52,7 @@ Property test conventions:
   - Logs: `~/kiro-cli-runs/rtsp-rtmp-stream-cameras/`.
 - The harness commits nothing, builds nothing, and touches no device or AWS account. Its changes stay uncommitted in this worktree.
 
-**Task 28 verified and committed, 26.3 done, and the Portal deployed (2026-10-02). Resume here.**
+**Task 28 verified and committed, 26.3 done, and the Portal deployed (2026-10-02). Superseded by the note above.**
 - **State.** Task 28 (findings 16, 17 and 18) is verified on all four device types and committed as `2ae3466`. The 26.3 floor is committed on top of it. Both are on `spec/rtsp-rtmp-stream-cameras` and fast-forwarded into `integration/all-specs`. The wip branches are deleted. 28.5 and 26.3 have the details.
 - **Verified builds.** All come from the same `src/`. Each passed every in-image gate, the harness stream stage (7 of 7) and a 30-minute soak with no failed run:
   - JP5 `1.0.51` on the MIC-730
@@ -133,9 +144,19 @@ Remaining work, in order:
    - Correction (2026-09-30): there is an amd64 test device. The Dell is the HEALTHY Greengrass core `ryanhomelabdellworkstation` and runs an amd64 LocalServer, and the portal build system has an `amd64` target (`recipe-amd64.yaml`, on an x86_64 build server). So `x86_64` can be verified. Plain `arm64` still has no build target, and `x86_64_nvidia` needs an NVIDIA x86 device (not checked), so the coverage test cannot pass as written either way.
 
    Until then the map is empty and fails closed: no workflow with stream or scene-analytics nodes can be packaged.
-5. **Portal deploy (done 2026-10-02), then an end-to-end Portal check (open).**
+5. **Portal deploy, then an end-to-end Portal check (both done 2026-10-02).**
    - The deploy from `26c892b` shipped this spec's Portal changes: Camera_Registry stream cameras with Secrets Manager credentials, sync, deployments, packaging, IAM and frontend, plus the 26.3 floor.
-   - Still to do: add a stream camera from the Portal with credentials, package a stream workflow, deploy it with a camera binding, and watch it run on a device.
+   - **End-to-end check: passed (2026-10-02, 19:24–20:52Z)** on the Orin (`ryanorinagxdevkithomelabjp622`, JP6 `1.0.74`, use case "cookies"). Every step went through the Portal REST API, as the temp user with a temporary UseCaseAdmin row in "cookies" (owner-approved). Helper: `~/rtsp-verify/e2e_portal_stream.py`, with its state in `e2e/state.json`.
+     1. **Camera.** POST `/devices/{thing}/cameras`: type RTSP, the MediaMTX credentialed path `rtsp://192.168.88.237:8554/secure`, and a username and password. The response was 201. The camera synced in 15 s as `cfg-pmr7q3yb`, with credentials configured, and streamed H.264 1920x1080 on the hardware decoder. The first attempt hit finding 21.
+     2. **Workflow.** `rtsp_camera_source` → `model_inference` → `capture`. Version 1 failed validation with `MODEL_REF_UNRESOLVED`, because I used the device component's name `yolo-test` instead of the registry's `yolo_test`. Version 2 passed.
+     3. **Package.** For `arm64_jp6`: `dda.workflow.dfec035c-5825-450f-bb56-5fac7b831eed` `2.0.0`. The 26.3 floor allowed it, since the Orin runs `1.0.74`.
+     4. **Deploy.** With `camera_bindings` `{cam: cfg-pmr7q3yb}`: 201, bindings delivered, no warnings. The Portal merged it into the Orin's deployment: the revision differs from the previous one only by the new component. COMPLETED in 3.5 minutes.
+     5. **Run.** Two triggered runs completed in about 1 s each, with output and overlay images. The log shows "Stream frame … from cfg-pmr7q3yb fed to node cam (1920x1080, selected by binding)".
+   - **Cleanup.**
+     - The Orin is back on its previous components (deployment `f5b17cba`). The workflow directory the removed component left behind is moved aside to `/aws_dda/workflows-removed/`, and its key in the `dda-camera-bindings` shadow is removed.
+     - The Portal workflow is deleted. The Portal's workflow delete keeps the Greengrass component and its artifact (existing behavior), so I deleted both by hand.
+     - `cfg-pmr7q3yb` is deleted through the Portal. Both secrets are scheduled for deletion, with 7 days to recover them. The temporary UseCaseAdmin row is removed.
+     - Still there: the failed entry `portal-be48f52dd98d` (finding 21).
 6. **Minor follow-up, not fixed.** On the first start after an upgrade, the Edge_Sync_Agent's first report can run before the database migrations finish. It fails once with `no such column: image_source_configuration.streamSettings`, then succeeds on its backoff retry (seen on thor1, see 25.2).
 7. **Task 27**, then the cleanup list below.
 
@@ -1679,7 +1700,7 @@ graph TD
           - Task 28 does not touch `vllm_runtime`, `app.py` or the startup order. The same `1.0.52` deployed cleanly on 2026-10-02 (`cecbee46`, load READY in 2 min 24 s), with the same concurrency: Triton loaded 8 ONNX models while the engine core forked.
           - To catch the next one, `~/rtsp-verify/capture_backend_logs.sh` keeps the next backend container's stdout on the device's disk.
           - A bound on the engine construction would turn the next hang into a FAILED load that can be retried, instead of a rolled-back deployment.
-          - **Follow-up (2026-10-02):** bugfix spec `vllm-jp7-engine-lifecycle` (Defect B), written but not implemented.
+          - **Follow-up (2026-10-02):** bugfix spec `vllm-jp7-engine-lifecycle` (Defect B). It is implemented on `wip/vllm-jp7-engine-lifecycle-verify` and in hardware verification; that spec's tasks.md has the state.
       20. **Open, outside this spec. An explicit vLLM unload restarts the JP7 backend.** Seen on thor1's `1.0.52` redeploy (2026-10-02).
           - The backend shut itself down at 01:57:42Z, 0.14 s after the reconciler's load finished, when the runtime processed the model component's queued unload. There was no docker kill event, the exit code was 0, and docker's restart policy restarted it (RestartCount 1).
           - The cause, reproduced in the JP7 image: vLLM forks its EngineCore from the backend process, and the unload stops it with SIGTERM. On Python 3.11 a forked child shares the parent's signal wakeup fd, so the child's SIGTERM also runs the parent's asyncio SIGTERM handler. uvicorn 0.23.2 installs that handler with `loop.add_signal_handler`, so the main server shuts down.
@@ -1687,7 +1708,24 @@ graph TD
           - The effect: a JP7 deployment that restarts a vLLM model component restarts the backend a second time, and stopping a vLLM model restarts the whole backend. Continuous workflows ride it out: they wait for their models and resume, and the startup reconciliation fails the runs it interrupted.
           - Seen on JP7. Not checked on JP6 or JP5.
           - Likely fixes: reset the wakeup fd in forked children (`os.register_at_fork(after_in_child=...)` calling `signal.set_wakeup_fd(-1)`), or install the signal handlers with `signal.signal`, as newer uvicorn does.
-          - **Follow-up (2026-10-02):** bugfix spec `vllm-jp7-engine-lifecycle` (Defect A), written but not implemented. The reset hook is validated against the reproduction (`wakeup_fd_fork_repro.py --fix`).
+          - **Follow-up (2026-10-02):** bugfix spec `vllm-jp7-engine-lifecycle` (Defect A). It is implemented on `wip/vllm-jp7-engine-lifecycle-verify` and in hardware verification; that spec's tasks.md has the state.
+      21. **Open, in this spec. The first stream camera with credentials can fail for good on an IAM propagation race.** Seen in the end-to-end Portal check on the Orin (2026-10-02).
+          - The device read grant (`DDAStreamCameraCredentialRead` on `GreengrassV2TokenExchangeRole`) did not exist yet. The create route put it at 19:24:43Z, stored the secret, and wrote the shadow change.
+          - The device fetched the secret at 19:24:44Z and was denied ("no identity-based policy allows the secretsmanager:GetSecretValue action"): the new policy had not propagated yet.
+          - The camera went to `failed` ("credential retrieval failed: AccessDeniedException"), and nothing retries it. Minutes later the same fetch from the device succeeded, and a second camera, created at 19:37Z, synced in 15 s.
+          - Only the create that adds the grant is exposed: the route writes the policy only when it is missing.
+          - The Portal cannot remove or retry the failed entry. The device rejects an update or delete of an id that does not start with `cfg-`, and reports the delete as `discovery-managed`. So `portal-be48f52dd98d` stays `failed` on the Orin. Its secret was correctly scheduled for deletion.
+          - Possible fixes:
+            - (a) The device retries a credential fetch that fails with AccessDenied, for a bounded time. IAM propagation takes seconds.
+            - (b) The Portal waits briefly after it creates the grant, before it writes the change.
+            - (c) The Portal can remove or retry a failed entry it created: the device acknowledges a delete of an id it never created.
+            - Recommended: (a) and (c).
+      22. **Open, in this spec. Deleting a stream camera with credentials leaves its secret behind.** Confirmed in the same check.
+          - The secret is named after the id the Portal assigned at create time: `.../{thing}/portal-<hex>`. The device then re-keys the camera to `cfg-<id>`.
+          - The delete route schedules the deletion of `.../{thing}/cfg-<id>` (`schedule_credential_deletion` uses `secret_name(device_id, csid)` with the current id), and no such secret exists. Deleting `cfg-pmr7q3yb` left `.../portal-9588187116b6` in place, and I scheduled it for deletion by hand.
+          - By the same naming, a credential update or clear on `cfg-<id>` writes or deletes `.../cfg-<id>`, not the camera's secret. This is from reading the code, not tested.
+          - The device can still read the leftover secret, because its grant covers `.../{its thing}/*`. So the credentials of a deleted camera stay in Secrets Manager with no end date.
+          - Fix: record the secret's ARN on the registry entry at create time, carry it over when the device re-keys the entry, and clear, update and delete by that ARN.
     - **Real camera (Amcrest PTZ, `rtsp://192.168.88.80:554/cam/realmonitor?channel=1&subtype=0|1`)**: H.264 Main, 1280x720 (main) and 640x480 (sub), no VUI timing, with an audio track. On JP5 with the current code, both streams connect with `nvv4l2decoder` and preview: the main stream (about 7 fps) in 7–9 s, the sub stream (30 fps) in 2–5 s. A wrong password gives `authentication_failed`, and the right one streams again. No response carries the password.
     - **Current code, hot-patched on the MIC-730 (JP5), 2026-09-29**: the Amcrest check passes. The harness stream stage passes 7 of 7, including the triggered stream workflow and the continuous rate, pause and resume. Every source the harness and the Amcrest check deleted left the shadow (8 retirements, no rejected report).
       - The 2-hour soak at 1 fps and 10 fps passed: 30,276 runs, none failed, no restart, the 10 fps workflow steady at 3.0–3.2 runs/s (it fell to 0.95 before fix 6), and the 90 s source outage recovered by the next 1-minute sample.
