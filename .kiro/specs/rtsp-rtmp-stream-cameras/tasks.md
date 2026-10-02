@@ -41,7 +41,7 @@ Property test conventions:
   - Logs: `~/kiro-cli-runs/rtsp-rtmp-stream-cameras/`.
 - The harness commits nothing, builds nothing, and touches no device or AWS account. Its changes stay uncommitted in this worktree.
 
-**Task 28 verified and committed, and the 26.3 floor set (2026-10-02). Resume here.**
+**Task 28 verified and committed, 26.3 done, and the Portal deployed (2026-10-02). Resume here.**
 - **State.** Task 28 (findings 16, 17 and 18) is verified on all four device types and committed as `2ae3466`. The 26.3 floor is committed on top of it. Both are on `spec/rtsp-rtmp-stream-cameras` and fast-forwarded into `integration/all-specs`. The wip branches are deleted. 28.5 and 26.3 have the details.
 - **Verified builds.** All come from the same `src/`. Each passed every in-image gate, the harness stream stage (7 of 7) and a 30-minute soak with no failed run:
   - JP5 `1.0.51` on the MIC-730
@@ -53,12 +53,13 @@ Property test conventions:
   - 19: a vLLM engine construction hung and rolled back thor1's first `1.0.52` deployment. The cause is unknown, and the redeploy did not repeat it.
   - 20: an explicit vLLM unload restarts the JP7 backend. The cause is found and reproduced.
 - **No temp Cognito user exists.** It was deleted on 2026-10-01 at 12:08Z. This cycle's only build (amd64) ran over SSM, without the Portal.
-- **26.3: the floor is set** to the versions above, with `arm64_cpu` left out as the owner chose. It goes live with the next Portal deploy.
+- **26.3 is done.** The floor holds the versions above, with `arm64_cpu` left out as the owner chose. It went live with the Portal deploy below.
+- **Portal deployed (2026-10-02, 13:12–13:29Z, owner-approved)** from `26c892b`, which then was `integration/all-specs`. It shipped this spec's Portal side and the floor (26.3 OUTCOME has the checks).
+- **Findings 19 and 20** now have their own bugfix spec, `.kiro/specs/vllm-jp7-engine-lifecycle/` on `spec/vllm-jp7-engine-lifecycle`. It is written but not implemented, and its task 8 needs the owner's two decisions.
 - **Next, in order:**
-  1. The Portal deploy (owner approval, and never during a component build), then the end-to-end Portal check (remaining-work item 5 below). The next Portal deploy from `integration/all-specs`, by any session, ships the floor together with the rest of this spec's Portal changes.
+  1. The end-to-end Portal check (remaining-work item 5 below). It needs a Portal user: the temp Cognito user needs the owner's OK.
   2. Task 27, then the cleanup list.
-  3. The owner's decisions on findings 19 and 20.
-  4. Rotate the Amcrest/Dell password. It was shared in chat again.
+  3. Rotate the Amcrest/Dell password. It was shared in chat again.
 
 **Paused by the owner (2026-10-01, 12:10Z). Superseded by the note above.**
 - **State.** `8e8f845` plus task 28 (findings 16, 17 and 18), uncommitted in this worktree. The verification snapshot is `wip/rtsp-rtmp-stream-cameras-task28-verify` (`8331a07`, pushed), with the same `src/` as the worktree. Details are in 28.5.
@@ -132,9 +133,9 @@ Remaining work, in order:
    - Correction (2026-09-30): there is an amd64 test device. The Dell is the HEALTHY Greengrass core `ryanhomelabdellworkstation` and runs an amd64 LocalServer, and the portal build system has an `amd64` target (`recipe-amd64.yaml`, on an x86_64 build server). So `x86_64` can be verified. Plain `arm64` still has no build target, and `x86_64_nvidia` needs an NVIDIA x86 device (not checked), so the coverage test cannot pass as written either way.
 
    Until then the map is empty and fails closed: no workflow with stream or scene-analytics nodes can be packaged.
-5. **Portal deploy, then an end-to-end Portal check.** Never during a component build.
-   - The next Portal deploy from `integration/all-specs`, by any session, ships this spec's Portal changes: Camera_Registry stream cameras with Secrets Manager credentials, sync, deployments, packaging, IAM and frontend.
-   - After 26.3 and the deploy: add a stream camera from the Portal with credentials, package a stream workflow, deploy it with a camera binding, and watch it run on a device.
+5. **Portal deploy (done 2026-10-02), then an end-to-end Portal check (open).**
+   - The deploy from `26c892b` shipped this spec's Portal changes: Camera_Registry stream cameras with Secrets Manager credentials, sync, deployments, packaging, IAM and frontend, plus the 26.3 floor.
+   - Still to do: add a stream camera from the Portal with credentials, package a stream workflow, deploy it with a camera binding, and watch it run on a device.
 6. **Minor follow-up, not fixed.** On the first start after an upgrade, the Edge_Sync_Agent's first report can run before the database migrations finish. It fails once with `no such column: image_source_configuration.streamSettings`, then succeeds on its backoff retry (seen on thor1, see 25.2).
 7. **Task 27**, then the cleanup list below.
 
@@ -1678,6 +1679,7 @@ graph TD
           - Task 28 does not touch `vllm_runtime`, `app.py` or the startup order. The same `1.0.52` deployed cleanly on 2026-10-02 (`cecbee46`, load READY in 2 min 24 s), with the same concurrency: Triton loaded 8 ONNX models while the engine core forked.
           - To catch the next one, `~/rtsp-verify/capture_backend_logs.sh` keeps the next backend container's stdout on the device's disk.
           - A bound on the engine construction would turn the next hang into a FAILED load that can be retried, instead of a rolled-back deployment.
+          - **Follow-up (2026-10-02):** bugfix spec `vllm-jp7-engine-lifecycle` (Defect B), written but not implemented.
       20. **Open, outside this spec. An explicit vLLM unload restarts the JP7 backend.** Seen on thor1's `1.0.52` redeploy (2026-10-02).
           - The backend shut itself down at 01:57:42Z, 0.14 s after the reconciler's load finished, when the runtime processed the model component's queued unload. There was no docker kill event, the exit code was 0, and docker's restart policy restarted it (RestartCount 1).
           - The cause, reproduced in the JP7 image: vLLM forks its EngineCore from the backend process, and the unload stops it with SIGTERM. On Python 3.11 a forked child shares the parent's signal wakeup fd, so the child's SIGTERM also runs the parent's asyncio SIGTERM handler. uvicorn 0.23.2 installs that handler with `loop.add_signal_handler`, so the main server shuts down.
@@ -1685,6 +1687,7 @@ graph TD
           - The effect: a JP7 deployment that restarts a vLLM model component restarts the backend a second time, and stopping a vLLM model restarts the whole backend. Continuous workflows ride it out: they wait for their models and resume, and the startup reconciliation fails the runs it interrupted.
           - Seen on JP7. Not checked on JP6 or JP5.
           - Likely fixes: reset the wakeup fd in forked children (`os.register_at_fork(after_in_child=...)` calling `signal.set_wakeup_fd(-1)`), or install the signal handlers with `signal.signal`, as newer uvicorn does.
+          - **Follow-up (2026-10-02):** bugfix spec `vllm-jp7-engine-lifecycle` (Defect A), written but not implemented. The reset hook is validated against the reproduction (`wakeup_fd_fork_repro.py --fix`).
     - **Real camera (Amcrest PTZ, `rtsp://192.168.88.80:554/cam/realmonitor?channel=1&subtype=0|1`)**: H.264 Main, 1280x720 (main) and 640x480 (sub), no VUI timing, with an audio track. On JP5 with the current code, both streams connect with `nvv4l2decoder` and preview: the main stream (about 7 fps) in 7–9 s, the sub stream (30 fps) in 2–5 s. A wrong password gives `authentication_failed`, and the right one streams again. No response carries the password.
     - **Current code, hot-patched on the MIC-730 (JP5), 2026-09-29**: the Amcrest check passes. The harness stream stage passes 7 of 7, including the triggered stream workflow and the continuous rate, pause and resume. Every source the harness and the Amcrest check deleted left the shadow (8 retirements, no rejected report).
       - The 2-hour soak at 1 fps and 10 fps passed: 30,276 runs, none failed, no restart, the 10 fps workflow steady at 3.0–3.2 runs/s (it fell to 0.95 before fix 6), and the 90 s source outage recovered by the next 1-minute sample.
@@ -1759,7 +1762,7 @@ graph TD
     - **JP5 real build (2026-09-30)**: on the MIC-730 running `1.0.50`, the first run passed 4 of 7. The three workflow tests failed because the model was stuck `LOADING` (finding 16). After a backend restart, 7 of 7 passed in 84 s. Results are in `~/rtsp-verify/results/mic730-real-1.0.50/`.
     - **JP6 real build (2026-09-30)**: the stage passes 7 of 7 on the Orin running `1.0.73`, the first full JP6 run, in 79 s. Results are in `~/rtsp-verify/results/orin-real-1.0.73/`. The 8 sources it deleted left the camera-registry shadow (8 retirements, no rejected report). The shadow holds 4.2 KB of state, and its five `cfg-` keys match the device's five image sources.
 
-- [ ] 26. Prepare the release
+- [x] 26. Prepare the release
   - [x] 26.1 Review third-party licenses
     - Review the licenses of the pinned PyAV wheel's bundled FFmpeg and libraries (x264, x265, gnutls), and record the outcome
     - If the review rejects them, switch to the documented fallback before release: a minimal LGPL, demux-only FFmpeg
@@ -1781,7 +1784,7 @@ graph TD
       - `iam_baseline_readme_prose.md` was regenerated with the guard's own excision (`readme_prose_excise_all_json_fences`), and its diff is identical to the README's.
       - Preservation: 140 passed, 6 skipped. The six audits and `python_version_audit` exit 0.
 
-  - [ ] 26.3 Set the feature floor
+  - [x] 26.3 Set the feature floor
     - Set `WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS` to the verified LocalServer version for each architecture
     - Redeploy the Portal, but never during a component build
     - _Requirements: 9.7_
@@ -1801,7 +1804,21 @@ graph TD
       - `arm64_cpu` stays out (the owner's 2026-09-30 decision: skip plain `arm64` for now), so a stream or scene-analytics workflow is rejected for it with `STREAM_CAMERAS_UNSUPPORTED_ARCH`. Requirement 9.7 and design component 5 now say so.
       - `test_stream_camera_feature_floor_coverage.py` lists `arm64_cpu` in `UNVERIFIED_STREAM_ARCHES`, with its reason, and requires the literal to cover every other architecture exactly. Two new tests check that each unverified entry names a real architecture and that the deployed literal rejects exactly the unverified ones. Dropping `arm64_jp6` from the literal, or adding `arm64_cpu` to it, fails two tests each.
       - `camera-registry-stream-credentials-infra.test.ts` now pins the verified map, without `arm64_cpu`, on both Lambdas.
-      - Still to do: the Portal deploy, with the owner's approval and never during a component build. The next Portal deploy from `integration/all-specs`, by any session, ships this floor together with the rest of this spec's Portal changes.
+      - **Portal deploy (2026-10-02, owner-approved): done.** It ran from `26c892b` (equal to `integration/all-specs`) with the repo scripts, through the uncommitted driver `edge-cv-portal/.deploy-rtsp-stream-cameras-driver.sh` in this worktree.
+        - The steps: `diff`, then `infra` (deploy-infrastructure.sh, all 8 stacks, 13:12–13:26Z), then `frontend` (deploy-frontend.sh with its ComputeStack redeploy, 13:27–13:29Z). Their logs are `edge-cv-portal/deploy-rtsp-stream-cameras-*.out`.
+        - Before it:
+          - no component build was running and no stack was mid-update;
+          - the live handlers equalled ancestors of `origin/integration/all-specs`, so nothing unpushed was rolled back;
+          - `cdk diff` showed 0 added and 0 removed resources, and the only IAM change was the Camera_Registry role's two stream-credential statements.
+        - After it, checked live:
+          - the packaging and deployments Lambdas carry the floor JSON;
+          - registry enforcement is still on for all 57 handlers;
+          - the live handler code and shared layer equal `26c892b`;
+          - the served bundle embeds `26c892b` and the stream node types;
+          - an IAM simulation of the Camera_Registry role allows `secretsmanager:CreateSecret` on `dda-portal/stream-camera-credentials/*`, and denies `GetSecretValue` and other secrets;
+          - the API answers 401 without a token;
+          - all stacks are UPDATE_COMPLETE.
+        - The `cdk.out` copies were removed afterwards, and the guard pair passes.
 
 
   - [x] 26.4 Commit and integrate
