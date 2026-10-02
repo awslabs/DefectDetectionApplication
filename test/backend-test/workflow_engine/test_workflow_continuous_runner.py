@@ -336,7 +336,10 @@ class TestRunner:
         assert status["cameraSourceId"] == "cfg-7"
         assert set(status["counters"]) == {"started", "completed", "failed", "skippedBusy",
                                            "skippedNoNewFrame", "notable", "outputsSent",
-                                           "streamUnavailable"}
+                                           "streamUnavailable", "modelUnavailable"}
+        # 11.11: no model gate for a document without an ``emltriton``
+        # element, so nothing is ever waited for.
+        assert status["modelReadiness"] is None
 
     def test_one_summary_line_per_minute(self, caplog):
         runner, clock = make_runner(fps=4.0)

@@ -123,7 +123,14 @@ class GstPipelineManager:
         # before: no extra bus messages are handled and nothing is forwarded
         # (R8.1). Sink calls are wrapped so a sink error can never disrupt the
         # pipeline (R8.5).
-        logger.warning("Initializing GStreamer pipeline")
+        #
+        # This runner's progress and result lines are INFO, not WARNING: a
+        # continuous stream workflow runs it several times a second, and
+        # the component log's continuous-run filter drops only INFO and
+        # DEBUG. At WARNING they wrote seven lines per run, about 1 GB of
+        # component log a day (rtsp-rtmp-stream-cameras finding 18,
+        # Requirement 12.6). Each run's own run.log still records them.
+        logger.info("Initializing GStreamer pipeline")
         parsed_tag_values = {}
         os.environ["GST_PLUGIN_PATH"] = utils.get_gst_plugins_path()
         os.environ["GST_DEBUG_FILE"] = os.path.join(os.environ['COMPONENT_WORK_PATH'], "gst-debug.log")
@@ -238,7 +245,7 @@ class GstPipelineManager:
                 return False  # one-shot
             watchdog_id = GLib.timeout_add_seconds(PIPELINE_TIMEOUT_SEC, _watchdog)
 
-            logger.warning("Setting pipeline to PLAYING state")
+            logger.info("Setting pipeline to PLAYING state")
             # emltriton initializes during this call; see TRITON_NATIVE_LOCK.
             with TRITON_NATIVE_LOCK:
                 ret = pipeline.set_state(Gst.State.PLAYING)
@@ -270,13 +277,13 @@ class GstPipelineManager:
                         "Pipeline failed to change state to PLAYING -{}".format(detail))
                 raise PipelineExecutionException(
                     "Pipeline failed to change state to PLAYING, check logs above this.")
-            logger.warning("Pipeline started, waiting for Triton inference")
+            logger.info("Pipeline started, waiting for Triton inference")
             if frame_data:
                 source.emit("push-buffer", gst_buffer)
                 source.emit("end-of-stream")
-            logger.warning("Running pipeline main loop")
+            logger.info("Running pipeline main loop")
             loop.run()
-            logger.warning("Pipeline main loop completed")
+            logger.info("Pipeline main loop completed")
             # Cancel the watchdog if it didn't fire (ignore if already removed).
             try:
                 GLib.source_remove(watchdog_id)
@@ -323,12 +330,13 @@ class GstPipelineManager:
                 # tag names should match https://code.amazon.com/packages/NeoAgentSmith/blobs/4169508c22ef7094f34c807c8aeea9e169d7b5a4/--/gst_eminfer/plugin/library/sources/eminfer.cc#L844,L845,L847
                 is_anomaly = taglist.get_value_index("is_anomalous", 0)
                 confidence = taglist.get_value_index("confidence", 0)
+                # INFO, like run_pipeline's progress lines (finding 18).
                 if is_anomaly is not None:
-                    logger.warning(f"Triton inference result received: is_anomalous={is_anomaly}")
+                    logger.info(f"Triton inference result received: is_anomalous={is_anomaly}")
                     tag_values["is_anomalous"] = is_anomaly
                     latency_metrics.add_timestamp(INFERENCE_RECEIVED_TIMESTAMP)
                 if confidence is not None:
-                    logger.warning(f"Triton confidence score: {confidence}")
+                    logger.info(f"Triton confidence score: {confidence}")
                     tag_values["confidence"] = confidence
 
             except Exception as exception: 

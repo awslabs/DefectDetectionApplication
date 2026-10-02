@@ -25,6 +25,23 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 
+def _fresh_connections(*engines):
+    """Drop every pooled connection, so the next create_all or drop_all runs
+    on a new connection that reads the schema from the database file.
+
+    The backend's import-time daemon threads (the camera-registry sync and
+    friends) use the same engines during the tests, so the pool can hold
+    several connections and hands them out in turn. SQLite 3.31.1, in the
+    amd64 and JP5 images, answers ``PRAGMA table_info`` from a connection's
+    cached schema. A connection that did not run the last create_all or
+    drop_all then reports the tables as absent: drop_all skips them, and the
+    next create_all fails with "table image_source_configuration already
+    exists" (rtsp-rtmp-stream-cameras 28.5, the amd64 build gate).
+    """
+    for engine in engines:
+        engine.dispose()
+
+
 class LocalServerBaseTestCase(TestCase):
     @classmethod
     def setUpClass(cls):
@@ -77,6 +94,7 @@ class LocalServerBaseTestCase(TestCase):
         self.client = TestClient(app)
         self.engine = engine
         self.metadata_engine = metadata_engine
+        _fresh_connections(self.engine, self.metadata_engine)
         Base.metadata.create_all(self.engine)
         BaseMetadata.metadata.create_all(self.metadata_engine)
 
@@ -92,5 +110,6 @@ class LocalServerBaseTestCase(TestCase):
             json.dump(stream_config, jsonFile)
 
         from dao.sqlite_db.sqlite_db_operations import Base, BaseMetadata
+        _fresh_connections(self.engine, self.metadata_engine)
         Base.metadata.drop_all(self.engine)
         BaseMetadata.metadata.drop_all(self.metadata_engine)

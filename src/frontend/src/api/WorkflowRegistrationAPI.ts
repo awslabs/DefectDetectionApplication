@@ -202,7 +202,11 @@ export async function listRegistrationExecutions(
 }
 
 /** The state of a continuous workflow (rtsp-rtmp-stream-cameras Req. 16.2). */
-export type ContinuousState = "running" | "paused" | "waiting_for_stream";
+export type ContinuousState =
+  | "running"
+  | "paused"
+  | "waiting_for_stream"
+  | "waiting_for_model";
 
 /**
  * The per-registration counters of a continuous workflow, which survive run
@@ -217,6 +221,32 @@ export interface ContinuousCounters {
   notable: number;
   outputsSent: number;
   streamUnavailable: number;
+  /**
+   * Model waits: one per wait for a model to become READY in Triton. Older
+   * devices do not report it, so it is optional.
+   */
+  modelUnavailable?: number;
+}
+
+/**
+ * Why the Continuous_Runner is not starting runs: the model it waits for
+ * (the `modelReadiness` document of the Continuous status).
+ */
+export interface ModelReadiness {
+  /** The model name of the document's `emltriton` element. */
+  model: string;
+  /** The deployed repository name it resolved to. */
+  tritonModel: string;
+  /**
+   * `READY` | `LOADING` | `UNLOADING` | `UNAVAILABLE` | `UNKNOWN`, or the
+   * gate's own `NOT_DEPLOYED` and `INCOMPLETE`.
+   */
+  state: string;
+  reason: string | null;
+  /** Epoch milliseconds: when this wait began. */
+  sinceMs: number;
+  /** True once the wait has lasted longer than 300 s. */
+  stalled: boolean;
 }
 
 /**
@@ -235,6 +265,11 @@ export interface ContinuousStatus {
   pausedAtMs: number | null;
   cameraSourceId: string;
   runInProgress: boolean;
+  /**
+   * The model the runner waits for while the state is `waiting_for_model`,
+   * null otherwise. Older devices omit the field.
+   */
+  modelReadiness?: ModelReadiness | null;
 }
 
 function isNotFound(error: unknown): boolean {

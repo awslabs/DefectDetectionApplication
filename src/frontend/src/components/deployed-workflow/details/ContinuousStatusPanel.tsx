@@ -17,8 +17,9 @@
  * The continuous processing status of a deployed workflow whose stream node
  * runs in `continuous` mode (rtsp-rtmp-stream-cameras Requirement 16.2): its
  * state, configured and effective run rates, the counters of Requirement
- * 12.5, its camera's Stream_Health, and the pause and resume controls of
- * Requirement 11.6.
+ * 12.5, its camera's Stream_Health, the model it waits for while a model of
+ * the workflow is not READY in Triton (Requirements 11.11 and 11.12), and
+ * the pause and resume controls of Requirement 11.6.
  */
 import {
   Alert,
@@ -58,7 +59,27 @@ const STATE_INDICATORS: Record<ContinuousState, [StatusIndicatorProps.Type, stri
   running: ["success", "Running"],
   paused: ["stopped", "Paused"],
   waiting_for_stream: ["pending", "Waiting for the stream"],
+  waiting_for_model: ["pending", "Waiting for the model"],
 };
+
+/**
+ * Triton's model states, plus the model gate's own two filesystem states
+ * (rtsp-rtmp-stream-cameras Requirements 11.11 and 11.12).
+ */
+const MODEL_STATE_INDICATORS: Record<string, [StatusIndicatorProps.Type, string]> = {
+  READY: ["success", "Ready"],
+  LOADING: ["in-progress", "Loading"],
+  UNLOADING: ["in-progress", "Unloading"],
+  UNAVAILABLE: ["error", "Unavailable"],
+  UNKNOWN: ["pending", "Not loaded"],
+  NOT_DEPLOYED: ["pending", "Not deployed"],
+  INCOMPLETE: ["in-progress", "Being deployed"],
+};
+
+export function ModelStateIndicator({ state }: { state: string }): JSX.Element {
+  const [type, label] = MODEL_STATE_INDICATORS[state] ?? ["pending", String(state)];
+  return <StatusIndicator type={type}>{label}</StatusIndicator>;
+}
 
 export function ContinuousStateIndicator({
   state,
@@ -79,6 +100,7 @@ export const COUNTER_LABELS: ReadonlyArray<[keyof ContinuousCounters, string]> =
   ["notable", "Notable runs"],
   ["outputsSent", "Outputs sent"],
   ["streamUnavailable", "Stream outages"],
+  ["modelUnavailable", "Model waits"],
 ];
 
 /** "2 fps", "0.5 fps", "1.83 fps". */
@@ -111,6 +133,7 @@ export default function ContinuousStatusPanel({
   });
   const health = status.streamHealth;
   const streamDetail = isNotStreaming(health) ? notStreamingDetail(health) : "";
+  const model = status.modelReadiness ?? null;
   return (
     <Container
       data-testid="continuous-status-panel"
@@ -148,6 +171,13 @@ export default function ContinuousStatusPanel({
             paused you can run it manually.
           </Alert>
         )}
+        {model?.stalled && (
+          <Alert type="warning" header="This workflow has waited for its model for over 10 minutes">
+            The model {model.tritonModel || model.model} is not ready in Triton. Once this device's
+            model components are running, restart the LocalServer backend so that it loads the
+            model again.
+          </Alert>
+        )}
         <ColumnLayout columns={4} variant="text-grid">
           <ValueWithLabel label="State">
             <ContinuousStateIndicator state={status.state} />
@@ -167,6 +197,13 @@ export default function ContinuousStatusPanel({
             <StreamStateIndicator state={health?.state} />
             {streamDetail && <Box color="text-body-secondary">{streamDetail}</Box>}
           </ValueWithLabel>
+          {model && (
+            <ValueWithLabel label="Model">
+              <div>{model.model}</div>
+              <ModelStateIndicator state={model.state} />
+              {model.reason && <Box color="text-body-secondary">{model.reason}</Box>}
+            </ValueWithLabel>
+          )}
         </ColumnLayout>
         <ColumnLayout columns={4} variant="text-grid">
           {COUNTER_LABELS.map(([key, label]) => (

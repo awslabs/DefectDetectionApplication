@@ -274,7 +274,7 @@ Scope decisions this document commits to:
 
 #### Acceptance Criteria
 
-1. WHEN a valid registration's Stream_Camera_Source_Node is in `continuous` mode, THE Continuous_Runner SHALL start runs for it on Sampling_Ticks at `frames_per_second`. It SHALL begin within 10 seconds of the Stream_Session reaching `streaming`.
+1. WHEN a valid registration's Stream_Camera_Source_Node is in `continuous` mode, THE Continuous_Runner SHALL start runs for it on Sampling_Ticks at `frames_per_second`. It SHALL begin within 10 seconds of the Stream_Session reaching `streaming` and every model the workflow uses being READY.
 2. Each continuous run SHALL process the Latest_Frame at its tick. THE Continuous_Runner SHALL process each frame sequence number at most once, and SHALL skip a tick when no newer frame exists.
 3. IF a run is still in progress at a Sampling_Tick, THEN THE Continuous_Runner SHALL skip that tick and count it as skipped. Ticks SHALL never queue.
 4. THE Continuous_Runner SHALL learn of a run's completion directly from the Workflow_Executor, so that its achievable rate is limited by run duration and not by status polling.
@@ -284,6 +284,8 @@ Scope decisions this document commits to:
 8. WHEN a continuous registration is removed or superseded, THE Continuous_Runner SHALL stop starting runs immediately, let an in-progress run finish, and release its Stream_Lease.
 9. THE Continuous_Runner SHALL record each run's trigger context as the continuous source, with the frame sequence number, frame acquisition time, and tick time.
 10. IF a continuous run fails, THEN THE Continuous_Runner SHALL record that run's failure and continue with the next tick.
+11. WHILE a model the workflow uses is not READY in Triton, THE Continuous_Runner SHALL start no runs, SHALL record one model-unavailable event per wait, and SHALL resume at the next tick once every model is READY.
+12. THE Continuous_Runner SHALL request a model load only when the model's repository files are complete and have not changed for 10 seconds. It SHALL report a wait longer than 600 seconds as stalled.
 
 ### Requirement 12: Continuous run retention, storage, and logging bounds
 
@@ -304,6 +306,8 @@ Scope decisions this document commits to:
 6. THE LocalServer SHALL NOT write per-run informational log lines for continuous runs to the component log. THE Continuous_Runner SHALL log state changes and at most one summary line per minute per registration, and SHALL keep per-run detail in each run's own log.
 7. THE LocalServer SHALL bound, in both level and size, the GStreamer debug output that Stream_Workers and continuous runs produce.
 8. THE LocalServer SHALL NOT delete or alter the run history of any workflow that has no continuous-mode stream node.
+9. WHEN the backend starts, THE LocalServer SHALL mark every continuous run that a previous process left `pending` or `running` as failed, with an interrupted error. It SHALL count each such run as failed and SHALL retain it under the limits of 12.1 as a run that is not notable. Runs of every other kind are untouched (12.8).
+10. THE LocalServer SHALL bound the disk use of its component logs, whatever their volume. It SHALL cap each container log by size, and SHALL cap the total size of the rotated `application.log` and `service.log` files, in addition to their 14-day age limit. Per-call trace lines from the native inference runtime are not informational for 12.6 purposes, and SHALL be logged below the component log's level.
 
 ### Requirement 13: Detection counting with zones
 
@@ -384,7 +388,7 @@ Scope decisions this document commits to:
 
 1. THE LocalServer UI SHALL show each stream camera's Stream_Health. WHILE a camera is not streaming, its live preview SHALL show the session state.
 2. THE LocalServer UI SHALL show the following for each continuous workflow registration:
-   - Its state: `running`, `paused`, or `waiting_for_stream`.
+   - Its state: `running`, `paused`, `waiting_for_stream`, or `waiting_for_model`.
    - Its configured and effective run rates.
    - The counters of Requirement 12.5.
    - Its recent runs and recent Notable_Runs.

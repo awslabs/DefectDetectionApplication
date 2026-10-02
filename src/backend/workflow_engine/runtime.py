@@ -147,6 +147,22 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
                 "Continuous run retention unavailable; continuous runs write "
                 "to the capture root"
             )
+        # Finish the continuous runs a previous process left pending or
+        # running (rtsp-rtmp-stream-cameras Requirement 12.9). Its own
+        # contained block, here so it happens before the executor is
+        # registered and before the ContinuousRunnerManager's first
+        # on_registrations_changed — nobody else ever completes those
+        # runs, so without this their staging is never evicted and the
+        # staged count grows with every restart.
+        try:
+            if retention is not None:
+                retention.reconcile_interrupted()
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "Could not finish the continuous runs an earlier process "
+                "left unfinished; their staged artifacts stay until the "
+                "device byte caps evict them"
+            )
         # Register the pipeline executor so triggered runs execute instead
         # of staying pending. Contained separately: a broken executor still
         # leaves discovery/registration/status reporting functional.

@@ -28,6 +28,7 @@
 import logging
 logger = logging.getLogger(__name__)
 from panorama import trace
+from utils.edgemlsdk_trace_levels import is_per_call_trace
 # Python implementation of ITraceListener
 # Python <--> C
 class EdgeMLSdkLoggingTraceListener(trace.TraceListener):
@@ -41,6 +42,13 @@ class EdgeMLSdkLoggingTraceListener(trace.TraceListener):
         elif level == trace.TraceLevel.Warning.value:
             logger.warning(f'[{message_file}:{line}] {message}')
         elif level == trace.TraceLevel.Info.value:
-            logger.info(f'[{message_file}:{line}] {message}')
+            # Per-call chatter (a model status read on every buffer, a
+            # result's confidence) goes to DEBUG; see
+            # utils.edgemlsdk_trace_levels (rtsp-rtmp-stream-cameras
+            # finding 18).
+            if is_per_call_trace(message_file, message):
+                logger.debug(f'[{message_file}:{line}] {message}')
+            else:
+                logger.info(f'[{message_file}:{line}] {message}')
         elif level == trace.TraceLevel.Verbose.value:
             logger.debug(f'[{message_file}:{line}] {message}')

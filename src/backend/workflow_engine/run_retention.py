@@ -39,6 +39,14 @@ be kept like triggered ones. :class:`RunRetention` bounds them:
 - **Only continuous runs are touched**: rows whose Trigger_Context source
   is ``continuous``. Every other run, including a manual run of a paused
   continuous workflow, is never deleted (Requirement 12.8).
+- **Startup reconciliation** (``reconcile_interrupted``, Requirement
+  12.9): a continuous run a previous backend process left ``pending`` or
+  ``running`` is never finished by anyone, so its staging is never
+  evicted and the staged count grows with every restart. At startup each
+  one becomes ``failed`` with :data:`INTERRUPTED_ERROR`, counts as a
+  failed run, and is retained as a run that is *not* notable — otherwise
+  every restart would promote its staged directory to persistent storage
+  and push real Notable_Runs out.
 - **Housekeeping**, every :data:`HOUSEKEEPING_INTERVAL_S`: the byte caps,
   the registered housekeeping tasks (the Continuous_Runner counter
   snapshots), a staging re-check, and the size bound on
@@ -49,6 +57,7 @@ import logging
 import os
 import shutil
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -85,6 +94,11 @@ _CONTINUOUS_LIKE = '%"source": "continuous"%'
 
 _ACTIVE_STATUSES = ("pending", "running")
 _FAILED = "failed"
+
+#: The ``error`` of a continuous run a previous backend process left
+#: ``pending`` or ``running`` (``reconcile_interrupted``, Requirement
+#: 12.9). Such a run counts as failed but is never notable.
+INTERRUPTED_ERROR = "Interrupted: the backend stopped before this continuous run finished"
 
 
 # --- pure helpers ---------------------------------------------------------------
@@ -128,11 +142,19 @@ def has_notable_transition(tag_values: Any) -> bool:
                for gate in events.values())
 
 
-def classify_run(status: Any, node_status: Any, output_ids: Iterable[str], tag_values: Any) -> Tuple[bool, int]:
+def classify_run(status: Any, node_status: Any, output_ids: Iterable[str], tag_values: Any,
+                 error: Any = None) -> Tuple[bool, int]:
     """``(notable, outputs sent)`` of a finished run (see the module
-    docstring)."""
+    docstring).
+
+    ``error`` is the run's recorded error: a failed run interrupted by a
+    backend restart (:data:`INTERRUPTED_ERROR`) is *not* notable, or else
+    every restart would promote its staged run to persistent storage and
+    push real Notable_Runs out (Requirement 12.9).
+    """
     sent = outputs_sent(node_status, output_ids)
-    notable = status == _FAILED or sent > 0 or has_notable_transition(tag_values)
+    failed = status == _FAILED and error != INTERRUPTED_ERROR
+    notable = failed or sent > 0 or has_notable_transition(tag_values)
     return notable, sent
 
 
@@ -291,7 +313,8 @@ class RunRetention:
                  disk_usage: Callable = shutil.disk_usage,
                  debug_log_path: Optional[str] = None,
                  interval_s: float = HOUSEKEEPING_INTERVAL_S,
-                 min_staging_free_bytes: int = MIN_STAGING_FREE_BYTES):
+                 min_staging_free_bytes: int = MIN_STAGING_FREE_BYTES,
+                 wall: Callable[[], float] = time.time):
         self._session_factory = session_factory
         self._persistent_root = persistent_root
         self._staging_candidate = staging_candidate
@@ -300,6 +323,7 @@ class RunRetention:
         self._debug_log_path = debug_log_path if debug_log_path is not None else _default_debug_log_path()
         self._interval_s = interval_s
         self._min_staging_free = min_staging_free_bytes
+        self._wall = wall
         self._lock = threading.RLock()
         self._staging_root: Optional[str] = None
         self._staging_resolved = False
@@ -383,7 +407,8 @@ class RunRetention:
         tag_values = _read_run_metadata(row.output_dir, row.capture_id)
         if output_ids is None:
             output_ids = self._registration_output_ids(session, row.registration_id)
-        notable, sent = classify_run(row.status, _load_json(row.node_status_json), output_ids, tag_values)
+        notable, sent = classify_run(row.status, _load_json(row.node_status_json), output_ids, tag_values,
+                                     error=row.error)
         tick = context.get("tickAtMs")
         if not isinstance(tick, int) or isinstance(tick, bool):
             tick = int(row.started_at or 0) * 1000
@@ -435,6 +460,101 @@ class RunRetention:
                     continue
                 if session.get(WorkflowExecution, execution_id) is None:
                     self._remove_dir(os.path.join(workflow_dir, execution_id), execution_id)
+
+    # -- startup reconciliation --------------------------------------------------
+
+    def reconcile_interrupted(self) -> int:
+        """Finish the continuous runs a previous backend process left
+        ``pending`` or ``running`` (Requirement 12.9), returning how many.
+
+        Nobody ever completes such a run, so its staging is never evicted
+        and the staged count grows with every restart (on the MIC-730
+        seven ``running`` and three ``pending`` rows kept 23-27 runs
+        staged per workflow instead of 20). Each one becomes ``failed``
+        with :data:`INTERRUPTED_ERROR` and a finish time, counts as a
+        failed run in its registration's counter snapshot, and is indexed
+        when the index is already loaded, so the recent window evicts the
+        surplus. Triggered and manual runs are never touched
+        (Requirement 12.8), including a manual run of a paused continuous
+        workflow. Contained: an exception is logged and startup continues.
+        """
+        from workflow_engine.models import WorkflowExecution
+
+        with self._lock:
+            session = None
+            try:
+                session = self._session()
+                rows = (session.query(WorkflowExecution)
+                        .filter(WorkflowExecution.trigger_context_json.like(_CONTINUOUS_LIKE))
+                        .filter(WorkflowExecution.status.in_(_ACTIVE_STATUSES)).all())
+                now = int(self._wall())
+                interrupted = []
+                for row in rows:
+                    context = _load_json(row.trigger_context_json)
+                    if not is_continuous_context(context):
+                        continue
+                    row.status = _FAILED
+                    row.error = INTERRUPTED_ERROR
+                    if not row.finished_at:
+                        row.finished_at = now
+                    interrupted.append((row.id, row.registration_id, context))
+                if not interrupted:
+                    return 0
+                self._count_interrupted_locked(session, interrupted, now)
+                session.commit()
+                self._index_interrupted_locked(session, interrupted)
+                logger.info(
+                    "Failed %d continuous run(s) an earlier backend process left unfinished",
+                    len(interrupted))
+                return len(interrupted)
+            except Exception:  # noqa: BLE001 - startup must continue
+                if session is not None:
+                    session.rollback()
+                logger.exception("Could not finish the continuous runs an earlier process left unfinished")
+                return 0
+            finally:
+                if session is not None:
+                    session.close()
+
+    def _count_interrupted_locked(self, session, interrupted: Sequence[Tuple[str, str, Any]],
+                                  now: int) -> None:
+        """Add each registration's interrupted runs to the ``failed``
+        counter of its stored snapshot, where that row exists."""
+        from workflow_engine.models import WorkflowContinuousState
+
+        counts: Dict[str, int] = {}
+        for _execution_id, registration_id, _context in interrupted:
+            counts[registration_id] = counts.get(registration_id, 0) + 1
+        for registration_id, count in counts.items():
+            state = session.get(WorkflowContinuousState, registration_id)
+            if state is None:
+                continue
+            counters = _load_json(state.counters_json)
+            counters = dict(counters) if isinstance(counters, Mapping) else {}
+            failed = counters.get(_FAILED)
+            if not isinstance(failed, int) or isinstance(failed, bool) or failed < 0:
+                failed = 0
+            counters[_FAILED] = failed + count
+            state.counters_json = json.dumps(counters, sort_keys=True)
+            state.updated_at = now
+
+    def _index_interrupted_locked(self, session, interrupted: Sequence[Tuple[str, str, Any]]) -> None:
+        """Index the now-failed rows when the index is already loaded, so
+        the recent window evicts their surplus staged directories. An
+        index that is not loaded yet reads them on its first use."""
+        if not self._loaded:
+            return
+        from workflow_engine.models import WorkflowExecution
+
+        for execution_id, registration_id, context in interrupted:
+            row = session.get(WorkflowExecution, execution_id)
+            if row is None:
+                continue
+            record, _sent, _tags = self._record(session, row, context=context)
+            runs = self._runs.setdefault(registration_id, [])
+            runs[:] = [run for run in runs if run.execution_id != record.execution_id]
+            runs.append(record)
+            runs.sort(key=_sort_key)
 
     # -- completion ------------------------------------------------------------
 

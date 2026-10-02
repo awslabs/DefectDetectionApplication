@@ -31,6 +31,12 @@ Paused                                    Wait; resuming ticks at once.
 Session not ``streaming``                 Record one ``streamUnavailable``
                                           per outage; tick at once when
                                           streaming resumes.
+A model the workflow uses is not          Record one ``modelUnavailable``
+``READY`` in Triton (the                  per wait, then re-check every 3 s
+``model_gate.ModelGate`` returns a        at most; insert no run row and
+wait)                                     clear the schedule, so the first
+                                          tick after the wait is immediate.
+                                          A wait past 600 s is stalled.
 No frame newer than the last one run      Count ``skippedNoNewFrame``.
 Otherwise                                 Insert a pending run with
                                           ``{"source": "continuous",
@@ -60,6 +66,7 @@ import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from dda_logging.run_context import continuous_run
+from workflow_engine.model_gate import STALL_AFTER_S, ModelGate, ModelWait
 from workflow_engine.stream_feed import (
     CONTINUOUS_SOURCE,
     FRAME_HANDOFF,
@@ -74,19 +81,55 @@ logger = logging.getLogger(__name__)
 STATE_RUNNING = "running"
 STATE_PAUSED = "paused"
 STATE_WAITING = "waiting_for_stream"
+STATE_WAITING_MODEL = "waiting_for_model"
 
 #: The per-registration counters (Requirement 12.5), in report order.
+#: ``modelUnavailable`` is last: :func:`new_counters` accepts a stored
+#: snapshot that predates it.
 COUNTER_KEYS = ("started", "completed", "failed", "skippedBusy", "skippedNoNewFrame",
-                "notable", "outputsSent", "streamUnavailable")
+                "notable", "outputsSent", "streamUnavailable", "modelUnavailable")
 
 RATE_WINDOW_S = 60.0
 SUMMARY_INTERVAL_S = 60.0
 #: How often a paused or waiting runner checks again.
 IDLE_POLL_S = 0.5
+#: How often the model gate is consulted, at most (Requirement 11.11).
+MODEL_POLL_S = 3.0
+#: How often a stalled model wait is logged again.
+STALL_LOG_INTERVAL_S = 300.0
 
 _STREAMING = "streaming"
 _COMPLETED = "completed"
 _FAILED = "failed"
+
+
+#: The ``emltriton`` element factory a compiled document runs models with.
+_MODEL_FACTORY = "emltriton"
+
+
+def document_model_names(document: Any) -> Tuple[str, ...]:
+    """The distinct Triton model names a compiled document uses.
+
+    The ``args["model"]`` of every ``emltriton`` element, in document
+    order. A document without one gets no model gate, and so makes no
+    Triton call at all.
+    """
+    models: list = []
+    if not isinstance(document, dict):
+        return ()
+    for segment in document.get("segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        for element in segment.get("elements") or []:
+            if not isinstance(element, dict) or element.get("factory") != _MODEL_FACTORY:
+                continue
+            args = element.get("args")
+            if not isinstance(args, dict):
+                continue
+            model = args.get("model")
+            if model and model not in models:
+                models.append(model)
+    return tuple(models)
 
 
 def new_counters(stored: Any = None) -> Dict[str, int]:
@@ -157,10 +200,14 @@ class ContinuousRunner:
                  paused: bool = False,
                  paused_at_ms: Optional[int] = None,
                  counters: Optional[Dict[str, int]] = None,
+                 models: Sequence[str] = (),
+                 engine_started_at: Optional[float] = None,
+                 gate: Any = None,
                  on_exit: Optional[Callable[["ContinuousRunner"], None]] = None):
         self.registration_id = registration_id
         self.feed = feed
         self.output_ids = tuple(output_ids)
+        self.models = tuple(models)
         self._execute = execute
         self._stream_manager = stream_manager
         self._store = store
@@ -169,6 +216,19 @@ class ContinuousRunner:
         self._clock = clock
         self._wall = wall
         self._on_exit = on_exit
+        # The model gate (Requirement 11.11): none at all for a document
+        # without an ``emltriton`` element, which therefore never consults
+        # Triton.
+        if gate is None and self.models:
+            gate = ModelGate(self.models, clock=clock, wall=wall,
+                             engine_started_at=engine_started_at)
+        self._gate = gate
+        self._model_wait: Optional[ModelWait] = None
+        self._gate_checked_at: Optional[float] = None
+        #: The gate is consulted at the runner's start and after any run
+        #: that did not complete; while waiting it is polled instead.
+        self._recheck_gate = True
+        self._stall_logged_at: Optional[float] = None
         self._period = 1.0 / max(0.05, float(feed.frames_per_second))
         self._lock = threading.Lock()
         self._counters = new_counters(counters)
@@ -191,7 +251,7 @@ class ContinuousRunner:
 
     @property
     def fingerprint(self) -> Tuple:
-        return runner_fingerprint(self.feed, self.output_ids)
+        return runner_fingerprint(self.feed, self.output_ids, self.models)
 
     @property
     def camera(self) -> str:
@@ -283,6 +343,12 @@ class ContinuousRunner:
             self._outage = False
             logger.info("Continuous workflow %s: stream camera %s is streaming; resuming",
                         self.registration_id, self.camera)
+        if self._model_gate(now) is not None:
+            # Requirement 11.11: no run is started, and no row is inserted,
+            # while a model the workflow uses is not READY. The schedule is
+            # cleared so the first tick after the wait is immediate.
+            self._next_tick = None
+            return MODEL_POLL_S
         if self._next_tick is None:
             self._next_tick = now
         if now < self._next_tick:
@@ -306,6 +372,57 @@ class ContinuousRunner:
             self._count("skippedBusy")
             self._next_tick += self._period
         return max(0.0, self._next_tick - now)
+
+    def _model_gate(self, now: float) -> Optional[ModelWait]:
+        """The outstanding model wait, or None when the models are ready.
+
+        Consulted at the runner's start, after any run that did not
+        complete, and every :data:`MODEL_POLL_S` while waiting — never more
+        often than that, and never at all for a document without a model.
+        """
+        if self._gate is None:
+            return None
+        waiting = self._model_wait is not None
+        if not waiting and not self._recheck_gate:
+            return None
+        if self._gate_checked_at is not None and now - self._gate_checked_at < MODEL_POLL_S:
+            return self._model_wait
+        self._gate_checked_at = now
+        self._recheck_gate = False
+        try:
+            wait = self._gate.check()
+        except Exception:  # noqa: BLE001 - fail open: never stop runs on the gate itself
+            logger.warning("Continuous workflow %s: the model gate failed; running anyway",
+                           self.registration_id, exc_info=True)
+            wait = None
+        self._note_model_wait(wait, now)
+        return wait
+
+    def _note_model_wait(self, wait: Optional[ModelWait], now: float) -> None:
+        """One WARNING when a wait starts, one INFO when it ends, and a
+        WARNING every :data:`STALL_LOG_INTERVAL_S` while stalled — never a
+        line per poll (Requirement 11.11)."""
+        with self._lock:
+            previous, self._model_wait = self._model_wait, wait
+        if wait is not None:
+            if previous is None:
+                self._count("modelUnavailable")
+                self._stall_logged_at = None
+                logger.warning(
+                    "Continuous workflow %s: model %s (%s) is %s; waiting for it%s",
+                    self.registration_id, wait.model, wait.triton_model, wait.state,
+                    ": {0}".format(wait.reason) if wait.reason else "")
+            elif wait.stalled and (self._stall_logged_at is None
+                                   or now - self._stall_logged_at >= STALL_LOG_INTERVAL_S):
+                self._stall_logged_at = now
+                logger.warning(
+                    "Continuous workflow %s: model %s (%s) is still %s after %d s; no run has "
+                    "started. Restart the backend once the model components are running%s",
+                    self.registration_id, wait.model, wait.triton_model, wait.state,
+                    int(STALL_AFTER_S), ": {0}".format(wait.reason) if wait.reason else "")
+        elif previous is not None:
+            logger.info("Continuous workflow %s: model %s (%s) is READY; resuming",
+                        self.registration_id, previous.model, previous.triton_model)
 
     def _run(self, frame) -> None:
         self._last_seq = max(self._last_seq, int(frame.seq))
@@ -356,6 +473,10 @@ class ContinuousRunner:
             if outcome is not None:
                 self._counters["notable"] += 1 if outcome.notable else 0
                 self._counters["outputsSent"] += int(outcome.outputs_sent or 0)
+        if status != _COMPLETED:
+            # A run that did not complete may have been a model that is not
+            # loaded: ask the gate once more before the next tick.
+            self._recheck_gate = True
         processed = getattr(outcome, "processed_seq", None)
         if isinstance(processed, int) and processed > self._last_seq:
             self._last_seq = processed
@@ -381,12 +502,16 @@ class ContinuousRunner:
         with self._lock:
             paused, paused_at_ms, in_flight = self._paused, self._paused_at_ms, self._in_flight
             counters = dict(self._counters)
+            model_wait = self._model_wait
+        # paused > waiting_for_stream > waiting_for_model > running.
         if paused:
             state = STATE_PAUSED
-        elif health.get("state") == _STREAMING:
-            state = STATE_RUNNING
-        else:
+        elif health.get("state") != _STREAMING:
             state = STATE_WAITING
+        elif model_wait is not None:
+            state = STATE_WAITING_MODEL
+        else:
+            state = STATE_RUNNING
         return {
             "registrationId": self.registration_id,
             "state": state,
@@ -397,6 +522,7 @@ class ContinuousRunner:
             "pausedAtMs": paused_at_ms,
             "cameraSourceId": self.feed.camera_source_id,
             "runInProgress": in_flight is not None,
+            "modelReadiness": model_wait.as_document() if model_wait is not None else None,
         }
 
     def _maybe_summarize(self, now: float) -> None:
@@ -443,10 +569,14 @@ class ContinuousRunner:
                     logger.exception("Continuous workflow %s: exit hook failed", self.registration_id)
 
 
-def runner_fingerprint(feed: StreamFeed, output_ids: Sequence[str]) -> Tuple:
-    """What a runner's behavior depends on: a change restarts it."""
+def runner_fingerprint(feed: StreamFeed, output_ids: Sequence[str],
+                       models: Sequence[str] = ()) -> Tuple:
+    """What a runner's behavior depends on: a change restarts it.
+
+    ``models`` is defaulted so a two-argument call still works.
+    """
     return (feed.node_id, feed.camera_key, feed.frames_per_second, feed.max_frame_age_ms,
-            feed.keep_recent_runs, feed.keep_notable_runs, tuple(output_ids))
+            feed.keep_recent_runs, feed.keep_notable_runs, tuple(output_ids), tuple(models))
 
 
 def _default_stream_manager():
@@ -473,7 +603,8 @@ class ContinuousRunnerManager:
                  runner_factory: Callable[..., ContinuousRunner] = ContinuousRunner,
                  start_threads: bool = True,
                  clock: Callable[[], float] = time.monotonic,
-                 wall: Callable[[], float] = time.time):
+                 wall: Callable[[], float] = time.time,
+                 engine_started_at: Optional[float] = None):
         if session_factory is None:
             from dao.sqlite_db.sqlite_db_operations import SessionLocal
             session_factory = SessionLocal
@@ -488,6 +619,10 @@ class ContinuousRunnerManager:
         self._start_threads = start_threads
         self._clock = clock
         self._wall = wall
+        # The engine's start (runtime.py builds the manager at engine
+        # start): the model gate treats the repository rewrite that follows
+        # a LocalServer deployment as expected for a while after it.
+        self._engine_started_at = wall() if engine_started_at is None else float(engine_started_at)
         self._store = ExecutionStore(session_factory)
         self._lock = threading.RLock()
         self._runners: Dict[str, ContinuousRunner] = {}
@@ -553,21 +688,21 @@ class ContinuousRunnerManager:
                 wanted = desired.get(registration_id)
                 if wanted is None or runner_fingerprint(*wanted) != runner.fingerprint:
                     self._stop_runner_locked(registration_id)
-            for registration_id, (feed, output_ids) in sorted(desired.items()):
+            for registration_id, (feed, output_ids, models) in sorted(desired.items()):
                 if registration_id not in self._runners:
-                    self._start_runner_locked(registration_id, feed, output_ids)
+                    self._start_runner_locked(registration_id, feed, output_ids, models)
         for registration_id in superseded:
             self._delete_state(registration_id)
 
     def _desired(self):
-        """``({registration id: (feed, output ids)}, superseded ids with
-        a state row)``."""
+        """``({registration id: (feed, output ids, model names)}, superseded
+        ids with a state row)``."""
         from workflow_engine.discovery import STATUS_REGISTERED, STATUS_SUPERSEDED
         from workflow_engine.models import WorkflowContinuousState, WorkflowRegistration
         from workflow_engine.run_retention import output_node_ids
         from workflow_engine.stream_leases import _read_document
 
-        desired: Dict[str, Tuple[StreamFeed, Tuple[str, ...]]] = {}
+        desired: Dict[str, Tuple[StreamFeed, Tuple[str, ...], Tuple[str, ...]]] = {}
         session = self._session_factory()
         try:
             rows = session.query(WorkflowRegistration).filter(
@@ -597,7 +732,8 @@ class ContinuousRunnerManager:
                 except StreamFeedError:
                     continue
                 if feeds and feeds[0].continuous:
-                    desired[row.id] = (feeds[0], output_node_ids(document))
+                    desired[row.id] = (feeds[0], output_node_ids(document),
+                                       document_model_names(document))
             stated = {state.registration_id for state in session.query(WorkflowContinuousState).all()}
             superseded = []
             if stated:
@@ -608,7 +744,8 @@ class ContinuousRunnerManager:
             session.close()
         return desired, superseded
 
-    def _start_runner_locked(self, registration_id: str, feed: StreamFeed, output_ids) -> None:
+    def _start_runner_locked(self, registration_id: str, feed: StreamFeed, output_ids,
+                             models: Sequence[str] = ()) -> None:
         execute = self._execute_provider()
         if execute is None:
             if not self._warned_no_executor:
@@ -623,6 +760,7 @@ class ContinuousRunnerManager:
             paused=bool(state and state.get("paused")),
             paused_at_ms=state.get("pausedAt") if state else None,
             counters=state.get("counters") if state else None,
+            models=models, engine_started_at=self._engine_started_at,
             on_exit=self._update_state_on_exit)
         self._runners[registration_id] = runner
         if self._retention is not None and self._start_threads:

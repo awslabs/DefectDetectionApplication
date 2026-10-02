@@ -753,18 +753,36 @@ A resolution change makes the worker create a new segment.
   |---|---|
   | Paused | Wait. Resuming ticks at once. |
   | Session not streaming | Record one `streamUnavailable` event per outage, then poll every 0.5 s at most. Tick at once when streaming resumes. |
+  | Model not ready (`ModelGate.check()` returns a `ModelWait`) | Record one `modelUnavailable` event per wait, then re-check every 3 s at most. Insert no run row, and clear the schedule so the first tick after the wait is immediate. A wait past 600 s is reported as stalled. |
   | No frame newer than the last processed (`latest_frame(after=last seq, wait_ms=0)` returns none) | Count `skippedNoNewFrame`. |
   | Otherwise | Insert a pending `WorkflowExecution` with `trigger_context_json = {"source": "continuous", "frameSeq", "frameAcquiredAtMs", "tickAtMs"}`, put the frame in the `FrameHandoff` under the execution id, then call the registered executor on the runner thread. |
 
+- **Model gate: `workflow_engine/model_gate.py`** (new; Requirements 11.1, 11.11, 11.12). After a LocalServer deployment Greengrass restarts the dependent model components, and each one's Startup rewrites its entries in the Triton model repository. A continuous registration persisted as running resumes within seconds of the backend's start, so without a gate its first runs load a model whose files are missing or half-written, and edgemlsdk's cached state can then stay `LOADING` indefinitely (finding 16).
+  - `ModelGate(models, *, repo, client_provider, repo_has_models, clock, wall, engine_started_at)`. `check()` returns None when every model is ready, and otherwise a `ModelWait` of `model`, `triton_model`, `state`, `reason`, `since_ms` and `stalled`. `dda_triton` and `utils` are imported lazily, inside functions, because `triton_edge_client` imports the on-device `panorama` module.
+  - **Model names** are the distinct `args["model"]` values of every `emltriton` element in the compiled document's `segments[].elements[]`. `ContinuousRunnerManager._desired()` collects them, passes them to the runner as a `models` kwarg, and carries them in the desired tuple and in `runner_fingerprint` (as a defaulted argument, so two-argument calls still work), so a changed model name restarts the runner. A document with no `emltriton` element gets no gate and makes no Triton call.
+  - Each model is resolved the way the executor does, with `resolve_triton_model_name(name, _loaded_ensemble_models(repo))` from `pipeline_executor.py`, against `/aws_dda/dda_triton/triton_model_repo`. A resolved name with no directory in the repository, or a repository that `utils.feature_configs_utils.triton_repo_has_models()` reports as empty, is `NOT_DEPLOYED` and no load is requested. The Triton client is not created in that case: creating it against an empty repository hangs.
+  - **Files.** The state is `INCOMPLETE`, with a reason naming the missing or changing path, unless all of these hold: the model's `config.pbtxt` exists; every step model it names (`model_name: "…"`, such as `base_*` and `marshal_*`) has a `config.pbtxt`; a step on the python backend has `<version>/model.py`; no `.staging-<name>-*` sibling exists (model_convertor's `_atomic_publish_model_dir` staging directory); and the newest mtime of those paths is more than 10 s old.
+  - **State** is read fresh, from `TritonEdgeClient.get_instance().list_triton_models(quiet=True)`: `ListModels` refreshes edgemlsdk's cached states from Triton's index, while `get_model_status` returns only the cache, which stayed `LOADING` for 19 minutes on the MIC-730. `triton_edge_client.py` gains the `quiet` flag, which logs the index at DEBUG instead of INFO (Requirement 12.6). A model missing from the list is `UNKNOWN`.
+  - **Acting on the state.** `READY` is ready; `LOADING` and `UNLOADING` wait; `UNKNOWN` requests one load (`start_triton_model`), but only once the files are complete and stable and either the model directory's mtime is newer than `engine_started_at` or 120 s have passed since it — the model components rewrite the repository about 26–31 s after the backend starts (the Dell and the MIC-730); `UNAVAILABLE` requests a load again after 15, 30, 60 and 120 s and then every 300 s, carrying Triton's `reason`.
+  - **Fail open.** Any unexpected exception while reading the state — the import, the client, or the list — counts as ready, with one WARNING log. The executor's per-run gate (`dda_triton/model_readiness.ensure_model_ready`) still runs as before.
+  - **In the loop**, the gate runs after the stream check and before scheduling: at the runner's start, after any run that did not complete (at most once per 3 s), and every 3 s while waiting. While waiting the runner sets `_next_tick = None`, inserts no row, and returns 3 s. `modelUnavailable` is counted once per wait; it is a new counter, last in `COUNTER_KEYS`, and `new_counters` already accepts stored counters that lack it. The runner logs one WARNING when a wait starts, one INFO ("READY; resuming") when it ends, and a WARNING every 300 s while stalled — never a line per poll.
+  - `engine_started_at` is the manager's own construction wall time, which `runtime.py` builds at engine start.
 - **Frame handoff.** The runner must read the Latest_Frame to know a newer one exists, because the worker only reports its sequence number every 2 s. So it hands that frame to the run: the executor takes it from `stream_feed.FRAME_HANDOFF` and analyzes exactly the tick's frame. Only without a matching handoff does it read the camera (`after = frameSeq - 1`). This keeps each sequence number to at most one run, and a frame is copied out of the worker once. The runner discards its entry when the run returns.
 - **No queueing.** Ticks that elapse during a run, including one at the moment it ends, are counted as `skippedBusy`, and the schedule advances to the next future tick. Ticks that a late loop missed are counted the same way.
 - **Runners** are keyed by registration. A change to the feed (camera, rate, frame age, retention, output nodes) restarts the runner with its counters. Stopping one lets its in-flight run finish.
 - **State table.** Pause state and counter snapshots persist in a new `workflow_continuous_state` table, added by an additive alembic migration. Its columns are `registration_id` (PK), `paused`, `paused_at`, `counters_json`, and `updated_at`. A superseded registration's row is deleted along with it.
 - **API**, under the existing workflow API authorization:
-  - `GET /workflows/registrations/{id}/continuous` returns the state, configured and effective rates, counters, stream health, and `pausedAtMs`, plus `cameraSourceId` and `runInProgress`. Any other registration gets 404.
+  - `GET /workflows/registrations/{id}/continuous` returns the state, configured and effective rates, counters, stream health, and `pausedAtMs`, plus `cameraSourceId`, `runInProgress` and `modelReadiness`. Any other registration gets 404.
+    - The state's precedence is paused > `waiting_for_stream` > `waiting_for_model` > running. `modelReadiness` is the current `ModelWait` as a document, or null. The `get_continuous_status` docstring in `workflow_engine/api.py` records both.
   - `POST …/continuous/pause` and `POST …/continuous/resume` return the updated status.
 - **Logging**
   - Runs execute inside the `continuous_run` context variable (`dda_logging/run_context.py`).
+  - Every per-run line has to be INFO or DEBUG for that filter to drop it. Finding 18 (task 28.6) closed the two gaps found on hardware:
+    - `GstPipelineManager.run_pipeline` and `parse_msg` logged seven progress and result lines per run at WARNING. They are INFO now.
+    - edgemlsdk's per-call native INFO traces reach Python through `utils.edgemlsdk_trace_listener`, mostly on GStreamer streaming threads, where the context is not set. There are four: the model status `emltriton` reads on every buffer, `LoadModel` on an already loaded model, and each result's anomaly flag and confidence. `utils/edgemlsdk_trace_levels.py` lists them, and the listener logs them at DEBUG on every path. A test pins the list to the native format strings.
+  - The sinks are bounded whatever the volume (Requirement 12.10):
+    - `src/docker-compose.yaml` gives every service `json-file` logging with `max-size: 50m` and `max-file: 3`. Docker never rotates a json-file log by default.
+    - `application.log` and `service.log` keep their hourly rotation and 14-day age limit. `dda_logging/log_rotation.py`'s `SizeCappedTimedRotatingFileHandler` also deletes the oldest rotated files at each rotation, until they total at most 512 MiB and 128 MiB, but never the newest one.
   - While it is set on the logging thread, a filter on the console and `application.log` handlers drops INFO and DEBUG records from the `workflow_engine` and `gstreamer` loggers. `RunLogCapture` still records them.
   - The runner logs state transitions and one summary line per minute.
 
@@ -776,7 +794,7 @@ A resolution change makes the worker create a new segment.
 - Run directories keep the `{workflow_id}/{execution_id}` layout, from which the marshal model derives the workflow id.
 
 **Classification.** `on_run_complete(execution_id, keep_recent_runs, keep_notable_runs, output_ids, stream_node_id)` reads the run's row and its metadata JSON. It marks the run notable when any of these holds:
-- The run failed.
+- The run failed, unless its error is `INTERRUPTED_ERROR` (see Startup reconciliation below). `classify_run` takes the error as a defaulted `error=None` argument and `_record` passes `row.error`; otherwise every restart would promote its staged interrupted runs to persistent storage and push real Notable_Runs out.
 - An output binding (`digital_output`, `mqtt_publish`, `opcua_write`, `modbus_write`) succeeded with a node-status detail other than a `not sent: …` skip.
 - An `event.*.transition` is `activated` or `cleared`.
 
@@ -795,6 +813,13 @@ For the device cap, the oldest Notable_Runs outside a recent window go first, th
 Eviction deletes the `workflow_executions` row and then its directory. A directory is removed only when it is named for its execution and sits under a retention root. Only runs whose trigger source is `continuous` are ever retained or deleted, so every other run keeps its history, including a manual run of a paused continuous workflow (Requirement 12.8).
 
 At first use, existing continuous runs are indexed in `tickAtMs` order and classified from their stored data. Staged directories that no row owns are removed.
+
+**Startup reconciliation** (`reconcile_interrupted()`; Requirement 12.9). A run that a previous backend process left `pending` or `running` is never finished by anyone, so its staging is never evicted: on the MIC-730 seven `running` and three `pending` rows kept 23–27 runs staged per workflow instead of 20, and the count grows with every restart (finding 17).
+- It selects every `workflow_executions` row whose Trigger_Context is continuous and whose status is `pending` or `running` — prefiltered with `_CONTINUOUS_LIKE`, then confirmed with `is_continuous_context` — and makes each one `failed`, with `error = INTERRUPTED_ERROR` (a new module constant, "Interrupted: the backend stopped before this continuous run finished") and `finished_at` set to now when it is unset.
+- It adds the count to each registration's `failed` in `WorkflowContinuousState.counters_json`, where that row exists; it indexes the rows too when the index is already loaded (`_loaded`), so the recent window then evicts the surplus staged directories back to `keep_recent_runs`.
+- It returns the count and logs one INFO line with it when the count is not zero.
+- `runtime.start_workflow_engine` calls it in its own try/except right after `RunRetention()` is created — before `register_workflow_executor` and before the ContinuousRunnerManager's first `on_registrations_changed`. It is contained: an exception is logged and startup continues.
+- Triggered and manual runs are never touched, including a manual run of a paused continuous workflow (Requirement 12.8).
 
 **Serving.** Artifact routes already read `execution.output_dir`, so staged and promoted runs are served without route changes.
 
@@ -850,6 +875,7 @@ At first use, existing continuous runs are indexed in `tickAtMs` order and class
 - **`components/deployed-workflow/`**
   - A `ContinuousStatusPanel` in the details view shows the state, configured and effective rates, camera state, and counters, with pause and resume controls.
     - The status is polled every 2 s. A 404 means the registration does not run continuously, so the page behaves as before.
+    - `waiting_for_model` is labelled "Waiting for the model", with the `pending` indicator, and a "Model waits" counter shows `modelUnavailable`. While `modelReadiness` is set the panel names the model, its Triton state and its reason; a `stalled` wait adds a warning suggesting a backend restart once the model components are running. `api/WorkflowRegistrationAPI.ts` gains the state in `ContinuousState`, the optional `modelUnavailable` counter, and an optional `modelReadiness` on `ContinuousStatus`.
   - For a continuous registration, the executions table lists the 50 newest runs, with a Recent/Notable filter (`GET …/executions?limit=50&notable=true`).
     - The details query stops polling the full history, since a continuous workflow always has a run in flight.
     - "Run workflow" shows only while the workflow is paused (Requirement 11.7).
@@ -1048,14 +1074,30 @@ The probe also reports `rtspTls` (GIO TLS for `rtsps`) and `rtmpTls` (FFmpeg's `
 ```jsonc
 {
   "registrationId": "...",
-  "state": "running",                // running | paused | waiting_for_stream
+  "state": "running",                // running | paused | waiting_for_stream | waiting_for_model
   "configuredFps": 2.0, "effectiveFps": 1.8,
   "counters": {"started": 1200, "completed": 1195, "failed": 5, "skippedBusy": 40,
-               "skippedNoNewFrame": 3, "notable": 12, "outputsSent": 9, "streamUnavailable": 1},
+               "skippedNoNewFrame": 3, "notable": 12, "outputsSent": 9, "streamUnavailable": 1,
+               "modelUnavailable": 1},
   "streamHealth": {"...": "..."},
   "pausedAtMs": null,
   "cameraSourceId": "cfg-7",
-  "runInProgress": false
+  "runInProgress": false,
+  "modelReadiness": null             // or the current wait, see below
+}
+```
+
+While the runner waits for a model, `state` is `waiting_for_model` and `modelReadiness` holds the wait:
+
+```jsonc
+{
+  "model": "model-yolo-test",           // the document's emltriton model name
+  "tritonModel": "model-yolo-test-jetson-xavier-jp5",  // the resolved repository name
+  "state": "LOADING",                   // READY | LOADING | UNLOADING | UNAVAILABLE | UNKNOWN
+                                        //   | NOT_DEPLOYED | INCOMPLETE
+  "reason": "base_model-…/8/model.py is missing",
+  "sinceMs": 1790000000000,             // when this wait started
+  "stalled": false                      // true past 600 s
 }
 ```
 
@@ -1403,6 +1445,9 @@ It SHALL never select a decoder that is absent from the capabilities.
 | Session limit reached | Lease refused; the registration stays invalid until capacity frees | Registration reason, or a connection test error |
 | On-trigger run with no fresh frame | Run failed, with the failing node set to the stream node | Run error naming the camera and its health state |
 | Continuous stream outage | Runs pause; one event is recorded per outage | Continuous status `waiting_for_stream` |
+| A model a continuous workflow uses is not READY in Triton, for example while the model components rewrite the repository after a LocalServer deployment | Runs pause; one event is recorded per wait; a load is requested once the repository files are complete and stable; a wait past 600 s is stalled | Continuous status `waiting_for_model` with `modelReadiness`, and the `modelUnavailable` counter |
+| A continuous run left `pending` or `running` by a previous backend process | Marked failed at startup with `INTERRUPTED_ERROR` and a finish time, counted as failed, and not notable, so retention evicts its staging | One INFO line with the count, and the run's error in the executions table |
+| A log flood from any source, such as every run of a continuous workflow failing | Container logs rotate at 3 x 50 MB; rotated `application.log` and `service.log` files are deleted oldest first beyond 512 MiB and 128 MiB | The disk use stays bounded; older log history rotates out sooner |
 | Manual trigger on a running continuous workflow | 409 `CONTINUOUS_WORKFLOW_RUNNING` | LocalServer UI message |
 | Zone set but frame size unknown | Node error outcome; downstream nodes gated; the run completes | Node status error |
 | No Detection_List at a counter or association node | Zero counts and a node warning | Node status warning |

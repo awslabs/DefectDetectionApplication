@@ -163,6 +163,10 @@ class TestImageSourceAccessor(LocalServerBaseTestCase):
             "imageCrop": None,
             "device": None,
             "deviceName": None,
+            # Columns added later: a camera's persisted advanced settings
+            # (c368c9f) and a stream camera's settings (rtsp-rtmp-stream-cameras).
+            "advancedSettings": None,
+            "streamSettings": None,
         }
         self.session.add(ImageSource(**self.img_src_data))
         self.session.commit()

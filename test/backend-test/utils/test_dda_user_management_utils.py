@@ -14,7 +14,7 @@
 import os
 
 from local_server_base_test_case import LocalServerBaseTestCase
-from unittest.mock import patch, call
+from unittest.mock import Mock, patch, call
 from utils import constants
 
 OK = (True, b"ok")
@@ -93,17 +93,32 @@ class TestGetAllParentDirectories(LocalServerBaseTestCase):
         self.assertEqual(result, ["/", "/aws_dda", "/aws_dda/a", "/aws_dda/a/b"])
 
 
+def _module_os(exists):
+    """A stand-in for ``dda_user_management_utils``'s own ``os`` name.
+
+    These tests used to patch ``os.path.exists`` and ``os.makedirs``
+    themselves, which replaces them for every thread: a background thread
+    of the backend under test (the camera-registry sync saving its state
+    under /aws_dda) then called the mock too, and a JP6 build gate failed
+    with ``makedirs`` "called 2 times" (2026-10-01). Patching only this
+    module's ``os`` keeps the tests' view of the calls to their own.
+    """
+    fake = Mock(name="os")
+    fake.path.exists.return_value = exists
+    return fake
+
+
 class TestCreateDdaUserDirectory(LocalServerBaseTestCase):
 
     def test_creates_dir_and_sets_perms_excluding_root_and_slash(self):
         from utils import dda_user_management_utils as dda
-        with patch("utils.dda_user_management_utils.os.path.exists", return_value=False), \
-                patch("utils.dda_user_management_utils.os.makedirs") as makedirs, \
+        fake_os = _module_os(exists=False)
+        with patch.object(dda, "os", fake_os), \
                 patch("utils.dda_user_management_utils.update_dda_user_file_permissions") as update_perms:
             result = dda.create_dda_user_directory("/aws_dda/a/b")
 
         self.assertEqual(result, "/aws_dda/a/b")
-        makedirs.assert_called_once_with("/aws_dda/a/b")
+        fake_os.makedirs.assert_called_once_with("/aws_dda/a/b")
         # "/" and DDA_ROOT_FOLDER (/aws_dda) are excluded; only deeper dirs get perms.
         updated = [c.args[0] for c in update_perms.call_args_list]
         self.assertEqual(updated, ["/aws_dda/a", "/aws_dda/a/b"])
@@ -112,16 +127,17 @@ class TestCreateDdaUserDirectory(LocalServerBaseTestCase):
 
     def test_skips_makedirs_when_exists(self):
         from utils import dda_user_management_utils as dda
-        with patch("utils.dda_user_management_utils.os.path.exists", return_value=True), \
-                patch("utils.dda_user_management_utils.os.makedirs") as makedirs, \
+        fake_os = _module_os(exists=True)
+        with patch.object(dda, "os", fake_os), \
                 patch("utils.dda_user_management_utils.update_dda_user_file_permissions"):
             dda.create_dda_user_directory("/aws_dda/a/b")
-        makedirs.assert_not_called()
+        fake_os.makedirs.assert_not_called()
 
     def test_makedirs_oserror_propagates(self):
         from utils import dda_user_management_utils as dda
-        with patch("utils.dda_user_management_utils.os.path.exists", return_value=False), \
-                patch("utils.dda_user_management_utils.os.makedirs", side_effect=OSError("denied")), \
+        fake_os = _module_os(exists=False)
+        fake_os.makedirs.side_effect = OSError("denied")
+        with patch.object(dda, "os", fake_os), \
                 patch("utils.dda_user_management_utils.update_dda_user_file_permissions"):
             with self.assertRaises(OSError):
                 dda.create_dda_user_directory("/aws_dda/a/b")

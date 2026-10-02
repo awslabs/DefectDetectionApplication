@@ -34,8 +34,16 @@ import sys
 import structlog
 from structlog.types import EventDict, Processor
 
+from dda_logging.log_rotation import MIB, SizeCappedTimedRotatingFileHandler
 from dda_logging.redaction import install_redaction
 from dda_logging.run_context import install_continuous_run_filter
+
+#: Total bytes the rotated application.log and service.log files may hold
+#: (rtsp-rtmp-stream-cameras finding 18, Requirement 12.10). Normal use
+#: writes about 4 MB of application.log a day, so the 14-day count limit
+#: still decides; the caps only bite during a flood.
+APPLICATION_LOG_MAX_ROTATED_BYTES = 512 * MIB
+SERVICE_LOG_MAX_ROTATED_BYTES = 128 * MIB
 
 
 # https://github.com/hynek/structlog/issues/35#issuecomment-591321744
@@ -127,14 +135,18 @@ def setup_logging(json_logs: bool = False, log_level: str = "INFO"):
     if not os.path.exists(log_path):
         os.makedirs(log_path)
 
-    # Rotate every hour, delete entries older than 14 days
-    service_logs_handler = logging.handlers.TimedRotatingFileHandler(
-        log_path + "/service.log", when='h', interval=1, backupCount=24*14, encoding='utf-8')
+    # Rotate every hour, delete entries older than 14 days, and keep the
+    # rotated files under a total size cap (see dda_logging.log_rotation)
+    service_logs_handler = SizeCappedTimedRotatingFileHandler(
+        log_path + "/service.log", max_rotated_bytes=SERVICE_LOG_MAX_ROTATED_BYTES,
+        when='h', interval=1, backupCount=24*14, encoding='utf-8')
     service_logs_handler.setFormatter(formatter)
 
-    # Rotate every hour, delete entries older than 14 days
-    application_logs_handler = logging.handlers.TimedRotatingFileHandler(
-        log_path + "/application.log", when='h', interval=1, backupCount=24*14, encoding='utf-8')
+    # Rotate every hour, delete entries older than 14 days, and keep the
+    # rotated files under a total size cap (see dda_logging.log_rotation)
+    application_logs_handler = SizeCappedTimedRotatingFileHandler(
+        log_path + "/application.log", max_rotated_bytes=APPLICATION_LOG_MAX_ROTATED_BYTES,
+        when='h', interval=1, backupCount=24*14, encoding='utf-8')
     application_logs_handler.setFormatter(formatter)
 
     # Stream camera credentials never reach a log (rtsp-rtmp-stream-cameras

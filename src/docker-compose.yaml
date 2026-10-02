@@ -26,6 +26,17 @@ services:
     # 10s default). `docker compose stop`/`down` inherits this value as the
     # default timeout, so the recipe Shutdown scripts need no change.
     stop_grace_period: 120s
+    # Bound the container log (rtsp-rtmp-stream-cameras finding 18). Docker's
+    # json-file default never rotates, and the backend writes every log
+    # record to stdout as well as to application.log: continuous stream
+    # workflows once grew it by about 1 GB a day. These caps keep at most
+    # 3 x 50 MB per container; `docker logs` reads across the rotated files.
+    # The driver is named because max-size/max-file are json-file options.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     # Health gate (edge-deploy-reliability, Defect B): /healthcheck.py probes
     # the unauthenticated GET /health endpoint on 127.0.0.1:5000, falling back
     # to https://127.0.0.1:5443 (TLS when station authorization is enabled).
@@ -144,6 +155,12 @@ services:
     restart: always
     # See the stop_grace_period rationale on backend_tegra_gpu_enabled above.
     stop_grace_period: 120s
+    # See the logging rationale on backend_tegra_gpu_enabled above.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     # See the healthcheck rationale on backend_tegra_gpu_enabled above.
     healthcheck:
       test: ["CMD", "python3", "/healthcheck.py"]
@@ -207,6 +224,12 @@ services:
     network_mode: "host"
     # Auto-recover from crashes (see backend_tegra_gpu_enabled above).
     restart: unless-stopped
+    # See the logging rationale on backend_tegra_gpu_enabled above.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     image: flask-app
     privileged: true
     expose:
@@ -270,6 +293,12 @@ services:
     image: react-webapp
     # Auto-recover from crashes (see backend_tegra_gpu_enabled above).
     restart: unless-stopped
+    # See the logging rationale on backend_tegra_gpu_enabled above.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     # Basic liveness probe of the nginx-served app on the container port
     # (edge-deploy-reliability, Defect B). The react-webapp image is
     # nginx:stable-alpine — busybox wget is available, curl is not, so the

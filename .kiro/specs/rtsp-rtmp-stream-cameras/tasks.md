@@ -33,6 +33,62 @@ Property test conventions:
 
 ## Resume Here (handoff, 2026-09-29)
 
+**Handoff to the kiro-cli harness (2026-09-30).** The owner paused interactive work for the day.
+- Everything below is committed at `8e8f845`, on both `origin/spec/rtsp-rtmp-stream-cameras` and `origin/integration/all-specs`.
+- Findings 16 and 17 became task 28.
+- The unattended harness runs 28.1–28.4, one at a time, and skips 25.x, 26.3, 27 and 28.5.
+  - Script: `.kiro/harness/run_spec_tasks.sh`, in tmux session `agents`, window `rtsp`.
+  - Logs: `~/kiro-cli-runs/rtsp-rtmp-stream-cameras/`.
+- The harness commits nothing, builds nothing, and touches no device or AWS account. Its changes stay uncommitted in this worktree.
+
+**Task 28 verified and committed (2026-10-02, 03:45Z). Resume here.**
+- **State.** Task 28 (findings 16, 17 and 18) is verified on all four device types and committed on `spec/rtsp-rtmp-stream-cameras` with this note, then fast-forwarded into `integration/all-specs`. The wip branches are deleted. 28.5 has the details.
+- **Verified builds.** All come from the same `src/`. Each passed every in-image gate, the harness stream stage (7 of 7) and a 30-minute soak with no failed run:
+  - JP5 `1.0.51` on the MIC-730
+  - JP6 `1.0.74` on the Orin
+  - JP7 `1.0.52` on thor1
+  - amd64 `1.0.47` on the Dell. The amd64 build first needed a test-only fix (28.5).
+- **Devices.** All four run those builds, with the `rtsp-verify-*` continuous workflows running and their logs capped. Pause them where the CPU is wanted.
+- **New findings, outside this spec (25.3).** Both need the owner's decision on where to fix them:
+  - 19: a vLLM engine construction hung and rolled back thor1's first `1.0.52` deployment. The cause is unknown, and the redeploy did not repeat it.
+  - 20: an explicit vLLM unload restarts the JP7 backend. The cause is found and reproduced.
+- **No temp Cognito user exists.** It was deleted on 2026-10-01 at 12:08Z. This cycle's only build (amd64) ran over SSM, without the Portal.
+- **Next, in order:**
+  1. 26.3: set the floor to the versions above, plus the `arm64_cpu` amendment the owner chose (skip plain `arm64` for now).
+  2. The Portal deploy (owner approval, and never during a component build), then the end-to-end Portal check (remaining-work item 5 below).
+  3. Task 27, then the cleanup list.
+  4. Rotate the Amcrest/Dell password. It was shared in chat again.
+
+**Paused by the owner (2026-10-01, 12:10Z). Superseded by the note above.**
+- **State.** `8e8f845` plus task 28 (findings 16, 17 and 18), uncommitted in this worktree. The verification snapshot is `wip/rtsp-rtmp-stream-cameras-task28-verify` (`8331a07`, pushed), with the same `src/` as the worktree. Details are in 28.5.
+- **Builds.** All three passed every in-image gate:
+  - JP5 `1.0.51`, on the MIC-730: verified.
+  - JP6 `1.0.74`, on the Orin: deployed.
+  - JP7 `1.0.52`, on thor1: deployed.
+  - amd64 is blocked by the in-image test failure described in 28.5.
+- **Devices.**
+  - MIC-730, Orin and thor1 run the new builds with the `rtsp-verify-*` continuous workflows running, as an unattended soak. Their logs are capped.
+  - The Dell runs the old `1.0.46`, with its continuous workflows paused so that its uncapped log does not grow.
+- **Stopped and removed.** No build, watcher or harness process is running on this host. The temp Cognito user was deleted at 12:08Z; recreating it for this cycle is already approved by the owner.
+- **Next, in order:**
+  1. Check that thor1's deployment `e8c4694a` COMPLETED.
+  2. Run the harness stage and a 30-minute soak on the Orin and on thor1.
+  3. Fix the amd64 in-image test failure, rebuild amd64, deploy it to the Dell (resume its workflows first), and run the same checks.
+  4. If a fix touches `src/`, rebuild the JP targets one at a time from the new snapshot, so the commit matches what was verified.
+  5. Commit on the spec branch, with the verified devices in the message. Fast-forward `integration/all-specs`, then delete the wip branch and the temp user.
+  6. 26.3: the floor versions, plus the `arm64_cpu` amendment the owner chose. Then the Portal deploy (owner approval, never during a build), then 27, then the cleanup list.
+
+**Update (2026-09-30, 19:40Z).**
+- The harness finished 28.1–28.4. The suites were rerun independently and are green, apart from the failures that already exist at `8e8f845`.
+- Findings 16 and 17 pass on the MIC-730 hot-patch, including a recreated deployment race (28.5).
+- The owner approved the temp Cognito user for the rebuilds. They are held for the owner's decision on finding 18, the continuous-run log flood (25.3).
+
+Next, for a human:
+1. Review the harness's diff, and the OUTCOME or BLOCKED bullets under 28.1–28.4.
+2. Do 28.5: hot-patch the MIC-730, then rebuild and deploy JP7, JP6, JP5 and amd64, one at a time. The temp Cognito user needs the owner's OK. Verify, then commit.
+3. Do 26.3 with the new versions, then the Portal deploy (with owner approval, and never during a build), then 27 and the cleanup list below.
+4. Rotate the Amcrest/Dell password. It was shared in chat again.
+
 At the owner's request, the work was committed and pushed to `integration/all-specs` before task 25 finished.
 
 **Status at handoff:**
@@ -49,7 +105,7 @@ At the owner's request, the work was committed and pushed to `integration/all-sp
 - **Soak results:** the Orin and Dell soaks passed. The MIC-730 soak passed everything except retention, which failed because of finding 17. The Amcrest checks passed on all three devices (25.3).
 - **Owner decisions (2026-09-30, second round):**
   - Commit fixes 14 and 15 once the soaks pass.
-  - Fix finding 16 in this spec. Finding 17 is fixed along with it.
+  - Fix findings 16 and 17 in this spec. The owner approved 17 at the harness handoff.
   - Skip plain `arm64` for now (26.3).
   - The owner supplied the Amcrest credentials in chat. Pass them only through the environment. **They should be rotated**, since they were shared in chat again.
 - **Uncommitted in the worktree until their device checks pass:** fix 14 (`Dockerfile.jp6` and its two goldens) and fix 15 (`stream_ingest/pipeline.py` and its tests).
@@ -1596,7 +1652,38 @@ graph TD
           - Workaround meanwhile: restart the backend once the model components report RUNNING after a LocalServer deployment.
           - **Owner decision (2026-09-30)**: fix it in this spec.
       17. **Runs interrupted by a backend restart are never finished.** On the MIC-730, after the deployment and the restart for finding 16, `workflow_executions` held continuous runs left `running` (7) or `pending` (3) by the previous backend process. Their `/dev/shm/dda-continuous` staging was never evicted, so 23–27 runs stayed staged per workflow instead of 20.
-          - The count stays bounded between restarts, but it grows with every restart. It is being fixed together with finding 16.
+          - The count stays bounded between restarts, but it grows with every restart.
+          - **Owner decision (2026-09-30)**: fix it in this spec, together with finding 16 (task 28).
+      18. **Fixed in task 28.6 (owner decision 2026-09-30: option (a), "flooding the logs will destabilize the system"). Continuous runs flood the backend log, and docker never rotates it.** This was found during the task 28 check on the MIC-730 (28.5), and it affects every current build.
+          - It is worse than first measured. `application.log` rotates hourly and keeps 14 days of files, which bounds its age but not its size. The MIC-730 held 1.6 GB of it, at 681–733 MB a day since the continuous workflows started; before that it ran at about 4 MB a day. 14 days at the flood rate is about 15 GB on persistent storage.
+          - About 12 lines per run reach the backend's stdout:
+            - 7 come from `gstreamer.gst_pipeline`, logged at WARNING ("Initializing GStreamer pipeline", "Triton confidence score", and so on). `ContinuousRunLogFilter` keeps every WARNING and drops only INFO and DEBUG, so these pass.
+            - 5 are native edgemlsdk traces that reach Python logging through `utils.edgemlsdk_trace_listener`: "Model … status is READY" three times, "is already loaded", and "Confidence". The filter does not cover that logger. The traces are also emitted on GStreamer threads, where the run context is not set.
+          - Measured rates:
+            - MIC-730, at about 4.3 runs/s: the log file grew 762 KB/min, about 1.1 GB/day. Its backend docker log reached 673 MB in 15.6 hours. The stock `1.0.50` process showed the same rate, so task 28 did not cause this.
+            - thor1, at about 10 runs/s: 1.57 MB/min of log output, about 2.2 GB/day.
+          - Docker keeps this output in an unrotated json-file log. Neither `src/docker-compose.yaml` nor the devices' `daemon.json` sets `max-size`.
+          - This breaks Requirement 12.6 and the intent of 12.7: flash wear, and a full disk on devices with small storage. The test devices have 0.8–1.7 TB free, so nothing on them is urgent.
+          - The options:
+            - (a) Fix it in this spec, before the task 28 rebuilds:
+              - Demote the per-run `gst_pipeline` lines to INFO. Check first which thread logs them, since the filter needs the run context.
+              - Quiet the per-buffer native traces.
+              - Bound the docker log with `max-size`/`max-file` in `docker-compose.yaml`. That file is preservation-tracked, so rebaseline it.
+            - (b) Ship task 28 without it and fix it later. That costs another rebuild cycle.
+      19. **Open, outside this spec. A vLLM engine construction can hang with no bound, and then the deployment rolls back.** Seen once, on thor1's JP7 `1.0.52` deployment `e8c4694a` (2026-10-01).
+          - At the new backend's start (11:46:04Z), the vLLM reconciler re-drove the load of the staged `qwen3-vl-8b-instruct`. `AsyncLLMEngine.from_engine_args` never returned.
+          - It runs on the vLLM runtime server's event loop, so the model component's unload (from its Shutdown script, 11:46:07Z) and every later load request waited behind it. After three 30-minute startup timeouts the component went BROKEN, and Greengrass rolled the whole deployment back to `1.0.51` at 13:31Z.
+          - The cause is unknown. The engine core writes to the container's stdout, and the rollback replaced the container, so its output was lost. `application.log` stops at "Loading vLLM model".
+          - Task 28 does not touch `vllm_runtime`, `app.py` or the startup order. The same `1.0.52` deployed cleanly on 2026-10-02 (`cecbee46`, load READY in 2 min 24 s), with the same concurrency: Triton loaded 8 ONNX models while the engine core forked.
+          - To catch the next one, `~/rtsp-verify/capture_backend_logs.sh` keeps the next backend container's stdout on the device's disk.
+          - A bound on the engine construction would turn the next hang into a FAILED load that can be retried, instead of a rolled-back deployment.
+      20. **Open, outside this spec. An explicit vLLM unload restarts the JP7 backend.** Seen on thor1's `1.0.52` redeploy (2026-10-02).
+          - The backend shut itself down at 01:57:42Z, 0.14 s after the reconciler's load finished, when the runtime processed the model component's queued unload. There was no docker kill event, the exit code was 0, and docker's restart policy restarted it (RestartCount 1).
+          - The cause, reproduced in the JP7 image: vLLM forks its EngineCore from the backend process, and the unload stops it with SIGTERM. On Python 3.11 a forked child shares the parent's signal wakeup fd, so the child's SIGTERM also runs the parent's asyncio SIGTERM handler. uvicorn 0.23.2 installs that handler with `loop.add_signal_handler`, so the main server shuts down.
+          - `~/rtsp-verify/wakeup_fd_fork_repro.py` prints `PARENT-GOT-SIGTERM` in the JP7 image (Python 3.11.16), and not on Python 3.14.
+          - The effect: a JP7 deployment that restarts a vLLM model component restarts the backend a second time, and stopping a vLLM model restarts the whole backend. Continuous workflows ride it out: they wait for their models and resume, and the startup reconciliation fails the runs it interrupted.
+          - Seen on JP7. Not checked on JP6 or JP5.
+          - Likely fixes: reset the wakeup fd in forked children (`os.register_at_fork(after_in_child=...)` calling `signal.set_wakeup_fd(-1)`), or install the signal handlers with `signal.signal`, as newer uvicorn does.
     - **Real camera (Amcrest PTZ, `rtsp://192.168.88.80:554/cam/realmonitor?channel=1&subtype=0|1`)**: H.264 Main, 1280x720 (main) and 640x480 (sub), no VUI timing, with an audio track. On JP5 with the current code, both streams connect with `nvv4l2decoder` and preview: the main stream (about 7 fps) in 7–9 s, the sub stream (30 fps) in 2–5 s. A wrong password gives `authentication_failed`, and the right one streams again. No response carries the password.
     - **Current code, hot-patched on the MIC-730 (JP5), 2026-09-29**: the Amcrest check passes. The harness stream stage passes 7 of 7, including the triggered stream workflow and the continuous rate, pause and resume. Every source the harness and the Amcrest check deleted left the shadow (8 retirements, no rejected report).
       - The 2-hour soak at 1 fps and 10 fps passed: 30,276 runs, none failed, no restart, the 10 fps workflow steady at 3.0–3.2 runs/s (it fell to 0.95 before fix 6), and the 90 s source outage recovered by the next 1-minute sample.
@@ -1713,6 +1800,244 @@ graph TD
     - Integrate into `integration/all-specs`
     - _Requirements: 17.6_
     - **OUTCOME (2026-09-29)**: Committed on `spec/rtsp-rtmp-stream-cameras` and pushed to `integration/all-specs` at the owner's request, before task 25 finished (see the note under task 25). The commit message records what was verified on which device. The feature floor is still empty, so the Portal cannot package a stream or scene-analytics workflow until 26.3.
+
+- [x] 28. Fix findings 16 and 17: continuous runs resume before the model is ready, and interrupted runs are never finished
+  - Numbered 28 so that existing references stay valid. It runs before the final checkpoint (27). The incidents are findings 16 and 17 in 25.3. **Owner decision (2026-09-30)**: fix both in this spec.
+  - Baseline at `8e8f845` on the build host: `test/backend-test/workflow_engine` gives 1812 passed and 9 skipped, and `dda_triton/test_model_readiness.py` gives 12 passed. These already fail at `8e8f845` and are not yours:
+    - `dda_triton/test_eml_triton.py` and `dda_triton/test_triton_edge_client.py`, which need the on-device `panorama` module
+    - `dda_triton/test_triton_inference_runtimes_bug.py::test_missing_module_raises_module_not_found`
+    - `dda_triton/test_triton_setup_preservation.py::test_cp_model_conversion_files_copies_same_files_to_same_destinations`
+    - the six tests in `camera_sync/test_server_setup_isolation.py`
+  - The device images run Python 3.10 (JP6) and 3.11 (JP5, amd64). The host venvs run 3.14. After editing backend files, compile them under 3.10 with the local image; this needs no pull and no build: `docker run --rm -v "$PWD":/w -w /w public.ecr.aws/docker/library/python:3.10-slim-bookworm python -m py_compile <files>`.
+  - Run the host security preservation suite after each code task: `PYTHONPATH=src/backend:test/backend-test ~/.venvs/dda-edge-tests/bin/python -m pytest test/backend-test/security/preservation -q -p no:cacheprovider`. Rebaseline any hash pin that an intended edit changes, in the same change, and name it in the OUTCOME.
+  - [x] 28.1 Amend requirements.md and design.md for findings 16 and 17
+    - Write the design of 28.2, 28.3 and 28.4 into the spec, in its existing style. Change nothing else, and write no code in this task.
+    - requirements.md:
+      - Requirement 11.1: runs begin within 10 seconds of the Stream_Session reaching `streaming` **and every model the workflow uses being READY**.
+      - Add to Requirement 11: WHILE a model the workflow uses is not READY in Triton, THE Continuous_Runner SHALL start no runs, SHALL record one model-unavailable event per wait, and SHALL resume at the next tick once every model is READY.
+      - Add to Requirement 11: THE Continuous_Runner SHALL request a model load only when the model's repository files are complete and have not changed for 10 s. It SHALL report a wait longer than 300 s as stalled.
+      - Add to Requirement 12: WHEN the backend starts, THE LocalServer SHALL mark every continuous run that a previous process left `pending` or `running` as failed, with an interrupted error. It SHALL count each such run as failed and retain it under the normal limits as a run that is not notable. Other runs are untouched (12.8).
+      - Requirement 16.2: the states are `running`, `paused`, `waiting_for_stream` and `waiting_for_model`.
+    - design.md:
+      - Component 14's loop table: a "Model not ready" row.
+      - The Continuous status JSON: the state list, `modelReadiness`, and the `modelUnavailable` counter.
+      - Component 15: startup reconciliation, and interrupted runs are not notable.
+      - The Error Handling table: one row for each finding.
+    - Check: `git diff --stat` shows only the two spec files (and tasks.md).
+    - **OUTCOME**: Spec text only — `git diff --stat` shows `requirements.md` (+7/-3), `design.md` (+48/-7) and this tasks.md, and no code, test or preservation-tracked file was touched. requirements.md: 11.1 now also requires every model the workflow uses to be READY; new 11.11 (no runs while a model is not READY, one model-unavailable event per wait, resume at the next tick) and 11.12 (request a load only when the repository files are complete and unchanged for 10 s; a wait past 300 s is stalled); new 12.9 (interrupted `pending`/`running` continuous runs are failed at startup with an interrupted error, counted as failed, retained under 12.1 as not notable, other kinds untouched per 12.8); 16.2's state list gained `waiting_for_model`. design.md: component 14's loop table gained a "Model not ready" row between the stream check and the frame check, plus a **Model gate** block specifying `model_gate.py` end to end (the `ModelGate(...)`/`ModelWait` surface and lazy `dda_triton`/`utils` imports, model names from `emltriton` `args["model"]` carried through `_desired()`, the `models` kwarg, the desired tuple and a defaulted `runner_fingerprint` argument, `resolve_triton_model_name` + `triton_repo_has_models()` giving `NOT_DEPLOYED` without creating the client, the five file conditions and the 10 s mtime quiet period giving `INCOMPLETE`, fresh state from `list_triton_models(quiet=True)` with the new `quiet` flag and why the cached `get_model_status` is not used, the per-state actions including the `UNKNOWN` single load with the mtime-or-120 s grace and the `UNAVAILABLE` 15/30/60/120/300 s backoff, fail-open with one WARNING, and the in-loop cadence, `_next_tick = None`, the `modelUnavailable` counter last in `COUNTER_KEYS`, the three log lines and `engine_started_at`); the status API bullet gained `modelReadiness` and the `paused > waiting_for_stream > waiting_for_model > running` precedence; the Continuous status JSON gained the fourth state, the `modelUnavailable` counter and a second block showing the `modelReadiness` document; component 15 gained the `INTERRUPTED_ERROR` exclusion in **Classification** (with `classify_run(..., error=None)` and `_record` passing `row.error`, and why) and a **Startup reconciliation** block for `reconcile_interrupted()` (selection via `_CONTINUOUS_LIKE` + `is_continuous_context`, the error constant and `finished_at`, the `counters_json` bump, indexing when `_loaded` so the recent window evicts the surplus staging, the returned count and INFO line, the contained call site in `runtime.start_workflow_engine` right after `RunRetention()`, and 12.8); component 17's `ContinuousStatusPanel` bullet gained the 28.4 UI (label, `pending` indicator, "Model waits" counter, the `modelReadiness` detail, the stalled warning, and the three `WorkflowRegistrationAPI.ts` type additions); and the Error Handling table gained one row per finding. Decisions: the new criteria were appended as 11.11/11.12 and 12.9 rather than renumbering, so every existing reference stays valid; no new Correctness Property was added, since 28.2–28.4 specify no property test and Property 21 stays true under a gate that only withholds runs; and the loop-table docstring in `continuous_runner.py`, which mirrors that table, is left to 28.2 because this task writes no code. Verification: no tests exist for spec prose, so only the security preservation guards were run — 4 passed, 3 skipped.
+  - [x] 28.2 Make the Continuous_Runner wait for its models to be READY (finding 16)
+    - Add a new module `src/backend/workflow_engine/model_gate.py` with `ModelGate(models, *, repo, client_provider, repo_has_models, clock, wall, engine_started_at)`.
+      - `check()` returns None when every model is ready. Otherwise it returns a `ModelWait` of `model`, `triton_model`, `state`, `reason`, `since_ms` and `stalled`.
+      - Import `dda_triton` and `utils` lazily, inside functions: `triton_edge_client` imports the on-device `panorama` module.
+    - Model names:
+      - They are the distinct `args["model"]` values of every `emltriton` element in `segments[].elements[]`.
+      - `ContinuousRunnerManager._desired()` collects them. Pass them to the runner as a new `models` kwarg.
+      - Add them to the desired tuple, and to `runner_fingerprint` as a defaulted argument so that two-argument calls still work. Update the tuple unpacking in `on_registrations_changed`.
+      - A document with no `emltriton` element gets no gate and makes no Triton call.
+    - For each model:
+      1. Resolve it the way the executor does: `resolve_triton_model_name(name, _loaded_ensemble_models(repo))` from `pipeline_executor.py`. The repo is `/aws_dda/dda_triton/triton_model_repo`.
+         - If the resolved name has no directory in the repository, the state is `NOT_DEPLOYED`, and no load is requested.
+         - If `utils.feature_configs_utils.triton_repo_has_models()` is false, the state is also `NOT_DEPLOYED`. Do not create the Triton client in that case: creating it against an empty repository hangs.
+      2. Files. All of these must hold, or the state is `INCOMPLETE`, with a reason that names the missing or changing path:
+         - The model's `config.pbtxt` exists.
+         - Every step model it names (`model_name: "..."`, such as `base_*` and `marshal_*`) has a `config.pbtxt`.
+         - A step with the python backend has `<version>/model.py`.
+         - No `.staging-<name>-*` sibling exists (the staging directory of model_convertor's `_atomic_publish_model_dir`).
+         - The newest mtime of those paths is more than 10 s old.
+      3. State. Read it fresh, from `TritonEdgeClient.get_instance().list_triton_models(quiet=True)`.
+         - `ListModels` refreshes edgemlsdk's cached states from Triton's index. `get_model_status` returns only the cache, which stayed `LOADING` for 19 minutes on the MIC-730.
+         - Add the `quiet` flag to `dda_triton/triton_edge_client.py`: when set, log the index at DEBUG instead of INFO (Requirement 12.6).
+         - A model that is missing from the list is `UNKNOWN`.
+      4. Act on the state:
+         - `READY`: the model is ready.
+         - `LOADING` or `UNLOADING`: wait.
+         - `UNKNOWN`: request one load (`start_triton_model`), and only when the files are complete and stable AND either the model directory's mtime is newer than `engine_started_at` or 120 s have passed since `engine_started_at`. The reason: after a LocalServer deployment, the model components rewrite the repository about 26–31 s after the backend starts (the Dell and the MIC-730).
+         - `UNAVAILABLE`: request a load again after 15, 30, 60 and 120 s, then every 300 s. Carry Triton's `reason`.
+      5. Fail open. Any unexpected exception while reading state (the import, the client, or the list) counts as ready, with one WARNING log. The executor's per-run gate (`dda_triton/model_readiness.ensure_model_ready`) still runs as before.
+    - `ContinuousRunner.step()`: run the gate after the stream check and before scheduling.
+      - Check at start, after any run that did not complete (at most once per 3 s), and every 3 s while waiting.
+      - While waiting: set `_next_tick = None`, insert no row, and return 3 s.
+      - Count `modelUnavailable` once per wait. It is a new counter, last in `COUNTER_KEYS`; `new_counters` already accepts stored counters that lack it.
+      - Log one WARNING when a wait starts, one INFO ("READY; resuming") when it ends, and a WARNING every 300 s while stalled. A wait becomes `stalled: true` after 300 s. Write no log line per poll.
+    - `status()`:
+      - Add the state `waiting_for_model`. The precedence is paused > waiting_for_stream > waiting_for_model > running.
+      - Add a field `modelReadiness`: `{model, tritonModel, state, reason, sinceMs, stalled}`, or null.
+      - Update the `get_continuous_status` docstring in `workflow_engine/api.py`.
+    - The manager passes `engine_started_at`: its own construction wall time. `runtime.py` builds it at engine start.
+    - Tests go in a new file, `test/backend-test/workflow_engine/test_workflow_continuous_model_gate.py`, using fakes and temporary repo directories only. Cover:
+      - The MIC-730 sequence:
+        1. The repository is mid-rewrite, with the base `model.py` missing: no load is requested, no run row is inserted, and the state is `waiting_for_model`.
+        2. Once the files are complete and stable, exactly one load is requested.
+        3. While the state is `LOADING`, the runner waits.
+        4. At `READY`, runs resume, with exactly one WARNING and one INFO.
+      - An unresolved name gives `NOT_DEPLOYED`, with no load.
+      - The 120 s grace for files older than the engine start.
+      - The `UNAVAILABLE` backoff.
+      - The stall after 300 s.
+      - Fail-open.
+      - No gate, and no Triton call, without `emltriton`.
+      - A runner restart when a model name changes.
+      - The status precedence.
+    - Keep `test/backend-test/workflow_engine` and `dda_triton/test_model_readiness.py` green.
+    - _Requirements: 11 (new criteria), 11.1, 16.2_
+    - **OUTCOME**: Landed `src/backend/workflow_engine/model_gate.py` (`ModelGate` / `ModelWait` exactly as designed: lazy `dda_triton`/`utils`/`pipeline_executor` imports, `resolve_triton_model_name` + `triton_repo_has_models` giving `NOT_DEPLOYED` without ever creating the client, the five file conditions and the 10 s mtime quiet period giving `INCOMPLETE` with the offending path in the reason, fresh state from `list_triton_models(quiet=True)` once per `check()`, the single `UNKNOWN` load behind the mtime-or-120 s grace, the 15/30/60/120/300 s `UNAVAILABLE` backoff carrying Triton's reason, `stalled` past 300 s, and fail-open with one WARNING), wired it into `ContinuousRunner` (new `models`/`engine_started_at`/`gate` kwargs, the gate run after the stream check and before scheduling at start / after a run that did not complete / every 3 s while waiting, `_next_tick = None` and a 3 s return while waiting, `modelUnavailable` last in `COUNTER_KEYS`, one WARNING at the start of a wait, one INFO at its end, a WARNING every 300 s while stalled, and `waiting_for_model` + `modelReadiness` in `status()` under the paused > waiting_for_stream > waiting_for_model > running precedence), added `document_model_names()` plus the `models` element of the desired tuple and of `runner_fingerprint` (defaulted, so two-argument calls still work), gave `TritonEdgeClient.list_triton_models` the `quiet` flag (DEBUG instead of INFO), and updated the `get_continuous_status` docstring and the runner's loop-table docstring. `runtime.py` needed no change: the manager's construction wall time *is* the engine start, so `engine_started_at` defaults to it (an injectable kwarg was added for tests). Tests: the new `test/backend-test/workflow_engine/test_workflow_continuous_model_gate.py` has 26 tests covering the four-stage MIC-730 sequence, `NOT_DEPLOYED` (unresolved name and empty repository), the staging sibling, the 120 s grace and its "repository newer than the engine start" converse, the `UNAVAILABLE` backoff schedule, the 300 s stall, one listing per check for several models, fail-open at both the gate and the runner, no gate/no Triton call without `emltriton`, the 3 s poll cadence, the restart on a changed model name, and the status precedence — `test/backend-test/workflow_engine` is 1838 passed / 9 skipped (was 1812/9), `dda_triton/test_model_readiness.py` 12 passed, `test/backend-test/security/preservation` 140 passed / 6 skipped, and the edited backend files compile under Python 3.10 in the slim image. One pre-existing test was updated in the same spec's file (`test_status_reports_rates_and_counters` pinned the counter key set, which the new counter intentionally changes). Decisions: the wait reports the state a load was requested *from* (so the poll right after the single `UNKNOWN` load still says `UNKNOWN`, then `LOADING`); a model seen `READY` clears its load-request memo so a later republish gets one fresh load; and no preservation-tracked file was touched, so no baseline needed rebaselining. Deferred to 28.4: the UI additions for `waiting_for_model` / `modelReadiness`.
+  - [x] 28.3 Finish interrupted continuous runs at startup (finding 17)
+    - Add `RunRetention.reconcile_interrupted()` in `workflow_engine/run_retention.py`:
+      - It selects every `workflow_executions` row whose Trigger_Context is continuous and whose status is `pending` or `running`. Prefilter with `_CONTINUOUS_LIKE`, then confirm with `is_continuous_context`.
+      - Each such row becomes `failed`, with `error = INTERRUPTED_ERROR` and `finished_at` = now when unset. `INTERRUPTED_ERROR` is a new module constant, for example "Interrupted: the backend stopped before this continuous run finished".
+      - It adds the count to each registration's `failed` in `WorkflowContinuousState.counters_json`, when that row exists.
+      - If the index is already loaded (`_loaded`), it indexes the rows too.
+      - It returns the count, and logs one INFO line with it when the count is not zero.
+      - It is contained: an exception is logged, and startup continues.
+    - `classify_run(..., error=None)`: a failed run whose error is `INTERRUPTED_ERROR` is not notable. Otherwise every restart would promote staged interrupted runs to persistent storage and push real Notable_Runs out. `_record` passes `row.error`.
+    - Call it in `runtime.start_workflow_engine`, in its own try/except, right after `RunRetention()` is created. That is before `register_workflow_executor`, and before the ContinuousRunnerManager's first `on_registrations_changed`.
+    - Never touch triggered or manual runs (Requirement 12.8), including a manual run of a paused continuous workflow.
+    - Tests go in `test_workflow_run_retention_units.py` or a new file, using its existing sqlite fixtures. Cover:
+      - Pending and running continuous rows become failed, with the error and a finish time.
+      - Triggered, manual, completed and failed rows stay unchanged.
+      - The counters are bumped.
+      - The index then evicts staged directories back to `keep_recent_runs`. The MIC-730 held 23–27 staged runs per workflow instead of 20.
+      - Interrupted runs are not notable, while other failed runs still are.
+      - If practical, a startup-order test for `runtime.start_workflow_engine`.
+    - _Requirements: 12.1, 12.4, 12.5, 12.8, and the new criterion in 12_
+    - **OUTCOME**: Landed `RunRetention.reconcile_interrupted()` in `src/backend/workflow_engine/run_retention.py` exactly as designed: it selects the `workflow_executions` rows prefiltered with `_CONTINUOUS_LIKE` and `status IN ('pending','running')`, confirms each with `is_continuous_context`, sets `status='failed'`, `error=INTERRUPTED_ERROR` (new module constant) and `finished_at=now` only when unset, bumps each registration's `failed` in `WorkflowContinuousState.counters_json` where that row exists (`_count_interrupted_locked`, tolerating a missing/broken/non-integer snapshot and never creating a row), indexes the rows when `_loaded` (`_index_interrupted_locked`, so the recent window then evicts the surplus), returns the count and logs one INFO line only when it is non-zero. `classify_run` gained a defaulted `error=None` and no longer calls a failed run notable when its error is `INTERRUPTED_ERROR`; `_record` passes `row.error`. `runtime.start_workflow_engine` calls it in its own try/except immediately after `RunRetention()`, before `register_workflow_executor` and before the ContinuousRunnerManager's first `on_registrations_changed`. Tests: 14 new tests in `test/backend-test/workflow_engine/test_workflow_run_retention_units.py` (`TestStartupReconciliation` + `TestStartupOrder`) cover pending/running → failed with the error and a finish time, an existing finish time kept, triggered/manual/completed/failed rows untouched, the per-registration counter bump including the no-state and broken-JSON cases, the MIC-730 23→20 staged-run eviction after the next completion, pickup by an already-loaded index, interrupted runs not notable while other failures still are (and not promoted out of staging), and both containment paths; the startup-order test drives the real `start_workflow_engine` with fakes and asserts the order `watcher → retention → reconcile → executor → continuous`. `test/backend-test/workflow_engine` is 1852 passed / 9 skipped (was 1838/9), and `test/backend-test/security/preservation` is 140 passed / 6 skipped with the two guard files green (4 passed / 3 skipped). Decisions: `RunRetention` gained an injectable `wall=time.time` kwarg so the finish time is testable (additive, matching `ModelGate`'s convention); the counter bump writes the `failed` key directly rather than importing `continuous_runner.new_counters`, avoiding a new module edge (`new_counters` still filters the snapshot on read); the method contains its own exceptions *and* runtime wraps it, since the task bullet and the design each state containment; and eviction is left to the normal `on_run_complete`/cap path rather than forced inside reconcile, as the design's "the recent window then evicts" describes. No preservation-tracked file was touched, so nothing needed rebaselining. Deferred: on-hardware verification on the MIC-730 (task 28.5).
+  - [x] 28.4 Show the model wait in the LocalServer UI
+    - In `src/frontend/src/api/WorkflowRegistrationAPI.ts`, add:
+      - `waiting_for_model` to `ContinuousState`
+      - an optional `modelUnavailable` counter
+      - an optional `modelReadiness` on `ContinuousStatus`: `{model, tritonModel, state, reason, sinceMs, stalled}`, or null
+    - In `src/frontend/src/components/deployed-workflow/details/ContinuousStatusPanel.tsx`:
+      - Label the new state "Waiting for the model", with the `pending` indicator.
+      - When `modelReadiness` is set, show the model, its Triton state and its reason. When `stalled` is set, show a warning that suggests restarting the backend once the model components are running.
+      - Add a "Model waits" counter.
+    - Follow the panel's existing patterns: add no new APIList keys, make tests mirror `staleTime: Infinity`, and remember that API errors carry `{message}`.
+    - Tests: extend `DeployedWorkflowDetails.continuous.test.tsx` with a waiting case and a stalled case. Run that file, and `npx tsc --noEmit`, in `src/frontend`.
+    - _Requirements: 16.2_
+    - **OUTCOME**: `src/frontend/src/api/WorkflowRegistrationAPI.ts` gained `waiting_for_model` in `ContinuousState`, an optional `modelUnavailable` on `ContinuousCounters`, a new exported `ModelReadiness` interface (`model`, `tritonModel`, `state`, `reason`, `sinceMs`, `stalled` — matching `ModelWait.as_document()`) and an optional `modelReadiness: ModelReadiness | null` on `ContinuousStatus`; both new fields are optional so a status document from an older device still type-checks. `ContinuousStatusPanel.tsx` labels the new state "Waiting for the model" with the `pending` indicator, adds `["modelUnavailable", "Model waits"]` last in `COUNTER_LABELS`, renders a "Model" value (the document's model name, a new `ModelStateIndicator` for the Triton/gate state, and the reason as secondary text) beside "Camera" whenever `modelReadiness` is set, and shows a `warning` Alert above the values for a `stalled` wait that names the Triton model and suggests restarting the backend once the device's model components are running. No new APIList key, no new query, and the existing panel patterns (ValueWithLabel, ColumnLayout, `apiErrorMessage`) are unchanged. Tests: `DeployedWorkflowDetails.continuous.test.tsx` gained a waiting case (state, model name, "Loading", the "Model waits" counter at 2, camera still streaming, no stalled warning) and a stalled case (the warning header and restart sentence, "Unavailable", the reason), and the existing counters test now also pins "Model waits" at 0 for a device that omits the counter — 12 passed in that file, 7 passed in `src/api/streamCameraClients.test.ts` (the only other suite referencing `ContinuousStatus`), `npx tsc --noEmit` clean, and `test/backend-test/security/preservation` 140 passed / 6 skipped with the two guard files green (4 passed / 3 skipped). Decisions: `ModelStateIndicator` maps the seven states to operator labels (READY→Ready success, LOADING/UNLOADING→in-progress, UNAVAILABLE→error, UNKNOWN→"Not loaded", NOT_DEPLOYED→"Not deployed", INCOMPLETE→"Being deployed") and falls back to the raw string with `pending`, mirroring `streamHealth.tsx`; the panel shows `model` rather than `tritonModel` in the value (design: "names the model, its Triton state and its reason") and uses `tritonModel` only in the stalled warning, where the deployed name is what an operator looks for. No preservation-tracked file was touched, so nothing needed rebaselining. Deferred: on-device confirmation of the panel (task 28.5).
+  - [x] 28.6 Bound the component log (finding 18)
+    - Numbered 28.6 so that references to 28.5 stay valid. It is done before 28.5's rebuilds, so that one build cycle carries findings 16, 17 and 18.
+    - Make every per-run line of a continuous run INFO or below, so the continuous-run filter drops it. Log edgemlsdk's per-call native INFO traces at DEBUG. Cap the container logs and the rotated `application.log` and `service.log` files by size.
+    - _Requirements: 12.6, 12.10_
+    - **OUTCOME (2026-10-01)**: Landed as designed in component 14 ("Logging") and Requirement 12.10.
+      - The changes:
+        - `gstreamer/gst_pipeline.py`: the seven per-run lines are INFO. Only the relay of GStreamer's own WARNING messages stays at WARNING.
+        - New `utils/edgemlsdk_trace_levels.py`: the four per-call native formats, which `utils/edgemlsdk_trace_listener.py` logs at DEBUG.
+        - New `dda_logging/log_rotation.py`, used by `custom_logging.py`: rotated files are capped at 512 MiB for `application.log` and 128 MiB for `service.log`.
+        - `src/docker-compose.yaml`: every service gets `json-file` logging with `max-size: 50m` and `max-file: 3`.
+      - Rebaselined for the intended compose edit, each diff exactly the four `logging` blocks:
+        - the compose sha256 `30582c98…` → `376d3c94…`, in `security/baselines/docker_baseline_out_of_scope.json` and `backend_jammy_pkgs/baselines/docker-compose.yaml.sha256.txt`;
+        - with their own `--regenerate` entry points: `deploy_reliability/goldens/docker_compose_structure.golden.json`, `docker_compose_defect_e_baseline.sha256.golden.txt`, and `vllm_hf_cache/goldens/hf_home_masked_compose_structure.golden.json`. The recipe goldens that the same entry points rewrote are unchanged.
+      - Tests:
+        - New `workflow_engine/test_component_log_bounds.py`, 31 passed. 6 of them fail on the pre-fix code. They cover the runner's levels in and out of a continuous run, the native list against the C++ format strings, the listener's levels, the rotation cap (including a real rollover), and the compose caps.
+        - The capped rollover is also checked under Python 3.10 and 3.11 containers.
+        - `workflow_engine`: 1883 passed, 9 skipped. `deploy_reliability` 72, `backend_jammy_pkgs` 46, `build_save_pkgs` 21 and `vllm_jp7_engine_cuda_init` 16 passed.
+        - Security preservation: 140 passed, 6 skipped on the host; 138 passed, 8 skipped in the `flask-app` container. The guards pass.
+        - The `flask-app` container's real-GStreamer suites with the new file: 88 passed.
+        - These failures predate this task, and each fails identically on a pristine `8e8f845` copy: `vllm_hf_cache`'s `vllm_model_prep.py` hash pin, the 9 known `dda_triton`/`camera_sync` failures, `camera_sync/test_property_portal_change_round_trip.py` (a Python 3.14 multiprocessing environment error), and the collection errors in the host `gstreamer/` and `utils/` directories.
+      - On the MIC-730 (hot-patch, 2026-10-01 02:27Z), with the same two continuous workflows at 1.0 and 3.25 runs/s:
+        - The backend's stdout fell from 3,360 lines (542 KB) a minute to 13 lines (5 KB). What is left: the two runners' per-minute summaries, and 11 `workflow_engine.watcher` errors a minute for an invalid wrong-architecture registration (pre-existing, about 3 MB a day; not changed here).
+        - `application.log` fell from about 733 MB a day to about 7 MB.
+        - The device's `docker compose` v2.24.7 accepts the new compose file and resolves the `logging` block for all four services.
+      - The container log caps take effect when a deployment recreates the containers, so they are checked in 28.5.
+  - [x] 28.5 Verify 28.2 and 28.3 on hardware, then commit (human only; the harness skips this task)
+    - These are on-device changes, so per the build steering they are committed only after this task.
+    - The rebuilds also carry 28.6. For each deployed build, also check that `docker inspect` shows the backend's `LogConfig` with `max-size: 50m` and `max-file: 3`, and that the backend's log stays at a few lines a minute.
+    - **PROGRESS (2026-09-30), MIC-730 hot-patch**: the task 28 backend was hot-patched onto the MIC-730's `1.0.50` at 19:14Z. Results are in `~/rtsp-verify/results/mic730-task28/`, and `task28_state.sh` takes the snapshots.
+      - The backup of its `1.0.50` files is `~/dda-hotpatch-backup/20260930T191421Z` on the device. Do not run `hotpatch_backend.sh --restore` here: it restores the oldest backup, which holds the `1.0.49` files.
+      - **Finding 17**:
+        - The first start failed the 10 continuous runs that earlier processes had left `pending` or `running`, and added them to the `failed` counters.
+        - The recent window then evicted them together with their staging: 24 and 26 staged runs fell to 20 and 21, and stayed at 20–21.
+        - A second restart failed the one run it interrupted.
+      - **Finding 16, plain restart**:
+        - Both workflows reported `waiting_for_model` (`UNKNOWN`) from 19:14:39Z.
+        - The gate requested one load at 19:16:38Z, 120 s after the engine started, and the workflows resumed at 19:17:00Z.
+      - **Finding 16, the deployment race**:
+        - The backend was restarted, and 13 s later so was the model component `model-yolo-test-jetson-xavier-jp5` (`greengrass-cli component restart`). The component rewrote the repository, as it does in a deployment.
+        - The status went from `UNKNOWN` to `INCOMPLETE` ("… changed 2.7 s ago"), then `LOADING` (the component's own load), then running. That was 38 s after the backend restart.
+        - There was one load request, no failed load, and no failed run. On the `1.0.50` code this sequence hung the workflows for 19 minutes.
+      - **Harness and stability**: the harness stream stage passes 7 of 7 (92 s). 18 minutes later no run had failed, the backend had not restarted and was healthy, and the workflows ran at 1.0 and 3.27 runs/s.
+      - This check also found finding 18 (25.3), which needs an owner decision before the rebuilds.
+    - **Verification builds (2026-10-01)** are built from `wip/rtsp-rtmp-stream-cameras-task28-verify`, which snapshots the worktree on top of `8e8f845` without touching the spec branch. The temp Cognito user was recreated with the owner's OK.
+    - **JP5 `1.0.51` on the MIC-730: passed.**
+      - The build: portal job `de714248` on `srv-aac90870`, from `6428049`, took 13 minutes with cached layers. Every in-image gate passed, including the backend unit tests and the stream components gate.
+      - Deployed as a revision of the device's deployment (`a429d14a`, `1.0.50` → `1.0.51`) at 02:56Z, with both continuous workflows running. Results are in `~/rtsp-verify/results/mic730-task28-deploy/`.
+      - Through the deployment, the status went:
+        - `waiting_for_stream` at the new backend's start (02:57:26Z);
+        - then `waiting_for_model`: first `NOT_DEPLOYED` (the repository was being rewritten, so the name did not resolve), then `INCOMPLETE` ("… changed 2.9 s ago"), then `LOADING`;
+        - then `running`, at 03:02:14Z.
+        - The model components requested the loads at 02:57:57Z. Triton loads one model at a time, and the three models took 4 min 17 s. The gate requested no load itself. No run failed (the counters stayed at 3 and 61, both from earlier days), and no model was stuck.
+      - That 4 min 35 s wait is a normal deployment, and it came close to the 300 s stall threshold, which would have advised a backend restart. The threshold is now 600 s, the per-run gate's `READY_TIMEOUT_S`, with the UI alert and spec updated to match (`0b8af82`).
+      - Harness stream stage: 7 of 7 (90 s).
+      - After the deployment: no `pending` or `running` leftovers, and 20–21 staged runs per workflow.
+      - Soak, 28 minutes from 03:06Z: no failed run in 7,308, no restart, healthy; 0.98–1.00 and 3.25–3.52 runs/s. Backend RSS went 385 → 378 MB.
+      - The backend's `LogConfig` is `json-file` with `max-size: 50m` and `max-file: 3`. The log runs at 16 lines (6.7 KB) a minute.
+    - **JP6, first attempt:** portal job `a2e3e533` (from `0b8af82`) failed in the in-image backend unit tests.
+      - The cause: `utils/test_dda_user_management_utils.py::TestCreateDdaUserDirectory` patched `os.makedirs` and `os.path.exists` for the whole process. A background thread of the backend under test, the camera-registry sync saving `/aws_dda/camera_sync_state.json`, called the mock too, so the test saw `makedirs` "called 2 times".
+      - It is a pre-existing race. It had not failed before, and it is unrelated to task 28.
+      - The tests now patch only that module's own `os` name. The gate's four test files pass in the `flask-app` container (48 passed).
+      - Retried as job `1670d30c` from `73b910a`. That commit also carried a test fixture, `utils/em-agent-id-testListImages.json`, which a failing host test run had rewritten with this host's path; `8331a07` restores it. The two have the same `src/`.
+    - **JP6 `1.0.74`:** built by job `1670d30c`, and every in-image gate passed.
+      - Its deployment to the Orin was held, because the owner's own change to the Orin had been stuck since 2026-09-30 11:07Z. That change removed Qwen 2.5-VL and the `vlm-smoketest` workflows.
+        - Greengrass had dropped revision 99 as a "duplicate" after a nucleus restart, and `vlm-smoketest (copy)` depended on the Qwen component, so the removal never took.
+        - Fixed at the owner's request with revisions 100 and 101: Qwen and both `vlm-smoketest` workflows are gone. Their folders are backed up under `/aws_dda/workflow-backups/20261001T*/` on the Orin. See memory `gg-stuck-revision`.
+      - Deployed to the Orin at 11:45Z (`35ae2368`, `1.0.73` → `1.0.74`) with both continuous workflows running. It COMPLETED.
+        - The status went `waiting_for_model` (`INCOMPLETE` while the repository was rewritten, then `LOADING`), then `running` at 11:51:05Z.
+        - Startup failed the 2 runs the old backend left unfinished (finding 17). No other run failed.
+        - `LogConfig` is capped.
+        - The log runs at about 13 lines a minute. 11 of those are the pre-existing "registered as invalid: Plugin checksum verification failed" error for the owner's `bedrock_test`, repeated on every watcher scan.
+      - Not yet done on the Orin: the harness stage and a 30-minute soak.
+    - **JP7 `1.0.52`:** built by job `fdb15a1a` from `8331a07` in 22 minutes, and every in-image gate passed.
+      - Deployed to jetson-thor1 at 11:45Z (`e8c4694a`, `1.0.51` → `1.0.52`).
+      - The workflows waited for the model and were `running` again at 11:46:31Z. Startup failed the 1 run the old backend left unfinished.
+      - `LogConfig` is capped. About 96 of its 135 log lines a minute are an INFO "Inside Image Sources" from something polling thor1's image sources; that is not from this spec.
+      - At 12:05Z the Greengrass deployment was still `IN_PROGRESS`, because `model-vllm-qwen3-vl-8b-instruct-jetson-xavier-jp7` was restarting. Check that it COMPLETED.
+      - Not yet done on thor1: the harness stage and a 30-minute soak.
+    - **amd64:** two builds on the x86 host from `8331a07` failed the in-image backend unit tests. Both times the failure was `utils/test_user_group_management_utils.py::TestIdempotentHelpers::test_delete_group_if_exists_short_circuits_when_absent`, at the same position, with `sqlite3.OperationalError: table image_source_configuration already exists` in `LocalServerBaseTestCase.setUp`'s `Base.metadata.create_all`.
+      - The same test set passed in the JP5, JP6 and JP7 images. `1.0.46` (`c8072f1`) passed it on this host, so suspect something background-threaded in the newer tree racing `setUp`'s `create_all`. The camera-registry sync startup thread in `utils/server_setup.py` is the first suspect.
+      - Not investigated yet. A local replication in the old `localhost/flask-app` image is not faithful: its baked backend at `/` shadows the mount. Use a fresh amd64 image, or overlay the tree as the build gate does.
+      - The script is `~/rtsp-verify/amd64_build_task28.sh`, with REF and SHA set inside. Run it with `ssm_run.py i-0ae8ec99335683610 ... amd64_build_task28.sh 150`. Check the result with `amd64_build_status.sh`; the full log is `/home/ubuntu/dda-rtsp-amd64-build.log` on that host.
+    - **Resumed (2026-10-02).** Results are in `~/rtsp-verify/results/` (`thor-task28-redeploy/`, `dell-task28-deploy/`, `soak-*-task28-*.jsonl`, `leak-*-task28-*.jsonl`, `ui-task28/`). `soak_summary.py` summarizes a soak.
+    - **JP7 `1.0.52` on thor1: the first deployment failed, and the redeploy passed.**
+      - `e8c4694a` FAILED and rolled back to `1.0.51` at 13:31Z on 2026-10-01: the vLLM engine construction hung (finding 19). Nothing in task 28 touches that path.
+      - Redeployed the same build as `cecbee46` at 01:54Z on 2026-10-02. It COMPLETED at 01:59Z.
+      - The status went `waiting_for_stream`, then `waiting_for_model` (`INCOMPLETE`), then `running` at 01:55:35Z. Startup failed the 2 runs the old backend left unfinished. No other run failed, and no gate fail-open WARNING was logged. `LogConfig` is capped.
+      - The first ONNX loads took 8–17 s, far below the 600 s stall threshold.
+      - The backend then restarted once by itself at 01:57:43Z (finding 20, not from this spec). On that start the workflows waited through the 120 s grace (`UNKNOWN`, then `LOADING`) and ran again at 01:59:53Z, with no failed run.
+      - Harness stream stage: 7 of 7 (76 s).
+      - Soak, 29 minutes from 02:09Z: no restart, no failed run, 1.0 and 8.1 runs/s. Backend RSS went 1439.7 → 1441.4 MB, and the thread count stayed at 153 (8 `AwsEventLoop`).
+      - The log runs at about 20 lines a minute, apart from the "Inside Image Sources" poller (about 94 a minute, not from this spec).
+    - **JP6 `1.0.74` on the Orin: passed.**
+      - Unattended from 11:51Z on 2026-10-01 to 02:40Z on 2026-10-02 (14 h 50 min): no restart and no failed run.
+      - Harness stream stage: 7 of 7 (89 s).
+      - Soak, 30 minutes from 02:11Z: no failed run, 1.0 and 2.53 runs/s. RSS went 421.8 → 423.5 MB, with 264–265 threads (2 `AwsEventLoop`).
+    - **JP5 `1.0.51` on the MIC-730**: still clean at 02:28Z on 2026-10-02, 23.5 hours after its deployment. No restart and no failed run, at 1.0 and 3.35 runs/s.
+    - **amd64: fixed, rebuilt and deployed.**
+      - The cause of the test failure: the amd64 image (Ubuntu 20.04) has SQLite 3.31.1, whose `PRAGMA table_info` answers from a connection's cached schema. The backend's import-time daemon threads (the camera-registry sync and friends) use the same engine during the tests, so SQLAlchemy's pool hands successive DDL calls different connections. A connection that did not run the last `create_all` reported the tables as absent: `drop_all` skipped them, and the next `create_all` failed with "already exists".
+      - The JP5 image also has SQLite 3.31.1 and passed by timing. The JP6 (3.37.2) and JP7 (3.45.1) images see the current schema. `~/rtsp-verify/sqlite_stale_pragma.py` shows the difference.
+      - It is test-only. Production queries re-prepare on a schema change, and Alembic uses its own engine.
+      - The fix: `LocalServerBaseTestCase` disposes both engines' pools before its `create_all` and `drop_all`. In the amd64 image, a 40-test repro (`test_pool_schema_race_repro.py`, not committed) failed 4 and 5 times before the fix, and passed 3 runs of 3 after. The gate's five files pass (52).
+      - The 41 test files that use the base went from 17 failures to 5 in the amd64 image. The 12 that now pass had failed on rows a skipped `drop_all` left behind, mostly as UNIQUE constraint errors.
+      - The other 5 failed the same way before and after, and none is from task 28: two `test_streams_api.py` cases expect FastAPI's own 422 response, which the app's handlers replace (since `0209527`); a `Mock` in `test_camera_api.py`; a missing logo fixture in `test_utils.py`; and `test_get_image_source_by_id`, whose expected row lacked `advancedSettings` and this spec's `streamSettings`. That last one is updated and passes.
+      - Built `aws.edgeml.dda.LocalServer.amd64` `1.0.47` from `edf81cb` (`wip/rtsp-rtmp-stream-cameras-task28-verify`: the test fix on top of `8331a07`, with the same `src/`). Every in-image gate passed.
+      - Deployed to the Dell (`1.0.46` → `1.0.47`) at 02:44Z, with both continuous workflows resumed first. It COMPLETED at 02:57Z.
+      - The status went `waiting_for_model` (`UNKNOWN`, then `INCOMPLETE` while the model component rewrote the repository, then `LOADING`), then `running` at 02:57:02Z. Startup failed the 2 runs the old backend left unfinished. No other run failed, and no gate fail-open WARNING was logged. `LogConfig` is capped.
+      - Harness stream stage: 7 of 7 (78 s).
+      - Soak, 29 minutes from 02:59Z: no restart, no failed run, 1.0 and 2.45 runs/s. Backend RSS went 349.9 → 355.7 MB in two steps and was flat in between; 335 threads (1 `AwsEventLoop`) throughout.
+    - **The 28.4 panel on a device: passed.** All three rebuilt devices serve the same bundle (`main.ea7f63b4.js`), which carries the 28.4 strings. On the Dell, Firefox headless rendered the deployed-workflow page on the device itself (`~/rtsp-verify/ui_wrap_server.py` and `ui_device_shot.sh` hold the load event until the UI has fetched; this host's Chrome 152 loads no http page). Screenshots are in `results/ui-task28/`.
+      - Running: "Running", the camera "Streaming", and the "Model waits" counter at 1.
+      - After a backend restart at 03:29:38Z: "Waiting for the model" with the pending indicator, and a "Model" value of `yolo-test`, "Not loaded" (the gate's `UNKNOWN`), beside the streaming camera. "Model waits" went to 2.
+      - The workflows resumed at 03:31:46Z, after the 120 s grace. Startup failed the 1 run the restart interrupted, and no other run failed.
+    - The JP builds need no rebuild: the only change since their snapshot is in `test/`.
+    - Hot-patch the MIC-730 first. Its `1.0.50` still holds 7 `running` and 3 `pending` interrupted rows. After the restart, check that they are failed, that staging falls back to 20 per workflow, and that the continuous workflows run.
+    - Rebuild one target at a time: JP5 first (about 45 minutes, and the MIC-730 is where findings 16–18 were seen, so it gives the fastest real-build check), then JP6, amd64, and JP7 last (its vLLM layer makes it the longest). The owner approved the temp Cognito user on 2026-09-30.
+    - Deploy each build while the `rtsp-verify-*` continuous workflows are running. Check that:
+      - the status shows `waiting_for_model` while the model components republish, then `running`
+      - no run fails, and no model is stuck in `LOADING`
+      - the backend log has no "continuous runs proceed without the model gate" WARNING during the deployment window. That line means the gate failed open. Code review (2026-09-30) found that the index is readable from backend start whenever the repository already holds models, so the line is not expected. But the Dell's `1.0.45` start once showed a `null` index for 0.2 s, and that has not been explained.
+    - On thor1, time the first ONNX load. If `LOADING` legitimately lasts more than 300 s while TensorRT builds its engine, the gate reports the wait as stalled and advises a backend restart, which would be wrong advice. In that case, raise the stall threshold for `LOADING` to the 600 s of `model_readiness.READY_TIMEOUT_S`.
+    - After a plain backend restart (no deployment), continuous workflows start their first runs about 120 s later. That is the gate's grace period for model files older than the engine start (`UNKNOWN_LOAD_GRACE_S`), and it is expected.
+    - Rerun the harness stage and a short soak on each device.
+    - Then do 26.3 with the new versions, the Portal deploy (with owner approval, and never during a build), 27, and the cleanup list.
 
 - [ ] 27. Final checkpoint
   - Ensure these are complete, and ask the user if questions arise:

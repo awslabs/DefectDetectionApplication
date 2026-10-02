@@ -53,6 +53,13 @@
         "timeout": "10s"
       },
       "image": "flask-app",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "50m"
+        }
+      },
       "network_mode": "host",
       "privileged": true,
       "profiles": [
@@ -115,6 +122,13 @@
         "8002"
       ],
       "image": "flask-app",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "50m"
+        }
+      },
       "network_mode": "host",
       "privileged": true,
       "profiles": [
@@ -183,6 +197,13 @@
         "timeout": "10s"
       },
       "image": "flask-app",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "50m"
+        }
+      },
       "network_mode": "host",
       "platform": "linux/arm64/v8",
       "privileged": true,
@@ -220,6 +241,13 @@
         "timeout": "5s"
       },
       "image": "react-webapp",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "50m"
+        }
+      },
       "ports": [
         "3000:80",
         "3443:443"

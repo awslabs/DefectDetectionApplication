@@ -153,6 +153,7 @@ describe("a continuous deployed workflow", () => {
     expect(valueOf("Notable runs")).toBe("12");
     expect(valueOf("Outputs sent")).toBe("9");
     expect(valueOf("Stream outages")).toBe("1");
+    expect(valueOf("Model waits")).toBe("0");
   });
 
   it("offers no manual run while it runs, and lists the bounded recent runs (11.7, 16.2)", async () => {
@@ -274,6 +275,67 @@ describe("a continuous deployed workflow", () => {
     const camera = screen.getByText("Camera").parentElement as HTMLElement;
     expect(within(camera).getByText("Reconnecting")).toBeInTheDocument();
     expect(within(camera).getByText("No frame for 10 s; next attempt in 4 s")).toBeInTheDocument();
+  });
+
+  it("names the model it waits for, and counts the wait (11.11, 16.2)", async () => {
+    (RegistrationAPI.getContinuousStatus as jest.Mock).mockResolvedValue(
+      continuousStatus({
+        state: "waiting_for_model",
+        runInProgress: false,
+        effectiveFps: 0,
+        counters: { ...continuousStatus().counters, modelUnavailable: 2 },
+        modelReadiness: {
+          model: "model-yolo-test",
+          tritonModel: "model-yolo-test-jetson-xavier-jp5",
+          state: "LOADING",
+          reason: null,
+          sinceMs: 1790000000000,
+          stalled: false,
+        },
+      }),
+    );
+    renderDetails();
+    expect(await screen.findByText("Waiting for the model")).toBeInTheDocument();
+    const model = screen.getByText("Model").parentElement as HTMLElement;
+    expect(within(model).getByText("model-yolo-test")).toBeInTheDocument();
+    expect(within(model).getByText("Loading")).toBeInTheDocument();
+    expect(valueOf("Model waits")).toBe("2");
+    // The stream is fine, so the camera reads as streaming and no warning shows.
+    expect(screen.getByText("Streaming")).toBeInTheDocument();
+    expect(
+      screen.queryByText("This workflow has waited for its model for over 10 minutes"),
+    ).toBeNull();
+  });
+
+  it("warns about a stalled model wait, with its reason (11.12)", async () => {
+    (RegistrationAPI.getContinuousStatus as jest.Mock).mockResolvedValue(
+      continuousStatus({
+        state: "waiting_for_model",
+        runInProgress: false,
+        effectiveFps: 0,
+        counters: { ...continuousStatus().counters, modelUnavailable: 1 },
+        modelReadiness: {
+          model: "model-yolo-test",
+          tritonModel: "model-yolo-test-jetson-xavier-jp5",
+          state: "UNAVAILABLE",
+          reason: "base_model-yolo-test/8/model.py is missing",
+          sinceMs: 1790000000000,
+          stalled: true,
+        },
+      }),
+    );
+    renderDetails();
+    expect(
+      await screen.findByText("This workflow has waited for its model for over 10 minutes"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/restart the LocalServer backend so that it loads the model again/),
+    ).toBeInTheDocument();
+    const model = screen.getByText("Model").parentElement as HTMLElement;
+    expect(within(model).getByText("Unavailable")).toBeInTheDocument();
+    expect(
+      within(model).getByText("base_model-yolo-test/8/model.py is missing"),
+    ).toBeInTheDocument();
   });
 });
 

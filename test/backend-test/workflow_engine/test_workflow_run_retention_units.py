@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Run retention units (rtsp-rtmp-stream-cameras Requirements 12.1-12.4,
-12.7, 12.8): staging selection, classification, promotion, the
-executor's artifact root, the startup index, directory safety, and the
-GStreamer debug log bound."""
+12.7, 12.8, 12.9): staging selection, classification, promotion, the
+executor's artifact root, the startup index, the startup reconciliation
+of interrupted runs, directory safety, and the GStreamer debug log
+bound."""
 import json
 import os
 import shutil
@@ -33,9 +34,10 @@ from test_workflow_stream_executor import (
 from workflow_engine_test_utils import make_session_factory, write_artifact_set
 
 from workflow_engine import gst_plugins, pipeline_executor
-from workflow_engine.models import WorkflowExecution
+from workflow_engine.models import WorkflowContinuousState, WorkflowExecution
 from workflow_engine.pipeline_executor import WorkflowExecutor
 from workflow_engine.run_retention import (
+    INTERRUPTED_ERROR,
     RunRetention,
     classify_run,
     output_node_ids,
@@ -75,7 +77,7 @@ def make_retention(session_factory, roots, limits=UNLIMITED, **kwargs):
 
 
 def add_run(session_factory, directory, execution_id, status="completed", context=CONTINUOUS, size=100,
-            node_status=None, tags=None, registration_id="wf-1:3"):
+            node_status=None, tags=None, registration_id="wf-1:3", error=None):
     os.makedirs(directory, exist_ok=True)
     capture_id = "wf-1-" + execution_id
     with open(os.path.join(directory, capture_id + ".jpg"), "wb") as handle:
@@ -88,7 +90,7 @@ def add_run(session_factory, directory, execution_id, status="completed", contex
     session.add(WorkflowExecution(
         id=execution_id, registration_id=registration_id, started_at=1, status=status,
         capture_id=capture_id, output_dir=directory, log_path=os.path.join(directory, "run.log"),
-        node_status_json=json.dumps(node_status or {}),
+        node_status_json=json.dumps(node_status or {}), error=error,
         trigger_context_json=json.dumps(context) if context is not None else None))
     session.commit()
     session.close()
@@ -269,6 +271,250 @@ class TestStartupIndex:
 
         assert row(session_factory, "live") is not None
         assert os.path.isdir(os.path.join(staging, "wf-1", "live"))
+
+
+class TestStartupReconciliation:
+    """A continuous run a previous backend process left ``pending`` or
+    ``running`` is finished at startup (Requirement 12.9)."""
+
+    def state_counters(self, session_factory, registration_id):
+        session = session_factory()
+        try:
+            found = session.get(WorkflowContinuousState, registration_id)
+            return json.loads(found.counters_json) if found and found.counters_json else None
+        finally:
+            session.close()
+
+    def seed_state(self, session_factory, registration_id, counters):
+        session = session_factory()
+        session.add(WorkflowContinuousState(registration_id=registration_id, paused=False,
+                                            counters_json=json.dumps(counters), updated_at=1))
+        session.commit()
+        session.close()
+
+    def test_pending_and_running_continuous_runs_become_failed(self, session_factory, roots):
+        staging = roots[1]
+        for execution_id, status in (("p1", "pending"), ("r1", "running")):
+            add_run(session_factory, os.path.join(staging, "wf-1", execution_id), execution_id, status=status)
+        retention = make_retention(session_factory, roots, wall=lambda: 1700.9)
+
+        assert retention.reconcile_interrupted() == 2
+
+        for execution_id in ("p1", "r1"):
+            found = row(session_factory, execution_id)
+            assert found.status == "failed"
+            assert found.error == INTERRUPTED_ERROR
+            assert found.finished_at == 1700
+
+    def test_an_existing_finish_time_is_kept(self, session_factory, roots):
+        add_run(session_factory, os.path.join(roots[1], "wf-1", "r1"), "r1", status="running")
+        session = session_factory()
+        session.get(WorkflowExecution, "r1").finished_at = 42
+        session.commit()
+        session.close()
+
+        make_retention(session_factory, roots, wall=lambda: 1700.0).reconcile_interrupted()
+
+        assert row(session_factory, "r1").finished_at == 42
+
+    @pytest.mark.parametrize("execution_id,status,context", [
+        ("triggered", "running", {"source": "mqtt", "tickAtMs": 1}),
+        ("manual", "pending", None),
+        ("done", "completed", CONTINUOUS),
+        ("gone", "failed", CONTINUOUS),
+    ])
+    def test_other_runs_are_untouched(self, session_factory, roots, execution_id, status, context):
+        add_run(session_factory, os.path.join(roots[1], "wf-1", execution_id), execution_id, status=status,
+                context=context)
+
+        assert make_retention(session_factory, roots).reconcile_interrupted() == 0
+
+        found = row(session_factory, execution_id)
+        assert (found.status, found.error, found.finished_at) == (status, None, None)
+
+    def test_the_failed_counter_is_bumped_per_registration(self, session_factory, roots):
+        staging = roots[1]
+        self.seed_state(session_factory, "wf-1:3", {"started": 9, "failed": 4})
+        self.seed_state(session_factory, "wf-2:1", {"started": 1})
+        for execution_id, registration_id in (("a", "wf-1:3"), ("b", "wf-1:3"), ("c", "wf-2:1")):
+            add_run(session_factory, os.path.join(staging, "wf-1", execution_id), execution_id,
+                    status="running", registration_id=registration_id)
+        # A registration with no state row must not create one.
+        add_run(session_factory, os.path.join(staging, "wf-1", "d"), "d", status="pending",
+                registration_id="wf-3:1")
+
+        assert make_retention(session_factory, roots).reconcile_interrupted() == 4
+
+        assert self.state_counters(session_factory, "wf-1:3") == {"started": 9, "failed": 6}
+        assert self.state_counters(session_factory, "wf-2:1") == {"started": 1, "failed": 1}
+        assert self.state_counters(session_factory, "wf-3:1") is None
+
+    def test_a_missing_or_broken_snapshot_still_counts(self, session_factory, roots):
+        self.seed_state(session_factory, "wf-1:3", {"failed": "many"})
+        session = session_factory()
+        session.get(WorkflowContinuousState, "wf-1:3").counters_json = "not json"
+        session.commit()
+        session.close()
+        add_run(session_factory, os.path.join(roots[1], "wf-1", "r1"), "r1", status="running")
+
+        assert make_retention(session_factory, roots).reconcile_interrupted() == 1
+
+        assert self.state_counters(session_factory, "wf-1:3") == {"failed": 1}
+
+    def test_the_surplus_staged_runs_are_then_evicted(self, session_factory, roots):
+        """The MIC-730 held 23-27 staged runs per workflow instead of 20:
+        the interrupted rows were never finished, so the recent window
+        never evicted them."""
+        staging = roots[1]
+        for index in range(3):
+            execution_id = "stuck{0}".format(index)
+            add_run(session_factory, os.path.join(staging, "wf-1", execution_id), execution_id,
+                    status="running", context=dict(CONTINUOUS, tickAtMs=1000 + index))
+        for index in range(20):
+            execution_id = "e{0}".format(index)
+            add_run(session_factory, os.path.join(staging, "wf-1", execution_id), execution_id,
+                    context=dict(CONTINUOUS, tickAtMs=2000 + index))
+        retention = make_retention(session_factory, roots)
+
+        assert retention.reconcile_interrupted() == 3
+        assert len(retention.retained("wf-1:3")) == 23
+
+        add_run(session_factory, os.path.join(staging, "wf-1", "fresh"), "fresh",
+                context=dict(CONTINUOUS, tickAtMs=3000))
+        retention.on_run_complete("fresh", 20, 0)
+
+        assert len(retention.retained("wf-1:3")) == 20
+        for index in range(3):
+            assert not os.path.exists(os.path.join(staging, "wf-1", "stuck{0}".format(index)))
+            assert row(session_factory, "stuck{0}".format(index)) is None
+
+    def test_an_already_loaded_index_picks_the_rows_up(self, session_factory, roots):
+        staging = roots[1]
+        add_run(session_factory, os.path.join(staging, "wf-1", "e0"), "e0",
+                context=dict(CONTINUOUS, tickAtMs=1000))
+        add_run(session_factory, os.path.join(staging, "wf-1", "r1"), "r1", status="running",
+                context=dict(CONTINUOUS, tickAtMs=1001))
+        retention = make_retention(session_factory, roots)
+        assert retention.retained("wf-1:3") == ["e0"]  # loads the index first
+
+        assert retention.reconcile_interrupted() == 1
+
+        assert retention.retained("wf-1:3") == ["e0", "r1"]
+        assert retention.notable_ids("wf-1:3") == []
+
+    def test_an_interrupted_run_is_not_notable_but_other_failures_are(self, session_factory, roots):
+        staging = roots[1]
+        add_run(session_factory, os.path.join(staging, "wf-1", "boom"), "boom", status="failed",
+                error="pipeline element sink failed", context=dict(CONTINUOUS, tickAtMs=1000))
+        add_run(session_factory, os.path.join(staging, "wf-1", "r1"), "r1", status="running",
+                context=dict(CONTINUOUS, tickAtMs=1001))
+        retention = make_retention(session_factory, roots)
+        retention.reconcile_interrupted()
+
+        assert retention.retained("wf-1:3") == ["boom", "r1"]
+        assert retention.notable_ids("wf-1:3") == ["boom"]
+        # Not promoted out of staging either, so a restart cannot push the
+        # real Notable_Runs out.
+        assert os.path.isdir(os.path.join(staging, "wf-1", "r1"))
+
+        assert classify_run("failed", {}, (), {}, error=INTERRUPTED_ERROR) == (False, 0)
+        assert classify_run("failed", {}, (), {}) == (True, 0)
+
+    def test_a_database_failure_is_contained(self, session_factory, roots):
+        retention = make_retention(session_factory, roots)
+        with patch.object(retention, "_session", side_effect=RuntimeError("no database")):
+            assert retention.reconcile_interrupted() == 0
+
+    def test_a_failure_while_reconciling_is_contained(self, session_factory, roots):
+        add_run(session_factory, os.path.join(roots[1], "wf-1", "r1"), "r1", status="running")
+        retention = make_retention(session_factory, roots)
+        with patch.object(retention, "_count_interrupted_locked", side_effect=RuntimeError("boom")):
+            assert retention.reconcile_interrupted() == 0
+
+        assert row(session_factory, "r1").status == "running"
+
+
+class TestStartupOrder:
+    def test_reconciliation_precedes_the_executor_and_the_continuous_manager(self):
+        """``runtime.start_workflow_engine`` reconciles right after the
+        retention is created: before the executor is registered and before
+        the ContinuousRunnerManager's first ``on_registrations_changed``."""
+        from workflow_engine import continuous_runner as continuous_module
+        from workflow_engine import pipeline_executor as executor_module
+        from workflow_engine import run_retention as retention_module
+        from workflow_engine import runtime, stream_leases, trigger_runtime
+
+        order = []
+
+        class FakeRetention:
+            def __init__(self, *args, **kwargs):
+                order.append("retention")
+
+            def reconcile_interrupted(self):
+                order.append("reconcile")
+                return 0
+
+            def capture_root_for(self, registration, context):
+                return None
+
+            def add_housekeeping_task(self, task):
+                pass
+
+        class FakeWatcher:
+            def __init__(self, *args, **kwargs):
+                self.registrations_listeners = []
+                self.lease_refusal_lookup = None
+
+            def start(self):
+                order.append("watcher")
+
+            def binding_resolution(self, *args, **kwargs):
+                return None
+
+            def _resync_for_bindings(self, *args, **kwargs):
+                return None
+
+        class FakeContinuousManager:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def on_registrations_changed(self, *args, **kwargs):
+                order.append("continuous")
+
+            def persist_counters(self):
+                pass
+
+        class FakeListener:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def on_registrations_changed(self, *args, **kwargs):
+                pass
+
+            def refusal_reason(self, *args, **kwargs):
+                return None
+
+        def fake_register(**kwargs):
+            order.append("executor")
+            return object()
+
+        with patch.object(runtime, "_watcher", None), \
+                patch.object(runtime, "_executor_instance", None), \
+                patch.object(runtime, "_trigger_manager", None), \
+                patch.object(runtime, "_stream_lease_keeper", None), \
+                patch.object(runtime, "_continuous_manager", None), \
+                patch.object(runtime, "WorkflowWatcher", FakeWatcher), \
+                patch.object(runtime, "_camera_binding_dependencies", return_value=(None, None)), \
+                patch.object(runtime, "_wire_camera_binding_hooks"), \
+                patch.object(runtime, "_configure_sample_export", return_value=None), \
+                patch.object(retention_module, "RunRetention", FakeRetention), \
+                patch.object(executor_module, "register_workflow_executor", fake_register), \
+                patch.object(trigger_runtime, "TriggerSubscriptionManager", FakeListener), \
+                patch.object(stream_leases, "StreamLeaseKeeper", FakeListener), \
+                patch.object(continuous_module, "ContinuousRunnerManager", FakeContinuousManager):
+            assert runtime.start_workflow_engine() is not None
+
+        assert order == ["watcher", "retention", "reconcile", "executor", "continuous"]
 
 
 class TestDirectorySafety:

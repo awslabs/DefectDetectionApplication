@@ -100,11 +100,21 @@ class TritonEdgeClient:
             f"{_LIST_MODELS_ATTEMPTS} attempts; model listing temporarily unavailable"
         )
 
-    def list_triton_models(self):
+    def list_triton_models(self, quiet: bool = False):
+        """The Triton model index, which also REFRESHES edgemlsdk's cached
+        per-model states from Triton itself.
+
+        ``quiet`` logs the index at DEBUG instead of INFO, for the callers
+        that poll it (the Continuous_Runner's model gate polls every 3 s
+        while it waits; rtsp-rtmp-stream-cameras Requirement 12.6).
+        """
         models = []
         try:
             models_list_response = json.loads(self._list_models_raw())
-            logger.info(f"Triton models(including base and marshal): {models_list_response}")
+            logger.log(
+                logging.DEBUG if quiet else logging.INFO,
+                f"Triton models(including base and marshal): {models_list_response}",
+            )
             for model, state in models_list_response.items():
                 __model_dict = {"model_component": model, "status": state.get("state", "UNKNOWN")}
                 # The edgemlsdk wrapper records why a load failed (Triton's own

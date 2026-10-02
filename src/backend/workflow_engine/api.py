@@ -311,10 +311,17 @@ def _continuous_or_404(registration_id: str, status) -> dict:
 @router.get("/workflows/registrations/{registration_id}/continuous")
 def get_continuous_status(registration_id: str, db: Session = Depends(get_db)) -> dict:
     """The Continuous status of a registration whose stream node runs in
-    ``continuous`` mode (rtsp-rtmp-stream-cameras Requirements 11.6, 12.5):
-    its state (``running``, ``paused`` or ``waiting_for_stream``), the
-    configured and effective rates, the counters, the camera's
-    Stream_Health and ``pausedAtMs``. 404 for any other registration."""
+    ``continuous`` mode (rtsp-rtmp-stream-cameras Requirements 11.6, 11.11,
+    12.5): its state, the configured and effective rates, the counters, the
+    camera's Stream_Health, ``pausedAtMs`` and ``modelReadiness``. 404 for
+    any other registration.
+
+    The state is ``running``, ``paused``, ``waiting_for_stream`` or
+    ``waiting_for_model``, in the precedence paused > waiting_for_stream >
+    waiting_for_model > running. ``modelReadiness`` is the model wait the
+    runner is holding for (``model``, ``tritonModel``, ``state``,
+    ``reason``, ``sinceMs``, ``stalled``), or null when every model the
+    workflow uses is READY."""
     _get_registration_or_404(registration_id, db)
     return _continuous_or_404(registration_id, runtime.continuous_status(registration_id))
 
