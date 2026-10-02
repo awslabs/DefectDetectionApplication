@@ -41,8 +41,8 @@ Property test conventions:
   - Logs: `~/kiro-cli-runs/rtsp-rtmp-stream-cameras/`.
 - The harness commits nothing, builds nothing, and touches no device or AWS account. Its changes stay uncommitted in this worktree.
 
-**Task 28 verified and committed (2026-10-02, 03:45Z). Resume here.**
-- **State.** Task 28 (findings 16, 17 and 18) is verified on all four device types and committed on `spec/rtsp-rtmp-stream-cameras` with this note, then fast-forwarded into `integration/all-specs`. The wip branches are deleted. 28.5 has the details.
+**Task 28 verified and committed, and the 26.3 floor set (2026-10-02). Resume here.**
+- **State.** Task 28 (findings 16, 17 and 18) is verified on all four device types and committed as `2ae3466`. The 26.3 floor is committed on top of it. Both are on `spec/rtsp-rtmp-stream-cameras` and fast-forwarded into `integration/all-specs`. The wip branches are deleted. 28.5 and 26.3 have the details.
 - **Verified builds.** All come from the same `src/`. Each passed every in-image gate, the harness stream stage (7 of 7) and a 30-minute soak with no failed run:
   - JP5 `1.0.51` on the MIC-730
   - JP6 `1.0.74` on the Orin
@@ -53,10 +53,11 @@ Property test conventions:
   - 19: a vLLM engine construction hung and rolled back thor1's first `1.0.52` deployment. The cause is unknown, and the redeploy did not repeat it.
   - 20: an explicit vLLM unload restarts the JP7 backend. The cause is found and reproduced.
 - **No temp Cognito user exists.** It was deleted on 2026-10-01 at 12:08Z. This cycle's only build (amd64) ran over SSM, without the Portal.
+- **26.3: the floor is set** to the versions above, with `arm64_cpu` left out as the owner chose. It goes live with the next Portal deploy.
 - **Next, in order:**
-  1. 26.3: set the floor to the versions above, plus the `arm64_cpu` amendment the owner chose (skip plain `arm64` for now).
-  2. The Portal deploy (owner approval, and never during a component build), then the end-to-end Portal check (remaining-work item 5 below).
-  3. Task 27, then the cleanup list.
+  1. The Portal deploy (owner approval, and never during a component build), then the end-to-end Portal check (remaining-work item 5 below). The next Portal deploy from `integration/all-specs`, by any session, ships the floor together with the rest of this spec's Portal changes.
+  2. Task 27, then the cleanup list.
+  3. The owner's decisions on findings 19 and 20.
   4. Rotate the Amcrest/Dell password. It was shared in chat again.
 
 **Paused by the owner (2026-10-01, 12:10Z). Superseded by the note above.**
@@ -1793,7 +1794,15 @@ graph TD
       - a build: `./portal-build.sh aarch64 cpu` on an arm64 Ubuntu 22.04 host, since there is no portal ARM64 target;
       - a non-Jetson arm64 Greengrass core without CUDA, for example a temporary Graviton EC2 instance;
       - an arm64-cpu `yolo-test` model component (none is published), plus a stream source that the device can reach.
-      - The bare `.arm64` name is also the JetPack 4 lineage: `jp4mic730ai-ryanlabhome` runs `1.0.124` and classifies as `arm64_cpu`. The existing `arm64` `1.1.0` (2026-09-25) is a generic CPU build that was probed as an image only.
+]633;E;cat edits/f263_old.txt;da15a678-247f-4536-94f0-133fe32f45ab]633;C      - The bare `.arm64` name is also the JetPack 4 lineage: `jp4mic730ai-ryanlabhome` runs `1.0.124` and classifies as `arm64_cpu`. The existing `arm64` `1.1.0` (2026-09-25) is a generic CPU build that was probed as an image only.
+    - **OUTCOME (2026-10-02): the floor is set; the Portal deploy is pending the owner's approval.**
+      - `compute-stack.ts` sets `WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS` to the first builds verified on hardware with the feature and its task 28 fixes (28.5): `arm64_jp5` `1.0.51`, `arm64_jp6` `1.0.74`, `arm64_jp7` `1.0.52`, and `1.0.47` for both `x86_64` and `x86_64_nvidia`.
+      - The builds before task 28 (`1.0.50`, `1.0.73`, `1.0.51` on JP7, `1.0.46`) are below the floor on purpose: they flood the log under continuous workflows (finding 18), which the owner ruled would destabilize the system.
+      - `arm64_cpu` stays out (the owner's 2026-09-30 decision: skip plain `arm64` for now), so a stream or scene-analytics workflow is rejected for it with `STREAM_CAMERAS_UNSUPPORTED_ARCH`. Requirement 9.7 and design component 5 now say so.
+      - `test_stream_camera_feature_floor_coverage.py` lists `arm64_cpu` in `UNVERIFIED_STREAM_ARCHES`, with its reason, and requires the literal to cover every other architecture exactly. Two new tests check that each unverified entry names a real architecture and that the deployed literal rejects exactly the unverified ones. Dropping `arm64_jp6` from the literal, or adding `arm64_cpu` to it, fails two tests each.
+      - `camera-registry-stream-credentials-infra.test.ts` now pins the verified map, without `arm64_cpu`, on both Lambdas.
+      - Still to do: the Portal deploy, with the owner's approval and never during a component build. The next Portal deploy from `integration/all-specs`, by any session, ships this floor together with the rest of this spec's Portal changes.
+
 
   - [x] 26.4 Commit and integrate
     - Commit with per-device verification notes

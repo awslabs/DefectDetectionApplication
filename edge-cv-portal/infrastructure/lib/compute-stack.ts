@@ -758,13 +758,25 @@ export class ComputeStack extends cdk.Stack {
     // and Scene_Analytics_Nodes. The Component_Packager
     // (WorkflowPackagingHandler) and the pre-submit deployment gate
     // (DeploymentsHandler) read this one literal, so they cannot disagree.
-    // Empty until the first supporting LocalServer builds are published
-    // (spec task 26.3). The empty map FAILS CLOSED: every workflow that uses
-    // the new node types is rejected with STREAM_CAMERAS_UNSUPPORTED_ARCH.
-    // Once filled it must cover exactly ARCH_TO_LOCAL_SERVER_COMPONENT
-    // (test_stream_camera_feature_floor_coverage.py).
+    // Each value is the first LocalServer build verified on hardware with the
+    // feature and its task 28 fixes (spec task 26.3, 2026-10-02): JP5 on a
+    // MIC-730, JP6 on an AGX Orin, JP7 on a Jetson Thor, and amd64 on an x86
+    // workstation (x86_64 and x86_64_nvidia both run
+    // aws.edgeml.dda.LocalServer.amd64). arm64_cpu is left out on purpose
+    // (owner decision 2026-09-30: skip plain arm64 for now): it has no build
+    // target or test device yet. An architecture missing from the map FAILS
+    // CLOSED: a workflow that uses the new node types is rejected for it with
+    // STREAM_CAMERAS_UNSUPPORTED_ARCH. The map must cover exactly
+    // ARCH_TO_LOCAL_SERVER_COMPONENT minus the architectures that
+    // test_stream_camera_feature_floor_coverage.py lists as unverified.
     const streamCameraFeatureFloorEnvironment = {
-      WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({}),
+      WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({
+        arm64_jp5: '1.0.51',
+        arm64_jp6: '1.0.74',
+        arm64_jp7: '1.0.52',
+        x86_64: '1.0.47',
+        x86_64_nvidia: '1.0.47',
+      }),
     };
 
     // Per-model Model_Image_Limit overrides for `llm:` auto-label requests

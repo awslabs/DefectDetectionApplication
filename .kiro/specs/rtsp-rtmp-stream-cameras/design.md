@@ -415,8 +415,9 @@ STREAM_SOURCE_PROTOCOLS = {RTSP_CAMERA_SOURCE_TYPE_ID: 'rtsp',
   - `parameters` set to the rendered parameters, which are all non-secret by construction.
 - **Camera input record.** `camera_input_nodes_record` needs no change, because stream points have no `device` slot.
 - **Feature floor.** When the graph contains a Stream_Camera_Source_Node or a Scene_Analytics_Node, `min_local_server_version_for(arch)` becomes the maximum of the architecture floor and the feature floor.
-  - The feature floor comes from a new environment map, `WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS` (`{arch: version}`). It is set in `compute-stack.ts` once the first supporting LocalServer builds are published.
+  - The feature floor comes from a new environment map, `WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS` (`{arch: version}`), set in `compute-stack.ts`. Each value is the first LocalServer build verified on hardware with the feature and its task 28 fixes (task 26.3): `arm64_jp5` `1.0.51`, `arm64_jp6` `1.0.74`, `arm64_jp7` `1.0.52`, and `1.0.47` for both `x86_64` and `x86_64_nvidia`, which run the same `aws.edgeml.dda.LocalServer.amd64` build.
   - If an architecture is missing from the map, packaging is rejected with `STREAM_CAMERAS_UNSUPPORTED_ARCH`, naming the architecture. No workflow that uses the feature can reach a LocalServer without it.
+  - An architecture with no verified build stays out of the map, and so fails closed. `arm64_cpu` is out for now (owner decision, 2026-09-30): it has no Portal build target and no test device. The coverage test lists it in `UNVERIFIED_STREAM_ARCHES` and requires a floor for every other architecture in `ARCH_TO_LOCAL_SERVER_COMPONENT`.
   - Workflows without the new node types resolve their floors exactly as before.
 
 ### 6. Deployment_Service: `deployments.py` and the binding matrix

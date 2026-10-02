@@ -231,10 +231,22 @@ describe('camera registry Lambda (single-account setups, design component 7)', (
 });
 
 describe('stream feature floor (Requirement 9.7)', () => {
+  // The first LocalServer builds verified on hardware with the feature (spec
+  // task 26.3). arm64_cpu has no verified build, so it stays out and fails
+  // closed with STREAM_CAMERAS_UNSUPPORTED_ARCH.
+  const VERIFIED_FLOOR = {
+    arm64_jp5: '1.0.51',
+    arm64_jp6: '1.0.74',
+    arm64_jp7: '1.0.52',
+    x86_64: '1.0.47',
+    x86_64_nvidia: '1.0.47',
+  };
   test.each([['workflow_packaging.handler'], ['deployments.handler']])(
-    '%s reads the empty, fail-closed feature floor', (handler) => {
+    '%s reads the verified feature floor, without arm64_cpu', (handler) => {
       const fn = lambdaWithHandler(handler);
-      expect(fn.Properties.Environment.Variables[FEATURE_FLOOR_ENV]).toBe('{}');
+      const floor = JSON.parse(fn.Properties.Environment.Variables[FEATURE_FLOOR_ENV]);
+      expect(floor).toEqual(VERIFIED_FLOOR);
+      expect(floor).not.toHaveProperty('arm64_cpu');
     }
   );
 

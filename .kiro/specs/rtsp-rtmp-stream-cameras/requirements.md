@@ -249,7 +249,7 @@ Scope decisions this document commits to:
 4. WHERE a user chooses a manual override for a Stream_Camera_Source_Node, THE binding matrix SHALL collect a Stream_URL for the node's `url` parameter. THE Deployment_Service SHALL validate the URL against the node's parameter constraints and the rules of Requirements 2.1 and 2.2.
 5. WHEN a bound Camera_Source's last reported Stream_Health state is `failed`, THE Deployment_Service SHALL raise the existing degraded-source warning, which requires confirmation.
 6. THE Deployment_Service SHALL deliver stream bindings through the existing `dda-camera-bindings` shadow and leave the packaged artifact unchanged.
-7. WHEN a workflow contains a Stream_Camera_Source_Node or a Scene_Analytics_Node, THE Component_Packager and the Deployment_Service SHALL require, on each target architecture, a LocalServer version that supports those node types. THE Deployment_Service SHALL reject deployment to a device running an older LocalServer with a message naming the required version.
+7. WHEN a workflow contains a Stream_Camera_Source_Node or a Scene_Analytics_Node, THE Component_Packager and the Deployment_Service SHALL require, on each target architecture, a LocalServer version that supports those node types. THE Deployment_Service SHALL reject deployment to a device running an older LocalServer with a message naming the required version. WHERE an architecture has no LocalServer build verified on hardware for those node types, THE Component_Packager SHALL reject such a workflow for that architecture with `STREAM_CAMERAS_UNSUPPORTED_ARCH`.
 
 ### Requirement 10: Device-side binding resolution and triggered frame feed
 

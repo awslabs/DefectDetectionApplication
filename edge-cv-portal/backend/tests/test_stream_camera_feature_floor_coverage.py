@@ -17,10 +17,11 @@ test_workflow_min_localserver_floor_coverage.py (the jp7 floor guard):
 
 1. the DEPLOYED feature-floor literal in
    ``edge-cv-portal/infrastructure/lib/compute-stack.ts`` covers exactly
-   ``workflow_packaging.ARCH_TO_LOCAL_SERVER_COMPONENT`` once it carries any
+   ``workflow_packaging.ARCH_TO_LOCAL_SERVER_COMPONENT`` minus the
+   architectures listed in ``UNVERIFIED_STREAM_ARCHES`` once it carries any
    entry, with well-formed ``N.N.N`` values — so a future arch fan-out
    (e.g. JP8) cannot add an architecture that silently has no feature
-   floor, and 26.3 cannot fill the map for only some architectures;
+   floor, and an architecture is left out only by a recorded decision;
 2. the packager's notion of "the new node types" (``STREAM_FEATURE_TYPE_
    IDS``) stays equal to the shared vocabulary (its own stream-protocol map
    plus workflow_core's ``SCENE_ANALYTICS_TYPES``), so a new member of
@@ -68,6 +69,18 @@ from test_workflow_packaging_binding_points import (
 
 #: The deployed feature-floor env var (design component 5).
 FEATURE_FLOOR_ENV = 'WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS'
+
+#: Architectures with no LocalServer build verified on hardware for the new
+#: node types, each with the reason it is left out of the floor map
+#: (Requirement 9.7: such an architecture has no floor and fails closed with
+#: STREAM_CAMERAS_UNSUPPORTED_ARCH). Every other architecture in
+#: ARCH_TO_LOCAL_SERVER_COMPONENT must have a floor. Remove an entry here in
+#: the same change that adds its verified floor to compute-stack.ts.
+UNVERIFIED_STREAM_ARCHES = {
+    "arm64_cpu": (
+        "owner decision 2026-09-30, spec task 26.3: skip plain arm64 for "
+        "now; it has no portal build target and no test device"),
+}
 
 #: Semantic version shape every floor value must carry (plain N.N.N).
 _SEMVER = re.compile(r"\d+\.\d+\.\d+")
@@ -201,18 +214,52 @@ class TestDeployedFeatureFloorCoverage:
                 "every architecture is rejected")
         literal_keys = set(deployed_feature_floor)
         packager_archs = set(packaging.ARCH_TO_LOCAL_SERVER_COMPONENT)
-        missing = packager_archs - literal_keys
-        extra = literal_keys - packager_archs
-        assert literal_keys == packager_archs, (
+        expected = packager_archs - set(UNVERIFIED_STREAM_ARCHES)
+        missing = expected - literal_keys
+        extra = literal_keys - expected
+        assert literal_keys == expected, (
             f"{FEATURE_FLOOR_ENV} must cover EXACTLY the packager arch "
-            "vocabulary (ARCH_TO_LOCAL_SERVER_COMPONENT). Missing from the "
-            f"literal: {sorted(missing)} - a workflow using stream camera or "
-            "scene analytics nodes is REJECTED outright on each of those "
-            "architectures (STREAM_CAMERAS_UNSUPPORTED_ARCH), so a partially "
-            "filled map silently makes the feature unavailable there; "
-            f"unknown extra literal keys: {sorted(extra)} (dead entries no "
-            "arch resolves - likely a typo'd arch id). Fix compute-stack.ts "
-            "and/or workflow_packaging.py so both vocabularies move together")
+            "vocabulary (ARCH_TO_LOCAL_SERVER_COMPONENT) minus the "
+            f"architectures listed as unverified ({sorted(UNVERIFIED_STREAM_ARCHES)}). "
+            f"Missing from the literal: {sorted(missing)} - a workflow using "
+            "stream camera or scene analytics nodes is REJECTED outright on "
+            "each of those architectures (STREAM_CAMERAS_UNSUPPORTED_ARCH), "
+            "so a partially filled map silently makes the feature "
+            "unavailable there; list an architecture in "
+            "UNVERIFIED_STREAM_ARCHES only when that is the decision. "
+            f"Unexpected literal keys: {sorted(extra)} (dead entries no arch "
+            "resolves - likely a typo'd arch id - or an unverified "
+            "architecture given a floor without removing it from "
+            "UNVERIFIED_STREAM_ARCHES). Fix compute-stack.ts and/or "
+            "workflow_packaging.py so both vocabularies move together")
+
+    def test_unverified_architectures_are_known_and_documented(self, packaging):
+        # Validates: Requirements 9.7
+        # An unverified entry must name a real architecture (a typo would
+        # silently exempt nothing) and say why it is left out.
+        unknown = set(UNVERIFIED_STREAM_ARCHES) - set(
+            packaging.ARCH_TO_LOCAL_SERVER_COMPONENT)
+        assert not unknown, (
+            f"UNVERIFIED_STREAM_ARCHES names unknown architectures "
+            f"{sorted(unknown)}; they are not in ARCH_TO_LOCAL_SERVER_COMPONENT")
+        assert all(reason.strip() for reason in UNVERIFIED_STREAM_ARCHES.values())
+
+    def test_deployed_literal_rejects_exactly_the_unverified_architectures(
+            self, deployed_feature_floor, packaging, monkeypatch):
+        # Validates: Requirements 9.7
+        # With the deployed literal, the gate accepts every verified
+        # architecture and rejects each unverified one by name.
+        if not deployed_feature_floor:
+            pytest.skip(f"{FEATURE_FLOOR_ENV} carries no entries yet")
+        monkeypatch.setattr(
+            packaging, "STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS",
+            dict(deployed_feature_floor))
+        archs = sorted(packaging.ARCH_TO_LOCAL_SERVER_COMPONENT)
+        graph = graph_of(packaging, stream_definition())
+        findings = packaging.stream_feature_arch_gate_findings(graph, archs)
+        assert sorted(f['arch'] for f in findings) == sorted(UNVERIFIED_STREAM_ARCHES)
+        assert all(f['code'] == 'STREAM_CAMERAS_UNSUPPORTED_ARCH'
+                   for f in findings)
 
     def test_deployed_literal_values_are_wellformed_semver(
             self, deployed_feature_floor):
