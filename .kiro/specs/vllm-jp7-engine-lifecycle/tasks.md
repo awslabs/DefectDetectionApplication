@@ -44,7 +44,7 @@ Conventions on the build host (the `build-host-test-tooling` memory):
 - **Build servers (2026-10-01 to 03).** Both arm64 build servers lost SSM when an org StackSet added SSM and EC2 interface endpoints without subnets, but with private DNS, to BuildVpc. A temporary DNS workaround brought them back on 2026-10-02. The owner approved the proper fix: on 2026-10-03 at 00:11Z both BuildVpc subnets were added to the four endpoints, the workaround was removed, and both servers booted clean on their original user data. The `build-vpc-dns-blackhole` memory has the details.
 - **Verification:** done on every architecture: task 10 on thor1 (JP7 `1.0.53`), task 11 on the Orin (JP6 `1.0.75`), the MIC-730 (JP5 `1.0.52`) and the Dell (amd64 `1.0.48`).
 - **Done (2026-10-03).** Committed on `spec/vllm-jp7-engine-lifecycle` and fast-forwarded into `integration/all-specs` (task 12). The commit's `src/` and `test/` are byte-identical to the verified snapshot `f69d9f5`.
-- **Left:** mark findings 19 and 20 fixed in the rtsp-rtmp-stream-cameras tasks.md. That waits for that spec's findings-21/22 workflow, which is editing the same file.
+- **Complete.** Nothing is left in this spec. A future natural hang leaves a `vllm-construction-timeout-*.txt` on the device (10.6).
 
 ## Tasks
 
@@ -149,11 +149,12 @@ Conventions on the build host (the `build-host-test-tooling` memory):
       - JP5 `1.0.52` on the MIC-730 (`fe6ef10f-b8b6-4078-97a3-132b30d381b6`, COMPLETED): 23 minutes, 4,605 runs, none failed. No vLLM in the image.
       - amd64 `1.0.48` on the Dell (`e4127bb9-fe72-44db-8b7c-482e74ce32f8`, COMPLETED): 11 minutes, 2,167 runs, none failed. No vLLM in the image.
 
-- [ ] 12. USER ACTION: commit and integrate
+- [x] 12. USER ACTION: commit and integrate
   - [x] Commit on `spec/vllm-jp7-engine-lifecycle`, naming the verified devices.
   - [x] Fast-forward `integration/all-specs`, then delete the wip branch.
     - OUTCOME (2026-10-03): `origin/integration/all-specs` was merged into the spec branch first (it had moved on with the rtsp spec's end-to-end record), then the code was committed on top and `integration/all-specs` fast-forwarded to it. `wip/vllm-jp7-engine-lifecycle-verify` is deleted locally and on origin.
-  - [ ] Mark findings 19 and 20 in the rtsp-rtmp-stream-cameras tasks.md as fixed by this spec, or record what remains open. Deferred until that spec's findings-21/22 workflow stops editing the file.
+  - [x] Mark findings 19 and 20 in the rtsp-rtmp-stream-cameras tasks.md as fixed by this spec, or record what remains open.
+    - OUTCOME (2026-10-03): both are marked fixed by `1ca71e0` in that spec's task 25.3. The edit is in the rtsp worktree and is committed with that spec's task 29.
 
 ## Notes
 
