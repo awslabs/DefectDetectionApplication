@@ -66,6 +66,7 @@ import inspect
 import json
 import logging
 import os
+import signal
 import threading
 import time
 import uuid
@@ -84,8 +85,19 @@ from typing import (
     Union,
 )
 
-from vllm_runtime import memory_budget
-from vllm_runtime.constants import UNLOAD_TOMBSTONE_NAME, VLLM_MODEL_DIR
+from vllm_runtime import engine_log, memory_budget
+from vllm_runtime.constants import (
+    CONSTRUCTION_HANG_MARKER_NAME,
+    UNLOAD_TOMBSTONE_NAME,
+    VLLM_MODEL_DIR,
+    engine_construction_timeout_s,
+    engine_stall_window_s,
+    engine_unblock_grace_s,
+)
+from vllm_runtime.construction_watchdog import (
+    ENGINE_CONSTRUCTION_TIMEOUT_MARKER,
+    ConstructionWatchdog,
+)
 from vllm_runtime.generation_metrics import (
     GenerationPhaseBreakdown,
     build_breakdown,
@@ -201,21 +213,29 @@ UNCLASSIFIED_FAILURE_TOKEN = ""
 #: us", and scoping it this way is what keeps the "no retry into a starved
 #: device" contract (exploration Case 6 and Property 6-D both pin exactly
 #: one construction per failed KV-OOM load) intact without weakening it.
+#:
+#: A construction the Construction_Watchdog stopped
+#: (:data:`ENGINE_CONSTRUCTION_TIMEOUT_MARKER`, spec vllm-jp7-engine-lifecycle)
+#: is not retried either: it already ran for the whole stall window or bound,
+#: and the caller (the component Startup, the reconciler) owns retries.
 _NO_OFFLINE_RETRY_TOKENS = (
     KV_CACHE_EXHAUSTION_TOKEN,
     ALLOCATOR_NVML_FAULT_TOKEN,
     PREFLIGHT_REFUSED_MARKER,
+    ENGINE_CONSTRUCTION_TIMEOUT_MARKER,
 )
 
 #: Every category token, including the preflight marker owned by
-#: :mod:`vllm_runtime.memory_budget` (that reason arrives already tokenized,
-#: so the classifier must not prepend a second one).
+#: :mod:`vllm_runtime.memory_budget` and the watchdog's timeout marker owned
+#: by :mod:`vllm_runtime.construction_watchdog` (those reasons arrive
+#: already tokenized, so the classifier must not prepend a second one).
 FAILURE_CATEGORY_TOKENS = (
     KV_CACHE_EXHAUSTION_TOKEN,
     ALLOCATOR_NVML_FAULT_TOKEN,
     PREFLIGHT_REFUSED_MARKER,
     REPOSITORY_INVALID_TOKEN,
     ENGINE_CONSTRUCTION_ERROR_TOKEN,
+    ENGINE_CONSTRUCTION_TIMEOUT_MARKER,
 )
 
 #: Case-insensitive signatures of the KV-cache exhaustion path. The first
@@ -531,6 +551,12 @@ class ModelUnavailableError(VllmRuntimeError):
         super().__init__(message)
 
 
+class ConstructionTimeout(VllmRuntimeError):
+    """The Construction_Watchdog stopped an engine construction (spec
+    vllm-jp7-engine-lifecycle, Defect B). The message is the watchdog's
+    reason, which starts with :data:`ENGINE_CONSTRUCTION_TIMEOUT_MARKER`."""
+
+
 class GenerationError(VllmRuntimeError):
     """The engine reported an error while generating. Carries the model
     name and the backend reason (Requirement 4.6)."""
@@ -585,8 +611,40 @@ def _default_engine_factory(engine_args: Mapping[str, Any]) -> Any:
     from vllm import AsyncEngineArgs
     from vllm.engine.async_llm_engine import AsyncLLMEngine
 
+    # After the first `import vllm` (its import-time logging config removes
+    # earlier handlers) and before the engine core is forked (it inherits
+    # the handler): vLLM's records also go to a persistent, size-bounded
+    # file that survives a container recreation (spec
+    # vllm-jp7-engine-lifecycle, 2.5). Idempotent.
+    engine_log.attach_persistent_vllm_log()
     args = AsyncEngineArgs(**dict(engine_args))
     return AsyncLLMEngine.from_engine_args(args)
+
+
+#: Seconds the self-restart (Decision 3) waits for the graceful shutdown it
+#: requested before it forces the process to exit. The graceful path takes
+#: about 35 s (the 20 s cleanup budget plus the runtime server's 10 s join,
+#: which times out because its loop is the blocked one), inside the 120 s
+#: compose stop grace.
+SELF_RESTART_FORCE_EXIT_AFTER_S = 90.0
+
+
+def _default_self_restart() -> None:
+    """Decision 3, option (a): restart the backend when a construction
+    cannot be unblocked. SIGTERM to our own pid runs the main server's
+    graceful shutdown (exit 0), and docker's restart policy brings the
+    backend back with a free runtime server. In the container the backend is
+    PID 1, which receives SIGTERM because its handler is installed. If the
+    graceful path has not ended the process after
+    :data:`SELF_RESTART_FORCE_EXIT_AFTER_S`, exit hard so docker still
+    restarts it. Runs on the watchdog's daemon thread."""
+    os.kill(os.getpid(), signal.SIGTERM)
+    time.sleep(SELF_RESTART_FORCE_EXIT_AFTER_S)
+    logger.critical(
+        "The backend did not finish its graceful shutdown within %.0f s of "
+        "the vLLM construction-hang restart; forcing the exit",
+        SELF_RESTART_FORCE_EXIT_AFTER_S)
+    os._exit(1)  # pylint: disable=protected-access
 
 
 def _default_sampling_params_factory(params: Mapping[str, Any]) -> Any:
@@ -616,6 +674,17 @@ class VllmRuntimeManager:
     settle-and-re-sample delay, so host tests never actually sleep. All
     state access is lock-guarded, so the manager is safe to touch from the
     HTTP server's event loop and from status-reporting threads alike.
+
+    Every engine construction runs under a
+    :class:`~vllm_runtime.construction_watchdog.ConstructionWatchdog` (spec
+    vllm-jp7-engine-lifecycle, Defect B). ``construction_bound_s``,
+    ``stall_window_s`` and ``unblock_grace_s`` default to the environment
+    overrides or the defaults in :mod:`vllm_runtime.constants`;
+    ``diagnostics_dir`` defaults to ``$COMPONENT_WORK_PATH/logs``;
+    ``watchdog_options`` are extra keyword arguments for the watchdog (its
+    injectable clock, ``/proc`` readers and killer, for tests); and
+    ``self_restart`` is Decision 3's action when a construction cannot be
+    unblocked (default: :func:`_default_self_restart`).
     """
 
     def __init__(
@@ -626,6 +695,12 @@ class VllmRuntimeManager:
         memory_reader: Optional[Callable[[], str]] = None,
         kv_margin_reader: Optional[Callable[[Any], Optional[Dict[str, Any]]]] = None,
         sleep: Optional[Callable[[float], None]] = None,
+        construction_bound_s: Optional[float] = None,
+        stall_window_s: Optional[float] = None,
+        unblock_grace_s: Optional[float] = None,
+        diagnostics_dir: Optional[Union[str, Path]] = None,
+        watchdog_options: Optional[Mapping[str, Any]] = None,
+        self_restart: Optional[Callable[[], None]] = None,
     ):
         self.model_dir = Path(model_dir)
         self._engine_factory = engine_factory or _default_engine_factory
@@ -647,6 +722,24 @@ class VllmRuntimeManager:
         #: life, lock-guarded, NEVER persisted — no tombstone interaction,
         #: no new status surface.
         self._starvation_latch: Optional[StarvationLatch] = None
+        # Construction_Watchdog settings (spec vllm-jp7-engine-lifecycle).
+        self._construction_bound_s = (
+            engine_construction_timeout_s() if construction_bound_s is None
+            else float(construction_bound_s))
+        self._stall_window_s = (
+            engine_stall_window_s() if stall_window_s is None
+            else float(stall_window_s))
+        self._unblock_grace_s = (
+            engine_unblock_grace_s() if unblock_grace_s is None
+            else float(unblock_grace_s))
+        if diagnostics_dir is None:
+            diagnostics_dir = engine_log.default_log_dir()
+        self._diagnostics_dir = (str(diagnostics_dir)
+                                 if diagnostics_dir is not None else None)
+        self._watchdog_options = dict(watchdog_options or {})
+        self._self_restart = self_restart or _default_self_restart
+        #: Models whose Hang_Marker was already reported (once per life).
+        self._hang_marker_warned = set()
 
     # --- inspection --------------------------------------------------------
 
@@ -696,8 +789,92 @@ class VllmRuntimeManager:
         if self._repository_staged(model_name):
             if self._tombstoned(model_name):
                 return ModelStatus(ModelState.UNLOADED)
+            marker = self.construction_hang_marker(model_name)
+            if marker is not None:
+                # Decision 3 (a), spec vllm-jp7-engine-lifecycle: the last
+                # construction hung and the backend restarted itself. FAILED
+                # with the recorded reason keeps the reconciler (which
+                # re-drives STAGED models only) from re-driving it, so a
+                # recurring hang cannot become a restart loop, and keeps the
+                # status truthful. An explicit load clears the marker.
+                reason = self._hang_marker_reason(model_name, marker)
+                self._warn_hang_marker_once(model_name, reason)
+                return ModelStatus(ModelState.FAILED, reason=reason)
             return ModelStatus(ModelState.STAGED)
         return UNKNOWN_STATUS
+
+    # --- Hang_Marker helpers (spec vllm-jp7-engine-lifecycle, Decision 3) --
+
+    def _hang_marker_path(self, model_name: str) -> Path:
+        return self.model_dir / model_name / CONSTRUCTION_HANG_MARKER_NAME
+
+    def construction_hang_marker(self, model_name: str) -> Optional[Dict[str, Any]]:
+        """The model's Hang_Marker content, ``{}`` when it exists but cannot
+        be parsed, or ``None`` when there is none. Only existence decides;
+        the content is for the status reason and triage."""
+        path = self._hang_marker_path(model_name)
+        try:
+            if not path.exists():
+                return None
+        except OSError:
+            return {}
+        try:
+            content = json.loads(path.read_text())
+        except Exception:  # noqa: BLE001 - a corrupt marker still counts
+            return {}
+        return content if isinstance(content, dict) else {}
+
+    @staticmethod
+    def _hang_marker_reason(model_name: str, marker: Mapping[str, Any]) -> str:
+        reason = marker.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return reason
+        return ("{} the last engine construction of vLLM model '{}' could not "
+                "be unblocked and the backend restarted (Hang_Marker {}); an "
+                "explicit load clears it").format(
+                    ENGINE_CONSTRUCTION_TIMEOUT_MARKER, model_name,
+                    CONSTRUCTION_HANG_MARKER_NAME)
+
+    def _warn_hang_marker_once(self, model_name: str, reason: str) -> None:
+        """One WARNING per backend life for each Hang_Marker reported."""
+        with self._lock:
+            if model_name in self._hang_marker_warned:
+                return
+            self._hang_marker_warned.add(model_name)
+        logger.warning(
+            "vLLM model '%s' carries the construction Hang_Marker: its last "
+            "engine construction could not be unblocked and the backend "
+            "restarted. It reports FAILED and the reconciler does not "
+            "re-drive it; an explicit load (the model component's Startup or "
+            "an operator) clears the marker. Recorded reason: %s",
+            model_name, reason)
+
+    def _clear_hang_marker(self, model_name: str) -> None:
+        """Best-effort Hang_Marker removal (an explicit load tries again)."""
+        with self._lock:
+            self._hang_marker_warned.discard(model_name)
+        try:
+            self._hang_marker_path(model_name).unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "Could not remove the construction Hang_Marker of vLLM model "
+                "'%s'; proceeding anyway", model_name, exc_info=True)
+
+    def _write_hang_marker(self, model_name: str, reason: str) -> None:
+        """Best-effort Hang_Marker write into a still-staged repository."""
+        if not self._repository_staged(model_name):
+            return
+        try:
+            self._hang_marker_path(model_name).write_text(json.dumps({
+                "marker": "construction hang",
+                "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+                "reason": reason,
+            }))
+        except Exception:  # noqa: BLE001 - the restart must still happen
+            logger.exception(
+                "Could not write the construction Hang_Marker of vLLM model "
+                "'%s'; the reconciler may re-drive it after the restart",
+                model_name)
 
     # --- Unload_Tombstone helpers (Decision 2; Requirements 2.4, 3.5) ------
 
@@ -772,9 +949,13 @@ class VllmRuntimeManager:
 
         FIRST action: best-effort removal of any Unload_Tombstone — an
         explicit load re-arms post-restart reconciliation (Decision 2;
-        removal failure logs and the load proceeds).
+        removal failure logs and the load proceeds) — and of any
+        construction Hang_Marker (spec vllm-jp7-engine-lifecycle, Decision
+        3: an explicit load tries the construction again, under the
+        watchdog).
         """
         self._clear_tombstone(model_name)
+        self._clear_hang_marker(model_name)
         with self._lock:
             entry = self._models.get(model_name)
             if entry is not None and entry.status.state in (
@@ -883,7 +1064,7 @@ class VllmRuntimeManager:
         restore_env = self._apply_hf_offline_mode(model_name, engine_args)
         try:
             try:
-                engine = await self._construct_engine(engine_args)
+                engine = await self._construct_engine(engine_args, model_name)
             except Exception as err:  # noqa: BLE001 - isolation (4.6, 8.9)
                 if restore_env is None or classify_failure_reason(
                         str(err)) in _NO_OFFLINE_RETRY_TOKENS:
@@ -911,7 +1092,7 @@ class VllmRuntimeManager:
                 self._restore_environment(restore_env)
                 restore_env = None
                 try:
-                    engine = await self._construct_engine(engine_args)
+                    engine = await self._construct_engine(engine_args, model_name)
                 except Exception as retry_err:  # noqa: BLE001 - isolation
                     return self._fail(model_name, str(retry_err),
                                       available_before=available_before)
@@ -943,15 +1124,88 @@ class VllmRuntimeManager:
         self._warn_on_thin_kv_margin(model_name, engine)
         return ModelStatus(ModelState.READY)
 
-    async def _construct_engine(self, engine_args: Mapping[str, Any]) -> Any:
+    async def _construct_engine(self, engine_args: Mapping[str, Any],
+                                model_name: str = "") -> Any:
         """One engine construction through the injectable factory, awaiting
-        an awaitable result. Exactly the two lines that used to sit inline
-        in :meth:`load`, factored out so the offline-cache gate can run it
-        at most twice without duplicating them."""
-        engine = self._engine_factory(engine_args)
-        if inspect.isawaitable(engine):
-            engine = await engine
+        an awaitable result, under a Construction_Watchdog (spec
+        vllm-jp7-engine-lifecycle, Defect B). Factored out of :meth:`load`
+        so the offline-cache gate can run it at most twice without
+        duplicating it.
+
+        Once the watchdog has fired, the construction is a timeout whatever
+        it does next: a raise (the usual case: the watchdog stopped the
+        engine core and vLLM noticed) becomes :class:`ConstructionTimeout`
+        with the watchdog's reason, and a late successful return shuts the
+        new engine down and raises the same."""
+        watchdog = self._new_watchdog(model_name)
+        watchdog.start()
+        try:
+            engine = self._engine_factory(engine_args)
+            if inspect.isawaitable(engine):
+                engine = await engine
+        except Exception as err:
+            if not watchdog.cancel():
+                raise ConstructionTimeout(self._timeout_reason(watchdog, model_name)) from err
+            raise
+        except BaseException:
+            watchdog.cancel()
+            raise
+        if not watchdog.cancel():
+            logger.warning(
+                "The engine construction of vLLM model '%s' returned after the "
+                "construction watchdog fired; shutting the late engine down and "
+                "keeping the load FAILED", model_name)
+            self._shutdown_engine(model_name, engine)
+            raise ConstructionTimeout(self._timeout_reason(watchdog, model_name))
         return engine
+
+    def _new_watchdog(self, model_name: str) -> ConstructionWatchdog:
+        return ConstructionWatchdog(
+            model_name,
+            bound_s=self._construction_bound_s,
+            stall_window_s=self._stall_window_s,
+            grace_s=self._unblock_grace_s,
+            on_unblock_failed=lambda reason: self._on_construction_unblock_failed(
+                model_name, reason),
+            diagnostics_dir=self._diagnostics_dir,
+            **self._watchdog_options,
+        )
+
+    @staticmethod
+    def _timeout_reason(watchdog: ConstructionWatchdog, model_name: str) -> str:
+        return watchdog.reason or (
+            "{} vLLM engine construction for '{}' was stopped by the "
+            "construction watchdog ({})").format(
+                ENGINE_CONSTRUCTION_TIMEOUT_MARKER, model_name,
+                watchdog.trigger or "no trigger recorded")
+
+    def _on_construction_unblock_failed(self, model_name: str, reason: str) -> None:
+        """Decision 3, option (a) (owner-confirmed, spec
+        vllm-jp7-engine-lifecycle): the construction did not return within
+        the Unblock_Grace after the watchdog fired, so the runtime server's
+        event loop stays blocked for this backend life.
+
+        Runs on the watchdog thread. It reports the model FAILED at once
+        (the status feeds read the manager directly, not the blocked loop),
+        logs CRITICAL, writes the Hang_Marker so the reconciler does not
+        re-drive the model after the restart (no restart loop), and restarts
+        the backend. Nothing here touches CUDA: the constructing thread may
+        be stuck inside it."""
+        final = ("{} The construction did not return within the {:.0f} s "
+                 "Unblock_Grace, so the backend restarts to free the vLLM "
+                 "runtime; the reconciler will not re-drive '{}' "
+                 "(Hang_Marker), and an explicit load clears that.").format(
+                     reason, self._unblock_grace_s, model_name)
+        with self._lock:
+            entry = self._models.get(model_name)
+            if entry is not None and entry.status.state is ModelState.LOADING:
+                entry.status = ModelStatus(ModelState.FAILED, reason=final)
+        logger.critical("vLLM model '%s' failed: %s", model_name, final)
+        self._write_hang_marker(model_name, final)
+        logger.critical(
+            "Restarting the LocalServer backend: a vLLM engine construction "
+            "could not be unblocked (model '%s')", model_name)
+        self._self_restart()
 
     def _apply_hf_offline_mode(
         self, model_name: str, engine_args: Mapping[str, Any]

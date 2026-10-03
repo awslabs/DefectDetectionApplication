@@ -68,3 +68,90 @@ except ValueError:
 #: it (re-arming reconciliation). One shared constant for the writer
 #: (the manager's ``unload()``) and any reader (the reconciler).
 UNLOAD_TOMBSTONE_NAME = ".dda_explicit_unload"
+
+# --- Construction_Watchdog (spec vllm-jp7-engine-lifecycle, Defect B) -----
+#
+# An engine construction (``AsyncLLMEngine.from_engine_args``) runs on the
+# runtime server's event loop and blocks it. Without a bound, a construction
+# that never returns leaves the model LOADING and the runtime answering
+# nothing until the model component goes BROKEN and the deployment rolls
+# back (jetson-thor1, 2026-10-01, deployment e8c4694a: 1 h 45 min).
+#
+# Measured legitimate constructions (2026-10-01/02): qwen3-vl-8b-instruct on
+# jetson-thor1 (JP7, vLLM 0.11 V1) 144 s with a cold compile cache (the cache
+# lives in the container layer, so every deployment is cold) and 72 s warm;
+# qwen2.5-vl-7b-instruct-awq on the Orin (JP6, vLLM 0.9.3 V0) 159-164 s.
+#
+# Two triggers, whichever comes first (the owner asked for faster than the
+# 900 s first proposed):
+# - the STALL check: no CPU time and no I/O by the constructing thread and
+#   the engine-core process tree over the stall window. A legitimate
+#   construction keeps burning CPU (weight loading, torch.compile, CUDA
+#   graph capture, profiling); a deadlocked engine core (H1), a lost
+#   handshake (H3) or a backend blocked before the fork (H2) does not.
+# - the hard Construction_Bound, for a construction that keeps busy without
+#   finishing. 600 s is about 3.7x the slowest measured construction.
+
+#: Hard bound on one engine construction, seconds. 0 disables it.
+DEFAULT_ENGINE_CONSTRUCTION_TIMEOUT_S = 600.0
+ENGINE_CONSTRUCTION_TIMEOUT_ENV = "VLLM_ENGINE_CONSTRUCTION_TIMEOUT_S"
+
+#: Stall window, seconds: the construction fails when it made no progress
+#: (see the two thresholds below) over this long. 0 disables the check.
+DEFAULT_ENGINE_STALL_WINDOW_S = 120.0
+ENGINE_STALL_WINDOW_ENV = "VLLM_ENGINE_STALL_WINDOW_S"
+
+#: How long the construction may take to return after the watchdog fired
+#: and stopped its engine core (vLLM notices a dead engine core at once:
+#: its startup wait polls the process sentinels). After that the runtime
+#: is treated as unrecoverable in this backend life (Decision 3).
+DEFAULT_ENGINE_UNBLOCK_GRACE_S = 30.0
+ENGINE_UNBLOCK_GRACE_ENV = "VLLM_ENGINE_UNBLOCK_GRACE_S"
+
+#: Progress below BOTH of these over the stall window is a stall.
+ENGINE_STALL_CPU_SECONDS = 1.0
+ENGINE_STALL_IO_BYTES = 1024 * 1024
+
+#: Watchdog sampling period, seconds.
+ENGINE_WATCHDOG_SAMPLE_PERIOD_S = 5.0
+
+#: Construction diagnostics files kept on the device (oldest deleted).
+ENGINE_DIAGNOSTICS_KEEP = 5
+
+#: Hang_Marker filename (Decision 3, option (a)): written into a staged
+#: repository when a construction could not be unblocked, right before the
+#: backend restarts itself. The repository then reports FAILED with the
+#: recorded reason, so the post-restart reconciler does not re-drive it (no
+#: restart loop). An explicit load clears it, like the Unload_Tombstone, and
+#: the component's atomic re-stage removes it with the old directory.
+CONSTRUCTION_HANG_MARKER_NAME = ".dda_construction_hang"
+
+
+def _env_seconds(name, default):
+    """A non-negative float from the environment, else ``default``."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value != value or value < 0:  # NaN or negative
+        return default
+    return value
+
+
+def engine_construction_timeout_s():
+    """Effective Construction_Bound (environment override, else default)."""
+    return _env_seconds(ENGINE_CONSTRUCTION_TIMEOUT_ENV,
+                        DEFAULT_ENGINE_CONSTRUCTION_TIMEOUT_S)
+
+
+def engine_stall_window_s():
+    """Effective stall window (environment override, else default)."""
+    return _env_seconds(ENGINE_STALL_WINDOW_ENV, DEFAULT_ENGINE_STALL_WINDOW_S)
+
+
+def engine_unblock_grace_s():
+    """Effective Unblock_Grace (environment override, else default)."""
+    return _env_seconds(ENGINE_UNBLOCK_GRACE_ENV, DEFAULT_ENGINE_UNBLOCK_GRACE_S)
