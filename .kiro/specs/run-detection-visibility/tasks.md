@@ -144,9 +144,14 @@ Order of work:
     - On the built component: 20 of 20 soak runs passed every route and byte check, the UI was re-verified, and the backend and device were healthy.
     - JP5 and JP6 were not verified on a device.
 
-- [ ] 8. USER ACTION: commit on the owner's request
+- [x] 8. USER ACTION: commit on the owner's request
   - Commit to `spec/run-detection-visibility`, stating what was verified on which device, and merge into `integration/all-specs` when asked.
   - _Requirements: 6.3_
+  - Result, 2026-09-26 (on the owner's request):
+    - Commit `f11f172` on `spec/run-detection-visibility`, pushed to origin. Its message states what was verified on `jetson-thor1`, and that JP5 and JP6 were not verified on a device.
+    - `integration/all-specs` fast-forwarded from `9beef02` to `f11f172`; origin had not moved, so no other session's work was in between.
+    - The committed code is byte-identical to `2f40e88`, the source LocalServer 1.0.46 was built from. Only `tasks.md` and `verification-notes.md` changed after the build, to record its results.
+    - `wip/run-detection-visibility-jp7-verify` was deleted from origin.
 
 ## Notes
 
