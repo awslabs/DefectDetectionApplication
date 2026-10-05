@@ -41,6 +41,20 @@ order design component 7 gives:
     Requirement 5.8's scheduled deletion, for ``clearCredentials`` and for
     the deletion of a stream camera, run *after* the change is delivered
     so a delivery failure never destroys a secret the device still uses.
+    Given ``secret_ids``, it schedules exactly those secrets.
+
+``device_secret_id``, ``secret_scope`` and ``CameraIdCannotHoldCredentials``
+    The camera's own secret (task 29, finding 22; design component 7,
+    "Secret record"). The Camera_Registry records the ARN of the secret a
+    camera got, because the device re-keys a Portal create to an id of
+    its own, and resolves a camera's secrets from that record, the pending
+    and the reported Credential_Reference, and the name of its id.
+    ``device_secret_id`` accepts a candidate only when it names
+    ``dda-portal/stream-camera-credentials/{device_id}/`` plus one path
+    segment, in the use case's account and region (``secret_scope``), so
+    no device can point the Portal at another device's secret. An update
+    of a camera whose id cannot name a secret, and that has none,
+    raises ``CameraIdCannotHoldCredentials`` with nothing written.
 
 The Portal holds create/update/delete permission on these secrets but not
 ``GetSecretValue`` (Req 6.6), so nothing here ever reads a value back;
@@ -52,7 +66,8 @@ from one — failures are logged with the secret *name* only.
 import json
 import logging
 import os
-from typing import Any, Dict, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from botocore.exceptions import ClientError
 
@@ -137,6 +152,24 @@ class CredentialStorageUnavailable(Exception):
             + (f": {detail}" if detail else ''))
 
 
+class CameraIdCannotHoldCredentials(Exception):
+    """An update would have to create a secret for a camera whose id cannot
+    name one: ``secret_name(device_id, csid)`` is not the device's prefix
+    plus one valid segment, and none of the camera's resolved secrets
+    exists (task 29, design component 7 "Update with credentials").
+
+    Raised before anything is written to the Credential_Vault. The message
+    is fixed and names no id, so it can travel into a response or a log
+    as it is; the route turns it into a 400 with ``field:
+    camera_source_id``.
+    """
+
+    MESSAGE = 'this camera id cannot hold Portal-managed credentials'
+
+    def __init__(self):
+        super().__init__(self.MESSAGE)
+
+
 # ---------------------------------------------------------------------------
 # Naming and request-body helpers
 # ---------------------------------------------------------------------------
@@ -144,6 +177,56 @@ class CredentialStorageUnavailable(Exception):
 def secret_name(device_id: str, csid: str) -> str:
     """The Credential_Vault secret name of one Camera_Source."""
     return f"{SECRET_NAME_PREFIX}/{device_id}/{csid}"
+
+
+#: A complete Secrets Manager secret ARN: the region, the account, and the
+#: name followed by the six-character suffix Secrets Manager appends
+#: (task 29, design component 7 "Secret record"). Applied with
+#: ``fullmatch`` only: ``$`` also matches before a final newline.
+_SECRET_ARN = re.compile(
+    r"arn:aws[a-z-]*:secretsmanager:(?P<region>[a-z0-9-]+):(?P<account>\d{12})"
+    r":secret:(?P<name>[A-Za-z0-9/_+=.@-]+)-[A-Za-z0-9]{6}")
+#: A secret name's characters, without '/': one path segment.
+_NAME_SEGMENT = re.compile(r"[A-Za-z0-9_+=.@-]+")
+
+
+def device_secret_id(candidate: Any, device_id: str,
+                     account_id: Optional[str] = None,
+                     region: Optional[str] = None, *,
+                     derived: bool = False) -> Optional[str]:
+    """The SecretId to call Secrets Manager with for one candidate of a
+    camera's secrets, or None when the candidate is not one of this
+    device's secrets (task 29, design component 7 "Secret record").
+
+    Candidates 1-3 (the record, the pending and the reported
+    Credential_Reference) count only as complete ARNs of ``account_id``
+    and ``region``. Candidate 4 (``derived=True``) is the name
+    ``secret_name()`` built, and reads no account or region. Either way
+    the name must be ``dda-portal/stream-camera-credentials/{device_id}/``
+    plus one segment, so a device can never point the Portal at another
+    device's secret: the prefix ends in '/', so ``dev1`` never matches the
+    secrets of ``dev1-b``.
+    """
+    if derived:                       # candidate 4; reads no account or region
+        name = secret_id = candidate
+    else:                             # candidates 1-3: complete ARNs only
+        match = _SECRET_ARN.fullmatch(candidate) \
+            if isinstance(candidate, str) else None
+        if not match or match["account"] != account_id \
+                or match["region"] != region:
+            return None
+        name, secret_id = match["name"], candidate
+    prefix = f"{SECRET_NAME_PREFIX}/{device_id}/"
+    rest = name[len(prefix):] if name.startswith(prefix) else ""
+    return secret_id if _NAME_SEGMENT.fullmatch(rest) else None
+
+
+def secret_id_name(secret_id: str) -> str:
+    """The secret name a SecretId stands for: the name of a complete ARN,
+    otherwise the id itself (a name)."""
+    match = _SECRET_ARN.fullmatch(secret_id) \
+        if isinstance(secret_id, str) else None
+    return match["name"] if match else secret_id
 
 
 def validate_credentials_request(body: Any) -> Optional[Tuple[str, str]]:
@@ -302,6 +385,28 @@ def _usecase_account_id(usecase: Dict[str, Any],
         'Account']
 
 
+def secret_scope(usecase: Dict[str, Any]) -> Tuple[str, str]:
+    """``(account_id, region)`` of the Use_Case_Account, which every
+    recorded, pending or reported secret ARN must name (task 29, design
+    component 7 "Secret record").
+
+    Resolved lazily, once per request, and only by a request that needs a
+    camera's secrets. ``AccessDenied*`` raises
+    :class:`CredentialStorageUnavailable`, the route's existing 409; any
+    other error propagates.
+    """
+    region = get_usecase_region(usecase or {})
+    try:
+        account_id = _usecase_account_id(usecase, region=region)
+    except Exception as e:  # noqa: BLE001 — classified here
+        if _is_access_denied(e):
+            raise CredentialStorageUnavailable(
+                'permission to store stream camera credentials',
+                str(_error_code(e))) from e
+        raise
+    return account_id, region
+
+
 # ---------------------------------------------------------------------------
 # Step 2: the device read grant
 # ---------------------------------------------------------------------------
@@ -409,6 +514,8 @@ def _current_version_id(description: Dict[str, Any]) -> Optional[str]:
 
 def store_stream_credentials(usecase: Dict[str, Any], device_id: str,
                              csid: str, credentials: Dict[str, str],
+                             secret_ids: Sequence[str] = (), *,
+                             create: bool,
                              region: Optional[str] = None,
                              session_name: Optional[str] = None
                              ) -> Dict[str, Any]:
@@ -420,6 +527,26 @@ def store_stream_credentials(usecase: Dict[str, Any], device_id: str,
     left pending deletion by an earlier ``clearCredentials`` or delete is
     restored first, so re-adding credentials to a camera works inside the
     recovery window.
+
+    Which secret is the camera's (task 29, design component 7 "Update
+    with credentials"):
+
+    - ``create=True``, a create: ``secret_name(device_id, csid)`` alone
+      is described, written into when it exists, and created otherwise.
+      ``secret_ids`` is not used.
+    - ``create=False``, an update: ``secret_ids`` are the camera's
+      resolved SecretIds, in order (``camera_registry
+      .credential_secret_ids``), which end with the derived name whenever
+      ``device_secret_id`` accepts it. They are described in order, and
+      the first that exists is restored, written into and re-tagged. When
+      none exists, ``secret_name(device_id, csid)`` is created, but only
+      when ``device_secret_id(..., derived=True)`` accepts it; otherwise
+      :class:`CameraIdCannotHoldCredentials` is raised before anything is
+      written.
+
+    Either way the secret written is re-tagged with the given ``csid``, so
+    ``dda-portal:camera_source_id`` names the registry entry while the
+    secret keeps the name it was created under.
 
     Returns ``{'secretArn', 'versionId', 'created', 'previousVersionId',
     'restoredFromDeletion'}``: the first two are the Credential_Reference
@@ -434,17 +561,26 @@ def store_stream_credentials(usecase: Dict[str, Any], device_id: str,
     """
     resolved_region = region or get_usecase_region(usecase or {})
     name = secret_name(device_id, csid)
+    candidates = (name,) if create else tuple(secret_ids or ())
     try:
         client = _client('secretsmanager', usecase, region=resolved_region,
                          session_name=session_name)
         description: Optional[Dict[str, Any]] = None
-        try:
-            description = client.describe_secret(SecretId=name)
-        except ClientError as e:
-            if _error_code(e) != 'ResourceNotFoundException':
-                raise
+        target: Optional[str] = None
+        for secret_id in candidates:
+            try:
+                description = client.describe_secret(SecretId=secret_id)
+            except ClientError as e:
+                if _error_code(e) != 'ResourceNotFoundException':
+                    raise
+                continue
+            target = secret_id
+            break
 
-        if description is None:
+        if target is None:
+            if not create and device_secret_id(
+                    name, device_id, derived=True) is None:
+                raise CameraIdCannotHoldCredentials()
             response = client.create_secret(
                 Name=name,
                 Description=('DDA Portal-managed stream camera credentials '
@@ -460,45 +596,51 @@ def store_stream_credentials(usecase: Dict[str, Any], device_id: str,
                     'previousVersionId': None,
                     'restoredFromDeletion': False}
 
+        # The camera's existing secret: the name for a create, the first
+        # resolved id that exists for an update (task 29). Logged by name.
+        label = description.get('Name') or secret_id_name(target)
         restored_from_deletion = False
         if description.get('DeletedDate') is not None:
             # Scheduled for deletion by an earlier clear/delete: restore
             # it rather than failing, and rewrite the value below.
-            client.restore_secret(SecretId=name)
+            client.restore_secret(SecretId=target)
             restored_from_deletion = True
             logger.info(
-                f"Restored Credential_Vault secret {name} from scheduled "
+                f"Restored Credential_Vault secret {label} from scheduled "
                 "deletion before writing a new version")
 
         try:
             if restored_from_deletion:
-                description = client.describe_secret(SecretId=name)
+                description = client.describe_secret(SecretId=target)
             previous_version_id = _current_version_id(description)
             response = client.put_secret_value(
-                SecretId=name, SecretString=_secret_string(credentials))
+                SecretId=target, SecretString=_secret_string(credentials))
         except Exception:
             # Nothing was written, but the restore above cancelled the
             # deletion an earlier clear/delete scheduled: schedule it
             # again, so a request that stores nothing leaves the vault
             # as it found it (Reqs 5.8, 5.9).
             if restored_from_deletion:
-                _reschedule_deletion(client, name)
+                _reschedule_deletion(client, target)
             raise
         try:
+            # Re-tagged with the camera's current id (task 29): after a
+            # re-key the tag names the cfg- entry, while the name keeps
+            # the id the secret was created under.
             client.tag_resource(
-                SecretId=name,
+                SecretId=target,
                 Tags=_secret_tags((usecase or {}).get('usecase_id'),
                                   device_id, csid))
         except Exception as e:  # noqa: BLE001 — tags are metadata only
-            logger.warning(f"Could not refresh the tags of {name}: {e}")
+            logger.warning(f"Could not refresh the tags of {label}: {e}")
         logger.info(
-            f"Wrote a new version of Credential_Vault secret {name}")
+            f"Wrote a new version of Credential_Vault secret {label}")
         return {'secretArn': response['ARN'],
                 'versionId': response['VersionId'],
                 'created': False,
                 'previousVersionId': previous_version_id,
                 'restoredFromDeletion': restored_from_deletion}
-    except CredentialStorageUnavailable:
+    except (CredentialStorageUnavailable, CameraIdCannotHoldCredentials):
         raise
     except Exception as e:  # noqa: BLE001 — classified here
         if _is_access_denied(e):
@@ -631,8 +773,8 @@ def _reschedule_deletion(client: Any, secret_id: str) -> bool:
 
 def schedule_secret_deletion(usecase: Dict[str, Any], device_id: str,
                              csid: str, region: Optional[str] = None,
-                             session_name: Optional[str] = None
-                             ) -> Dict[str, Any]:
+                             session_name: Optional[str] = None, *,
+                             secret_ids: Optional[Sequence[str]] = None):
     """Schedule deletion of a Camera_Source's Credential_Vault secret
     (Req 5.8), with the recoverable window of
     :data:`DELETION_RECOVERY_WINDOW_DAYS`.
@@ -642,10 +784,23 @@ def schedule_secret_deletion(usecase: Dict[str, Any], device_id: str,
     that never had credentials has no secret, which is reported as
     ``absent`` rather than as an error.
 
+    ``secret_ids`` (task 29, design component 7 "Clear and delete"):
+    exactly those SecretIds are scheduled, in order, and the result is a
+    list with one ``{'status', 'secret_id', ...}`` per id. An empty
+    sequence schedules nothing and makes no call. Only ``secret_ids is
+    None`` keeps the by-name behavior below, which schedules
+    ``secret_name(device_id, csid)`` and returns one dict: the test is
+    ``is None``, never the sequence's truth value, so an empty list can
+    never schedule a name another camera may use.
+
     Best-effort: the change is already delivered, so a failure here is
-    logged and reported, never raised. Returns ``{'status': 'scheduled' |
-    'absent' | 'failed', ...}``.
+    logged and reported, never raised. Each status is ``'scheduled'``,
+    ``'absent'`` (no such secret, or one already scheduled) or
+    ``'failed'``.
     """
+    if secret_ids is not None:
+        return _schedule_secret_ids(usecase, list(secret_ids),
+                                    region=region, session_name=session_name)
     name = secret_name(device_id, csid)
     try:
         client = _client('secretsmanager', usecase,
@@ -668,3 +823,51 @@ def schedule_secret_deletion(usecase: Dict[str, Any], device_id: str,
             f"Could not schedule deletion of Credential_Vault secret "
             f"{name}: {e}")
         return {'status': 'failed', 'secret_name': name, 'error': str(e)}
+
+
+def _schedule_secret_ids(usecase: Dict[str, Any], secret_ids: List[str],
+                         region: Optional[str] = None,
+                         session_name: Optional[str] = None
+                         ) -> List[Dict[str, Any]]:
+    """The ``secret_ids`` form of :func:`schedule_secret_deletion`: one
+    result per id, in order, and no call at all for an empty list. Each
+    secret is logged by name. Best-effort, never raising."""
+    if not secret_ids:
+        return []
+    try:
+        client = _client('secretsmanager', usecase,
+                         region=region or get_usecase_region(usecase or {}),
+                         session_name=session_name)
+    except Exception as e:  # noqa: BLE001 — the change is already delivered
+        logger.warning(
+            f"Could not schedule deletion of {len(secret_ids)} "
+            f"Credential_Vault secret(s): {e}")
+        return [{'status': 'failed', 'secret_id': secret_id,
+                 'error': str(e)} for secret_id in secret_ids]
+    results: List[Dict[str, Any]] = []
+    for secret_id in secret_ids:
+        label = secret_id_name(secret_id)
+        try:
+            client.delete_secret(
+                SecretId=secret_id,
+                RecoveryWindowInDays=DELETION_RECOVERY_WINDOW_DAYS)
+        except Exception as e:  # noqa: BLE001 — the change is delivered
+            if _error_code(e) in ('ResourceNotFoundException',
+                                  'InvalidRequestException'):
+                # No secret, or one already scheduled for deletion (a
+                # secret both an ARN and its name resolved, task 29).
+                results.append({'status': 'absent', 'secret_id': secret_id})
+                continue
+            logger.warning(
+                f"Could not schedule deletion of Credential_Vault secret "
+                f"{label}: {e}")
+            results.append({'status': 'failed', 'secret_id': secret_id,
+                            'error': str(e)})
+            continue
+        logger.info(
+            f"Scheduled Credential_Vault secret {label} for deletion in "
+            f"{DELETION_RECOVERY_WINDOW_DAYS} days")
+        results.append({'status': 'scheduled', 'secret_id': secret_id,
+                        'recovery_window_days':
+                            DELETION_RECOVERY_WINDOW_DAYS})
+    return results

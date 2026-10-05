@@ -26,6 +26,10 @@ A failure raises :class:`CredentialFetchError` whose message is
 ``credential retrieval failed: <AWS error code>``: it never holds a secret
 value, a secret name beyond the reference the Portal already knows, or a
 request payload, so it can travel as the change's failure reason.
+
+A denied fetch (:data:`RETRYABLE_REASONS`) is what a device read grant that
+has not propagated yet returns, so the Edge_Sync_Agent retries it before the
+change fails (``CredentialFetchError.retryable``; Requirement 5.6, finding 21).
 """
 import json
 import re
@@ -42,6 +46,12 @@ _SECRET_ARN_RE = re.compile(
     r"^arn:aws[a-z-]*:secretsmanager:(?P<region>[a-z0-9-]+):\d{12}:secret:[A-Za-z0-9/_+=.@-]+$")
 _VERSION_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 
+#: The error codes of a denied fetch. The Portal writes the device read grant
+#: about a second before the device fetches, and IAM can take longer than
+#: that to apply a new policy, so these are retried; every other failure is
+#: final (design component 12, **Denied credential fetch**).
+RETRYABLE_REASONS = frozenset({"AccessDeniedException", "AccessDenied"})
+
 
 class CredentialFetchError(Exception):
     """The credentials could not be retrieved; the message holds no secret."""
@@ -49,6 +59,11 @@ class CredentialFetchError(Exception):
     def __init__(self, reason: str):
         super().__init__(f"credential retrieval failed: {reason}")
         self.reason = reason
+
+    @property
+    def retryable(self) -> bool:
+        """Whether the fetch was denied, and is worth retrying."""
+        return self.reason in RETRYABLE_REASONS
 
 
 def parse_reference(credential_ref: Any) -> Dict[str, str]:

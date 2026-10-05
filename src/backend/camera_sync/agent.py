@@ -55,6 +55,19 @@ Report triggers (all funnel through :meth:`EdgeSyncAgent.report_inventory`):
   ``desired.changes[csid]`` through the existing accessors (Requirements
   5.2, 5.3, 5.4, 5.6, 11.3) and calls ``report_inventory`` afterwards, so
   the applied state (with ``ack``/failure entries) is what gets reported.
+  Each ``(csid, portalChangeId)`` is applied at most once per process, a
+  failed clear of the applied desired entries is retried from
+  :meth:`EdgeSyncAgent.pump` instead of waiting for a delta redelivery, and
+  :meth:`EdgeSyncAgent.on_subscription_active` applies the pending entries
+  each time the delta subscription becomes active (rtsp-rtmp-stream-cameras
+  finding 23, Requirement 5.13).
+
+Two apply rules come from rtsp-rtmp-stream-cameras finding 21 (Requirements
+5.6 and 5.11, design component 12). A change whose credential fetch is denied,
+because the device read grant has not propagated yet, is parked and retried
+2, 4, 8, 16 and 30 s apart on the ``change_retry_timer`` seam before it fails.
+A Portal delete of a camera the device never created is acknowledged, and the
+create's old failure key is removed from the shadow with an explicit ``null``.
 
 Reports are debounced to one shadow write per
 :data:`DEBOUNCE_SECONDS`-second window — comfortably inside the 30 s bound
@@ -80,6 +93,9 @@ Static_Video_Camera (static-camera-video-loop, :func:`make_video_pin_worker`).
 Both virtual cameras report their own inventory entry with their own
 absence lifecycle.
 """
+import collections
+import functools
+import itertools
 import json
 import logging
 import os
@@ -106,6 +122,7 @@ from camera_sync.pin_worker import (
 )
 from camera_sync.stream_reporting import (
     StreamReportDebouncer,
+    _default_timer,
     is_stream_change,
     stream_change_parts,
     stream_ingest_section,
@@ -262,6 +279,26 @@ BACKOFF_MAX_SECONDS = 60.0
 #: through discovery (defense in depth behind the portal-side rejection,
 #: Requirement 5.6).
 REASON_DISCOVERY_MANAGED = "discovery-managed"
+
+#: A change whose credential fetch is denied is retried this many seconds
+#: after each attempt ends (rtsp-rtmp-stream-cameras Requirement 5.6, finding
+#: 21): at most six attempts, the last about 60 s after the first denial.
+CREDENTIAL_RETRY_DELAYS_S: Tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 30.0)
+
+#: Appended to the failure reason when the last retry is denied too:
+#: ``credential retrieval failed: <code> (retried for 60 s)``.
+CREDENTIAL_RETRY_NOTE = "retried for 60 s"
+
+#: The ``(csid, portalChangeId)`` keys of processed Portal changes the agent
+#: remembers, so a redelivered change is not applied again
+#: (rtsp-rtmp-stream-cameras Requirement 5.13, finding 23). The oldest is
+#: forgotten first.
+PROCESSED_CHANGES_CAP = 256
+
+#: A failed clear of applied desired entries is retried from ``pump()``, 1 s
+#: after the failure, doubling up to 30 s apart (Requirement 5.13).
+CLEAR_RETRY_INITIAL_SECONDS = 1.0
+CLEAR_RETRY_MAX_SECONDS = 30.0
 
 #: Stable-id prefixes: configured Image_Sources report as ``cfg-{id}``;
 #: discovered-only hardware reports under its ``disc-…`` discovery id.
@@ -489,6 +526,7 @@ def build_report_document(
     retirements: Optional[Iterable[str]] = None,
     max_bytes: int = MAX_REPORT_BYTES,
     device_capabilities: Optional[Mapping[str, Any]] = None,
+    failure_retirements: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
     """Pure builder of the complete reported document (design section 3).
 
@@ -520,6 +558,12 @@ def build_report_document(
     ``device_capabilities`` (rtsp-rtmp-stream-cameras Requirement 16.5) is
     the ``deviceCapabilities.streamIngest`` section; when None the document
     has no ``deviceCapabilities`` key, exactly as before the feature.
+
+    ``failure_retirements`` (rtsp-rtmp-stream-cameras Requirement 5.11) are
+    failure keys the shadow holds that a delete of a camera the device
+    never created retired: each is written as ``failures[csid] = None``,
+    unless the document carries a failure for it, which wins. The default
+    leaves the document exactly as before.
     """
     acks = acks or {}
     cameras: Dict[str, Any] = {
@@ -536,11 +580,15 @@ def build_report_document(
     for retired_csid in sorted(retirements or ()):
         if retired_csid not in cameras:
             cameras[retired_csid] = None
+    failure_entries: Dict[str, Any] = {k: dict(v) for k, v in (failures or {}).items()}
+    for retired_csid in sorted(failure_retirements or ()):
+        if retired_csid not in failure_entries:
+            failure_entries[retired_csid] = None
     document: Dict[str, Any] = {
         "schemaVersion": SCHEMA_VERSION,
         "reportedAt": int(reported_at_ms),
         "cameras": cameras,
-        "failures": {k: dict(v) for k, v in (failures or {}).items()},
+        "failures": failure_entries,
         "discoveryErrors": [dict(e) for e in (discovery_errors or [])],
     }
     if device_capabilities is not None:
@@ -616,6 +664,13 @@ def _record_field(record, key: str):
     return getattr(record, key, None)
 
 
+def _change_identity(change: Mapping[str, Any]) -> Any:
+    """What a pending clear compares a ``desired.changes`` entry with: its
+    ``str(portalChangeId)``, or the whole change when it carries none."""
+    portal_change_id = change.get("portalChangeId")
+    return str(portal_change_id) if portal_change_id else dict(change)
+
+
 def _error_reason(err: Exception) -> str:
     """The accessor error message, verbatim (Requirement 5.4)."""
     if isinstance(err, HTTPException):
@@ -638,7 +693,10 @@ class EdgeSyncAgent:
     ``latest_snapshot``; ``db_session_factory`` yields SQLAlchemy sessions
     for the read-only ``ImageSourceAccessor`` calls (defaults to the
     LocalServer ``SessionLocal``). ``clock`` is a monotonic-seconds source
-    injected by fake-clock tests.
+    injected by fake-clock tests. ``change_retry_timer(delay_s, action)``
+    starts the retry timers of changes whose credential fetch was denied
+    (default: ``stream_reporting._default_timer``, a daemon
+    ``threading.Timer``); tests inject a recording fake and fire it by hand.
     """
 
     def __init__(
@@ -664,6 +722,7 @@ class EdgeSyncAgent:
         stream_timer: Optional[Callable[[float, Callable[[], None]], None]] = None,
         credential_fetcher: Optional[Callable[[Mapping[str, Any]], Dict[str, str]]] = None,
         credential_store=None,
+        change_retry_timer: Optional[Callable[[float, Callable[[], None]], None]] = None,
     ):
         self._shadow = iot_shadow_accessor
         self._image_source_accessor = image_source_accessor
@@ -789,6 +848,53 @@ class EdgeSyncAgent:
         self._credential_fetcher = credential_fetcher
         self._credential_store = credential_store
 
+        # Denied credential fetches (rtsp-rtmp-stream-cameras Requirement
+        # 5.6, design component 12). ``_apply_lock`` serializes every change
+        # application: a delta's batch, the activation catch-up and each
+        # retry. The lock order is ``_apply_lock``, then ``_lock``; nothing
+        # under ``_apply_lock`` writes the shadow, starts a timer or requests
+        # a report. ``_credential_retries[csid]`` is the parked change,
+        # ``{change, portalChangeId, attempt, token}``. Timers cannot be
+        # cancelled, so each parking takes a fresh token and a timer whose
+        # token is no longer parked does nothing. ``change_retry_timer``'s
+        # contract: the action runs later, on another thread.
+        self._change_retry_timer = (
+            change_retry_timer if change_retry_timer is not None else _default_timer
+        )
+        self._apply_lock = threading.Lock()
+        self._credential_retries: Dict[str, Dict[str, Any]] = {}
+        self._retry_tokens = itertools.count(1)
+
+        # At most once per Portal change (Requirement 5.13, design component
+        # 12): the ``(csid, str(portalChangeId))`` of every change finished
+        # here, oldest first, capped at PROCESSED_CHANGES_CAP. Used only
+        # under ``_apply_lock``. A parked change is never recorded.
+        self._processed_changes: "collections.OrderedDict[Tuple[str, str], None]" = (
+            collections.OrderedDict())
+
+        # Failed clears of applied desired entries, retried from pump()
+        # (Requirement 5.13), guarded by ``_lock``: ``_pending_clears[csid]``
+        # is the identity of the change whose entry is still to be nulled,
+        # its ``str(portalChangeId)`` or else ``dict(change)``. The retry
+        # reads the shadow first and nulls only an entry with that identity.
+        self._pending_clears: Dict[str, Any] = {}
+        self._clear_not_before = 0.0
+        self._clear_retry_delay = CLEAR_RETRY_INITIAL_SECONDS
+        self._clear_retries = 0  # the retries of the current episode, for the logs
+
+        # Failure keys of deletes of cameras the device never created
+        # (Requirement 5.11, design component 12), with the camera
+        # retirements' rule: only a key the shadow holds is nulled.
+        # - _published_failure_keys: the failure keys the shadow holds,
+        #   seeded from the start-time shadow GET and kept current by every
+        #   successful write (empty when that GET fails).
+        # - _pending_failure_retirements: the ids such a delete retired.
+        # - _consumed_failure_retirements: the nulls the document being
+        #   written carries; only a successful write retires them.
+        self._published_failure_keys: Set[str] = set()
+        self._pending_failure_retirements: Set[str] = set()
+        self._consumed_failure_retirements: Set[str] = set()
+
     # --- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
@@ -841,9 +947,12 @@ class EdgeSyncAgent:
 
     def stop(self) -> None:
         """Stop the report worker (and the owned pin worker) and wait for
-        them to exit."""
+        them to exit. Parked credential retries are dropped, so a retry
+        timer that fires afterwards does nothing."""
         self._stop_event.set()
         self._wakeup.set()
+        with self._apply_lock:
+            self._credential_retries.clear()
         self.pin_worker.stop()
         self.video_pin_worker.stop()
         thread = self._thread
@@ -940,50 +1049,169 @@ class EdgeSyncAgent:
         if isinstance(changes, Mapping) and changes:
             self.apply_desired_changes(changes)
 
+    def on_subscription_active(self) -> bool:
+        """The delta subscription became active (Requirement 5.13, design
+        component 12, **Catch-up on activation**). The subscription's worker
+        runs this at the catch-up's place in its queue after every
+        activation, the first included.
+
+        Once the shadow GET is readable (a mapping, or False when there is no
+        shadow), reports and a pending clear resume at once, and the shadow's
+        ``desired.changes`` is applied. Returns False when the shadow could
+        not be read, so the subscription runs the catch-up again. A catch-up
+        that could not read the shadow leaves the report and clear backoffs
+        as they are: retried while the stream is up, it neither forces a
+        report nor restarts a failing write's backoff."""
+        state = self._shadow.get_thing_shadow_state_request(self.thing_name, self.shadow_name)
+        if state is None:
+            logger.warning(
+                "Could not read the camera-registry shadow after subscribing; retrying")
+            return False
+        with self._lock:
+            self._not_before = 0.0
+            self._retry_delay = self._backoff_initial
+            self._dirty = True
+            self._clear_not_before = 0.0
+            self._clear_retry_delay = CLEAR_RETRY_INITIAL_SECONDS
+        self._wakeup.set()
+        desired = state.get("desired") if isinstance(state, Mapping) else None
+        changes = desired.get("changes") if isinstance(desired, Mapping) else None
+        if isinstance(changes, Mapping) and changes:
+            self.apply_desired_changes(changes)
+        return True
+
     # --- portal-change apply path (Requirements 5.2–5.6, 11.3) ------------
 
     def apply_desired_changes(self, changes: Mapping[str, Any]) -> None:
         """Apply every ``desired.changes[csid]`` entry through the existing
         accessors, record acks/failures, clear the processed desired
-        entries (writing ``null``), and report the resulting state."""
+        entries (writing ``null``), and report the resulting state.
+
+        The batch is applied under ``_apply_lock``. The retry timers of the
+        changes a denied fetch parked, the desired-entry clear and the
+        report request run only after the lock is released (design
+        component 12, **Denied credential fetch**). A change already
+        processed is listed too, so its entry is cleared. When the clear
+        fails, its entries are retried from :meth:`pump` (Requirement 5.13)."""
         processed: List[str] = []
-        for csid in sorted(changes):
-            change = changes[csid]
-            if not isinstance(change, Mapping):
-                continue  # already-cleared (null) entries carry no work
-            processed.append(csid)
-            self._apply_one_change(str(csid), change)
+        identities: Dict[str, Any] = {}
+        retries: List[Tuple[str, float, int]] = []
+        with self._apply_lock:
+            for csid in sorted(changes):
+                change = changes[csid]
+                if not isinstance(change, Mapping):
+                    continue  # already-cleared (null) entries carry no work
+                processed.append(csid)
+                identities[csid] = _change_identity(change)
+                retry = self._apply_one_change(str(csid), change)
+                if retry is not None:
+                    retries.append(retry)
+        for retry in retries:
+            self._start_retry_timer(*retry)
         if not processed:
             return
-        self._clear_desired_entries(processed)
+        cleared = self._clear_desired_entries(processed)
+        with self._lock:
+            if cleared:
+                for csid in processed:
+                    self._pending_clears.pop(csid, None)
+            else:
+                self._pending_clears.update(identities)
+                self._clear_not_before = self._clock() + self._clear_retry_delay
+        if not cleared:
+            self._wakeup.set()
         self.report_inventory()
 
-    def _apply_one_change(self, csid: str, change: Mapping[str, Any]) -> None:
+    def _apply_one_change(
+        self, csid: str, change: Mapping[str, Any], attempt: int = 0
+    ) -> Optional[Tuple[str, float, int]]:
+        """Apply one Portal change; the caller holds ``_apply_lock``.
+
+        ``attempt`` is 0 for a delivered change, and the number of the retry
+        for a parked one (:meth:`_retry_parked_change`). Returns the retry to
+        schedule, ``(csid, delay_s, token)``, when a denied fetch parked the
+        change, and otherwise None. It never starts a timer itself: its
+        callers start the returned retry once they release ``_apply_lock``.
+
+        Task 29's parked-change check runs first. Then a delivered change
+        that was already processed (the same csid and ``portalChangeId``) is
+        not applied again (Requirement 5.13). Any other change is dispatched,
+        and recorded once it has finished: applied, failed, refused or
+        acknowledged, never while it is parked.
+        """
         op = str(change.get("op") or "")
         portal_change_id = change.get("portalChangeId")
 
-        # Discovery-managed sources are immutable from the Portal
-        # (defense in depth behind the portal-side rejection, Req 5.6):
-        # only cfg- configured sources can be updated or deleted, and a
-        # create must not target a disc- discovery id. The literal
-        # `static-image-camera` id is likewise discovery-managed (feature
-        # cloud-static-camera-provisioning, Requirement 6.5), and so is
-        # `static-video-camera` (static-camera-video-loop).
+        if attempt == 0 and self._redelivers_parked_change(csid, portal_change_id):
+            return None
+
+        key = (csid, str(portal_change_id)) if portal_change_id else None
+        if attempt == 0 and key is not None and key in self._processed_changes:
+            logger.info(
+                "Portal change %s for %s was already processed; clearing its "
+                "desired entry without applying it again", portal_change_id, csid,
+            )
+            self._processed_changes.move_to_end(key)
+            return None
+
+        retry = self._dispatch_change(csid, change, op, portal_change_id, attempt)
+        if retry is None and key is not None:
+            self._processed_changes[key] = None
+            self._processed_changes.move_to_end(key)
+            while len(self._processed_changes) > PROCESSED_CHANGES_CAP:
+                self._processed_changes.popitem(last=False)
+        return retry
+
+    def _dispatch_change(
+        self,
+        csid: str,
+        change: Mapping[str, Any],
+        op: str,
+        portal_change_id: Optional[str],
+        attempt: int,
+    ) -> Optional[Tuple[str, float, int]]:
+        """Apply one Portal change by the rules below; the caller,
+        :meth:`_apply_one_change`, holds ``_apply_lock`` and gets the retry
+        to schedule, or None."""
+        # The rules of design component 12, in order (Requirements 5.6, 5.11;
+        # defense in depth behind the portal-side rejection):
+        # 1. Any change to a disc- discovery id is refused as
+        #    discovery-managed, creates included, and so is any change to the
+        #    literal `static-image-camera` (feature
+        #    cloud-static-camera-provisioning, Requirement 6.5) and
+        #    `static-video-camera` (static-camera-video-loop) ids.
+        # 2. Creates, and any change to a cfg- configured source, take their
+        #    existing paths.
+        # 3. A delete of an arv- id, and any op other than a create or a
+        #    delete on any other id, is refused as discovery-managed.
+        # 4. Any other delete names a camera the device never created, such
+        #    as a Portal create that failed or never arrived, and is
+        #    acknowledged (_apply_never_created_delete).
+        configured = csid.startswith(_CONFIGURED_PREFIX)
         targets_discovered = (
             csid.startswith(_DISCOVERED_PREFIX)
             or csid == STATIC_IMAGE_CAMERA_ID
             or csid == STATIC_VIDEO_CAMERA_ID
         )
+        never_created_delete = (
+            op == "delete"
+            and not configured
+            and not targets_discovered
+            and not csid.startswith(ARAVIS_STABLE_ID_PREFIX)
+        )
         if targets_discovered or (
-            op != "create" and not csid.startswith(_CONFIGURED_PREFIX)
+            op != "create" and not configured and not never_created_delete
         ):
             self._record_failure(csid, REASON_DISCOVERY_MANAGED, portal_change_id)
-            return
+            return None
 
         from stream_ingest.credential_fetch import CredentialFetchError
 
+        failure_code: Optional[str] = None
         try:
-            if op == "create" and is_stream_change(change):
+            if never_created_delete:
+                self._apply_never_created_delete(csid, portal_change_id)
+            elif op == "create" and is_stream_change(change):
                 self._apply_stream_create(csid, change, portal_change_id)
             elif op == "create":
                 self._apply_create(csid, change, portal_change_id)
@@ -998,17 +1226,149 @@ class EdgeSyncAgent:
                     csid, "unsupported operation '{}'".format(op), portal_change_id
                 )
         except CredentialFetchError as err:
-            # Requirement 5.6: the change fails with a reason that holds no
-            # secret ("credential retrieval failed: AccessDenied"), and the
-            # device is left unchanged.
-            self._record_failure(csid, str(err), portal_change_id)
+            # Requirement 5.6: a denial is retried; any other failure fails
+            # the change with a reason that holds no secret ("credential
+            # retrieval failed: ResourceNotFoundException"), and the device
+            # is left unchanged.
+            return self._credential_fetch_failed(
+                csid, change, portal_change_id, attempt, err
+            )
         except (ValidationError, HTTPException) as err:
             # Accessor validation rejected the change: the message travels
             # verbatim as the failure reason (Requirement 5.4).
             self._record_failure(csid, _error_reason(err), portal_change_id)
+            failure_code = type(err).__name__
         except Exception as err:  # noqa: BLE001 - apply isolation (11.2)
             logger.exception("Applying portal change for %s failed", csid)
             self._record_failure(csid, str(err), portal_change_id)
+            failure_code = type(err).__name__
+        if attempt > 0 and failure_code is None:
+            logger.info(
+                "Portal change %s for %s applied after %d credential retries",
+                portal_change_id, csid, attempt,
+            )
+        elif attempt > 0:
+            logger.warning(
+                "Portal change %s for %s failed on credential retry %d (%s)",
+                portal_change_id, csid, attempt, failure_code,
+            )
+        return None
+
+    # --- denied credential fetches (Requirement 5.6, design component 12) ---
+
+    def _redelivers_parked_change(
+        self, csid: str, portal_change_id: Optional[str]
+    ) -> bool:
+        """A change was delivered for ``csid``, from a delta or the
+        start-time catch-up (the caller holds ``_apply_lock``).
+
+        True when it is the parked change redelivered: same
+        ``portalChangeId``, both present. It is not applied again, and the
+        parked change keeps its schedule. Any other change, of any op, is
+        newer: the parked change is dropped, and its timer finds nothing."""
+        parked = self._credential_retries.get(csid)
+        if parked is None:
+            return False
+        parked_change_id = parked.get("portalChangeId")
+        if portal_change_id and parked_change_id and portal_change_id == parked_change_id:
+            logger.info(
+                "Portal change %s for %s is already waiting for a credential "
+                "retry; not applying it again", portal_change_id, csid,
+            )
+            return True
+        del self._credential_retries[csid]
+        logger.info(
+            "Portal change %s for %s supersedes change %s, which was waiting "
+            "for a credential retry", portal_change_id, csid, parked_change_id,
+        )
+        return False
+
+    def _credential_fetch_failed(
+        self,
+        csid: str,
+        change: Mapping[str, Any],
+        portal_change_id: Optional[str],
+        attempt: int,
+        err,
+    ) -> Optional[Tuple[str, float, int]]:
+        """A credential fetch failed (the caller holds ``_apply_lock``). A
+        denial parks the change for its next retry while one is left, and
+        returns that retry. Any other failure fails the change at once, and
+        so does a denial of the last retry, with the retry note. The log
+        lines name only the id, the change id and the error code."""
+        if err.retryable and attempt < len(CREDENTIAL_RETRY_DELAYS_S):
+            token = next(self._retry_tokens)
+            self._credential_retries[csid] = {
+                "change": dict(change),
+                "portalChangeId": portal_change_id,
+                "attempt": attempt + 1,
+                "token": token,
+            }
+            delay_s = CREDENTIAL_RETRY_DELAYS_S[attempt]
+            log = logger.warning if attempt == 0 else logger.info
+            log("Credential retrieval for Portal change %s for %s was denied "
+                "(%s); retry %d of %d in %g s", portal_change_id, csid, err.reason,
+                attempt + 1, len(CREDENTIAL_RETRY_DELAYS_S), delay_s)
+            return csid, delay_s, token
+        if err.retryable:
+            logger.warning(
+                "Credential retrieval for Portal change %s for %s was still "
+                "denied (%s) after retrying for 60 s; the change failed",
+                portal_change_id, csid, err.reason,
+            )
+            self._record_failure(
+                csid, "{} ({})".format(err, CREDENTIAL_RETRY_NOTE), portal_change_id
+            )
+            return None
+        if attempt > 0:
+            logger.warning(
+                "Credential retrieval for Portal change %s for %s failed on "
+                "retry %d (%s); the change failed",
+                portal_change_id, csid, attempt, err.reason,
+            )
+        self._record_failure(csid, str(err), portal_change_id)
+        return None
+
+    def _retry_parked_change(self, csid: str, token: int) -> None:
+        """A credential retry timer fired, on the timer's thread.
+
+        Does nothing unless the agent is running and ``csid``'s parked
+        change still holds ``token``, so a timer left by a change that was
+        superseded, retried again or dropped never runs a newer change's
+        retry early. The attempt runs under ``_apply_lock``; the next
+        retry's timer, or the report request, after it is released. Every
+        exception is caught, so the timer thread never dies with one."""
+        try:
+            with self._apply_lock:
+                parked = self._credential_retries.get(csid)
+                if (
+                    self._stop_event.is_set()
+                    or parked is None
+                    or parked.get("token") != token
+                ):
+                    return
+                del self._credential_retries[csid]
+                retry = self._apply_one_change(
+                    csid, parked["change"], attempt=parked["attempt"]
+                )
+            if retry is not None:
+                self._start_retry_timer(*retry)
+            else:
+                self.report_inventory()
+        except Exception:  # noqa: BLE001 - timer thread isolation (11.2)
+            logger.exception("The credential retry of the Portal change for %s failed", csid)
+
+    def _start_retry_timer(self, csid: str, delay_s: float, token: int) -> None:
+        """Start a parked change's retry timer. Never called with
+        ``_apply_lock`` held, so even a timer that runs its action at once
+        cannot deadlock. A timer that cannot start is logged; the change
+        stays parked until a newer change for the id supersedes it."""
+        try:
+            self._change_retry_timer(
+                delay_s, functools.partial(self._retry_parked_change, csid, token)
+            )
+        except Exception:  # noqa: BLE001 - timer start isolation (11.2)
+            logger.exception("Could not start the credential retry timer for %s", csid)
 
     def _apply_create(
         self, csid: str, change: Mapping[str, Any], portal_change_id: Optional[str]
@@ -1152,6 +1512,44 @@ class EdgeSyncAgent:
             self._apply_failures.pop(csid, None)
             self._pending_acks.pop(csid, None)
 
+    def _apply_never_created_delete(
+        self, csid: str, portal_change_id: Optional[str]
+    ) -> None:
+        """A Portal delete of an id that is neither a ``cfg-`` id nor
+        discovery-managed (rule 4 of design component 12, Requirement 5.11),
+        such as a Portal create that failed or never reached the device. The
+        caller holds ``_apply_lock``.
+
+        When the id is a create alias the agent has not reported yet, the
+        create made a camera the Portal does not know yet, and the delete
+        deletes it through :meth:`_apply_delete`. A 404 means it is already
+        gone; any other error fails the delete and keeps the alias.
+        Otherwise the device holds nothing for the id, and the delete is
+        acknowledged. Either way the id's parked retry, recorded failure,
+        pending ack and alias go, and its failure key is retired from the
+        shadow when the shadow holds one (see ``_build_current_document``)."""
+        with self._lock:
+            created_csid = self._create_aliases.get(csid)
+        deleted = False
+        if created_csid is not None:
+            try:
+                self._apply_delete(created_csid, portal_change_id)
+                deleted = True
+            except HTTPException as err:
+                if err.status_code != 404:
+                    raise
+        self._credential_retries.pop(csid, None)
+        with self._lock:
+            self._apply_failures.pop(csid, None)
+            self._pending_acks.pop(csid, None)
+            self._create_aliases.pop(csid, None)
+            self._pending_failure_retirements.add(csid)
+        logger.info(
+            "Acknowledged Portal delete %s for %s, which the device never "
+            "created%s", portal_change_id, csid,
+            "; deleted {}, which its create made".format(created_csid) if deleted else "",
+        )
+
     def _record_failure(
         self, csid: str, reason: str, portal_change_id: Optional[str]
     ) -> None:
@@ -1162,19 +1560,107 @@ class EdgeSyncAgent:
             self._apply_failures[csid] = failure
             self._pending_acks.pop(csid, None)
 
-    def _clear_desired_entries(self, csids: Iterable[str]) -> None:
+    def _clear_desired_entries(self, csids: Iterable[str]) -> bool:
         """Clear applied or failed desired entries by writing ``null``
-        (standard shadow discipline: the delta must not re-fire)."""
+        (standard shadow discipline: the delta must not re-fire). Returns
+        whether the write succeeded. A failed clear no longer waits for a
+        delta redelivery: :meth:`apply_desired_changes` keeps its entries
+        pending, and :meth:`pump` retries them (Requirement 5.13)."""
         payload = {"desired": {"changes": {csid: None for csid in csids}}}
         try:
             self._shadow.update_thing_shadow_state_request(
                 self.thing_name, self.shadow_name, payload
             )
-        except Exception:  # noqa: BLE001 - offline clear retries via delta redelivery
+        except Exception:  # noqa: BLE001 - a failed clear is retried from pump()
             logger.exception(
                 "Could not clear applied desired changes from the "
                 "camera-registry shadow"
             )
+            return False
+        return True
+
+    def _retry_pending_clears(self) -> Optional[float]:
+        """Retry the failed clears when one is due (Requirement 5.13, design
+        component 12, **Clear retry**). Returns the seconds until the next
+        retry, or None when no clear is pending.
+
+        The retry reads the shadow before it writes, and nulls only an entry
+        that still holds the identity of the change it is for: a missing
+        entry, or a newer change, needs nothing. Completion is
+        compare-and-remove, so a newer pending clear added meanwhile stays.
+        A failed retry (an unreadable shadow, or a GET or UPDATE that
+        raises) keeps every entry and backs off, 1 s doubling up to 30 s.
+        Nothing raised escapes."""
+        with self._lock:
+            if self._stop_event.is_set() or not self._pending_clears:
+                return None
+            now = self._clock()
+            if now < self._clear_not_before:
+                return self._clear_not_before - now
+            snapshot = dict(self._pending_clears)
+            self._clear_retries += 1
+            retry_number = self._clear_retries
+
+        done: Dict[str, Any] = {}
+        nulls: List[str] = []
+        error: Optional[str] = None
+        try:
+            state = self._shadow.get_thing_shadow_state_request(
+                self.thing_name, self.shadow_name
+            )
+        except Exception as err:  # noqa: BLE001 - counts as a failed retry
+            state, error = None, "{}: {}".format(type(err).__name__, err)
+        if state is False:
+            done = snapshot  # no shadow: nothing left to clear
+        elif not isinstance(state, Mapping):
+            error = error or "the shadow could not be read"
+        else:
+            desired = state.get("desired")
+            entries = desired.get("changes") if isinstance(desired, Mapping) else None
+            entries = entries if isinstance(entries, Mapping) else {}
+            for csid, identity in snapshot.items():
+                entry = entries.get(csid)
+                if isinstance(entry, Mapping) and _change_identity(entry) == identity:
+                    nulls.append(csid)
+                else:
+                    done[csid] = identity  # gone, or a newer change: left in place
+            if nulls:
+                try:
+                    self._shadow.update_thing_shadow_state_request(
+                        self.thing_name, self.shadow_name,
+                        {"desired": {"changes": {csid: None for csid in nulls}}},
+                    )
+                except Exception as err:  # noqa: BLE001 - counts as a failed retry
+                    error = "{}: {}".format(type(err).__name__, err)
+                else:
+                    done.update((csid, snapshot[csid]) for csid in nulls)
+
+        with self._lock:
+            for csid, identity in done.items():
+                if self._pending_clears.get(csid) == identity:
+                    del self._pending_clears[csid]
+            now = self._clock()
+            if error is not None:
+                delay = self._clear_retry_delay
+                self._clear_not_before = now + delay
+                self._clear_retry_delay = min(delay * 2.0, CLEAR_RETRY_MAX_SECONDS)
+            else:
+                self._clear_retry_delay = CLEAR_RETRY_INITIAL_SECONDS
+                self._clear_retries = 0
+            pending = bool(self._pending_clears)
+            next_delay = max(0.0, self._clear_not_before - now) if pending else None
+        if error is not None:
+            logger.warning(
+                "Could not clear %d applied desired change(s) from the "
+                "camera-registry shadow (retry %d): %s; retrying in %g s",
+                len(nulls) if nulls else len(snapshot), retry_number, error, delay,
+            )
+        elif nulls:
+            logger.info(
+                "Cleared %d applied desired change(s) from the camera-registry "
+                "shadow on retry %d", len(nulls), retry_number,
+            )
+        return next_delay
 
     # --- scheduling core ---------------------------------------------------
 
@@ -1182,10 +1668,22 @@ class EdgeSyncAgent:
         """Run one scheduling step; the worker thread's loop body.
 
         Returns ``None`` when idle (nothing pending), or the number of
-        seconds until the next actionable moment (debounce expiry or
-        backoff retry). Fake-clock tests call this directly to drive the
-        agent deterministically.
+        seconds until the next actionable moment (debounce expiry, backoff
+        retry or clear retry). A due clear retry runs first, then the report
+        step. Fake-clock tests call this directly to drive the agent
+        deterministically.
         """
+        clear_delay = self._retry_pending_clears()
+        report_delay = self._pump_report()
+        if clear_delay is None:
+            return report_delay
+        if report_delay is None:
+            return clear_delay
+        return min(clear_delay, report_delay)
+
+    def _pump_report(self) -> Optional[float]:
+        """The report step of :meth:`pump`: write the report when one is
+        requested and due. Returns as :meth:`pump` does for reports alone."""
         with self._lock:
             if self._stop_event.is_set() or not self._dirty:
                 return None
@@ -1214,11 +1712,8 @@ class EdgeSyncAgent:
     def _run(self) -> None:
         while not self._stop_event.is_set():
             delay = self.pump()
-            if delay is None:
-                self._wakeup.wait()
-                self._wakeup.clear()
-            else:
-                self._stop_event.wait(delay)
+            self._wakeup.wait(delay)  # None: until woken
+            self._wakeup.clear()
 
     # --- report construction ----------------------------------------------
 
@@ -1245,9 +1740,18 @@ class EdgeSyncAgent:
             cameras = reported.get("cameras") if isinstance(reported, Mapping) else None
             if not isinstance(cameras, Mapping):
                 cameras = {}
+            # And of the failure keys it holds, so a delete of a camera the
+            # device never created can remove one an earlier process or
+            # build left (design component 12).
+            failures = reported.get("failures") if isinstance(reported, Mapping) else None
+            if not isinstance(failures, Mapping):
+                failures = {}
             with self._lock:
                 self._published_keys = {
                     str(key) for key, entry in cameras.items() if isinstance(entry, Mapping)
+                }
+                self._published_failure_keys = {
+                    str(key) for key, failure in failures.items() if isinstance(failure, Mapping)
                 }
         return state if isinstance(state, Mapping) else None
 
@@ -1301,12 +1805,22 @@ class EdgeSyncAgent:
                 previously_published,
                 [entry.camera_source_id for entry in inventory] + list(aliases),
             )
+            # The failure keys deletes of never-created cameras retired: a
+            # null only for a key the shadow holds, and only while the id has
+            # no live failure again (the new failure wins). The rest have
+            # nothing to remove and are dropped.
+            failure_retirements = {
+                csid for csid in self._pending_failure_retirements
+                if csid in self._published_failure_keys and csid not in failures
+            }
+            self._pending_failure_retirements = set(failure_retirements)
             # Acks, aliases, and failures are one-shot: remember what this
             # document carries so a successful write clears exactly that.
             self._consumed_acks = dict(acks)
             self._consumed_aliases = dict(aliases)
             self._consumed_failures = {k: dict(v) for k, v in failures.items()}
             self._consumed_retirements = set(retirements)
+            self._consumed_failure_retirements = set(failure_retirements)
         # A source with an outstanding apply failure reports through the
         # `failures` map, not `cameras` (design reported-document shape):
         # the Portal keeps its recorded entry marked failed (Req 5.4).
@@ -1327,6 +1841,7 @@ class EdgeSyncAgent:
             retirements=retirements,
             max_bytes=cap,
             device_capabilities=self._device_stream_capabilities(),
+            failure_retirements=failure_retirements,
         )
 
     # --- report cap (static-camera-video-loop design Decision 7) ------------
@@ -1692,6 +2207,17 @@ class EdgeSyncAgent:
                 for csid, failure in self._consumed_failures.items():
                     if self._apply_failures.get(csid) == failure:
                         del self._apply_failures[csid]
+                # The failure keys the shadow now holds: every key written
+                # with a failure, minus every key written with a null; the
+                # nulls this document carried are done.
+                for csid, failure in (document.get("failures") or {}).items():
+                    if isinstance(failure, Mapping):
+                        self._published_failure_keys.add(csid)
+                    else:
+                        self._published_failure_keys.discard(csid)
+                self._pending_failure_retirements.difference_update(
+                    self._consumed_failure_retirements
+                )
                 # The retirement this document carried is now applied: the
                 # shadow key is gone. Prune it from the version floor so
                 # nothing re-derives "previously reported" from it — the
@@ -1706,6 +2232,7 @@ class EdgeSyncAgent:
                 self._consumed_aliases = {}
                 self._consumed_failures = {}
                 self._consumed_retirements = set()
+                self._consumed_failure_retirements = set()
             return True
         except Exception as exc:  # noqa: BLE001 - offline/transport errors retry
             logger.exception(

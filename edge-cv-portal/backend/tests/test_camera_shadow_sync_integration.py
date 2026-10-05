@@ -45,7 +45,11 @@ already covered by test/backend-test/camera_sync/
 test_property_portal_change_round_trip.py; here a dict-backed accessor
 keeps the focus on the transport wiring.
 
-Requirements: 3.3, 5.5, 12.4
+The id-list parity tests at the end (rtsp-rtmp-stream-cameras task 29.5)
+pin the Portal's ``camera_sync.CFG_OR_DISCOVERY_MANAGED_IDS`` to the real
+edge agent's id lists and delete rule.
+
+Requirements: 3.3, 5.5, 12.4 (rtsp-rtmp-stream-cameras: 5.11, 5.12, 18.3)
 """
 import contextlib
 import copy
@@ -1127,3 +1131,50 @@ class TestStaticImagePinRoundTrip:
         assert view["latest"]["status"] == "applied"
         assert view["deviceReported"]["present"] is False
         assert int(view["deviceReported"]["absentSince"]) == absent_since
+
+
+# --- the id list the Portal shares with the device (task 29.5) ---------------
+#
+# rtsp-rtmp-stream-cameras Requirements 5.11, 5.12 and 18.3: the registry's
+# exception for pending deletes covers exactly the ids the device's rule 4
+# acknowledges, so the Portal's CFG_OR_DISCOVERY_MANAGED_IDS must be the
+# device's list, matched the same way. These tests pin the two together
+# against the REAL edge package loaded above.
+
+PARITY_IDS = ("cfg-1", "disc-video0", "arv-Fake-1", "static-image-camera",
+              "static-video-camera", "portal-be48f52dd98d", "cam-1", "cfg",
+              "CFG-1", "static-image-camera-2")
+
+
+class TestIdListParity:
+    def test_the_portal_list_is_the_devices_list(self, sync_env):
+        agent = _edge_camera_sync.agent
+        rules = sync_env.camera_sync.CFG_OR_DISCOVERY_MANAGED_IDS
+        prefixes = {rule for rule in rules if rule.endswith("-")}
+        exact_ids = {rule for rule in rules if not rule.endswith("-")}
+        assert prefixes == {agent._CONFIGURED_PREFIX,
+                            *agent.ABSENCE_TRACKED_PREFIXES}
+        assert exact_ids == set(agent.ABSENCE_TRACKED_IDS)
+
+    def test_a_delete_fails_on_the_device_exactly_for_listed_ids(
+            self, sync_env, env, tmp_path):
+        """Ten deletes delivered to a real EdgeSyncAgent whose accessor
+        holds no Image_Source: the device reports a failure exactly for
+        the ids is_cfg_or_discovery_managed lists (a cfg- delete fails
+        because the camera does not exist, the discovery-managed ids are
+        refused), and acknowledges every other delete."""
+        device = make_edge_device(sync_env, env, tmp_path)
+        changes = {csid: {"op": "delete",
+                          "portalChangeId": f"pc-parity-{index}"}
+                   for index, csid in enumerate(PARITY_IDS)}
+        device.agent.apply_desired_changes(changes)
+        _flush(device.agent, device.clock)
+
+        failures = device.emulator.reported.get("failures") or {}
+        for csid in PARITY_IDS:
+            listed = sync_env.camera_sync.is_cfg_or_discovery_managed(csid)
+            assert (csid in failures) is listed, (csid, failures.get(csid))
+            if listed:
+                assert failures[csid]["portalChangeId"] == \
+                    changes[csid]["portalChangeId"]
+        assert device.accessor.sources == {}

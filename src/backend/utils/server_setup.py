@@ -176,10 +176,15 @@ def start_camera_registry_sync():
     # Build the delta subscription pieces before starting anything, so a
     # construction failure (e.g. the deferred awsiot import inside
     # make_shadow_stream_handler) never leaves half-started threads behind.
+    # Each time the subscription becomes active, its worker runs the agent's
+    # catch-up at the catch-up's place in the event queue: desired entries
+    # that queued up in the shadow while the device was offline are applied
+    # then (5.5, 5.13).
     subscription = SubscriptionHandler(
         delta_topic_prefix(agent.thing_name, agent.shadow_name),
         make_shadow_stream_handler(agent),
         publish_handler,
+        on_active=agent.on_subscription_active,
     )
 
     # Start the report worker (schedules the full startup report, 3.4),
@@ -195,26 +200,10 @@ def start_camera_registry_sync():
     # From here on the agent is running: post-start steps are individually
     # guarded so a hiccup in one never abandons the running agent (11.2).
 
-    # Reconnect-time application of pending portal changes (5.5): desired
-    # entries that queued up in the shadow while the device was offline are
-    # applied now; a missing or unreadable shadow yields nothing to apply.
-    try:
-        state = iot_shadow_accessor.get_thing_shadow_state_request(
-            agent.thing_name, agent.shadow_name
-        )
-        desired = state.get("desired") if isinstance(state, dict) else None
-        changes = desired.get("changes") if isinstance(desired, dict) else None
-        if isinstance(changes, dict) and changes:
-            agent.apply_desired_changes(changes)
-    except Exception:  # noqa: BLE001 - post-start isolation (11.2)
-        logger.exception(
-            "Could not apply pending portal camera changes at start; they "
-            "will be applied when the next shadow delta arrives"
-        )
-
     # Delta subscription for portal-originated changes (5.2), following the
-    # existing MQTT SubscriptionHandler pattern. subscribe() blocks to keep
-    # its stream alive, so it gets its own daemon thread.
+    # existing MQTT SubscriptionHandler pattern. Its first activation runs
+    # the start-time catch-up. subscribe() blocks to keep its stream alive,
+    # so it gets its own daemon thread.
     def _subscribe():
         try:
             subscription.subscribe()

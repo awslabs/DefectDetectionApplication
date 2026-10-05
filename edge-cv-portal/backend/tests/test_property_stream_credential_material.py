@@ -369,7 +369,14 @@ def test_registry_never_stores_or_returns_credential_material(
         "credentials": credentials,
     }
 
-    csid = f"portal-p11-{next(_device_counter)}"
+    # The update case acts on an acknowledged camera, which the device
+    # reports under cfg-<imageSourceId> with origin edge-configured; a
+    # synced stream entry under any other id is a create mirror, which the
+    # routes refuse (task 29, third design review finding 3). The create
+    # case keeps a portal- id, which the create id check accepts.
+    case_number = next(_device_counter)
+    csid = (f"cfg-p11-{case_number}" if case["op"] == "update"
+            else f"portal-p11-{case_number}")
     prior_ref = {
         "secretArn": (f"arn:aws:secretsmanager:{REGION}:123456789012:secret:"
                       f"dda-portal/stream-camera-credentials/{device_id}/"
@@ -386,10 +393,47 @@ def test_registry_never_stores_or_returns_credential_material(
             "params": {"url": url, "credentialRef": prior_ref,
                        "credentialsConfigured": True,
                        "credentialsUpdatedAt": 1_700_000_000_000},
-            "capabilities": {}, "origin": "portal-created", "version": 3,
+            "capabilities": {}, "origin": "edge-configured", "version": 3,
             "sync_status": "synced",
             "last_reported_at": 1_700_000_000_000,
         })
+        # The old fixture shape, a synced portal-created stream entry, is a
+        # create mirror: its credentialed update is refused with 409
+        # CAMERA_SOURCE_ALIAS and writes nothing.
+        old_csid = f"portal-p11-old-{case_number}"
+        old_item = {
+            "device_id": device_id, "sk": f"CAMERA#{old_csid}",
+            "camera_source_id": old_csid, "usecase_id": usecase_id,
+            "name": "existing", "type": case["type"],
+            "params": {"url": url, "credentialRef": prior_ref,
+                       "credentialsConfigured": True,
+                       "credentialsUpdatedAt": 1_700_000_000_000},
+            "capabilities": {}, "origin": "portal-created", "version": 3,
+            "sync_status": "synced",
+            "last_reported_at": 1_700_000_000_000,
+        }
+        camera_env.registry.put_item(Item=old_item)
+        refused = FakeIotDataClient()
+        camera_env.shadow_holder["client"] = refused
+        status, response, raw_response = invoke(
+            camera_env, "PUT", device_id, operator.user,
+            sub_path=f"/{old_csid}", body=body)
+        assert status == 409, response
+        assert response["code"] == "CAMERA_SOURCE_ALIAS"
+        assert refused.updates == []
+        stored_old = camera_env.registry.get_item(Key={
+            "device_id": device_id, "sk": f"CAMERA#{old_csid}"})["Item"]
+        assert stored_old == old_item
+        for value in secret_values:
+            assert value not in raw_response
+        try:
+            camera_env.secrets.describe_secret(
+                SecretId=camera_env.credentials.secret_name(
+                    device_id, old_csid))
+        except camera_env.secrets.exceptions.ResourceNotFoundException:
+            pass
+        else:
+            raise AssertionError("the refused update created a secret")
 
     # --- a legacy stored row whose URL embeds user information ------------
     legacy = case["legacy"]

@@ -562,29 +562,63 @@ class TestUpdateClearDelete:
         assert rows[-1]["details"]["credentials_configured"] is False
 
     def test_update_after_an_unacknowledged_clear_keeps_the_clear(
-            self, camera_env, device):
+            self, camera_env, device, env):
         """The device reported the reference, then the Portal cleared it;
         an unrelated edit before the device acknowledges the clear must not
-        deliver the old reference again."""
+        deliver the old reference again.
+
+        Re-keyed by task 29 (third design review, finding 3): the device
+        reports the camera a create made under ``cfg-<imageSourceId>``, so
+        the acknowledged camera is a ``cfg-`` entry with origin
+        ``edge-configured``. The create route refuses a ``cfg-`` id, so the
+        entry is seeded as the sync reducer leaves it after the re-key: the
+        create's params, its ``credential_secret_arn``, and the mirror's
+        ``cam-1`` item retired."""
         create(camera_env, device, "cam-1",
                credentials={"password": PASSWORD})
         item = camera_item(camera_env, device.device_id, "cam-1")
-        # The device applied and reported the create.
-        item["params"] = dict(item["pending_content"]["params"])
-        item["sync_status"] = "synced"
-        camera_env.registry.put_item(Item=item)
         consume_change(camera_env, device.device_id, "cam-1")
 
+        # The old fixture shape, a synced stream entry under a non-cfg- id,
+        # is a create mirror now: the clear is refused and writes nothing.
+        mirror = dict(item)
+        mirror["params"] = dict(item["pending_content"]["params"])
+        mirror["sync_status"] = "synced"
+        camera_env.registry.put_item(Item=mirror)
+        audit_before = len(audit_rows(env.stack, device.device_id))
         clear = rtsp_body()
         clear["clearCredentials"] = True
-        assert update(camera_env, device, "cam-1", clear)[0] == 200
-        status, body, _ = update(camera_env, device, "cam-1",
+        status, body, _ = update(camera_env, device, "cam-1", clear)
+        assert status == 409, body
+        assert body["code"] == "CAMERA_SOURCE_ALIAS"
+        assert camera_item(camera_env, device.device_id, "cam-1") == mirror
+        assert shadow_changes(camera_env, device.device_id) == {}
+        assert len(audit_rows(env.stack, device.device_id)) == audit_before
+        assert describe(camera_env, secret_name(
+            camera_env, device, "cam-1")).get("DeletedDate") is None
+
+        # The acknowledged camera as the device reports it: cfg-1.
+        camera_env.registry.delete_item(
+            Key={"device_id": device.device_id, "sk": "CAMERA#cam-1"})
+        camera_env.registry.put_item(Item={
+            "device_id": device.device_id, "sk": "CAMERA#cfg-1",
+            "camera_source_id": "cfg-1", "usecase_id": device.usecase_id,
+            "name": item["name"], "type": "RTSP",
+            "params": dict(item["pending_content"]["params"]),
+            "capabilities": {}, "origin": "edge-configured", "version": 1,
+            "absent": False, "sync_status": "synced",
+            "last_reported_at": 1_700_000_000_000,
+            "credential_secret_arn": item["credential_secret_arn"],
+        })
+
+        assert update(camera_env, device, "cfg-1", clear)[0] == 200
+        status, body, _ = update(camera_env, device, "cfg-1",
                                  rtsp_body(latencyMs=300))
         assert status == 200, body
-        params = shadow_changes(camera_env, device.device_id)["cam-1"][
+        params = shadow_changes(camera_env, device.device_id)["cfg-1"][
             "params"]
         assert "credentialRef" not in params
-        pending = camera_item(camera_env, device.device_id, "cam-1")[
+        pending = camera_item(camera_env, device.device_id, "cfg-1")[
             "pending_content"]["params"]
         assert "credentialRef" not in pending
 
@@ -833,9 +867,12 @@ class TestOtherTypesUnchanged:
     def vault_forbidden(self, camera_env, monkeypatch):
         def forbidden(*args, **kwargs):
             raise AssertionError("a non-stream flow touched the vault")
+        # Task 29: a non-stream flow never resolves the use case's account
+        # either (Req 18.3).
         for name in ("ensure_device_read_grant", "store_stream_credentials",
                      "withdraw_stream_credentials",
-                     "schedule_secret_deletion"):
+                     "schedule_secret_deletion", "_usecase_account_id",
+                     "secret_scope"):
             monkeypatch.setattr(camera_env.credentials, name, forbidden)
 
     @pytest.fixture

@@ -733,10 +733,17 @@ def _default_greengrass_publisher(
     close the client, and each connection kept its ``AwsEventLoop`` thread
     and buffers for the life of the process. A continuous workflow whose
     event gate publishes every few seconds left 2,700 such threads and
-    about 175 KB per message behind in 12 hours on a JP5 device. A failed
-    publish other than a denial reconnects the shared client and retries
-    once, like ``utils.ipc_client.call_with_ipc_retry``; a denial is final
-    and says nothing about the connection."""
+    about 175 KB per message behind in 12 hours on a JP5 device.
+
+    The publish runs through ``utils.ipc_client.call_with_ipc_retry``, on
+    the client it is handed (rtsp-rtmp-stream-cameras finding 24,
+    Requirement 5.14): only a closed connection (``ConnectionClosedError``)
+    is retried, once, after the shared reconnect, at most ``RETRY_WAIT_S``
+    (10 s) from the loss. A denial is final and keeps its diagnosis. A
+    timeout or any other error is final too, with no reconnect and no
+    retry: it says nothing about the connection, and a reconnect moves
+    every IPC user. A publish in flight when the connection drops fails
+    with ``StreamClosedError`` and is not retried."""
     import awsiot.greengrasscoreipc.model as model
 
     from utils import ipc_client as shared_ipc
@@ -756,22 +763,13 @@ def _default_greengrass_publisher(
                 "field".format(topic))
         request.retain = True
 
-    def publish() -> None:
-        operation = shared_ipc.get_ipc_client().new_publish_to_iot_core()
+    def publish(client) -> None:
+        operation = client.new_publish_to_iot_core()
         operation.activate(request)
         operation.get_response().result(timeout=10.0)
 
     try:
-        try:
-            publish()
-        except model.UnauthorizedError:
-            raise
-        except Exception as error:  # noqa: BLE001 - a broken shared connection
-            logger.warning(
-                "Greengrass IPC publish to '%s' failed (%s); reconnecting the "
-                "shared IPC client and retrying once", topic, error)
-            shared_ipc.reset_ipc_client()
-            publish()
+        shared_ipc.call_with_ipc_retry(publish)
     except model.UnauthorizedError as error:
         message = (
             "Greengrass IPC denied PublishToIoTCore for topic "

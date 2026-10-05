@@ -15,8 +15,13 @@ moto-backed conftest stack (registry table + devices table + SQS DLQ):
     (batchItemFailures) so only the affected record retries
   - every processed report stamps the device META item: last_report_at
     set, never_synced cleared (Req 3.2)
+  - rtsp-rtmp-stream-cameras task 29.5: a stream create acknowledged under
+    the device's own id links the created entry to the create's secret
+    record and marks the mirror (``alias_of``), idempotently and for the
+    stream types only, with the partial-processing fallback; and the
+    stale-failure matrix of Requirement 5.12
 
-Requirements: 3.2, 3.5
+Requirements: 3.2, 3.5 (rtsp-rtmp-stream-cameras: 5.8, 5.12, 18.3)
 """
 import json
 import os
@@ -465,3 +470,212 @@ class TestAravisDiscoveredIngestion:
         for csid in classic:
             assert strip_device(camera_item(items_with, csid)) == \
                 strip_device(camera_item(items_without, csid))
+
+
+# ---------------------------------------------------------------------------
+# rtsp-rtmp-stream-cameras task 29.5: create links and stale failures
+# ---------------------------------------------------------------------------
+
+LINK_ARN = ("arn:aws:secretsmanager:us-east-1:123456789012:secret:"
+            "dda-portal/stream-camera-credentials/{device}/portal-x-AbCdEf")
+
+
+def seed_pending_create(ingest_env, thing_name, usecase_id, source_type,
+                        record=None, csid="portal-x", change_id="pc-create"):
+    """A Portal create as mark_pending leaves it."""
+    params = ({"devicePath": "/dev/video0"} if source_type == "Camera"
+              else {"url": "rtsp://10.0.0.5/live"})
+    if record is not None:
+        params = {**params, "credentialRef": {"secretArn": record,
+                                              "versionId": "v1"},
+                  "credentialsConfigured": True}
+    item = {
+        "device_id": thing_name, "sk": f"CAMERA#{csid}",
+        "camera_source_id": csid, "usecase_id": usecase_id,
+        "name": "Dock", "type": source_type, "params": params,
+        "capabilities": {}, "origin": "portal-created", "version": 0,
+        "absent": False, "sync_status": "pending",
+        "portal_change_id": change_id,
+        "pending_content": {"op": "create", "name": "Dock",
+                            "type": source_type, "params": params},
+    }
+    if record is not None:
+        item["credential_secret_arn"] = record
+    ingest_env.registry.put_item(Item=item)
+    return item
+
+
+def created_camera(source_type, params, ack="pc-create", version=1):
+    return {"version": version, "name": "Dock", "type": source_type,
+            "origin": "edge-configured", "params": params,
+            "capabilities": {}, "ack": ack}
+
+
+class TestCreateLinks:
+    def test_the_link_a_replay_before_retirement_and_the_retirement(
+            self, ingest_env, env):
+        usecase_id = env.create_usecase()
+        thing_name = register_device(ingest_env, usecase_id)
+        record = LINK_ARN.format(device=thing_name)
+        create = seed_pending_create(ingest_env, thing_name, usecase_id,
+                                     "RTSP", record)
+        camera = created_camera("RTSP", create["params"])
+        alias_event = make_record(thing_name, report(
+            {"cfg-y": camera, "portal-x": dict(camera)},
+            reported_at=1730000001000))
+
+        ingest_env.module.handler({"Records": [alias_event]}, None)
+        linked = device_items(ingest_env, thing_name)
+        created = camera_item(linked, "cfg-y")
+        mirror = camera_item(linked, "portal-x")
+        assert created["credential_secret_arn"] == record
+        assert "alias_of" not in created
+        assert mirror["alias_of"] == "cfg-y"
+        assert mirror["sync_status"] == "synced"
+        assert mirror["credential_secret_arn"] == record
+
+        # Replaying the event before the device retires the mirror changes
+        # nothing: both entries already hold their link fields.
+        ingest_env.module.handler({"Records": [alias_event]}, None)
+        assert device_items(ingest_env, thing_name) == linked
+
+        # The retirement deletes the mirror and leaves the created entry.
+        ingest_env.module.handler({"Records": [make_record(
+            thing_name, report({"cfg-y": camera},
+                               reported_at=1730000002000))]}, None)
+        retired = device_items(ingest_env, thing_name)
+        assert camera_item(retired, "portal-x") is None
+        assert camera_item(retired, "cfg-y")["credential_secret_arn"] == \
+            record
+
+    def test_a_non_stream_create_links_nothing(self, ingest_env, env):
+        usecase_id = env.create_usecase()
+        thing_name = register_device(ingest_env, usecase_id)
+        create = seed_pending_create(ingest_env, thing_name, usecase_id,
+                                     "Camera")
+        camera = created_camera("Camera", create["params"])
+        ingest_env.module.handler({"Records": [make_record(
+            thing_name, report({"cfg-c": camera, "portal-x": dict(camera)},
+                               reported_at=1730000001000))]}, None)
+        items = device_items(ingest_env, thing_name)
+        # Stored exactly as at 2ae4645: the reported content, synced, and
+        # no Portal-owned key on either entry.
+        base_keys = {"device_id", "sk", "camera_source_id", "usecase_id",
+                     "name", "type", "params", "capabilities", "origin",
+                     "version", "last_reported_at", "absent", "sync_status"}
+        for csid in ("cfg-c", "portal-x"):
+            entry = camera_item(items, csid)
+            assert set(entry) == base_keys, csid
+            assert entry["sync_status"] == "synced"
+            assert entry["params"] == create["params"]
+            assert entry["last_reported_at"] == 1730000001000
+
+    def test_the_partial_processing_fallback(self, ingest_env, env):
+        """A retried, partly processed event: the create's entry was
+        already rebuilt from the mirror, so the link is missed and the
+        created entry has no record. 29.4's resolution still finds the
+        secret through its reported Credential_Reference."""
+        usecase_id = env.create_usecase()
+        thing_name = register_device(ingest_env, usecase_id)
+        record = LINK_ARN.format(device=thing_name)
+        create = seed_pending_create(ingest_env, thing_name, usecase_id,
+                                     "RTSP", record)
+        camera = created_camera("RTSP", create["params"])
+        # The first, partly failed attempt persisted the mirror only.
+        mirror = dict(create)
+        for key in ("pending_content", "portal_change_id"):
+            mirror.pop(key)
+        mirror.update(sync_status="synced", alias_of="cfg-y", version=1,
+                      origin="edge-configured", last_reported_at=1730000001000)
+        ingest_env.registry.put_item(Item=mirror)
+
+        ingest_env.module.handler({"Records": [make_record(
+            thing_name, report({"cfg-y": camera, "portal-x": dict(camera)},
+                               reported_at=1730000001000))]}, None)
+        created = camera_item(device_items(ingest_env, thing_name), "cfg-y")
+        assert "credential_secret_arn" not in created
+        assert created["params"]["credentialRef"]["secretArn"] == record
+
+        import camera_registry
+        resolved = camera_registry.credential_secret_ids(
+            created, thing_name, "cfg-y", "123456789012", "us-east-1")
+        assert resolved[0][0] == record
+
+
+class TestStaleFailureMatrix:
+    """Requirement 5.12: a reported failure keeps its entry, except an
+    entry pending a Portal delete whose id is neither cfg- nor
+    discovery-managed and whose failure belongs to an earlier change."""
+
+    IDS = ("portal-0123456789ab", "cam-1", "cfg", "CFG-1",
+           "static-image-camera-2", "cfg-1", "disc-1", "arv-1",
+           "static-image-camera", "static-video-camera")
+    LISTED = {"cfg-1", "disc-1", "arv-1", "static-image-camera",
+              "static-video-camera"}
+    STATES = ("pending_delete", "pending_update", "pending_create",
+              "synced", "failed")
+    FAILURES = ("earlier", "current", "without_change_id")
+
+    @staticmethod
+    def entry(thing_name, usecase_id, csid, state):
+        item = {
+            "device_id": thing_name, "sk": f"CAMERA#{csid}",
+            "camera_source_id": csid, "usecase_id": usecase_id,
+            "name": csid, "type": "Camera",
+            "params": {"devicePath": "/dev/video0"}, "capabilities": {},
+            "origin": "portal-created", "version": 1, "absent": False,
+        }
+        op = {"pending_delete": "delete", "pending_update": "update",
+              "pending_create": "create"}.get(state)
+        if op is not None:
+            item.update(sync_status="pending", portal_change_id="pc-now",
+                        pending_content={"op": op} if op == "delete" else {
+                            "op": op, "name": csid, "type": "Camera",
+                            "params": {"devicePath": "/dev/video1"}})
+        elif state == "failed":
+            item.update(sync_status="failed", portal_change_id="pc-now",
+                        failure_reason="it failed")
+        else:
+            item.update(sync_status="synced")
+        return item
+
+    @pytest.mark.parametrize("state", STATES)
+    @pytest.mark.parametrize("failure_kind", FAILURES)
+    def test_matrix(self, ingest_env, env, state, failure_kind):
+        usecase_id = env.create_usecase()
+        thing_name = register_device(ingest_env, usecase_id)
+        failure = {"reason": "an earlier change failed"}
+        if failure_kind == "earlier":
+            failure["portalChangeId"] = "pc-earlier"
+        elif failure_kind == "current":
+            failure["portalChangeId"] = "pc-now"
+        if state == "synced" and failure_kind == "without_change_id":
+            # A synced entry has no change id, so this failure would be
+            # its own; the matrix keeps the failure foreign.
+            failure["portalChangeId"] = "pc-earlier"
+        for csid in self.IDS:
+            ingest_env.registry.put_item(
+                Item=self.entry(thing_name, usecase_id, csid, state))
+
+        ingest_env.module.handler({"Records": [make_record(
+            thing_name, report({}, reported_at=1730000001000,
+                               failures={csid: dict(failure)
+                                         for csid in self.IDS}))]}, None)
+
+        items = device_items(ingest_env, thing_name)
+        for csid in self.IDS:
+            entry = camera_item(items, csid)
+            removed = (csid not in self.LISTED and state == "pending_delete"
+                       and failure_kind == "earlier")
+            if removed:
+                assert entry is None, csid
+                continue
+            assert entry is not None, (csid, state, failure_kind)
+            if failure_kind == "current" and state != "synced":
+                assert entry["sync_status"] == "failed", csid
+                assert entry["failure_reason"] == failure["reason"]
+            else:
+                expected = self.entry(thing_name, usecase_id, csid,
+                                      state)["sync_status"]
+                assert entry["sync_status"] == expected, csid
+        assert conflict_items(items) == []

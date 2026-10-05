@@ -146,12 +146,21 @@ def _is_deletion(incoming: Optional[Dict[str, Any]]) -> bool:
     return incoming is None or incoming.get("deleted") is True
 
 
+#: Portal-owned registry keys no report carries (rtsp-rtmp-stream-cameras
+#: task 29, design component 8 "Secret record and create mirrors"): the
+#: camera's Credential_Vault secret, and the id of the camera a create
+#: mirror stands for. Kept on every entry rebuilt from a report.
+_PORTAL_OWNED_KEYS = ("credential_secret_arn", "alias_of")
+
+
 def _carry_identity(
     entry: Dict[str, Any], registry_entry: Optional[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """Preserve identity/scoping attributes from the existing entry (Req 1.4)."""
+    """Preserve identity/scoping attributes from the existing entry
+    (Req 1.4), and the Portal-owned keys (task 29)."""
     if registry_entry:
-        for key in ("usecase_id", "camera_source_id", "device_id"):
+        for key in ("usecase_id", "camera_source_id", "device_id",
+                    *_PORTAL_OWNED_KEYS):
             if key in registry_entry:
                 entry.setdefault(key, registry_entry[key])
     return entry
@@ -301,6 +310,49 @@ def stamp_meta(
     return meta
 
 
+def create_aliases(
+    entries: Dict[str, Dict[str, Any]], cameras: Dict[str, Any]
+) -> Dict[str, str]:
+    """The Portal stream creates a report acknowledges under an id of the
+    device's own: ``{alias_csid: created_csid}`` (rtsp-rtmp-stream-cameras
+    task 29, design component 8 "Secret record and create mirrors").
+
+    The device stores every create under ``cfg-<imageSourceId>`` and, for
+    one report, mirrors it under the Portal's id. Each reported key whose
+    ``ack`` equals the ``portal_change_id`` of a pending create stored
+    under another id is the camera that create made, and the create's own
+    entry is its mirror. Only stream creates are linked (a
+    ``pending_content.type`` that is a key of ``_STREAM_PARAM_DEFAULTS``:
+    ``RTSP`` or ``RTMP``), because only the stream rules read the link;
+    every other type's items stay as they were (Requirement 18.3).
+
+    Pure: it reads the registry as loaded before the event, so the order
+    of the reported keys does not matter.
+    """
+    creates: Dict[str, str] = {}
+    for csid, entry in (entries or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        pending = entry.get("pending_content")
+        change_id = entry.get("portal_change_id")
+        if (entry.get("sync_status") == SYNC_STATUS_PENDING
+                and isinstance(pending, dict)
+                and pending.get("op") == "create"
+                and isinstance(pending.get("type"), str)
+                and pending["type"] in _STREAM_PARAM_DEFAULTS
+                and isinstance(change_id, str) and change_id):
+            creates[change_id] = csid
+    links: Dict[str, str] = {}
+    for reported_csid, incoming in (cameras or {}).items():
+        if not isinstance(incoming, dict):
+            continue
+        ack = incoming.get("ack")
+        alias = creates.get(ack) if isinstance(ack, str) else None
+        if alias is not None and alias != reported_csid:
+            links[alias] = reported_csid
+    return links
+
+
 # ---------------------------------------------------------------------------
 # SQS ingest handler (task 5.4)
 #
@@ -337,6 +389,42 @@ SK_STATIC_IMAGE_CAMERA = f"{SK_CAMERA_PREFIX}{STATIC_IMAGE_CAMERA_ID}"
 # static-camera-video-loop), and its registry SK.
 STATIC_VIDEO_CAMERA_ID = "static-video-camera"
 SK_STATIC_VIDEO_CAMERA = f"{SK_CAMERA_PREFIX}{STATIC_VIDEO_CAMERA_ID}"
+
+#: The Camera_Source ids a device names itself (rtsp-rtmp-stream-cameras
+#: Requirements 5.11 and 5.12): `cfg-<imageSourceId>` for a configured
+#: Image_Source, and the discovery-managed ids `disc-…`, `arv-…`,
+#: `static-image-camera` and `static-video-camera`. An entry that ends in
+#: "-" is a prefix, and any other is an exact id. The same list as the
+#: device's camera_sync/agent.py (_CONFIGURED_PREFIX,
+#: ABSENCE_TRACKED_PREFIXES and ABSENCE_TRACKED_IDS), pinned to it by the
+#: id-list parity test in test_camera_shadow_sync_integration.py.
+CFG_OR_DISCOVERY_MANAGED_IDS = ("cfg-", "disc-", "arv-",
+                                STATIC_IMAGE_CAMERA_ID, STATIC_VIDEO_CAMERA_ID)
+
+
+def is_cfg_or_discovery_managed(csid: Any) -> bool:
+    """True for a `cfg-` or discovery-managed id, matched as the device
+    matches it: `startswith` for a prefix, `==` for an exact id."""
+    return isinstance(csid, str) and any(
+        csid.startswith(rule) if rule.endswith("-") else csid == rule
+        for rule in CFG_OR_DISCOVERY_MANAGED_IDS)
+
+
+def _failure_pins(csid: str, entry: Dict[str, Any], failure: Any) -> bool:
+    """A reported failure keeps its entry out of the deletion path, except
+    for an entry pending a Portal delete whose id is neither a `cfg-` id
+    nor discovery-managed, and whose failure belongs to an earlier change
+    (Requirement 5.12). A failure without a `portalChangeId` cannot be told
+    apart from a failure of this delete, so it still pins the entry."""
+    if is_cfg_or_discovery_managed(csid):
+        return True
+    change_id = failure.get("portalChangeId") if isinstance(failure, dict) \
+        else None
+    pending_delete = (entry.get("sync_status") == SYNC_STATUS_PENDING
+                      and (entry.get("pending_content") or {}).get("op")
+                      == _OP_DELETE)
+    return not (pending_delete and change_id is not None
+                and change_id != entry.get("portal_change_id"))
 
 
 class MalformedReport(Exception):
@@ -826,6 +914,13 @@ def _deletion_candidates(
 ) -> list:
     """Registry sources missing from the full report -> reported deletions.
 
+    A reported failure keeps its entry out of the deletion path
+    (:func:`_failure_pins`), except an entry pending a Portal delete whose
+    id is neither `cfg-` nor discovery-managed and whose failure belongs
+    to an earlier change (rtsp-rtmp-stream-cameras Requirement 5.12): a
+    shadow update merges nested maps, so a create's failure stays in every
+    later documents event, and must not keep a deleted camera forever.
+
     Entries whose pending portal change is a `create` are excluded: the
     device never had the source, so its absence from a full report is
     expected delivery lag, not an edge deletion.
@@ -834,7 +929,9 @@ def _deletion_candidates(
     failures = reported.get("failures", {})
     candidates = []
     for csid, entry in entries.items():
-        if csid in cameras or csid in failures:
+        if csid in cameras:
+            continue
+        if csid in failures and _failure_pins(csid, entry, failures[csid]):
             continue
         pending_content = entry.get("pending_content") or {}
         if (
@@ -844,6 +941,38 @@ def _deletion_candidates(
             continue
         candidates.append(csid)
     return candidates
+
+
+def _link_create(
+    outcome: SyncOutcome,
+    csid: str,
+    links: Dict[str, str],
+    created_by: Dict[str, str],
+    entries: Dict[str, Dict[str, Any]],
+) -> SyncOutcome:
+    """Apply a stream create's link (:func:`create_aliases`) to one camera
+    outcome (task 29, design component 8).
+
+    The created entry, the device's own key, gets the create's
+    ``credential_secret_arn`` when it has none, so the routes act on the
+    camera's secret after the re-key. The create's own entry, the mirror,
+    gets ``alias_of``: the created id. A discarded or deleted outcome is
+    returned as it is; :class:`SyncOutcome` is frozen, so a linked outcome
+    is a new one.
+    """
+    if outcome.action == ACTION_DISCARD_STALE or outcome.entry is None:
+        return outcome
+    entry = outcome.entry
+    alias = created_by.get(csid)
+    if alias is not None and not entry.get("credential_secret_arn"):
+        record = (entries.get(alias) or {}).get("credential_secret_arn")
+        if record:
+            entry = {**entry, "credential_secret_arn": record}
+    if csid in links:
+        entry = {**entry, "alias_of": links[csid]}
+    if entry is outcome.entry:
+        return outcome
+    return SyncOutcome(outcome.action, entry, outcome.conflict_event)
 
 
 def _process_report(
@@ -872,9 +1001,15 @@ def _process_report(
     reported_at = reported.get("reportedAt")
     now_ms = int(reported_at) if reported_at is not None else int(time.time() * 1000)
 
+    # Stream creates the device acknowledged under an id of its own
+    # (task 29), from the registry as loaded before this event.
+    links = create_aliases(entries, reported.get("cameras", {}))
+    created_by = {created: alias for alias, created in links.items()}
+
     # Camera state entries from the report.
     for csid, incoming in reported.get("cameras", {}).items():
         outcome = reduce_report(entries.get(csid), incoming, now_ms)
+        outcome = _link_create(outcome, csid, links, created_by, entries)
         _persist_outcome(table, thing_name, usecase_id, csid, outcome)
 
     # Failure entries: portal-originated changes the device rejected (5.4).
