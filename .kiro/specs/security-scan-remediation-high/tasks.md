@@ -19,15 +19,22 @@ Snapshot rule, from 8.1 on: 9.12's copy never runs again, because the shared fil
   - "Merge integration/all-specs into remediation", which brings in the trunk at `3e49de6`.
 
   It was pushed to `origin/remediation`, and `integration/all-specs` was fast-forwarded to it. Neither push was forced. Before the push, the merged tree differed from the deployed trunk only in this spec directory.
-- **Still uncommitted.** The section 7 code group stays uncommitted in the working tree of the main clone, on `remediation`. It covers the device-side code under `src/`, the vendored catalog copy, `test/on-hardware/register_vllm_models.py` and the rest. Build steering commits on-device changes only after they are verified on real hardware.
+- **Device fixes committed before device verification (2026-10-06, at the owner's request).**
+  - The section 7 code commit, "fix(security): remediate HIGH scan findings in LocalServer and Portal code", is on `origin/remediation`. It holds all 27 section-7 paths (21 modified, 6 new), and its diff is byte-identical to the reviewed working-tree diff.
+  - The owner asked for it so the build fleet can build the LocalServer components from `source_ref` `remediation`. Build steering normally commits on-device changes only after real-hardware verification.
+  - Before the push, on the merged tree:
+    - the out-of-scope guard suites gave 4 passed and 3 skipped;
+    - the preservation suite in `flask-app:latest` gave 143 passed and 9 skipped, matching task 11;
+    - the eight test files of the device fixes passed, 212 tests in all.
+  - `integration/all-specs` was NOT moved and stays without this commit. Fast-forward the trunk to `remediation` only after section 6 passes on every touched architecture.
 - **Next, in order:**
   1. The owner checks from Verify A and Deploy B, listed below.
   2. Section 5: build and push the detector export image, then deploy its digest.
   3. Section 6: the LocalServer builds, one at a time, and the device checks on each architecture. The owner supplies the device SSH passwords.
-  4. Section 7: the code commit, only AFTER section 6's device verification, with the devices named in its message. Its second commit, the spec directory, is already made, so a later spec change goes into a new `docs(spec)` commit.
+  4. Section 7: the code commit is already on `remediation` (see above). After section 6, record the devices verified and their results in a new `docs(spec)` commit, then merge the trunk and fast-forward `integration/all-specs` to `remediation`. The spec directory commit is already made too, so any later spec change also goes into a new `docs(spec)` commit.
   5. Section 8: the ComputeStack deploy that publishes the `WorkflowCoreLayer` catalog note.
   6. Section 9: the platform rescan and its `rescan.json` record.
-  7. Done on 2026-10-06: the push and the merge into the trunk (Requirement 18.3, owner decision 9). Later commits go on `remediation`. Before pushing them, fetch and merge `origin/integration/all-specs`, then fast-forward the trunk to `remediation`, as in that first push. Never force.
+  7. Done on 2026-10-06: the push and the merge into the trunk (Requirement 18.3, owner decision 9). Later commits go on `remediation`. Before pushing them, fetch and merge `origin/integration/all-specs`. Never force. Since the device-fix commit, don't fast-forward the trunk to `remediation` until section 6 passes. Until then, push only `remediation`.
 - **Owner checks (Verify A section 10 and Deploy B section 9).** Each writes Portal data, publishes, starts a job, opens a tunnel or touches a device, so none ran here:
   - Alert delivery through the encrypted topic. The topic has 0 subscriptions, so either make one test publish (it can only show a `MessageId`) or, after the next real training or compilation failure alert, check `NumberOfMessagesPublished` ≥ 1 and `NumberOfNotificationsFailed` = 0 for that hour, and that neither events handler logged `Error sending SNS notification`.
   - One auto-labeling job end to end, through the `alias/aws/sqs` queue, watching both workers' Errors and the DLQ.
