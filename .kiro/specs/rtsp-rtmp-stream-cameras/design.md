@@ -1983,9 +1983,10 @@ Stale, out-of-order redeliveries of a processed change are outside the domain; a
 | Continuous throughput may fall short on smaller Jetsons | <ul><li>Measure during hardware verification.</li><li>A configured rate that cannot be met degrades to skipped ticks, never to queues.</li></ul> |
 | The marshal model or Triton may not write staged runs correctly under `/dev/shm` | <ul><li>Verify on a device (task 25.3).</li><li>The persistent-root fallback uses the same code path.</li></ul> |
 | `rtspsrc` on GStreamer 1.16 (JP5) may have H.265 depayload quirks | <ul><li>The JP5 verification matrix covers it.</li><li>Worker isolation contains any failure.</li></ul> |
-| E-RTMP publishers (OBS, FFmpeg, camera vendors) may not interoperate | <ul><li>Verify with FFmpeg and OBS publishers.</li><li>The non-standard codec-id-12 variant is out of scope and is reported as `unsupported_codec`.</li></ul> |
+| E-RTMP publishers (OBS, FFmpeg, camera vendors) may not interoperate | <ul><li>Verify with FFmpeg and OBS publishers. FFmpeg was verified on every device; OBS was not tested (accepted by the owner, 2026-10-05).</li><li>The non-standard codec-id-12 variant is out of scope and is reported as `unsupported_codec`.</li></ul> |
 
 ## Follow-ups (out of scope)
+- Verifying Enhanced RTMP publishing from OBS. Only the FFmpeg publishers were tested (accepted by the owner, 2026-10-05; task 25.1).
 
 - Device-hosted RTMP ingest for cameras that can only push, for example a bundled MediaMTX relay with per-path publish credentials.
 - A persistent streaming inference pipeline, for full-frame-rate analytics.

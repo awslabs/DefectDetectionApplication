@@ -32,20 +32,16 @@ Property test conventions:
 - Each property test is tagged `**Feature: rtsp-rtmp-stream-cameras, Property {number}: {property_text}**`.
 
 ## Resume Here (handoff, 2026-10-05)
-**Tasks 29 and 30 are done and committed (2026-10-05). Resume with task 27.**
+**The spec is complete (2026-10-06): every task is ticked, and task 27's final checkpoint is green. Nothing is left to resume.**
 - **Committed.** Tasks 29 (findings 21 and 22) and 30 (findings 23, 24 and 25) are committed together on `spec/rtsp-rtmp-stream-cameras` and fast-forwarded to `integration/all-specs`.
   - They were verified on hardware with JP7 `1.0.55` (thor1), JP6 `1.0.77` (Orin), JP5 `1.0.54` (MIC-730) and amd64 `1.0.50` (Dell). The 29.7 and 30.7 OUTCOMEs have the details.
   - The Portal runs the committed `edge-cv-portal/backend`. It was deployed on 2026-10-04 from the identical tree.
-- **Devices now.** Each device runs the build above, is healthy, and has no test camera left. The `rtsp-verify-*` continuous workflows still run on all four (logs capped) until the cleanup.
-- **Temp access.**
-  - The temporary UseCaseAdmin row in "cookies" was removed on 2026-10-05.
-  - The temp Cognito user `kiro-rtsp-build-temp` still exists, with only its global DataScientist row. Delete it in the cleanup (`portal_temp_user.py delete`).
-- **Next, in order:**
-  1. Task 27. Two items need the owner, so 25 and 25.1 stay open until they are settled:
-     - 25.1's OBS publisher was never run. Every other test source is in place.
-     - Finding 16 is still "Not fixed; owner decision needed": continuous workflows resume before the model components re-provision Triton.
-  2. The cleanup list below.
-  3. Rotate the Amcrest/Dell password.
+- **Devices now.** Each device runs the build above and is healthy. The cleanup (2026-10-05) removed the test workflows, test state and test sources. The build host's SSH access to the devices was removed too, so on-device work needs the owner to re-add access (see "Cleanup: done" below).
+- **Temp access.** The temporary UseCaseAdmin row and the temp Cognito user `kiro-rtsp-build-temp` were deleted on 2026-10-05.
+- **State of the work:**
+  1. Done: task 27 is green (2026-10-06). Task 25 is closed: the owner accepted the untested OBS publisher (2026-10-05), and finding 16 had already been fixed by task 28 (its 25.3 header was stale).
+  2. Done: the cleanup (below).
+  3. For the owner: rotate the passwords shared in chat, and decide whether thor1's public SSH should keep accepting passwords. Optional follow-ups: task 27's O1 and O2, the design's Follow-ups, and deleting the broken JP7 `1.0.50` component version.
 **End-to-end Portal check done (2026-10-02, 19:24–20:52Z).**
 - **Result.** The check passed on the Orin. A stream camera with credentials, added from the Portal, reached the device and streamed. A stream workflow then packaged, deployed with the camera binding, and ran. Remaining-work item 5 has the details.
 - **Two new findings in this spec (25.3).** **Owner decision (2026-10-03): fix both in this spec, before task 27, as task 29.**
@@ -205,21 +201,35 @@ Remaining work, in order:
 - The MIC-730 runs the stock `1.0.49` image. Since 2026-09-29 14:03Z its backend has been hot-patched with the committed code, and its continuous test workflows are running. `results/leak-mic730-fix12.jsonl` records fix 12's effect there.
 - The Dell runs MediaMTX and its publishers (`~/dda-mediamtx`, with `start.sh` and `stop.sh`) and has UFW rules commented `dda-rtsp-verify`.
 
-**Cleanup when 25–27 are done:**
-- Test workflows and state:
-  - On a device that runs a supporting build (thor1 now; the Orin and the MIC-730 after their builds), keep the database. Remove only the `rtsp-verify-*` directories under `/aws_dda/workflows`, the leftover test image sources, and `/dev/shm/dda-continuous`.
-  - `restore_stock_state.sh` also downgrades alembic, so use it only on a device that runs a pre-feature build.
-- On the Dell: run `~/dda-mediamtx/stop.sh` and delete the `dda-rtsp-verify` UFW rules.
-- On thor1: remove the `kiro-rtsp-verify@dda-build-host` key and the `aws` docker-group membership.
-- Delete:
-  - the `wip/rtsp-rtmp-stream-cameras-f2122-verify` branch, local and on origin: the tasks 29 and 30 verification snapshots `ac74c0b` and `ecb112c`, whose code is in the 2026-10-05 commit. (`wip/rtsp-rtmp-stream-cameras-verify`, the source of the broken `1.0.50` `9e4df80`, is already gone.)
-  - the temp Cognito user `kiro-rtsp-build-temp`, recreated for the 2026-10-02 builds and now with only its global DataScientist row: `~/.venvs/dda-portal-tests/bin/python ~/rtsp-verify/portal_temp_user.py delete`, then confirm with `admin-get-user` and a role-table scan
-  - the `/tmp` worktrees
-  - optionally, the broken `aws.edgeml.dda.LocalServer.arm64JP7` `1.0.50` component version
+**Cleanup: done 2026-10-05 (20:48–21:05Z), with the owner's OK.**
+- Test workflows and state, on all four devices, which run supporting builds (the database was kept):
+  - The `rtsp-verify-*` workflow directories were removed. The watcher marked the three registrations `removed`, both continuous runners stopped, and their stream leases and sessions ended.
+  - Also removed: their captures under `/aws_dda/captures`, their `/dev/shm/dda-continuous` staging, the `~/dda-hotpatch-backup` dirs, and the 2026-09-29 `dda_backend_app.db.pre-restore-*` copies.
+  - No test image source was left: the devices hold only the owner's and other specs' sources. Every stream credential store holds 0 entries.
+  - The backends stayed healthy, with `RestartCount` 0.
+  - The device-side log captures of the final deployments were archived to `~/rtsp-verify/results/device-captures/<device>.tgz`, then removed from the devices' `/tmp` together with the other scratch.
+- The Dell:
+  - `~/dda-mediamtx/stop.sh` ran.
+  - The two `dda-src-*-people` publishers were removed too; stop.sh does not list them.
+  - Both `dda-rtsp-verify` UFW rules were deleted (1935, 1936, 8322 and 8554/tcp, and 8000:8001/udp, from 192.168.88.0/24). Nothing listens on those ports any more.
+- Access:
+  - The `kiro-rtsp-verify@dda-build-host` key was removed from thor1, the Orin, the MIC-730 and the Dell. It had been added for this spec on 2026-09-28/29.
+  - `aws` was removed from thor1's docker group.
+  - A new login with the key is refused ("Permission denied (publickey,password)").
+- Deleted:
+  - the temp Cognito user `kiro-rtsp-build-temp` and its last role row (`admin-get-user`: "User does not exist"; 0 role rows);
+  - the temporary UseCaseAdmin row (removed earlier the same day);
+  - the probe secret;
+  - this spec's scratch in the build host's `/tmp` (the base worktrees were already removed).
+  - the `wip/rtsp-rtmp-stream-cameras-f2122-verify` branch, local and on origin, deleted on 2026-10-06 after the task 27 run. Its tip `ecb112c` held code byte-identical to `4b8d31d`.
+- Left in place on purpose:
+  - `~/rtsp-verify` on the build host (helpers and results);
+  - `~/dda-mediamtx` on the Dell, to restart the sources;
+  - `/tmp/dda-baseline-hd` (another spec's worktree, from 2026-08-24);
+  - the broken `aws.edgeml.dda.LocalServer.arm64JP7` `1.0.50` component version (optional; the owner did not ask for it to be deleted).
 - Security follow-ups for the owner:
-  - thor1's public SSH port still accepts passwords.
-  - The device and camera passwords shared in chat should be rotated (the Amcrest and the Dell share one).
-
+  - thor1's public SSH port (ryan.120v.ac:9997) still accepts passwords.
+  - Rotate the device and camera passwords shared in chat: thor1 and the Orin (`aws`), the MIC-730 (`mic-730ai`), the Dell (`ryvan`) and the Amcrest (`admin`). The Amcrest and the Dell share one password.
 ## Task Dependency Graph
 
 ```mermaid
@@ -1562,9 +1572,9 @@ graph TD
         - `iam_post_fix_approved_additions.json` for the Credential_Vault grants (task 9).
         - `build_save_pkgs/baselines/build_custom_save_masked.txt` for the new gate stage (24.1).
 
-- [ ] 25. Build and verify on hardware. Do not commit on-device changes before this task is complete.
+- [x] 25. Build and verify on hardware. Do not commit on-device changes before this task is complete.
   - **Owner decision (2026-09-29)**: commit and push to `integration/all-specs` now, before this task is complete. JP6 and JP5 real-build verification continues in the next session (see Resume Here).
-  - [ ] 25.1 Stand up the test sources
+  - [x] 25.1 Stand up the test sources
     - Run MediaMTX on the build host or on the LAN
     - RTSP sources: H.264, H.265, and a credentialed RTSP path
     - RTMP sources: H.264 and E-RTMP H.265, published with FFmpeg ≥ 6.1 and with OBS
@@ -1573,7 +1583,7 @@ graph TD
       - RTSP 8554: `h264`, `h265` (1080p15 test pattern), `people` (OpenCV `vtest.avi` looped, 768x576 at 10 fps, for real detections), `vp9` (unsupported codec), `secure` (credentialed).
       - RTSPS 8322 and RTMPS 1936 with a self-signed certificate. RTMP 1935: `live/h264`, E-RTMP `live/h265` and `live/people` (H.265).
       - `nosuchpath` is readable but never published (wrong path). Only 127.0.0.1 may publish; the LAN may read.
-      - Open: publishing from OBS.
+      - Accepted without OBS (owner decision, 2026-10-05): publishing from OBS was never tested. The FFmpeg 9.0 publishers cover RTMP H.264 and Enhanced RTMP H.265 on every device, and the Amcrest PTZ covered a real camera. Design Risks and Follow-ups record the gap.
 
   - [x] 25.2 Build and deploy one target at a time
     - Follow the build steering:
@@ -1635,7 +1645,7 @@ graph TD
       - The continuous test workflows, still `running` from the hot-patch, resumed at 04:03:32Z and hit finding 16. They made no progress until the backend was restarted at 04:22:48Z. After that restart they run normally.
 
   - [x] 25.3 Run the verification matrix on each device
-    - **OUTCOME (2026-10-05)**: the matrix ran on all four devices on real builds, last on JP7 `1.0.55`, JP6 `1.0.77`, JP5 `1.0.54` and amd64 `1.0.50`. Its findings are below. Finding 16 is still open (owner decision) and is carried to task 27.
+    - **OUTCOME (2026-10-05)**: the matrix ran on all four devices on real builds, last on JP7 `1.0.55`, JP6 `1.0.77`, JP5 `1.0.54` and amd64 `1.0.50`. Its findings are below. Every finding is fixed or carries the owner's decision. Finding 16 was fixed by task 28; its header was corrected on 2026-10-05.
     - All four protocol × codec sources, recording the decoder in use per codec
     - Connection-test categories: wrong password, wrong path, unsupported codec, and TLS failure
     - Triggered runs
@@ -1677,7 +1687,7 @@ graph TD
           - The Jetsons were not affected: they decode H.265 on `nvv4l2decoder` and have 8–14 CPUs. The in-image gate did not catch it, because its few-frame samples never reach frame threading.
           - Hot-patched onto the Dell's `1.0.45` backend, the harness stage passes 7 of 7 with no worker exit. The 1 fps RTSP H.264 workflow runs on `avdec_h264`, and the RTMP H.265 one on `avdec_h265` at about 2.35 runs/s (CPU inference). A 2-hour soak of the hot-patch, without an outage, started at 03:36Z (`results/soak-dell-hotpatch-fix15.jsonl`, `leak-dell-hotpatch-fix15.jsonl`).
           - The real amd64 build with the fix, `1.0.46` (25.2), passes the harness stage 7 of 7 on the Dell.
-      16. **Not fixed; owner decision needed. Continuous workflows resume before the model components re-provision Triton.** After a LocalServer deployment, Greengrass restarts the dependent model components, and each one's Startup (`model_convertor.py`) rewrites its entries in `/aws_dda/dda_triton/triton_model_repo`. Continuous workflows persisted as `running` resume within seconds of the backend's start, and their first runs load the model while those files are missing or being rewritten.
+      16. **Fixed by task 28 (28.2, the Continuous_Runner waits for its models to be READY), verified on hardware in 28.5 (owner decision 2026-09-30: fix it in this spec). Continuous workflows resumed before the model components re-provisioned Triton.** (This header said "Not fixed; owner decision needed" until 2026-10-05; it predated the decision and the fix.) After a LocalServer deployment, Greengrass restarts the dependent model components, and each one's Startup (`model_convertor.py`) rewrites its entries in `/aws_dda/dda_triton/triton_model_repo`. Continuous workflows persisted as `running` resume within seconds of the backend's start, and their first runs load the model while those files are missing or being rewritten.
           - **MIC-730 (JP5 `1.0.50`)**: the first load, at 04:03:36Z, found no `base_model-yolo-test-jetson-xavier-jp5/8/model.py` ("Failed to preinitialize Python stub: Python model file not found"). The component wrote it at 04:03:52Z.
             - The ensemble then stayed `LOADING`, since edgemlsdk's cached state is never refreshed after the failed load. Every run hung, and the harness workflow tests failed (4 of 7).
             - For 19 minutes both workflows reported `running` with `effectiveFps` 0 and no error, until a backend restart. After it, the model loaded, the workflows ran, and the harness passed 7 of 7.
@@ -2741,10 +2751,43 @@ graph TD
         - The 14 rebaselined goldens are the recipe pins of 30.5. No security baseline changed.
         - amd64-nvidia and arm64 CPU were not run on hardware: their recipe change produces what their ECR path already publishes.
 
-- [ ] 27. Final checkpoint
+- [x] 27. Final checkpoint
   - Ensure these are complete, and ask the user if questions arise:
     - Every suite and gate is green
     - The hardware matrix is recorded for JP5, JP6, and JP7
+  - **OUTCOME (2026-10-06)**: green.
+    - The committed head `4b8d31d` was compared with the pre-spec base `56e8e12` (the parent of `76fbdd5`). Each ran from its own detached worktree, one suite at a time, and the run took 3 h 28 min.
+    - Report and evidence: `/home/ubuntu/github/DefectDetectionApplication/.agents/tasks/rtsp-final-checkpoint/report.md`.
+    - **This spec introduced no failure.** Of the head's 637 failure ids, 630 fail identically at the base. The other 7 were checked by hand:
+      - 5 are this spec's container-only `test_stream_source_classic_rejection.py`, which fails on the host only because the whole `resources` directory needs `panorama` there (77 of 77 fail at the base). It passes in the image.
+      - 1 is `test_triton_edge_client.py::test_converted_model_with_triton_dda`. It collects on the host only because of this spec's panorama stub (O1 below). The same id fails in the image at both trees.
+      - 1 is the Portal `tests/` directory failing to collect as one run (O2 below). The file passes alone.
+    - Results, head (base):
+
+      | Suite | Head | Base |
+      |---|---|---|
+      | Device backend, host | 3773 passed | 2973 |
+      | Device backend, flask-app image | 4479 passed | 3590 |
+      | Properties under `HYPOTHESIS_PROFILE=ci` | 79 passed | — |
+      | Portal backend, file by file | 6181 passed, the same 29 failures | 5704 |
+      | `workflow_core` | 1022 passed, the same 1 failure | 633 |
+      | Portal frontend | 2282 tests passed, `tsc` clean | 2218 |
+      | LocalServer frontend | 307 of 308, `tsc` clean | 187 |
+      | Infrastructure jest | 278 of 279 | 268 of 269 |
+      | Harness selftests | 173 passed | 107 passed, 5 failed |
+
+      - The LocalServer frontend failure is the known whitespace property flake in `DeployedWorkflowDetails.exploration`, which fails at the base on a rerun too.
+      - The infrastructure failure is the known unbuilt video-layer size check, which fails at the base too.
+    - Security gates, the same at head and base:
+      - the guard pair: 4 passed, 3 skipped;
+      - preservation: 140 passed, 6 skipped on the host; 138 passed, 8 skipped in flask-app;
+      - the six audits: 0 disallowed each; `python_version_audit`: 0 counterexamples;
+      - the exploration and negative-fixture suites pass, except the two known aws-CLI `s3_squat` cases (`cp`, `sync`).
+    - The in-image build gate is cited, not replicated: the four 30.7 builds came from `ecb112c`, whose code is byte-identical to `4b8d31d`, and each passed all 7 gates and the backend unit tests.
+    - The hardware matrix is recorded for JP5, JP6 and JP7, and for amd64, in 25.2, 25.3, 25.5, 28.5, 29.7 and 30.7. §6 of the report lists the lines per device.
+    - Observations, not blocking (follow-ups, not done):
+      - **O1.** `dda_triton/test_native_call_serialization.py` leaves `TritonEdgeClient._instance` patched and a MagicMock `panorama` in `sys.modules` for the rest of a combined run. Today this only changes the message of a test that fails anyway without Triton. A fixture that restores `_instance` would remove it.
+      - **O2.** The Portal `tests/` directory cannot be collected as one run on either tree, because of the earlier collection-time `shared_utils` fakes. This spec's `test_frontend_stream_parity_fixtures.py` is one more file that it breaks. Run it file by file.
 
 ## Notes
 
