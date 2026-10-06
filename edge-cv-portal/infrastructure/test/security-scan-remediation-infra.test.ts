@@ -19,6 +19,13 @@
  * principals of this account, so these cases also pin that every sender of
  * the auto-label pair is in this account (Requirements 14.3, 14.4).
  *
+ * R14 DynamoDB (design r14-dynamodb-cmk): one retained customer managed key
+ * with rotation serves both portal-account tables, and every principal of
+ * the tables holds key access from a policy both tables depend on, so
+ * CloudFormation attaches it before either table switches to the key
+ * (Requirement 14.5). Names, point-in-time recovery and Retain stay
+ * (Requirement 16.2).
+ *
  * R15 (design r15-least-privilege-iam): the five flagged statements are
  * split. Only actions without resource-level permissions stay on '*', every
  * other action moves to the ARNs it uses at runtime, and every action each
@@ -26,7 +33,8 @@
  * role's grants across all of its policy carriers, so ComputeStack's policy
  * minimization doesn't affect them.
  *
- * Requirements covered: 14.1, 14.2, 14.3, 14.4, 15.1, 15.2, 15.4, 16.1, 17.2.
+ * Requirements covered: 14.1, 14.2, 14.3, 14.4, 14.5, 15.1, 15.2, 15.4, 16.1,
+ * 16.2, 17.2.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -658,6 +666,163 @@ describe('R15: least-privilege IAM (Requirements 15.1, 15.2, 15.4)', () => {
     expect(pick(grants, Object.keys(grants).filter((action) => /^(cloudwatch|logs|sagemaker):/.test(action)))).toEqual(
       sortedGrants(expected)
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R14 DynamoDB: the account tables (design r14-dynamodb-cmk, task 8)
+// ---------------------------------------------------------------------------
+
+// The two portal-account tables: CDK's logical id prefix, name and partition key.
+const ACCOUNT_TABLES = [
+  { prefix: 'EdgeCredentialsTable', name: 'dda-portal-edge-credentials', partitionKey: 'username' },
+  { prefix: 'AccountSyncTable', name: 'dda-portal-account-sync', partitionKey: 'device_id' },
+];
+// Every principal of the tables (design "R14 DynamoDB current behavior").
+const ACCOUNT_TABLE_PRINCIPALS = ['AccountSyncRole', 'DevicesRole', 'UserAdminRole'];
+const ACCOUNT_TABLES_KEY_ACTIONS = ['kms:Decrypt', 'kms:DescribeKey', 'kms:Encrypt', 'kms:GenerateDataKey*',
+  'kms:ReEncrypt*'];
+// Task 6.3's topic key, the one other key this spec may add (owner-gated section 1).
+const TOPIC_KEY = /^TrainingAlertTopicKey[0-9A-F]{8}$/;
+
+/** The logical id of the one resource of `type` whose id is `prefix` plus CDK's hash. */
+function logicalIdOf(template: any, type: string, prefix: string): string {
+  const pattern = new RegExp(`^${prefix}[0-9A-F]{8}$`);
+  const ids = Object.keys(template.Resources).filter(
+    (id) => template.Resources[id].Type === type && pattern.test(id)
+  );
+  expect(ids).toHaveLength(1);
+  return ids[0];
+}
+
+// A rendered DynamoDB ARN. Its partition slot may be a token such as
+// ${AWS::Partition}, which holds colons: Table.fromTableName and formatArn
+// render the partition, region and account that way in this env-less synth.
+const ARN_SLOT = '(?:\\$\\{[^}]*\\}|[^:$])*';
+const DYNAMODB_ARN = new RegExp(`^arn:${ARN_SLOT}:dynamodb:`);
+
+/**
+ * Whether a rendered grant resource can name the table: its ARN, index ARNs
+ * or another of its attributes, '*', every DynamoDB resource, or a table
+ * pattern that matches its name or names it by Ref. A condition only narrows
+ * a grant, so roleGrants' " when {...}" suffix is dropped first.
+ */
+function reachesTable(resource: string, tableId: string, tableName: string): boolean {
+  const target = resource.split(' when ')[0];
+  if (target === '*' || target.startsWith('${' + tableId + '.')) return true;
+  if (!DYNAMODB_ARN.test(target)) return false;
+  if (target.endsWith(':*')) return true;
+  const segment = /:table\/([^/]*)/.exec(target);
+  if (!segment) return false;
+  if (segment[1] === '${' + tableId + '}') return true;
+  const glob = segment[1].split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+  return new RegExp(`^${glob}$`).test(tableName);
+}
+
+describe('R14 DynamoDB: one customer managed key for the account tables (Requirements 14.5, 16.2)', () => {
+  test('one new KMS key, rotated and retained, with the default key policy and the alias alias/dda-portal/account-tables', () => {
+    const template = computeTemplate.toJSON();
+    const key = logicalIdOf(template, 'AWS::KMS::Key', 'AccountTablesKey');
+    const ids = (type: string) => Object.keys(template.Resources).filter(
+      (id) => template.Resources[id].Type === type && !TOPIC_KEY.test(id) && !id.startsWith('TrainingAlertTopicKeyAlias')
+    );
+    expect(ids('AWS::KMS::Key')).toEqual([key]);
+    for (const nested of nestedComputeTemplates) nested.resourceCountIs('AWS::KMS::Key', 0);
+    const resource = template.Resources[key];
+    expect(resource.DeletionPolicy).toBe('Retain');
+    expect(resource.UpdateReplacePolicy).toBe('Retain');
+    expect(resource.Properties.EnableKeyRotation).toBe(true);
+    expect(resource.Properties.Description).toContain('dda-portal-edge-credentials and dda-portal-account-sync');
+    // CDK's default key policy: the account root holds kms:*, which delegates to IAM.
+    expect(resource.Properties.KeyPolicy.Statement.map((statement: any) => ({
+      ...statement, Principal: renderValue(statement.Principal.AWS),
+    }))).toEqual([{ Action: 'kms:*', Effect: 'Allow', Principal: 'arn:${AWS::Partition}:iam::' + ACCOUNT_REF + ':root',
+      Resource: '*' }]);
+    expect(ids('AWS::KMS::Alias').map((alias) => template.Resources[alias].Properties)).toEqual([
+      { AliasName: 'alias/dda-portal/account-tables', TargetKeyId: { 'Fn::GetAtt': [key, 'Arn'] } },
+    ]);
+  });
+
+  test('both tables use the key, keep their names, keys, point-in-time recovery and Retain, and depend on AccountTablesKeyAccess', () => {
+    const template = computeTemplate.toJSON();
+    const key = logicalIdOf(template, 'AWS::KMS::Key', 'AccountTablesKey');
+    const access = logicalIdOf(template, 'AWS::IAM::Policy', 'AccountTablesKeyAccess');
+    for (const table of ACCOUNT_TABLES) {
+      const resource = template.Resources[logicalIdOf(template, 'AWS::DynamoDB::Table', table.prefix)];
+      // The whole property set: SSESpecification is the only new property.
+      expect(resource.Properties).toEqual({
+        TableName: table.name,
+        KeySchema: [{ AttributeName: table.partitionKey, KeyType: 'HASH' }],
+        AttributeDefinitions: [{ AttributeName: table.partitionKey, AttributeType: 'S' }],
+        BillingMode: 'PAY_PER_REQUEST',
+        PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+        SSESpecification: { SSEEnabled: true, SSEType: 'KMS', KMSMasterKeyId: { 'Fn::GetAtt': [key, 'Arn'] } },
+      });
+      expect(resource.DeletionPolicy).toBe('Retain');
+      expect(resource.UpdateReplacePolicy).toBe('Retain');
+      expect(asArray(resource.DependsOn ?? [])).toContain(access);
+    }
+  });
+
+  // Feature: security-scan-remediation-high, Property 8: Every principal of the account tables can use their key
+  // Validates: Requirement 14.5
+  test('Property 8: every role with a dynamodb grant on either table holds kms:Decrypt on the key, from the policy the tables depend on', () => {
+    const template = computeTemplate.toJSON();
+    const keyArn = '${' + logicalIdOf(template, 'AWS::KMS::Key', 'AccountTablesKey') + '.Arn}';
+    const tables = ACCOUNT_TABLES.map((table) => ({
+      ...table, id: logicalIdOf(template, 'AWS::DynamoDB::Table', table.prefix),
+    }));
+    const grantsTable = (action: string, resource: string): boolean =>
+      (action === '*' || action.startsWith('dynamodb:')) &&
+      tables.some((table) => reachesTable(resource, table.id, table.name));
+    const principals = Object.keys(template.Resources)
+      .filter((id) => template.Resources[id].Type === 'AWS::IAM::Role')
+      .filter((role) => Object.entries(roleGrants(template, role)).some(([action, resources]) =>
+        resources.some((resource) => grantsTable(action, resource))));
+    expect(principals.map((role) => role.replace(/[0-9A-F]{8}$/, '')).sort()).toEqual(ACCOUNT_TABLE_PRINCIPALS);
+    // Every policy of the stack that grants either table attaches to those roles
+    // alone, by Ref. A user, a group, a role imported by name, or a reference
+    // from anywhere but those roles' ManagedPolicyArns (a nested stack, an
+    // output) would give the tables a principal the role check can't see. A
+    // NotAction or NotResource statement counts as a table grant.
+    const strays = Object.entries<any>(template.Resources)
+      .filter(([, resource]) => resource.Type === 'AWS::IAM::Policy' || resource.Type === 'AWS::IAM::ManagedPolicy')
+      .filter(([, resource]) => resource.Properties.PolicyDocument.Statement.some((statement: any) =>
+        statement.Effect === 'Allow' && ('NotAction' in statement || 'NotResource' in statement ||
+          asArray(statement.Action).some((action: string) =>
+            asArray(statement.Resource).some((value: any) => grantsTable(action, renderValue(value)))))))
+      .flatMap(([id, resource]) => [
+        ...asArray(resource.Properties.Roles ?? []).filter((role) => !principals.includes(role?.Ref))
+          .map((role) => `${id}: role ${renderValue(role)}`),
+        ...asArray(resource.Properties.Users ?? []).map((user) => `${id}: user ${renderValue(user)}`),
+        ...asArray(resource.Properties.Groups ?? []).map((group) => `${id}: group ${renderValue(group)}`),
+        ...referencePaths(template, id).filter(([section, holder, properties, key]) => !(section === 'Resources' &&
+          principals.includes(holder) && properties === 'Properties' && key === 'ManagedPolicyArns'))
+          .map((where) => `${id}: referenced at ${where.join('.')}`),
+      ]);
+    expect(strays).toEqual([]);
+    for (const role of principals) {
+      expect(roleGrants(template, role)['kms:Decrypt']).toContain(keyArn);
+      // A Lambda role of this stack, so no cross-account principal uses either table.
+      expect(template.Resources[role].Properties.AssumeRolePolicyDocument.Statement).toEqual([
+        { Action: 'sts:AssumeRole', Effect: 'Allow', Principal: { Service: 'lambda.amazonaws.com' } },
+      ]);
+    }
+    // The key access comes from the one policy both tables depend on (case above),
+    // so every principal holds it before either table switches to the key.
+    const access = template.Resources[logicalIdOf(template, 'AWS::IAM::Policy', 'AccountTablesKeyAccess')].Properties;
+    expect(asArray(access.Roles).map((ref) => ref.Ref).sort()).toEqual([...principals].sort());
+    expect(access.PolicyDocument.Statement.map((statement: any) => ({
+      ...statement, Action: [...asArray(statement.Action)].sort(), Resource: asArray(statement.Resource).map(renderValue),
+    }))).toEqual([{ Action: ACCOUNT_TABLES_KEY_ACTIONS, Effect: 'Allow', Resource: [keyArn] }]);
+    // No nested stack's role is granted either table: none names them.
+    for (const nested of nestedComputeTemplates) {
+      const text = JSON.stringify(nested.toJSON());
+      for (const table of tables) {
+        expect(text).not.toContain(table.id);
+        expect(text).not.toContain(table.name);
+      }
+    }
   });
 });
 

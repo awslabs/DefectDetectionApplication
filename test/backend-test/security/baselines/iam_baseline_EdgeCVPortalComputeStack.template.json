@@ -31639,6 +31639,46 @@
     "aws:asset:property": "Code"
    }
   },
+  "AccountTablesKeyF0219603": {
+   "Type": "AWS::KMS::Key",
+   "Properties": {
+    "Description": "DDA Portal: encryption at rest for dda-portal-edge-credentials and dda-portal-account-sync. Disabling or deleting it makes both tables unreadable.",
+    "EnableKeyRotation": true,
+    "KeyPolicy": {
+     "Statement": [
+      {
+       "Action": "kms:*",
+       "Effect": "Allow",
+       "Principal": {
+        "AWS": "arn:aws:iam::111111111111:root"
+       },
+       "Resource": "*"
+      }
+     ],
+     "Version": "2012-10-17"
+    }
+   },
+   "UpdateReplacePolicy": "Retain",
+   "DeletionPolicy": "Retain",
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/AccountTablesKey/Resource"
+   }
+  },
+  "AccountTablesKeyAliasF8ABBD99": {
+   "Type": "AWS::KMS::Alias",
+   "Properties": {
+    "AliasName": "alias/dda-portal/account-tables",
+    "TargetKeyId": {
+     "Fn::GetAtt": [
+      "AccountTablesKeyF0219603",
+      "Arn"
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "EdgeCVPortalComputeStack/AccountTablesKey/Alias/Resource"
+   }
+  },
   "EdgeCredentialsTable60F80243": {
    "Type": "AWS::DynamoDB::Table",
    "Properties": {
@@ -31657,6 +31697,16 @@
     ],
     "PointInTimeRecoverySpecification": {
      "PointInTimeRecoveryEnabled": true
+    },
+    "SSESpecification": {
+     "KMSMasterKeyId": {
+      "Fn::GetAtt": [
+       "AccountTablesKeyF0219603",
+       "Arn"
+      ]
+     },
+     "SSEEnabled": true,
+     "SSEType": "KMS"
     },
     "TableName": "dda-portal-edge-credentials"
    },
@@ -31684,6 +31734,16 @@
     ],
     "PointInTimeRecoverySpecification": {
      "PointInTimeRecoveryEnabled": true
+    },
+    "SSESpecification": {
+     "KMSMasterKeyId": {
+      "Fn::GetAtt": [
+       "AccountTablesKeyF0219603",
+       "Arn"
+      ]
+     },
+     "SSEEnabled": true,
+     "SSEType": "KMS"
     },
     "TableName": "dda-portal-account-sync"
    },

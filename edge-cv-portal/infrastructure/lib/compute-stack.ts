@@ -4,6 +4,7 @@ import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as kms from 'aws-cdk-lib/aws-kms';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as sns from 'aws-cdk-lib/aws-sns';
@@ -2028,6 +2029,19 @@ export class ComputeStack extends cdk.Stack {
         'the forgot-password flow.',
     });
 
+    // Customer managed key for the two portal-account tables (R14.5). One key
+    // serves both, because the same principals use them. Rotation is on. The
+    // key is retained like the tables: a retained table whose key is deleted
+    // can't be read.
+    const accountTablesKey = new kms.Key(this, 'AccountTablesKey', {
+      alias: 'dda-portal/account-tables',
+      description:
+        'DDA Portal: encryption at rest for dda-portal-edge-credentials and ' +
+        'dda-portal-account-sync. Disabling or deleting it makes both tables unreadable.',
+      enableKeyRotation: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     // Credential-verifier table (design D3/D4): salted one-way PBKDF2
     // verifiers captured by user_admin.py password flows; never contains
     // plaintext. Read at listing time for the edgeCapable flag and by the
@@ -2043,6 +2057,8 @@ export class ComputeStack extends cdk.Stack {
         pointInTimeRecoveryEnabled: true,
       },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: accountTablesKey,
     });
 
     // Per-device account-sync state (staged account set + syncId, status,
@@ -2059,6 +2075,8 @@ export class ComputeStack extends cdk.Stack {
         pointInTimeRecoveryEnabled: true,
       },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: accountTablesKey,
     });
 
     // SQS-managed SSE (R14.3). Use-case accounts may send to this queue. SSE-SQS
@@ -2226,6 +2244,24 @@ export class ComputeStack extends cdk.Stack {
 
     edgeCredentialsTable.grantReadWriteData(userAdminHandler);
     accountSyncTable.grantReadWriteData(userAdminHandler);
+
+    // Key access for every principal of the two tables, in a policy of its own
+    // that both tables depend on. CloudFormation therefore attaches key access
+    // before it switches either table to the key. grantReadWriteData adds the
+    // same grant to the AccountSync and UserAdmin default policies, but those
+    // policies reference the tables and update after them. DevicesRole gets key
+    // access only here: Table.grant() with an explicit action list adds none.
+    const accountTablesKeyAccess = new iam.Policy(this, 'AccountTablesKeyAccess', {
+      roles: [accountSyncHandler.role!, userAdminRole, devicesHandler.role!],
+      statements: [new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['kms:Decrypt', 'kms:DescribeKey', 'kms:Encrypt', 'kms:ReEncrypt*', 'kms:GenerateDataKey*'],
+        resources: [accountTablesKey.keyArn],
+      })],
+    });
+    edgeCredentialsTable.node.addDependency(accountTablesKeyAccess);
+    accountSyncTable.node.addDependency(accountTablesKeyAccess);
+
     // finalize_audit_event (shared_utils.py) recovers the audit table's
     // (event_id, timestamp) range key with a dynamodb:Query before the
     // terminal update_item — the base createLambdaRole only grants

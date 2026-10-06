@@ -74,7 +74,11 @@
         "AccountSyncAckDLQ75DF4763",
         "AccountSyncAckQueue772F11D7",
         "DdaAutolabelDLQB2573578",
-        "DdaAutolabelQueue5780A6F7"
+        "DdaAutolabelQueue5780A6F7",
+        "EdgeCredentialsTable60F80243",
+        "AccountSyncTable789D4162",
+        "AccountTablesKeyF0219603",
+        "AccountTablesKeyAliasF8ABBD99"
       ],
       "unfixed_snapshot_sha256": "01a4f4be17104b617e0a211c5db1699d2edc1c33d54f458c42d35961dcc32298"
     },
