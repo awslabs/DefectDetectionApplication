@@ -13,8 +13,13 @@ Snapshot rule, from 8.1 on: 9.12's copy never runs again, because the shared fil
 - **Deployed and pushed.**
   - `origin/integration/all-specs` = `3e49de6`: `d7bf0d6` (Deploy A, the cherry-pick of `acf2fdd`) and `3e49de6` (Deploy B, the cherry-pick of `aba57cb`), both fast-forwards on `527ce4e`, never forced.
   - Both are deployed to every EdgeCVPortal stack in the one portal account and region, with no failure or rollback. Each passed its 30-minute watch.
-  - The branch `remediation-deploy` stays at `3e49de6`. Its worktree, `.worktrees/remediation-deploy`, is removed.
-- **Local only, not pushed.** `remediation` holds `acf2fdd` (Deploy A), `aba57cb` (Deploy B) and the spec commit ("docs(spec): add the security-scan-remediation-high spec, ledger and rescan record") on `4a3f960`. The section 7 code group stays uncommitted in the working tree: the device-side code under `src/`, the vendored catalog copy, `test/on-hardware/register_vllm_models.py` and the rest. Build steering commits on-device changes only after they are verified on real hardware.
+  - The worktree `.worktrees/remediation-deploy` is removed. The branch `remediation-deploy` was deleted after the merge below, because the trunk holds its commits.
+- **Published (2026-10-06, owner decision 9 in requirements.md).** `remediation` contains:
+  - `acf2fdd` (Deploy A), `aba57cb` (Deploy B), the spec commit and the owner-decision commit;
+  - "Merge integration/all-specs into remediation", which brings in the trunk at `3e49de6`.
+
+  It was pushed to `origin/remediation`, and `integration/all-specs` was fast-forwarded to it. Neither push was forced. Before the push, the merged tree differed from the deployed trunk only in this spec directory.
+- **Still uncommitted.** The section 7 code group stays uncommitted in the working tree of the main clone, on `remediation`. It covers the device-side code under `src/`, the vendored catalog copy, `test/on-hardware/register_vllm_models.py` and the rest. Build steering commits on-device changes only after they are verified on real hardware.
 - **Next, in order:**
   1. The owner checks from Verify A and Deploy B, listed below.
   2. Section 5: build and push the detector export image, then deploy its digest.
@@ -22,7 +27,7 @@ Snapshot rule, from 8.1 on: 9.12's copy never runs again, because the shared fil
   4. Section 7: the code commit, only AFTER section 6's device verification, with the devices named in its message. Its second commit, the spec directory, is already made, so a later spec change goes into a new `docs(spec)` commit.
   5. Section 8: the ComputeStack deploy that publishes the `WorkflowCoreLayer` catalog note.
   6. Section 9: the platform rescan and its `rescan.json` record.
-  7. The push decision for `remediation` (Requirement 18.3): `git -C "$REPO" push -u origin remediation`, to a new remote branch, never forced, and only when the owner decides. Its Deploy A and B commits have different hashes from the trunk's cherry-picks, so a later merge into the trunk needs a rebase or merge.
+  7. Done on 2026-10-06: the push and the merge into the trunk (Requirement 18.3, owner decision 9). Later commits go on `remediation`. Before pushing them, fetch and merge `origin/integration/all-specs`, then fast-forward the trunk to `remediation`, as in that first push. Never force.
 - **Owner checks (Verify A section 10 and Deploy B section 9).** Each writes Portal data, publishes, starts a job, opens a tunnel or touches a device, so none ran here:
   - Alert delivery through the encrypted topic. The topic has 0 subscriptions, so either make one test publish (it can only show a `MessageId`) or, after the next real training or compilation failure alert, check `NumberOfMessagesPublished` ≥ 1 and `NumberOfNotificationsFailed` = 0 for that hour, and that neither events handler logged `Error sending SNS notification`.
   - One auto-labeling job end to end, through the `alias/aws/sqs` queue, watching both workers' Errors and the DLQ.
