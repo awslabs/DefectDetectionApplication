@@ -265,3 +265,61 @@ class TestImageSourceAccessor(LocalServerBaseTestCase):
         image_source_dict = {"type": "Camera"}
         data = self.accessor.update_image_source_with_camera_status(image_source_dict)
         self.assertEqual(data["cameraStatus"].status, CameraStatusEnum.DISCONNECTED)
+
+    # security-scan-remediation-high R7: a Folder location outside the DDA
+    # area is a bad request (Requirements 7.2, 16.6). The real
+    # create_dda_user_directory runs, with its os name and chown/chmod mocked.
+
+    def _no_filesystem_change(self):
+        from utils import dda_user_management_utils as dda
+        fake_os = Mock(name="os")
+        fake_os.path.exists.return_value = False
+        return fake_os, [
+            patch.object(dda, "os", fake_os),
+            patch("utils.filesystem_management_utils.chown", return_value=(True, b"ok")),
+            patch("utils.filesystem_management_utils.chmod", return_value=(True, b"ok")),
+        ]
+
+    def test_create_folder_source_outside_the_dda_area_returns_400(self):
+        from dao.sqlite_db.models import ImageSource
+        fake_os, patches = self._no_filesystem_change()
+        data = {"description": "outside", "location": "/etc/x", "name": "outside_folder", "type": "Folder"}
+        with patches[0], patches[1] as chown, patches[2]:
+            with pytest.raises(HTTPException) as excinfo:
+                self.accessor.create_image_source(data, self.session)
+        self.assertEqual(excinfo.value.status_code, 400)
+        self.assertIn("/etc/x", excinfo.value.detail)
+        fake_os.makedirs.assert_not_called()
+        chown.assert_not_called()
+        self.assertEqual(self.session.query(ImageSource).filter_by(location="/etc/x").count(), 0)
+
+    def test_update_folder_source_outside_the_dda_area_returns_400(self):
+        from dao.sqlite_db.models import ImageSource
+        folder_id = str(uuid.uuid4())[:8]
+        self.session.add(ImageSource(
+            imageSourceId=folder_id, name="folder0", description="folder", type="Folder",
+            location="/aws_dda/images", imageCapturePath="",
+            creationTime=FAKE_TIME_STAMP, lastUpdateTime=FAKE_TIME_STAMP))
+        self.session.commit()
+        fake_os, patches = self._no_filesystem_change()
+        with patches[0], patches[1] as chown, patches[2]:
+            with pytest.raises(HTTPException) as excinfo:
+                self.accessor.update_image_source(folder_id, {"location": "/etc/x"}, self.session)
+        self.assertEqual(excinfo.value.status_code, 400)
+        self.assertIn("/etc/x", excinfo.value.detail)
+        fake_os.makedirs.assert_not_called()
+        chown.assert_not_called()
+        self.session.expire_all()
+        self.assertEqual(self.session.get(ImageSource, folder_id).location, "/aws_dda/images")
+
+    def test_create_folder_source_inside_the_dda_area_is_accepted(self):
+        from dao.sqlite_db.models import ImageSource
+        fake_os, patches = self._no_filesystem_change()
+        data = {"description": "inside", "location": "/aws_dda/images/cam1", "name": "inside_folder",
+                "type": "Folder"}
+        with patches[0], patches[1] as chown, patches[2]:
+            p_key = self.accessor.create_image_source(data, self.session)["imageSourceId"]
+        self.assertEqual(self.session.get(ImageSource, p_key).location, "/aws_dda/images/cam1")
+        fake_os.makedirs.assert_called_once_with("/aws_dda/images/cam1")
+        self.assertEqual([c.args[0] for c in chown.call_args_list],
+                         ["/aws_dda/images", "/aws_dda/images/cam1"])

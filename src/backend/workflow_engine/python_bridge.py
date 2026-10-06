@@ -1449,14 +1449,51 @@ def _split_segment(segment: Dict) -> List[Dict]:
     return parts
 
 
+def _artifact_handler_path(
+    node_id: Optional[str], artifact_path: str, relative: str
+) -> str:
+    """The handler path joined onto the component artifact directory.
+
+    The compiled document names the handler relative to the artifact
+    (``python/{nodeId}/handler.py``). Its real path must lie strictly
+    inside the artifact directory's real path, so an absolute path, a
+    ``..`` segment or a symlink can't make another file on the device
+    the handler. Containment is checked, not the layout. The joined
+    path is returned, not the resolved one, so a valid document keeps
+    today's handler path string.
+    """
+    if not artifact_path:
+        raise CustomPythonNodeError(
+            node_id, "component artifact directory is unknown"
+        )
+    joined = os.path.join(artifact_path, relative)
+    try:
+        root = os.path.realpath(artifact_path)
+        resolved = os.path.realpath(joined)
+    except ValueError:  # an embedded NUL can't name a file inside
+        root = resolved = None
+    if (
+        resolved is None
+        or resolved == root
+        or os.path.commonpath([root, resolved]) != root
+    ):
+        raise CustomPythonNodeError(
+            node_id,
+            "handler path '{0}' resolves outside the component artifact "
+            "directory".format(relative),
+        )
+    return joined
+
+
 def build_bridges(
     specs: List[BridgeSpec],
     artifact_path: str,
     wall_clock_limit_sec: float = DEFAULT_WALL_CLOCK_LIMIT_SEC,
     memory_limit_bytes: Optional[int] = DEFAULT_MEMORY_LIMIT_BYTES,
 ) -> List[CustomPythonBridge]:
-    """One CustomPythonBridge per spec, handler paths resolved against
-    the component artifact directory."""
+    """One CustomPythonBridge per spec, handler paths joined onto the
+    component artifact directory and confined to it
+    (:func:`_artifact_handler_path`)."""
     bridges = []
     for spec in specs:
         if not spec.handler_path:
@@ -1469,7 +1506,9 @@ def build_bridges(
         bridges.append(
             CustomPythonBridge(
                 node_id=spec.node_id,
-                handler_path=os.path.join(artifact_path, spec.handler_path),
+                handler_path=_artifact_handler_path(
+                    spec.node_id, artifact_path, spec.handler_path
+                ),
                 wall_clock_limit_sec=wall_clock_limit_sec,
                 memory_limit_bytes=memory_limit_bytes,
             )
@@ -1536,7 +1575,9 @@ def build_producer_bridge(feed, artifact_path: str) -> CustomPythonBridge:
         )
     return CustomPythonBridge(
         node_id=feed.node_id,
-        handler_path=os.path.join(artifact_path, handler_path),
+        handler_path=_artifact_handler_path(
+            feed.node_id, artifact_path, handler_path
+        ),
         wall_clock_limit_sec=producer_wall_clock_limit_sec(),
         memory_limit_bytes=producer_memory_limit_bytes(),
     )

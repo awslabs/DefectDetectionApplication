@@ -438,7 +438,12 @@ class ImageSourceAccessor:
             raise ValidationError(
                 "Folder path is required and should be absolute path: {}".format(folder_path)
             )
-        return dda_user_management_utils.create_dda_user_directory(folder_path)
+        try:
+            return dda_user_management_utils.create_dda_user_directory(folder_path)
+        except ValueError as error:
+            # A location outside the DDA area (confine_dda_path) is a bad
+            # request, returned as HTTP 400 by the create and update handlers.
+            raise ValidationError(str(error))
 
     def __create_image_source_configuration(self, image_src_config, cameraId, db: Session):
         logger.info("Creating image source configuration: {}".format(image_src_config))

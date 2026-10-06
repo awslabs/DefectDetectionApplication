@@ -124,6 +124,12 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: maintenance path; every other recording (``mqtt_publish`` included) is
 #: untouched, and the additivity is pinned by
 #: ``test_catalog_stream_and_analytics.py``.
+#:
+#: The security-scan-remediation-high spec appended one sentence to the
+#: ``bedrock_inference`` ``allowed_uri_prefixes`` description: an empty
+#: list lets a trigger payload point the fetch at any remote source, so
+#: setting prefixes is recommended. Only that entry was regenerated per
+#: the same maintenance path; ONLY that description moved.
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",

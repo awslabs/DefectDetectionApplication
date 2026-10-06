@@ -34,8 +34,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     YOLO_CONFIG_DIR=/tmp \
     MPLCONFIGDIR=/tmp/matplotlib \
     HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1 \
-    ORT_FLOOR_PYTHON=/opt/ort-floor/bin/python
+    TRANSFORMERS_OFFLINE=1
 
 # Shared libraries opencv-python needs (pulled in by ultralytics, which
 # requires the non-headless wheel).

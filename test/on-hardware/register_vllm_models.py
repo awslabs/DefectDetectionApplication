@@ -50,7 +50,10 @@ Usage:
     ./register_vllm_models.py --dry-run ...
 
 ``--portal-api`` is the API base WITHOUT the ``/api/v1`` suffix (the same
-``$PORTAL_API`` convention as the curl examples in the validation doc).
+``$PORTAL_API`` convention as the curl examples in the validation doc). It
+must be an ``https://`` URL with no user information, query or fragment,
+and redirects aren't followed, so the bearer token never travels in clear
+text or to another host.
 ``--token`` is a portal bearer token for a user holding the DataScientist
 role on the use case. Standard library only — no extra dependencies on the
 build server or a tester workstation.
@@ -112,11 +115,48 @@ MODELS = [
 ]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Follows no redirect: urllib would copy the Authorization header onto
+    the redirected request. A 3xx response then arrives as HTTPError."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect())
+
+
+def _validate_portal_api(value):
+    """The Portal API base URL without a trailing ``/``, after checking it:
+    the scheme must be ``https`` (any case) and a host is required; user
+    information, a query or a fragment is refused. Raises ValueError with a
+    message that names only the rejected scheme or the rule, never the URL,
+    which could carry credentials."""
+    name = "--portal-api / PORTAL_API"
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        raise ValueError("{} is not a valid URL".format(name)) from None
+    scheme = parts.scheme.lower()
+    if scheme != "https":
+        got = "scheme {!r}".format(scheme) if scheme else "no scheme"
+        raise ValueError("{} must be an https:// URL (got {})".format(name, got))
+    if "@" in parts.netloc:
+        raise ValueError("{} must not contain user information".format(name))
+    if not parts.hostname:
+        raise ValueError("{} must name a host".format(name))
+    if "?" in value or "#" in value:
+        raise ValueError("{} must not contain a query or fragment".format(name))
+    return value.rstrip("/")
+
+
 def _request(method, url, token, body=None, timeout=30):
     """Issue one portal API request. Returns (status_code, parsed_json).
 
     HTTP error statuses are returned (not raised) so callers can surface
     the portal's structured error payloads (e.g. 400 validation findings).
+    Redirects aren't followed (:class:`_NoRedirect`): a 3xx is returned as
+    its status, and the Authorization header never reaches its target.
     """
     data = None
     headers = {"Authorization": "Bearer " + token}
@@ -125,7 +165,7 @@ def _request(method, url, token, body=None, timeout=30):
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _OPENER.open(req, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as err:
         raw = err.read().decode("utf-8", errors="replace")
@@ -247,7 +287,10 @@ def main(argv=None):
     if missing:
         parser.error("missing required settings: " + ", ".join(missing))
 
-    portal_api = args.portal_api.rstrip("/")
+    try:
+        portal_api = _validate_portal_api(args.portal_api)
+    except ValueError as err:
+        parser.error(str(err))
 
     try:
         registered = list_registered_names(

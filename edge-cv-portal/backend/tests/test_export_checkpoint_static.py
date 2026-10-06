@@ -22,6 +22,7 @@ packaging.package_trained_detection_component reads and against the portal's
 own validator (detector_conversion).
 # Validates: Requirements 5.3, 5.6, 5.7, 6.1-6.8, 12.2
 """
+import ast
 import copy
 import hashlib
 import importlib.util
@@ -641,7 +642,16 @@ def test_fleet_floor_subprocess(tmp_path, monkeypatch, mode, fragment):
     script = tmp_path / "fake_floor_python"
     script.write_text(FAKE_FLOOR.format(python=sys.executable, mode=mode))
     script.chmod(0o755)
-    monkeypatch.setattr(ec, "ORT_FLOOR_PYTHON", str(script))
+    real_run = ec.subprocess.run
+    calls = []
+
+    def floor_run(argv, *args, **kwargs):
+        # The program is the image's fixed venv; run the fake floor in its place.
+        assert argv[0] == "/opt/ort-floor/bin/python"
+        calls.append(argv)
+        return real_run([str(script), *argv[1:]], *args, **kwargs)
+
+    monkeypatch.setattr(ec.subprocess, "run", floor_run)
     monkeypatch.setattr(ec, "WORK", tmp_path / "work")
     inputs = {"synthetic": np.zeros((1, 3, 4, 4), np.float32), "image": np.ones((1, 3, 4, 4), np.float32)}
     if fragment is None:
@@ -650,6 +660,63 @@ def test_fleet_floor_subprocess(tmp_path, monkeypatch, mode, fragment):
         assert out.outputs["image"][0].shape == (1, 8, 10)
     else:
         assert fragment in fatal_message(ec.run_on_fleet_floor, tmp_path / "m.onnx", inputs)
+    assert len(calls) == 1
+
+
+def _no_floor_run(*args, **kwargs):
+    pytest.fail("subprocess.run was called for a path that must be refused")
+
+
+def test_fleet_floor_refuses_a_relative_work_dir(tmp_path, monkeypatch):
+    # Run from tmp_path so a check that moved below the writes can't leave
+    # files in the checkout, and the assertion below catches it.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ec.subprocess, "run", _no_floor_run)
+    monkeypatch.setattr(ec, "WORK", Path("relative-export-work"))
+    inputs = {"image": np.ones((1, 3, 4, 4), np.float32)}
+    message = fatal_message(ec.run_on_fleet_floor, tmp_path / "m.onnx", inputs)
+    assert "EXPORT_WORK_DIR must be an absolute path" in message
+    assert not (tmp_path / "relative-export-work").exists()
+
+
+def test_fleet_floor_refuses_a_relative_onnx_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(ec.subprocess, "run", _no_floor_run)
+    monkeypatch.setattr(ec, "WORK", tmp_path / "work")
+    inputs = {"image": np.ones((1, 3, 4, 4), np.float32)}
+    message = fatal_message(ec.run_on_fleet_floor, Path("m.onnx"), inputs)
+    assert "the exported ONNX path must be absolute" in message
+    assert not (tmp_path / "work").exists()
+
+
+def _dotted(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def test_floor_interpreter_is_a_literal_not_an_environment_value():
+    tree = ast.parse(Path(_DETECTION_TRAINING, "export_checkpoint.py").read_text())
+    env_keys, run_argvs = set(), []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _dotted(node.func) in ("os.environ.get", "os.getenv"):
+            env_keys.update(a.value for a in node.args[:1] if isinstance(a, ast.Constant))
+        elif isinstance(node, ast.Subscript) and _dotted(node.value) == "os.environ":
+            if isinstance(node.slice, ast.Constant):
+                env_keys.add(node.slice.value)
+        if isinstance(node, ast.Call) and _dotted(node.func) == "subprocess.run":
+            run_argvs.append(node.args[0])
+    assert "EXPORT_WORK_DIR" in env_keys  # the walk sees the module's environment reads
+    assert "ORT_FLOOR_PYTHON" not in env_keys
+    assert not hasattr(ec, "ORT_FLOOR_PYTHON")
+    assert run_argvs, "no subprocess.run call found"
+    for argv in run_argvs:
+        assert isinstance(argv, ast.List) and argv.elts, ast.dump(argv)
+        program = argv.elts[0]
+        assert isinstance(program, ast.Constant) and program.value == "/opt/ort-floor/bin/python"
 
 
 # ---------------------------------------------------------------------------

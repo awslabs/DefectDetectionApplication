@@ -27,6 +27,7 @@
 # limitations under the License.
 
 import os
+import posixpath
 import sys
 import logging
 from pathlib import Path
@@ -69,7 +70,40 @@ def setup_dda_users_and_groups():
     __create_user_and_group(constants.DDA_ADMIN_USER, constants.DDA_ADMIN_GROUP, DDA_ADMIN_USER_ID, DDA_ADMIN_GROUP_ID)
 
 
+def _is_within(path, top):
+    return posixpath.commonpath([top, path]) == top
+
+
+def confine_dda_path(path):
+    """Resolve ``path`` and require it to lie strictly below DDA_ROOT_FOLDER,
+    outside the root-owned Greengrass root and DDA_SYSTEM_FOLDER.
+
+    Returns the resolved path. Raises TypeError for a missing path and
+    ValueError naming the path and the rule otherwise. Uses ``posixpath``,
+    not this module's ``os`` name, which the unit tests replace.
+    """
+    if not isinstance(path, str) or not path:
+        raise TypeError(f"A path is required, got {path!r}")
+    if "\x00" in path:
+        raise ValueError(f"Path {path!r} must not contain a NUL character")
+    if not posixpath.isabs(path):
+        raise ValueError(f"Path {path!r} must be absolute")
+    root = posixpath.realpath(constants.DDA_ROOT_FOLDER)
+    resolved = posixpath.realpath(path)
+    if resolved == root or not _is_within(resolved, root):
+        raise ValueError(f"Path {path!r} must resolve to a location below {root}")
+    # Root-owned by design: the installer leaves the Greengrass root out of
+    # its DDA admin chown, and host services run the scripts in the system folder.
+    for protected in (posixpath.dirname(constants.DDA_GREENGRASS_ROOT_FOLDER),
+                      constants.DDA_SYSTEM_FOLDER):
+        protected = posixpath.realpath(protected)
+        if _is_within(resolved, protected):
+            raise ValueError(f"Path {path!r} must not be in {protected}, which stays root-owned")
+    return resolved
+
+
 def update_dda_user_file_permissions(filepath, permissions=DEFAULT_DDA_USER_PERMISSION):
+    filepath = confine_dda_path(filepath)
     is_success, output = filesystem_management_utils.chown(filepath, constants.DDA_ADMIN_USER, constants.DDA_ADMIN_GROUP)
     if not is_success:
         logger.error(f"Unable to update ownership for {filepath}: {output}")
@@ -84,11 +118,13 @@ def update_dda_user_file_permissions(filepath, permissions=DEFAULT_DDA_USER_PERM
 def create_dda_user_directory(folder_path):
     logger.info(f"Creating directory: {folder_path}")
     try:
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
-        # add permissions to all parent directories except DDA_ROOT_FOLDER
-        for dir in get_all_parent_directories(folder_path):
-            if dir not in ['/', constants.DDA_ROOT_FOLDER]:
+        resolved = confine_dda_path(folder_path)
+        if not os.path.exists(resolved):
+            os.makedirs(resolved)
+        # add permissions to every directory strictly below DDA_ROOT_FOLDER
+        root = posixpath.realpath(constants.DDA_ROOT_FOLDER)
+        for dir in get_all_parent_directories(resolved):
+            if dir != root and _is_within(dir, root):
                 logger.error("changing directory permissions:"+str(dir))
                 update_dda_user_file_permissions(dir)
     except OSError as error:
@@ -96,6 +132,9 @@ def create_dda_user_directory(folder_path):
         raise
     except TypeError as error:
         logger.error("Folder path is required")
+        raise
+    except ValueError as error:
+        logger.error(f"Cannot create directory: {error}")
         raise
     return folder_path
 

@@ -34,7 +34,6 @@ injectable :class:`camera_discovery.v4l2.V4l2Io` layer.
   enumeration are marked absent with an absence timestamp and are never
   dropped from the tracked set (2.4).
 """
-import hashlib
 import logging
 import threading
 import time
@@ -42,6 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from camera_discovery import aravis, v4l2
+from camera_discovery.stable_hash import id_digest_hex
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ def diff_snapshot(
 def make_stable_id(bus_info: str, card_name: str) -> str:
     """``disc-{sha1(bus_info + card)[:12]}`` — stable across reboots and
     ``/dev/videoN`` renumbering, which V4L2 does not guarantee."""
-    digest = hashlib.sha1((bus_info + card_name).encode("utf-8")).hexdigest()
+    digest = id_digest_hex(bus_info + card_name)
     return "disc-" + digest[:12]
 
 

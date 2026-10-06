@@ -479,7 +479,7 @@
         "constraints": {},
         "default": "",
         "depends_on": null,
-        "description": "Optional newline-separated list of URI prefixes that reference_payload_path fetches may target, e.g. s3://plant-images/; empty permits any source. The restriction applies only to URI fetches (s3://, http(s):// and file://) — base64-encoded payload data needs no gate. A file:// reference is the exception to 'empty permits any source': reading images off the device requires an explicit file:// entry here, and paths are resolved before the check so they cannot escape it.",
+        "description": "Optional newline-separated list of URI prefixes that reference_payload_path fetches may target, e.g. s3://plant-images/; empty permits any source. The restriction applies only to URI fetches (s3://, http(s):// and file://) — base64-encoded payload data needs no gate. A file:// reference is the exception to 'empty permits any source': reading images off the device requires an explicit file:// entry here, and paths are resolved before the check so they cannot escape it. Leaving the list empty lets a trigger payload point the fetch at any remote source, so setting prefixes for the sources you use is recommended.",
         "examples": [
           "s3://plant-images/\nhttps://mes.local/",
           "file:///aws_dda/reference-images/"

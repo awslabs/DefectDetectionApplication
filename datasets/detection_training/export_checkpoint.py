@@ -67,7 +67,6 @@ MODEL_DIR = Path(os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))
 FAILURE_FILE = Path(os.environ.get("FAILURE_FILE", "/opt/ml/output/failure"))
 # On the job's attached volume (the trainers' WORK lives under the same root).
 WORK = Path(os.environ.get("EXPORT_WORK_DIR", "/opt/ml/input/work/export"))
-ORT_FLOOR_PYTHON = os.environ.get("ORT_FLOOR_PYTHON", "/opt/ort-floor/bin/python")
 
 ARCHES = ("yolo", "rf_detr")
 # Fleet_Floor_Runtime: the oldest onnxruntime among the default packaging
@@ -436,14 +435,20 @@ def run_on_fleet_floor(onnx_path: Path, inputs: Dict[str, Any]) -> SimpleNamespa
     """Load and run the graph on onnxruntime 1.16.3 (the /opt/ort-floor venv)
     and return its outputs per input. FATAL if it cannot load, run, or emits
     NaN / Inf (Req 6.6)."""
+    # The paths are positional arguments after -c; only absolute ones are run.
+    if not WORK.is_absolute():
+        fatal("EXPORT_WORK_DIR must be an absolute path")
+    if not Path(onnx_path).is_absolute():
+        fatal("the exported ONNX path must be absolute")
     import numpy as np
 
     WORK.mkdir(parents=True, exist_ok=True)
     feeds = WORK / "floor_inputs.npz"
     results = WORK / "floor_outputs.npz"
     np.savez(feeds, **{k: np.ascontiguousarray(v, dtype=np.float32) for k, v in inputs.items()})
+    # The interpreter is the fixed venv the image creates and checks at build time.
     proc = subprocess.run(
-        [ORT_FLOOR_PYTHON, "-c", _FLOOR_SCRIPT, str(onnx_path), str(feeds), str(results)],
+        ["/opt/ort-floor/bin/python", "-c", _FLOOR_SCRIPT, str(onnx_path), str(feeds), str(results)],
         capture_output=True, text=True, check=False, timeout=900)
     if proc.returncode != 0:
         tail = " ".join((proc.stderr or proc.stdout).strip().splitlines()[-3:])

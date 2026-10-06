@@ -825,7 +825,12 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                                         "requires an explicit file:// "
                                         "entry here, and paths are "
                                         "resolved before the check so "
-                                        "they cannot escape it.",
+                                        "they cannot escape it. Leaving "
+                                        "the list empty lets a trigger "
+                                        "payload point the fetch at any "
+                                        "remote source, so setting "
+                                        "prefixes for the sources you "
+                                        "use is recommended.",
                             examples=["s3://plant-images/\nhttps://mes.local/",
                                       "file:///aws_dda/reference-images/"]),
     ],

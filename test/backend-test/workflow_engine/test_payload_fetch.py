@@ -21,17 +21,26 @@ rejection, and the errors-carry-source-not-bytes contract. HTTP cases
 use an in-process localhost server; S3 uses a stubbed client.
 
 Requirements: 3.2, 3.3, 3.4, 3.5, 3.7, 3.8
+
+The security-scan-remediation-high cases at the end cover unsupported
+schemes, per-hop redirect checks, the opener's handlers and URL
+redaction (that spec's Requirements 9.1, 9.3, 9.4 and 9.5).
 """
 import base64
 import io
 import itertools
 import os
+import select
+import socket
 import threading
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
 import numpy as np
 import pytest
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 
 from workflow_engine import payload_fetch
 from workflow_engine.payload_fetch import (
@@ -63,12 +72,24 @@ PNG_BYTES = encode_png()
 # ---------------------------------------------------------------------------
 
 class _ContentHandler(BaseHTTPRequestHandler):
-    """Serves the bytes registered on the server under each path."""
+    """Serves the bytes registered on the server under each path, answers
+    the redirects registered for a path as ``(status, Location)`` and the
+    error status registered for it (404 for any other path), and records
+    every requested path."""
 
     def do_GET(self):
+        self.server.requested.append(self.path)
+        redirect = self.server.redirects.get(self.path)
+        if redirect is not None:
+            status, location = redirect
+            self.send_response(status)
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         body = self.server.content.get(self.path)
         if body is None:
-            self.send_response(404)
+            self.send_response(self.server.statuses.get(self.path, 404))
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -85,6 +106,9 @@ class _ContentHandler(BaseHTTPRequestHandler):
 def http_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ContentHandler)
     server.content = {}
+    server.redirects = {}
+    server.statuses = {}
+    server.requested = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -100,6 +124,18 @@ def serve(server, body):
     path = "/ref-{0}".format(next(_path_counter))
     server.content[path] = body
     return "http://127.0.0.1:{0}{1}".format(server.server_address[1], path)
+
+
+def serve_redirect(server, status, location, directory=""):
+    """Register a ``status`` redirect to ``location`` under a fresh path
+    (below ``directory``); return its localhost URL."""
+    path = "{0}/redirect-{1}".format(directory, next(_path_counter))
+    server.redirects[path] = (status, location)
+    return "http://127.0.0.1:{0}{1}".format(server.server_address[1], path)
+
+
+def base_url(server):
+    return "http://127.0.0.1:{0}".format(server.server_address[1])
 
 
 # ---------------------------------------------------------------------------
@@ -403,29 +439,36 @@ def test_http_fetch_passes_bounded_timeout(monkeypatch):
 
     # ``context`` is always passed by _fetch_http (the CA-bundle fix):
     # a verifying SSLContext for https://, None for plain http.
-    def fake_urlopen(url, timeout=None, context=None):
-        captured["url"] = url
-        captured["timeout"] = timeout
-        captured["context"] = context
-        return _FakeResponse()
+    class _FakeOpener:
+        def open(self, url, timeout=None):
+            captured["url"] = url
+            captured["timeout"] = timeout
+            return _FakeResponse()
 
-    monkeypatch.setattr(
-        payload_fetch.urllib.request, "urlopen", fake_urlopen
-    )
+    def fake_build_opener(prefixes, context=None):
+        captured["context"] = context
+        return _FakeOpener()
+
+    monkeypatch.setattr(payload_fetch, "_build_opener", fake_build_opener)
     data = fetch_reference_bytes("http://example.invalid/ref.png", ())
     assert data == PNG_BYTES
     assert captured["url"] == "http://example.invalid/ref.png"
     assert captured["timeout"] == REFERENCE_FETCH_TIMEOUT_SEC
     # A plain-http fetch needs no trust store, so no context is built.
     assert captured["context"] is None
+    # An https fetch verifies against the certifi-backed context.
+    fetch_reference_bytes("https://example.invalid/ref.png", ())
+    assert captured["context"] is payload_fetch.https_ssl_context()
 
 
 def test_http_timeout_error_names_source(monkeypatch):
-    def fake_urlopen(url, timeout=None, context=None):
-        raise TimeoutError("timed out")
+    class _FakeOpener:
+        def open(self, url, timeout=None):
+            raise TimeoutError("timed out")
 
     monkeypatch.setattr(
-        payload_fetch.urllib.request, "urlopen", fake_urlopen
+        payload_fetch, "_build_opener",
+        lambda prefixes, context=None: _FakeOpener()
     )
     with pytest.raises(PayloadReferenceError) as e:
         fetch_reference_bytes("http://example.invalid/slow.png", ())
@@ -618,3 +661,349 @@ def test_describe_reference_source_reports_file_uris_by_value():
     assert describe_reference_source(
         "file:///aws_dda/refs/a.png"
     ) == "file:///aws_dda/refs/a.png"
+
+
+# ---------------------------------------------------------------------------
+# URL fetching limits (security-scan-remediation-high, Requirement 9):
+# initial schemes, per-hop redirect checks (Property 5), the opener's
+# handlers, and URL redaction (Property 4). No outbound network: requests
+# go to the localhost server, to a local listener that only records
+# connection attempts, or to a closed local port.
+# ---------------------------------------------------------------------------
+
+#: Every redirect status this runtime follows (CPython 3.10 doesn't follow 308).
+FOLLOWED_STATUSES = [301, 302, 303, 307] + (
+    [308] if hasattr(urllib.request.HTTPRedirectHandler, "http_error_308")
+    else [])
+
+#: A visibly fake presigned-URL query.
+FAKE_QUERY = "X-Amz-Signature=FAKE-SIGNATURE-FOR-TESTS"
+
+
+@pytest.fixture
+def listener():
+    """A local port that records connection attempts and answers none."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(8)
+    try:
+        yield sock
+    finally:
+        sock.close()
+
+
+def attempted(sock):
+    """Whether anything tried to connect to the ``listener`` socket."""
+    readable, _, _ = select.select([sock], [], [], 0.2)
+    return bool(readable)
+
+
+@pytest.mark.parametrize("template", [
+    "ftp://127.0.0.1:{port}{path}",
+    "gopher://127.0.0.1:{port}{path}",
+    "HTTP://127.0.0.1:{port}{path}",
+    "javascript:fetch('{path}')",
+])
+def test_unsupported_initial_scheme_is_rejected_without_echo(
+        http_server, template):
+    path = "/scheme-{0}".format(next(_path_counter))
+    value = template.format(port=http_server.server_address[1], path=path)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(value, ())
+    assert path not in str(e.value)
+    assert path not in http_server.requested
+
+
+def assert_scheme_refusal(message, scheme, target_path):
+    assert "redirect to scheme '{0}' is not allowed".format(scheme) in message
+    assert target_path not in message
+    assert "FAKE-SIGNATURE" not in message
+
+
+@pytest.mark.parametrize("status", FOLLOWED_STATUSES)
+@pytest.mark.parametrize("scheme", ["file", "gopher"])
+def test_redirect_to_a_non_http_scheme_is_refused_for_every_status(
+        http_server, listener, tmp_path, status, scheme):
+    target_path = "/target-{0}.png".format(next(_path_counter))
+    if scheme == "file":
+        (tmp_path / target_path[1:]).write_bytes(PNG_BYTES)
+        target = "file://{0}{1}?{2}".format(tmp_path, target_path, FAKE_QUERY)
+    else:
+        target = "gopher://127.0.0.1:{0}{1}?{2}".format(
+            listener.getsockname()[1], target_path, FAKE_QUERY)
+    url = serve_redirect(http_server, status, target)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(url, ())
+    assert_scheme_refusal(str(e.value), scheme, target_path)
+    assert str(tmp_path) not in str(e.value)
+    assert not attempted(listener)
+
+
+def test_redirect_to_ftp_is_refused_and_never_connects(http_server, listener):
+    target_path = "/ftp-target-{0}.png".format(next(_path_counter))
+    target = "ftp://127.0.0.1:{0}{1}?{2}".format(
+        listener.getsockname()[1], target_path, FAKE_QUERY)
+    url = serve_redirect(http_server, 302, target)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(url, ())
+    assert_scheme_refusal(str(e.value), "ftp", target_path)
+    assert not attempted(listener)
+
+
+def test_redirect_inside_the_allowed_prefix_is_followed(http_server):
+    target = serve(http_server, PNG_BYTES)
+    url = serve_redirect(http_server, 302, target)
+    assert fetch_reference_bytes(url, (base_url(http_server) + "/",)) == PNG_BYTES
+    assert target[len(base_url(http_server)):] in http_server.requested
+
+
+def test_redirect_outside_the_allowed_prefix_is_refused_and_never_requested(
+        http_server):
+    target = serve(http_server, PNG_BYTES)
+    url = serve_redirect(http_server, 302, target, directory="/inside")
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(url, (base_url(http_server) + "/inside/",))
+    message = str(e.value)
+    assert "the redirect to '{0}' is outside".format(target) in message
+    assert target[len(base_url(http_server)):] not in http_server.requested
+
+
+def test_same_host_redirect_is_followed_without_prefixes(http_server):
+    target_path = serve(http_server, PNG_BYTES)[len(base_url(http_server)):]
+    url = serve_redirect(http_server, 307, target_path)  # relative Location
+    assert fetch_reference_bytes(url, ()) == PNG_BYTES
+    assert target_path in http_server.requested
+
+
+def test_redirect_to_a_url_with_userinfo_is_refused(http_server):
+    target_path = serve(http_server, PNG_BYTES)[len(base_url(http_server)):]
+    target = "http://{0}:{1}@127.0.0.1:{2}{3}".format(
+        "fake-user", "fake-credential", http_server.server_address[1],
+        target_path)
+    url = serve_redirect(http_server, 302, target)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(url, ())
+    message = str(e.value)
+    assert "embedded credentials" in message
+    assert "fake-user" not in message and "fake-credential" not in message
+    assert target_path not in http_server.requested
+
+
+class _ClosingResponse:
+    closed = False
+
+    def close(self):
+        self.closed = True
+
+
+def test_https_to_http_redirect_is_refused():
+    handler = payload_fetch._GatedRedirectHandler(())
+    request = urllib.request.Request("https://example.invalid/start")
+    response = _ClosingResponse()
+    with pytest.raises(PayloadReferenceError) as e:
+        handler.redirect_request(
+            request, response, 302, "Found", {},
+            "http://example.invalid/next?" + FAKE_QUERY)
+    message = str(e.value)
+    assert "from https to http" in message
+    assert "FAKE-SIGNATURE" not in message
+    assert response.closed
+    # https to https stays allowed; redirect_request sends nothing itself.
+    followed = handler.redirect_request(
+        request, _ClosingResponse(), 302, "Found", {},
+        "https://example.invalid/next")
+    assert followed.full_url == "https://example.invalid/next"
+
+
+def test_opener_has_only_http_handlers(monkeypatch):
+    # With a proxy configured, ProxyHandler must be part of the chain.
+    monkeypatch.setenv("https_proxy", "http://proxy.example.invalid:3128")
+    opener = payload_fetch._build_opener(
+        ("https://allowed.example/",), payload_fetch.https_ssl_context())
+    handlers = opener.handlers
+    for absent in (urllib.request.FTPHandler, urllib.request.FileHandler,
+                   urllib.request.DataHandler):
+        assert not any(isinstance(h, absent) for h in handlers)
+    redirects = [h for h in handlers
+                 if isinstance(h, urllib.request.HTTPRedirectHandler)]
+    assert len(redirects) == 1
+    assert isinstance(redirects[0], payload_fetch._GatedRedirectHandler)
+    assert redirects[0].allowed_prefixes == ("https://allowed.example/",)
+    https = [h for h in handlers if isinstance(h, urllib.request.HTTPSHandler)]
+    assert len(https) == 1
+    assert https[0]._context is payload_fetch.https_ssl_context()
+    assert any(isinstance(h, urllib.request.ProxyHandler) for h in handlers)
+    assert any(type(h) is urllib.request.HTTPHandler for h in handlers)
+    # Without a context (plain http fetches) urllib keeps its default.
+    plain = payload_fetch._build_opener(())
+    assert [h._context for h in plain.handlers
+            if isinstance(h, urllib.request.HTTPSHandler)] == [None]
+
+
+def test_url_with_userinfo_is_refused_before_any_request(http_server):
+    path = serve(http_server, PNG_BYTES)[len(base_url(http_server)):]
+    url = "http://{0}:{1}@127.0.0.1:{2}{3}".format(
+        "fake-user", "fake-credential", http_server.server_address[1], path)
+    for prefixes in ((), (base_url(http_server) + "/",), ("http://",)):
+        with pytest.raises(PayloadReferenceError) as e:
+            fetch_reference_bytes(url, prefixes)
+        message = str(e.value)
+        assert "URLs with embedded credentials are not supported" in message
+        assert "(scheme 'http', host '127.0.0.1')" in message
+        assert "fake-user" not in message
+        assert "fake-credential" not in message
+    assert path not in http_server.requested
+
+
+def test_http_404_on_a_signed_url_reports_the_path_not_the_query(http_server):
+    path = "/no-such-signed-ref-{0}".format(next(_path_counter))
+    query = "X-Amz-Signature={0}&X-Amz-Security-Token={1}".format(
+        "FAKE-SIGNATURE-FOR-TESTS", "FAKE-SESSION-FOR-TESTS")
+    url = "{0}{1}?{2}".format(base_url(http_server), path, query)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(url, ())
+    message = str(e.value)
+    assert "{0}{1}?<redacted>".format(base_url(http_server), path) in message
+    assert "HTTP Error 404" in message
+    assert "FAKE-SIGNATURE-FOR-TESTS" not in message
+    assert "FAKE-SESSION-FOR-TESTS" not in message
+    assert path + "?" + query in http_server.requested  # the fetch itself is unchanged
+
+
+def test_exception_text_echoing_the_query_is_scrubbed(http_server):
+    # http.client rejects the space and quotes the whole request path.
+    path = "/control-{0}".format(next(_path_counter))
+    url = "{0}{1}?sig=FAKE SIGNATURE\x01".format(base_url(http_server), path)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(url, ())
+    message = str(e.value)
+    assert path in message
+    assert "FAKE SIGNATURE" not in message
+
+
+def test_prefix_denial_names_the_redacted_url(http_server):
+    url = "{0}/denied-{1}?{2}".format(
+        base_url(http_server), next(_path_counter), FAKE_QUERY)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(url, ("https://allowed.example/",))
+    message = str(e.value)
+    assert "'{0}?<redacted>'".format(url.partition("?")[0]) in message
+    assert "FAKE-SIGNATURE" not in message
+
+
+def test_describe_reference_source_drops_userinfo_query_and_fragment():
+    value = "https://{0}@bucket.example/refs/a.png?{1}#part".format(
+        "fake-user", FAKE_QUERY)
+    assert describe_reference_source(value) == (
+        "https://bucket.example/refs/a.png?<redacted>")
+    assert describe_reference_source("s3://b/k.jpg?versionId=v1") == (
+        "s3://b/k.jpg?<redacted>")
+    assert describe_reference_source("https://[::1/x") == "<unparseable URI>"
+
+
+@pytest.fixture(scope="module")
+def closed_port():
+    """A local port with no listener: connections are refused at once."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+class _EchoingS3Client:
+    """Fails like a boto3 parameter error that quotes the bucket and key."""
+
+    def get_object(self, Bucket, Key):  # noqa: N803 - boto3 signature
+        raise RuntimeError("Invalid bucket {0!r} or key {1!r}".format(Bucket, Key))
+
+
+_USERINFO_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;="
+_QUERY_CHARS = _USERINFO_CHARS + ":@/? \x01"
+
+
+@st.composite
+def url_credential_cases(draw):
+    """A reference URL carrying generated user information and/or query
+    values (each with a fixed marker prefix, so it can't occur in message
+    text by chance), the node's prefixes, and those values."""
+    user = "fakeuser" + draw(st.text(_USERINFO_CHARS, max_size=10))
+    credential = "fakecred" + draw(st.text(_USERINFO_CHARS + ":", max_size=10))
+    signature = "fakesig" + draw(st.text(_QUERY_CHARS, max_size=12))
+    userinfo = draw(st.sampled_from(["", "{0}@", "{0}:{1}@"]))
+    query = draw(st.sampled_from(
+        ["", "?X-Amz-Signature={2}", "?a=1&X-Amz-Security-Token={2}"]))
+    if not userinfo and not query:
+        query = "?X-Amz-Signature={2}"
+    return {
+        "scheme": draw(st.sampled_from(["http", "https", "s3", "file"])),
+        "userinfo": userinfo.format(user, credential),
+        "query": query.format(user, credential, signature),
+        "remote_prefixes": draw(
+            st.sampled_from([(), ("https://allowed.example/",)])),
+        "values": (user, credential, signature),
+    }
+
+
+# Feature: security-scan-remediation-high, Property 4: Payload reference
+# errors never echo URL secrets. Validates: Requirements 9.4
+# Runs at Hypothesis's own default example count, taken from its built-in
+# "default" profile, because the conftests' fast profiles lower it to 25.
+@settings(max_examples=settings.get_profile("default").max_examples, deadline=None)
+@given(case=url_credential_cases())
+@example(case={"scheme": "http", "userinfo": "fakeuser:fakecred@",
+               "query": "?X-Amz-Signature=fakesig", "remote_prefixes": (),
+               "values": ("fakeuser", "fakecred", "fakesig")})
+@example(case={"scheme": "https", "userinfo": "",
+               "query": "?X-Amz-Signature=fakesig x\x01", "remote_prefixes": (),
+               "values": ("fakeuser", "fakecred", "fakesig x\x01")})
+@example(case={"scheme": "s3", "userinfo": "fakeuser:fakecred@",
+               "query": "?a=1&X-Amz-Security-Token=fakesig'", "remote_prefixes": (),
+               "values": ("fakeuser", "fakecred", "fakesig'")})
+def test_property_payload_reference_errors_never_echo_url_credentials(
+        http_server, closed_port, case):
+    hosts = {
+        "http": "127.0.0.1:{0}".format(http_server.server_address[1]),
+        "https": "127.0.0.1:{0}".format(closed_port),
+        "s3": "reference-bucket",
+        "file": "localhost",
+    }
+    scheme = case["scheme"]
+    url = "{0}://{1}{2}/property-root/ref-{3}.png{4}".format(
+        scheme, case["userinfo"], hosts[scheme], next(_path_counter),
+        case["query"])
+    prefixes = (("file:///property-root/",) if scheme == "file"
+                else case["remote_prefixes"])
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(url, prefixes, s3_client=_EchoingS3Client())
+    for text in (str(e.value), describe_reference_source(url)):
+        for value in case["values"]:
+            assert value not in text
+            assert repr(value)[1:-1] not in text  # as exception text quotes it
+        # No fragment either: every generated value starts with its marker.
+        for marker in ("fakeuser", "fakecred", "fakesig"):
+            assert marker not in text
+
+
+# Short values are scrubbed only where they appear as URL parts, with their
+# delimiter, so the rest of the error text stays readable (task 3 review).
+
+def test_short_query_and_fragment_leave_the_status_text_intact(http_server):
+    path = "/unauthorized-{0}".format(next(_path_counter))
+    http_server.statuses[path + "?1"] = 401
+    url = "{0}{1}?1#a".format(base_url(http_server), path)
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(url, ())
+    assert str(e.value) == (
+        "could not fetch reference '{0}{1}?<redacted>': HTTP Error 401: "
+        "Unauthorized".format(base_url(http_server), path))
+    assert path + "?1" in http_server.requested
+
+
+def test_short_userinfo_and_query_are_scrubbed_only_as_url_parts():
+    with pytest.raises(PayloadReferenceError) as e:
+        fetch_reference_bytes(
+            "s3://a:b@bucket/key.png?1", (), s3_client=_EchoingS3Client())
+    assert str(e.value) == (
+        "could not fetch reference 's3://bucket/key.png?<redacted>': "
+        "Invalid bucket '<redacted>@bucket' or key 'key.png?<redacted>'")

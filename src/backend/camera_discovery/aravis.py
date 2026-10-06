@@ -32,10 +32,11 @@ on hosts without the ``gi``/Aravis stack (Requirement 2.7).
   empty it falls back to including ``physical_id`` so two serial-less
   cameras of the same model do not collide (Requirement 2.2).
 """
-import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
+
+from camera_discovery.stable_hash import id_digest_hex
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ def aravis_stable_id(
         key = "|".join((vendor, model, serial))
     else:
         key = "|".join((vendor, model, serial, physical_id))
-    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    digest = id_digest_hex(key)
     return STABLE_ID_PREFIX + digest[:12]
 
 
