@@ -340,12 +340,12 @@ def test_s1_policy_is_pure_function_of_claims_not_the_log_line(
 # flow is exercised end to end, substituting the signature algorithm RS256 ->
 # HS256 (HMAC — pure-Python, needs no cryptography backend) for the verify step
 # ONLY. This still performs a GENUINE cryptographic signature verification (a
-# tampered token is really rejected) through the module's real unverified
-# pre-parse (``get_unverified_header`` + ``verify_signature=False`` decode),
-# issuer routing, ``kid`` lookup, and ``verify_exp``/``verify_aud``/``verify_iss``
-# options. The RS256->HS256 substitution is an environment adaptation, not a
-# behavior change; the S5 fix (task 3.3) only adds a ``# nosem`` comment (no
-# control-flow change), so task 8 re-runs this unchanged.
+# tampered token is really rejected) through the module's real header read
+# (``get_unverified_header``, for the ``kid`` only), trusted-issuer walk, ``kid``
+# lookup and configured issuer/audience/expiry checks. Recorded repoint
+# (security-scan-remediation-high, R6): the unverified payload pre-parse the S5
+# fix annotated is deleted and ``aud`` is required, so S5 sets ALLOWED_AUDIENCES
+# and signs a matching ``aud``; the RS256->HS256 adaptation and S5 property stay.
 _S5_ISSUER = "https://issuer.preservation.test"
 _S5_KID = "preservation-kid"
 _S5_SECRET = "preservation-hmac-secret-key-0123456789"
@@ -379,9 +379,9 @@ class _JwtProxy:
 def _mount_two_stage_decode(mod):
     """Mock the JWKS lookup + RSA-key construction (returning the HMAC secret)
     and adapt the verified decode's algorithm RS256 -> HS256 so the real
-    signature verification runs without the cryptography backend. The unverified
-    pre-parse call (``options={"verify_signature": False}``) is passed through
-    untouched."""
+    signature verification runs without the cryptography backend. The module
+    reads only the header before this decode, so no unverified decode is left
+    to pass through."""
     import jwt as pyjwt
 
     mod.get_jwks_keys = lambda url: {"keys": [{"kid": _S5_KID}]}
@@ -390,12 +390,8 @@ def _mount_two_stage_decode(mod):
     real_decode = pyjwt.decode
 
     def _decode(token, key=None, algorithms=None, **kwargs):
-        options = kwargs.get("options") or {}
-        # Stage 1 — the unverified pre-parse: no key, signature disabled.
-        if key is None and options.get("verify_signature") is False:
-            return real_decode(token, options=options)
-        # Stage 2 — the verified decode: substitute RS256 -> HS256 for the
-        # pure-python HMAC verification path.
+        # The verified decode: substitute RS256 -> HS256 for the pure-python
+        # HMAC verification path.
         if algorithms and "RS256" in algorithms:
             algorithms = ["HS256"]
         return real_decode(token, key, algorithms=algorithms, **kwargs)
@@ -403,11 +399,15 @@ def _mount_two_stage_decode(mod):
     mod.jwt = _JwtProxy(pyjwt, _decode)
 
 
+# The app client id the S5 authorizer allows; the signed claims carry it as aud.
+_S5_AUDIENCE = "preservation-client-id"
+
+
 def _load_jwt_authorizer_s5():
     return _load_jwt_authorizer(
         env={
             "ISSUER_WHITELIST": _S5_ISSUER,
-            "ALLOWED_AUDIENCES": "",
+            "ALLOWED_AUDIENCES": _S5_AUDIENCE,
             "COGNITO_USER_POOL_ID": "",
         }
     )
@@ -416,13 +416,14 @@ def _load_jwt_authorizer_s5():
 # Validates: Requirements 3.5
 def test_s5_valid_token_validates_to_same_claims():
     """A real (HS256-signed) token validates via the two-stage decode and returns
-    the signed claims — the routing-only pre-parse then the verified decode."""
+    the signed claims — the kid-only header read then the verified decode."""
     import time
 
     mod = _load_jwt_authorizer_s5()
     _mount_two_stage_decode(mod)
 
-    claims = {"sub": "user-42", "iss": _S5_ISSUER, "exp": int(time.time()) + 3600}
+    claims = {"sub": "user-42", "iss": _S5_ISSUER, "aud": _S5_AUDIENCE,
+              "exp": int(time.time()) + 3600}
     token = _sign_hs256(claims)
 
     decoded = mod.validate_jwt_token(token)
@@ -433,20 +434,21 @@ def test_s5_valid_token_validates_to_same_claims():
 # Validates: Requirements 3.5
 def test_s5_tampered_token_is_rejected():
     """A token whose signature is tampered is rejected by the verified decode
-    with AuthorizationError (the pre-parse still succeeds; the verified decode
+    with AuthorizationError (the header read still succeeds; the verified decode
     fails the signature check)."""
     import time
 
     mod = _load_jwt_authorizer_s5()
     _mount_two_stage_decode(mod)
 
-    claims = {"sub": "user-42", "iss": _S5_ISSUER, "exp": int(time.time()) + 3600}
+    claims = {"sub": "user-42", "iss": _S5_ISSUER, "aud": _S5_AUDIENCE,
+              "exp": int(time.time()) + 3600}
     token = _sign_hs256(claims)
 
     header, payload, signature = token.split(".")
     # Flip the first signature character to a different base64url char so the
-    # HMAC no longer matches (header/payload preserved so the pre-parse still
-    # reads the issuer and routes as before).
+    # HMAC no longer matches (header/payload preserved so the header read still
+    # finds the kid and the key is selected as before).
     flipped = ("B" if signature[0] != "B" else "C") + signature[1:]
     tampered = ".".join([header, payload, flipped])
 
@@ -463,6 +465,7 @@ def test_s5_valid_token_still_accepted_after_tamper_check():
     mod = _load_jwt_authorizer_s5()
     _mount_two_stage_decode(mod)
 
-    claims = {"sub": "user-7", "iss": _S5_ISSUER, "exp": int(time.time()) + 3600}
+    claims = {"sub": "user-7", "iss": _S5_ISSUER, "aud": _S5_AUDIENCE,
+              "exp": int(time.time()) + 3600}
     token = _sign_hs256(claims)
     assert mod.validate_jwt_token(token)["sub"] == "user-7"

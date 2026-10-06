@@ -3,3 +3,4 @@
 # requirements files; nothing here is packaged into a deployment artifact.
 pytest==9.0.3
 moto[s3,dynamodb]==5.1.22
+PyJWT==2.15.0

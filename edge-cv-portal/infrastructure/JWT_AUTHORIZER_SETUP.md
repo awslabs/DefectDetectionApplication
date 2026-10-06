@@ -25,21 +25,24 @@ The JWT authorizer is configured via environment variables:
 environment: {
   COGNITO_USER_POOL_ID: props.userPool.userPoolId,
   COGNITO_REGION: cdk.Aws.REGION,
-  ALLOWED_AUDIENCES: '', // Comma-separated list of allowed audiences
-  ISSUER_WHITELIST: '', // Comma-separated list of trusted issuers
+  ALLOWED_AUDIENCES: props.userPoolClientId ?? '', // Required: comma-separated app client ids
+  ISSUER_WHITELIST: '', // Comma-separated exact https:// issuer strings
 }
 ```
+
+- `ALLOWED_AUDIENCES` is required. CDK wires it from the user-pool client id: `bin/app.ts` passes `authStack.userPoolClient.userPoolClientId` to ComputeStack as `userPoolClientId`. A token's `aud` must name one of the listed ids. If the list is empty, the authorizer denies every request. When you add a custom identity provider, add its client ids here too.
+- `ISSUER_WHITELIST` entries are exact `https://` issuer strings, compared by string equality. Each issuer's keys are fetched from `<issuer>/.well-known/jwks.json`. An entry that doesn't start with `https://` is ignored and logged at ERROR.
+- Tokens from the configured user pool must be ID tokens (`token_use` is `id`). Access tokens are denied.
 
 ### Token Validation Process
 
 1. Extract JWT token from Authorization header
-2. Decode token header to get Key ID (kid) and issuer
-3. Determine JWKS URL based on issuer
-4. Fetch and cache JWKS keys
-5. Validate token signature using RSA public key
-6. Verify token claims (expiration, audience, issuer)
-7. Extract user information and role mappings
-8. Generate IAM policy for API Gateway
+2. Read only the token header before verification, and use its Key ID (kid) only to select a signing key
+3. Fetch and cache the JWKS of each trusted issuer in turn (the configured user pool first, then each `ISSUER_WHITELIST` entry) and look up the kid
+4. Validate the RS256 signature with that issuer's public key
+5. Verify the claims against configuration: `exp`, `iss`, `aud` and `sub` are required, `iss` must equal the issuer that owns the key, `aud` must be in `ALLOWED_AUDIENCES`, and user-pool tokens must be ID tokens
+6. Extract user information and role mappings
+7. Generate IAM policy for API Gateway
 
 ### Role Mapping
 
@@ -148,10 +151,11 @@ All errors are logged for debugging purposes.
 ## Security Considerations
 
 1. **JWKS Caching**: Keys are cached to prevent excessive requests to identity providers
-2. **Issuer Validation**: Only whitelisted issuers are accepted
-3. **Audience Validation**: Tokens must have valid audience claims
-4. **Signature Verification**: All tokens are cryptographically verified
-5. **Error Handling**: Detailed errors are logged but not exposed to clients
+2. **Issuer Validation**: Only the configured user pool and the exact `https://` issuers in `ISSUER_WHITELIST` are trusted, and a token's `iss` must equal the issuer whose key verified it
+3. **Audience Validation**: `ALLOWED_AUDIENCES` is required, and a token's `aud` must name one of its app client ids. User-pool tokens must be ID tokens, so access tokens are denied
+4. **Signature Verification**: All tokens are cryptographically verified with RS256. Only the header is read before verification, and only its `kid`, to select the key
+5. **Required Claims**: Tokens without `exp`, `iss`, `aud` or `sub` are denied
+6. **Error Handling**: Detailed errors are logged but not exposed to clients
 
 ## Monitoring
 
@@ -179,10 +183,12 @@ curl -H "Authorization: Bearer <jwt_token>" \
 
 ### Common Issues
 
-1. **"Key not found in JWKS"**: The token's key ID doesn't match any keys in the JWKS
-2. **"Untrusted issuer"**: The token issuer is not in the whitelist
+1. **"Key not found in any trusted JWKS"**: The token's key ID doesn't match any key of the trusted issuers
+2. **"Invalid token issuer"**: The token's `iss` isn't the issuer whose key verified it
 3. **"Invalid token signature"**: The token signature verification failed
 4. **"Token has expired"**: The token's exp claim is in the past
+5. **"Invalid token audience"** or **"Token missing required claim: aud"**: The token's `aud` isn't in `ALLOWED_AUDIENCES`, or it has none. A user-pool access token lands here, because it carries `client_id` and no `aud`; send the ID token
+6. **"Token is not an ID token"**: A user-pool token has an allowed `aud`, but its `token_use` isn't `id`
 
 ### Debug Logging
 

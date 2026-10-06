@@ -150,31 +150,46 @@
        ]
       },
       {
+       "Action": "cloudwatch:PutMetricData",
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
        "Action": [
-        "cloudwatch:PutMetricData",
         "logs:CreateLogGroup",
         "logs:CreateLogStream",
         "logs:PutLogEvents",
         "logs:DescribeLogStreams"
        ],
        "Effect": "Allow",
-       "Resource": "*"
+       "Resource": "arn:aws:logs:*:111111111111:log-group:/aws/sagemaker/*"
       },
       {
        "Action": [
         "sagemaker:CreateTrainingJob",
         "sagemaker:DescribeTrainingJob",
         "sagemaker:StopTrainingJob",
-        "sagemaker:ListTrainingJobs",
         "sagemaker:CreateCompilationJob",
         "sagemaker:DescribeCompilationJob",
         "sagemaker:StopCompilationJob",
-        "sagemaker:ListCompilationJobs",
         "sagemaker:DescribeLabelingJob",
-        "sagemaker:ListLabelingJobs",
         "sagemaker:CreateModel",
         "sagemaker:DescribeModel",
-        "sagemaker:DeleteModel",
+        "sagemaker:DeleteModel"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        "arn:aws:sagemaker:*:111111111111:training-job/*",
+        "arn:aws:sagemaker:*:111111111111:compilation-job/*",
+        "arn:aws:sagemaker:*:111111111111:labeling-job/*",
+        "arn:aws:sagemaker:*:111111111111:model/*"
+       ]
+      },
+      {
+       "Action": [
+        "sagemaker:ListTrainingJobs",
+        "sagemaker:ListCompilationJobs",
+        "sagemaker:ListLabelingJobs",
         "sagemaker:ListModels"
        ],
        "Effect": "Allow",

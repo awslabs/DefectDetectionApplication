@@ -1760,18 +1760,98 @@
        "Action": [
         "iot:CreateKeysAndCertificate",
         "iot:AttachThingPrincipal",
-        "iot:AttachPolicy",
-        "iot:CreatePolicy",
+        "iot:DescribeEndpoint"
+       ],
+       "Effect": "Allow",
+       "Resource": "*"
+      },
+      {
+       "Action": [
         "iot:GetPolicy",
+        "iot:CreatePolicy"
+       ],
+       "Effect": "Allow",
+       "Resource": [
+        {
+         "Fn::Join": [
+          "",
+          [
+           "arn:aws:iot:*:",
+           {
+            "Ref": "AWS::AccountId"
+           },
+           ":policy/GreengrassV2IoTThingPolicy"
+          ]
+         ]
+        },
+        {
+         "Fn::Join": [
+          "",
+          [
+           "arn:aws:iot:*:",
+           {
+            "Ref": "AWS::AccountId"
+           },
+           ":policy/GreengrassTESCertificatePolicy*"
+          ]
+         ]
+        }
+       ]
+      },
+      {
+       "Action": [
         "iot:ListPolicyVersions",
         "iot:CreatePolicyVersion",
-        "iot:DeletePolicyVersion",
-        "iot:DescribeEndpoint",
+        "iot:DeletePolicyVersion"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:iot:*:",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":policy/GreengrassV2IoTThingPolicy"
+         ]
+        ]
+       }
+      },
+      {
+       "Action": "iot:AttachPolicy",
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:iot:*:",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":cert/*"
+         ]
+        ]
+       }
+      },
+      {
+       "Action": [
         "iot:CreateRoleAlias",
         "iot:DescribeRoleAlias"
        ],
        "Effect": "Allow",
-       "Resource": "*"
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:iot:*:",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":rolealias/GreengrassCoreTokenExchangeRoleAlias"
+         ]
+        ]
+       }
       },
       {
        "Action": [
@@ -3937,14 +4017,31 @@
       {
        "Action": [
         "iot:OpenTunnel",
-        "iot:CloseTunnel",
-        "iot:DescribeTunnel",
         "iot:ListTunnels",
-        "iot:ListTagsForResource",
-        "iot:RotateTunnelAccessToken"
+        "iot:ListTagsForResource"
        ],
        "Effect": "Allow",
        "Resource": "*"
+      },
+      {
+       "Action": [
+        "iot:CloseTunnel",
+        "iot:DescribeTunnel",
+        "iot:RotateTunnelAccessToken"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:iot:*:",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":tunnel/*"
+         ]
+        ]
+       }
       }
      ],
      "Version": "2012-10-17"
@@ -29133,7 +29230,8 @@
    "Type": "AWS::SQS::Queue",
    "Properties": {
     "MessageRetentionPeriod": 1209600,
-    "QueueName": "dda-portal-camera-shadow-reports-dlq"
+    "QueueName": "dda-portal-camera-shadow-reports-dlq",
+    "SqsManagedSseEnabled": true
    },
    "UpdateReplacePolicy": "Delete",
    "DeletionPolicy": "Delete",
@@ -29191,6 +29289,7 @@
      },
      "maxReceiveCount": 3
     },
+    "SqsManagedSseEnabled": true,
     "VisibilityTimeout": 180
    },
    "UpdateReplacePolicy": "Delete",
@@ -31598,7 +31697,8 @@
    "Type": "AWS::SQS::Queue",
    "Properties": {
     "MessageRetentionPeriod": 1209600,
-    "QueueName": "dda-portal-account-sync-acks-dlq"
+    "QueueName": "dda-portal-account-sync-acks-dlq",
+    "SqsManagedSseEnabled": true
    },
    "UpdateReplacePolicy": "Delete",
    "DeletionPolicy": "Delete",
@@ -31656,6 +31756,7 @@
      },
      "maxReceiveCount": 3
     },
+    "SqsManagedSseEnabled": true,
     "VisibilityTimeout": 180
    },
    "UpdateReplacePolicy": "Delete",
@@ -34238,6 +34339,7 @@
   "DdaAutolabelDLQB2573578": {
    "Type": "AWS::SQS::Queue",
    "Properties": {
+    "KmsMasterKeyId": "alias/aws/sqs",
     "MessageRetentionPeriod": 1209600,
     "QueueName": "dda-portal-autolabel-queue-dlq"
    },
@@ -34286,6 +34388,7 @@
   "DdaAutolabelQueue5780A6F7": {
    "Type": "AWS::SQS::Queue",
    "Properties": {
+    "KmsMasterKeyId": "alias/aws/sqs",
     "MessageRetentionPeriod": 345600,
     "QueueName": "dda-portal-autolabel-queue",
     "RedrivePolicy": {
@@ -43561,6 +43664,7 @@
    "Type": "AWS::SNS::Topic",
    "Properties": {
     "DisplayName": "DDA Portal Training Alerts",
+    "KmsMasterKeyId": "alias/aws/sns",
     "TopicName": "dda-portal-training-alerts"
    },
    "Metadata": {
@@ -46012,9 +46116,28 @@
        "Action": [
         "events:PutRule",
         "events:DeleteRule",
-        "events:DescribeRule",
-        "events:ListRules"
+        "events:DescribeRule"
        ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::Join": [
+         "",
+         [
+          "arn:aws:events:",
+          {
+           "Ref": "AWS::Region"
+          },
+          ":",
+          {
+           "Ref": "AWS::AccountId"
+          },
+          ":rule/sagemaker-eventbridge-enabler"
+         ]
+        ]
+       }
+      },
+      {
+       "Action": "events:ListRules",
        "Effect": "Allow",
        "Resource": "*"
       }

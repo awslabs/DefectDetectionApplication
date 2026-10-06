@@ -153,6 +153,7 @@ const computeStack = new ComputeStack(app, 'EdgeCVPortalComputeStack', {
   // it without JSON indentation keeps it well under (CDK's recommended fix).
   suppressTemplateIndentation: true,
   userPool: authStack.userPool,
+  userPoolClientId: authStack.userPoolClient.userPoolClientId,
   useCasesTable: storageStack.useCasesTable,
   userRolesTable: storageStack.userRolesTable,
   devicesTable: storageStack.devicesTable,

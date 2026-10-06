@@ -8,18 +8,28 @@ import os
 import base64
 import jwt
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from functools import lru_cache
 from datetime import datetime, timezone
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Configuration from environment variables
+
+def _csv_env(name: str) -> Tuple[str, ...]:
+    """Return an environment variable's comma-separated entries, trimmed, with
+    empty entries dropped."""
+    entries = (entry.strip() for entry in os.environ.get(name, '').split(','))
+    return tuple(entry for entry in entries if entry)
+
+
+# Configuration from environment variables, read once at import
 COGNITO_USER_POOL_ID = os.environ.get('COGNITO_USER_POOL_ID')
 COGNITO_REGION = os.environ.get('COGNITO_REGION', 'us-east-1')
-ALLOWED_AUDIENCES = os.environ.get('ALLOWED_AUDIENCES', '').split(',')
-ISSUER_WHITELIST = os.environ.get('ISSUER_WHITELIST', '').split(',')
+# App client ids the Portal allows; a token's `aud` must name one of them.
+ALLOWED_AUDIENCES = _csv_env('ALLOWED_AUDIENCES')
+# Exact `https://` issuer strings of additional identity providers.
+ISSUER_WHITELIST = _csv_env('ISSUER_WHITELIST')
 
 # Cache for JWKS keys (1 hour TTL)
 JWKS_CACHE_TTL = 3600
@@ -73,6 +83,37 @@ def get_cognito_jwks_url(user_pool_id: str, region: str) -> str:
     return f"https://cognito-idp.{region}.amazonaws.com/{user_pool_id}/.well-known/jwks.json"
 
 
+# The configured user pool's issuer, when a pool is configured
+COGNITO_ISSUER = (
+    f"https://cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}"
+    if COGNITO_USER_POOL_ID else None
+)
+
+
+def _trusted_issuers() -> Tuple[Tuple[str, str], ...]:
+    """The trusted issuers, in lookup order, as (issuer, jwks_url) pairs: the
+    configured user pool first, then each `https://` ISSUER_WHITELIST entry."""
+    issuers = []
+    if COGNITO_ISSUER:
+        issuers.append((COGNITO_ISSUER, get_cognito_jwks_url(COGNITO_USER_POOL_ID, COGNITO_REGION)))
+    for issuer in ISSUER_WHITELIST:
+        if not issuer.startswith('https://'):
+            # Its signing keys would be fetched without TLS.
+            logger.error(f"Ignoring ISSUER_WHITELIST entry that is not an https:// URL: {issuer}")
+            continue
+        issuers.append((issuer, f"{issuer}/.well-known/jwks.json"))
+    return tuple(issuers)
+
+
+TRUSTED_ISSUERS = _trusted_issuers()
+
+if not ALLOWED_AUDIENCES or not TRUSTED_ISSUERS:
+    logger.error(
+        "JWT authorizer configuration is incomplete (ALLOWED_AUDIENCES and at least "
+        "one trusted issuer are required): every request will be denied"
+    )
+
+
 def find_jwks_key(jwks: Dict, kid: str) -> Optional[Dict]:
     """
     Find specific key in JWKS by key ID
@@ -117,7 +158,7 @@ def construct_rsa_key(jwks_key: Dict) -> str:
         public_key = rsa.RSAPublicNumbers(e_int, n_int).public_key(default_backend())
         
         # Serialize to PEM format
-        pem = public_key.serialize(
+        pem = public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
@@ -132,6 +173,12 @@ def construct_rsa_key(jwks_key: Dict) -> str:
 def validate_jwt_token(token: str) -> Dict[str, Any]:
     """
     Validate JWT token and extract claims
+
+    Only the token header is read before verification, and only its key ID
+    (kid), to select a signing key from the trusted issuers' JWKS. The claims
+    are returned only after the signature, expiry, issuer, audience and, for
+    the configured user pool, the token type have been checked against
+    configuration.
     
     Args:
         token: JWT token string
@@ -143,60 +190,57 @@ def validate_jwt_token(token: str) -> Dict[str, Any]:
         AuthorizationError: If token validation fails
     """
     try:
-        # Decode header without verification to get key ID and issuer info.
-        # The unverified pre-parse below reads `kid`/`iss` ONLY to select the
-        # JWKS key. The token is NOT trusted at this point — a full RS256
-        # signature-verified decode (verify_exp / verify_aud / verify_iss) is
-        # enforced afterward at the `jwt.decode(token, public_key,
-        # algorithms=['RS256'], ...)` call below, before any claim is used.
+        if not ALLOWED_AUDIENCES or not TRUSTED_ISSUERS:
+            raise AuthorizationError("No allowed audience or trusted issuer is configured")
+
+        # Only the header's key ID (kid) is read before verification, and only
+        # to select the signing key. No claim is read until the token has been
+        # verified against the configured issuer that owns that key.
         unverified_header = jwt.get_unverified_header(token)
-        unverified_payload = jwt.decode(token, options={"verify_signature": False})  # nosem: python.jwt.security.unverified-jwt-decode
-        
         kid = unverified_header.get('kid')
-        if not kid:
+        if not isinstance(kid, str) or not kid:
             raise AuthorizationError("Token missing key ID (kid)")
-        
-        issuer = unverified_payload.get('iss')
-        if not issuer:
-            raise AuthorizationError("Token missing issuer (iss)")
-        
-        # Determine JWKS URL based on issuer
-        if COGNITO_USER_POOL_ID and f"cognito-idp.{COGNITO_REGION}.amazonaws.com/{COGNITO_USER_POOL_ID}" in issuer:
-            # Cognito token
-            jwks_url = get_cognito_jwks_url(COGNITO_USER_POOL_ID, COGNITO_REGION)
-        elif issuer in ISSUER_WHITELIST:
-            # Custom identity provider
-            jwks_url = f"{issuer}/.well-known/jwks.json"
-        else:
-            raise AuthorizationError(f"Untrusted issuer: {issuer}")
-        
-        # Fetch JWKS keys
-        jwks = get_jwks_keys(jwks_url)
-        
-        # Find the specific key
-        jwks_key = find_jwks_key(jwks, kid)
-        if not jwks_key:
-            raise AuthorizationError(f"Key not found in JWKS: {kid}")
-        
-        # Construct public key for verification
-        public_key = construct_rsa_key(jwks_key)
-        
-        # Verify and decode token
-        decoded_token = jwt.decode(
-            token,
-            public_key,
-            algorithms=['RS256'],
-            audience=ALLOWED_AUDIENCES if ALLOWED_AUDIENCES != [''] else None,
-            issuer=issuer,
-            options={
-                'verify_exp': True,
-                'verify_aud': bool(ALLOWED_AUDIENCES and ALLOWED_AUDIENCES != ['']),
-                'verify_iss': True,
-            }
-        )
-        
-        logger.info(f"Successfully validated token for user: {decoded_token.get('sub', 'unknown')}")
-        return decoded_token
+
+        claims = None
+        verified_issuer = None
+        signature_error = None
+        for issuer, jwks_url in TRUSTED_ISSUERS:
+            try:
+                jwks = get_jwks_keys(jwks_url)
+            except AuthorizationError:
+                # get_jwks_keys has logged the failure; try the next issuer
+                continue
+            jwks_key = find_jwks_key(jwks, kid)
+            if not jwks_key:
+                continue
+            try:
+                claims = jwt.decode(
+                    token,
+                    construct_rsa_key(jwks_key),
+                    algorithms=['RS256'],
+                    audience=list(ALLOWED_AUDIENCES),
+                    issuer=issuer,  # the configured issuer that owns this key, never the token's iss
+                    options={'require': ['exp', 'iss', 'aud', 'sub']},
+                )
+            except jwt.InvalidSignatureError as e:
+                # Another trusted issuer may hold a key with the same kid
+                signature_error = e
+                continue
+            verified_issuer = issuer
+            break
+
+        if claims is None:
+            if signature_error is None:
+                raise AuthorizationError(f"Key not found in any trusted JWKS: {kid}")
+            raise signature_error
+
+        # User pool ID tokens carry the app client id in `aud`; access tokens
+        # are not accepted. Other issuers are checked by `aud` alone.
+        if verified_issuer == COGNITO_ISSUER and claims.get('token_use') != 'id':
+            raise AuthorizationError("Token is not an ID token")
+
+        logger.info(f"Successfully validated token for user: {claims.get('sub', 'unknown')}")
+        return claims
         
     except jwt.ExpiredSignatureError:
         raise AuthorizationError("Token has expired")
@@ -206,6 +250,8 @@ def validate_jwt_token(token: str) -> Dict[str, Any]:
         raise AuthorizationError("Invalid token issuer")
     except jwt.InvalidSignatureError:
         raise AuthorizationError("Invalid token signature")
+    except jwt.MissingRequiredClaimError as e:
+        raise AuthorizationError(f"Token missing required claim: {e.claim}")
     except jwt.InvalidTokenError as e:
         raise AuthorizationError(f"Invalid token: {str(e)}")
     except Exception as e:
