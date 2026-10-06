@@ -37,6 +37,11 @@ import { PYTHON_CONTAINER_ASSET_EXCLUDES } from './container-asset-excludes';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
+  /**
+   * The app client id the custom JWT authorizer accepts (its
+   * ALLOWED_AUDIENCES). Without it the authorizer denies every request.
+   */
+  userPoolClientId?: string;
   useCasesTable: dynamodb.Table;
   userRolesTable: dynamodb.Table;
   devicesTable: dynamodb.Table;
@@ -972,33 +977,45 @@ export class ComputeStack extends cdk.Stack {
         `arn:aws:iot:*:${cdk.Aws.ACCOUNT_ID}:thinggroup/*`,
       ],
     }));
-    // IoT cert/policy/endpoint/role-alias actions whose target ids are generated
-    // during provisioning (Resource '*'; never a wildcard *action*).
-    //
-    // nosec: this resource wildcard is intentional and mitigated, not an
-    // unscoped grant. iot:CreateKeysAndCertificate and iot:DescribeEndpoint are
-    // resource-less (no ARN to scope to), and the cert/policy/role-alias ids the
-    // remaining actions target are generated at provisioning time so cannot be
-    // pre-scoped in the role. This role is only assumable by the QuickSetupHandler
-    // Lambda, which assumes it with a per-device session policy that narrows every
-    // call to the specific device being provisioned (see the session-policy
-    // narrowing on the statement above). It is never attached to a station.
+    // IoT certificate, policy, endpoint and role-alias actions of the Greengrass
+    // installer (setup_station.sh:1050) and the thing-policy shadow repair
+    // (setup_station.sh:1075-1165). setup_station.sh fixes the policy and
+    // role-alias names; certificate ids are generated at provisioning time, so
+    // AttachPolicy is scoped to cert/*. Region '*' as in the thing statement
+    // above. The per-device session policy narrows these grants further only
+    // for thing and thing-group resources.
+    const iotArn = (resource: string) => `arn:aws:iot:*:${cdk.Aws.ACCOUNT_ID}:${resource}`;
     stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: [
-        'iot:CreateKeysAndCertificate',
-        'iot:AttachThingPrincipal',
-        'iot:AttachPolicy',
-        'iot:CreatePolicy',
-        'iot:GetPolicy',
-        'iot:ListPolicyVersions',
-        'iot:CreatePolicyVersion',
-        'iot:DeletePolicyVersion',
-        'iot:DescribeEndpoint',
-        'iot:CreateRoleAlias',
-        'iot:DescribeRoleAlias',
+      actions: ['iot:CreateKeysAndCertificate', 'iot:AttachThingPrincipal', 'iot:DescribeEndpoint'],
+      // nosec: iam-resource-wildcard. These three actions have no resource-level
+      // permissions; every other provisioning action is scoped below.
+      resources: ['*'],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:GetPolicy', 'iot:CreatePolicy'],
+      resources: [
+        iotArn('policy/GreengrassV2IoTThingPolicy'),
+        // The installer names its TES certificate policy with this prefix
+        // followed by the role-alias name.
+        iotArn('policy/GreengrassTESCertificatePolicy*'),
       ],
-      resources: ['*'], // nosec - see rationale above (resource-less + runtime-generated ids, session-policy narrowed)
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:ListPolicyVersions', 'iot:CreatePolicyVersion', 'iot:DeletePolicyVersion'],
+      resources: [iotArn('policy/GreengrassV2IoTThingPolicy')],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:AttachPolicy'],
+      resources: [iotArn('cert/*')],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:CreateRoleAlias', 'iot:DescribeRoleAlias'],
+      resources: [iotArn('rolealias/GreengrassCoreTokenExchangeRoleAlias')],
     }));
     // Greengrass Token Exchange Service (TES) role setup performed by the
     // provisioner, scoped to the GreengrassV2TokenExchangeRole* names.
@@ -1103,21 +1120,18 @@ export class ComputeStack extends cdk.Stack {
     // iot:OpenTunnel). Using the wrong prefix yields AccessDeniedException.
     devicesHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: [
-        'iot:OpenTunnel',
-        'iot:CloseTunnel',
-        'iot:DescribeTunnel',
-        'iot:ListTunnels',
-        'iot:ListTagsForResource',
-        'iot:RotateTunnelAccessToken',
-      ],
-      // nosec: iam-resource-wildcard — AWS IoT Secure Tunneling OpenTunnel does
-      // not support resource-level permissions (the tunnel does not yet exist
-      // when OpenTunnel is called), and iot:ListTunnels is an account-scoped
-      // list operation; both must remain on '*'. The remaining Close/Describe/
-      // RotateTunnelAccessToken actions are bundled with them in this single
-      // grant. This statement is NOT one of the I1–I17 scanner findings.
+      actions: ['iot:OpenTunnel', 'iot:ListTunnels', 'iot:ListTagsForResource'],
+      // nosec: iam-resource-wildcard. iot:OpenTunnel and iot:ListTunnels have no
+      // resource-level permissions, and the read-only iot:ListTagsForResource
+      // has none for tunnels; the other tunnel actions are scoped below.
       resources: ['*'],
+    }));
+    devicesHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:CloseTunnel', 'iot:DescribeTunnel', 'iot:RotateTunnelAccessToken'],
+      // OpenTunnel generates the tunnel ids. Region '*' because a same-account
+      // use case opens tunnels in its own region with this role.
+      resources: [`arn:aws:iot:*:${cdk.Aws.ACCOUNT_ID}:tunnel/*`],
     }));
 
     // Device removal (DELETE /devices/{id}, devices.delete_device) for
@@ -1265,7 +1279,7 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         COGNITO_USER_POOL_ID: props.userPool.userPoolId,
         COGNITO_REGION: cdk.Aws.REGION,
-        ALLOWED_AUDIENCES: '', // Configure based on your needs
+        ALLOWED_AUDIENCES: props.userPoolClientId ?? '', // The app client ids the authorizer accepts
         ISSUER_WHITELIST: '', // Configure based on your identity providers
       },
       layers: [jwtLayer],
@@ -1666,6 +1680,10 @@ export class ComputeStack extends cdk.Stack {
     // dda-portal-camera-registry table.
     // ------------------------------------------------------------------
 
+    // SQS-managed SSE (R14.3). Use-case accounts may send to this queue. SSE-SQS
+    // needs no KMS permission from any sender, while an AWS managed key can't be
+    // used across accounts (R14.4). The DLQ matches its source queue.
+
     // Dead-letter queue for shadow-report events that repeatedly fail
     // processing (malformed/unparseable reports are also dead-lettered
     // explicitly by the handler without blocking the batch).
@@ -1673,6 +1691,7 @@ export class ComputeStack extends cdk.Stack {
       queueName: 'dda-portal-camera-shadow-reports-dlq',
       retentionPeriod: cdk.Duration.days(14),
       enforceSSL: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
     });
 
     // Shadow-report queue fed by the per-use-case IoT topic rules. The
@@ -1683,6 +1702,7 @@ export class ComputeStack extends cdk.Stack {
       visibilityTimeout: cdk.Duration.seconds(180),
       retentionPeriod: cdk.Duration.days(4),
       enforceSSL: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
       deadLetterQueue: {
         queue: cameraShadowReportDlq,
         maxReceiveCount: 3,
@@ -2041,6 +2061,10 @@ export class ComputeStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
+    // SQS-managed SSE (R14.3). Use-case accounts may send to this queue. SSE-SQS
+    // needs no KMS permission from any sender, while an AWS managed key can't be
+    // used across accounts (R14.4). The DLQ matches its source queue.
+
     // Dead-letter queue for ack events that repeatedly fail processing
     // (malformed acks are also dead-lettered explicitly by the handler
     // without blocking the batch — camera-registry-sync pattern).
@@ -2048,6 +2072,7 @@ export class ComputeStack extends cdk.Stack {
       queueName: 'dda-portal-account-sync-acks-dlq',
       retentionPeriod: cdk.Duration.days(14),
       enforceSSL: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
     });
 
     // Ack queue fed by the dda-user-accounts shadow topic rule(s). The
@@ -2058,6 +2083,7 @@ export class ComputeStack extends cdk.Stack {
       visibilityTimeout: cdk.Duration.seconds(180),
       retentionPeriod: cdk.Duration.days(4),
       enforceSSL: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
       deadLetterQueue: {
         queue: accountSyncAckDlq,
         maxReceiveCount: 3,
@@ -2551,6 +2577,11 @@ export class ComputeStack extends cdk.Stack {
       maxEventAge: cdk.Duration.minutes(5),
     });
 
+    // The AWS managed SQS key (R14.3). Only Lambda roles in this account and SQS
+    // redrive use these queues, and that key's policy admits them through SQS
+    // without a grant. A sender in another account or an AWS service sender
+    // would need SSE-SQS or a customer managed key instead.
+
     // Auto-label queue + DLQ (camera-shadow queue pattern). The visibility
     // timeout equals the consumer Lambda timeout (300 s) so a message is
     // never redelivered while its Bedrock/SAM inference is still running;
@@ -2559,6 +2590,7 @@ export class ComputeStack extends cdk.Stack {
       queueName: 'dda-portal-autolabel-queue-dlq',
       retentionPeriod: cdk.Duration.days(14),
       enforceSSL: true,
+      encryption: sqs.QueueEncryption.KMS_MANAGED,
     });
 
     const ddaAutolabelQueue = new sqs.Queue(this, 'DdaAutolabelQueue', {
@@ -2566,6 +2598,7 @@ export class ComputeStack extends cdk.Stack {
       visibilityTimeout: cdk.Duration.seconds(300),
       retentionPeriod: cdk.Duration.days(4),
       enforceSSL: true,
+      encryption: sqs.QueueEncryption.KMS_MANAGED,
       deadLetterQueue: {
         queue: ddaAutolabelDlq,
         maxReceiveCount: 3,
@@ -3449,6 +3482,13 @@ export class ComputeStack extends cdk.Stack {
       displayName: 'DDA Portal Training Alerts',
       topicName: 'dda-portal-training-alerts',
     });
+    // Encryption at rest with the AWS managed SNS key (R14.1). The only
+    // publishers are the TrainingEvents and CompilationEvents Lambda roles in
+    // this account, which that key's policy admits without a KMS grant. An AWS
+    // service publisher (CloudWatch alarm, EventBridge target) can't use the
+    // AWS managed key and would need a customer managed key whose key policy
+    // admits that service (R14.2).
+    (trainingAlertTopic.node.defaultChild as sns.CfnTopic).kmsMasterKeyId = 'alias/aws/sns';
 
     // Training Events Lambda Handler (for EventBridge)
     const trainingEventsHandler = new lambda.Function(this, 'TrainingEventsHandler', {
@@ -3551,6 +3591,7 @@ export class ComputeStack extends cdk.Stack {
     // 3. Or automatically via a custom resource (implemented below)
 
     // Custom resource to enable SageMaker EventBridge integration
+    const SAGEMAKER_ENABLER_RULE_NAME = 'sagemaker-eventbridge-enabler';
     const enableSageMakerEventBridge = new lambda.Function(this, 'EnableSageMakerEventBridge', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'index.handler',
@@ -3571,7 +3612,7 @@ def handler(event, context):
             
             # Enable SageMaker events by creating a rule that captures all SageMaker events
             # This effectively enables SageMaker to send events to EventBridge
-            rule_name = 'sagemaker-eventbridge-enabler'
+            rule_name = '${SAGEMAKER_ENABLER_RULE_NAME}'
             
             try:
                 events_client.put_rule(
@@ -3610,7 +3651,7 @@ def handler(event, context):
         elif event['RequestType'] == 'Delete':
             # Clean up the enabler rule on stack deletion
             events_client = boto3.client('events')
-            rule_name = 'sagemaker-eventbridge-enabler'
+            rule_name = '${SAGEMAKER_ENABLER_RULE_NAME}'
             
             try:
                 events_client.delete_rule(Name=rule_name)
@@ -3635,12 +3676,14 @@ def handler(event, context):
     // Grant permissions to the custom resource Lambda
     enableSageMakerEventBridge.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: [
-        'events:PutRule',
-        'events:DeleteRule',
-        'events:DescribeRule',
-        'events:ListRules',
+      actions: ['events:PutRule', 'events:DeleteRule', 'events:DescribeRule'],
+      resources: [
+        `arn:aws:events:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:rule/${SAGEMAKER_ENABLER_RULE_NAME}`,
       ],
+    }));
+    enableSageMakerEventBridge.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['events:ListRules'], // no resource-level permissions
       resources: ['*'],
     }));
 

@@ -460,9 +460,11 @@ def test_deploy_source_interpolates_credentials():
 # ---------------------------------------------------------------------------
 
 def test_unverified_decode_line_has_documented_marker():
-    """S5 (Req 1.5): the ``jwt.decode(token, options={"verify_signature":
-    False})`` pre-parse line (jwt_authorizer.py:131) must carry a documented
-    ``# nosem``. UNFIXED-TREE EXPECTATION: FAILS -- the line has no marker."""
+    """S5 (Req 1.5): a ``jwt.decode(token, options={"verify_signature":
+    False})`` line in jwt_authorizer.py must carry a documented ``# nosem``.
+    UNFIXED-TREE EXPECTATION: FAILS -- the line has no marker. Recorded repoint
+    (security-scan-remediation-high, R6): the unverified pre-parse is deleted, so
+    no such line exists and the test passes; an undocumented one still fails."""
     src_path = os.path.join(REPO_ROOT, _JWT_AUTHORIZER_REL)
     with open(src_path) as f:
         lines = f.readlines()
@@ -473,7 +475,6 @@ def test_unverified_decode_line_has_documented_marker():
         if "verify_signature" in ln and "False" in ln and not ln.lstrip().startswith("#")
     ]
     print(f"\n[S5 counterexample] unverified-decode line(s): {matches}")
-    assert matches, "expected the verify_signature=False pre-parse line to exist"
 
     undocumented = [(no, txt) for no, txt in matches
                     if "nosem" not in txt.lower() and "nosec" not in txt.lower()]

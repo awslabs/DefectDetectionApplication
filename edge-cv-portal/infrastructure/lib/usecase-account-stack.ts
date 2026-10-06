@@ -246,52 +246,54 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
-    // Ground Truth CloudWatch Logs
+    // SageMaker job metrics and logs. PutMetricData has no resource-level
+    // permissions. SageMaker writes training, compilation, labeling and
+    // processing job logs under /aws/sagemaker/, the pattern the
+    // DDAPortalAccessRole CloudWatchLogs statement also uses.
     this.groundTruthRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: [
-          'cloudwatch:PutMetricData',
-          'logs:CreateLogGroup',
-          'logs:CreateLogStream',
-          'logs:PutLogEvents',
-          'logs:DescribeLogStreams',
-        ],
+        actions: ['cloudwatch:PutMetricData'],
         resources: ['*'],
       })
     );
+    this.groundTruthRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents', 'logs:DescribeLogStreams'],
+        resources: [`arn:aws:logs:*:${this.account}:log-group:/aws/sagemaker/*`],
+      })
+    );
 
-    // SageMaker permissions for training, compilation, and labeling
+    // SageMaker job and model actions, scoped by resource type. Job and model
+    // names come from the use case and model, not from a fixed prefix (a dda-*
+    // prefix broke compilation status reads; see compute-stack.ts:395-404).
     this.groundTruthRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          // Training job permissions
-          'sagemaker:CreateTrainingJob',
-          'sagemaker:DescribeTrainingJob',
-          'sagemaker:StopTrainingJob',
-          'sagemaker:ListTrainingJobs',
-          // Compilation job permissions
-          'sagemaker:CreateCompilationJob',
-          'sagemaker:DescribeCompilationJob',
-          'sagemaker:StopCompilationJob',
-          'sagemaker:ListCompilationJobs',
-          // Labeling job permissions
+          'sagemaker:CreateTrainingJob', 'sagemaker:DescribeTrainingJob', 'sagemaker:StopTrainingJob',
+          'sagemaker:CreateCompilationJob', 'sagemaker:DescribeCompilationJob', 'sagemaker:StopCompilationJob',
           'sagemaker:DescribeLabelingJob',
-          'sagemaker:ListLabelingJobs',
-          // Model permissions
-          'sagemaker:CreateModel',
-          'sagemaker:DescribeModel',
-          'sagemaker:DeleteModel',
-          'sagemaker:ListModels',
+          'sagemaker:CreateModel', 'sagemaker:DescribeModel', 'sagemaker:DeleteModel',
         ],
-        // nosec: iam-resource-wildcard — this is the Ground Truth execution
-        // role's SageMaker job/model grant, NOT one of the I1–I17 scanner
-        // findings (the scoped SageMaker finding is I8 on the
-        // DDASageMakerExecutionRole in deploy-account-role.sh). These
-        // create/describe/stop/list actions span dynamically-named training,
-        // compilation, labeling jobs and models and are left on '*' here to
-        // preserve existing Ground Truth behavior byte-for-byte.
+        resources: [
+          `arn:aws:sagemaker:*:${this.account}:training-job/*`,
+          `arn:aws:sagemaker:*:${this.account}:compilation-job/*`,
+          `arn:aws:sagemaker:*:${this.account}:labeling-job/*`,
+          `arn:aws:sagemaker:*:${this.account}:model/*`,
+        ],
+      })
+    );
+    this.groundTruthRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'sagemaker:ListTrainingJobs', 'sagemaker:ListCompilationJobs',
+          'sagemaker:ListLabelingJobs', 'sagemaker:ListModels',
+        ],
+        // nosec: iam-resource-wildcard. The List* actions have no resource-level
+        // permissions; every job and model action is scoped by type above.
         resources: ['*'],
       })
     );

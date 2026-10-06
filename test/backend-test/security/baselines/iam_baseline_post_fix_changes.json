@@ -1,0 +1,125 @@
+{
+  "note": "Post-fix record, approved by the repository owner in the approval block (spec security-scan-remediation-high, design 'R14 and R15 fixtures and deploy constraints'). rescopes: each split statement of the R15 sites, with the removed statement copied from the Baseline_Template at 4a3f960 and the added ones rendered by CDK from the site code without policy minimization, all in the sorted-key JSON form iam_statements_multiset uses; carrier is the logical id whose statement is replaced; only unscopable_actions may stay on '*'. refreshed_resources: logical ids whose encryption properties (or, for a new KMS key or alias, the whole resource) the Baseline_Template takes from a fresh fixture synth. unfixed_snapshot_sha256: each Unfixed_Snapshot at 4a3f960, which never changes. Read by test_preservation_iam_cdk_synth.py.",
+  "approval": {
+    "approved_by": "Ryan Vanderwerf",
+    "approved_on": "2026-10-05"
+  },
+  "stacks": {
+    "EdgeCVPortalComputeStack": {
+      "rescopes": [
+        {
+          "site": "R15 site 1: StationProvisioningRole provisioning statement",
+          "finding_ids": [
+            "bcba7f05-bd61-4f0d-a0ac-672b1d990f2c-1",
+            "bcba7f05-bd61-4f0d-a0ac-672b1d990f2c-2"
+          ],
+          "carrier": "StationProvisioningRoleDefaultPolicyD9DAB7DD",
+          "removed": [
+            "{\"Action\": [\"iot:CreateKeysAndCertificate\", \"iot:AttachThingPrincipal\", \"iot:AttachPolicy\", \"iot:CreatePolicy\", \"iot:GetPolicy\", \"iot:ListPolicyVersions\", \"iot:CreatePolicyVersion\", \"iot:DeletePolicyVersion\", \"iot:DescribeEndpoint\", \"iot:CreateRoleAlias\", \"iot:DescribeRoleAlias\"], \"Effect\": \"Allow\", \"Resource\": \"*\"}"
+          ],
+          "added": [
+            "{\"Action\": [\"iot:CreateKeysAndCertificate\", \"iot:AttachThingPrincipal\", \"iot:DescribeEndpoint\"], \"Effect\": \"Allow\", \"Resource\": \"*\"}",
+            "{\"Action\": [\"iot:GetPolicy\", \"iot:CreatePolicy\"], \"Effect\": \"Allow\", \"Resource\": [{\"Fn::Join\": [\"\", [\"arn:aws:iot:*:\", {\"Ref\": \"AWS::AccountId\"}, \":policy/GreengrassV2IoTThingPolicy\"]]}, {\"Fn::Join\": [\"\", [\"arn:aws:iot:*:\", {\"Ref\": \"AWS::AccountId\"}, \":policy/GreengrassTESCertificatePolicy*\"]]}]}",
+            "{\"Action\": [\"iot:ListPolicyVersions\", \"iot:CreatePolicyVersion\", \"iot:DeletePolicyVersion\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:iot:*:\", {\"Ref\": \"AWS::AccountId\"}, \":policy/GreengrassV2IoTThingPolicy\"]]}}",
+            "{\"Action\": \"iot:AttachPolicy\", \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:iot:*:\", {\"Ref\": \"AWS::AccountId\"}, \":cert/*\"]]}}",
+            "{\"Action\": [\"iot:CreateRoleAlias\", \"iot:DescribeRoleAlias\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:iot:*:\", {\"Ref\": \"AWS::AccountId\"}, \":rolealias/GreengrassCoreTokenExchangeRoleAlias\"]]}}"
+          ],
+          "unscopable_actions": [
+            "iot:CreateKeysAndCertificate",
+            "iot:AttachThingPrincipal",
+            "iot:DescribeEndpoint"
+          ]
+        },
+        {
+          "site": "R15 site 2: DevicesHandler secure-tunneling grant",
+          "finding_ids": [
+            "bcba7f05-bd61-4f0d-a0ac-672b1d990f2c-3"
+          ],
+          "carrier": "DevicesRoleOverflowPolicy23F23C37D",
+          "removed": [
+            "{\"Action\": [\"iot:OpenTunnel\", \"iot:CloseTunnel\", \"iot:DescribeTunnel\", \"iot:ListTunnels\", \"iot:ListTagsForResource\", \"iot:RotateTunnelAccessToken\"], \"Effect\": \"Allow\", \"Resource\": \"*\"}"
+          ],
+          "added": [
+            "{\"Action\": [\"iot:OpenTunnel\", \"iot:ListTunnels\", \"iot:ListTagsForResource\"], \"Effect\": \"Allow\", \"Resource\": \"*\"}",
+            "{\"Action\": [\"iot:CloseTunnel\", \"iot:DescribeTunnel\", \"iot:RotateTunnelAccessToken\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:iot:*:\", {\"Ref\": \"AWS::AccountId\"}, \":tunnel/*\"]]}}"
+          ],
+          "unscopable_actions": [
+            "iot:OpenTunnel",
+            "iot:ListTunnels",
+            "iot:ListTagsForResource"
+          ]
+        },
+        {
+          "site": "R15 site 3: SageMaker EventBridge enabler role",
+          "finding_ids": [
+            "bcba7f05-bd61-4f0d-a0ac-672b1d990f2c-4"
+          ],
+          "carrier": "EnableSageMakerEventBridgeServiceRoleDefaultPolicy6B859A55",
+          "removed": [
+            "{\"Action\": [\"events:PutRule\", \"events:DeleteRule\", \"events:DescribeRule\", \"events:ListRules\"], \"Effect\": \"Allow\", \"Resource\": \"*\"}"
+          ],
+          "added": [
+            "{\"Action\": [\"events:PutRule\", \"events:DeleteRule\", \"events:DescribeRule\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:events:\", {\"Ref\": \"AWS::Region\"}, \":\", {\"Ref\": \"AWS::AccountId\"}, \":rule/sagemaker-eventbridge-enabler\"]]}}",
+            "{\"Action\": \"events:ListRules\", \"Effect\": \"Allow\", \"Resource\": \"*\"}"
+          ],
+          "unscopable_actions": [
+            "events:ListRules"
+          ]
+        }
+      ],
+      "refreshed_resources": [
+        "TrainingAlertTopic5C2CFA97",
+        "CameraShadowReportDLQ50DB798A",
+        "CameraShadowReportQueue78573A06",
+        "AccountSyncAckDLQ75DF4763",
+        "AccountSyncAckQueue772F11D7",
+        "DdaAutolabelDLQB2573578",
+        "DdaAutolabelQueue5780A6F7"
+      ],
+      "unfixed_snapshot_sha256": "01a4f4be17104b617e0a211c5db1699d2edc1c33d54f458c42d35961dcc32298"
+    },
+    "DDAPortalUseCaseAccountStack": {
+      "rescopes": [
+        {
+          "site": "R15 site 4: DDASageMakerExecutionRole metrics and logs statement",
+          "finding_ids": [
+            "ec660377-3ea5-4738-962a-1e6d384643fa-0"
+          ],
+          "carrier": "DDASageMakerExecutionRoleDefaultPolicyAABC5DB6",
+          "removed": [
+            "{\"Action\": [\"cloudwatch:PutMetricData\", \"logs:CreateLogGroup\", \"logs:CreateLogStream\", \"logs:PutLogEvents\", \"logs:DescribeLogStreams\"], \"Effect\": \"Allow\", \"Resource\": \"*\"}"
+          ],
+          "added": [
+            "{\"Action\": \"cloudwatch:PutMetricData\", \"Effect\": \"Allow\", \"Resource\": \"*\"}",
+            "{\"Action\": [\"logs:CreateLogGroup\", \"logs:CreateLogStream\", \"logs:PutLogEvents\", \"logs:DescribeLogStreams\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:logs:*:111111111111:log-group:/aws/sagemaker/*\"}"
+          ],
+          "unscopable_actions": [
+            "cloudwatch:PutMetricData"
+          ]
+        },
+        {
+          "site": "R15 site 4: DDASageMakerExecutionRole SageMaker job and model statement",
+          "finding_ids": [
+            "ec660377-3ea5-4738-962a-1e6d384643fa-0"
+          ],
+          "carrier": "DDASageMakerExecutionRoleDefaultPolicyAABC5DB6",
+          "removed": [
+            "{\"Action\": [\"sagemaker:CreateTrainingJob\", \"sagemaker:DescribeTrainingJob\", \"sagemaker:StopTrainingJob\", \"sagemaker:ListTrainingJobs\", \"sagemaker:CreateCompilationJob\", \"sagemaker:DescribeCompilationJob\", \"sagemaker:StopCompilationJob\", \"sagemaker:ListCompilationJobs\", \"sagemaker:DescribeLabelingJob\", \"sagemaker:ListLabelingJobs\", \"sagemaker:CreateModel\", \"sagemaker:DescribeModel\", \"sagemaker:DeleteModel\", \"sagemaker:ListModels\"], \"Effect\": \"Allow\", \"Resource\": \"*\"}"
+          ],
+          "added": [
+            "{\"Action\": [\"sagemaker:CreateTrainingJob\", \"sagemaker:DescribeTrainingJob\", \"sagemaker:StopTrainingJob\", \"sagemaker:CreateCompilationJob\", \"sagemaker:DescribeCompilationJob\", \"sagemaker:StopCompilationJob\", \"sagemaker:DescribeLabelingJob\", \"sagemaker:CreateModel\", \"sagemaker:DescribeModel\", \"sagemaker:DeleteModel\"], \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:sagemaker:*:111111111111:training-job/*\", \"arn:aws:sagemaker:*:111111111111:compilation-job/*\", \"arn:aws:sagemaker:*:111111111111:labeling-job/*\", \"arn:aws:sagemaker:*:111111111111:model/*\"]}",
+            "{\"Action\": [\"sagemaker:ListTrainingJobs\", \"sagemaker:ListCompilationJobs\", \"sagemaker:ListLabelingJobs\", \"sagemaker:ListModels\"], \"Effect\": \"Allow\", \"Resource\": \"*\"}"
+          ],
+          "unscopable_actions": [
+            "sagemaker:ListTrainingJobs",
+            "sagemaker:ListCompilationJobs",
+            "sagemaker:ListLabelingJobs",
+            "sagemaker:ListModels"
+          ]
+        }
+      ],
+      "refreshed_resources": [],
+      "unfixed_snapshot_sha256": "385907f3aac00207e45ad851cc3fa7a11da0c61c8d72e2afd8a86991f19b9be2"
+    }
+  }
+}
