@@ -83,6 +83,9 @@
     },
     "aws.greengrass.ShadowManager": {
       "VersionRequirement": ">=2.2.0"
+    },
+    "aws.greengrass.TokenExchangeService": {
+      "VersionRequirement": "~2.0.0"
     }
   },
   "ComponentDescription": "DDA Local Web Server App - AMD64",

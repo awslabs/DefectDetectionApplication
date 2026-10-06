@@ -19,8 +19,9 @@
   camera per 30 s; ``deviceCapabilities.streamIngest`` is reported once the
   probe finished.
 - A Portal create or update carrying a Credential_Reference is fetched,
-  applied and stored, in that order; a fetch ``AccessDenied`` fails the
-  change with a secret-free reason and changes nothing; a failed store
+  applied and stored, in that order; a fetch ``AccessDenied`` is retried for
+  60 s (task 29.2), then fails the change with a secret-free reason, and
+  changes nothing; a failed store
   write leaves no half-created camera; a held reference is not fetched
   again; a clear removes the credentials.
 
@@ -162,6 +163,9 @@ def world(tmp_path, monkeypatch):
     manager_module.set_stream_ingest_manager(stream)
     clock = Clock()
     timer = Timer()
+    # The credential retry timer is separate from the stream debouncer's, so
+    # no real 2-30 s timer outlives a test (task 29.2).
+    retry_timer = Timer()
     fetcher = Fetcher()
     shadow = Shadow()
     accessor = ImageSourceAccessor()
@@ -172,7 +176,8 @@ def world(tmp_path, monkeypatch):
                          state_store=CameraSyncStateStore(str(tmp_path / "state.json")),
                          thing_name="thing", clock=clock, wall_clock=lambda: 1_790_000_000.0,
                          debounce_seconds=0.0, stream_ingest=stream, stream_timer=timer,
-                         credential_fetcher=fetcher, credential_store=store)
+                         credential_fetcher=fetcher, credential_store=store,
+                         change_retry_timer=retry_timer)
         arguments.update(overrides)
         return EdgeSyncAgent(**arguments)
 
@@ -397,14 +402,28 @@ class TestApplyStreamChanges:
         assert PASSWORD not in json.dumps(document)
 
     def test_a_fetch_access_denied_fails_the_change_and_changes_nothing(self, world):
+        """Task 29.2: a denial is retried 2, 4, 8, 16 and 30 s apart before
+        the change fails, with the retry note; nothing changes on the way."""
         world.fetcher.error = CredentialFetchError("AccessDenied")
         agent = world.make_agent()
         self._apply(agent, "portal-cam-1", _create_change())
+        assert world.shadow.reported[-1]["failures"] == {}
+        assert world.shadow.desired[-1] == {"changes": {"portal-cam-1": None}}
+        delays = []
+        for _ in range(5):
+            [(delay, action)] = world.retry_timer.pending
+            world.retry_timer.pending.clear()
+            delays.append(delay)
+            action()
+            agent.pump()
+        assert delays == [2.0, 4.0, 8.0, 16.0, 30.0]
+        assert world.retry_timer.pending == [] and len(world.fetcher.calls) == 6
         assert _image_sources(world) == []
         document = world.shadow.reported[-1]
         assert document["failures"] == {"portal-cam-1": {
-            "reason": "credential retrieval failed: AccessDenied", "portalChangeId": "chg-1"}}
-        assert world.shadow.desired[-1] == {"changes": {"portal-cam-1": None}}
+            "reason": "credential retrieval failed: AccessDenied (retried for 60 s)",
+            "portalChangeId": "chg-1"}}
+        assert world.shadow.desired == [{"changes": {"portal-cam-1": None}}]
 
     def test_a_failed_store_write_leaves_no_half_created_camera(self, world, monkeypatch):
         def broken_put(image_source_id, credentials):

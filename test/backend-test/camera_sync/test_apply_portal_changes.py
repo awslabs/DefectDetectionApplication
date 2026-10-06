@@ -23,11 +23,13 @@ Example-based tests with fakes covering ``on_delta``:
 - ``ValidationError``/``HTTPException`` reports ``{csid, status: failed}``
   semantics via the ``failures`` map with the message verbatim (5.4),
 - changes targeting origin ``edge-discovered`` (``disc-`` stable ids, or
-  update/delete of anything that is not a ``cfg-`` configured source) are
+  an update of anything that is not a ``cfg-`` configured source) are
   refused with reason ``discovery-managed`` (5.6),
+- a delete of an id the device never created (neither ``cfg-`` nor
+  discovery-managed) is acknowledged (rtsp-rtmp-stream-cameras 5.11),
 - applied or failed desired entries are cleared by writing ``null``.
 
-_Requirements: 5.2, 5.3, 5.4, 5.6, 11.3_
+_Requirements: 5.2, 5.3, 5.4, 5.6, 5.11, 11.3_
 
 The agent is driven deterministically through :meth:`EdgeSyncAgent.pump`
 with an injectable clock, like the other camera_sync suites.
@@ -455,9 +457,31 @@ def test_discovery_managed_changes_are_refused(tmp_path):
 
 
 def test_update_of_non_configured_csid_is_refused(tmp_path):
-    """Update/delete of anything that is not a cfg- configured source is
-    refused as discovery-managed (defense in depth). _Requirements: 5.6_"""
+    """An update of anything that is not a cfg- configured source is
+    refused as discovery-managed (defense in depth); a delete of such an id
+    is acknowledged instead (next test). _Requirements: 5.6, 5.11_"""
     agent, shadow, accessor, clock = _make_agent(tmp_path)
+
+    agent.on_delta(_delta({
+        "portal-xyz": {"op": "update", "portalChangeId": "pc-3",
+                       "name": "Ghost", "type": "Camera", "params": {}},
+    }))
+    _flush(agent, clock)
+
+    assert accessor.calls == []
+    failure = shadow.reported_writes[-1]["failures"]["portal-xyz"]
+    assert failure["reason"] == REASON_DISCOVERY_MANAGED
+    assert failure["portalChangeId"] == "pc-3"
+
+
+def test_delete_of_never_created_csid_is_acknowledged(tmp_path):
+    """A delete of an id that is neither a cfg- id nor discovery-managed,
+    which the device holds nothing for (a Portal create that failed or never
+    arrived), is acknowledged: no failure, the accessor untouched, and the
+    desired entry cleared (rtsp-rtmp-stream-cameras Requirement 5.11)."""
+    agent, shadow, accessor, clock = _make_agent(
+        tmp_path, sources=[_CONFIGURED_SOURCE]
+    )
 
     agent.on_delta(_delta({
         "portal-xyz": {"op": "delete", "portalChangeId": "pc-3"},
@@ -465,8 +489,11 @@ def test_update_of_non_configured_csid_is_refused(tmp_path):
     _flush(agent, clock)
 
     assert accessor.calls == []
-    failure = shadow.reported_writes[-1]["failures"]["portal-xyz"]
-    assert failure["reason"] == REASON_DISCOVERY_MANAGED
+    assert "is-1" in accessor.sources
+    document = shadow.reported_writes[-1]
+    assert document["failures"] == {}
+    assert "portal-xyz" not in document["cameras"]
+    assert shadow.desired_writes == [{"changes": {"portal-xyz": None}}]
 
 
 # --- multiple changes in one delta -----------------------------------------------

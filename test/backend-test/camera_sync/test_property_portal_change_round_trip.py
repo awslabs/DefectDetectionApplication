@@ -42,7 +42,12 @@ Harness:
   ``camera_sync``). Only the ingest handler's reduction loop (cameras ->
   failures -> deletion candidates, mirroring ``_process_report``) is
   re-implemented here over an in-memory registry dict in place of
-  DynamoDB.
+  DynamoDB; its deletion candidates come from the real
+  ``_deletion_candidates`` (rtsp-rtmp-stream-cameras task 29.3).
+- A delete of an id the device never created (neither ``cfg-`` nor
+  discovery-managed) is acknowledged, and its registry entry removed
+  (rtsp-rtmp-stream-cameras Requirement 5.11); an update of such an id is
+  still refused as ``discovery-managed``.
 - The agent is driven deterministically through :meth:`EdgeSyncAgent.pump`
   with a fake clock and a recording fake shadow accessor, like the other
   camera_sync suites.
@@ -200,11 +205,15 @@ class _FakeShadowAccessor:
 
 
 def _as_documents_event(document):
-    """A report as the Portal's documents event shows it: a camera key the
-    report deleted with an explicit null is gone from the shadow."""
+    """A report as the Portal's documents event shows it: a camera key or a
+    failure key the report deleted with an explicit null is gone from the
+    shadow."""
     shown = copy.deepcopy(document)
     shown["cameras"] = {
         csid: entry for csid, entry in shown.get("cameras", {}).items() if entry is not None
+    }
+    shown["failures"] = {
+        csid: failure for csid, failure in shown.get("failures", {}).items() if failure is not None
     }
     return shown
 
@@ -284,6 +293,7 @@ def _scenario(draw):
         "invalid_update_missing",
         "invalid_delete_missing",
         "discovery_managed_noncfg",
+        "discovery_managed_noncfg_update",
     ]
     camera_indices = [
         i for i, s in enumerate(source_specs) if s["type"] == "Camera"
@@ -466,10 +476,19 @@ def _build_change(spec, position, source_ids, source_specs, snapshot):
             "op": "update", "portalChangeId": pcid,
             "name": "hijack", "type": "Camera", "params": {},
         }, "discovery"
+    if kind == "discovery_managed_noncfg_update":
+        # An update of an id the device never created stays refused
+        # (rtsp-rtmp-stream-cameras Requirement 5.11).
+        return "portal-ghost-{}".format(position), {
+            "op": "update", "portalChangeId": pcid,
+            "name": "Ghost", "type": "Camera", "params": {},
+        }, "discovery"
     assert kind == "discovery_managed_noncfg"
+    # A delete of an id the device never created, such as a Portal create
+    # that failed or never arrived, is acknowledged (Requirement 5.11).
     return "portal-ghost-{}".format(position), {
         "op": "delete", "portalChangeId": pcid,
-    }, "discovery"
+    }, "acknowledged"
 
 
 def _dump_db(session_factory):
@@ -517,7 +536,9 @@ def _apply_outcome(portal, registry, csid, outcome):
 def _reduce_document(portal, registry, document):
     """Mirror of the ingest handler's reduction loop (`_process_report`):
     camera entries, then failure entries, then reported deletions —
-    every reduction through the REAL `reduce_report`."""
+    every reduction through the REAL `reduce_report`, and the deletion
+    candidates from the REAL `_deletion_candidates`, so the round trip
+    checks whatever deletion rule the Portal ships."""
     entries = {csid: dict(entry) for csid, entry in registry.items()}
     now_ms = document["reportedAt"]
     cameras = document.get("cameras", {})
@@ -533,18 +554,10 @@ def _reduce_document(portal, registry, document):
             portal, registry, csid,
             portal.reduce_report(entries.get(csid), incoming, now_ms),
         )
-    for csid, entry in entries.items():
-        if csid in cameras or csid in failures:
-            continue
-        pending_content = entry.get("pending_content") or {}
-        if (
-            entry.get("sync_status") == portal.SYNC_STATUS_PENDING
-            and pending_content.get("op") == "create"
-        ):
-            continue
+    for csid in portal._deletion_candidates(entries, document):
         _apply_outcome(
             portal, registry, csid,
-            portal.reduce_report(entry, None, now_ms),
+            portal.reduce_report(entries.get(csid), None, now_ms),
         )
 
 
@@ -590,9 +603,11 @@ def _assert_valid_round_trip(portal, registry, document, session_factory,
     if change["op"] == "create":
         # The report also carries the real cfg- entry (same ack) the
         # placeholder mirrors; the device row is the applied state (5.2).
+        # A key the same report retired (an applied delete in the batch) is
+        # a null, not an entry (task 29.3, plan D10).
         real_csids = [
             other for other, entry in document["cameras"].items()
-            if other != csid and entry.get("ack") == pcid
+            if other != csid and entry is not None and entry.get("ack") == pcid
         ]
         assert len(real_csids) == 1
         image_source_id = real_csids[0][len("cfg-"):]
@@ -731,6 +746,13 @@ def test_portal_change_apply_report_round_trip(scenario):
                     if csid.startswith("cfg-"):
                         assert db_after.get(csid[len("cfg-"):]) == \
                             db_before.get(csid[len("cfg-"):])
+                elif expected == "acknowledged":
+                    # Requirement 5.11: no failure, the registry entry is
+                    # removed, and the device is unchanged (the surviving-id
+                    # check below).
+                    assert document["failures"].get(csid) is None
+                    assert document["cameras"].get(csid) is None
+                    assert csid not in registry
                 else:
                     _assert_failed_round_trip(
                         portal, registry, document, csid, change

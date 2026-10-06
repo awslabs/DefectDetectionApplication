@@ -171,6 +171,7 @@ class _FakeAgent:
         self.started = False
         self.applied = []
         self.discovery_changes = []
+        self.catch_ups = []
 
     def start(self):
         self.started = True
@@ -181,6 +182,11 @@ class _FakeAgent:
     def apply_desired_changes(self, changes):
         self.applied.append(dict(changes))
 
+    def on_subscription_active(self):
+        """The subscription's catch-up (rtsp-rtmp-stream-cameras 30.3)."""
+        self.catch_ups.append(threading.current_thread().name)
+        return True
+
 
 class _RaisingStartAgent(_FakeAgent):
     def start(self):
@@ -189,15 +195,24 @@ class _RaisingStartAgent(_FakeAgent):
 
 class _FakeSubscription:
     """Stand-in for mqtt.SubscriptionHandler.SubscriptionHandler whose
-    subscribe() returns immediately (the real one blocks forever)."""
+    subscribe() returns at once (the real one blocks until close()). It runs
+    the ``on_active`` catch-up, as the real one does after activating, then
+    sets ``subscribed``; ``last_instance`` is the one the wiring built."""
 
-    def __init__(self, topic_prefix, handler, publish_handler):
+    last_instance = None
+
+    def __init__(self, topic_prefix, handler, publish_handler, on_active=None):
         self.topic_prefix = topic_prefix
         self.handler = handler
         self.publish_handler = publish_handler
+        self.on_active = on_active
+        self.subscribed = threading.Event()
+        _FakeSubscription.last_instance = self
 
     def subscribe(self):
-        return None
+        if self.on_active is not None:
+            self.on_active()
+        self.subscribed.set()
 
 
 class _FakeShadow:
@@ -388,12 +403,14 @@ class TestServerSetupCameraSyncIsolation(unittest.TestCase):
     def test_successful_start_sets_globals_and_hooks(self):
         """The guard does not over-swallow: a clean start publishes the
         discovery/agent globals, wires discovery on_change through to the
-        agent, registers the CRUD-hook active agent, and applies desired
-        changes pending in the shadow."""
+        agent, registers the CRUD-hook active agent, and hands the agent's
+        catch-up to the delta subscription, which runs it once it is active
+        (rtsp-rtmp-stream-cameras 30.3: the subscription applies the desired
+        changes pending in the shadow, not a start-time read)."""
         discovery = _FakeDiscovery()
         agent = _FakeAgent()
-        pending = {"cfg-1": {"op": "delete", "portalChangeId": "pc-1"}}
-        shadow = _FakeShadow({"desired": {"changes": dict(pending)}})
+        shadow = _FakeShadow()
+        _FakeSubscription.last_instance = None
         with mock.patch.object(
             self.camera_discovery_pkg, "CameraDiscovery", lambda **kw: discovery
         ), mock.patch.object(
@@ -419,7 +436,15 @@ class TestServerSetupCameraSyncIsolation(unittest.TestCase):
         discovery.started_with(snapshot)
         self.assertEqual(agent.discovery_changes, [snapshot])
         self.assertIs(self.camera_sync_pkg.get_active_agent(), agent)
-        self.assertEqual(agent.applied, [pending])
+        # The wiring hands the agent's catch-up to the subscription (equal,
+        # not identical: each attribute access makes a new bound method),
+        # whose subscribe() runs on its own daemon thread.
+        subscription = _FakeSubscription.last_instance
+        self.assertIsNotNone(subscription)
+        self.assertEqual(subscription.on_active, agent.on_subscription_active)
+        self.assertTrue(subscription.subscribed.wait(5.0),
+                        "the camera-registry subscription never ran")
+        self.assertEqual(agent.catch_ups, ["camera-sync-shadow-subscription"])
 
     def test_agent_reads_the_shadow_manager_size_limit(self):
         """static-camera-video-loop task 10: the agent gets a size-limit

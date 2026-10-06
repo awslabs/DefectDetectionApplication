@@ -11,6 +11,11 @@ ComponentDependencies:
     VersionRequirement: ">=2.2.0"
   aws.greengrass.Cli:
     VersionRequirement: ">=2.6.0"
+  # The backend fetches Portal-managed stream credentials with the device's
+  # TES credentials (rtsp-rtmp-stream-cameras 17.1, finding 25). The ECR
+  # publish path adds the same dependency.
+  aws.greengrass.TokenExchangeService:
+    VersionRequirement: "~2.0.0"
 ComponentConfiguration:
   DefaultConfiguration:
     StreamShadowName: "streamConfigurationShadow"

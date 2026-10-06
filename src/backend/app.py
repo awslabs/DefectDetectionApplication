@@ -408,6 +408,12 @@ async def main():
     await server.serve()
 
 if __name__ == "__main__":  # pragma: no cover
+    # FIRST, before the backend forks any child: a forked child must not
+    # share the main server's signal wakeup fd, or a signal the child
+    # handles (vLLM's engine core on SIGTERM) runs the backend's own
+    # shutdown handler (spec vllm-jp7-engine-lifecycle, Defect A).
+    from utils import fork_signal_hygiene
+    fork_signal_hygiene.install()
     triton_instance = TritonEdgeClient.get_instance()
     setup_triton()
     # Start schema migration using alembic tool

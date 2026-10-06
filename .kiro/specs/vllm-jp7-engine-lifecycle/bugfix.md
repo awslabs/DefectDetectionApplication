@@ -53,7 +53,7 @@ They meet in one place: every JP7 deployment that includes a staged vLLM model. 
 
 2.2 WHEN a forked child of the backend receives any signal THEN the system SHALL NOT run the backend's own signal handlers for it.
 
-2.3 WHEN a vLLM engine construction has not completed within the Construction_Bound THEN the system SHALL capture diagnostics (the Python stacks of every backend thread, and of the engine core process when one exists), stop the stuck construction's engine processes, and mark the load FAILED with a reason that names the bound. A later load request SHALL be able to try again.
+2.3 WHEN a vLLM engine construction has made no progress over the Stall_Window, or has not completed within the Construction_Bound, THEN the system SHALL capture diagnostics (the Python stacks of every backend thread, and of the engine core process when one exists), stop the stuck construction's engine processes, and mark the load FAILED with a reason that names the trigger. A later load request SHALL be able to try again.
 
 2.4 WHEN a construction is stopped under 2.3 THEN the vLLM runtime server SHALL answer requests again (unload, index, generate and a new load) without a backend restart. IF the construction cannot be unblocked (there is no engine process to stop, or the construction still has not returned within the Unblock_Grace) THEN the system SHALL report the model FAILED, log the condition as CRITICAL with the diagnostics, and recover the runtime as the design decides (design Decision 3).
 
@@ -73,6 +73,6 @@ They meet in one place: every JP7 deployment that includes a staged vLLM model. 
 
 3.6 WHEN LocalServer runs on an image without vLLM (JP5, amd64) or with JP6's in-process V0 engine (vLLM 0.9.3, `VLLM_USE_V1=0`) THEN the system SHALL CONTINUE TO behave identically, apart from the inert fork hook.
 
-3.7 WHEN a vLLM model's construction legitimately takes long (a first load with a cold compile cache, a large model) THEN the system SHALL CONTINUE TO let it finish. The Construction_Bound SHALL exceed the slowest legitimate construction measured on the device.
+3.7 WHEN a vLLM model's construction legitimately takes long (a first load with a cold compile cache, a large model) THEN the system SHALL CONTINUE TO let it finish. The Construction_Bound SHALL exceed the slowest legitimate construction measured on the device, and a construction that keeps making progress SHALL never trip the stall check.
 
 3.8 WHEN the model component's lifecycle scripts run (`vllm_model_prep.py` load and `--cleanup`) THEN they SHALL CONTINUE TO use their current requests, retries and timeouts, and the recipe's Startup (1800 s) and Shutdown (900 s) timeouts SHALL be unchanged.

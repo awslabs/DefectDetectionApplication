@@ -78,11 +78,26 @@ capability, with the registry, the shadow, and the audit log untouched;
 credential-free stream cameras are still accepted (Req 5.9, task 8.3).
 Authorization and the audit events are the existing camera registry ones
 throughout (Req 5.10).
+
+The camera's own secret (task 29, finding 22; Reqs 5.2, 5.8). The device
+re-keys a Portal create to ``cfg-<imageSourceId>``, so the routes record
+the secret's ARN on the entry (``credential_secret_arn``, through
+``mark_pending``), resolve a camera's secrets from the record, the pending
+and the reported Credential_Reference and the name of its id
+(``credential_secret_ids``), and update, clear and delete by them, never
+scheduling a secret another stream entry of the device still resolves.
+Only secrets under the device's own prefix, in the use case's account and
+region, are ever named. A stream create's body id is validated, an update
+or delete of a stream create mirror is refused with 409
+``CAMERA_SOURCE_ALIAS``, and a create no longer schedules anything. No
+response carries ``credential_secret_arn`` or ``alias_of``: the views are
+built field by field.
 """
 import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -154,6 +169,23 @@ SHADOW_NAME = 'dda-camera-registry'
 # Machine-readable rejection code for mutations of discovery-managed
 # sources (Req 5.6).
 DISCOVERY_MANAGED = 'DISCOVERY_MANAGED'
+
+# Machine-readable rejection code for an update or delete of a stream
+# create mirror (rtsp-rtmp-stream-cameras task 29, design component 7
+# "Create mirrors"): the entry only mirrors a Portal create the device
+# acknowledged under an id of its own, so it owns no secret and is never
+# the camera to change.
+CAMERA_SOURCE_ALIAS = 'CAMERA_SOURCE_ALIAS'
+
+# The prefix of the ids the device gives the Image_Sources it creates
+# (``cfg-<imageSourceId>``), which the mirror shape rule reads.
+CONFIGURED_ID_PREFIX = 'cfg-'
+
+# A stream create's body ``camera_source_id`` (task 29, Requirement 5.2):
+# 1 to 128 of the characters a Secrets Manager name allows, without '/',
+# so the derived secret name is one segment under the device's prefix.
+# Applied with ``fullmatch``: ``$`` also matches before a final newline.
+STREAM_CREATE_ID_PATTERN = re.compile(r"[A-Za-z0-9_.@+=-]{1,128}")
 
 # Machine-readable rejection code for a credentialed stream mutation the
 # Use_Case_Account does not let the Portal carry out (Req 5.9, design
@@ -753,6 +785,30 @@ def discovery_managed_rejection(csid: str) -> Dict:
     })
 
 
+def alias_rejection(csid: str, entry: Optional[Dict[str, Any]]) -> Dict:
+    """Reject an update or delete of a stream create mirror: 409
+    ``CAMERA_SOURCE_ALIAS`` (task 29, design component 7 "Create
+    mirrors").
+
+    Names the created camera's id when the registry linked the mirror to
+    it (``alias_of``), under ``created_camera_source_id``; the link itself
+    is a Portal-owned key that no response carries.
+    """
+    created = entry.get('alias_of') if isinstance(entry, dict) else None
+    known = isinstance(created, str) and bool(created)
+    body: Dict[str, Any] = {
+        'error': (f"Camera source '{csid}' only mirrors a camera the device "
+                  "created for a Portal create; edit or delete the created "
+                  "camera" + (f" '{created}'" if known else '')
+                  + " instead"),
+        'code': CAMERA_SOURCE_ALIAS,
+        'camera_source_id': csid,
+    }
+    if known:
+        body['created_camera_source_id'] = created
+    return create_response(409, body)
+
+
 def validate_camera_body(body: Any) -> Optional[Dict]:
     """Minimal shape validation for create/update bodies."""
     if not isinstance(body, dict):
@@ -936,6 +992,46 @@ def validate_stream_credentials_body(body: Any) -> Optional[Dict]:
     return _stream_field_rejection(field, message)
 
 
+def validate_stream_create_id(body: Any) -> Optional[Dict]:
+    """Validate the ``camera_source_id`` a stream create's body carries
+    (task 29, Requirement 5.2; design component 7 "Body validation").
+
+    Applies to the stream types only, and only when the key is present and
+    its value is not null: a missing key or ``null`` gets a generated
+    ``portal-<hex>`` id. Any other value must be a string that
+    :data:`STREAM_CREATE_ID_PATTERN` matches in full, must not be made only
+    of dots (``.`` and ``..`` are URL dot segments), and must not be a
+    ``cfg-``, ``disc-`` or ``arv-`` id, ``static-image-camera`` or
+    ``static-video-camera`` (``camera_sync.is_cfg_or_discovery_managed``,
+    the device's own list). So the derived secret name is one segment
+    under the device's prefix, and every stream create stays outside the
+    ids the device names itself. Returns a 400 naming the field, never
+    echoing the value, or ``None``. Every other type keeps its validation
+    and id handling (Req 18.3).
+    """
+    if not (isinstance(body, dict)
+            and is_stream_camera_type(body.get('type'))):
+        return None
+    value = body.get('camera_source_id')
+    if value is None:
+        return None
+    if not (isinstance(value, str)
+            and STREAM_CREATE_ID_PATTERN.fullmatch(value)
+            and set(value) != {'.'}):
+        return _stream_field_rejection(
+            'camera_source_id',
+            "camera_source_id must be a string of 1 to 128 of the "
+            "characters A-Z, a-z, 0-9 and _.@+=-, not made only of dots; "
+            "omit it to get a generated id")
+    if camera_sync.is_cfg_or_discovery_managed(value):
+        return _stream_field_rejection(
+            'camera_source_id',
+            "camera_source_id must not be a cfg-, disc- or arv- id, "
+            "static-image-camera or static-video-camera: the device names "
+            "those cameras itself")
+    return None
+
+
 def credentials_usecase(usecase_id: str) -> Dict[str, Any]:
     """The Use_Case record the Credential_Vault calls are made against.
 
@@ -960,6 +1056,14 @@ def carried_credential_params(existing: Optional[Dict[str, Any]]
     camera unable to authenticate. The latest portal intent wins over the
     last reported state, so two updates in a row keep the reference the
     first one delivered.
+
+    The reported reference is carried only while the device reports
+    ``credentialsConfigured: true`` (task 29, Requirement 5.8; design
+    component 7 "Updates that do not mention credentials"). After a clear,
+    the device's report leaves ``credentialRef`` out but never nulls it,
+    so the merged shadow, and the item built from it, still hold the old
+    reference while ``credentialsConfigured`` turns false; delivering it
+    would make the device fetch a secret the clear scheduled for deletion.
     """
     if not isinstance(existing, dict):
         return {}
@@ -983,7 +1087,8 @@ def carried_credential_params(existing: Optional[Dict[str, Any]]
             # because the device has not acknowledged the clear yet.
             return {}
     reported = existing.get('params')
-    if isinstance(reported, dict) and reported.get(PARAM_CREDENTIAL_REF):
+    if (isinstance(reported, dict) and reported.get(PARAM_CREDENTIAL_REF)
+            and reported.get(PARAM_CREDENTIALS_CONFIGURED) is True):
         return credential_keys(reported)
     return {}
 
@@ -1013,6 +1118,16 @@ def prepare_stream_params(body: Any, usecase_id: str, device_id: str,
     the routes turn that into the 409 of
     :func:`credentials_unavailable_rejection`, before anything is written.
 
+    Which secret step 3 writes (task 29, design component 7 "Secret
+    record"): a create (``existing`` is None) writes
+    ``secret_name(device_id, csid)`` and resolves no account. An update
+    resolves the use case's account and region first
+    (``stream_credentials.secret_scope``), then the camera's secrets
+    (:func:`credential_secret_ids`), and writes into the first that
+    exists. When no candidate resolves, the derived name included, it
+    raises ``stream_credentials.CameraIdCannotHoldCredentials`` before
+    step 2, so nothing at all is written; the route turns that into a 400.
+
     Every non-stream body returns its own ``params`` untouched, so no
     other type's flow changes (Req 18.3).
     """
@@ -1025,9 +1140,20 @@ def prepare_stream_params(body: Any, usecase_id: str, device_id: str,
     credentials = stream_credentials.credentials_from_body(body)
     if credentials:
         usecase = credentials_usecase(usecase_id)
-        stream_credentials.ensure_device_read_grant(usecase)
-        stored = stream_credentials.store_stream_credentials(
-            usecase, device_id, csid, credentials)
+        if existing is None:
+            stream_credentials.ensure_device_read_grant(usecase)
+            stored = stream_credentials.store_stream_credentials(
+                usecase, device_id, csid, credentials, create=True)
+        else:
+            account_id, region = stream_credentials.secret_scope(usecase)
+            secret_ids = [secret_id for secret_id, _ in credential_secret_ids(
+                existing, device_id, csid, account_id, region)]
+            if not secret_ids:
+                raise stream_credentials.CameraIdCannotHoldCredentials()
+            stream_credentials.ensure_device_read_grant(usecase)
+            stored = stream_credentials.store_stream_credentials(
+                usecase, device_id, csid, credentials, secret_ids,
+                create=False)
         params[PARAM_CREDENTIAL_REF] = \
             stream_credentials.credential_reference(stored)
         params[PARAM_CREDENTIALS_CONFIGURED] = True
@@ -1093,22 +1219,192 @@ def entry_is_stream_camera(entry: Optional[Dict[str, Any]]) -> bool:
         pending.get('type'))
 
 
+def is_create_mirror(entry: Optional[Dict[str, Any]], csid: Any) -> bool:
+    """Whether a registry entry is a stream create mirror (task 29, design
+    component 7 "Create mirrors").
+
+    For one report, the device mirrors a Portal create under the Portal's
+    id onto the camera it created, and the next report retires the mirror.
+    A stream entry is a mirror when the reducer linked it (``alias_of``),
+    or when it is ``synced`` under an id that is not a ``cfg-`` id: the
+    device stores every create under ``cfg-<imageSourceId>``, and a Portal
+    create that owns a secret is ``pending`` or ``failed``. The shape rule
+    also covers a mirror a replayed documents event brought back without
+    ``alias_of``. A mirror owns no secret. Entries of other types are
+    never mirrors here (Req 18.3).
+    """
+    if not entry_is_stream_camera(entry):
+        return False
+    if entry.get('alias_of'):
+        return True
+    return (entry.get('sync_status') == camera_sync.SYNC_STATUS_SYNCED
+            and not (isinstance(csid, str)
+                     and csid.startswith(CONFIGURED_ID_PREFIX)))
+
+
+#: Stands for a ``credentialRef`` that is present but not an object:
+#: ``device_secret_id`` rejects it, whatever the value is.
+_MALFORMED_REFERENCE = object()
+
+
+def _reference_arn(source: Any) -> Any:
+    """The ``credentialRef.secretArn`` a ``params`` dict carries: the value
+    when present, None when absent (no ``params``, no ``credentialRef``, or
+    a reference without ``secretArn``). A ``credentialRef`` that is present
+    but not an object gives :data:`_MALFORMED_REFERENCE`, so the caller
+    rejects it."""
+    if not isinstance(source, dict):
+        return None
+    reference = source.get(PARAM_CREDENTIAL_REF)
+    if reference is None:
+        return None
+    if not isinstance(reference, dict):
+        return _MALFORMED_REFERENCE
+    return reference.get('secretArn')
+
+
+def credential_secret_ids(entry: Optional[Dict[str, Any]], device_id: str,
+                          csid: str, account_id: Optional[str],
+                          region: Optional[str]) -> List[tuple]:
+    """A camera's Credential_Vault secrets, as ``(secret_id, name)`` pairs
+    in resolution order (task 29, Requirement 5.8; design component 7
+    "Secret record"):
+
+    1. the record, ``credential_secret_arn``;
+    2. ``pending_content.params.credentialRef.secretArn``, the reference
+       the pending change delivers;
+    3. ``params.credentialRef.secretArn``, the reference the device last
+       reported (or, before its first report, the one the Portal stored);
+    4. ``secret_name(device_id, csid)``.
+
+    Each passes ``stream_credentials.device_secret_id``: candidates 1-3
+    only as complete ARNs of ``account_id`` and ``region``, and every name
+    only as the device's prefix plus one segment. Duplicates are dropped
+    by SecretId, in candidate order (fifth design review, N3), so an ARN
+    and the derived name of the same secret both stay. A candidate that is
+    present and rejected is logged at WARNING with the camera id and its
+    position, never its value; an absent candidate (or a reference without
+    ``secretArn``) and a duplicate are silent.
+    """
+    entry = entry if isinstance(entry, dict) else {}
+    pending = entry.get('pending_content')
+    pending_params = pending.get('params') if isinstance(pending, dict) \
+        else None
+    candidates = (
+        ('record', entry.get('credential_secret_arn'), False),
+        ('pending', _reference_arn(pending_params), False),
+        ('reported', _reference_arn(entry.get('params')), False),
+        ('name', stream_credentials.secret_name(device_id, csid), True),
+    )
+    pairs: List[tuple] = []
+    seen = set()
+    for position, candidate, derived in candidates:
+        if candidate is None:
+            continue
+        secret_id = stream_credentials.device_secret_id(
+            candidate, device_id, account_id, region, derived=derived)
+        if secret_id is None:
+            logger.warning(
+                f"Ignored the {position} secret candidate of camera source "
+                f"{csid!r}: it is not a secret of this device in the use "
+                "case's account and region")
+            continue
+        if secret_id in seen:
+            continue
+        seen.add(secret_id)
+        pairs.append((secret_id, stream_credentials.secret_id_name(
+            secret_id)))
+    return pairs
+
+
+def referenced_secret_names(items: List[Dict[str, Any]], device_id: str,
+                            exclude_csid: str, account_id: Optional[str],
+                            region: Optional[str]) -> set:
+    """The secret names the device's other stream entries resolve through
+    any of their four candidates (task 29, design component 7 "Clear and
+    delete"). Create mirrors, linked or recognized by shape, and entries
+    pending a delete do not count as users. Names, not SecretIds, so a
+    secret one entry names by ARN and another by name counts once."""
+    names = set()
+    for item in items or []:
+        sk = item.get('sk') or ''
+        if not sk.startswith(SK_CAMERA_PREFIX):
+            continue
+        other = sk[len(SK_CAMERA_PREFIX):]
+        if other == exclude_csid or not entry_is_stream_camera(item):
+            continue
+        if is_create_mirror(item, other):
+            continue
+        pending = item.get('pending_content')
+        if (item.get('sync_status') == camera_sync.SYNC_STATUS_PENDING
+                and isinstance(pending, dict)
+                and pending.get('op') == 'delete'):
+            continue
+        names.update(name for _, name in credential_secret_ids(
+            item, device_id, other, account_id, region))
+    return names
+
+
 def schedule_credential_deletion(usecase_id: str, device_id: str,
-                                 csid: str) -> None:
-    """Schedule the Camera_Source's Credential_Vault secret for deletion
-    (Req 5.8), after its change has been delivered.
+                                 csid: str, entry: Optional[Dict[str, Any]],
+                                 items: List[Dict[str, Any]]) -> None:
+    """Schedule the camera's Credential_Vault secrets for deletion
+    (Req 5.8), after the change of a clearing update or of a delete has
+    been delivered (task 29, design component 7 "Clear and delete").
+
+    The camera's resolved secrets (:func:`credential_secret_ids`), minus
+    the names another stream entry of the device still resolves
+    (:func:`referenced_secret_names`), each skip logged at INFO. When
+    nothing is left, ``schedule_secret_deletion`` is not called at all, so
+    a secret another camera uses is never scheduled, by name included.
 
     Best-effort and never raising: the change is already written, so a
     vault failure must not turn a delivered clear or delete into an error
-    response. A camera that never had credentials simply has no secret.
+    response. When the use case's account cannot be resolved, nothing is
+    scheduled, with a WARNING.
     """
     try:
+        usecase = credentials_usecase(usecase_id)
+        account_id, region = stream_credentials.secret_scope(usecase)
+    except Exception as e:  # noqa: BLE001 — the change is already delivered
+        logger.warning(
+            f"Could not resolve the use case's account for "
+            f"{device_id}/{csid}, so no Credential_Vault secret is "
+            f"scheduled for deletion: {e}")
+        return
+    try:
+        in_use = referenced_secret_names(items, device_id, csid,
+                                         account_id, region)
+        secret_ids = []
+        for secret_id, name in credential_secret_ids(
+                entry, device_id, csid, account_id, region):
+            if name in in_use:
+                logger.info(
+                    f"Kept Credential_Vault secret {name}: another camera "
+                    f"of {device_id} still uses it")
+                continue
+            secret_ids.append(secret_id)
+        if not secret_ids:
+            return
         stream_credentials.schedule_secret_deletion(
-            credentials_usecase(usecase_id), device_id, csid)
+            usecase, device_id, csid, secret_ids=secret_ids)
     except Exception as e:  # noqa: BLE001 — the change is already delivered
         logger.warning(
             f"Could not schedule credential deletion for "
             f"{device_id}/{csid}: {e}")
+
+
+def camera_id_cannot_hold_credentials_rejection(csid: str) -> Dict:
+    """400 for a credentialed update of a camera whose id cannot name a
+    secret and that has none (task 29, design component 7 "Update with
+    credentials"). Nothing is written, except at most the idempotent
+    device read grant."""
+    logger.warning(
+        f"Rejected a credentialed update of camera source {csid!r}: "
+        f"{stream_credentials.CameraIdCannotHoldCredentials.MESSAGE}")
+    return _stream_field_rejection(
+        'camera_source_id',
+        stream_credentials.CameraIdCannotHoldCredentials.MESSAGE)
 
 
 def credential_audit_details(stored: Optional[Dict[str, Any]],
@@ -1150,13 +1446,19 @@ def audit_mutation(user: Dict, action: str, device_id: str, csid: str,
 def mark_pending(device_id: str, usecase_id: str, csid: str,
                  portal_change_id: str, pending_content: Dict[str, Any],
                  existing: Optional[Dict[str, Any]],
-                 body: Optional[Dict[str, Any]] = None) -> None:
+                 body: Optional[Dict[str, Any]] = None,
+                 credential_secret_arn: Optional[str] = None) -> None:
     """Upsert the registry entry into sync_status=pending (Req 5.1).
 
     Existing entries keep their last-reported edge state as the effective
     content (the portal version travels in pending_content until the
     device acknowledges); newly created entries carry the portal content
     directly so they are visible in the cameras view while pending.
+
+    ``credential_secret_arn`` (task 29, Requirement 5.8): the ARN of the
+    secret this change's credentials were stored in, recorded on a new
+    and on a copied item when given. Without it, a copied item keeps its
+    record, so a credential-free update, a clear and a delete keep it.
     """
     table = dynamodb.Table(CAMERA_REGISTRY_TABLE)
     if existing:
@@ -1180,6 +1482,8 @@ def mark_pending(device_id: str, usecase_id: str, csid: str,
         'portal_change_id': portal_change_id,
         'pending_content': pending_content,
     })
+    if credential_secret_arn is not None:
+        item['credential_secret_arn'] = credential_secret_arn
     item.pop('failure_reason', None)  # a fresh change supersedes old failures
     table.put_item(Item={k: v for k, v in item.items() if v is not None})
 
@@ -1203,6 +1507,11 @@ def create_camera(device_id: str, user: Dict, event: Dict,
     if error:
         return error
     error = validate_stream_credentials_body(body)
+    if error:
+        return error
+    # A stream create's body id (task 29, Req 5.2): a missing key or null
+    # gets a generated id below, and anything else must pass the check.
+    error = validate_stream_create_id(body)
     if error:
         return error
 
@@ -1245,12 +1554,14 @@ def create_camera(device_id: str, user: Dict, event: Dict,
                        'params': params}
     mark_pending(device_id, usecase_id, csid, portal_change_id,
                  pending_content, existing=None,
-                 body={**body, 'params': params})
+                 body={**body, 'params': params},
+                 credential_secret_arn=(stored['secretArn']
+                                        if stored is not None else None))
+    # A create owns no secret yet, so a create with clearCredentials
+    # schedules nothing (task 29, Req 5.8).
     audit_mutation(user, 'create_camera_source', device_id, csid,
                    usecase_id, portal_change_id,
                    credential_audit_details(stored, cleared))
-    if cleared:
-        schedule_credential_deletion(usecase_id, device_id, csid)
     return create_response(201, {
         'device_id': device_id,
         'camera_source_id': csid,
@@ -1274,6 +1585,10 @@ def update_camera(device_id: str, csid: str, user: Dict, event: Dict,
             'error': f"Camera source '{csid}' not found"})
     if entry.get('origin') == ORIGIN_EDGE_DISCOVERED:
         return discovery_managed_rejection(csid)
+    if is_create_mirror(entry, csid):
+        # A stream create mirror owns no secret and is not the camera to
+        # change; nothing is written (task 29).
+        return alias_rejection(csid, entry)
     error = validate_camera_body(body)
     if error:
         return error
@@ -1285,16 +1600,20 @@ def update_camera(device_id: str, csid: str, user: Dict, event: Dict,
         return error
 
     # Steps 2-4: an update with credentials writes a new secret version
-    # and delivers the new reference (Req 5.8); one that mentions neither
-    # credentials nor clearCredentials carries the reference it already
-    # delivered forward. A Use_Case_Account that does not grant the
-    # Portal the credential capabilities is a 409 with the entry, the
-    # shadow, and the audit log untouched (Req 5.9, task 8.3).
+    # into the camera's own secret and delivers the new reference
+    # (Req 5.8); one that mentions neither credentials nor clearCredentials
+    # carries the reference it already delivered forward. A
+    # Use_Case_Account that does not grant the Portal the credential
+    # capabilities is a 409 with the entry, the shadow, and the audit log
+    # untouched (Req 5.9, task 8.3), and a camera whose id cannot name a
+    # secret, and that has none, is a 400 (task 29).
     try:
         params, stored, cleared = prepare_stream_params(
             body, usecase_id, device_id, csid, existing=entry)
     except stream_credentials.CredentialStorageUnavailable as e:
         return credentials_unavailable_rejection(e, csid)
+    except stream_credentials.CameraIdCannotHoldCredentials:
+        return camera_id_cannot_hold_credentials_rejection(csid)
 
     portal_change_id = new_change_id()
     change = {
@@ -1316,12 +1635,15 @@ def update_camera(device_id: str, csid: str, user: Dict, event: Dict,
                        'type': body['type'],
                        'params': params}
     mark_pending(device_id, usecase_id, csid, portal_change_id,
-                 pending_content, existing=entry)
+                 pending_content, existing=entry,
+                 credential_secret_arn=(stored['secretArn']
+                                        if stored is not None else None))
     audit_mutation(user, 'update_camera_source', device_id, csid,
                    usecase_id, portal_change_id,
                    credential_audit_details(stored, cleared))
     if cleared:
-        schedule_credential_deletion(usecase_id, device_id, csid)
+        schedule_credential_deletion(usecase_id, device_id, csid, entry,
+                                     items)
     return create_response(200, {
         'device_id': device_id,
         'camera_source_id': csid,
@@ -1344,6 +1666,11 @@ def delete_camera(device_id: str, csid: str, user: Dict, event: Dict,
             'error': f"Camera source '{csid}' not found"})
     if entry.get('origin') == ORIGIN_EDGE_DISCOVERED:
         return discovery_managed_rejection(csid)
+    if is_create_mirror(entry, csid):
+        # Deleting a stream create mirror would leave the created camera
+        # and schedule nothing; the operator deletes the created camera
+        # (task 29). A mirror of another type keeps its delete (Req 18.3).
+        return alias_rejection(csid, entry)
 
     portal_change_id = new_change_id()
     change = {
@@ -1359,12 +1686,14 @@ def delete_camera(device_id: str, csid: str, user: Dict, event: Dict,
                  {'op': 'delete'}, existing=entry)
     audit_mutation(user, 'delete_camera_source', device_id, csid,
                    usecase_id, portal_change_id)
-    # Req 5.8: the secret is scheduled for deletion only after the delete
-    # change has been delivered, so a delivery failure never destroys
-    # credentials the device is still using. A stream camera that never
-    # had credentials has no secret, which is not an error.
+    # Req 5.8: the camera's secrets are scheduled for deletion only after
+    # the delete change has been delivered, so a delivery failure never
+    # destroys credentials the device is still using, and only those no
+    # other camera of the device still uses (task 29). A stream camera that
+    # never had credentials has no secret, which is not an error.
     if entry_is_stream_camera(entry):
-        schedule_credential_deletion(usecase_id, device_id, csid)
+        schedule_credential_deletion(usecase_id, device_id, csid, entry,
+                                     items)
     return create_response(200, {
         'device_id': device_id,
         'camera_source_id': csid,
@@ -1416,6 +1745,11 @@ def reapply_conflict(device_id: str, cid: str, user: Dict, event: Dict,
     op = portal_version.get('op') or ('create' if entry is None else 'update')
     if op == 'update' and entry is None:
         op = 'create'
+    if (entry is not None and op in ('update', 'delete')
+            and is_create_mirror(entry, csid)):
+        # Never re-issue an update or delete to a stream create mirror's
+        # id, such as a ConflictEvent recorded in the alias race (task 29).
+        return alias_rejection(csid, entry)
     if op == 'delete' and entry is None:
         return create_response(409, {
             'error': f"Camera source '{csid}' no longer exists; the "
