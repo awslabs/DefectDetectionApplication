@@ -36,12 +36,13 @@ Property test conventions:
 - **Committed.** Tasks 29 (findings 21 and 22) and 30 (findings 23, 24 and 25) are committed together on `spec/rtsp-rtmp-stream-cameras` and fast-forwarded to `integration/all-specs`.
   - They were verified on hardware with JP7 `1.0.55` (thor1), JP6 `1.0.77` (Orin), JP5 `1.0.54` (MIC-730) and amd64 `1.0.50` (Dell). The 29.7 and 30.7 OUTCOMEs have the details.
   - The Portal runs the committed `edge-cv-portal/backend`. It was deployed on 2026-10-04 from the identical tree.
+  - Checked on 2026-10-06: `integration/all-specs` holds all of this spec's code. No other branch or worktree has uncommitted or unmerged rtsp code. The 2026-09-28 `stash@{0}` (`d22afbf`) and `~/rtsp-backups/20260928T145459Z` hold only older versions of committed code. Applied to `033b4ae`, the stash either merges to identical files or conflicts only where later tasks rewrote the same lines.
 - **Devices now.** Each device runs the build above and is healthy. The cleanup (2026-10-05) removed the test workflows, test state and test sources. The build host's SSH access to the devices was removed too, so on-device work needs the owner to re-add access (see "Cleanup: done" below).
 - **Temp access.** The temporary UseCaseAdmin row and the temp Cognito user `kiro-rtsp-build-temp` were deleted on 2026-10-05.
 - **State of the work:**
   1. Done: task 27 is green (2026-10-06). Task 25 is closed: the owner accepted the untested OBS publisher (2026-10-05), and finding 16 had already been fixed by task 28 (its 25.3 header was stale).
   2. Done: the cleanup (below).
-  3. For the owner: rotate the passwords shared in chat, and decide whether thor1's public SSH should keep accepting passwords. Optional follow-ups: task 27's O1 and O2, the design's Follow-ups, and deleting the broken JP7 `1.0.50` component version.
+  3. For the owner: rotate the passwords shared in chat, and decide whether thor1's public SSH should keep accepting passwords. Optional follow-ups: task 27's O1 and O2, and the design's Follow-ups. The broken JP7 `1.0.50` component version was deleted on 2026-10-06 (see "Cleanup: done").
 **End-to-end Portal check done (2026-10-02, 19:24–20:52Z).**
 - **Result.** The check passed on the Orin. A stream camera with credentials, added from the Portal, reached the device and streamed. A stream workflow then packaged, deployed with the camera binding, and ran. Remaining-work item 5 has the details.
 - **Two new findings in this spec (25.3).** **Owner decision (2026-10-03): fix both in this spec, before task 27, as task 29.**
@@ -116,7 +117,7 @@ At the owner's request, the work was committed and pushed to `integration/all-sp
 
 **Status at handoff:**
 - JP7 has a verified real build, `aws.edgeml.dda.LocalServer.arm64JP7` `1.0.51`. It runs on jetson-thor1 and passed the harness stream stage (7/7) and the Amcrest checks. Its 2-hour soak was left running.
-- `1.0.50` is a broken build: it lacks `stream_ingest` (fix 13). Never deploy it.
+- `1.0.50` is a broken build: it lacks `stream_ingest` (fix 13). Never deploy it. (Deleted on 2026-10-06.)
 - JP6 and JP5 still need their real builds.
 
 **Progress on 2026-09-30** (see 25.2, 25.3 and 25.5 for detail):
@@ -222,11 +223,11 @@ Remaining work, in order:
   - the probe secret;
   - this spec's scratch in the build host's `/tmp` (the base worktrees were already removed).
   - the `wip/rtsp-rtmp-stream-cameras-f2122-verify` branch, local and on origin, deleted on 2026-10-06 after the task 27 run. Its tip `ecb112c` held code byte-identical to `4b8d31d`.
+  - the broken `aws.edgeml.dda.LocalServer.arm64JP7` `1.0.50` component version, deleted on 2026-10-06 at the owner's request. Before the delete, none of the 56 latest deployments referenced it, and only thor1 had arm64JP7 installed (`1.0.55`). `describe-component` now returns ResourceNotFoundException. Its artifacts are still stored and no other version references them: the `dda/flask-app` and `dda/react-webapp` ECR images tagged `arm64JP7-1.0.50`, and the S3 zip under `aws.edgeml.dda.LocalServer.arm64JP7/1.0.50/`. Deleting them awaits the owner's decision.
 - Left in place on purpose:
   - `~/rtsp-verify` on the build host (helpers and results);
   - `~/dda-mediamtx` on the Dell, to restart the sources;
   - `/tmp/dda-baseline-hd` (another spec's worktree, from 2026-08-24);
-  - the broken `aws.edgeml.dda.LocalServer.arm64JP7` `1.0.50` component version (optional; the owner did not ask for it to be deleted).
 - Security follow-ups for the owner:
   - thor1's public SSH port (ryan.120v.ac:9997) still accepts passwords.
   - Rotate the device and camera passwords shared in chat: thor1 and the Orin (`aws`), the MIC-730 (`mic-730ai`), the Dell (`ryvan`) and the Amcrest (`admin`). The Amcrest and the Dell share one password.
