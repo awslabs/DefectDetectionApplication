@@ -25,12 +25,16 @@ Both invocations run the same full tick, in order:
      (patterns per .kiro/steering/builds.md), and start the build agent
      via SSM SendCommand only when no build process is found; otherwise
      defer the job to the head of its queue with re-verification at
-     >= 5-minute intervals (Req 7.5, 7.6).
+     >= 5-minute intervals (Req 7.5, 7.6). An SSM association still
+     running on the server defers it the same way — advisory, capped,
+     never failing the job (ephemeral-runner-patch-reboot P1).
   2. Provision ephemeral runners: exactly one RunInstances per dispatched
      job, arch and sizing from the job's own config_snapshot (Req 2.3,
      3.1, 7.4, 9.3); once the instance is SSM-managed (ping Online) AND
      its bootstrap has signalled completion (the Bootstrap_Marker probe,
-     Req 6.1-6.4), SendCommand the agent. RunInstances failure -> job
+     Req 6.1-6.4) AND no SSM association is still running on it (the
+     host-settled gate, ephemeral-runner-patch-reboot P0-A),
+     SendCommand the agent. RunInstances failure -> job
      failed with the provisioning cause, partial compute terminated,
      audited (Req 3.7); a bootstrap that never completes inside its
      budget -> job failed at the bootstrap stage with the bootstrap log
@@ -91,7 +95,7 @@ import shlex
 import time
 import uuid
 from decimal import Decimal
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import boto3
 from botocore.exceptions import ClientError
@@ -1144,6 +1148,52 @@ def bootstrap_log_redirect_commands() -> List[str]:
     ]
 
 
+#: Per-boot re-entry for the ephemeral bootstrap
+#: (ephemeral-runner-patch-reboot P0-B). cloud-init runs user data once
+#: per instance (scripts_user is PER_INSTANCE and its semaphore is
+#: written BEFORE the script runs), so a reboot partway through the
+#: bootstrap — an account-level patch run rebooting the new runner —
+#: would leave it unfinished and the marker unwritten. Scripts in this
+#: directory run on EVERY boot (scripts_per_boot, PER_ALWAYS; it runs
+#: before scripts_user in the cloud-init 26.1 packages of Ubuntu 22.04
+#: and 24.04), so the user data installs a root-owned 0700 copy of
+#: itself here and a reboot simply re-runs the idempotent bootstrap.
+RUNNER_BOOTSTRAP_PER_BOOT_PATH = \
+    '/var/lib/cloud/scripts/per-boot/dda-runner-bootstrap.sh'
+#: The bootstrap's own lock file, so two runs never overlap.
+RUNNER_BOOTSTRAP_LOCK_FILE = '/var/lock/dda-runner-bootstrap.lock'
+#: Bounded wait for the dpkg lock: an install waits up to 600 s instead of
+#: failing at once while the patch run (or any other apt user) holds it.
+#: apt does not apply the option to the lists lock `apt-get update` takes.
+APT_LOCK_WAIT_OPTION = '-o DPkg::Lock::Timeout=600'
+
+
+def runner_bootstrap_reentry_commands() -> List[str]:
+    """The opening statements of the ephemeral bootstrap (P0-B).
+
+    1. The guard: exit 0 when the Bootstrap_Marker exists, so a re-run
+       after the bootstrap completed (every later boot) is a no-op.
+    2. A blocking flock on RUNNER_BOOTSTRAP_LOCK_FILE, then the guard
+       again: a run that waited behind another one exits once that one
+       wrote the marker. An unopenable lock file (an unprivileged run, a
+       test harness) skips the lock rather than the bootstrap.
+    3. Install a root-owned 0700 copy of this script (``$0``, the file
+       cloud-init executes) as RUNNER_BOOTSTRAP_PER_BOOT_PATH, unless
+       this run IS that copy; tolerated, so a host without cloud-init
+       still bootstraps once, exactly as before.
+    """
+    marker = shlex.quote(build_planner.BOOTSTRAP_MARKER_PATH)
+    per_boot = shlex.quote(RUNNER_BOOTSTRAP_PER_BOOT_PATH)
+    lock = shlex.quote(RUNNER_BOOTSTRAP_LOCK_FILE)
+    return [
+        f'[ -f {marker} ] && exit 0',
+        f'if {{ exec 9>>{lock}; }} 2>/dev/null; then flock 9; fi',
+        f'[ -f {marker} ] && exit 0',
+        f'if [ "$0" != {per_boot} ] && [ -f "$0" ]; then '
+        f'install -D -m 0700 "$0" {per_boot} 2>/dev/null || true; fi',
+    ]
+
+
 def tolerate_failure(command: str) -> str:
     """A generated statement made non-fatal (`|| true`).
 
@@ -1193,6 +1243,16 @@ def runner_bootstrap_user_data(job: Optional[Dict[str, Any]] = None,
     The clone lands in the resolved repository directory (Req 5.1, 5.4) —
     the same directory provisioning records on the runner record and the
     agent command is later rooted in.
+
+    The script survives a reboot partway through
+    (ephemeral-runner-patch-reboot P0-B): it opens with the marker guard,
+    its own flock and the per-boot self-install
+    (runner_bootstrap_reentry_commands), so cloud-init re-runs it on the
+    next boot until the marker exists; every apt-get carries the dpkg
+    lock wait (APT_LOCK_WAIT_OPTION), so the install waits while the
+    patch run holds the lock. A re-run is idempotent: the sync is
+    clone-if-absent plus a forced checkout, setup-build-server.sh guards
+    its installs, and the marker is written last.
     """
     if not BUILD_REPO_URL:
         # No repo URL configured: assume a pre-provisioned AMI.
@@ -1209,6 +1269,10 @@ def runner_bootstrap_user_data(job: Optional[Dict[str, Any]] = None,
                      + commands[:-1])
     return '\n'.join([
         '#!/bin/bash',
+        # The marker guard is the FIRST statement, the marker write stays
+        # the LAST (P0-B per-boot re-entry, see
+        # runner_bootstrap_reentry_commands).
+        *runner_bootstrap_reentry_commands(),
         'set -uo pipefail',
         *bootstrap_log_redirect_commands(),
         HOME_EXPORT_COMMAND,
@@ -1218,7 +1282,8 @@ def runner_bootstrap_user_data(job: Optional[Dict[str, Any]] = None,
         # ship them and the synced ref's setup-build-server.sh apt line is
         # ref-dependent and failure-tolerant (the 2026-09-07
         # zip-command-not-found incident, job 53312133).
-        'apt-get update -y && apt-get install -y git zip unzip',
+        f'apt-get {APT_LOCK_WAIT_OPTION} update -y && '
+        f'apt-get {APT_LOCK_WAIT_OPTION} install -y git zip unzip',
         *repo_parent_prepare_commands(repo_dir),
         repo_ownership_heal_command(repo_dir),
         *run_as_build_user_commands(body),
@@ -1614,6 +1679,48 @@ def instance_ssm_online(instance_id: str) -> bool:
     return False
 
 
+def runner_association_statuses(
+        instance_id: str) -> Optional[List[Tuple[str, str]]]:
+    """``(name, status)`` for every SSM State Manager association on an
+    instance (DescribeInstanceAssociationsStatus, every page), or None
+    when the status could not be read (ClientError).
+
+    ``name`` is the association's document name (e.g.
+    ``AWS-RunPatchBaseline``), falling back to its association name or
+    id. What None means is decided in build_planner, not here: the
+    ephemeral host-settled gate reads it as "not settled" (fail-safe,
+    decide_host_settled) and the dedicated deferral as "do not defer"
+    (fail open, decide_dedicated_settle).
+    """
+    statuses: List[Tuple[str, str]] = []
+    kwargs: Dict[str, Any] = {'InstanceId': instance_id}
+    try:
+        while True:
+            response = ssm.describe_instance_associations_status(**kwargs)
+            for info in response.get('InstanceAssociationStatusInfos', []):
+                name = (info.get('Name') or info.get('AssociationName')
+                        or info.get('AssociationId') or '')
+                statuses.append((str(name), str(info.get('Status') or '')))
+            token = response.get('NextToken')
+            # Only a fresh, non-empty string token continues: anything
+            # else ends the walk, so pagination can never loop forever.
+            if not isinstance(token, str) or not token or \
+                    token == kwargs.get('NextToken'):
+                return statuses
+            kwargs['NextToken'] = token
+    except ClientError as e:
+        logger.warning(
+            f"DescribeInstanceAssociationsStatus({instance_id}): {e}")
+        return None
+
+
+def association_records(
+        statuses: Optional[List[Tuple[str, str]]]) -> List[Dict[str, str]]:
+    """The ``(name, status)`` pairs as job-record evidence maps."""
+    return [{'name': name, 'status': status}
+            for name, status in statuses or []]
+
+
 def send_agent(job: Dict[str, Any], instance_id: str,
                repo_dir: Optional[str] = None,
                comment: Optional[str] = None,
@@ -1981,6 +2088,14 @@ def verify_and_start_dedicated(job: Dict[str, Any],
     an unverifiable command, fail-safe) -> the job stays queued at the
     head of its queue (original created_at retained) with deferred_at
     recording this attempt.
+
+    After the preflight and before the claim, the advisory host-settled
+    deferral (ephemeral-runner-patch-reboot P1, build_planner.
+    decide_dedicated_settle): while an SSM association is Pending or
+    InProgress on the server the job is deferred the same way, for at
+    most the settle cap from the deferral's start, then dispatched anyway
+    with an advisory; an unreadable status never defers (fail open). It
+    never fails a job.
     """
     if not build_planner.is_reverification_due(job.get('deferred_at'), now):
         return
@@ -2045,6 +2160,41 @@ def verify_and_start_dedicated(job: Dict[str, Any],
         release_server(server['server_id'], job['build_job_id'])
         return
 
+    # Advisory host-settled deferral (ephemeral-runner-patch-reboot P1),
+    # the last gate before the claim: never START a build into a running
+    # SSM association (a patch run may reboot the server). A deferral
+    # keeps the allocation (no other job slips onto the server) and
+    # writes deferred_at like every other pre-dispatch deferral: that
+    # drives the 5-minute re-verification cadence and is the deferral
+    # activity the lock-deferral backstop reads, so a requeued job is
+    # never failed as stalled while it waits here.
+    settle = build_planner.decide_dedicated_settle(
+        job, runner_association_statuses(instance_id), now)
+    if settle.action == build_planner.PREDISPATCH_DEFER:
+        update_job_fields(job['build_job_id'], {
+            'deferred_at': now,
+            'host_settle': {
+                'deferral_started_at': settle.deferral_started_at,
+                'checked_at': now,
+                'running': list(settle.running),
+                'advisory': settle.advisory,
+            },
+        })
+        logger.info(
+            f"Deferred Build_Job {job['build_job_id']}: SSM association(s) "
+            f"running on server {server['server_id']}: "
+            f"{list(settle.running)}")
+        return
+    # START: the advisory (fail open, cap reached, or a deferral ending)
+    # is recorded with the dispatch below; deferral_started_at is cleared
+    # so a later requeue of this job starts a fresh deferral.
+    settle_note = None if settle.advisory is None else {
+        'deferral_started_at': None,
+        'checked_at': now,
+        'running': list(settle.running),
+        'advisory': settle.advisory,
+    }
+
     # Execution-attempt claim recorded BEFORE the SendCommand
     # (build-fleet-execution-failures Req 2.7): dispatch_state moves
     # claimed -> sending -> sent around the send, and the deterministic
@@ -2065,19 +2215,22 @@ def verify_and_start_dedicated(job: Dict[str, Any],
     # (overlapping scheduled + async on-submit executions run the same
     # full tick). It also keeps every dedicated-dispatch persistence
     # write on the transition_job/update_job_fields seams.
+    extra = {'dispatched_at': now, 'started_at': now,
+             'execution_attempt': attempt,
+             'bootstrap': bootstrap_note,
+             # Separately recorded preflight evidence (task 7.1,
+             # Req 2.8): the local contract passed; the
+             # machine-side checks and disk recording arrive with
+             # the agent's execution-start event.
+             'preflight': to_dynamo(
+                 preflight_record(preflight, repo_dir, now))}
+    if settle_note is not None:
+        extra['host_settle'] = settle_note
     if not transition_job(
             job['build_job_id'], build_domain.STATUS_QUEUED,
             build_domain.next_status(build_domain.STATUS_QUEUED,
                                      build_domain.EVENT_DISPATCH_DEDICATED),
-            extra={'dispatched_at': now, 'started_at': now,
-                   'execution_attempt': attempt,
-                   'bootstrap': bootstrap_note,
-                   # Separately recorded preflight evidence (task 7.1,
-                   # Req 2.8): the local contract passed; the
-                   # machine-side checks and disk recording arrive with
-                   # the agent's execution-start event.
-                   'preflight': to_dynamo(
-                       preflight_record(preflight, repo_dir, now))}):
+            extra=extra):
         # Raced (e.g. cancellation, or a concurrent tick that already
         # claimed this dispatch): allocation release happens next tick.
         return
@@ -2177,14 +2330,21 @@ def fail_provisioning(job: Dict[str, Any], cause: str) -> None:
              ledger=plan_job_ledger(job, cleanup_required=True))
 
 
-def fail_bootstrap_timeout(job: Dict[str, Any],
-                           decision: 'build_planner.ReadinessDecision') -> None:
+def fail_bootstrap_timeout(
+        job: Dict[str, Any],
+        decision: Union['build_planner.ReadinessDecision',
+                        'build_planner.HostSettledDecision']) -> None:
     """Bootstrap stage failure for an ephemeral Build_Job whose runner
     never signalled completion inside its budget (Req 6.3, 6.5): the
     runner is released through the same terminate_partial_compute path
     every other provisioning failure uses, then the job is failed with the
     bootstrap-stage error the pure decision produced — it names the budget
-    and the bootstrap log location — and audited."""
+    and the bootstrap log location — and audited.
+
+    ``decision`` is a ``build_planner.ReadinessDecision`` (marker never
+    observed) or a ``build_planner.HostSettledDecision`` (marker observed
+    but an SSM association still running past the same budget; its error
+    names those associations). Both carry ``error`` and ``log_path``."""
     terminated = terminate_partial_compute(job['build_job_id'])
     fail_job(job, ERROR_BOOTSTRAP_TIMEOUT, decision.error,
              'build_bootstrap_timeout',
@@ -2283,9 +2443,11 @@ def provision_ephemeral(jobs: List[Dict[str, Any]], now: int) -> None:
     ephemeral Build_Jobs: exactly one runner per job, sizing from the
     job's own config_snapshot (Req 2.3, 3.1, 7.4, 9.3), and start the
     agent on runners of provisioning jobs once SSM-managed AND the
-    Bootstrap_Marker has been observed (Req 6.1-6.5): WAIT does nothing
-    this tick, TIMEOUT fails the job at the bootstrap stage and releases
-    the runner."""
+    Bootstrap_Marker has been observed (Req 6.1-6.5) AND no SSM
+    association is still running on the runner (host-settled gate,
+    ephemeral-runner-patch-reboot P0-A): WAIT does nothing this tick,
+    TIMEOUT fails the job at the bootstrap stage and releases the
+    runner."""
     for plan in build_planner.plan_ephemeral_provisioning(jobs):
         job = next(j for j in jobs
                    if j.get('build_job_id') == plan.build_job_id)
@@ -2367,10 +2529,31 @@ def provision_ephemeral(jobs: List[Dict[str, Any]], now: int) -> None:
         if readiness.readiness == build_planner.READINESS_TIMEOUT:
             fail_bootstrap_timeout(job, readiness)
             continue
-        # Marker observed: record the readiness evidence and the bootstrap
-        # log location BEFORE the agent command (Req 6.4).
+        # The marker is still not sufficient (ephemeral-runner-patch-reboot
+        # P0-A): it only means the user data finished, while an
+        # account-level patch association may still be running and reboot
+        # the host mid-build. Wait, inside the same bootstrap budget, until
+        # no SSM association on the runner is Pending/InProgress; an
+        # unreadable status keeps waiting (fail-safe).
+        statuses = runner_association_statuses(instance_id)
+        settled = build_planner.decide_host_settled(job, statuses, now)
+        if settled.readiness == build_planner.READINESS_WAIT:
+            logger.info(
+                f"Build_Job {job['build_job_id']}: runner {instance_id} "
+                f"bootstrapped but not settled: "
+                + (', '.join(settled.running) if settled.statuses_read
+                   else 'SSM association status unreadable'))
+            continue
+        if settled.readiness == build_planner.READINESS_TIMEOUT:
+            fail_bootstrap_timeout(job, settled)
+            continue
+        # Marker observed and host settled: record the readiness evidence,
+        # the bootstrap log location and the associations seen BEFORE the
+        # agent command (Req 6.4).
         update_job_fields(job['build_job_id'], {
-            'bootstrap': {'marker_at': now, 'log_path': readiness.log_path},
+            'bootstrap': {'marker_at': now, 'log_path': readiness.log_path,
+                          'settled_at': now,
+                          'associations': association_records(statuses)},
         })
         # The directory recorded by this runner's own provisioning pass
         # (Req 5.1, 5.4); pre-existing runners with none recorded resolve

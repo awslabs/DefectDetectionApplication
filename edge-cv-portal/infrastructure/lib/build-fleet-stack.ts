@@ -528,8 +528,9 @@ export class BuildFleetStack extends cdk.Stack {
     };
 
     /** SSM SendCommand restricted to AWS-RunShellScript on instances
-     * carrying one of the dda-build:* tags; invocation reads and the
-     * managed-instance ping have no resource-level scoping. */
+     * carrying one of the dda-build:* tags; invocation reads, the
+     * managed-instance ping and the association-status read have no
+     * resource-level scoping. */
     const grantSsmCommands = (role: iam.Role) => {
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -549,6 +550,14 @@ export class BuildFleetStack extends cdk.Stack {
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ssm:GetCommandInvocation', 'ssm:DescribeInstanceInformation'],
+        resources: ['*'],
+      }));
+      // Read-only association status for the host-settled gate
+      // (ephemeral-runner-patch-reboot P0-A/P1): no resource-level
+      // scoping exists for this read.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['ssm:DescribeInstanceAssociationsStatus'],
         resources: ['*'],
       }));
     };

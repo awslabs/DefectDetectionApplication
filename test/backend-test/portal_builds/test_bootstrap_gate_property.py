@@ -76,12 +76,23 @@ real SSM command, calls real AWS, or starts a real build.
   instance is ever created, not even a simulated one.
 * Explicit AMI ids are configured, so `resolve_ami` never reads an SSM
   parameter.
-* `runner_bootstrap_user_data` is only ever rendered to text; the text is
-  parsed and syntax-checked with `bash -n`, which does not execute it.
+* `runner_bootstrap_user_data` is rendered to text and syntax-checked with
+  `bash -n`; the per-boot re-entry tests (ephemeral-runner-patch-reboot)
+  also EXECUTE it, but only inside a temp sandbox: every system path in
+  the text is substituted into it, apt-get is a recording stub, the
+  repository is a local bare origin, and nothing runs as root.
+
+The host-settled gate (ephemeral-runner-patch-reboot P0-A) is driven the
+same way: the recording SSM stub also answers
+DescribeInstanceAssociationsStatus (settled by default, so the
+properties above are unchanged).
 """
+import glob
 import json
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -353,6 +364,11 @@ class _RecordingSSM:
         self.probe_completes = True      # False -> unverifiable probe
         self.online = True               # DescribeInstanceInformation ping
         self.agent_send_error = None     # ClientError to raise on the agent
+        # DescribeInstanceAssociationsStatus (host-settled gate,
+        # ephemeral-runner-patch-reboot): (name, status) pairs, [] =
+        # settled (every pre-existing property), None = unreadable.
+        self.associations = []
+        self.association_reads = 0
         self._counter = 0
 
     # -- introspection -----------------------------------------------------
@@ -421,6 +437,22 @@ class _RecordingSSM:
     def get_command_invocation(self, CommandId, InstanceId, **kwargs):
         return dict(self.invocations[CommandId], CommandId=CommandId,
                     InstanceId=InstanceId)
+
+    def describe_instance_associations_status(self, InstanceId,
+                                              NextToken=None, **kwargs):
+        """One association per page, so the dispatcher's pagination is
+        exercised; None raises (an unreadable status)."""
+        self.association_reads += 1
+        if self.associations is None:
+            raise _client_error("ThrottlingException", "Rate exceeded",
+                                "DescribeInstanceAssociationsStatus")
+        index = int(NextToken or 0)
+        page = [{"Name": name, "Status": status, "InstanceId": InstanceId}
+                for name, status in self.associations[index:index + 1]]
+        response = {"InstanceAssociationStatusInfos": page}
+        if index + 1 < len(self.associations):
+            response["NextToken"] = str(index + 1)
+        return response
 
     def get_parameter(self, Name, **kwargs):  # pragma: no cover - guard
         raise AssertionError(
@@ -826,6 +858,141 @@ class TestProperty6BootstrapGatesTheAgentCommand:
 
 
 # ---------------------------------------------------------------------------
+# Host-settled gate — no agent command while an SSM association is still
+# running on the runner, whatever the marker says
+# (ephemeral-runner-patch-reboot P0-A)
+# ---------------------------------------------------------------------------
+
+PATCH_DOC = "AWS-RunPatchBaseline"
+AGENT_UPDATE_DOC = "AWS-UpdateSSMAgent"
+
+#: The generated association domain. `None` is an unreadable status.
+ASSOCIATION_STATES = {
+    "none": [],
+    "settled": [(AGENT_UPDATE_DOC, "Success"), (PATCH_DOC, "Success")],
+    "patch_failed": [(PATCH_DOC, "Failed")],
+    "skipped": [("AWS-GatherSoftwareInventory", "Skipped")],
+    "patch_in_progress": [(AGENT_UPDATE_DOC, "Success"),
+                          (PATCH_DOC, "InProgress")],
+    "patch_in_progress_lowercase": [(PATCH_DOC, "inprogress")],
+    "agent_update_pending": [(PATCH_DOC, "Success"),
+                             (AGENT_UPDATE_DOC, "Pending")],
+    "unreadable": None,
+}
+#: Kinds in which NO association is Pending/InProgress: only these settle.
+SETTLED_ASSOCIATION_KINDS = frozenset(
+    {"none", "settled", "patch_failed", "skipped"})
+
+association_kinds = st.sampled_from(sorted(ASSOCIATION_STATES))
+settle_ticks = st.lists(st.tuples(probe_kinds, association_kinds,
+                                  time_kinds), min_size=1, max_size=5)
+
+
+class TestHostSettledGatesTheAgentCommand:
+    """Generated (marker, association, time) tick sequences through
+    `provision_ephemeral`: the agent command needs the marker AND a
+    settled host; an unreadable status never opens the gate."""
+
+    @given(tick_list=settle_ticks, budget=budget_minutes, target=targets)
+    @settings(max_examples=150, deadline=None,
+              suppress_health_check=[HealthCheck.too_slow])
+    def test_no_agent_command_while_an_association_is_running(
+            self, tick_list, budget, target):
+        _clear_tables()
+        job_id = f"job-{uuid.uuid4().hex[:12]}"
+        _seed_queued_ephemeral_job(job_id, target=target,
+                                   budget_minutes=budget)
+        with _MockedAws():
+            _run_provisioning_tick(job_id, BASE_TIME)
+            deadline = BASE_TIME + budget * MS_PER_MINUTE
+            sent = failed = False
+            ordered = sorted(tick_list, key=lambda t: _TIME_RANK[t[2]])
+            for index, (probe_kind, assoc_kind, time_kind) in \
+                    enumerate(ordered):
+                now = _tick_time(time_kind, BASE_TIME, budget, nudge=index)
+                _SSM.probe_output = PROBE_OUTPUTS[probe_kind]
+                _SSM.probe_completes = probe_kind != "unverifiable"
+                _SSM.associations = ASSOCIATION_STATES[assoc_kind]
+                marker = probe_kind in MARKER_OBSERVED_KINDS
+                settled = assoc_kind in SETTLED_ASSOCIATION_KINDS
+                agents_before = len(_SSM.agent_sends)
+                reads_before = _SSM.association_reads
+
+                _tick(now)
+
+                job = _job(job_id)
+                new_sends = _SSM.agent_sends[agents_before:]
+                observed = _observation(
+                    tick=index, probe_kind=probe_kind,
+                    assoc_kind=assoc_kind, now=now, deadline=deadline,
+                    job=job, sent_before=sent, failed_before=failed)
+                if sent or failed:
+                    assert new_sends == [], observed
+                    continue
+                # The association status is read only once the marker
+                # is observed (the gate's order).
+                assert (_SSM.association_reads > reads_before) == marker, \
+                    observed
+                if marker and settled:
+                    assert len(new_sends) == 1, observed
+                    bootstrap = build_dispatcher.to_native(
+                        new_sends[0]["job_at_send"])["bootstrap"]
+                    assert bootstrap["settled_at"] == now, observed
+                    assert bootstrap["associations"] == [
+                        {"name": n, "status": s}
+                        for n, s in ASSOCIATION_STATES[assoc_kind]], \
+                        observed
+                    sent = True
+                    continue
+                assert new_sends == [], observed
+                if now > deadline:
+                    assert job["status"] == STATUS_FAILED, observed
+                    assert job["error"]["code"] == \
+                        ERROR_BOOTSTRAP_TIMEOUT, observed
+                    if marker and assoc_kind == "unreadable":
+                        assert "could not be read" in \
+                            job["error"]["message"], observed
+                    elif marker:
+                        running = [n for n, s in
+                                   ASSOCIATION_STATES[assoc_kind]
+                                   if s.lower() in ("pending",
+                                                    "inprogress")]
+                        for name in running:
+                            assert name in job["error"]["message"], \
+                                observed
+                    assert _EC2.live_instances_for(job_id) == [], observed
+                    failed = True
+                else:
+                    assert job["status"] == STATUS_PROVISIONING, observed
+                    assert "bootstrap" not in job, observed
+            assert len(_SSM.agent_sends) <= 1
+
+    def test_an_unreadable_status_never_opens_the_gate(self):
+        """Marker present but the association read keeps failing: no
+        command at any tick up to the deadline, then BOOTSTRAP_TIMEOUT
+        and the runner is released (fail-safe)."""
+        _clear_tables()
+        job_id = f"job-{uuid.uuid4().hex[:12]}"
+        _seed_queued_ephemeral_job(job_id, budget_minutes=5)
+        with _MockedAws():
+            _run_provisioning_tick(job_id, BASE_TIME)
+            _SSM.probe_output = PROBE_OUTPUTS["done"]
+            _SSM.associations = None
+            for minute in range(1, 6):
+                _tick(BASE_TIME + minute * MS_PER_MINUTE)
+                assert _SSM.agent_sends == []
+                assert _job(job_id)["status"] == STATUS_PROVISIONING
+            _tick(BASE_TIME + 5 * MS_PER_MINUTE + 1)
+            job = _job(job_id)
+            observed = _observation(job=job)
+            assert _SSM.agent_sends == [], observed
+            assert job["status"] == STATUS_FAILED, observed
+            assert job["error"]["code"] == ERROR_BOOTSTRAP_TIMEOUT, observed
+            assert "could not be read" in job["error"]["message"], observed
+            assert _EC2.live_instances_for(job_id) == [], observed
+
+
+# ---------------------------------------------------------------------------
 # Property 7 — Provisioning/bootstrap failures release the runner (Req 6.5)
 # ---------------------------------------------------------------------------
 
@@ -974,6 +1141,13 @@ class TestProperty7FailuresReleaseTheRunner:
 
 _BASH = "/bin/bash"
 
+#: Per-boot re-entry (ephemeral-runner-patch-reboot P0-B), restated: the
+#: script cloud-init runs on every boot, the bootstrap's own lock file,
+#: and the guard that makes a re-run after completion a no-op.
+PER_BOOT_PATH = "/var/lib/cloud/scripts/per-boot/dda-runner-bootstrap.sh"
+LOCK_PATH = "/var/lock/dda-runner-bootstrap.lock"
+MARKER_GUARD = f"[ -f {MARKER_PATH} ] && exit 0"
+
 
 def _statements(user_data):
     """The non-blank statement lines of a generated bootstrap script."""
@@ -981,7 +1155,10 @@ def _statements(user_data):
 
 
 def _marker_indexes(statements):
-    return [i for i, line in enumerate(statements) if MARKER_PATH in line]
+    """Indexes of the statements that WRITE the marker (the re-entry
+    guards only test for it)."""
+    return [i for i, line in enumerate(statements)
+            if MARKER_PATH in line and line.split()[0] == "touch"]
 
 
 class TestEphemeralUserDataWritesTheMarkerLast:
@@ -993,6 +1170,11 @@ class TestEphemeralUserDataWritesTheMarkerLast:
     non-fatal (`|| true`) and the log redirect conditional, so what matters
     is that the marker is written exactly once, after the source sync and
     the build-environment setup, and that nothing follows it.
+
+    Per-boot form (ephemeral-runner-patch-reboot P0-B): the same script is
+    also cloud-init's per-boot re-entry, so its FIRST statement is the
+    marker guard, followed by its own flock, the guard again and the
+    per-boot self-install; the marker write stays the LAST statement.
     """
 
     @given(source_ref=source_refs, target=targets,
@@ -1021,6 +1203,20 @@ class TestEphemeralUserDataWritesTheMarkerLast:
         # Written exactly once, and it is the LAST statement.
         assert len(indexes) == 1, observed
         assert indexes[0] == len(statements) - 1, observed
+
+        # Per-boot form (P0-B): the guard is the FIRST statement, the
+        # lock and the guard again follow, then the per-boot self-install;
+        # every other mention of the marker is one of those two guards.
+        assert statements[0] == "#!/bin/bash", observed
+        assert statements[1] == MARKER_GUARD, observed
+        assert statements[2].startswith("if { exec 9>>") and \
+            LOCK_PATH in statements[2] and "flock 9" in statements[2], \
+            observed
+        assert statements[3] == MARKER_GUARD, observed
+        assert PER_BOOT_PATH in statements[4] and \
+            'install -D -m 0700 "$0"' in statements[4], observed
+        assert [i for i, line in enumerate(statements)
+                if MARKER_PATH in line] == [1, 3, indexes[0]], observed
 
         marker_statement = statements[-1]
         tokens = marker_statement.split()
@@ -1105,3 +1301,186 @@ class TestEphemeralUserDataWritesTheMarkerLast:
             BASE_TIME + 140_000)
         assert decision.readiness == build_planner.READINESS_READY
         assert decision.log_path == LOG_PATH
+
+
+# ---------------------------------------------------------------------------
+# Executed: per-boot re-entry is idempotent (ephemeral-runner-patch-reboot
+# P0-B). Hermetic: every system path in the generated text is substituted
+# into a temp sandbox, apt-get is a recording stub, the repository is a
+# LOCAL bare origin, and each run gets its own session so the simulated
+# reboot (kill of the run's process group) cannot reach the test runner.
+# ---------------------------------------------------------------------------
+
+def _write(path, text, mode):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as handle:
+        handle.write(text)
+    os.chmod(path, mode)
+
+
+def _git(env, *args, cwd=None):
+    result = subprocess.run(["git", *args], cwd=cwd, env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+#: setup-build-server.sh stand-in: records each run, nothing else.
+SETUP_STUB = '#!/bin/bash\necho "setup ran" >> "$DDA_TEST_STATE/setup.log"\n'
+
+#: The same, except that its FIRST run "reboots" the host after the
+#: source sync and before the marker: every process of the bootstrap's
+#: session is killed, as a shutdown would.
+SETUP_REBOOT_STUB = (
+    '#!/bin/bash\n'
+    'if [ ! -f "$DDA_TEST_STATE/rebooted" ]; then\n'
+    '  touch "$DDA_TEST_STATE/rebooted"\n'
+    '  kill -KILL 0\n'
+    'fi\n'
+    'echo "setup ran" >> "$DDA_TEST_STATE/setup.log"\n')
+
+
+class _PerBootSandbox:
+
+    def __init__(self, root, setup_stub):
+        self.root = root
+        self.state = os.path.join(root, "state")
+        os.makedirs(self.state)
+        bin_dir = os.path.join(root, "bin")
+        _write(os.path.join(bin_dir, "apt-get"),
+               '#!/bin/bash\necho "$*" >> "$DDA_TEST_STATE/apt-get.log"\n',
+               0o755)
+        self.env = {
+            "PATH": os.pathsep.join([bin_dir, "/usr/bin", "/bin"]),
+            "HOME": os.path.join(root, "home"),
+            "DDA_TEST_STATE": self.state,
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+            "GIT_AUTHOR_NAME": "DDA Test",
+            "GIT_AUTHOR_EMAIL": "dda-test@example.invalid",
+            "GIT_COMMITTER_NAME": "DDA Test",
+            "GIT_COMMITTER_EMAIL": "dda-test@example.invalid",
+        }
+        os.makedirs(self.env["HOME"])
+        work = os.path.join(root, "origin-work")
+        _git(self.env, "init", "--quiet", work)
+        _git(self.env, "symbolic-ref", "HEAD", "refs/heads/main", cwd=work)
+        _write(os.path.join(work, "setup-build-server.sh"), setup_stub,
+               0o755)
+        _git(self.env, "add", "-A", cwd=work)
+        _git(self.env, "commit", "--quiet", "-m", "fixture", cwd=work)
+        self.origin = os.path.join(root, "origin.git")
+        _git(self.env, "clone", "--quiet", "--bare", work, self.origin)
+        self.repo_dir = os.path.join(root, "runner", "dda")
+        self.paths = {MARKER_PATH: os.path.join(root, "bootstrap.done"),
+                      LOG_PATH: os.path.join(root, "bootstrap.log"),
+                      LOCK_PATH: os.path.join(root, "bootstrap.lock"),
+                      PER_BOOT_PATH: os.path.join(root, "per-boot",
+                                                  "dda-runner-bootstrap.sh")}
+        self.marker = self.paths[MARKER_PATH]
+        self.per_boot = self.paths[PER_BOOT_PATH]
+
+    def user_data(self):
+        """The generated user data, its system paths moved into the
+        sandbox, written where cloud-init would execute it from."""
+        job = {"build_job_id": "job-per-boot", "build_target": "JP6",
+               "execution_mode": "ephemeral",
+               "config_snapshot": {"source_ref": "main"}}
+        with mock.patch.object(build_dispatcher, "BUILD_REPO_URL",
+                               self.origin):
+            text = build_dispatcher.runner_bootstrap_user_data(
+                job, repo_dir=self.repo_dir)
+        for real, local in self.paths.items():
+            assert real in text, real
+            text = text.replace(real, local)
+        path = os.path.join(self.root, "part-001")
+        _write(path, text, 0o700)
+        return path, text
+
+    def run(self, script):
+        """Run the script as cloud-init does (its path is $0)."""
+        return subprocess.run([_BASH, script], cwd=self.root, env=self.env,
+                              capture_output=True, text=True,
+                              start_new_session=True, timeout=120)
+
+    def lines(self, name):
+        path = os.path.join(self.state, name)
+        if not os.path.exists(path):
+            return []
+        with open(path) as handle:
+            return handle.read().splitlines()
+
+    def cleanup(self):
+        """A killed run leaves its build-user temp script in /tmp."""
+        for path in glob.glob("/tmp/portal-build-run.*"):
+            try:
+                with open(path) as handle:
+                    if self.root in handle.read():
+                        os.unlink(path)
+            except OSError:
+                pass
+        shutil.rmtree(self.root, ignore_errors=True)
+
+@pytest.mark.skipif(not os.path.exists(_BASH), reason="bash unavailable")
+class TestPerBootReentryIsIdempotent:
+
+    def test_running_it_twice_is_a_no_op_once_the_marker_exists(self):
+        sandbox = _PerBootSandbox(
+            tempfile.mkdtemp(prefix="dda-per-boot-"), SETUP_STUB)
+        try:
+            path, text = sandbox.user_data()
+            first = sandbox.run(path)
+            assert first.returncode == 0, first.stdout + first.stderr
+            assert os.path.exists(sandbox.marker)
+            assert sandbox.lines("setup.log") == ["setup ran"]
+            apt_calls = sandbox.lines("apt-get.log")
+            assert len(apt_calls) == 2, apt_calls
+            assert all("DPkg::Lock::Timeout=600" in c for c in apt_calls)
+            # cloud-init's per-boot copy: this very script, mode 0700.
+            assert stat.S_IMODE(os.stat(sandbox.per_boot).st_mode) == 0o700
+            with open(sandbox.per_boot) as handle:
+                assert handle.read() == text
+            with open(sandbox.paths[LOG_PATH]) as handle:
+                log = handle.read()
+
+            # Every later boot, and any re-run: a no-op.
+            for script in (sandbox.per_boot, path, sandbox.per_boot):
+                again = sandbox.run(script)
+                assert again.returncode == 0, again.stderr
+                assert (again.stdout, again.stderr) == ("", "")
+            assert sandbox.lines("setup.log") == ["setup ran"]
+            assert sandbox.lines("apt-get.log") == apt_calls
+            with open(sandbox.paths[LOG_PATH]) as handle:
+                assert handle.read() == log
+        finally:
+            sandbox.cleanup()
+
+    def test_a_reboot_partway_through_reruns_to_completion(self):
+        """The first run dies after the source sync, before the marker
+        (the patch reboot); the next boot's per-boot run finishes the
+        sync, setup-build-server.sh and the marker; the boot after that
+        is a no-op."""
+        sandbox = _PerBootSandbox(
+            tempfile.mkdtemp(prefix="dda-per-boot-"), SETUP_REBOOT_STUB)
+        try:
+            path, _ = sandbox.user_data()
+            first = sandbox.run(path)
+            assert first.returncode != 0, first.stdout + first.stderr
+            assert not os.path.exists(sandbox.marker)
+            assert os.path.isdir(os.path.join(sandbox.repo_dir, ".git"))
+            assert os.path.exists(sandbox.per_boot)
+
+            second = sandbox.run(sandbox.per_boot)
+            assert second.returncode == 0, second.stdout + second.stderr
+            assert os.path.exists(sandbox.marker)
+            assert sandbox.lines("setup.log") == ["setup ran"]
+            env = sandbox.env
+            assert _git(env, "-C", sandbox.repo_dir, "rev-parse",
+                        "--abbrev-ref", "HEAD") == "main"
+            assert _git(env, "-C", sandbox.repo_dir, "rev-parse", "HEAD") \
+                == _git(env, "--git-dir", sandbox.origin, "rev-parse", "main")
+
+            third = sandbox.run(sandbox.per_boot)
+            assert third.returncode == 0, third.stderr
+            assert sandbox.lines("setup.log") == ["setup ran"]
+        finally:
+            sandbox.cleanup()

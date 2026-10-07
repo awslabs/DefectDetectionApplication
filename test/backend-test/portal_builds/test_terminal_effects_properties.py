@@ -240,6 +240,19 @@ import build_jobs  # noqa: E402
 # pytest process get untouched moto clients.
 boto3.client = _REAL_BOTO3_CLIENT
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _settled_ssm_associations():
+    """The host-settled gate (ephemeral-runner-patch-reboot) reads SSM
+    association status, which moto does not emulate: every instance here
+    reports none (settled), so these scenarios are unchanged."""
+    with mock.patch.object(build_dispatcher, "runner_association_statuses",
+                           return_value=[]):
+        yield
+
+
 NOW = 1_786_200_000_000
 _MINUTE_MS = 60 * 1000
 _HOUR_MS = 60 * _MINUTE_MS

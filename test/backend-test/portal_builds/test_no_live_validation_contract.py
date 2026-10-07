@@ -252,11 +252,21 @@ _SERVER = {"server_id": "srv-1", "instance_id": "i-0000000000000000a",
            "repo_dir": "/home/ubuntu/DefectDetectionApplication"}
 
 
+#: The READ-ONLY association-status read a dedicated dispatch makes just
+#: before it starts a build (the host-settled check,
+#: ephemeral-runner-patch-reboot P1): no association running.
+_SETTLED_ASSOCIATIONS_READ = {
+    "describe_instance_associations_status":
+        {"InstanceAssociationStatusInfos": []},
+}
+
+
 class _Flow:
     """One representative flow driven under the failing adapters."""
 
     def __init__(self, ssm_reads=None):
-        self.ssm = RecordingFailingClient("ssm", reads=ssm_reads)
+        self.ssm = RecordingFailingClient(
+            "ssm", reads={**_SETTLED_ASSOCIATIONS_READ, **(ssm_reads or {})})
         self.ec2 = RecordingFailingClient("ec2")
         self.sns = RecordingFailingClient("sns")
         self.shell_commands = []  # mocked stop/pgrep seam captures
@@ -300,7 +310,8 @@ def _assert_no_prohibited(flow):
     # every captured provider interaction was an allow-listed READ
     for operation, _ in flow.ssm.read_calls:
         assert operation in ("get_command_invocation", "list_commands",
-                             "describe_instance_information")
+                             "describe_instance_information",
+                             "describe_instance_associations_status")
     assert flow.ec2.read_calls == []
     assert flow.sns.read_calls == []
 

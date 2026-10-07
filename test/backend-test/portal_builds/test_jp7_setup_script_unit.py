@@ -382,6 +382,29 @@ class TestErrorHandlingConventions:
 
 
 # ===========================================================================
+# dpkg lock wait on every apt-get (ephemeral-runner-patch-reboot P0-B)
+# ===========================================================================
+
+class TestAptLockWait:
+
+    def test_every_apt_get_line_carries_the_dpkg_lock_timeout(self):
+        """On a fresh instance an SSM patch run can hold the dpkg lock
+        while this script runs: every apt-get carries
+        `-o DPkg::Lock::Timeout=600` so it waits instead of failing at
+        once (comment lines excluded)."""
+        apt_lines = [(number, line) for number, line in _code_lines()
+                     if re.search(r"\bapt-get\b", line)]
+        # update, install, remove, the 18.04 build deps, the PPA update
+        # and install: the check is never vacuous.
+        assert len(apt_lines) >= 6, apt_lines
+        missing = [f"line {number + 1}: {line.strip()}"
+                   for number, line in apt_lines
+                   if "apt-get -o DPkg::Lock::Timeout=600 " not in line]
+        assert not missing, (
+            "apt-get without the dpkg lock wait: " + "; ".join(missing))
+
+
+# ===========================================================================
 # Syntax (Req 3.8: the edited script still parses)
 # ===========================================================================
 

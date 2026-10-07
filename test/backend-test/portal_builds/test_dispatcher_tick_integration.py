@@ -73,6 +73,8 @@ import sys
 import types
 from unittest import mock
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Environment BEFORE any import: build_dispatcher binds its boto3
 # resources/clients and env-derived settings at import time.
@@ -286,9 +288,36 @@ def _audits(action):
     return [entry for entry in AUDIT_EVENTS if entry["action"] == action]
 
 
+# SSM association status per instance for the host-settled gate
+# (ephemeral-runner-patch-reboot P0-A/P1). moto does not emulate
+# DescribeInstanceAssociationsStatus, so the dispatcher's client answers
+# from this table: an instance with no entry reports no association
+# (settled), which keeps every pre-existing scenario unchanged. A value
+# is a list of (document name, status) pairs, or a ClientError to raise.
+_ASSOCIATIONS = {}
+
+
+def _describe_associations(InstanceId, **kwargs):
+    entry = _ASSOCIATIONS.get(InstanceId, [])
+    if isinstance(entry, Exception):
+        raise entry
+    return {"InstanceAssociationStatusInfos": [
+        {"Name": name, "InstanceId": InstanceId, "Status": status}
+        for name, status in entry]}
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _scripted_ssm_associations():
+    with mock.patch.object(build_dispatcher.ssm,
+                           "describe_instance_associations_status",
+                           side_effect=_describe_associations):
+        yield
+
+
 def _setup():
     _clear_tables()
     del AUDIT_EVENTS[:]
+    _ASSOCIATIONS.clear()
 
 
 _CLEAN_PGREP = ""  # no build process found (Req 7.5 clean verification)
@@ -1418,4 +1447,214 @@ class TestScheduledCommandReconciliation:
         assert job["status"] == build_domain.STATUS_SUCCEEDED
         assert job["ended_at"] == NOW + 30_000
         assert "error" not in job
+
+
+# ---------------------------------------------------------------------------
+# Host-settled gate: no agent command while an SSM association is still
+# running on the runner (ephemeral-runner-patch-reboot P0-A)
+# ---------------------------------------------------------------------------
+
+_PATCH_DOC = "AWS-RunPatchBaseline"
+_AGENT_UPDATE_DOC = "AWS-UpdateSSMAgent"
+
+
+def _agent_commands_on(instance_id):
+    """Every (moto) SSM command sent to ``instance_id``. run_shell_sync
+    is stubbed in these scenarios, so each one is an agent SendCommand."""
+    return [command for command in _SSM.list_commands()["Commands"]
+            if instance_id in command.get("InstanceIds", [])]
+
+
+def _provisioned_runner(job_id, budget_minutes=20):
+    """Tick 1 for one ephemeral job: queued -> provisioning + runner."""
+    _seed_job(job_id, build_domain.STATUS_QUEUED,
+              build_domain.EXECUTION_MODE_EPHEMERAL,
+              build_target=build_domain.TARGET_JP5,
+              config_snapshot={"max_runtime_hours": 4,
+                               "bootstrap_timeout_minutes": budget_minutes})
+    build_dispatcher.run_tick(now=NOW)
+    job = _get_job(job_id)
+    assert job["status"] == build_domain.STATUS_PROVISIONING
+    return job["runner"]["instance_id"]
+
+
+def _bootstrapped_tick(now):
+    """A tick on which the runner is SSM Online with its marker present."""
+    with mock.patch.object(build_dispatcher, "instance_ssm_online",
+                           return_value=True), \
+            mock.patch.object(
+                build_dispatcher, "run_shell_sync",
+                side_effect=_shell_sync_router(_MARKER_OBSERVED)):
+        build_dispatcher.run_tick(now=now)
+
+
+class TestHostSettledGate:
+
+    def setup_method(self):
+        _setup()
+
+    def test_patch_run_in_progress_holds_the_agent_until_it_settles(self):
+        """Marker present but AWS-RunPatchBaseline InProgress -> no
+        SendCommand; the next tick it is Success -> exactly one, with the
+        settle evidence recorded on the job."""
+        instance_id = _provisioned_runner("job-settle")
+        _ASSOCIATIONS[instance_id] = [(_AGENT_UPDATE_DOC, "Success"),
+                                      (_PATCH_DOC, "InProgress")]
+        _bootstrapped_tick(NOW + 3 * _MINUTE_MS)
+
+        job = _get_job("job-settle")
+        assert job["status"] == build_domain.STATUS_PROVISIONING
+        assert "ssm" not in job
+        assert "bootstrap" not in job
+        assert _agent_commands_on(instance_id) == []
+
+        # The patch run (and its post-reboot resume) has finished.
+        _ASSOCIATIONS[instance_id] = [(_AGENT_UPDATE_DOC, "Success"),
+                                      (_PATCH_DOC, "Success")]
+        settled_at = NOW + 4 * _MINUTE_MS
+        _bootstrapped_tick(settled_at)
+
+        job = _get_job("job-settle")
+        commands = _agent_commands_on(instance_id)
+        assert len(commands) == 1
+        assert job["ssm"]["command_id"] == commands[0]["CommandId"]
+        assert "portal-build-agent.sh" in \
+            commands[0]["Parameters"]["commands"][0]
+        assert job["bootstrap"]["marker_at"] == settled_at
+        assert job["bootstrap"]["settled_at"] == settled_at
+        assert job["bootstrap"]["associations"] == [
+            {"name": _AGENT_UPDATE_DOC, "status": "Success"},
+            {"name": _PATCH_DOC, "status": "Success"}]
+
+        # Agent already dispatched: no second SendCommand, ever.
+        _bootstrapped_tick(settled_at + _MINUTE_MS)
+        assert len(_agent_commands_on(instance_id)) == 1
+
+    def test_still_running_past_the_budget_fails_and_releases_the_runner(
+            self):
+        """Past the bootstrap budget with the association still running:
+        BOOTSTRAP_TIMEOUT naming it, no agent command, runner terminated."""
+        instance_id = _provisioned_runner("job-unsettled")
+        _ASSOCIATIONS[instance_id] = [(_PATCH_DOC, "InProgress")]
+        deadline = NOW + 20 * _MINUTE_MS
+
+        _bootstrapped_tick(deadline)  # at the deadline: still waiting
+        assert _get_job("job-unsettled")["status"] == \
+            build_domain.STATUS_PROVISIONING
+
+        _bootstrapped_tick(deadline + 1)  # strictly past it
+        job = _get_job("job-unsettled")
+        assert job["status"] == build_domain.STATUS_FAILED
+        assert job["error"]["code"] == \
+            build_dispatcher.ERROR_BOOTSTRAP_TIMEOUT
+        assert f"{_PATCH_DOC} (InProgress)" in job["error"]["message"]
+        assert _agent_commands_on(instance_id) == []
+        assert _instance_state(instance_id) in ("shutting-down",
+                                                "terminated")
+        audits = _audits("build_bootstrap_timeout")
+        assert len(audits) == 1
+        assert audits[0]["details"]["stage"] == "bootstrap"
+
+
+# ---------------------------------------------------------------------------
+# Advisory host-settled deferral of a dedicated dispatch
+# (ephemeral-runner-patch-reboot P1): capped, fail open, never a failure
+# ---------------------------------------------------------------------------
+
+def _dedicated_tick(now):
+    with mock.patch.object(build_dispatcher, "run_shell_sync",
+                           return_value=_CLEAN_PGREP):
+        build_dispatcher.run_tick(now=now)
+
+
+class TestDedicatedSettleDeferral:
+
+    def setup_method(self):
+        _setup()
+
+    def test_defers_while_in_progress_then_dispatches_after_success(self):
+        """InProgress -> deferred (queued, advisory recorded, allocation
+        kept, the follower stays queued, nothing sent); Success at the
+        next re-verification -> dispatched once."""
+        instance_id = _seed_server("srv-p", name="arm-server-patching")
+        _seed_job("job-p1", build_domain.STATUS_QUEUED,
+                  build_domain.EXECUTION_MODE_DEDICATED, server_id="srv-p",
+                  created_at=NOW - 2 * _MINUTE_MS)
+        _seed_job("job-p2", build_domain.STATUS_QUEUED,
+                  build_domain.EXECUTION_MODE_DEDICATED, server_id="srv-p",
+                  created_at=NOW - _MINUTE_MS)
+        _ASSOCIATIONS[instance_id] = [(_PATCH_DOC, "InProgress")]
+
+        _dedicated_tick(NOW)
+
+        job = _get_job("job-p1")
+        assert job["status"] == build_domain.STATUS_QUEUED
+        assert job["deferred_at"] == NOW
+        assert "ssm" not in job and "error" not in job
+        assert job["host_settle"]["deferral_started_at"] == NOW
+        assert f"{_PATCH_DOC} (InProgress)" in \
+            job["host_settle"]["advisory"]
+        # The per-server single-build lock is kept by the deferred job.
+        assert _get_server("srv-p")["running_build_job_id"] == "job-p1"
+        assert _get_job("job-p2")["status"] == build_domain.STATUS_QUEUED
+        assert _agent_commands_on(instance_id) == []
+
+        _ASSOCIATIONS[instance_id] = [(_PATCH_DOC, "Success")]
+        later = NOW + build_planner.PREDISPATCH_RETRY_INTERVAL_MS
+        _dedicated_tick(later)
+
+        job = _get_job("job-p1")
+        assert job["status"] == build_domain.STATUS_BUILDING
+        commands = _agent_commands_on(instance_id)
+        assert len(commands) == 1
+        assert job["ssm"]["command_id"] == commands[0]["CommandId"]
+        assert job["host_settle"]["deferral_started_at"] is None
+        assert "5-minute deferral" in job["host_settle"]["advisory"]
+        assert _get_server("srv-p")["running_build_job_id"] == "job-p1"
+        assert _get_job("job-p2")["status"] == build_domain.STATUS_QUEUED
+
+    def test_dispatches_after_the_cap_with_an_advisory(self):
+        instance_id = _seed_server("srv-c", name="arm-server-stuck")
+        _seed_job("job-c1", build_domain.STATUS_QUEUED,
+                  build_domain.EXECUTION_MODE_DEDICATED, server_id="srv-c")
+        _ASSOCIATIONS[instance_id] = [(_PATCH_DOC, "Pending")]
+        cap = build_planner.DEDICATED_SETTLE_DEFERRAL_CAP_MS
+        interval = build_planner.PREDISPATCH_RETRY_INTERVAL_MS
+
+        _dedicated_tick(NOW)            # the deferral starts
+        _dedicated_tick(NOW + cap)      # at the cap: still deferred
+        job = _get_job("job-c1")
+        assert job["status"] == build_domain.STATUS_QUEUED
+        assert job["deferred_at"] == NOW + cap
+        assert job["host_settle"]["deferral_started_at"] == NOW
+        assert _agent_commands_on(instance_id) == []
+
+        _dedicated_tick(NOW + cap + interval)  # past it: dispatched
+        job = _get_job("job-c1")
+        assert job["status"] == build_domain.STATUS_BUILDING
+        assert "error" not in job
+        assert len(_agent_commands_on(instance_id)) == 1
+        advisory = job["host_settle"]["advisory"]
+        assert f"{build_planner.DEDICATED_SETTLE_DEFERRAL_CAP_MINUTES}" \
+               f"-minute" in advisory
+        assert f"{_PATCH_DOC} (Pending)" in advisory
+
+    def test_an_unreadable_status_does_not_defer(self):
+        """Fail open: the read errors -> dispatched at once, advisory
+        recorded (the working dedicated path is unchanged)."""
+        instance_id = _seed_server("srv-e", name="arm-server-no-read")
+        _seed_job("job-e1", build_domain.STATUS_QUEUED,
+                  build_domain.EXECUTION_MODE_DEDICATED, server_id="srv-e")
+        _ASSOCIATIONS[instance_id] = ClientError(
+            {"Error": {"Code": "AccessDeniedException",
+                       "Message": "not authorized"}},
+            "DescribeInstanceAssociationsStatus")
+
+        _dedicated_tick(NOW)
+
+        job = _get_job("job-e1")
+        assert job["status"] == build_domain.STATUS_BUILDING
+        assert len(_agent_commands_on(instance_id)) == 1
+        assert "could not be read" in job["host_settle"]["advisory"]
+        assert "deferred_at" not in job
 
