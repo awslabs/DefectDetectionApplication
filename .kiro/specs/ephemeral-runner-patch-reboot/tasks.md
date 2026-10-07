@@ -67,9 +67,9 @@ Ship P0-A, P0-B and P1 together (owner-approved, Ryan Vanderwerf,
 
 - [x] 8. Commit on `spec/ephemeral-runner-patch-reboot`
 
-- [ ] 9. Rebase, push and merge (later workflow step)
+- [x] 9. Rebase, push and merge (later workflow step)
 
-- [ ] 10. Portal deploy (later step): not while a component build runs;
+- [x] 10. Portal deploy (later step): not while a component build runs;
   afterwards move `cdk.out` aside and re-run the guard pair. Record the
   deploy evidence in `verification-notes.md`.
 

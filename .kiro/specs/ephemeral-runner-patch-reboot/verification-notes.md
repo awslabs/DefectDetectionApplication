@@ -129,6 +129,53 @@ program and alias tokens; the pattern itself is kept out of the repo) over
 
 ## Deploy evidence
 
-To be filled in by the deploy step (Portal deploy, `cdk.out` moved aside,
-guard pair re-run, first ephemeral build on a fresh runner).
+Ship step, 2026-10-07 UTC, us-east-1, umask 0002. Full record in the
+workflow's `ship-evidence.md` (outside the repo).
+
+- Rebase: `origin/integration/all-specs` was still `86ddf49` at 05:21Z,
+  the branch's base, so no rebase or re-test was needed.
+- Build gate: `dda-portal-build-jobs` held 0 jobs outside the terminal set
+  (succeeded, failed, interrupted, cancelled) of 188 at 05:21Z and again
+  at 05:36Z, right before the deploy. `ed2bb0c2…` had succeeded. No build,
+  SSM command or build server was touched.
+- Deployed code before: the build handlers' bundle differed from this
+  branch's `backend/functions` in exactly `build_dispatcher.py`,
+  `build_fleet.py` and `build_planner.py`. No other undeployed trunk
+  commit touches a Portal asset.
+- `cdk diff --all` (cloudFrontDomain from FrontendStack,
+  `portalRegistryEnforced=true`): BuildFleetStack adds
+  `ssm:DescribeInstanceAssociationsStatus` (`*`) to the BuildDispatcher
+  and BuildJobs default policies (2 `+` rows, no `-` row); every function
+  on the shared `backend/functions` asset gets new Code. Otherwise noise
+  only: the two `Timestamp` custom resources, the ApiGateway nested
+  TemplateURL, the two imaging layer versions (built `python/` equals
+  deployed v18 byte for byte) and the Quick Setup bucket deployment's
+  source key (all 5 files equal the live objects). No data store
+  replacement, no IAM removal.
+- Quick Setup: synth and deploy printed
+  `setup-bundle.tar.gz (sha256=b367e915…c078)`, the live value.
+  JwtLayer not built; it stays as deployed.
+- Push: `spec/ephemeral-runner-patch-reboot` pushed (new branch), then
+  fast-forward `86ddf49..df80db4` to `integration/all-specs`. Public-repo
+  grep empty before each push. `remediation` not pushed.
+- Deploy: `./deploy-infrastructure.sh` 05:37:27 to 05:52:13Z, rc 0, 8/8
+  stacks `✅` (Auth, Storage, Frontend no changes). 0
+  `CREATE_FAILED|UPDATE_FAILED|UPDATE_ROLLBACK` lines. All 16 portal
+  stacks `UPDATE_COMPLETE`; BuildFleetStack updated 05:48:32Z.
+- After: the deployed functions tree equals this branch's
+  (`diff -rq --exclude=__pycache__` clean); sha256 of
+  `build_dispatcher.py` `26cf986d…`, `build_fleet.py` `ec395d74…`,
+  `build_planner.py` `8020436e…`, each equal to the branch. The
+  dispatcher role's default policy carries
+  `ssm:DescribeInstanceAssociationsStatus`. `PORTAL_REGISTRY_ENFORCED`
+  is `true` on all 54 handlers that set it; `QuickSetupHandler`'s
+  environment is unchanged (`QUICK_SETUP_BUNDLE_SHA256` `b367e915…c078`),
+  and the live bundle object hashes to the same value.
+- Dispatcher watch 05:48:59 to 06:04:59Z: 17 ticks, each "Dispatcher tick
+  complete: {jobs: 188, servers: 9}"; no ERROR, Traceback, AccessDenied or
+  timeout; CloudWatch Errors 0. No job was queued in the window, so the
+  new association read has not yet run live (review finding 4, task 11).
+- `cdk.out` moved to `cdk.out.bak-20261007T060058Z`; guard pair: 4 passed,
+  3 skipped (no cdk.out copies present). The main clone's `cdk.out*` set
+  is unchanged.
 
