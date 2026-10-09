@@ -194,6 +194,20 @@ import build_planner  # noqa: E402
 import build_source  # noqa: E402
 import build_dispatcher  # noqa: E402
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _settled_ssm_associations():
+    """moto does not emulate DescribeInstanceAssociationsStatus, the
+    host-settled gate's read (ephemeral-runner-patch-reboot): every
+    instance reports no association, i.e. settled, so the scenarios
+    below are unchanged."""
+    with mock.patch.object(
+            build_dispatcher.ssm, "describe_instance_associations_status",
+            return_value={"InstanceAssociationStatusInfos": []}):
+        yield
+
 
 # ---------------------------------------------------------------------------
 # Helpers (sibling conventions)

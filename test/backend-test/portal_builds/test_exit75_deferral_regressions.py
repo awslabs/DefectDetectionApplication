@@ -188,6 +188,17 @@ import build_planner  # noqa: E402
 import build_reconciliation as br  # noqa: E402
 import build_dispatcher  # noqa: E402
 
+
+@pytest.fixture(autouse=True, scope="module")
+def _settled_ssm_associations():
+    """The host-settled gate (ephemeral-runner-patch-reboot) reads SSM
+    association status, which moto does not emulate: every instance here
+    reports none (settled), so these scenarios are unchanged."""
+    with mock.patch.object(build_dispatcher, "runner_association_statuses",
+                           return_value=[]):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Incident constants (bugfix.md Introduction; 2026-09-09)
 # ---------------------------------------------------------------------------

@@ -376,9 +376,17 @@ class TestEphemeralUserDataRunsAsUbuntu:
         marker = build_planner.BOOTSTRAP_MARKER_PATH
         assert statements[-1] == f"touch {shlex.quote(marker)} || true"
         # Outside the body: after the sudo execution and the status
-        # capture, and the marker path appears exactly once.
+        # capture, and the marker is WRITTEN exactly once. Its only other
+        # mentions are the two per-boot re-entry guards
+        # (ephemeral-runner-patch-reboot P0-B), which test for it, run as
+        # root ahead of everything else, and never write it.
         assert user_data.index(SUDO_LINE) < user_data.index(statements[-1])
-        assert user_data.count(marker) == 1
+        assert user_data.count(f"touch {shlex.quote(marker)}") == 1
+        guard = f"[ -f {shlex.quote(marker)} ] && exit 0"
+        assert statements[1] == guard
+        assert user_data.count(guard) == 2
+        assert user_data.count(marker) == 3
+        assert user_data.rindex(guard) < user_data.index(SUDO_LINE)
 
     def test_classified_sync_exit_gates_the_marker(self):
         """The 65/66 propagation sits between the body execution and the

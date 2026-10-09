@@ -470,6 +470,9 @@ def _drive_dedicated_dispatch(job, server, now=1_754_500_000_000):
         "audit": _Recorder(None),
         # pre-dispatch verification (mocked pgrep: clean)
         "run_shell_sync": _Recorder(""),
+        # host-settled read (ephemeral-runner-patch-reboot P1): no SSM
+        # association running on the server
+        "runner_association_statuses": _Recorder([]),
     }
     with mock.patch.multiple(build_dispatcher, **recorders):
         build_dispatcher.verify_and_start_dedicated(job, server, now)
@@ -529,6 +532,9 @@ class TestProperty12ZeroCostlyWorkOnInvalidContracts:
         assert recorders["run_runner_instance"].calls == []
         assert recorders["send_shell_command"].calls == []
         assert len(recorders["run_shell_sync"].calls) == 1  # pgrep only
+        # The host-settled check sits after the preflight: an invalid
+        # contract never reads the association status.
+        assert recorders["runner_association_statuses"].calls == []
 
         # The stable terminal outcome through the common flow (Req 2.8):
         # exactly one failed transition, never queued -> building.

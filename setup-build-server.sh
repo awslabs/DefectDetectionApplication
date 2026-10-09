@@ -123,13 +123,18 @@ done
 echo "✓ apt sources repointed to canonical mirrors, IPv4 forced"
 
 echo "▶ Updating package manager..."
-run_cmd "sudo apt-get update" || true
+# Every apt-get carries DPkg::Lock::Timeout=600: on a fresh instance an
+# SSM patch run can hold the dpkg lock, and install/remove then wait up
+# to 600 s for it instead of failing at once. (apt does not apply the
+# option to the lists lock `apt-get update` takes; that failure stays
+# tolerated, as before.)
+run_cmd "sudo apt-get -o DPkg::Lock::Timeout=600 update" || true
 
 echo "▶ Installing system dependencies..."
-run_cmd "sudo apt-get install -y python3 python3-pip nodejs npm git curl snapd zip" || add_warning "Some system packages failed to install"
+run_cmd "sudo apt-get -o DPkg::Lock::Timeout=600 install -y python3 python3-pip nodejs npm git curl snapd zip" || add_warning "Some system packages failed to install"
 
 echo "▶ Removing old Docker packages from apt..."
-run_cmd "sudo apt-get remove -y docker.io docker-compose" || true
+run_cmd "sudo apt-get -o DPkg::Lock::Timeout=600 remove -y docker.io docker-compose" || true
 
 echo "▶ Installing Docker via snap..."
 if ! command -v docker >/dev/null 2>&1; then
@@ -210,7 +215,7 @@ if ! command -v python3.11 >/dev/null 2>&1; then
     UBUNTU_VERSION=$(lsb_release -rs)
     if [ "$UBUNTU_VERSION" = "18.04" ]; then
         echo "  Building Python 3.11 from source (Ubuntu 18.04)..."
-        run_cmd "sudo apt-get install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget" || add_warning "Failed to install build dependencies"
+        run_cmd "sudo apt-get -o DPkg::Lock::Timeout=600 install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget" || add_warning "Failed to install build dependencies"
         
         if [ ! -d /tmp/Python-3.11.9 ]; then
             run_cmd "cd /tmp && wget --tries=5 --waitretry=30 --retry-on-http-error=429,500,502,503 https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz" || add_error "Failed to download Python 3.11"
@@ -223,8 +228,8 @@ if ! command -v python3.11 >/dev/null 2>&1; then
     else
         echo "  Installing Python 3.11 from PPA..."
         run_cmd "sudo add-apt-repository ppa:deadsnakes/ppa -y" || add_warning "Failed to add deadsnakes PPA"
-        run_cmd "sudo apt-get update" || add_warning "Failed to update package manager"
-        run_cmd "sudo apt-get install -y python3.11 python3.11-venv python3.11-dev" || add_error "Failed to install Python 3.11"
+        run_cmd "sudo apt-get -o DPkg::Lock::Timeout=600 update" || add_warning "Failed to update package manager"
+        run_cmd "sudo apt-get -o DPkg::Lock::Timeout=600 install -y python3.11 python3.11-venv python3.11-dev" || add_error "Failed to install Python 3.11"
     fi
     
     # Set as default

@@ -206,6 +206,21 @@ import build_domain  # noqa: E402
 import build_planner  # noqa: E402
 import build_dispatcher  # noqa: E402
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _settled_ssm_associations():
+    """moto does not emulate DescribeInstanceAssociationsStatus, the
+    host-settled gate's read (ephemeral-runner-patch-reboot): every
+    instance reports no association, i.e. settled, so the scenarios
+    below are unchanged."""
+    with mock.patch.object(
+            build_dispatcher.ssm, "describe_instance_associations_status",
+            return_value={"InstanceAssociationStatusInfos": []}):
+        yield
+
+
 # The env knobs above are all bound by the imports; drop the ones this
 # file customized so later-collected sibling modules importing fresh
 # copies see a clean environment.
@@ -292,7 +307,14 @@ def frozen_runner_bootstrap(repo_url, repo_dir, source_ref, region):
     line gained zip/unzip so build-custom.sh's packaging step (ZIP_MEMBERS
     zip + `zip -T`) stops dying with exit 127 on fresh runners (the job
     53312133 incident). Only that one line changed; the oracle stays
-    byte-level and must not be weakened."""
+    byte-level and must not be weakened.
+
+    CONSCIOUS RE-RECORD (ephemeral-runner-patch-reboot, 2026-10-07): the
+    script now opens with its per-boot re-entry lines (marker guard, own
+    flock, guard again, per-boot self-install) so a reboot partway
+    through re-runs it, and the root apt line carries the dpkg lock wait
+    (`-o DPkg::Lock::Timeout=600`). Nothing else changed; the oracle
+    stays byte-level."""
     qdir = shlex.quote(repo_dir)
     body = ['export HOME="${HOME:-/home/ubuntu}"']
     if region:
@@ -304,6 +326,14 @@ def frozen_runner_bootstrap(repo_url, repo_dir, source_ref, region):
     body += ["bash ./setup-build-server.sh"]
     return "\n".join([
         "#!/bin/bash",
+        "[ -f /var/log/dda-build-server-bootstrap.done ] && exit 0",
+        "if { exec 9>>/var/lock/dda-runner-bootstrap.lock; } "
+        "2>/dev/null; then flock 9; fi",
+        "[ -f /var/log/dda-build-server-bootstrap.done ] && exit 0",
+        'if [ "$0" != /var/lib/cloud/scripts/per-boot/'
+        'dda-runner-bootstrap.sh ] && [ -f "$0" ]; then install -D -m '
+        '0700 "$0" /var/lib/cloud/scripts/per-boot/dda-runner-bootstrap.sh'
+        " 2>/dev/null || true; fi",
         "set -uo pipefail",
         "BOOTSTRAP_LOG=/var/log/dda-build-server-bootstrap.log",
         'if : > "$BOOTSTRAP_LOG" 2>/dev/null; then',
@@ -311,7 +341,8 @@ def frozen_runner_bootstrap(repo_url, repo_dir, source_ref, region):
         "fi",
         'export HOME="${HOME:-/root}"',
         "export DEBIAN_FRONTEND=noninteractive",
-        "apt-get update -y && apt-get install -y git zip unzip",
+        "apt-get -o DPkg::Lock::Timeout=600 update -y && "
+        "apt-get -o DPkg::Lock::Timeout=600 install -y git zip unzip",
         'mkdir -p "$(dirname %s)"' % qdir,
         'chown ubuntu:ubuntu "$(dirname %s)" 2>/dev/null || true' % qdir,
         "if [ -d %s ]; then chown -R ubuntu:ubuntu %s 2>/dev/null || true; fi"

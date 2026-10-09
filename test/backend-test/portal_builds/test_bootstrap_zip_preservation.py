@@ -179,6 +179,23 @@ FROZEN_MARKER_STATEMENT = \
 #: The canonical token the ONE fix-touchable line is normalized to.
 APT_TOKEN = "@@ROOT_APT_INSTALL@@"
 
+#: CONSCIOUS RE-RECORD (ephemeral-runner-patch-reboot, 2026-10-07): the
+#: runner bootstrap now opens with its per-boot re-entry lines (marker
+#: guard, own flock, guard again, per-boot self-install), and every root
+#: apt-get carries the dpkg lock wait. Spelled out literally, like every
+#: other frozen value here; nothing else in either oracle changed.
+FROZEN_APT_LOCK_WAIT = "-o DPkg::Lock::Timeout=600"
+FROZEN_RUNNER_REENTRY_LINES = [
+    "[ -f /var/log/dda-build-server-bootstrap.done ] && exit 0",
+    "if { exec 9>>/var/lock/dda-runner-bootstrap.lock; } 2>/dev/null; "
+    "then flock 9; fi",
+    "[ -f /var/log/dda-build-server-bootstrap.done ] && exit 0",
+    'if [ "$0" != /var/lib/cloud/scripts/per-boot/dda-runner-bootstrap.sh'
+    ' ] && [ -f "$0" ]; then install -D -m 0700 "$0" '
+    "/var/lib/cloud/scripts/per-boot/dda-runner-bootstrap.sh 2>/dev/null "
+    "|| true; fi",
+]
+
 
 # ---------------------------------------------------------------------------
 # Normalization: the root apt-get install line -> canonical token,
@@ -261,7 +278,7 @@ def frozen_fleet_bootstrap_normalized(repo_url, repo_dir, source_ref):
         "fi",
         "",
         "export DEBIAN_FRONTEND=noninteractive",
-        "apt-get update",
+        f"apt-get {FROZEN_APT_LOCK_WAIT} update",
         APT_TOKEN,
         "",
         "# Clone the source repository for the build agent (design §2/§5).",
@@ -298,9 +315,9 @@ def frozen_runner_bootstrap_normalized(repo_url, repo_dir, source_ref,
     """The ephemeral runner bootstrap, normalized: every line
     ``build_dispatcher.runner_bootstrap_user_data(job, repo_dir)`` emits,
     with the root apt install line as APT_TOKEN. Root prologue order as
-    recorded: log redirect -> HOME export -> apt -> parent prepare /
-    ownership heal -> build-user body -> classified sync exits ->
-    marker LAST."""
+    recorded: (re-recorded) per-boot re-entry lines -> log redirect ->
+    HOME export -> apt -> parent prepare / ownership heal -> build-user
+    body -> classified sync exits -> marker LAST."""
     qdir = shlex.quote(repo_dir)
     body = ['export HOME="${HOME:-/home/ubuntu}"']
     if region:
@@ -313,6 +330,7 @@ def frozen_runner_bootstrap_normalized(repo_url, repo_dir, source_ref,
     body += ["bash ./setup-build-server.sh"]
     return "\n".join([
         "#!/bin/bash",
+        *FROZEN_RUNNER_REENTRY_LINES,
         "set -uo pipefail",
         FROZEN_LOG_LINE,
         'if : > "$BOOTSTRAP_LOG" 2>/dev/null; then',
@@ -518,6 +536,7 @@ class TestRunnerBootstrapPreservation:
         normalized = normalize_bootstrap(text)
         lines = normalized.splitlines()
         order = [
+            lines.index(FROZEN_RUNNER_REENTRY_LINES[0]),
             lines.index(FROZEN_LOG_LINE),
             lines.index('export HOME="${HOME:-/root}"'),
             lines.index(APT_TOKEN),

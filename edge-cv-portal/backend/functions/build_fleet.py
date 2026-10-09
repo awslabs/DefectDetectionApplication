@@ -288,6 +288,11 @@ INITIATED_STATE_AFTER_ACTION = {
 #: `zip: command not found` (exit 127) at the packaging step after ~1.5h
 #: of successful work on a freshly bootstrapped server.
 #:
+#: Both apt-get lines carry `DPkg::Lock::Timeout=600`, so the install
+#: waits up to 600 s for the dpkg lock instead of failing at once while an
+#: SSM patch run holds it (spec ephemeral-runner-patch-reboot, P0-B; apt
+#: does not apply the option to the lists lock `apt-get update` takes).
+#:
 #: Placeholders, all bound by `_user_data_body()`:
 #:   `{repo_dir}`     the clone location, fed from the shared resolver
 #:                    (Req 5.2) — never a literal;
@@ -313,8 +318,8 @@ if : > "$BOOTSTRAP_LOG" 2>/dev/null; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y git zip unzip
+apt-get -o DPkg::Lock::Timeout=600 update
+apt-get -o DPkg::Lock::Timeout=600 install -y git zip unzip
 
 # Clone the source repository for the build agent (design §2/§5).
 sudo -u ubuntu -H git clone {repo_url} {repo_dir}

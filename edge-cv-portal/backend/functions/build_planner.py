@@ -1015,6 +1015,15 @@ _BOOTSTRAP_DONE_FALSE_VALUES = frozenset({'0', 'false', 'no'})
 # only — current configuration is NEVER consulted here (Req 9.3).
 DEFAULT_BOOTSTRAP_TIMEOUT_MINUTES = 20
 
+# Cap on the advisory host-settled deferral of a DEDICATED dispatch,
+# measured from when that deferral started (spec
+# .kiro/specs/ephemeral-runner-patch-reboot, P1). Past it the build is
+# dispatched anyway with an advisory: a dedicated job is never failed for
+# a running SSM association.
+DEDICATED_SETTLE_DEFERRAL_CAP_MINUTES = 30
+DEDICATED_SETTLE_DEFERRAL_CAP_MS = \
+    DEDICATED_SETTLE_DEFERRAL_CAP_MINUTES * _MS_PER_MINUTE
+
 # Readiness decision outcomes
 READINESS_READY = 'ready'      # marker observed: the agent command may be sent
 READINESS_WAIT = 'wait'        # marker absent, at or below the budget (6.2)
@@ -1188,4 +1197,218 @@ def decide_runner_readiness(
             f"Ephemeral_Build_Runner bootstrap did not complete within "
             f"{limit_minutes:g} minutes; bootstrap log: {log_path}"
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Host-settled gate — no SSM association still running on the instance
+# (spec .kiro/specs/ephemeral-runner-patch-reboot, P0-A and P1)
+# ---------------------------------------------------------------------------
+
+# SSM association statuses that mean an association is still running on
+# the instance, compared case-insensitively. Every other status (Success,
+# Failed, Skipped, or anything unrecognized) never blocks: a failed patch
+# run leaves no reboot pending. An account-level patch association
+# (AWS-RunPatchBaseline, Install, RebootIfNeeded) stays InProgress from
+# the instance's registration through its reboot and the post-reboot
+# resume, so waiting on these covers the reboot as well. ALL associations
+# are waited on, not a list of documents: the account-managed set lives
+# outside this repository and changes without notice.
+ASSOCIATION_RUNNING_STATUSES = frozenset({'pending', 'inprogress'})
+
+
+def running_associations(
+    statuses: Optional[Iterable[Tuple[Any, Any]]],
+) -> Tuple[str, ...]:
+    """``'<name> (<status>)'`` for every association in ``statuses`` (the
+    ``(name, status)`` pairs the dispatcher read) that is still Pending
+    or InProgress, in the order read; empty when none is (or when
+    ``statuses`` is None — the caller decides what unreadable means)."""
+    running = []
+    for name, status in statuses or ():
+        text = str(status or '').strip()
+        if text.lower() in ASSOCIATION_RUNNING_STATUSES:
+            running.append(f"{name} ({text})")
+    return tuple(running)
+
+
+class HostSettledDecision(NamedTuple):
+    """Host-settled gate decision for one Ephemeral_Build_Runner whose
+    Bootstrap_Marker has already been observed (P0-A).
+
+    - ``readiness``: READINESS_READY (no association Pending or
+      InProgress), READINESS_WAIT (one still running, or the status could
+      not be read, at or below the budget) or READINESS_TIMEOUT (strictly
+      past it)
+    - ``build_job_id``: the job the decision is about
+    - ``running``: ``'<name> (<status>)'`` per association still running
+    - ``statuses_read``: False when the association status was unreadable
+    - ``log_path``: the documented bootstrap log, recorded by the shared
+      bootstrap-timeout failure path
+    - ``deadline`` / ``timeout_minutes``: the SAME bootstrap budget
+      ``decide_runner_readiness`` applies
+    - ``error``: the bootstrap-stage error naming the associations still
+      running (None unless timed out)
+    """
+    readiness: str
+    build_job_id: str
+    running: Tuple[str, ...]
+    statuses_read: bool
+    log_path: str
+    deadline: Optional[int]
+    timeout_minutes: Any
+    error: Optional[str]
+
+
+def decide_host_settled(
+    job: Dict[str, Any],
+    statuses: Optional[Iterable[Tuple[Any, Any]]],
+    now: int,
+) -> HostSettledDecision:
+    """Decide whether a bootstrapped runner has SETTLED (pure, P0-A).
+
+    The Bootstrap_Marker only means the user data finished; an
+    account-level patch association can still be running and reboot the
+    host minutes later, mid-build. So after ``decide_runner_readiness``
+    returns READY, the agent command additionally waits for this gate.
+
+    ``statuses`` is the ``(name, status)`` list the dispatcher read for
+    the instance, or None when the read failed.
+
+    - No association Pending/InProgress -> READY (an empty list too).
+    - One still running, or ``statuses`` None (fail-safe: the gate never
+      opens on an unreadable status), at or below the budget -> WAIT.
+    - Otherwise strictly past the budget -> TIMEOUT, with an error naming
+      the associations still running (or the unreadable status), failed
+      through the same bootstrap-timeout path as an absent marker.
+
+    Budget, deadline and boundary are ``decide_runner_readiness``'s:
+    ``bootstrap_timeout_minutes`` from the job's own ``config_snapshot``
+    (default 20) measured from ``dispatched_at``, strict ``now >
+    deadline``; a missing ``dispatched_at`` is WAIT.
+    """
+    limit_ms = bootstrap_timeout_ms(job.get('config_snapshot'))
+    limit_minutes = limit_ms / _MS_PER_MINUTE
+    dispatched_at = job.get('dispatched_at')
+    deadline = None if dispatched_at is None else dispatched_at + limit_ms
+    statuses_read = statuses is not None
+    running = running_associations(statuses)
+
+    if statuses_read and not running:
+        readiness, error = READINESS_READY, None
+    elif deadline is None or not now > deadline:
+        readiness, error = READINESS_WAIT, None
+    else:
+        readiness = READINESS_TIMEOUT
+        cause = (
+            f"SSM association(s) still running: {', '.join(running)}"
+            if statuses_read else
+            "its SSM association status could not be read")
+        error = (
+            f"Ephemeral_Build_Runner did not settle within "
+            f"{limit_minutes:g} minutes: {cause}; bootstrap log: "
+            f"{BOOTSTRAP_LOG_PATH}")
+    return HostSettledDecision(
+        readiness=readiness,
+        build_job_id=job['build_job_id'],
+        running=running,
+        statuses_read=statuses_read,
+        log_path=BOOTSTRAP_LOG_PATH,
+        deadline=deadline,
+        timeout_minutes=limit_minutes,
+        error=error,
+    )
+
+
+class DedicatedSettleDecision(NamedTuple):
+    """Advisory host-settled deferral for one dedicated dispatch (P1).
+
+    - ``action``: PREDISPATCH_START or PREDISPATCH_DEFER
+    - ``build_job_id``: the job the decision is about
+    - ``running``: ``'<name> (<status>)'`` per association still running
+    - ``statuses_read``: False when the association status was unreadable
+    - ``deferral_started_at``: when the current deferral started (ms
+      epoch) — the value to keep on a DEFER; on a START, the start of
+      the deferral that just ended (None when there was none)
+    - ``advisory``: the reason to record on the job; None only for a
+      plain settled start with no deferral behind it
+    """
+    action: str
+    build_job_id: str
+    running: Tuple[str, ...]
+    statuses_read: bool
+    deferral_started_at: Optional[int]
+    advisory: Optional[str]
+
+
+def decide_dedicated_settle(
+    job: Dict[str, Any],
+    statuses: Optional[Iterable[Tuple[Any, Any]]],
+    now: int,
+) -> DedicatedSettleDecision:
+    """Decide whether a dedicated dispatch defers for a running SSM
+    association (pure, P1). Advisory only: it NEVER fails a job.
+
+    ``statuses`` is the dispatcher's read for the server's instance (None
+    when it failed); the current deferral's start is the job's
+    ``host_settle.deferral_started_at`` (absent when none is running).
+
+    - Unreadable status -> START with an advisory: FAIL OPEN, so the
+      working dedicated path is never blocked by a failed read.
+    - No association Pending/InProgress -> START (an advisory only when a
+      deferral is ending).
+    - One still running, at or below the cap from the deferral's start
+      (the start is ``now`` on the first such check) -> DEFER.
+    - One still running, strictly past the cap -> START with an advisory
+      naming the associations still running.
+    """
+    host_settle = job.get('host_settle') or {}
+    since = host_settle.get('deferral_started_at')
+    if statuses is None:
+        return DedicatedSettleDecision(
+            action=PREDISPATCH_START,
+            build_job_id=job['build_job_id'],
+            running=(),
+            statuses_read=False,
+            deferral_started_at=since,
+            advisory=(
+                "The SSM association status of the Dedicated_Build_Server "
+                "could not be read; dispatched without the host-settled "
+                "check (fail open)"),
+        )
+    running = running_associations(statuses)
+    if not running:
+        return DedicatedSettleDecision(
+            action=PREDISPATCH_START,
+            build_job_id=job['build_job_id'],
+            running=(),
+            statuses_read=True,
+            deferral_started_at=since,
+            advisory=None if since is None else (
+                f"Dispatched once no SSM association was running on the "
+                f"Dedicated_Build_Server, after a "
+                f"{int(now - since) // _MS_PER_MINUTE}-minute deferral"),
+        )
+    started = now if since is None else since
+    if not now > started + DEDICATED_SETTLE_DEFERRAL_CAP_MS:
+        return DedicatedSettleDecision(
+            action=PREDISPATCH_DEFER,
+            build_job_id=job['build_job_id'],
+            running=running,
+            statuses_read=True,
+            deferral_started_at=started,
+            advisory=(
+                f"Dispatch deferred: SSM association(s) still running on "
+                f"the Dedicated_Build_Server: {', '.join(running)}"),
+        )
+    return DedicatedSettleDecision(
+        action=PREDISPATCH_START,
+        build_job_id=job['build_job_id'],
+        running=running,
+        statuses_read=True,
+        deferral_started_at=started,
+        advisory=(
+            f"Dispatched after the {DEDICATED_SETTLE_DEFERRAL_CAP_MINUTES}"
+            f"-minute settle deferral cap with SSM association(s) still "
+            f"running: {', '.join(running)}"),
     )

@@ -260,6 +260,23 @@ describe('reconciliation least privilege (build-fleet-execution-failures Require
   });
 });
 
+describe('host-settled gate read (ephemeral-runner-patch-reboot P0-A, P1)', () => {
+  const ACTION = 'ssm:DescribeInstanceAssociationsStatus';
+
+  test('the dispatcher role allows ssm:DescribeInstanceAssociationsStatus', () => {
+    const granting = policyStatementsForRole('BuildDispatcherRole').filter(
+      (s) => asArray(s.Action).includes(ACTION),
+    );
+    expect(granting.length).toBeGreaterThan(0);
+    for (const statement of granting) {
+      expect(statement.Effect).toBe('Allow');
+      // A read-only grant on its own: nothing rides along with it.
+      expect(asArray(statement.Action)).toEqual([ACTION]);
+      expect(asArray(statement.Resource)).toEqual(['*']);
+    }
+  });
+});
+
 describe('IAM scoping condition keys (design §10)', () => {
   test.each([
     ['dda-build:ephemeral'], // dispatcher provisions ephemeral runners
