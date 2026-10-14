@@ -1049,11 +1049,49 @@ export class ComputeStack extends cdk.Stack {
     }));
 
     // UseCases Lambda Handler
+    // Held in a local so the use-case bucket configuration grants below land
+    // on this role only (portal-usecase-bucket-config, design §6.1).
+    const usecasesRole = createLambdaRole('UseCases');
+    // POST /s3-buckets creates a bucket for a use case, tags it in the same
+    // CreateBucket request and enables ABAC on it. The bucket name is chosen at
+    // request time, so the resource cannot be narrower than arn:aws:s3:::*; the
+    // TagResource grant is bounded to requests that assert the portal's own
+    // creation marker, which is the only tag write the handler performs.
+    usecasesRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:CreateBucket'],
+      // nosec: iam-resource-wildcard. The bucket does not exist yet, so no
+      // resource tag can gate CreateBucket; the handler validates the name,
+      // refuses portal-owned and already-configured names and tags the bucket
+      // in the same request (usecases.create_s3_bucket).
+      resources: ['arn:aws:s3:::*'],
+    }));
+    usecasesRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:TagResource'],
+      // nosec: iam-resource-wildcard. Bounded by the request-tag Condition
+      // below instead of a resource tag: the just-created bucket carries no
+      // tags yet, and the role may only tag while asserting the portal's
+      // creation marker (the only tag write the handler performs).
+      resources: ['arn:aws:s3:::*'],
+      conditions: {
+        StringEquals: { 'aws:RequestTag/dda-portal:created-by': 'portal' },
+      },
+    }));
+    usecasesRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutBucketABAC'],
+      // nosec: iam-resource-wildcard. S3 evaluates bucket-tag condition keys
+      // only once ABAC is on, so the call that turns it on cannot be
+      // tag-conditioned; it is made only on the bucket the handler has just
+      // created.
+      resources: ['arn:aws:s3:::*'],
+    }));
     const useCasesHandler = new lambda.Function(this, 'UseCasesHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'usecases.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
-      role: createLambdaRole('UseCases'),
+      role: usecasesRole,
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2025-01-08-auto-cors', // Force update with auto CORS configuration
