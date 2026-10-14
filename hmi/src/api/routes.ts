@@ -15,7 +15,9 @@
  * `/node-image`) are loaded via `<img src>` which cannot carry headers, so
  * their builders embed the Session_Token as the `token` query parameter,
  * matching the LocalServer's token-in-query image serving
- * (Requirements 1.3, 5.5).
+ * (Requirements 1.3, 5.5). Callers pass `null` when there is no session for
+ * the current API origin (`auth/session.ts` `loadSession`), and the URL then
+ * carries no `token` parameter at all.
  */
 
 import { getApiBase } from "./base";
@@ -90,25 +92,28 @@ export function executionMetadataUrl(executionId: string): string {
 /**
  * `GET /workflows/executions/{executionId}/output-image?token=` — the run's
  * base output image, with the Session_Token as an encoded `token` query
- * parameter (Requirements 1.3, 5.5).
+ * parameter (Requirements 1.3, 5.5); no parameter when `token` is null.
  */
-export function outputImageUrl(executionId: string, token: string): string {
-  return `${base()}/workflows/executions/${enc(executionId)}/output-image?token=${enc(token)}`;
+export function outputImageUrl(executionId: string, token: string | null): string {
+  const query = token === null ? "" : `?token=${enc(token)}`;
+  return `${base()}/workflows/executions/${enc(executionId)}/output-image${query}`;
 }
 
 /**
  * `GET /workflows/executions/{executionId}/node-image?nodeId=&port=&token=`
  * — a node's persisted frame for `(nodeId, port)`, with the Session_Token as
- * an encoded `token` query parameter (Requirements 1.3, 5.5).
+ * an encoded `token` query parameter (Requirements 1.3, 5.5); no `token`
+ * parameter when `token` is null.
  */
 export function nodeImageUrl(
   executionId: string,
   nodeId: string,
   port: string,
-  token: string,
+  token: string | null,
 ): string {
   return (
     `${base()}/workflows/executions/${enc(executionId)}/node-image` +
-    `?nodeId=${enc(nodeId)}&port=${enc(port)}&token=${enc(token)}`
+    `?nodeId=${enc(nodeId)}&port=${enc(port)}` +
+    (token === null ? "" : `&token=${enc(token)}`)
   );
 }

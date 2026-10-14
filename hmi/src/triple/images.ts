@@ -30,7 +30,9 @@
  * The module keeps no view state and holds nothing across panels: `loadSession`
  * supplies the token per request (the token may have been re-issued by the 401
  * re-login of `api/client.ts`), and the only retained per-panel value is the
- * in-flight request's canceller.
+ * in-flight request's canceller. `loadSession` only returns a session the
+ * current API origin issued, so a token is never put in another origin's URL;
+ * without one the URL carries no `token` parameter.
  */
 
 import { nodeImageUrl } from "../api/routes";
@@ -49,11 +51,12 @@ export const IMAGE_UNAVAILABLE_TEXT = "Image unavailable";
 
 export interface PanelImageLoaderOptions {
   /**
-   * Supplies the current Session_Token; defaults to the stored session's
-   * token, or the empty string when no session is stored (the request then
-   * fails authentication and the panel shows its placeholder).
+   * Supplies the current Session_Token; defaults to the token of the session
+   * the current API origin issued, or null when there is none (the URL then
+   * has no `token` parameter; on a device that requires one the request fails
+   * authentication and the panel shows its placeholder).
    */
-  token?: () => string;
+  token?: () => string | null;
   /** Per-image timeout; defaults to `IMAGE_TIMEOUT_MS` (Requirement 4.5). */
   timeoutMs?: number;
 }
@@ -70,7 +73,7 @@ type Canceller = () => void;
 export function panelImageUrl(
   executionId: string,
   ref: ImageRef,
-  token: string,
+  token: string | null,
 ): string {
   return nodeImageUrl(executionId, ref.nodeId, ref.port, token);
 }
@@ -85,7 +88,7 @@ export function panelImageUrl(
 export function createPanelImageLoader(
   options: PanelImageLoaderOptions = {},
 ): PanelImageLoader {
-  const tokenOf = options.token ?? (() => loadSession()?.token ?? "");
+  const tokenOf = options.token ?? (() => loadSession()?.token ?? null);
   const timeoutMs = options.timeoutMs ?? IMAGE_TIMEOUT_MS;
 
   // One in-flight request per element; a new request for the same panel

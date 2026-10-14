@@ -20,8 +20,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { resetApiBase } from "../api/base";
 import { configureApiClient, resetApiClient } from "../api/client";
 import {
+  localAuthStatusUrl,
   registrationExecutionsUrl,
   registrationsUrl,
   loginUrl,
@@ -106,7 +108,7 @@ function scriptedFetch(): typeof fetch {
       body: typeof init?.body === "string" ? init.body : null,
     });
 
-    if (url === LOCAL_AUTH_STATUS_URL) {
+    if (url === localAuthStatusUrl()) {
       if (script.status === "network-error") throw new TypeError("fetch failed");
       return jsonResponse(200, script.status);
     }
@@ -208,6 +210,8 @@ afterEach(() => {
   resetApiClient();
   clearRetainedCredentials();
   localStorage.clear();
+  history.replaceState(null, "", "/");
+  resetApiBase();
   vi.useRealTimers();
 });
 
@@ -226,9 +230,10 @@ describe("startTripleApp login wiring", () => {
     submitLogin(root, "operator", "secret");
     await settle();
 
-    // The token and its expiry are persisted together (1.2).
+    // The token and its expiry are persisted together (1.2), bound to the
+    // LocalServer that issued them (here the page's own origin).
     expect(storedSession()).toBe(
-      JSON.stringify({ token: "tok-1", expiresAt }),
+      JSON.stringify({ token: "tok-1", expiresAt, origin: location.origin }),
     );
     expect(JSON.parse(requestsTo(loginUrl())[0]!.body!)).toEqual({
       username: "operator",
@@ -377,5 +382,84 @@ describe("startTripleApp startup decisions", () => {
     expect(started.getState().auth.screen).toBe("login");
     expect(visible(one(root, ".login-screen"))).toBe(true);
     expect(urls()).toEqual([LOCAL_AUTH_STATUS_URL]);
+  });
+});
+
+describe("startTripleApp API origin binding", () => {
+  const STATION = "http://192.168.8.224:5000";
+
+  /** Opens the kiosk page with `search` as its query string, as a link would. */
+  function openWithQuery(search: string): void {
+    history.replaceState(null, "", `/hmi/triple.html${search}`);
+    resetApiBase();
+  }
+
+  /** This jsdom page's own host:port. */
+  function pageAddress(): string {
+    return `${location.hostname}:${location.port || "80"}`;
+  }
+
+  it("does not send a session another LocalServer issued, and names the form's target", async () => {
+    saveSession({ token: "station-token", expiresAt, origin: STATION });
+    const { app: started, root } = start();
+    await started.ready;
+    await settle();
+
+    // Signed out for this origin: the login form, not a resume.
+    expect(started.getState().auth.screen).toBe("login");
+    expect(urls()).toEqual([LOCAL_AUTH_STATUS_URL]);
+    expect(requests[0]!.authorization).toBeNull();
+    expect(one(root, ".login-target-address").textContent).toBe(pageAddress());
+    // The other LocalServer's session is left alone.
+    expect(storedSession()).toContain("station-token");
+  });
+
+  it("follows ?api= to a station on the plant network, signed out there until the operator signs in", async () => {
+    saveSession({ token: "page-token", expiresAt, origin: location.origin });
+    openWithQuery(`?api=${STATION}`);
+    const { app: started, root } = start();
+    await started.ready;
+    await settle();
+
+    expect(started.getState().auth.screen).toBe("login");
+    expect(urls()).toEqual([`${STATION}/local-auth/status`]);
+    expect(requests[0]!.authorization).toBeNull();
+    // The form says where the credentials would go; nothing was ignored.
+    expect(one(root, ".login-target-address").textContent).toBe("192.168.8.224:5000");
+    expect(visible(one(root, ".api-notice"))).toBe(false);
+
+    submitLogin(root, "operator", "secret");
+    await settle();
+
+    expect(requestsTo(`${STATION}/local-auth/login`)).toHaveLength(1);
+    expect(JSON.parse(storedSession()!)).toEqual({ token: "tok-1", expiresAt, origin: STATION });
+    const authenticated = requests.filter((request) =>
+      request.url.startsWith(`${STATION}/workflows/`),
+    );
+    expect(authenticated.length).toBeGreaterThan(0);
+    for (const request of authenticated) {
+      expect(request.authorization).toBe("Bearer tok-1");
+    }
+    // The page origin's token never went to the station.
+    expect(requests.some((request) => request.authorization === "Bearer page-token")).toBe(false);
+  });
+
+  it("ignores a ?api= host outside the policy: notice shown, the page's own session resumes", async () => {
+    saveSession({ token: "page-token", expiresAt, origin: location.origin });
+    openWithQuery("?api=https://other.example");
+    const { app: started, root } = start();
+    await started.ready;
+    await settle();
+
+    // Fell back to same-origin, where the stored session is valid.
+    expect(started.getState().auth.screen).toBe("app");
+    expect(urls()[0]).toBe(registrationsUrl());
+    expect(requests.some((request) => request.url.includes("other.example"))).toBe(false);
+    for (const request of requests) {
+      expect(request.authorization).toBe("Bearer page-token");
+    }
+    const notice = one(root, ".api-notice");
+    expect(visible(notice)).toBe(true);
+    expect(notice.textContent).toContain('Ignored ?api= host "other.example"');
   });
 });
