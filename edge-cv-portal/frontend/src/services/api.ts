@@ -2,7 +2,7 @@
  * API service for making HTTP requests to the backend
  */
 import { getConfig } from '../config';
-import { UseCase, Device, User, S3Bucket } from '../types';
+import { UseCase, Device, User, UserRole, S3Bucket } from '../types';
 import type { Capture } from '../components/ResultsViewer';
 import type {
   NodeTypeDescriptor,
@@ -100,6 +100,54 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+// Use-case bucket configuration API types (spec:
+// portal-usecase-bucket-config, design §5.3, §5.5, §10.1).
+
+/** Response of PUT /usecases/{id} with additional_s3_buckets_add / _remove. */
+export interface UsecaseBucketUpdateResponse {
+  message: string;
+  added: string[];
+  already_present: string[];
+  removed: string[];
+  not_present: string[];
+  /** The computed allowed set after the write (configured + additional). */
+  allowed_s3_buckets: string[];
+}
+
+/** The bucket entry POST /s3-buckets answers with (201). */
+export interface CreatedS3Bucket extends S3Bucket {
+  portal_created: true;
+  /** Tag keys written on the bucket (dda-portal:*). */
+  tags: string[];
+  abac: 'enabled' | 'failed';
+  /** True when the bucket was also added to the given use case. */
+  added_to_usecase: boolean;
+  /** Present when `usecase_id` was given and the add did not happen. */
+  add_error?: {
+    error_code: 'usecase_not_found' | 'bucket_not_eligible' | 'usecase_update_failed';
+    reason?: string;
+    remedy: string;
+  };
+}
+
+/** One entry of GET /users/me/usecases. */
+export interface MyUsecaseEntry {
+  usecase_id: string;
+  name?: string;
+  description?: string;
+  owner?: string;
+  /** The caller's role on this use case as the RBAC manager resolves it. */
+  user_role: UserRole | null;
+  created_at?: number;
+  account_id?: string;
+}
+
+export interface MyUsecasesResponse {
+  usecases: MyUsecaseEntry[];
+  total_count: number;
+  is_super_user: boolean;
 }
 
 // Code_Assistant API types (custom-node-code-assist).
@@ -1711,12 +1759,55 @@ class ApiService {
     return this.request<{ buckets: S3Bucket[]; count: number }>('/s3-buckets');
   }
 
-  // Create a new S3 bucket in the current (portal) account with default settings
-  async createS3Bucket(data: { name: string; region?: string }): Promise<{ bucket: S3Bucket }> {
-    return this.request<{ bucket: S3Bucket }>('/s3-buckets', {
+  // Create a new S3 bucket in the current (portal) account with default
+  // settings. The server tags it for the portal (dda-portal:managed,
+  // dda-portal:created-by and, with `usecase_id`, dda-portal:usecase-id),
+  // enables ABAC and, when `usecase_id` is given, adds it to that use case's
+  // additional buckets (spec: portal-usecase-bucket-config, design §5.5).
+  // Without `usecase_id` only a PortalAdmin may call it (403 otherwise).
+  async createS3Bucket(data: {
+    name: string;
+    region?: string;
+    usecase_id?: string;
+  }): Promise<{ bucket: CreatedS3Bucket }> {
+    return this.request<{ bucket: CreatedS3Bucket }>('/s3-buckets', {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // Use-case bucket configuration (spec: portal-usecase-bucket-config,
+  // design §5.3 / §10.1): allow one more bucket for the use case. The server
+  // probes the bucket's eligibility (dda-portal:managed tag, unclaimed) and
+  // refuses with a 400 `bucket_not_eligible` body carrying `reason` and
+  // `remedy`; a name already in the list answers `already_present`.
+  async allowBucketForUsecase(
+    usecaseId: string,
+    bucket: string
+  ): Promise<UsecaseBucketUpdateResponse> {
+    return this.request<UsecaseBucketUpdateResponse>(`/usecases/${usecaseId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ additional_s3_buckets_add: [bucket] }),
+    });
+  }
+
+  // Remove one allowed (additional) bucket from the use case. Configured
+  // buckets (s3_bucket / data_s3_bucket) are not removable this way.
+  async removeAllowedBucket(
+    usecaseId: string,
+    bucket: string
+  ): Promise<UsecaseBucketUpdateResponse> {
+    return this.request<UsecaseBucketUpdateResponse>(`/usecases/${usecaseId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ additional_s3_buckets_remove: [bucket] }),
+    });
+  }
+
+  // The caller's accessible use cases with the role held on each, resolved
+  // server-side through the RBAC manager (so it is authoritative in both
+  // registry-enforcement modes, unlike the JWT role claim).
+  async getMyUsecases(): Promise<MyUsecasesResponse> {
+    return this.request<MyUsecasesResponse>('/users/me/usecases');
   }
 
   // Dataset endpoints
@@ -3745,6 +3836,11 @@ class ApiService {
       region: string;
       tags?: Record<string, string>;
       is_configured?: boolean;
+      // Use-case bucket configuration (design §5.6): `allowed` marks the
+      // buckets in the use case's allowed set (configured + additional);
+      // `portal_created` the ones the portal created.
+      allowed?: boolean;
+      portal_created?: boolean;
     }>;
     current_data_bucket: string | null;
     target_account?: string;

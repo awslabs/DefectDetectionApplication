@@ -18,7 +18,9 @@ import {
 import { apiService } from '../services/api';
 import { validateBucketName } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
+import { bucketErrorCode } from '../utils/bucketErrors';
 import S3BucketPicker from '../components/S3BucketPicker';
+import BucketNotAllowedNotice from '../components/BucketNotAllowedNotice';
 
 interface OnboardingState {
   // Step 1: Setup Type Selection
@@ -60,6 +62,9 @@ export default function UseCaseOnboarding() {
   const [activeStepIndex, setActiveStepIndex] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A bucket the server refused on create (`bucket_not_eligible`,
+  // `invalid_bucket_name`): rendered through the notice (design §10.2).
+  const [bucketError, setBucketError] = useState<unknown>(null);
   const [registeredDataAccounts, setRegisteredDataAccounts] = useState<Array<{
     data_account_id: string;
     name: string;
@@ -129,6 +134,7 @@ export default function UseCaseOnboarding() {
     try {
       setSubmitting(true);
       setError(null);
+      setBucketError(null);
 
       // Create the use case
       const useCaseData: Record<string, unknown> = {
@@ -184,12 +190,23 @@ export default function UseCaseOnboarding() {
         navigate('/usecases');
       }
     } catch (err) {
-      setError(getErrorMessage(err, 'Failed to create use case'));
+      if (bucketErrorCode(err)) {
+        // The configured bucket is not eligible (not tagged for the portal,
+        // claimed by another use case, ...) or malformed: the notice names
+        // the bucket, the reason and the remedy.
+        setBucketError(err);
+      } else {
+        setError(getErrorMessage(err, 'Failed to create use case'));
+      }
       scrollToTop();
     } finally {
       setSubmitting(false);
     }
   };
+
+  // The refused-bucket notice; no use case exists yet, so it offers no action.
+  const bucketNotice =
+    bucketError !== null ? <BucketNotAllowedNotice err={bucketError} /> : null;
 
   const cdkDeployCommand = `cd edge-cv-portal
 ./deploy-account-role.sh`;
@@ -274,6 +291,7 @@ export default function UseCaseOnboarding() {
                     {error}
                   </Alert>
                 )}
+                {bucketNotice}
 
                 <FormField
                   label="Use Case Name"
@@ -737,6 +755,7 @@ export default function UseCaseOnboarding() {
           description: 'Review configuration and choose next steps',
           content: (
             <SpaceBetween size="l">
+              {bucketNotice}
               <Container header={<Header variant="h2">Configuration Summary</Header>}>
                 <ColumnLayout columns={2} variant="text-grid">
                   <SpaceBetween size="xs">

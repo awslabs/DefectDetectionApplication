@@ -36,6 +36,8 @@ import {
   VllmRegistrationFinding,
 } from '../services/api';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
+import { bucketErrorCode } from '../utils/bucketErrors';
+import BucketNotAllowedNotice from '../components/BucketNotAllowedNotice';
 
 type SourceType = 'huggingface' | 's3';
 
@@ -118,6 +120,10 @@ export default function RegisterLlm() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // A refused `s3_model_artifact` bucket (`bucket_not_allowed`,
+  // `invalid_s3_uri`): the notice with the allow action (spec:
+  // portal-usecase-bucket-config, design §10.2).
+  const [bucketError, setBucketError] = useState<unknown>(null);
 
   useEffect(() => {
     const load = async () => {
@@ -180,6 +186,7 @@ export default function RegisterLlm() {
 
     setSubmitting(true);
     setError(null);
+    setBucketError(null);
     setFieldErrors({});
 
     const engineConfiguration: VllmEngineConfiguration = {};
@@ -235,6 +242,8 @@ export default function RegisterLlm() {
           setEngineExpanded(true);
         }
         setError('Registration failed validation. Fix the highlighted fields and retry.');
+      } else if (bucketErrorCode(err)) {
+        setBucketError(err);
       } else {
         setError(getErrorMessage(err, 'Failed to register the LLM'));
       }
@@ -325,6 +334,13 @@ export default function RegisterLlm() {
         <Alert type="error" dismissible onDismiss={() => setError(null)}>
           {error}
         </Alert>
+      )}
+      {bucketError !== null && (
+        <BucketNotAllowedNotice
+          err={bucketError}
+          usecaseId={selectedUseCase?.value}
+          onAllowed={() => setBucketError(null)}
+        />
       )}
       {success && <Alert type="success">{success}</Alert>}
 

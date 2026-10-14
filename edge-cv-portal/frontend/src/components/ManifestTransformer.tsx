@@ -15,6 +15,8 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { LabelingJob } from '../types';
+import { bucketErrorCode } from '../utils/bucketErrors';
+import BucketNotAllowedNotice from './BucketNotAllowedNotice';
 
 interface ManifestTransformerProps {
   usecaseId: string;
@@ -36,6 +38,10 @@ export default function ManifestTransformer({ usecaseId, preSelectedJobId }: Man
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [result, setResult] = useState<any>(null);
+  // A refused manifest bucket (source or output outside the use case's
+  // allowed set, or a malformed URI): the notice with the allow action
+  // (spec: portal-usecase-bucket-config, design §10.2).
+  const [bucketError, setBucketError] = useState<unknown>(null);
 
   useEffect(() => {
     loadLabelingJobs();
@@ -116,6 +122,7 @@ export default function ManifestTransformer({ usecaseId, preSelectedJobId }: Man
     setError('');
     setSuccess('');
     setResult(null);
+    setBucketError(null);
     setTransforming(true);
 
     try {
@@ -129,7 +136,11 @@ export default function ManifestTransformer({ usecaseId, preSelectedJobId }: Man
       setSuccess('Manifest transformed successfully!');
       setResult(response);
     } catch (err: any) {
-      setError(err.message || 'Failed to transform manifest');
+      if (bucketErrorCode(err)) {
+        setBucketError(err);
+      } else {
+        setError(err.message || 'Failed to transform manifest');
+      }
     } finally {
       setTransforming(false);
     }
@@ -161,6 +172,17 @@ export default function ManifestTransformer({ usecaseId, preSelectedJobId }: Man
           <Alert type="error" dismissible onDismiss={() => setError('')}>
             {error}
           </Alert>
+        )}
+
+        {bucketError !== null && (
+          <BucketNotAllowedNotice
+            err={bucketError}
+            usecaseId={usecaseId}
+            onAllowed={() => {
+              setBucketError(null);
+              handleTransform();
+            }}
+          />
         )}
 
         {success && (

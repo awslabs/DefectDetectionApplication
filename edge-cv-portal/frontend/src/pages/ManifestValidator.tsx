@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import api from '../services/api';
+import { bucketErrorCode } from '../utils/bucketErrors';
+import BucketNotAllowedNotice from '../components/BucketNotAllowedNotice';
 
 interface ValidationIssue {
   type: string;
@@ -38,9 +40,22 @@ export default function ManifestValidator() {
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
   const [transformResult, setTransformResult] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'validate' | 'transform' | 'compare'>('validate');
+  // A refused manifest bucket (`bucket_not_allowed`, `invalid_s3_uri`):
+  // rendered through the notice instead of the alert (spec:
+  // portal-usecase-bucket-config, design §10.2).
+  const [bucketError, setBucketError] = useState<unknown>(null);
+
+  const reportFailure = (prefix: string, error: any) => {
+    if (bucketErrorCode(error)) {
+      setBucketError(error);
+      return;
+    }
+    alert(`${prefix}: ${error.response?.data?.error || error.message}`);
+  };
 
   const handleValidate = async () => {
     setLoading(true);
+    setBucketError(null);
     try {
       const response = await api.manifestValidator({
         action: 'validate',
@@ -50,7 +65,7 @@ export default function ManifestValidator() {
       setValidationResult(response.data);
       setActiveTab('validate');
     } catch (error: any) {
-      alert(`Validation failed: ${error.response?.data?.error || error.message}`);
+      reportFailure('Validation failed', error);
     } finally {
       setLoading(false);
     }
@@ -58,6 +73,7 @@ export default function ManifestValidator() {
 
   const handleTransform = async () => {
     setLoading(true);
+    setBucketError(null);
     try {
       const response = await api.manifestValidator({
         action: 'transform',
@@ -67,7 +83,7 @@ export default function ManifestValidator() {
       setTransformResult(response.data);
       setActiveTab('compare');
     } catch (error: any) {
-      alert(`Transformation failed: ${error.response?.data?.error || error.message}`);
+      reportFailure('Transformation failed', error);
     } finally {
       setLoading(false);
     }
@@ -77,6 +93,7 @@ export default function ManifestValidator() {
     if (!confirm('This will modify the manifest in S3. Continue?')) return;
     
     setLoading(true);
+    setBucketError(null);
     try {
       const response = await api.manifestValidator({
         action: 'fix_timestamps',
@@ -87,7 +104,7 @@ export default function ManifestValidator() {
       // Re-validate after fix
       await handleValidate();
     } catch (error: any) {
-      alert(`Fix failed: ${error.response?.data?.error || error.message}`);
+      reportFailure('Fix failed', error);
     } finally {
       setLoading(false);
     }
@@ -95,6 +112,7 @@ export default function ManifestValidator() {
 
   const handleValidateAndTransform = async () => {
     setLoading(true);
+    setBucketError(null);
     try {
       const response = await api.manifestValidator({
         action: 'validate_and_transform',
@@ -105,7 +123,7 @@ export default function ManifestValidator() {
       setTransformResult(response.data.transformation);
       setActiveTab('compare');
     } catch (error: any) {
-      alert(`Workflow failed: ${error.response?.data?.error || error.message}`);
+      reportFailure('Workflow failed', error);
     } finally {
       setLoading(false);
     }
@@ -132,6 +150,9 @@ export default function ManifestValidator() {
       {/* Input Section */}
       <div className="bg-white shadow rounded-lg p-6 mb-6">
         <div className="space-y-4">
+          {bucketError !== null && (
+            <BucketNotAllowedNotice err={bucketError} />
+          )}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Manifest S3 Path

@@ -19,8 +19,10 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '../services/api';
 import S3Browser from '../components/S3Browser';
+import BucketNotAllowedNotice from '../components/BucketNotAllowedNotice';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
+import { bucketErrorCode } from '../utils/bucketErrors';
 
 interface PreLabeledDataset {
   dataset_id: string;
@@ -64,6 +66,9 @@ export default function PreLabeledDatasets() {
   const [selectedUseCase, setSelectedUseCase] = useState<any>(null);
   const [showHelpPanel, setShowHelpPanel] = useState(false);
   const [showBrowseModal, setShowBrowseModal] = useState(false);
+  // A refused manifest bucket (`bucket_not_allowed`, `invalid_s3_uri`):
+  // rendered through the notice with the allow action (design §10.2).
+  const [bucketError, setBucketError] = useState<unknown>(null);
   
   const [formData, setFormData] = useState({
     name: '',
@@ -141,6 +146,7 @@ export default function PreLabeledDatasets() {
     try {
       setValidating(true);
       setValidation(null);
+      setBucketError(null);
       
       const result = await apiService.validateManifest({
         usecase_id: selectedUseCase.usecase_id,
@@ -149,6 +155,10 @@ export default function PreLabeledDatasets() {
       
       setValidation(result as any);
     } catch (err) {
+      if (bucketErrorCode(err)) {
+        setBucketError(err);
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Failed to validate manifest';
       setValidation({ valid: false, errors: [message], warnings: [], stats: { total_images: 0, task_type: '', label_distribution: {}, sample_entries: [] } });
       console.error('Validation error:', err);
@@ -171,6 +181,7 @@ export default function PreLabeledDatasets() {
     try {
       setCreating(true);
       setError(null);
+      setBucketError(null);
       
       await apiService.createPreLabeledDataset({
         usecase_id: selectedUseCase.usecase_id,
@@ -194,7 +205,11 @@ export default function PreLabeledDatasets() {
       
       await loadDatasets();
     } catch (err) {
-      setError(getErrorMessage(err, 'Failed to create dataset'));
+      if (bucketErrorCode(err)) {
+        setBucketError(err);
+      } else {
+        setError(getErrorMessage(err, 'Failed to create dataset'));
+      }
       console.error('Creation error:', err);
       scrollToTop();
     } finally {
@@ -432,6 +447,17 @@ export default function PreLabeledDatasets() {
                   </Box>
                 </SpaceBetween>
               </FormField>
+
+              {bucketError !== null && (
+                <BucketNotAllowedNotice
+                  err={bucketError}
+                  usecaseId={selectedUseCase?.usecase_id}
+                  onAllowed={() => {
+                    setBucketError(null);
+                    validateManifest();
+                  }}
+                />
+              )}
 
               {validation && (
                 <SpaceBetween size="s">
