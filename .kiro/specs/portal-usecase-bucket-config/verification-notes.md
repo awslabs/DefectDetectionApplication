@@ -180,6 +180,6 @@ Migration writes (through the deployed handlers as `ucb-migration`, and `aws s3c
 
 Teardown: verification use case deleted — yes (`DELETE /usecases/{id}` as `ucb-migration` → 200; `get-item` returns nothing; use case count back to 2); the three identity rows deleted — yes, 7 rows in all (`ucb-migration` global PortalAdmin + the `UseCaseAdmin` creator row on the verification use case, `ucb-verify-ds` global Viewer + use-case DataScientist, `ucb-verify-viewer` global Viewer + use-case Viewer; 0 rows remain for each identity); probe object removed — yes (`aws s3 rm`; both verification buckets list 0 objects); `dda-portal-labeling-jobs` count unchanged (19); `git status --porcelain` — only the two untracked state artifacts that predate the runbook (`plan.md`, `task-portal-usecase-bucket-config/`): nothing under the repository was created by the runbook. Leftover for manual removal: the two `ucb-verify-*` buckets named above.
 
-## Runbook 11.6 — trunk (to be filled)
+## Runbook 11.6 — trunk
 
-Rebase needed: —. Redeploy needed after rebase: —. `origin/portal/usecase-bucket-config` = —. `origin/integration/all-specs` fast-forwarded to — (= `HEAD`).
+Rebase needed: no. `origin/integration/all-specs` was still `48841a0` when the branch was pushed, so the trunk move was a fast-forward. Redeploy needed after rebase: no, because there was no rebase. `origin/portal/usecase-bucket-config` = `02275567` (new branch, 2026-10-14T16:18Z). `origin/integration/all-specs` fast-forwarded from `48841a0` to `02275567` (= `HEAD` at the push), and `remediation` fast-forwarded to the same commit. This record was committed after the push, so the trunk tip is one docs commit past `02275567`.
