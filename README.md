@@ -171,6 +171,8 @@ cd ..
 
 > **Note**: `cdk bootstrap` must be run from `edge-cv-portal/infrastructure/` where `cdk.json` lives. The `deploy-infrastructure.sh` script handles `npm install` and `cdk deploy` for you after that.
 
+> **Registry enforcement and allowed buckets.** Production deployments run with the Portal_Identity registry enforced: `PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh`, after `edge-cv-portal/backfill_portal_registry.py` has been applied and the accounts verified (a fresh install starts with enforcement off, and the script prints a warning whenever the value it resolves for a deploy is not `true`). Independently of that flag, the portal reads and writes S3 only in each use case's **allowed buckets** — its configured S3 bucket, its Data Account bucket, and the **Additional S3 buckets** a UseCaseAdmin allows (Use Cases → Edit → Allowed buckets, or "Allow for this use case" in Data Management). A bucket must be tagged `dda-portal:managed=true` (`aws s3control tag-resource --account-id ACCOUNT_ID --resource-arn arn:aws:s3:::BUCKET --tags Key=dda-portal:managed,Value=true`, plus `aws s3api put-bucket-abac --bucket BUCKET --abac-status Status=Enabled` for a bucket reached through a cross-account role) **before** a use case is created with it or allows it; buckets created through the portal are tagged, ABAC-enabled and allowed automatically. See `edge-cv-portal/ADMIN_GUIDE.md`, "Use case buckets and Additional S3 buckets" and "The enforcement flag".
+
 **What gets deployed:** CloudFront, API Gateway, Cognito, DynamoDB, Lambda functions, S3 buckets, IAM roles.
 
 **Save the CDK outputs:** `PortalApiEndpoint`, `PortalFrontendUrl`, `CognitoUserPoolId`, `CognitoClientId`.
@@ -455,9 +457,10 @@ This only needs to be done once per data account. All future UseCases can select
 2. Choose setup type (Single Account or Multi-Account)
 3. For multi-account: upload `usecase-account-*-config.txt` to auto-fill role details
 4. Configure data account (select from registered accounts or enter manually)
-5. Click **Create**
+5. Select the use case's S3 bucket: an existing bucket must already be tagged `dda-portal:managed=true` (and ABAC-enabled when it is reached through a cross-account role), or a PortalAdmin creates one with **Create new bucket**, which tags and allows it automatically
+6. Click **Create**
 
-This provisions Greengrass components, creates `DDAPortalComponentAccessPolicy`, and sets up S3 buckets.
+This provisions Greengrass components, creates `DDAPortalComponentAccessPolicy`, and sets up S3 buckets. The portal checks each configured bucket's tags through the use case's role at creation and answers `400 bucket_not_eligible` with a remedy for an untagged, unreadable or already-configured bucket (see `edge-cv-portal/ADMIN_GUIDE.md`, "Onboarding a New Customer").
 
 ### Step 7: Setting Up Edge Servers
 
