@@ -1,0 +1,6331 @@
+{
+  "aravis_camera_source": {
+    "category": "input",
+    "display_name": "Aravis Camera Source",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Aravis (GenICam) camera identifier as enumerated on the edge device, e.g. Aravis-Fake-GV01 or Basler-12345678.",
+        "examples": [
+          "Aravis-Fake-GV01",
+          "Basler-12345678"
+        ],
+        "multiline": false,
+        "name": "camera_id",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 100,
+          "min": 0
+        },
+        "default": 4,
+        "depends_on": null,
+        "description": "Sensor gain (0-100) applied through the camera manager. Higher values brighten the image but add noise; e.g. 4.",
+        "examples": [
+          4,
+          10
+        ],
+        "multiline": false,
+        "name": "gain",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": 5000000,
+        "depends_on": null,
+        "description": "Sensor exposure time in nanoseconds applied through the camera manager, e.g. 5000000 (5 ms).",
+        "examples": [
+          5000000,
+          16000000
+        ],
+        "multiline": false,
+        "name": "exposure",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "aravis_camera_source"
+  },
+  "bedrock_inference": {
+    "category": "inference",
+    "display_name": "Bedrock Inference",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "VideoFrames"
+      },
+      {
+        "name": "reference",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "bedrock_inference",
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "jpeg",
+          "multifile",
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "bedrock_inference",
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "jpeg",
+          "multifile",
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "bedrock_inference",
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "jpeg",
+          "multifile",
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "bedrock_inference",
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "jpeg",
+          "multifile",
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "bedrock_inference",
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "jpeg",
+          "multifile",
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "bedrock_inference",
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "jpeg",
+          "multifile",
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
+            "args_template": {
+              "name": "{sim_inference_name}"
+            },
+            "factory": "identity"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "values": [
+            "us.amazon.nova-pro-v1:0",
+            "us.amazon.nova-lite-v1:0",
+            "qwen.qwen3-vl-235b-a22b",
+            "moonshotai.kimi-k2.5"
+          ]
+        },
+        "default": "us.amazon.nova-lite-v1:0",
+        "depends_on": null,
+        "description": "Bedrock multimodal model invoked with the input frame and the reference image, e.g. us.amazon.nova-lite-v1:0.",
+        "examples": [
+          "us.amazon.nova-lite-v1:0",
+          "us.amazon.nova-pro-v1:0"
+        ],
+        "multiline": false,
+        "name": "model",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "Compare the input image to the reference image; is_anomalous is true when the input meaningfully differs from the reference.",
+        "depends_on": null,
+        "description": "Instruction sent to the model with both images. In anomaly mode the executor automatically appends the JSON-format instruction ({\"is_anomalous\": true|false, \"confidence\": 0..1}) and those fields become the inference metadata (is_anomalous, confidence) driving downstream filters, conditionals, and outputs; in freeform mode the prompt is sent as-is.",
+        "examples": [
+          "Compare the input image to the reference image; is_anomalous is true when the input meaningfully differs from the reference."
+        ],
+        "multiline": true,
+        "name": "prompt",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": true,
+        "depends_on": null,
+        "description": "Checked: anomaly mode — the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs. Unchecked: freeform mode — the prompt is sent as-is and the raw model text is recorded in the run metadata as bedrock_text (and bedrock.{nodeId}.text), with no JSON parsing.",
+        "examples": [
+          true,
+          false
+        ],
+        "multiline": false,
+        "name": "anomaly_mode",
+        "param_type": "bool",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "us-east-1",
+        "depends_on": null,
+        "description": "AWS region of the Bedrock runtime endpoint the device calls, e.g. us-east-1.",
+        "examples": [
+          "us-east-1",
+          "us-west-2"
+        ],
+        "multiline": false,
+        "name": "region",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 4096,
+          "min": 1
+        },
+        "default": 256,
+        "depends_on": null,
+        "description": "Maximum tokens the model may generate for its JSON answer, e.g. 256.",
+        "examples": [
+          256,
+          512
+        ],
+        "multiline": false,
+        "name": "max_tokens",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional system-role instructions sent as the Bedrock Converse API 'system' parameter. Empty sends no system parameter (identical to previous behavior).",
+        "examples": [
+          "You are a meticulous visual quality inspector.\nAnswer concisely."
+        ],
+        "multiline": true,
+        "name": "system_prompt",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Optional 0-based index into the run's detection list: the captured input frame is cropped to that detection's bounding box — detections ordered per the model_inference node's detection_sort_order — and the crop is sent as the input image. When the run has that many detections or fewer, the node records an error outcome (gating its downstream outputs) without failing the run. Empty keeps today's whole-frame behavior.",
+        "examples": [
+          0,
+          1,
+          2
+        ],
+        "multiline": false,
+        "name": "crop_detection_index",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 100,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Margin added on every side of the detection crop, as a percentage (0-100) of the bounding box's own width/height, clamped to the frame bounds; e.g. 10. Only used together with crop_detection_index.",
+        "examples": [
+          0,
+          10
+        ],
+        "multiline": false,
+        "name": "crop_margin_percent",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional dotted path resolved against the trigger payload's parsed JSON — dict keys and integer list indices, e.g. refs.0.image — selecting this node's reference image: an s3:// URI, an http(s):// URL, a file:// path to an image already on the device, or base64-encoded image data (bare or a data: URL). Mutually exclusive with a connected reference frame port; a resolution, fetch, or decode failure records an error outcome for this node (never a single-image fallback). Empty keeps today's reference-port behavior.",
+        "examples": [
+          "refs.0.image",
+          "reference.image_url"
+        ],
+        "multiline": false,
+        "name": "reference_payload_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional newline-separated list of URI prefixes that reference_payload_path fetches may target, e.g. s3://plant-images/; empty permits any source. The restriction applies only to URI fetches (s3://, http(s):// and file://) — base64-encoded payload data needs no gate. A file:// reference is the exception to 'empty permits any source': reading images off the device requires an explicit file:// entry here, and paths are resolved before the check so they cannot escape it. Leaving the list empty lets a trigger payload point the fetch at any remote source, so setting prefixes for the sources you use is recommended.",
+        "examples": [
+          "s3://plant-images/\nhttps://mes.local/",
+          "file:///aws_dda/reference-images/"
+        ],
+        "multiline": false,
+        "name": "allowed_uri_prefixes",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "bedrock_inference"
+  },
+  "capture": {
+    "category": "output",
+    "display_name": "Capture to File System",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "idct-method": 2,
+              "quality": "{quality}"
+            },
+            "factory": "jpegenc"
+          },
+          {
+            "args_template": {
+              "buffer-message-id": "file-target_{output_path}-jpg",
+              "interval": "{interval}",
+              "meta": "{capture_meta}"
+            },
+            "factory": "emlcapture"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "jpeg",
+          "emlcapture"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "idct-method": 2,
+              "quality": "{quality}"
+            },
+            "factory": "jpegenc"
+          },
+          {
+            "args_template": {
+              "buffer-message-id": "file-target_{output_path}-jpg",
+              "interval": "{interval}",
+              "meta": "{capture_meta}"
+            },
+            "factory": "emlcapture"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "jpeg",
+          "emlcapture"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "idct-method": 2,
+              "quality": "{quality}"
+            },
+            "factory": "jpegenc"
+          },
+          {
+            "args_template": {
+              "buffer-message-id": "file-target_{output_path}-jpg",
+              "interval": "{interval}",
+              "meta": "{capture_meta}"
+            },
+            "factory": "emlcapture"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "jpeg",
+          "emlcapture"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "idct-method": 2,
+              "quality": "{quality}"
+            },
+            "factory": "jpegenc"
+          },
+          {
+            "args_template": {
+              "buffer-message-id": "file-target_{output_path}-jpg",
+              "interval": "{interval}",
+              "meta": "{capture_meta}"
+            },
+            "factory": "emlcapture"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "jpeg",
+          "emlcapture"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "idct-method": 2,
+              "quality": "{quality}"
+            },
+            "factory": "jpegenc"
+          },
+          {
+            "args_template": {
+              "buffer-message-id": "file-target_{output_path}-jpg",
+              "interval": "{interval}",
+              "meta": "{capture_meta}"
+            },
+            "factory": "emlcapture"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "jpeg",
+          "emlcapture"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "idct-method": 2,
+              "quality": "{quality}"
+            },
+            "factory": "jpegenc"
+          },
+          {
+            "args_template": {
+              "buffer-message-id": "file-target_{output_path}-jpg",
+              "interval": "{interval}",
+              "meta": "{capture_meta}"
+            },
+            "factory": "emlcapture"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "jpeg",
+          "emlcapture"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "idct-method": 2,
+              "quality": "{quality}"
+            },
+            "factory": "jpegenc"
+          },
+          {
+            "args_template": {
+              "buffer-message-id": "file-target_{output_path}-jpg",
+              "interval": "{interval}",
+              "meta": "{capture_meta}"
+            },
+            "factory": "emlcapture"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "jpeg",
+          "emlcapture"
+        ]
+      }
+    ],
+    "outputs": [],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Folder on the device file system where captured JPEG images are written, e.g. /aws_dda/captures.",
+        "examples": [
+          "/aws_dda/captures"
+        ],
+        "multiline": false,
+        "name": "output_path",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Capture every Nth frame; 0 captures every frame, e.g. 10 keeps one frame in ten.",
+        "examples": [
+          0,
+          10
+        ],
+        "multiline": false,
+        "name": "interval",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 100,
+          "min": 1
+        },
+        "default": 100,
+        "depends_on": null,
+        "description": "JPEG encoding quality from 1 (smallest file) to 100 (best image), e.g. 85.",
+        "examples": [
+          85,
+          100
+        ],
+        "multiline": false,
+        "name": "quality",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "capture"
+  },
+  "conditional": {
+    "category": "post_processing",
+    "display_name": "Conditional",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "conditional",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "conditional",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "conditional",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "conditional",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "conditional",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "conditional",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "conditional",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "true",
+        "port_type": "InferenceMeta"
+      },
+      {
+        "name": "false",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Routes each inference result to one of the two outputs: the 'true' output receives it when this condition holds, the 'false' output when it does not. Rule expression over the inference metadata fields is_anomalous (true/false; for object-detection models true when at least one object was detected) and confidence (number; the model's confidence score, for object detection the top detection's confidence). Supports the comparisons ==, !=, >=, <=, >, <, the logic operators && (and), || (or), ! (not), and parentheses; values are numbers (e.g. 0.8), 'quoted strings', or true/false; a bare field name is tested for truth. E.g. is_anomalous == true && confidence >= 0.8",
+        "examples": [
+          "is_anomalous == true",
+          "confidence >= 0.8 && is_anomalous == true",
+          "is_anomalous == true || confidence < 0.5",
+          "!(is_anomalous == true)"
+        ],
+        "multiline": false,
+        "name": "condition",
+        "param_type": "string",
+        "required": true
+      }
+    ],
+    "type_id": "conditional"
+  },
+  "crop": {
+    "category": "preprocessing",
+    "display_name": "Crop",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "bottom": "{bottom}",
+              "left": "{left}",
+              "right": "{right}",
+              "top": "{top}"
+            },
+            "factory": "videocrop"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videocrop"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "bottom": "{bottom}",
+              "left": "{left}",
+              "right": "{right}",
+              "top": "{top}"
+            },
+            "factory": "videocrop"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videocrop"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "bottom": "{bottom}",
+              "left": "{left}",
+              "right": "{right}",
+              "top": "{top}"
+            },
+            "factory": "videocrop"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videocrop"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "bottom": "{bottom}",
+              "left": "{left}",
+              "right": "{right}",
+              "top": "{top}"
+            },
+            "factory": "videocrop"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videocrop"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "bottom": "{bottom}",
+              "left": "{left}",
+              "right": "{right}",
+              "top": "{top}"
+            },
+            "factory": "videocrop"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videocrop"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "bottom": "{bottom}",
+              "left": "{left}",
+              "right": "{right}",
+              "top": "{top}"
+            },
+            "factory": "videocrop"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videocrop"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "bottom": "{bottom}",
+              "left": "{left}",
+              "right": "{right}",
+              "top": "{top}"
+            },
+            "factory": "videocrop"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videocrop"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Pixels cropped from the top edge, e.g. 100.",
+        "examples": [
+          100
+        ],
+        "multiline": false,
+        "name": "top",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Pixels cropped from the bottom edge, e.g. 100.",
+        "examples": [
+          100
+        ],
+        "multiline": false,
+        "name": "bottom",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Pixels cropped from the left edge, e.g. 50.",
+        "examples": [
+          50
+        ],
+        "multiline": false,
+        "name": "left",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Pixels cropped from the right edge, e.g. 50.",
+        "examples": [
+          50
+        ],
+        "multiline": false,
+        "name": "right",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "crop"
+  },
+  "csi_camera_source": {
+    "category": "input",
+    "display_name": "CSI Camera Input",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "emexifextract"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "method": "automatic"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emexifextract",
+          "jpeg",
+          "videoconvertscale",
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "emexifextract"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "method": "automatic"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emexifextract",
+          "jpeg",
+          "videoconvertscale",
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "emexifextract"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "method": "automatic"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emexifextract",
+          "jpeg",
+          "videoconvertscale",
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "emexifextract"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "method": "automatic"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emexifextract",
+          "jpeg",
+          "videoconvertscale",
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "pngdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "png",
+          "videoconvertscale",
+          "python:pillow"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "emexifextract"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "method": "automatic"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emexifextract",
+          "jpeg",
+          "videoconvertscale",
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "max": 100,
+          "min": 0
+        },
+        "default": 4,
+        "depends_on": null,
+        "description": "NVIDIA CSI sensor gain (0-100) applied through the CSI capture service; e.g. 4.",
+        "examples": [
+          4,
+          10
+        ],
+        "multiline": false,
+        "name": "gain",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": 5000000,
+        "depends_on": null,
+        "description": "NVIDIA CSI sensor exposure time in nanoseconds, e.g. 5000000 (5 ms).",
+        "examples": [
+          5000000,
+          16000000
+        ],
+        "multiline": false,
+        "name": "exposure",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "csi_camera_source"
+  },
+  "custom_python": {
+    "category": "post_processing",
+    "display_name": "Custom Python",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Python run for every item passing through the node. Define process_frame(frame, metadata) to work with video frames as NumPy arrays (cv2/np pre-imported; import dda_frames for helpers), or handle(frame_bytes, metadata) -> (frame_bytes, metadata) to work with raw bytes.",
+        "examples": [
+          "def process_frame(frame, metadata):\n    return frame",
+          "def handle(frame_bytes, metadata):\n    return frame_bytes, metadata"
+        ],
+        "multiline": false,
+        "name": "code",
+        "param_type": "code",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Extra pip packages the code needs, one per line in requirements.txt form, e.g. numpy==1.24.0.",
+        "examples": [
+          "numpy==1.24.0",
+          "numpy==1.24.0\nopencv-python-headless==4.8.0.74"
+        ],
+        "multiline": false,
+        "name": "requirements",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "VideoFrames",
+            "InferenceMeta",
+            "EventSignal"
+          ]
+        },
+        "default": "InferenceMeta",
+        "depends_on": null,
+        "description": "Type of data this node accepts on its input port: VideoFrames, InferenceMeta, or EventSignal.",
+        "examples": [
+          "InferenceMeta"
+        ],
+        "multiline": false,
+        "name": "input_port_type",
+        "param_type": "enum",
+        "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            "VideoFrames",
+            "InferenceMeta",
+            "EventSignal"
+          ]
+        },
+        "default": "InferenceMeta",
+        "depends_on": null,
+        "description": "Type of data this node emits on its output port: VideoFrames, InferenceMeta, or EventSignal.",
+        "examples": [
+          "InferenceMeta"
+        ],
+        "multiline": false,
+        "name": "output_port_type",
+        "param_type": "enum",
+        "required": true
+      }
+    ],
+    "type_id": "custom_python"
+  },
+  "custom_python_preprocess": {
+    "category": "preprocessing",
+    "display_name": "Custom Python (Frames)",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "handler-path": "{python_handler_path}"
+            },
+            "factory": "emlpython"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Python run for every video frame. Define process_frame(frame, metadata) and return the processed frame; frame is a NumPy uint8 array (rows x cols x channels) and cv2/np are pre-imported. Return None to pass the frame through. Helpers: import dda_frames for frame_info(), load_image(path or s3:// URI), to_array(), to_bytes().",
+        "examples": [
+          "def process_frame(frame, metadata):\n    return cv2.GaussianBlur(frame, (5, 5), 0)"
+        ],
+        "multiline": false,
+        "name": "code",
+        "param_type": "code",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Extra pip packages the code needs, one per line in requirements.txt form.",
+        "examples": [
+          "scikit-image==0.24.0"
+        ],
+        "multiline": false,
+        "name": "requirements",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "custom_python_preprocess"
+  },
+  "custom_python_source": {
+    "category": "input",
+    "display_name": "Custom Python (Source)",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Python run once per workflow run to produce the run's frame. Define produce_frame(context) and return the frame; context is the trigger context that started the run: for MQTT triggers the keys topic, payload, payload_json, qos and timestamp (payload_json is the payload parsed as JSON, or None when it does not parse); for OPC UA triggers the keys endpoint, node_id, value and source_timestamp; an empty dict for manual runs. Return a NumPy uint8 array (rows x cols grayscale, rows x cols x 3 BGR, or rows x cols x 4 BGRA — OpenCV channel order), or {'array': arr, 'format': 'RGB'|'RGBA'|'GRAY8'} to use the array's bytes without channel conversion, or {'data': bytes, 'width': W, 'height': H, 'format': ...} for raw bytes; returning None fails the run. cv2/np are pre-imported. Helpers: import dda_frames for load_image(source) -> BGR uint8 array and load_bytes(source) -> raw bytes, for local paths, s3://bucket/key URIs, and http(s):// URLs.",
+        "examples": [
+          "def produce_frame(context):\n    import dda_frames\n    payload = context.get(\"payload_json\") or {}\n    return dda_frames.load_image(payload[\"image_url\"])",
+          "def produce_frame(context):\n    import dda_frames\n    return dda_frames.load_image(\"s3://plant-images/reference.jpg\")"
+        ],
+        "multiline": false,
+        "name": "code",
+        "param_type": "code",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Extra pip packages the code needs, one per line in requirements.txt form.",
+        "examples": [
+          "requests==2.32.3"
+        ],
+        "multiline": false,
+        "name": "requirements",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional newline-separated list of URI prefixes that dda_frames.load_image and load_bytes may fetch from, e.g. s3://plant-images/; empty permits any source. The restriction applies only to fetches made through the dda_frames helpers — it is not a sandbox boundary.",
+        "examples": [
+          "s3://plant-images/\nhttps://mes.local/"
+        ],
+        "multiline": false,
+        "name": "allowed_uri_prefixes",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "custom_python_source"
+  },
+  "detection_counter": {
+    "category": "post_processing",
+    "display_name": "Detection Counter",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "detection_counter",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Comma-separated detection labels to always report (up to 32), e.g. person, hardhat. Each listed label is present in the counts, zero when it was not detected; labels that are detected but not listed are still counted.",
+        "examples": [
+          "person, hardhat",
+          "bottle"
+        ],
+        "multiline": false,
+        "name": "classes",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1.0,
+          "min": 0.0
+        },
+        "default": 0.0,
+        "depends_on": null,
+        "description": "Ignore detections whose confidence is below this value (0 to 1), e.g. 0.5. 0 counts every detection.",
+        "examples": [
+          0.0,
+          0.5
+        ],
+        "multiline": false,
+        "name": "min_confidence",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional region of interest, as a JSON list of 3 to 32 [x, y] points in normalized frame coordinates (0 to 1), e.g. [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]. Leave empty to use the whole frame. Only detections that pass zone_rule are counted.",
+        "examples": [
+          "[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]"
+        ],
+        "multiline": false,
+        "name": "zone",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "center",
+            "overlap"
+          ]
+        },
+        "default": "center",
+        "depends_on": null,
+        "description": "How a detection passes the zone: center counts a detection when its box center lies inside the zone, overlap when its box intersects the zone. Ignored when no zone is set.",
+        "examples": [
+          "center",
+          "overlap"
+        ],
+        "multiline": false,
+        "name": "zone_rule",
+        "param_type": "enum",
+        "required": false
+      }
+    ],
+    "type_id": "detection_counter"
+  },
+  "dewarp": {
+    "category": "preprocessing",
+    "display_name": "Dewarp",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "mode": "{mode}",
+              "strength": "{strength}"
+            },
+            "factory": "dewarp"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "dda-dewarp"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "mode": "{mode}",
+              "strength": "{strength}"
+            },
+            "factory": "dewarp"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "dda-dewarp"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "mode": "{mode}",
+              "strength": "{strength}"
+            },
+            "factory": "dewarp"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "dda-dewarp"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "mode": "{mode}",
+              "strength": "{strength}"
+            },
+            "factory": "dewarp"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "dda-dewarp"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "mode": "{mode}",
+              "strength": "{strength}"
+            },
+            "factory": "dewarp"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "dda-dewarp"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "mode": "{mode}",
+              "strength": "{strength}"
+            },
+            "factory": "dewarp"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "dda-dewarp"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "mode": "{mode}",
+              "strength": "{strength}"
+            },
+            "factory": "dewarp"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "dda-dewarp"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "values": [
+            "fisheye",
+            "barrel",
+            "perspective"
+          ]
+        },
+        "default": "fisheye",
+        "depends_on": null,
+        "description": "Lens distortion model to correct: fisheye, barrel, or perspective.",
+        "examples": [
+          "fisheye",
+          "barrel"
+        ],
+        "multiline": false,
+        "name": "mode",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1.0,
+          "min": 0.0
+        },
+        "default": 0.5,
+        "depends_on": null,
+        "description": "Correction strength from 0.0 (none) to 1.0 (maximum), e.g. 0.5.",
+        "examples": [
+          0.5,
+          0.8
+        ],
+        "multiline": false,
+        "name": "strength",
+        "param_type": "float",
+        "required": false
+      }
+    ],
+    "type_id": "dewarp"
+  },
+  "digital_input": {
+    "category": "trigger",
+    "display_name": "Digital Input",
+    "hardware_dependent": true,
+    "inputs": [],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "digital_input",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "digital_input",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "digital_input",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "digital_input",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "digital_input",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "digital_input",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "{sim_source_name}"
+            },
+            "factory": "appsrc"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "EventSignal"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "max": 255,
+          "min": 0
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "GPIO input pin number to watch (0-255), e.g. 7.",
+        "examples": [
+          7,
+          18
+        ],
+        "multiline": false,
+        "name": "pin",
+        "param_type": "int",
+        "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            "rising",
+            "falling",
+            "both"
+          ]
+        },
+        "default": "rising",
+        "depends_on": null,
+        "description": "Signal edge that fires the trigger: rising (low to high), falling (high to low), or both.",
+        "examples": [
+          "rising",
+          "falling"
+        ],
+        "multiline": false,
+        "name": "trigger_edge",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 10
+        },
+        "default": 100,
+        "depends_on": null,
+        "description": "How often the pin is sampled, in milliseconds (10-60000), e.g. 100.",
+        "examples": [
+          100,
+          500
+        ],
+        "multiline": false,
+        "name": "poll_interval_ms",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "digital_input"
+  },
+  "digital_output": {
+    "category": "output",
+    "display_name": "Digital Output",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "config": "{dio_config_json}",
+              "script-path": "{dio_script_path}"
+            },
+            "factory": "emoutputevent"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "emoutputevent"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "config": "{dio_config_json}",
+              "script-path": "{dio_script_path}"
+            },
+            "factory": "emoutputevent"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "emoutputevent"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "config": "{dio_config_json}",
+              "script-path": "{dio_script_path}"
+            },
+            "factory": "emoutputevent"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "emoutputevent"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "config": "{dio_config_json}",
+              "script-path": "{dio_script_path}"
+            },
+            "factory": "emoutputevent"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "emoutputevent"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "config": "{dio_config_json}",
+              "script-path": "{dio_script_path}"
+            },
+            "factory": "emoutputevent"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "emoutputevent"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "config": "{dio_config_json}",
+              "script-path": "{dio_script_path}"
+            },
+            "factory": "emoutputevent"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "emoutputevent"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "recording_digital_output",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [],
+    "parameters": [
+      {
+        "constraints": {
+          "max": 255,
+          "min": 0
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "GPIO output pin number to actuate (0-255), e.g. 5.",
+        "examples": [
+          5,
+          12
+        ],
+        "multiline": false,
+        "name": "pin",
+        "param_type": "int",
+        "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            "high",
+            "low",
+            "pulse"
+          ]
+        },
+        "default": "pulse",
+        "depends_on": null,
+        "description": "Signal written to the pin: high or low latches the level; pulse sets high then resets after the pulse width.",
+        "examples": [
+          "pulse",
+          "high"
+        ],
+        "multiline": false,
+        "name": "signal_type",
+        "param_type": "enum",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 1
+        },
+        "default": 100,
+        "depends_on": null,
+        "description": "Pulse duration in milliseconds (used with signal type pulse), e.g. 100.",
+        "examples": [
+          100,
+          250
+        ],
+        "multiline": false,
+        "name": "pulse_width_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "The pin is actuated only when this condition holds. Rule expression over the inference metadata fields is_anomalous (true/false; for object-detection models true when at least one object was detected) and confidence (number; the model's confidence score, for object detection the top detection's confidence). Supports the comparisons ==, !=, >=, <=, >, <, the logic operators && (and), || (or), ! (not), and parentheses; values are numbers (e.g. 0.8), 'quoted strings', or true/false; a bare field name is tested for truth. E.g. is_anomalous == true && confidence >= 0.8",
+        "examples": [
+          "is_anomalous == true",
+          "confidence >= 0.8 && is_anomalous == true",
+          "is_anomalous == true || confidence < 0.5",
+          "!(is_anomalous == true)"
+        ],
+        "multiline": false,
+        "name": "condition",
+        "param_type": "string",
+        "required": true
+      }
+    ],
+    "type_id": "digital_output"
+  },
+  "event_gate": {
+    "category": "post_processing",
+    "display_name": "Event Gate",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "event_gate",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "A run counts as true for this gate while this condition holds; dotted field paths reach an upstream analytics node's values, e.g. association.ppe.violations > 0 or counter.people.total > 5. Rule expression over the inference metadata fields is_anomalous (true/false; for object-detection models true when at least one object was detected) and confidence (number; the model's confidence score, for object detection the top detection's confidence). Supports the comparisons ==, !=, >=, <=, >, <, the logic operators && (and), || (or), ! (not), and parentheses; values are numbers (e.g. 0.8), 'quoted strings', or true/false; a bare field name is tested for truth. E.g. is_anomalous == true && confidence >= 0.8",
+        "examples": [
+          "is_anomalous == true",
+          "confidence >= 0.8 && is_anomalous == true",
+          "is_anomalous == true || confidence < 0.5",
+          "!(is_anomalous == true)"
+        ],
+        "multiline": false,
+        "name": "condition",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 1
+        },
+        "default": 3,
+        "depends_on": null,
+        "description": "How many consecutive runs whose condition is true make the gate active (1-1000), e.g. 3. A condition that cannot be evaluated counts as false.",
+        "examples": [
+          3,
+          10
+        ],
+        "multiline": false,
+        "name": "activate_after",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 1
+        },
+        "default": 3,
+        "depends_on": null,
+        "description": "How many consecutive runs whose condition is false make the gate inactive again (1-1000), e.g. 3.",
+        "examples": [
+          3,
+          10
+        ],
+        "multiline": false,
+        "name": "clear_after",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "on_activate",
+            "on_change",
+            "while_active"
+          ]
+        },
+        "default": "on_activate",
+        "depends_on": null,
+        "description": "Which runs continue to the nodes downstream of the gate: on_activate only the run that activates it, on_change the activating and the clearing run, while_active every run while it is active.",
+        "examples": [
+          "on_activate",
+          "on_change",
+          "while_active"
+        ],
+        "multiline": false,
+        "name": "emit",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 86400000,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": "emit=while_active",
+        "description": "While the gate is active, let a run through at most once per this many milliseconds (0-86400000), e.g. 60000 for at most once a minute. 0 lets every active run through.",
+        "examples": [
+          0,
+          60000
+        ],
+        "multiline": false,
+        "name": "repeat_interval_ms",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "event_gate"
+  },
+  "folder_source": {
+    "category": "input",
+    "display_name": "Folder Source",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "{location}"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "emexifextract"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "method": "automatic"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emexifextract",
+          "jpeg",
+          "videoconvertscale",
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "{location}"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "emexifextract"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "method": "automatic"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emexifextract",
+          "jpeg",
+          "videoconvertscale",
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "{location}"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "emexifextract"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "method": "automatic"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emexifextract",
+          "jpeg",
+          "videoconvertscale",
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "{location}"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "emexifextract"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "method": "automatic"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emexifextract",
+          "jpeg",
+          "videoconvertscale",
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "{location}"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "pngdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "png",
+          "videoconvertscale",
+          "python:pillow"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "blocksize": -1,
+              "location": "{location}"
+            },
+            "factory": "filesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "emexifextract"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "method": "automatic"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emexifextract",
+          "jpeg",
+          "videoconvertscale",
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Path of the image file (or folder of files) to read on the device, e.g. /aws_dda/images/latest.jpg.",
+        "examples": [
+          "/aws_dda/images/latest.jpg",
+          "/aws_dda/captures"
+        ],
+        "multiline": false,
+        "name": "location",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "*.jpg",
+        "depends_on": null,
+        "description": "Glob pattern selecting which files in the folder are read, e.g. *.jpg.",
+        "examples": [
+          "*.jpg",
+          "line1_*.jpg"
+        ],
+        "multiline": false,
+        "name": "file_pattern",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "folder_source"
+  },
+  "format_convert": {
+    "category": "preprocessing",
+    "display_name": "Format Convert",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "caps": "video/x-raw,format={format}"
+            },
+            "factory": "capsfilter"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "coreelements"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "caps": "video/x-raw,format={format}"
+            },
+            "factory": "capsfilter"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "coreelements"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "caps": "video/x-raw,format={format}"
+            },
+            "factory": "capsfilter"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "coreelements"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "caps": "video/x-raw,format={format}"
+            },
+            "factory": "capsfilter"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "coreelements"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "caps": "video/x-raw,format={format}"
+            },
+            "factory": "capsfilter"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "coreelements"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "caps": "video/x-raw,format={format}"
+            },
+            "factory": "capsfilter"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "coreelements"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          },
+          {
+            "args_template": {
+              "caps": "video/x-raw,format={format}"
+            },
+            "factory": "capsfilter"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videoconvertscale",
+          "coreelements"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "values": [
+            "RGB",
+            "RGBA",
+            "BGR",
+            "GRAY8",
+            "NV12",
+            "I420"
+          ]
+        },
+        "default": "RGB",
+        "depends_on": null,
+        "description": "Pixel format frames are converted to, e.g. RGB (what most models expect).",
+        "examples": [
+          "RGB",
+          "GRAY8"
+        ],
+        "multiline": false,
+        "name": "format",
+        "param_type": "enum",
+        "required": true
+      }
+    ],
+    "type_id": "format_convert"
+  },
+  "icam_source": {
+    "category": "input",
+    "display_name": "ICAM",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "device": "{device}"
+            },
+            "factory": "v4l2src"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "video4linux2",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "device": "{device}"
+            },
+            "factory": "v4l2src"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "video4linux2",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "device": "{device}"
+            },
+            "factory": "v4l2src"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "video4linux2",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "device": "{device}"
+            },
+            "factory": "v4l2src"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "video4linux2",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "device": "{device}"
+            },
+            "factory": "v4l2src"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "video4linux2",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "device": "{device}"
+            },
+            "factory": "v4l2src"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "video4linux2",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "/dev/video0",
+        "depends_on": null,
+        "description": "V4L2 device path of the smart (ICAM) camera on the edge device, e.g. /dev/video0.",
+        "examples": [
+          "/dev/video0",
+          "/dev/video1"
+        ],
+        "multiline": false,
+        "name": "device",
+        "param_type": "string",
+        "required": true
+      }
+    ],
+    "type_id": "icam_source"
+  },
+  "inference_filter": {
+    "category": "post_processing",
+    "display_name": "Inference Filter",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "inference_filter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "inference_filter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "inference_filter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "inference_filter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "inference_filter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "inference_filter",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "inference_filter",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Inference results continue downstream only while this condition holds. Rule expression over the inference metadata fields is_anomalous (true/false; for object-detection models true when at least one object was detected) and confidence (number; the model's confidence score, for object detection the top detection's confidence). Supports the comparisons ==, !=, >=, <=, >, <, the logic operators && (and), || (or), ! (not), and parentheses; values are numbers (e.g. 0.8), 'quoted strings', or true/false; a bare field name is tested for truth. E.g. is_anomalous == true && confidence >= 0.8",
+        "examples": [
+          "is_anomalous == true",
+          "confidence >= 0.8 && is_anomalous == true",
+          "is_anomalous == true || confidence < 0.5",
+          "!(is_anomalous == true)"
+        ],
+        "multiline": false,
+        "name": "condition",
+        "param_type": "string",
+        "required": true
+      }
+    ],
+    "type_id": "inference_filter"
+  },
+  "llm_inference": {
+    "category": "inference",
+    "display_name": "VLM/LLM Inference",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "VideoFrames"
+      },
+      {
+        "name": "reference",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "llm_inference",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "llm_inference",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "sim_llm_inference",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Registered vLLM model to invoke, chosen from the vLLM models registered for the selected use case.",
+        "examples": [
+          "opt-125m"
+        ],
+        "multiline": false,
+        "name": "modelName",
+        "param_type": "model_ref",
+        "required": true
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Prompt sent to the model. {field} placeholders are replaced with values from the upstream inference metadata at execution time. In anomaly mode the executor automatically appends the JSON-format instruction ({\"is_anomalous\": true|false, \"confidence\": 0..1}) and the parsed verdict becomes the inference metadata; in freeform mode the rendered prompt is sent as-is. When the reference input port is connected the captured reference image is sent with the prompt so the model can compare the inspected frame against it.",
+        "examples": [
+          "Summarize this inspection result: anomalous={is_anomalous}, confidence={confidence}",
+          "Compare the input image to the reference image; is_anomalous is true when the input meaningfully differs from the reference."
+        ],
+        "multiline": true,
+        "name": "prompt_template",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": false,
+        "depends_on": null,
+        "description": "Checked: anomaly mode — the executor auto-appends the JSON instruction and the model's verdict (is_anomalous, confidence) drives downstream filters, conditionals, and outputs; an unparseable answer is recorded as the node's error without failing the run. Unchecked (default): freeform mode — the prompt is sent as-is and the raw model text is recorded in the run metadata at llm.{nodeId}.generated_text, with no JSON parsing.",
+        "examples": [
+          true,
+          false
+        ],
+        "multiline": false,
+        "name": "anomaly_mode",
+        "param_type": "bool",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 1
+        },
+        "default": 256,
+        "depends_on": null,
+        "description": "Maximum tokens the model may generate for its answer, e.g. 256. The default of 256 bounds the decode phase, so it caps worst-case generation latency; longer answers are truncated at the budget. Decode time grows with the number of generated tokens, so short verdict-style answers (e.g. anomaly mode's JSON verdict) need only 20-30 tokens and finish much faster than the 256-token default allows.",
+        "examples": [
+          256,
+          512
+        ],
+        "multiline": false,
+        "name": "max_tokens",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 2.0,
+          "min": 0.0
+        },
+        "default": 0.7,
+        "depends_on": null,
+        "description": "Sampling temperature between 0.0 (deterministic) and 2.0 (most random), e.g. 0.7.",
+        "examples": [
+          0.7,
+          0.2
+        ],
+        "multiline": false,
+        "name": "temperature",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1.0,
+          "min_exclusive": 0.0
+        },
+        "default": 1.0,
+        "depends_on": null,
+        "description": "Nucleus-sampling probability mass, greater than 0.0 and at most 1.0, e.g. 1.0.",
+        "examples": [
+          1.0,
+          0.9
+        ],
+        "multiline": false,
+        "name": "top_p",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional system-role instructions sent ahead of the prompt. UNLIKE prompt_template, the value is sent verbatim with no {placeholder} rendering. Empty sends no system prompt (identical to previous behavior).",
+        "examples": [
+          "You are a meticulous visual quality inspector.\nAnswer concisely."
+        ],
+        "multiline": true,
+        "name": "system_prompt",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Optional maximum pixel dimension for the longer edge of captured frames sent to the model. Larger frames are downscaled (aspect preserved) before inference to cut image-token prefill cost; smaller frames are never upscaled. Empty sends frames unmodified.",
+        "examples": [
+          1024,
+          640
+        ],
+        "multiline": false,
+        "name": "max_image_dimension",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "llm_inference"
+  },
+  "metadata": {
+    "category": "post_processing",
+    "display_name": "Metadata",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "metadata",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {},
+        "default": "[]",
+        "depends_on": null,
+        "description": "Metadata mappings as a JSON array of objects with 'path' (dotted field path resolved against the parsed trigger payload, e.g. job_id or order.id) and 'key' (output metadata key the resolved value is attached under). Up to 50 mappings; paths and keys must be non-empty and keys unique.",
+        "examples": [
+          "[{\"path\": \"job_id\", \"key\": \"job_id\"}]",
+          "[{\"path\": \"order.id\", \"key\": \"order_id\"}, {\"path\": \"file_path\", \"key\": \"source_file\"}]"
+        ],
+        "multiline": false,
+        "name": "mappings",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max_length": 10240
+        },
+        "default": "",
+        "depends_on": null,
+        "description": "Optional static JSON object (at most 10240 characters) whose top-level entries are attached to the output metadata alongside the resolved mappings; a resolved mapping wins on a key collision.",
+        "examples": [
+          "{\"station\": \"line-1\"}"
+        ],
+        "multiline": false,
+        "name": "static_json",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "metadata"
+  },
+  "modbus_write": {
+    "category": "output",
+    "display_name": "Modbus TCP Write",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "modbus_write",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "recording_modbus_write",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Modbus TCP server (PLC) hostname or IP, e.g. 192.168.1.30.",
+        "examples": [
+          "192.168.1.30",
+          "plc.local"
+        ],
+        "multiline": false,
+        "name": "host",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 65535,
+          "min": 1
+        },
+        "default": 502,
+        "depends_on": null,
+        "description": "Modbus TCP port, e.g. 502 (the standard Modbus port).",
+        "examples": [
+          502
+        ],
+        "multiline": false,
+        "name": "port",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 255,
+          "min": 0
+        },
+        "default": 1,
+        "depends_on": null,
+        "description": "Modbus unit (slave) id addressed by the write (0-255), e.g. 1.",
+        "examples": [
+          1,
+          0
+        ],
+        "multiline": false,
+        "name": "unit_id",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "coil",
+            "holding_register"
+          ]
+        },
+        "default": "coil",
+        "depends_on": null,
+        "description": "Write target kind: coil (a single on/off bit, Write Single Coil function code 0x05) or holding_register (a 16-bit register, Write Single Register function code 0x06).",
+        "examples": [
+          "coil",
+          "holding_register"
+        ],
+        "multiline": false,
+        "name": "register_type",
+        "param_type": "enum",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 65535,
+          "min": 0
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Address of the coil or holding register written (0-65535), e.g. 12.",
+        "examples": [
+          12,
+          40
+        ],
+        "multiline": false,
+        "name": "address",
+        "param_type": "int",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": "{is_anomalous}",
+        "depends_on": null,
+        "description": "Value written to the target. Placeholders in curly braces are replaced from the inference metadata: {is_anomalous}, {confidence}, or {inference_json}; a single placeholder keeps its native type. Coil writes coerce the rendered value to a boolean; holding-register writes coerce it to an integer 0-65535.",
+        "examples": [
+          "{is_anomalous}",
+          "{confidence}"
+        ],
+        "multiline": false,
+        "name": "value_template",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": "register_type=coil",
+        "description": "Coil pulse duration in milliseconds (0-60000): 0 latches the written value (single write); a positive value writes the rendered value, waits pulse_ms milliseconds, then writes the inverse coil value, e.g. 250.",
+        "examples": [
+          0,
+          250
+        ],
+        "multiline": false,
+        "name": "pulse_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "completion",
+            "capture"
+          ]
+        },
+        "default": "completion",
+        "depends_on": null,
+        "description": "When the write happens: completion (default) after inference and all upstream gates, or capture immediately after the camera frame is grabbed, before inference starts. A capture-phase write has no inference results, so use a literal value_template such as true or 1 (a pulse_ms coil pulse makes a clean 'picture taken' signal).",
+        "examples": [
+          "completion",
+          "capture"
+        ],
+        "multiline": false,
+        "name": "phase",
+        "param_type": "enum",
+        "required": false
+      }
+    ],
+    "type_id": "modbus_write"
+  },
+  "model_inference": {
+    "category": "inference",
+    "display_name": "Model Inference",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
+            "args_template": {
+              "model": "{modelName}",
+              "model-repo": "{triton_model_repo}",
+              "server-path": "{triton_server_path}"
+            },
+            "factory": "emltriton"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emltriton"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
+            "args_template": {
+              "model": "{modelName}",
+              "model-repo": "{triton_model_repo}",
+              "server-path": "{triton_server_path}"
+            },
+            "factory": "emltriton"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emltriton"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
+            "args_template": {
+              "model": "{modelName}",
+              "model-repo": "{triton_model_repo}",
+              "server-path": "{triton_server_path}"
+            },
+            "factory": "emltriton"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emltriton"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
+            "args_template": {
+              "model": "{modelName}",
+              "model-repo": "{triton_model_repo}",
+              "server-path": "{triton_server_path}"
+            },
+            "factory": "emltriton"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emltriton"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
+            "args_template": {
+              "model": "{modelName}",
+              "model-repo": "{triton_model_repo}",
+              "server-path": "{triton_server_path}"
+            },
+            "factory": "emltriton"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emltriton"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
+            "args_template": {
+              "model": "{modelName}",
+              "model-repo": "{triton_model_repo}",
+              "server-path": "{triton_server_path}"
+            },
+            "factory": "emltriton"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements",
+          "emltriton"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
+            "args_template": {
+              "name": "{sim_inference_name}"
+            },
+            "factory": "identity"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "coreelements"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Model to run on each frame, chosen from the models registered for the selected use case.",
+        "examples": [
+          "widget-anomaly-v3"
+        ],
+        "multiline": false,
+        "name": "modelName",
+        "param_type": "model_ref",
+        "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            "left_to_right",
+            "right_to_left",
+            "top_to_bottom",
+            "bottom_to_top",
+            "confidence_desc"
+          ]
+        },
+        "default": "left_to_right",
+        "depends_on": null,
+        "description": "Deterministic ordering of the object-detection results merged into the run metadata as 'detections', computed on bounding box centers: left_to_right (default), right_to_left, top_to_bottom, bottom_to_top, or confidence_desc; ties break on the orthogonal axis ascending (confidence ties by left_to_right). Downstream bedrock_inference nodes select a detection by its position (crop_detection_index) in this order. Read by the device executor from the registered workflow definition — never compiled into the pipeline.",
+        "examples": [
+          "left_to_right",
+          "confidence_desc"
+        ],
+        "multiline": false,
+        "name": "detection_sort_order",
+        "param_type": "enum",
+        "required": false
+      }
+    ],
+    "type_id": "model_inference"
+  },
+  "mqtt_publish": {
+    "category": "output",
+    "display_name": "MQTT Publish",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "mqtt_publish",
+        "plugin_dependencies": [
+          "python:paho-mqtt"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "mqtt_publish",
+        "plugin_dependencies": [
+          "python:paho-mqtt"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "mqtt_publish",
+        "plugin_dependencies": [
+          "python:paho-mqtt"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "mqtt_publish",
+        "plugin_dependencies": [
+          "python:paho-mqtt"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "mqtt_publish",
+        "plugin_dependencies": [
+          "python:paho-mqtt"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "recording_mqtt_publish",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "MQTT broker hostname or IP, e.g. 10.0.0.12 or broker.local.",
+        "examples": [
+          "10.0.0.12",
+          "broker.local"
+        ],
+        "multiline": false,
+        "name": "broker_host",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 65535,
+          "min": 1
+        },
+        "default": 1883,
+        "depends_on": null,
+        "description": "MQTT broker TCP port, e.g. 1883 (plain MQTT) or 8883 (TLS).",
+        "examples": [
+          1883,
+          8883
+        ],
+        "multiline": false,
+        "name": "broker_port",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Topic the message is published to, e.g. factory/line1/inspection.",
+        "examples": [
+          "factory/line1/inspection"
+        ],
+        "multiline": false,
+        "name": "topic",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": "{inference_json}",
+        "depends_on": null,
+        "description": "Message payload. Placeholders in curly braces are replaced from the inference metadata: {inference_json} (full metadata as JSON), {is_anomalous}, and {confidence}.",
+        "examples": [
+          "{inference_json}",
+          "anomaly={is_anomalous} confidence={confidence}"
+        ],
+        "multiline": true,
+        "name": "payload_template",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            0,
+            1,
+            2
+          ]
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "MQTT quality of service: 0 (at most once), 1 (at least once), or 2 (exactly once; AWS IoT Core supports up to 1).",
+        "examples": [
+          0,
+          1
+        ],
+        "multiline": false,
+        "name": "qos",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": false,
+        "depends_on": null,
+        "description": "Publish to AWS IoT Core over mutual TLS instead of a plain MQTT broker; enables the IoT thing name and certificate path fields.",
+        "examples": [
+          true
+        ],
+        "multiline": false,
+        "name": "aws_iot",
+        "param_type": "bool",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "AWS IoT thing name used as the MQTT client id, e.g. dda-edge-device-01.",
+        "examples": [
+          "dda-edge-device-01"
+        ],
+        "multiline": false,
+        "name": "iot_thing_name",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "Path of the Amazon root CA certificate on the device, e.g. /greengrass/v2/rootCA.pem.",
+        "examples": [
+          "/greengrass/v2/rootCA.pem"
+        ],
+        "multiline": false,
+        "name": "iot_ca_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "Path of the device client certificate on the device, e.g. /greengrass/v2/thingCert.crt.",
+        "examples": [
+          "/greengrass/v2/thingCert.crt"
+        ],
+        "multiline": false,
+        "name": "iot_client_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "Path of the device private key on the device, e.g. /greengrass/v2/privKey.key.",
+        "examples": [
+          "/greengrass/v2/privKey.key"
+        ],
+        "multiline": false,
+        "name": "iot_private_key_path",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "mqtt_publish"
+  },
+  "mqtt_subscribe": {
+    "category": "trigger",
+    "display_name": "MQTT Subscribe",
+    "hardware_dependent": true,
+    "inputs": [],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "mqtt_subscribe",
+        "plugin_dependencies": [
+          "python:paho-mqtt",
+          "python:awsiotsdk"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "{sim_source_name}"
+            },
+            "factory": "appsrc"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "EventSignal"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "MQTT broker hostname or IP, e.g. 10.0.0.12 or broker.local.",
+        "examples": [
+          "10.0.0.12",
+          "broker.local"
+        ],
+        "multiline": false,
+        "name": "broker_host",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 65535,
+          "min": 1
+        },
+        "default": 1883,
+        "depends_on": null,
+        "description": "MQTT broker TCP port, e.g. 1883 (plain MQTT) or 8883 (TLS).",
+        "examples": [
+          1883,
+          8883
+        ],
+        "multiline": false,
+        "name": "broker_port",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Topic filter the trigger subscribes to; a message arriving on a matching topic starts a workflow run, e.g. factory/line1/trigger or factory/+/trigger.",
+        "examples": [
+          "factory/line1/trigger",
+          "factory/+/trigger"
+        ],
+        "multiline": false,
+        "name": "topic",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            0,
+            1,
+            2
+          ]
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "MQTT quality of service: 0 (at most once), 1 (at least once), or 2 (exactly once; AWS IoT Core supports up to 1).",
+        "examples": [
+          0,
+          1
+        ],
+        "multiline": false,
+        "name": "qos",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": false,
+        "depends_on": null,
+        "description": "Publish through the device's Greengrass-managed MQTT (the Greengrass nucleus's AWS IoT Core connection) instead of a plain broker or your own AWS IoT credentials. Zero configuration: only the topic is required — no broker host or port and no certificate paths.",
+        "examples": [
+          true
+        ],
+        "multiline": false,
+        "name": "greengrass",
+        "param_type": "bool",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": false,
+        "depends_on": null,
+        "description": "Publish to AWS IoT Core over mutual TLS instead of a plain MQTT broker; enables the IoT thing name and certificate path fields.",
+        "examples": [
+          true
+        ],
+        "multiline": false,
+        "name": "aws_iot",
+        "param_type": "bool",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "AWS IoT Core data endpoint to connect to, e.g. a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com (from 'aws iot describe-endpoint --endpoint-type iot:Data-ATS' in the target account and region). Use it to reach IoT Core in a different account or region with a thing certificate from that account. When set it takes precedence over broker_host; when empty broker_host is used as the endpoint.",
+        "examples": [
+          "a1b2c3d4e5f6-ats.iot.eu-west-1.amazonaws.com"
+        ],
+        "multiline": false,
+        "name": "iot_endpoint",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "AWS IoT thing name used as the MQTT client id, e.g. dda-edge-device-01.",
+        "examples": [
+          "dda-edge-device-01"
+        ],
+        "multiline": false,
+        "name": "iot_thing_name",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "Path of the Amazon root CA certificate on the device, e.g. /greengrass/v2/rootCA.pem.",
+        "examples": [
+          "/greengrass/v2/rootCA.pem"
+        ],
+        "multiline": false,
+        "name": "iot_ca_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "Path of the device client certificate on the device, e.g. /greengrass/v2/thingCert.crt.",
+        "examples": [
+          "/greengrass/v2/thingCert.crt"
+        ],
+        "multiline": false,
+        "name": "iot_client_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": "aws_iot",
+        "description": "Path of the device private key on the device, e.g. /greengrass/v2/privKey.key.",
+        "examples": [
+          "/greengrass/v2/privKey.key"
+        ],
+        "multiline": false,
+        "name": "iot_private_key_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "queue",
+            "drop",
+            "debounce"
+          ]
+        },
+        "default": "queue",
+        "depends_on": null,
+        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce — coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
+        "examples": [
+          "queue",
+          "drop"
+        ],
+        "multiline": false,
+        "name": "concurrency_policy",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 1
+        },
+        "default": 10,
+        "depends_on": "concurrency_policy=queue",
+        "description": "Maximum pending activations queued for this trigger (1-1000); further firings are discarded and logged, e.g. 10.",
+        "examples": [
+          10,
+          100
+        ],
+        "multiline": false,
+        "name": "queue_depth",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 1
+        },
+        "default": 500,
+        "depends_on": "concurrency_policy=debounce",
+        "description": "Trailing debounce interval in milliseconds (1-60000): firings within it coalesce into one activation carrying the most recent trigger context, e.g. 500.",
+        "examples": [
+          500,
+          2000
+        ],
+        "multiline": false,
+        "name": "debounce_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Maximum automatic reconnect attempts after the trigger's connection drops (0-1000); 0 = retry forever, e.g. 0.",
+        "examples": [
+          0,
+          5
+        ],
+        "multiline": false,
+        "name": "retry_limit",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 0
+        },
+        "default": 100,
+        "depends_on": null,
+        "description": "Activation priority relative to the workflow's other triggers (0-1000); lower value = higher priority, ties served in firing order, e.g. 100.",
+        "examples": [
+          100,
+          10
+        ],
+        "multiline": false,
+        "name": "priority",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "mqtt_subscribe"
+  },
+  "object_association": {
+    "category": "post_processing",
+    "display_name": "Object Association",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "object_association",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "The detection label of the subjects being checked, e.g. person. Every required class is matched against these detections.",
+        "examples": [
+          "person"
+        ],
+        "multiline": false,
+        "name": "subject_class",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "1 to 10 comma-separated labels every subject must have, e.g. hardhat, vest. A subject is compliant only when each of these classes has a detection matched to it.",
+        "examples": [
+          "hardhat",
+          "hardhat, vest"
+        ],
+        "multiline": false,
+        "name": "required_classes",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 1.0,
+          "min": 0.05
+        },
+        "default": 0.5,
+        "depends_on": null,
+        "description": "How much of a required-class detection's own box area must lie inside a subject's box for the two to match (0.05 to 1), e.g. 0.5.",
+        "examples": [
+          0.5,
+          0.8
+        ],
+        "multiline": false,
+        "name": "min_overlap",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1.0,
+          "min": 0.0
+        },
+        "default": 0.0,
+        "depends_on": null,
+        "description": "Ignore subject detections whose confidence is below this value (0 to 1), e.g. 0.5. 0 takes every subject detection.",
+        "examples": [
+          0.0,
+          0.5
+        ],
+        "multiline": false,
+        "name": "min_confidence",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional region of interest, as a JSON list of 3 to 32 [x, y] points in normalized frame coordinates (0 to 1), e.g. [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]. Leave empty to use the whole frame. Only subjects whose box center lies inside the zone are checked.",
+        "examples": [
+          "[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]"
+        ],
+        "multiline": false,
+        "name": "zone",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "object_association"
+  },
+  "opcua_subscribe": {
+    "category": "trigger",
+    "display_name": "OPC UA Subscribe",
+    "hardware_dependent": true,
+    "inputs": [],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "opcua_subscribe",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "{sim_source_name}"
+            },
+            "factory": "appsrc"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "EventSignal"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1,
+          "regex": "^opc\\.tcp://.+"
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "OPC UA server endpoint URL, e.g. opc.tcp://192.168.1.20:4840.",
+        "examples": [
+          "opc.tcp://192.168.1.20:4840"
+        ],
+        "multiline": false,
+        "name": "endpoint",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "OPC UA node id the value is written to, e.g. ns=2;s=Machine1.Reject.",
+        "examples": [
+          "ns=2;s=Machine1.Reject"
+        ],
+        "multiline": false,
+        "name": "node_id",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 10
+        },
+        "default": 100,
+        "depends_on": null,
+        "description": "Sampling/publishing interval of the OPC UA subscription in milliseconds (10-60000), e.g. 100.",
+        "examples": [
+          100,
+          1000
+        ],
+        "multiline": false,
+        "name": "sampling_interval_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "subscribe",
+            "poll"
+          ]
+        },
+        "default": "subscribe",
+        "depends_on": null,
+        "description": "How value changes are detected: subscribe registers a true OPC UA data-change subscription (the default); poll reads the node periodically and fires when the value changes.",
+        "examples": [
+          "subscribe",
+          "poll"
+        ],
+        "multiline": false,
+        "name": "mode",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 10
+        },
+        "default": 500,
+        "depends_on": "mode=poll",
+        "description": "How often the node is read in poll mode, in milliseconds (10-60000), e.g. 500.",
+        "examples": [
+          500,
+          2000
+        ],
+        "multiline": false,
+        "name": "poll_interval_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional OPC UA user name for user-token authentication. Leave empty for anonymous access.",
+        "examples": [
+          "operator"
+        ],
+        "multiline": false,
+        "name": "username",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional password for the OPC UA user. Stored with the workflow definition; treat as a secret.",
+        "examples": [
+          "changeit"
+        ],
+        "multiline": false,
+        "name": "password",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional OPC UA security policy for an encrypted/signed session, e.g. Basic256Sha256. Requires client_cert_path and client_key_path.",
+        "examples": [
+          "Basic256Sha256"
+        ],
+        "multiline": false,
+        "name": "security_policy",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional message security mode used with security_policy: Sign or SignAndEncrypt (defaults to SignAndEncrypt when a policy is set).",
+        "examples": [
+          "SignAndEncrypt",
+          "Sign"
+        ],
+        "multiline": false,
+        "name": "security_mode",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional path (on the device) to the client application certificate used for certificate-based security.",
+        "examples": [
+          "/aws_dda/opcua/client-cert.der"
+        ],
+        "multiline": false,
+        "name": "client_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional path (on the device) to the client certificate private key.",
+        "examples": [
+          "/aws_dda/opcua/client-key.pem"
+        ],
+        "multiline": false,
+        "name": "client_key_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional path (on the device) to the server's certificate to pin/trust.",
+        "examples": [
+          "/aws_dda/opcua/server-cert.der"
+        ],
+        "multiline": false,
+        "name": "server_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "queue",
+            "drop",
+            "debounce"
+          ]
+        },
+        "default": "queue",
+        "depends_on": null,
+        "description": "What happens when this trigger fires while a run it activated is still in flight or pending: queue the firing (bounded by queue depth), drop it, or debounce — coalesce firings within the debounce interval into one run carrying the most recent trigger context.",
+        "examples": [
+          "queue",
+          "drop"
+        ],
+        "multiline": false,
+        "name": "concurrency_policy",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 1
+        },
+        "default": 10,
+        "depends_on": "concurrency_policy=queue",
+        "description": "Maximum pending activations queued for this trigger (1-1000); further firings are discarded and logged, e.g. 10.",
+        "examples": [
+          10,
+          100
+        ],
+        "multiline": false,
+        "name": "queue_depth",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 1
+        },
+        "default": 500,
+        "depends_on": "concurrency_policy=debounce",
+        "description": "Trailing debounce interval in milliseconds (1-60000): firings within it coalesce into one activation carrying the most recent trigger context, e.g. 500.",
+        "examples": [
+          500,
+          2000
+        ],
+        "multiline": false,
+        "name": "debounce_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Maximum automatic reconnect attempts after the trigger's connection drops (0-1000); 0 = retry forever, e.g. 0.",
+        "examples": [
+          0,
+          5
+        ],
+        "multiline": false,
+        "name": "retry_limit",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 1000,
+          "min": 0
+        },
+        "default": 100,
+        "depends_on": null,
+        "description": "Activation priority relative to the workflow's other triggers (0-1000); lower value = higher priority, ties served in firing order, e.g. 100.",
+        "examples": [
+          100,
+          10
+        ],
+        "multiline": false,
+        "name": "priority",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "opcua_subscribe"
+  },
+  "opcua_write": {
+    "category": "output",
+    "display_name": "OPC UA Write",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "InferenceMeta"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "opcua_write",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "opcua_write",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "opcua_write",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "opcua_write",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "opcua_write",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "opcua_write",
+        "plugin_dependencies": [
+          "python:asyncua"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "recording_opcua_write",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1,
+          "regex": "^opc\\.tcp://.+"
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "OPC UA server endpoint URL, e.g. opc.tcp://192.168.1.20:4840.",
+        "examples": [
+          "opc.tcp://192.168.1.20:4840"
+        ],
+        "multiline": false,
+        "name": "endpoint",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "OPC UA node id the value is written to, e.g. ns=2;s=Machine1.Reject.",
+        "examples": [
+          "ns=2;s=Machine1.Reject"
+        ],
+        "multiline": false,
+        "name": "node_id",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {},
+        "default": "{is_anomalous}",
+        "depends_on": null,
+        "description": "Value written to the node. Placeholders in curly braces are replaced from the inference metadata: {is_anomalous}, {confidence}, or {inference_json}; a single placeholder keeps its native type.",
+        "examples": [
+          "{is_anomalous}",
+          "{confidence}"
+        ],
+        "multiline": false,
+        "name": "value_template",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional OPC UA user name for user-token authentication. Leave empty for anonymous access.",
+        "examples": [
+          "operator"
+        ],
+        "multiline": false,
+        "name": "username",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional password for the OPC UA user. Stored with the workflow definition; treat as a secret.",
+        "examples": [
+          "changeit"
+        ],
+        "multiline": false,
+        "name": "password",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional OPC UA security policy for an encrypted/signed session, e.g. Basic256Sha256. Requires client_cert_path and client_key_path.",
+        "examples": [
+          "Basic256Sha256"
+        ],
+        "multiline": false,
+        "name": "security_policy",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional message security mode used with security_policy: Sign or SignAndEncrypt (defaults to SignAndEncrypt when a policy is set).",
+        "examples": [
+          "SignAndEncrypt",
+          "Sign"
+        ],
+        "multiline": false,
+        "name": "security_mode",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional path (on the device) to the client application certificate used for certificate-based security.",
+        "examples": [
+          "/aws_dda/opcua/client-cert.der"
+        ],
+        "multiline": false,
+        "name": "client_cert_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional path (on the device) to the client certificate private key.",
+        "examples": [
+          "/aws_dda/opcua/client-key.pem"
+        ],
+        "multiline": false,
+        "name": "client_key_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional path (on the device) to the server's certificate to pin/trust.",
+        "examples": [
+          "/aws_dda/opcua/server-cert.der"
+        ],
+        "multiline": false,
+        "name": "server_cert_path",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "opcua_write"
+  },
+  "rotate": {
+    "category": "preprocessing",
+    "display_name": "Rotate / Flip",
+    "hardware_dependent": false,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "method": "{method}"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "method": "{method}"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "method": "{method}"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "method": "{method}"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "method": "{method}"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "method": "{method}"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videofilter"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "method": "{method}"
+            },
+            "factory": "videoflip"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "videofilter"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "values": [
+            "clockwise",
+            "rotate-180",
+            "counterclockwise",
+            "horizontal-flip",
+            "vertical-flip",
+            "automatic"
+          ]
+        },
+        "default": "clockwise",
+        "depends_on": null,
+        "description": "Rotation or flip applied to every frame; automatic follows the image orientation metadata.",
+        "examples": [
+          "clockwise",
+          "rotate-180",
+          "automatic"
+        ],
+        "multiline": false,
+        "name": "method",
+        "param_type": "enum",
+        "required": true
+      }
+    ],
+    "type_id": "rotate"
+  },
+  "rtmp_stream_source": {
+    "category": "input",
+    "display_name": "RTMP Stream",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "max_length": 2048,
+          "min_length": 1,
+          "regex": "^(rtsps?|rtmps?)://[^\\s/@?#]+([/?][^\\s#]*)?$"
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Credential-free stream URL of the camera, e.g. rtsp://192.168.1.64:554/Streaming/Channels/101 or rtmp://media.local/live/line1. Credentials are set on the camera, never in the URL.",
+        "examples": [
+          "rtsp://192.168.1.64:554/Streaming/Channels/101",
+          "rtmp://media.local/live/line1"
+        ],
+        "multiline": false,
+        "name": "url",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            "continuous",
+            "on_trigger"
+          ]
+        },
+        "default": "continuous",
+        "depends_on": null,
+        "description": "How runs of this workflow start: continuous samples the stream at frames per second without any trigger, on_trigger runs once per external trigger (a subscription trigger or a manual run) on the camera's latest frame.",
+        "examples": [
+          "continuous",
+          "on_trigger"
+        ],
+        "multiline": false,
+        "name": "processing_mode",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 10.0,
+          "min": 0.05
+        },
+        "default": 1.0,
+        "depends_on": "processing_mode=continuous",
+        "description": "Continuous sampling rate in runs per second (0.05-10), e.g. 1.0 for one run a second. A tick is skipped when the previous run is still in flight or no newer frame has arrived, so the achievable rate is bounded by run duration.",
+        "examples": [
+          1.0,
+          5.0
+        ],
+        "multiline": false,
+        "name": "frames_per_second",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 100
+        },
+        "default": 2000,
+        "depends_on": null,
+        "description": "How old the frame a run analyzes may be, in milliseconds (100-60000), e.g. 2000. A run waits up to this long for a frame no older than this, and fails on this node if none arrives.",
+        "examples": [
+          2000
+        ],
+        "multiline": false,
+        "name": "max_frame_age_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 200,
+          "min": 1
+        },
+        "default": 20,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many of the most recent continuous runs of any kind to keep (1-200), e.g. 20. Older runs that are not notable are deleted with their artifacts.",
+        "examples": [
+          20
+        ],
+        "multiline": false,
+        "name": "keep_recent_runs",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 5000,
+          "min": 0
+        },
+        "default": 200,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many notable continuous runs to keep (0-5000), e.g. 200. A run is notable when it failed, sent an output, or recorded an event gate transition.",
+        "examples": [
+          200
+        ],
+        "multiline": false,
+        "name": "keep_notable_runs",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "rtmp_stream_source"
+  },
+  "rtsp_camera_source": {
+    "category": "input",
+    "display_name": "RTSP Camera",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [
+          {
+            "args_template": {
+              "name": "appsrc_{nodeId}"
+            },
+            "factory": "appsrc"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "app",
+          "videoconvertscale"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [
+          {
+            "args_template": {
+              "location": "{dataset_location}"
+            },
+            "factory": "multifilesrc"
+          },
+          {
+            "args_template": {},
+            "factory": "jpegparse"
+          },
+          {
+            "args_template": {
+              "idct-method": 2
+            },
+            "factory": "jpegdec"
+          },
+          {
+            "args_template": {},
+            "factory": "videoconvert"
+          }
+        ],
+        "executor_binding": null,
+        "plugin_dependencies": [
+          "multifile",
+          "jpeg",
+          "videoconvertscale"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "max_length": 2048,
+          "min_length": 1,
+          "regex": "^(rtsps?|rtmps?)://[^\\s/@?#]+([/?][^\\s#]*)?$"
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Credential-free stream URL of the camera, e.g. rtsp://192.168.1.64:554/Streaming/Channels/101 or rtmp://media.local/live/line1. Credentials are set on the camera, never in the URL.",
+        "examples": [
+          "rtsp://192.168.1.64:554/Streaming/Channels/101",
+          "rtmp://media.local/live/line1"
+        ],
+        "multiline": false,
+        "name": "url",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "values": [
+            "continuous",
+            "on_trigger"
+          ]
+        },
+        "default": "continuous",
+        "depends_on": null,
+        "description": "How runs of this workflow start: continuous samples the stream at frames per second without any trigger, on_trigger runs once per external trigger (a subscription trigger or a manual run) on the camera's latest frame.",
+        "examples": [
+          "continuous",
+          "on_trigger"
+        ],
+        "multiline": false,
+        "name": "processing_mode",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 10.0,
+          "min": 0.05
+        },
+        "default": 1.0,
+        "depends_on": "processing_mode=continuous",
+        "description": "Continuous sampling rate in runs per second (0.05-10), e.g. 1.0 for one run a second. A tick is skipped when the previous run is still in flight or no newer frame has arrived, so the achievable rate is bounded by run duration.",
+        "examples": [
+          1.0,
+          5.0
+        ],
+        "multiline": false,
+        "name": "frames_per_second",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 100
+        },
+        "default": 2000,
+        "depends_on": null,
+        "description": "How old the frame a run analyzes may be, in milliseconds (100-60000), e.g. 2000. A run waits up to this long for a frame no older than this, and fails on this node if none arrives.",
+        "examples": [
+          2000
+        ],
+        "multiline": false,
+        "name": "max_frame_age_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 200,
+          "min": 1
+        },
+        "default": 20,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many of the most recent continuous runs of any kind to keep (1-200), e.g. 20. Older runs that are not notable are deleted with their artifacts.",
+        "examples": [
+          20
+        ],
+        "multiline": false,
+        "name": "keep_recent_runs",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 5000,
+          "min": 0
+        },
+        "default": 200,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many notable continuous runs to keep (0-5000), e.g. 200. A run is notable when it failed, sent an output, or recorded an event gate transition.",
+        "examples": [
+          200
+        ],
+        "multiline": false,
+        "name": "keep_notable_runs",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "rtsp_camera_source"
+  },
+  "unified_input": {
+    "category": "input",
+    "display_name": "Input Source",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "activation",
+        "port_type": "EventSignal"
+      }
+    ],
+    "mappings": [],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "parameters": [
+      {
+        "constraints": {
+          "values": [
+            "csi_camera",
+            "icam",
+            "aravis_camera",
+            "folder",
+            "rtsp_camera",
+            "rtmp_stream"
+          ]
+        },
+        "default": "folder",
+        "depends_on": null,
+        "description": "Which underlying source this input represents.",
+        "examples": [
+          "folder",
+          "csi_camera"
+        ],
+        "multiline": false,
+        "name": "source_kind",
+        "param_type": "enum",
+        "required": true
+      },
+      {
+        "constraints": {
+          "max": 100,
+          "min": 0
+        },
+        "default": 4,
+        "depends_on": null,
+        "description": "NVIDIA CSI sensor gain (0-100) applied through the CSI capture service; e.g. 4.",
+        "examples": [
+          4,
+          10
+        ],
+        "multiline": false,
+        "name": "gain",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min": 0
+        },
+        "default": 5000000,
+        "depends_on": null,
+        "description": "NVIDIA CSI sensor exposure time in nanoseconds, e.g. 5000000 (5 ms).",
+        "examples": [
+          5000000,
+          16000000
+        ],
+        "multiline": false,
+        "name": "exposure",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "/dev/video0",
+        "depends_on": null,
+        "description": "V4L2 device path of the smart (ICAM) camera on the edge device, e.g. /dev/video0.",
+        "examples": [
+          "/dev/video0",
+          "/dev/video1"
+        ],
+        "multiline": false,
+        "name": "device",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Aravis (GenICam) camera identifier as enumerated on the edge device, e.g. Aravis-Fake-GV01 or Basler-12345678.",
+        "examples": [
+          "Aravis-Fake-GV01",
+          "Basler-12345678"
+        ],
+        "multiline": false,
+        "name": "camera_id",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Path of the image file (or folder of files) to read on the device, e.g. /aws_dda/images/latest.jpg.",
+        "examples": [
+          "/aws_dda/images/latest.jpg",
+          "/aws_dda/captures"
+        ],
+        "multiline": false,
+        "name": "location",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "*.jpg",
+        "depends_on": null,
+        "description": "Glob pattern selecting which files in the folder are read, e.g. *.jpg.",
+        "examples": [
+          "*.jpg",
+          "line1_*.jpg"
+        ],
+        "multiline": false,
+        "name": "file_pattern",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max_length": 2048,
+          "min_length": 1,
+          "regex": "^(rtsps?|rtmps?)://[^\\s/@?#]+([/?][^\\s#]*)?$"
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Credential-free stream URL of the camera, e.g. rtsp://192.168.1.64:554/Streaming/Channels/101 or rtmp://media.local/live/line1. Credentials are set on the camera, never in the URL.",
+        "examples": [
+          "rtsp://192.168.1.64:554/Streaming/Channels/101",
+          "rtmp://media.local/live/line1"
+        ],
+        "multiline": false,
+        "name": "url",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "continuous",
+            "on_trigger"
+          ]
+        },
+        "default": "continuous",
+        "depends_on": null,
+        "description": "How runs of this workflow start: continuous samples the stream at frames per second without any trigger, on_trigger runs once per external trigger (a subscription trigger or a manual run) on the camera's latest frame.",
+        "examples": [
+          "continuous",
+          "on_trigger"
+        ],
+        "multiline": false,
+        "name": "processing_mode",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 10.0,
+          "min": 0.05
+        },
+        "default": 1.0,
+        "depends_on": "processing_mode=continuous",
+        "description": "Continuous sampling rate in runs per second (0.05-10), e.g. 1.0 for one run a second. A tick is skipped when the previous run is still in flight or no newer frame has arrived, so the achievable rate is bounded by run duration.",
+        "examples": [
+          1.0,
+          5.0
+        ],
+        "multiline": false,
+        "name": "frames_per_second",
+        "param_type": "float",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60000,
+          "min": 100
+        },
+        "default": 2000,
+        "depends_on": null,
+        "description": "How old the frame a run analyzes may be, in milliseconds (100-60000), e.g. 2000. A run waits up to this long for a frame no older than this, and fails on this node if none arrives.",
+        "examples": [
+          2000
+        ],
+        "multiline": false,
+        "name": "max_frame_age_ms",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 200,
+          "min": 1
+        },
+        "default": 20,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many of the most recent continuous runs of any kind to keep (1-200), e.g. 20. Older runs that are not notable are deleted with their artifacts.",
+        "examples": [
+          20
+        ],
+        "multiline": false,
+        "name": "keep_recent_runs",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 5000,
+          "min": 0
+        },
+        "default": 200,
+        "depends_on": "processing_mode=continuous",
+        "description": "How many notable continuous runs to keep (0-5000), e.g. 200. A run is notable when it failed, sent an output, or recorded an event gate transition.",
+        "examples": [
+          200
+        ],
+        "multiline": false,
+        "name": "keep_notable_runs",
+        "param_type": "int",
+        "required": false
+      }
+    ],
+    "type_id": "unified_input"
+  }
+}

@@ -91,7 +91,8 @@ def test_default_registry_resolution_golden():
     assert refs["D2"]["stage"] == "builder"
     assert refs["D3"]["default_pull_reference"] == "nvcr.io/nvidia/l4t-cuda:11.4.19-runtime"
     assert refs["D3"]["stage"] == "cuda114"
-    assert refs["D4"]["default_pull_reference"] == "nvcr.io/nvidia/l4t-jetpack:r36.3.0"
+    # D4: bumped to r36.4.0 by jp6-vllm-enablement (Dockerfile.jp6 base bump).
+    assert refs["D4"]["default_pull_reference"] == "nvcr.io/nvidia/l4t-jetpack:r36.4.0"
     assert refs["D5"]["default_pull_reference"] == "nvcr.io/nvidia/l4t-jetpack:r36.3.0"
     assert refs["D5"]["stage"] == "builder"
 

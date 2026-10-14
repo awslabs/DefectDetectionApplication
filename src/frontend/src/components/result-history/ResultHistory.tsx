@@ -49,7 +49,7 @@ export default function ResultHistory(): JSX.Element {
           <WorkflowSelector
             setWorkflowId={setWorkflowId}
             workflowId={workflowId}
-            onWorkflowChange={(wid): void => navigate(`/history/${wid}`)}
+            onWorkflowChange={(wid): void => void navigate(`/history/${wid}`)}
           />
         </Container>
         {

@@ -8,11 +8,20 @@ from functools import wraps
 from typing import Dict, Any, List, Optional
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    rbac_manager, Role, Permission
+    rbac_manager, Role, Permission, RegistryUnavailable, attribution_from
 )
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+# Audit action for a request that could not be authorized because the
+# Portal_Identity registry could not be read. A lookup outage is an
+# availability failure, NOT a privilege decision: it is recorded with
+# result='failure' under its own action so a DynamoDB outage never shows
+# up as thousands of `unauthorized_access` denials
+# (portal-jwt-role-privilege-escalation Requirement 1.5, design.md
+# Decision 3).
+AUTHORIZATION_UNAVAILABLE_ACTION = 'authorization_unavailable'
 
 
 def extract_usecase_id_from_event(event: Dict, usecase_param: str = 'usecase_id') -> Optional[str]:
@@ -67,6 +76,11 @@ def rbac_check(required_permissions: List[Permission],
     def decorator(func):
         @wraps(func)
         def wrapper(event, context):
+            # Bound before the try so the RegistryUnavailable handler can
+            # audit an attributable failure whatever stage raised.
+            user = None
+            user_id = 'unknown'
+            usecase_id = None
             try:
                 # Extract user information
                 user = get_user_from_event(event)
@@ -85,15 +99,36 @@ def rbac_check(required_permissions: List[Permission],
                         'parameter': usecase_param
                     })
                 
-                # Check if user has any of the required permissions
+                # Check if user has any of the required permissions.
+                # Thread the JWT-derived user dict as user_info so the
+                # Cognito custom:role claim reaches role resolution. The
+                # claim is Claimed_Role only: privilege comes from the
+                # Portal_Identity registry once PORTAL_REGISTRY_ENFORCED
+                # is on, and the claim is recorded in the audit details of
+                # a denial as descriptive metadata
+                # (portal-jwt-role-privilege-escalation, design.md
+                # Decision 2). With the flag off the pre-fix resolution
+                # order applies unchanged.
+                # Historical note (the reason user_info is threaded at
+                # all): at the 'global' scope used by allow_global routes
+                # there is no per-usecase UserRoles row, so without
+                # user_info the role defaulted to Viewer and JWT
+                # PortalAdmins got 403s.
                 has_permission = False
                 for permission in required_permissions:
-                    if rbac_manager.has_permission(user_id, usecase_id, permission):
+                    if rbac_manager.has_permission(user_id, usecase_id, permission,
+                                                   user_info=user):
                         has_permission = True
                         break
                 
                 if not has_permission:
-                    # Log unauthorized access attempt
+                    effective_role = rbac_manager.get_user_role(
+                        user_id, usecase_id, user_info=user)
+                    # Log unauthorized access attempt, attributable after
+                    # the Cognito user is deleted: the actor's username /
+                    # email / source IP / user agent and the
+                    # Identity_Source that decided the role are captured
+                    # from THIS request (Requirements 4.1, 4.2, 4.4).
                     log_audit_event(
                         user_id=user_id,
                         action='unauthorized_access',
@@ -103,10 +138,17 @@ def rbac_check(required_permissions: List[Permission],
                         details={
                             'required_permissions': [p.value for p in required_permissions],
                             'usecase_id': usecase_id,
-                            'user_role': rbac_manager.get_user_role(user_id, usecase_id).value if rbac_manager.get_user_role(user_id, usecase_id) else 'none',
+                            'user_role': effective_role.value if effective_role else 'none',
                             'method': event.get('httpMethod'),
-                            'path': event.get('path')
-                        }
+                            'path': event.get('path'),
+                            # Claimed_Role: what the token asserted, which
+                            # grants nothing (design.md Decision 2). A
+                            # mismatch with the registry role is itself a
+                            # signal.
+                            'claimed_role': (user or {}).get('role', 'unknown'),
+                        },
+                        identity=attribution_from(event, user,
+                                                  usecase_id=usecase_id)
                     )
                     
                     return create_response(403, {
@@ -122,17 +164,50 @@ def rbac_check(required_permissions: List[Permission],
                 event['rbac_context'].update({
                     'user_id': user_id,
                     'usecase_id': usecase_id,
-                    'user_role': rbac_manager.get_user_role(user_id, usecase_id),
-                    'permissions': rbac_manager.get_user_permissions(user_id, usecase_id),
-                    'is_super_user': rbac_manager.is_portal_admin(user_id)
+                    'user_role': rbac_manager.get_user_role(user_id, usecase_id, user_info=user),
+                    'permissions': rbac_manager.get_user_permissions(user_id, usecase_id, user_info=user),
+                    'is_super_user': rbac_manager.is_portal_admin(user_id, user_info=user)
                 })
                 
-                # Call the original function
-                return func(event, context)
-                
+            except RegistryUnavailable as e:
+                # The registry could not be read: answer the availability
+                # error (never 403, never a silent Viewer downgrade) and
+                # audit result='failure' so the outage is distinguishable
+                # from a privilege decision (Requirement 1.5, design.md
+                # Decision 3).
+                logger.error(f"Portal_Identity registry unavailable during "
+                             f"RBAC check: {str(e)}", exc_info=True)
+                log_audit_event(
+                    user_id=user_id,
+                    action=AUTHORIZATION_UNAVAILABLE_ACTION,
+                    resource_type='api_endpoint',
+                    resource_id=event.get('resource', 'unknown'),
+                    result='failure',
+                    details={
+                        'required_permissions': [p.value for p in required_permissions],
+                        'usecase_id': usecase_id,
+                        'method': event.get('httpMethod'),
+                        'path': event.get('path'),
+                        'claimed_role': (user or {}).get('role', 'unknown'),
+                        'error': str(e),
+                    },
+                    identity=attribution_from(event, user,
+                                              usecase_id=usecase_id)
+                )
+                return create_response(500, {'error': 'Authorization check failed'})
             except Exception as e:
                 logger.error(f"Error in RBAC check: {str(e)}", exc_info=True)
                 return create_response(500, {'error': 'Authorization check failed'})
+            
+            # Call the original function OUTSIDE the authorization
+            # try/except: only failures of the authorization logic itself
+            # may answer 'Authorization check failed'. A handler error has
+            # to surface through the handler's own error handling (the
+            # portal handlers wrap their routing in try/except and return
+            # their own error envelope), otherwise a post-authorization
+            # bug is reported as an authorization failure and the real
+            # cause stays invisible (Req 2.7, 3.2).
+            return func(event, context)
         
         return wrapper
     return decorator
@@ -144,11 +219,20 @@ def super_user_only(func):
     """
     @wraps(func)
     def wrapper(event, context):
+        user = None
+        user_id = 'unknown'
         try:
             user = get_user_from_event(event)
             user_id = user['user_id']
             
-            if not rbac_manager.is_portal_admin(user_id):
+            # Pass user_info so the JWT custom:role claim reaches role
+            # resolution (same threading as rbac_check above). The claim is
+            # Claimed_Role only once PORTAL_REGISTRY_ENFORCED is on: the
+            # global Portal_Identity row decides PortalAdmin
+            # (portal-jwt-role-privilege-escalation, design.md Decision 2).
+            if not rbac_manager.is_portal_admin(user_id, user_info=user):
+                effective_role = rbac_manager.get_user_role(
+                    user_id, 'global', user_info=user)
                 log_audit_event(
                     user_id=user_id,
                     action='unauthorized_super_user_access',
@@ -156,10 +240,13 @@ def super_user_only(func):
                     resource_id=event.get('resource', 'unknown'),
                     result='denied',
                     details={
-                        'user_role': rbac_manager.get_user_role(user_id, 'global').value if rbac_manager.get_user_role(user_id, 'global') else 'none',
+                        'user_role': effective_role.value if effective_role else 'none',
                         'method': event.get('httpMethod'),
-                        'path': event.get('path')
-                    }
+                        'path': event.get('path'),
+                        'claimed_role': (user or {}).get('role', 'unknown'),
+                    },
+                    identity=attribution_from(event, user,
+                                              usecase_id='global')
                 )
                 
                 return create_response(403, {
@@ -177,11 +264,35 @@ def super_user_only(func):
                 'user_role': Role.PORTAL_ADMIN
             })
             
-            return func(event, context)
-            
+        except RegistryUnavailable as e:
+            # Availability failure, not a permission decision
+            # (Requirement 1.5, design.md Decision 3).
+            logger.error(f"Portal_Identity registry unavailable during super "
+                         f"user check: {str(e)}", exc_info=True)
+            log_audit_event(
+                user_id=user_id,
+                action=AUTHORIZATION_UNAVAILABLE_ACTION,
+                resource_type='api_endpoint',
+                resource_id=event.get('resource', 'unknown'),
+                result='failure',
+                details={
+                    'required_role': Role.PORTAL_ADMIN.value,
+                    'usecase_id': 'global',
+                    'method': event.get('httpMethod'),
+                    'path': event.get('path'),
+                    'claimed_role': (user or {}).get('role', 'unknown'),
+                    'error': str(e),
+                },
+                identity=attribution_from(event, user, usecase_id='global')
+            )
+            return create_response(500, {'error': 'Authorization check failed'})
         except Exception as e:
             logger.error(f"Error in super user check: {str(e)}", exc_info=True)
             return create_response(500, {'error': 'Authorization check failed'})
+        
+        # Handler call outside the authorization try/except: same
+        # reasoning as rbac_check above (Req 2.7, 3.2).
+        return func(event, context)
     
     return wrapper
 
@@ -288,6 +399,57 @@ class CommonPermissions:
     # Administrative Operations
     ADMIN_OPERATIONS = [Permission.MANAGE_USERS, Permission.MANAGE_SETTINGS, Permission.VIEW_AUDIT_LOGS]
 
+    # Workflow Manager Operations
+    # Role mapping (see shared_utils.RBACManager):
+    #   workflow:read                          -> Viewer, Operator, DataScientist, UseCaseAdmin
+    #   workflow:create/edit/save/delete/test  -> DataScientist, UseCaseAdmin
+    #   workflow:package/deploy                -> Operator, UseCaseAdmin
+    #   bedrock-config:write                   -> PortalAdmin only
+    VIEW_WORKFLOWS = [Permission.WORKFLOW_READ]
+    EDIT_WORKFLOWS = [
+        Permission.WORKFLOW_CREATE,
+        Permission.WORKFLOW_EDIT,
+        Permission.WORKFLOW_SAVE,
+        Permission.WORKFLOW_DELETE,
+    ]
+    TEST_WORKFLOWS = [Permission.WORKFLOW_TEST]
+    DEPLOY_WORKFLOWS = [Permission.WORKFLOW_PACKAGE, Permission.WORKFLOW_DEPLOY]
+    MANAGE_BEDROCK_CONFIG = [Permission.BEDROCK_CONFIG_WRITE]
+
+    # Node Designer Operations (custom-node-designer, Requirement 13)
+    # Role mapping (see shared_utils.RBACManager):
+    #   node-designer:read              -> Viewer, Operator, DataScientist,
+    #                                      UseCaseAdmin, PortalAdmin (13.3)
+    #   node-designer:create/generate/import/simulate/register/
+    #                 promote-demote/manage
+    #                                   -> UseCaseAdmin (own Use_Case),
+    #                                      PortalAdmin (13.1)
+    #   node-designer:security-review   -> PortalAdmin only (13.2)
+    # Denials return the standard authorization error envelope (13.4).
+    VIEW_NODE_DESIGNER = [Permission.NODE_DESIGNER_READ]
+    MANAGE_NODE_DESIGNER = [
+        Permission.NODE_DESIGNER_CREATE,
+        Permission.NODE_DESIGNER_GENERATE,
+        Permission.NODE_DESIGNER_IMPORT,
+        Permission.NODE_DESIGNER_SIMULATE,
+        Permission.NODE_DESIGNER_REGISTER,
+        Permission.NODE_DESIGNER_PROMOTE_DEMOTE,
+        Permission.NODE_DESIGNER_MANAGE,
+    ]
+    REVIEW_NODE_DESIGNER = [Permission.NODE_DESIGNER_SECURITY_REVIEW]
+
+    # Build Fleet Operations (portal-build-fleet-and-workflow-gates)
+    # Role mapping (see shared_utils.RBACManager):
+    #   builds:submit/cancel/read -> DataScientist, UseCaseAdmin, PortalAdmin
+    #                                (the Build_Operator capability)
+    # Builds are not Use_Case-scoped: check these permissions with
+    # rbac_check(..., allow_global=True) so the scope resolves to
+    # 'global'. Denials return the standard authorization error and
+    # record a denied-access Audit_Log entry (Req 1.6, 4.10, 9.6).
+    SUBMIT_BUILDS = [Permission.BUILDS_SUBMIT]
+    CANCEL_BUILDS = [Permission.BUILDS_CANCEL]
+    VIEW_BUILDS = [Permission.BUILDS_READ]
+
 
 # Convenience decorators for common permission patterns
 def require_data_scientist_or_admin(usecase_param: str = 'usecase_id'):
@@ -308,3 +470,61 @@ def require_usecase_admin_or_portal_admin(usecase_param: str = 'usecase_id'):
 def require_view_access(usecase_param: str = 'usecase_id'):
     """Require any role with view access"""
     return rbac_check([Permission.VIEW_USECASES], usecase_param)
+
+
+def require_workflow_read(usecase_param: str = 'usecase_id'):
+    """Require workflow:read (Viewer, Operator, DataScientist, UseCaseAdmin, PortalAdmin)"""
+    return rbac_check(CommonPermissions.VIEW_WORKFLOWS, usecase_param)
+
+
+def require_workflow_edit(usecase_param: str = 'usecase_id'):
+    """Require workflow create/edit/save/delete (DataScientist, UseCaseAdmin, PortalAdmin)"""
+    return rbac_check(CommonPermissions.EDIT_WORKFLOWS, usecase_param)
+
+
+def require_workflow_test(usecase_param: str = 'usecase_id'):
+    """Require workflow:test (DataScientist, UseCaseAdmin, PortalAdmin)"""
+    return rbac_check(CommonPermissions.TEST_WORKFLOWS, usecase_param)
+
+
+def require_workflow_deploy(usecase_param: str = 'usecase_id'):
+    """Require workflow package/deploy (Operator, UseCaseAdmin, PortalAdmin)"""
+    return rbac_check(CommonPermissions.DEPLOY_WORKFLOWS, usecase_param)
+
+
+def require_node_designer_read(usecase_param: str = 'usecase_id'):
+    """Require node-designer:read (every role of the Use_Case, 13.3)"""
+    return rbac_check(CommonPermissions.VIEW_NODE_DESIGNER, usecase_param)
+
+
+def require_node_designer_manage(usecase_param: str = 'usecase_id'):
+    """Require node-designer create/generate/import/simulate/register/
+    promote-demote/manage (UseCaseAdmin within own Use_Case, PortalAdmin, 13.1)"""
+    return rbac_check(CommonPermissions.MANAGE_NODE_DESIGNER, usecase_param)
+
+
+def require_node_designer_security_review(usecase_param: str = 'usecase_id'):
+    """Require node-designer:security-review (PortalAdmin only, 13.2)"""
+    return rbac_check(CommonPermissions.REVIEW_NODE_DESIGNER, usecase_param)
+
+
+def require_builds_submit():
+    """Require builds:submit (DataScientist, UseCaseAdmin, PortalAdmin).
+
+    Global scope: builds are not Use_Case-scoped (Req 1.6)."""
+    return rbac_check(CommonPermissions.SUBMIT_BUILDS, allow_global=True)
+
+
+def require_builds_cancel():
+    """Require builds:cancel (DataScientist, UseCaseAdmin, PortalAdmin).
+
+    Global scope: builds are not Use_Case-scoped (Req 4.10)."""
+    return rbac_check(CommonPermissions.CANCEL_BUILDS, allow_global=True)
+
+
+def require_builds_read():
+    """Require builds:read (DataScientist, UseCaseAdmin, PortalAdmin).
+
+    Global scope: builds are not Use_Case-scoped. Read is restricted to
+    Build_Operators too (build logs may contain account identifiers)."""
+    return rbac_check(CommonPermissions.VIEW_BUILDS, allow_global=True)

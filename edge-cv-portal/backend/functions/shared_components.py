@@ -31,7 +31,7 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, assume_cross_account_role,
-    create_boto3_client, get_usecase_region
+    create_boto3_client, get_usecase_region, caller_is_portal_admin
 )
 
 logger = logging.getLogger()
@@ -57,12 +57,12 @@ COMPONENT_BUCKET = os.environ.get('COMPONENT_BUCKET', f'{COMPONENT_BUCKET_PREFIX
 # NOTE: the JetPack-specific ARM64 variants (arm64JP5 / arm64JP6) are published by
 # gdk-component-build-and-publish.sh as distinct components. They must be listed
 # here so they are mirrored into usecase accounts; otherwise a JP5/JP6 device has
-# no deployable LocalServer in the portal even though the generic arm64 variant is
-# shared.
+# no deployable LocalServer in the portal even though the generic arm64 CPU
+# variant is shared.
 DDA_LOCAL_SERVER_COMPONENTS = {
     'arm64': {
         'name': 'aws.edgeml.dda.LocalServer.arm64',
-        'description': 'DDA LocalServer for ARM64 Jetson JetPack 4 (L4T r32.x / Ubuntu 18.04)',
+        'description': 'DDA LocalServer for generic ARM64 CPU devices (non-Jetson, e.g. AWS Graviton)',
         'platforms': ['linux/arm64']
     },
     'arm64JP5': {
@@ -1034,8 +1034,10 @@ def get_update_status(event: Dict, user: Dict) -> Dict:
     Portal admin only - shows which usecases need updates.
     """
     try:
-        # Check if user is portal admin
-        if user.get('role') != 'PortalAdmin':
+        # Effective_Role from the Portal_Identity registry, not the token's
+        # Claimed_Role (portal-jwt-role-privilege-escalation Req 1.5,
+        # design.md Decision 2). RegistryUnavailable -> 500 below, never 403.
+        if not caller_is_portal_admin(user):
             return create_response(403, {'error': 'Portal admin access required'})
         
         # Get latest version per component name for version comparison
@@ -1112,8 +1114,10 @@ def update_all_usecases(event: Dict, user: Dict) -> Dict:
     Portal admin only.
     """
     try:
-        # Check if user is portal admin
-        if user.get('role') != 'PortalAdmin':
+        # Effective_Role from the Portal_Identity registry, not the token's
+        # Claimed_Role (portal-jwt-role-privilege-escalation Req 1.5,
+        # design.md Decision 2). RegistryUnavailable -> 500 below, never 403.
+        if not caller_is_portal_admin(user):
             return create_response(403, {'error': 'Portal admin access required'})
         
         body = json.loads(event.get('body', '{}'))

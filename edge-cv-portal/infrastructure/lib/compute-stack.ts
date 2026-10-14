@@ -4,22 +4,58 @@ import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as kms from 'aws-cdk-lib/aws-kms';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
+import * as iot from 'aws-cdk-lib/aws-iot';
+import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as cr from 'aws-cdk-lib/custom-resources';
+import * as ecr from 'aws-cdk-lib/aws-ecr';
+import * as ecrAssets from 'aws-cdk-lib/aws-ecr-assets';
 import { Construct } from 'constructs';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
+import { execFileSync, execSync } from 'child_process';
 import { ApiGatewayStack } from './api-gateway-stack';
+import { CameraRegistryApiStack } from './camera-registry-api-stack';
+import { UserAdminApiStack } from './user-admin-api-stack';
+import { QuickSetupApiStack } from './quick-setup-api-stack';
+import { DdaLabelingApiStack } from './dda-labeling-api-stack';
+import { WorkflowManagerGapsApiStack } from './workflow-manager-gaps-api-stack';
+import { WorkflowTuningApiStack } from './workflow-tuning-api-stack';
+import {
+  detectorExportImage as resolveDetectorExportImage,
+  groundedSamWorkerEnabled,
+  portalRegistryEnforced,
+} from './context-helpers';
+import { PYTHON_CONTAINER_ASSET_EXCLUDES } from './container-asset-excludes';
 
 export interface ComputeStackProps extends cdk.StackProps {
   userPool: cognito.UserPool;
+  /**
+   * The app client id the custom JWT authorizer accepts (its
+   * ALLOWED_AUDIENCES). Without it the authorizer denies every request.
+   */
+  userPoolClientId?: string;
   useCasesTable: dynamodb.Table;
   userRolesTable: dynamodb.Table;
   devicesTable: dynamodb.Table;
   auditLogTable: dynamodb.Table;
   trainingJobsTable: dynamodb.Table;
   labelingJobsTable: dynamodb.Table;
+  /**
+   * DDA Data Labeling tables (dda-data-labeling): teams
+   * (dda-portal-labeling-teams) and per-image tasks
+   * (dda-portal-labeling-tasks), created by the StorageStack (task 3.1).
+   */
+  labelingTeamsTable: dynamodb.Table;
+  labelingTasksTable: dynamodb.Table;
   preLabeledDatasetsTable: dynamodb.Table;
   modelsTable: dynamodb.Table;
   deploymentsTable: dynamodb.Table;
@@ -27,7 +63,28 @@ export interface ComputeStackProps extends cdk.StackProps {
   componentsTable: dynamodb.Table;
   sharedComponentsTable: dynamodb.Table;
   dataAccountsTable: dynamodb.Table;
+  workflowsTable: dynamodb.Table;
+  workflowVersionsTable: dynamodb.Table;
+  testDatasetsTable: dynamodb.Table;
+  testRunsTable: dynamodb.Table;
+  workflowChatSessionsTable: dynamodb.Table;
+  cameraRegistryTable: dynamodb.Table;
+  /**
+   * Station Quick Setup device-registrations table
+   * (`dda-portal-device-registrations`). Backs both the Device_Registration
+   * items and the `RATELIMIT#` counters. The token-authenticated quick_setup
+   * Lambda is granted read/write on ONLY this table plus the audit log.
+   */
+  deviceRegistrationsTable: dynamodb.Table;
   portalArtifactsBucket: s3.Bucket;
+  /**
+   * Workflow_Test_Runner Step Functions state machine (test-runner stack).
+   * When provided, the WorkflowTestingHandler receives its ARN as the
+   * TEST_RUN_STATE_MACHINE_ARN environment variable and is granted
+   * StartExecution/DescribeExecution; without it the handler falls back to
+   * the portal settings table for runtime configuration.
+   */
+  testRunStateMachine?: sfn.IStateMachine;
   /**
    * CloudFront domain for the portal frontend.
    * Used to configure CORS on Data Account buckets during UseCase onboarding.
@@ -64,9 +121,28 @@ export interface ComputeStackProps extends cdk.StackProps {
 export class ComputeStack extends cdk.Stack {
   public readonly api: apigateway.RestApi;
   public readonly apiUrl: string;
+  /**
+   * DDA Data Labeling API handler (dda_labeling.py). Exported so the
+   * DdaLabelingApiStack (task 14.2) can register the /labeling-teams*,
+   * /labeler*, /labeling/{id}/stop and /labeling/{id}/review* routes
+   * against it.
+   */
+  public readonly ddaLabelingHandler: lambda.Function;
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
+
+    // Minimize this stack's IAM policies. aws-cdk-lib >= 2.260 (the first
+    // release with the NodejsFunction bundling fixes) grants DynamoDB's
+    // principal-only stream actions (GetRecords/GetShardIterator) in a
+    // statement of their own on every table grant. With this stack's role
+    // and table count that duplication pushed the template past
+    // CloudFormation's 1,000,000-byte limit (1.17 MB, deploy rejected).
+    // Minimization merges statements that share resources or actions back
+    // together; every role keeps exactly the same action x resource x
+    // condition grants. Scoped to this stack (set before any child exists)
+    // so the other stacks' policies are untouched.
+    this.node.setContext('@aws-cdk/aws-iam:minimizePolicies', true);
 
     // Validate the trusted UseCase account list at synth time. An empty list
     // would otherwise produce an empty sts:AssumeRole resource list; the
@@ -75,16 +151,20 @@ export class ComputeStack extends cdk.Stack {
     if (!props.trustedUseCaseAccountIds || props.trustedUseCaseAccountIds.length === 0) {
       throw new Error(
         'ComputeStack requires a non-empty trustedUseCaseAccountIds list ' +
-          '(pass -c trustedUseCaseAccountIds=<id>,<id> or the SSM parameter ' +
-          '/dda-portal/trusted-usecase-account-ids). Refusing to synth an ' +
-          'sts:AssumeRole grant on a wildcard account.'
+          '(pass -c trustedUseCaseAccountIds=<id>,<id>, set the ' +
+          'TRUSTED_USECASE_ACCOUNT_IDS environment variable, or the SSM ' +
+          'parameter /dda-portal/trusted-usecase-account-ids). Refusing to ' +
+          'synth an sts:AssumeRole grant on a wildcard account.'
       );
     }
 
     // Lambda Layer for shared utilities
+    // python3.12 is listed for the Pillow (imaging layer) consumers, which
+    // run on python3.12; the vendored packages are pure Python or fall back
+    // to their pure-Python implementations there.
     const sharedLayer = new lambda.LayerVersion(this, 'SharedLayer', {
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/shared')),
-      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11, lambda.Runtime.PYTHON_3_12],
       description: 'Shared utilities for Edge CV Portal Lambda functions - v2024-12-12-fixed-syntax',
     });
 
@@ -94,6 +174,171 @@ export class ComputeStack extends cdk.Stack {
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
       description: 'JWT validation dependencies (PyJWT, cryptography)',
     });
+
+    // Lambda Layer for the shared workflow_core package (node catalog, serializer,
+    // validator, compiler) used by the Workflow Manager Lambda functions. The
+    // layer asset ships only the python/ package directory; test/build files
+    // that live alongside it in the source tree are excluded.
+    const workflowCoreLayer = new lambda.LayerVersion(this, 'WorkflowCoreLayer', {
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/layers/workflow_core'), {
+        exclude: [
+          'tests',
+          'tests/**',
+          '.hypothesis',
+          '.hypothesis/**',
+          '.pytest_cache',
+          '.pytest_cache/**',
+          '**/__pycache__',
+          '**/__pycache__/**',
+          'build.sh',
+          'pyproject.toml',
+          'requirements.txt',
+          'README.md',
+        ],
+      }),
+      // PYTHON_3_12 is listed for the CameraRegistryHandler (3.12 for its
+      // imaging layer), which imports only the stdlib-only
+      // workflow_core.stream_url (rtsp-rtmp-stream-cameras design
+      // component 7). The layer's jsonschema dependency carries a
+      // cp311-only native rpds module, so a 3.12 function must not import
+      // workflow_core.serializer; camera-registry-stream-credentials-infra
+      // .test.ts pins camera_registry.py to workflow_core.stream_url.
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_11, lambda.Runtime.PYTHON_3_12],
+      description: 'workflow_core shared package (catalog, serializer, validator, compiler) for Workflow Manager',
+    });
+
+    // ---------------------------------------------------------------------
+    // Station Quick Setup bundle packaging (Requirements 4.3, 4.4, 4.5)
+    //
+    // At deploy time we package the repository's station_install/ tree
+    // (including quick_setup/) into a single self-contained installer
+    // (setup-bundle.tar.gz) and compute SHA-256 sidecars over the EXACT bytes
+    // we upload. The packaging is performed by build-quick-setup-bundle.sh so
+    // the checksums are guaranteed to be over the same bytes served to the
+    // station. Artifacts land under quick-setup/current/ in the portal
+    // artifacts bucket.
+    //
+    // The BucketDeployment custom resource only copies to the destination
+    // after a successful CloudFormation deploy; a failed deploy therefore
+    // leaves the previously published artifacts in place (Req 4.4). prune is
+    // disabled so the destination is never emptied on a partial run.
+    // ---------------------------------------------------------------------
+    const stationInstallDir = path.join(__dirname, '../../../station_install');
+    const bundleBuildScript = path.join(__dirname, '../scripts/build-quick-setup-bundle.sh');
+
+    const quickSetupBundleSource = s3deploy.Source.asset(stationInstallDir, {
+      // The bundle contents are derived purely from the station_install tree
+      // and the packaging script; hash both so the asset (and the deploy) only
+      // changes when the shipped bytes change.
+      assetHashType: cdk.AssetHashType.SOURCE,
+      bundling: {
+        // Docker fallback: any image with GNU tar + coreutils works. Local
+        // bundling (below) is used whenever the host has bash, so this image
+        // is only pulled in environments without a local shell toolchain.
+        image: cdk.DockerImage.fromRegistry('public.ecr.aws/amazonlinux/amazonlinux:2023'),
+        // Mount the packaging script into the container. CDK already mounts the
+        // asset source at /asset-input (read-only) and the output at
+        // /asset-output; the script lives outside that tree, so make it
+        // reachable at /build.
+        volumes: [
+          {
+            hostPath: path.join(__dirname, '../scripts'),
+            containerPath: '/build',
+          },
+        ],
+        command: [
+          'bash', '/build/build-quick-setup-bundle.sh', '/asset-input', '/asset-output',
+        ],
+        local: {
+          tryBundle(outputDir: string): boolean {
+            try {
+              execFileSync('bash', [bundleBuildScript, stationInstallDir, outputDir], {
+                stdio: ['ignore', 'inherit', 'inherit'],
+              });
+              return true;
+            } catch (err) {
+              // Fall back to the Docker image bundling on any local failure
+              // (e.g. bash unavailable on the build host).
+              return false;
+            }
+          },
+        },
+      },
+    });
+
+    // Exposed so ComputeStack wiring (task 8.2) can bake the bundle/bootstrap
+    // keys into the quick_setup Lambda environment.
+    const quickSetupBundleDeployment = new s3deploy.BucketDeployment(this, 'QuickSetupBundle', {
+      sources: [quickSetupBundleSource],
+      destinationBucket: props.portalArtifactsBucket,
+      destinationKeyPrefix: 'quick-setup/current/',
+      // Never empty the destination: a failed deploy must leave the prior
+      // successful artifacts intact (Req 4.4).
+      prune: false,
+      retainOnDelete: true,
+    });
+    // S3 keys of the artifacts uploaded by QuickSetupBundle under
+    // quick-setup/current/. These are baked into the Lambda environments so the
+    // quick_setup handler serves exactly the objects packaged by this
+    // deployment (Req 4.4).
+    const quickSetupBundleKey = 'quick-setup/current/setup-bundle.tar.gz';
+    const quickSetupBootstrapKey = 'quick-setup/current/bootstrap.sh';
+
+    // Compute the bundle/bootstrap SHA-256 digests at synth time so they can be
+    // baked into the Lambda environment. build-quick-setup-bundle.sh produces a
+    // reproducible tarball (stable ordering, zeroed timestamps/ownership,
+    // timestamp-free gzip), so the digests computed here match the exact bytes
+    // uploaded by QuickSetupBundle above — the checksum served to the station
+    // is over the served bytes (Req 4.5). A failed deploy leaves the previously
+    // baked env vars (and previously uploaded objects) in place (Req 4.4).
+    let quickSetupBundleSha256: string;
+    let quickSetupBootstrapSha256: string;
+    {
+      const manifestStagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dda-qs-manifest-'));
+      try {
+        execFileSync('bash', [bundleBuildScript, stationInstallDir, manifestStagingDir], {
+          stdio: ['ignore', 'inherit', 'inherit'],
+        });
+        const manifest = JSON.parse(
+          fs.readFileSync(path.join(manifestStagingDir, 'manifest.json'), 'utf-8')
+        ) as { bundle_sha256?: string; bootstrap_sha256?: string };
+        if (!manifest.bundle_sha256 || !manifest.bootstrap_sha256) {
+          throw new Error('manifest.json is missing bundle_sha256/bootstrap_sha256');
+        }
+        quickSetupBundleSha256 = manifest.bundle_sha256;
+        quickSetupBootstrapSha256 = manifest.bootstrap_sha256;
+      } catch (err) {
+        // The digests are required for the station to verify the bundle it
+        // downloads; refuse to synth a quick_setup Lambda that would serve an
+        // empty/incorrect checksum rather than silently degrade integrity.
+        throw new Error(
+          'Failed to compute Station Quick Setup bundle checksums for the ' +
+            `quick_setup Lambda environment. The packaging script (${bundleBuildScript}) ` +
+            `must run under bash at synth time. Underlying error: ${(err as Error).message}`
+        );
+      } finally {
+        fs.rmSync(manifestStagingDir, { recursive: true, force: true });
+      }
+    }
+    // quickSetupBundleDeployment is referenced below via addDependency so the
+    // QuickSetup Lambda is only reachable after the bundle is uploaded.
+
+    // Data-plane S3 bucket scope shared by the base Lambda role's object grant
+    // (createLambdaRole below) and the per-feature object grants that must
+    // stay inside that same bucket set (the workflow-tuning prefix grant).
+    // Resolve it from the optional allowlist: each entry may be a bare bucket
+    // name or a full `arn:aws:s3:::name` ARN; normalize to the canonical
+    // bucket ARN. Empty/unset -> all buckets (see the data-plane rationale in
+    // createLambdaRole).
+    const dataBucketAllowlist = (props.dataBucketAllowlist ?? []).filter((b) => b.length > 0);
+    const dataBucketArns: string[] =
+      dataBucketAllowlist.length > 0
+        ? dataBucketAllowlist.map((b) =>
+            b.startsWith('arn:aws:s3:::')
+              ? b.replace(/\/\*?$/, '')
+              : `arn:aws:s3:::${b}`
+          )
+        : ['arn:aws:s3:::*'];
 
     // Base IAM Role for Lambda functions
     const createLambdaRole = (name: string) => {
@@ -106,11 +351,25 @@ export class ComputeStack extends cdk.Stack {
 
       // Grant DynamoDB permissions
       props.useCasesTable.grantReadWriteData(role);
+      // dda-portal-user-roles is the Portal_Identity registry
+      // (portal-jwt-role-privilege-escalation): the User Manager
+      // (UserAdminHandler, user_admin.py) is its writer and needs
+      // GetItem/Query/Scan/PutItem/UpdateItem/DeleteItem here — Query for the
+      // per-Use_Case row sweep on delete, Scan for the last-PortalAdmin count
+      // once enforcement is on, the writes for create / role change /
+      // disable-enable / delete. grantReadWriteData covers all of them, so no
+      // extra statement is added for that handler. Narrowing the other
+      // handlers to read-only is deliberately NOT done here (out of scope:
+      // user_management.py and the Team Management routes also write role
+      // rows); the registry's authority comes from the read path in
+      // shared_utils, not from IAM.
       props.userRolesTable.grantReadWriteData(role);
       props.devicesTable.grantReadWriteData(role);
       props.auditLogTable.grantWriteData(role);
       props.trainingJobsTable.grantReadWriteData(role);
       props.labelingJobsTable.grantReadWriteData(role);
+      props.labelingTeamsTable.grantReadWriteData(role);
+      props.labelingTasksTable.grantReadWriteData(role);
       props.preLabeledDatasetsTable.grantReadWriteData(role);
       props.modelsTable.grantReadWriteData(role);
       props.deploymentsTable.grantReadWriteData(role);
@@ -118,6 +377,12 @@ export class ComputeStack extends cdk.Stack {
       props.componentsTable.grantReadWriteData(role);
       props.sharedComponentsTable.grantReadWriteData(role);
       props.dataAccountsTable.grantReadWriteData(role);
+      props.workflowsTable.grantReadWriteData(role);
+      props.workflowVersionsTable.grantReadWriteData(role);
+      props.testDatasetsTable.grantReadWriteData(role);
+      props.testRunsTable.grantReadWriteData(role);
+      props.workflowChatSessionsTable.grantReadWriteData(role);
+      props.cameraRegistryTable.grantReadWriteData(role);
 
       // Grant S3 permissions for portal artifacts bucket
       props.portalArtifactsBucket.grantReadWrite(role);
@@ -175,10 +440,22 @@ export class ComputeStack extends cdk.Stack {
       // conditions on the Greengrass v2 API are limited, so no tag Condition is
       // applied here — the grant is bounded to the components / coreDevices /
       // deployments resource types the portal operates on.
+      //
+      // greengrass:DeleteComponent backs the all-or-nothing rollback in
+      // greengrass_publish.py: when a multi-target vLLM publish fails part way
+      // through, the handler deletes only the component versions it created
+      // itself seconds earlier in that same failed attempt, so no orphaned
+      // version survives with no backing publish state. The action is confined
+      // to the Greengrass components resource ARN (never a wildcard resource),
+      // and the cross-account DDAPortalAccessRole in usecase-account-stack.ts
+      // already grants exactly this action — adding it here closes an
+      // inconsistency that only bit single-account setups rather than widening
+      // the trust boundary (2.7, 2.8, 3.15).
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
           'greengrass:CreateComponentVersion',
+          'greengrass:DeleteComponent',
           'greengrass:DescribeComponent',
           'greengrass:GetComponent',
           'greengrass:ListComponents',
@@ -362,20 +639,10 @@ export class ComputeStack extends cdk.Stack {
       // ACLs, DeleteBucket, PutBucketTagging, etc.) are granted here, and
       // cross-account data access is still gated by the assumed
       // DDAPortalAccessRole in the UseCase account.
-      // Resolve the data-plane bucket scope from the optional allowlist. Each
-      // allowlist entry may be a bare bucket name or a full `arn:aws:s3:::name`
-      // ARN; normalize to the canonical bucket ARN. Empty/unset -> all buckets.
-      const allowlist = (props.dataBucketAllowlist ?? []).filter((b) => b.length > 0);
-      const bucketArns: string[] =
-        allowlist.length > 0
-          ? allowlist.map((b) =>
-              b.startsWith('arn:aws:s3:::')
-                ? b.replace(/\/\*?$/, '')
-                : `arn:aws:s3:::${b}`
-            )
-          : ['arn:aws:s3:::*'];
-      const bucketLevelResources = bucketArns;
-      const objectLevelResources = bucketArns.map((arn) => `${arn}/*`);
+      // The data-plane bucket scope (dataBucketArns) is resolved once at stack
+      // scope from the optional allowlist; empty/unset -> all buckets.
+      const bucketLevelResources = dataBucketArns;
+      const objectLevelResources = dataBucketArns.map((arn) => `${arn}/*`);
 
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -416,33 +683,415 @@ export class ComputeStack extends cdk.Stack {
     };
 
     // Environment variables for Lambda functions
+    //
+    // PORTAL_REGISTRY_ENFORCED is the single enforcement flag of
+    // portal-jwt-role-privilege-escalation (Req 2.4, design Decision 4),
+    // resolved default-OFF from the `portalRegistryEnforced` CDK context
+    // value (`-c portalRegistryEnforced=true`). It rides in
+    // lambdaEnvironment, which every handler in this stack spreads or uses
+    // directly, so one context value moves the whole portal at once: a
+    // handler left without the variable would keep resolving privilege from
+    // the `custom:role` token claim after the flip, which is the escalation
+    // being fixed. Deploys stay behaviour-preserving until the registry has
+    // been backfilled (task 5.2); while it is off the shared layer also logs
+    // a `would_deny` WARNING naming every request enforcement would have
+    // denied, which is how the backfill's completeness is measured on real
+    // traffic before flipping.
+    const registryEnforced = portalRegistryEnforced(
+      this.node.tryGetContext('portalRegistryEnforced'),
+    );
     const lambdaEnvironment = {
       USECASES_TABLE: props.useCasesTable.tableName,
       USER_ROLES_TABLE: props.userRolesTable.tableName,
+      PORTAL_REGISTRY_ENFORCED: registryEnforced,
       DEVICES_TABLE: props.devicesTable.tableName,
       AUDIT_LOG_TABLE: props.auditLogTable.tableName,
       TRAINING_JOBS_TABLE: props.trainingJobsTable.tableName,
       LABELING_JOBS_TABLE: props.labelingJobsTable.tableName,
+      LABELING_TEAMS_TABLE: props.labelingTeamsTable.tableName,
+      LABELING_TASKS_TABLE: props.labelingTasksTable.tableName,
       PRE_LABELED_DATASETS_TABLE: props.preLabeledDatasetsTable.tableName,
       MODELS_TABLE: props.modelsTable.tableName,
       DEPLOYMENTS_TABLE: props.deploymentsTable.tableName,
       SETTINGS_TABLE: props.settingsTable.tableName,
       COMPONENTS_TABLE: props.componentsTable.tableName,
       SHARED_COMPONENTS_TABLE: props.sharedComponentsTable.tableName,
+      WORKFLOWS_TABLE: props.workflowsTable.tableName,
+      WORKFLOW_VERSIONS_TABLE: props.workflowVersionsTable.tableName,
+      TEST_DATASETS_TABLE: props.testDatasetsTable.tableName,
+      TEST_RUNS_TABLE: props.testRunsTable.tableName,
+      WORKFLOW_CHAT_SESSIONS_TABLE: props.workflowChatSessionsTable.tableName,
+      CAMERA_REGISTRY_TABLE: props.cameraRegistryTable.tableName,
       PORTAL_ARTIFACTS_BUCKET: props.portalArtifactsBucket.bucketName,
+      // Workflow Manager documents (definitions, compiled docs, test datasets,
+      // test results) live in the portal artifacts bucket under
+      // workflows/{usecase_id}/... prefixes.
+      WORKFLOWS_S3_PREFIX: 'workflows',
       PORTAL_ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
       USER_POOL_ID: props.userPool.userPoolId,
       // Shared component configuration - update DDA_LOCAL_SERVER_VERSION when publishing new component versions
       DDA_LOCAL_SERVER_VERSION: '1.0.63',
+      // Per-arch minimum LocalServer version for Workflow_Components. LocalServer
+      // ships as independently-versioned per-architecture variants whose lineages
+      // are NOT comparable (the arm64 variant is ~1.0.124 while arm64JP6 is
+      // ~1.0.35), so the single DDA_LOCAL_SERVER_VERSION=1.0.63 baseline falsely
+      // blocks the JetPack variants. This map gives every lineage its own floor
+      // (workflow support ships in current field builds, which sit well below
+      // the legacy lineage numbers). This map MUST cover every
+      // ARCH_TO_LOCAL_SERVER_COMPONENT key in workflow_packaging.py — the
+      // backend coverage test (test_workflow_min_localserver_floor_coverage.py)
+      // enforces it. Archs missing from the map resolve the safe '1.0.0'
+      // per-lineage floor with a loud warning, never the cross-lineage scalar.
+      // Keys are workflow_core arch ids. arm64_cpu (the bare .arm64 name, now
+      // the generic arm64 CPU build) floors at 1.1.0: every 1.0.x build of
+      // that name still installed in the field is a JetPack 4-era build that
+      // identifies as arm64_jp4 on device, so a workflow's dependency must
+      // pull such a device up to an arm64_cpu-aware build.
+      WORKFLOW_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({
+        arm64_cpu: '1.1.0',
+        arm64_jp5: '1.0.0',
+        arm64_jp6: '1.0.0',
+        arm64_jp7: '1.0.0',
+        x86_64: '1.0.0',
+        x86_64_nvidia: '1.0.0',
+      }),
       COMPONENT_BUCKET_PREFIX: 'dda-component',
     };
 
+    // The stream camera / scene analytics FEATURE floor
+    // (rtsp-rtmp-stream-cameras Requirement 9.7, design D14): per arch, the
+    // minimum LocalServer version that understands Stream_Camera_Source_Nodes
+    // and Scene_Analytics_Nodes. The Component_Packager
+    // (WorkflowPackagingHandler) and the pre-submit deployment gate
+    // (DeploymentsHandler) read this one literal, so they cannot disagree.
+    // Each value is the first LocalServer build verified on hardware with the
+    // feature and its task 28 fixes (spec task 26.3, 2026-10-02): JP5 on a
+    // MIC-730, JP6 on an AGX Orin, JP7 on a Jetson Thor, and amd64 on an x86
+    // workstation (x86_64 and x86_64_nvidia both run
+    // aws.edgeml.dda.LocalServer.amd64). arm64_cpu is left out on purpose
+    // (owner decision 2026-09-30: skip plain arm64 for now): it has no build
+    // target or test device yet. An architecture missing from the map FAILS
+    // CLOSED: a workflow that uses the new node types is rejected for it with
+    // STREAM_CAMERAS_UNSUPPORTED_ARCH. The map must cover exactly
+    // ARCH_TO_LOCAL_SERVER_COMPONENT minus the architectures that
+    // test_stream_camera_feature_floor_coverage.py lists as unverified.
+    const streamCameraFeatureFloorEnvironment = {
+      WORKFLOW_STREAM_CAMERA_MIN_LOCAL_SERVER_VERSIONS: JSON.stringify({
+        arm64_jp5: '1.0.51',
+        arm64_jp6: '1.0.74',
+        arm64_jp7: '1.0.52',
+        x86_64: '1.0.47',
+        x86_64_nvidia: '1.0.47',
+      }),
+    };
+
+    // Per-model Model_Image_Limit overrides for `llm:` auto-label requests
+    // (llm-autolabel-prompt-tuning Req 7.1): a JSON object keyed by model
+    // identifier, e.g. {"us.amazon.nova-pro-v1:0": 20, "tighter.model": 4}.
+    // Set with -c llmModelImageLimits='{"model-id": 4}'; the default of {}
+    // means every model resolves the shared default of 20. A missing,
+    // non-integer or < 1 entry also resolves to the default in
+    // resolve_model_image_limit, so configuration can never widen the bound
+    // or drive it to zero images. Only the three handlers that build or
+    // report `llm:` requests (DdaLabelingHandler preview, DdaAutolabelWorker
+    // labeling time, DataAccountsHandler model options) carry this, so it is
+    // deliberately not part of lambdaEnvironment.
+    const llmModelImageLimitsContext =
+      this.node.tryGetContext('llmModelImageLimits');
+    const llmModelImageLimits =
+      typeof llmModelImageLimitsContext === 'string'
+        ? llmModelImageLimitsContext
+        : llmModelImageLimitsContext
+          ? JSON.stringify(llmModelImageLimitsContext)
+          : '{}';
+
+    // Per-model Model_Token_Limit bootstrap for `llm:` auto-label requests
+    // (llm-model-token-and-image-sizing Req 1.8): a JSON object keyed by the
+    // model identifier following the `llm:` prefix, e.g.
+    // {"us.amazon.nova-pro-v1:0": 10000}. Set with
+    // -c llmModelTokenLimits='{"model-id": 10000}'; the default of {} means
+    // every model resolves the Model_Token_Limit_Default of 10000. A missing,
+    // non-integer or out-of-range entry also resolves to that default in
+    // resolve_token_budget, so configuration can never push a request past
+    // Model_Token_Limit_Ceiling (128000) or down to zero tokens. Deliberately
+    // built by the same string-passthrough / object-stringify / '{}' shape as
+    // llmModelImageLimits, and carried by exactly the same three handlers that
+    // build or report `llm:` requests (DdaLabelingHandler preview,
+    // DdaAutolabelWorker labeling time, DataAccountsHandler model options), so
+    // the delivery mechanism for both per-model settings is one mechanism
+    // (Req 1.8) and the displayed budget equals the sent budget (Req 1.6).
+    // It is a bootstrap only: the persisted llm_model_token_limits settings
+    // item takes whole-mapping precedence over this value.
+    const llmModelTokenLimitsContext =
+      this.node.tryGetContext('llmModelTokenLimits');
+    const llmModelTokenLimits =
+      typeof llmModelTokenLimitsContext === 'string'
+        ? llmModelTokenLimitsContext
+        : llmModelTokenLimitsContext
+          ? JSON.stringify(llmModelTokenLimitsContext)
+          : '{}';
+
+    // ---------------------------------------------------------------------
+    // Station Quick Setup Lambdas (Requirements 4.4, 5.1, 8.1)
+    //
+    // device_registrations.py is JWT-authenticated and gets the standard
+    // portal Lambda role (createLambdaRole) plus read/write on the new
+    // registrations table. quick_setup.py is token-authenticated and gets a
+    // deliberately minimal role: it may AssumeRole the use-case cross-account
+    // roles, read the quick-setup/* artifacts, and read/write ONLY the
+    // registrations + audit tables — never the broader portal tables.
+    // ---------------------------------------------------------------------
+
+    // device_registrations Lambda (Cognito JWT + manage_devices RBAC).
+    const deviceRegistrationsRole = createLambdaRole('DeviceRegistrations');
+    props.deviceRegistrationsTable.grantReadWriteData(deviceRegistrationsRole);
+    const deviceRegistrationsHandler = new lambda.Function(this, 'DeviceRegistrationsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'device_registrations.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: deviceRegistrationsRole,
+      environment: {
+        ...lambdaEnvironment,
+        REGISTRATIONS_TABLE: props.deviceRegistrationsTable.tableName,
+        // Integrity anchor embedded in the generated Setup_Command so the
+        // station can verify the bootstrap it downloads (Req 4.8 chain).
+        QUICK_SETUP_BOOTSTRAP_SHA256: quickSetupBootstrapSha256,
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    // quick_setup Lambda (token-authenticated; AuthorizationType.NONE routes).
+    // Minimal, dedicated role — NOT createLambdaRole.
+    const quickSetupRole = new iam.Role(this, 'QuickSetupHandlerRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+    // Read/write ONLY the registrations table (registration items + RATELIMIT#
+    // counters) and the audit log — never the broader portal tables.
+    props.deviceRegistrationsTable.grantReadWriteData(quickSetupRole);
+    props.auditLogTable.grantReadWriteData(quickSetupRole);
+    // Read-only on the use-cases table: get_bundle_manifest and
+    // exchange_credentials resolve the bound registration's Use_Case to obtain
+    // its AWS region, account id, cross-account role ARN, and external id
+    // (shared_utils.get_usecase). Without this the /quick-setup/bundle and
+    // /quick-setup/credentials routes fail with AccessDenied -> 503.
+    props.useCasesTable.grantReadData(quickSetupRole);
+    // Write access to the portal Devices table (dda-portal-devices) so a
+    // successful quick-setup completion can record the Station's detected DDA
+    // Target_Architecture, making the device deployment-gate-ready without a
+    // manual admin step (device-arch-compatibility Req 2.2). This is the single
+    // net-new permission in the feature and is scoped to the one portal table
+    // the gate reads. DEVICES_TABLE is already injected via lambdaEnvironment
+    // (spread into the handler environment below), so no env change is needed.
+    props.devicesTable.grantWriteData(quickSetupRole);
+    // Read-only on the quick-setup artifacts: serve the bootstrap bytes,
+    // head_object the bundle, and sign presigned GET URLs (Req 4.1, 4.10).
+    quickSetupRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject'],
+      resources: [`${props.portalArtifactsBucket.bucketArn}/quick-setup/*`],
+    }));
+    // The dedicated station-provisioning role name is FIXED so its ARN is
+    // computable here as a plain string. The role itself (created below) trusts
+    // this Lambda role, so referencing it by string ARN — rather than the
+    // construct — avoids a circular dependency between the two roles.
+    const stationProvisioningRoleName = 'DDAStationProvisioningRole';
+    const stationProvisioningRoleArn =
+      `arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/${stationProvisioningRoleName}`;
+
+    // AssumeRole to mint scoped, short-lived Provisioning_Credentials (Req 5.1):
+    //  - CROSS-account use cases assume their use-case-account DDAPortalAccessRole;
+    //  - SAME-account use cases (whose cross_account_role_arn is the account
+    //    root ARN — not assumable) assume the dedicated DDAStationProvisioningRole
+    //    in THIS account (created below, trusted only by this Lambda role).
+    // The per-device session policy narrows the issued credentials in both cases.
+    quickSetupRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['sts:AssumeRole'],
+      resources: [
+        ...props.trustedUseCaseAccountIds.map(
+          (id) => `arn:aws:iam::${id}:role/DDAPortalAccessRole`
+        ),
+        stationProvisioningRoleArn,
+      ],
+    }));
+
+    const quickSetupHandler = new lambda.Function(this, 'QuickSetupHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'quick_setup.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: quickSetupRole,
+      environment: {
+        ...lambdaEnvironment,
+        REGISTRATIONS_TABLE: props.deviceRegistrationsTable.tableName,
+        // Artifact keys + digests baked from this deployment's bundle asset so
+        // only the most recently deployed bundle is ever served (Req 4.4, 4.5).
+        QUICK_SETUP_BUNDLE_KEY: quickSetupBundleKey,
+        QUICK_SETUP_BUNDLE_SHA256: quickSetupBundleSha256,
+        QUICK_SETUP_BOOTSTRAP_KEY: quickSetupBootstrapKey,
+        QUICK_SETUP_BOOTSTRAP_SHA256: quickSetupBootstrapSha256,
+        // Same-account provisioning role assumed when a Use_Case's
+        // cross_account_role_arn is the (un-assumable) account root ARN.
+        QUICK_SETUP_PROVISIONING_ROLE_ARN: stationProvisioningRoleArn,
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+    // The bundle must be uploaded before the handler can serve it.
+    quickSetupHandler.node.addDependency(quickSetupBundleDeployment);
+
+    // Dedicated station-provisioning role for SAME-account use cases
+    // (station-quick-setup). The quick_setup Lambda assumes this role WITH the
+    // per-device least-privilege session policy (session_policy.build_session_policy)
+    // to mint the scoped, short-lived Provisioning_Credentials handed to the
+    // station. It holds the provisioning action CEILING; the session policy
+    // narrows every issuance to the single registered thing / Device_Group, so
+    // the station never receives broader access. It is trusted ONLY by the
+    // QuickSetupHandler role — no other principal may assume it. Cross-account
+    // use cases continue to use their use-case-account DDAPortalAccessRole.
+    const stationProvisioningRole = new iam.Role(this, 'StationProvisioningRole', {
+      roleName: stationProvisioningRoleName,
+      assumedBy: new iam.ArnPrincipal(quickSetupRole.roleArn),
+      description:
+        'Station Quick Setup provisioning role assumed by the quick_setup ' +
+        'Lambda (with a per-device session policy) to mint scoped, short-lived ' +
+        'station credentials for same-account use cases.',
+      maxSessionDuration: cdk.Duration.hours(1),
+    });
+    // IoT thing + Device_Group provisioning (narrowed per-device by the session
+    // policy), scoped to the thing/thinggroup resource types in this account.
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iot:CreateThing',
+        'iot:DescribeThing',
+        'iot:CreateThingGroup',
+        'iot:DescribeThingGroup',
+        'iot:AddThingToThingGroup',
+        'iot:ListThingGroupsForThing',
+      ],
+      resources: [
+        `arn:aws:iot:*:${cdk.Aws.ACCOUNT_ID}:thing/*`,
+        `arn:aws:iot:*:${cdk.Aws.ACCOUNT_ID}:thinggroup/*`,
+      ],
+    }));
+    // IoT certificate, policy, endpoint and role-alias actions of the Greengrass
+    // installer (setup_station.sh:1050) and the thing-policy shadow repair
+    // (setup_station.sh:1075-1165). setup_station.sh fixes the policy and
+    // role-alias names; certificate ids are generated at provisioning time, so
+    // AttachPolicy is scoped to cert/*. Region '*' as in the thing statement
+    // above. The per-device session policy narrows these grants further only
+    // for thing and thing-group resources.
+    const iotArn = (resource: string) => `arn:aws:iot:*:${cdk.Aws.ACCOUNT_ID}:${resource}`;
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:CreateKeysAndCertificate', 'iot:AttachThingPrincipal', 'iot:DescribeEndpoint'],
+      // nosec: iam-resource-wildcard. These three actions have no resource-level
+      // permissions; every other provisioning action is scoped below.
+      resources: ['*'],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:GetPolicy', 'iot:CreatePolicy'],
+      resources: [
+        iotArn('policy/GreengrassV2IoTThingPolicy'),
+        // The installer names its TES certificate policy with this prefix
+        // followed by the role-alias name.
+        iotArn('policy/GreengrassTESCertificatePolicy*'),
+      ],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:ListPolicyVersions', 'iot:CreatePolicyVersion', 'iot:DeletePolicyVersion'],
+      resources: [iotArn('policy/GreengrassV2IoTThingPolicy')],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:AttachPolicy'],
+      resources: [iotArn('cert/*')],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:CreateRoleAlias', 'iot:DescribeRoleAlias'],
+      resources: [iotArn('rolealias/GreengrassCoreTokenExchangeRoleAlias')],
+    }));
+    // Greengrass Token Exchange Service (TES) role setup performed by the
+    // provisioner, scoped to the GreengrassV2TokenExchangeRole* names.
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iam:GetRole',
+        'iam:CreateRole',
+        'iam:AttachRolePolicy',
+        'iam:PutRolePolicy',
+        'iam:PassRole',
+      ],
+      resources: [`arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/GreengrassV2TokenExchangeRole*`],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:CreatePolicy', 'iam:GetPolicy'],
+      resources: [`arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:policy/GreengrassV2TokenExchangeRoleAccess*`],
+    }));
+    // Tag the Greengrass core device (dda-portal:managed) during provisioning.
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['greengrass:TagResource'],
+      resources: [`arn:aws:greengrass:*:${cdk.Aws.ACCOUNT_ID}:coreDevices:*`],
+    }));
+    stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['sts:GetCallerIdentity'],
+      resources: ['*'],
+    }));
+
     // UseCases Lambda Handler
+    // Held in a local so the use-case bucket configuration grants below land
+    // on this role only (portal-usecase-bucket-config, design §6.1).
+    const usecasesRole = createLambdaRole('UseCases');
+    // POST /s3-buckets creates a bucket for a use case, tags it in the same
+    // CreateBucket request and enables ABAC on it. The bucket name is chosen at
+    // request time, so the resource cannot be narrower than arn:aws:s3:::*; the
+    // TagResource grant is bounded to requests that assert the portal's own
+    // creation marker, which is the only tag write the handler performs.
+    usecasesRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:CreateBucket'],
+      // nosec: iam-resource-wildcard. The bucket does not exist yet, so no
+      // resource tag can gate CreateBucket; the handler validates the name,
+      // refuses portal-owned and already-configured names and tags the bucket
+      // in the same request (usecases.create_s3_bucket).
+      resources: ['arn:aws:s3:::*'],
+    }));
+    usecasesRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:TagResource'],
+      // nosec: iam-resource-wildcard. Bounded by the request-tag Condition
+      // below instead of a resource tag: the just-created bucket carries no
+      // tags yet, and the role may only tag while asserting the portal's
+      // creation marker (the only tag write the handler performs).
+      resources: ['arn:aws:s3:::*'],
+      conditions: {
+        StringEquals: { 'aws:RequestTag/dda-portal:created-by': 'portal' },
+      },
+    }));
+    usecasesRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutBucketABAC'],
+      // nosec: iam-resource-wildcard. S3 evaluates bucket-tag condition keys
+      // only once ABAC is on, so the call that turns it on cannot be
+      // tag-conditioned; it is made only on the bucket the handler has just
+      // created.
+      resources: ['arn:aws:s3:::*'],
+    }));
     const useCasesHandler = new lambda.Function(this, 'UseCasesHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'usecases.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
-      role: createLambdaRole('UseCases'),
+      role: usecasesRole,
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2025-01-08-auto-cors', // Force update with auto CORS configuration
@@ -494,6 +1143,9 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         CODE_VERSION: '2024-12-12-fixed-shared-utils', // Force update with fixed shared_utils.py
+        // DELETE /devices/{id} deletes the removed device's
+        // Device_Registrations along with its other portal rows.
+        REGISTRATIONS_TABLE: props.deviceRegistrationsTable.tableName,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(30),
@@ -507,22 +1159,59 @@ export class ComputeStack extends cdk.Stack {
     // iot:OpenTunnel). Using the wrong prefix yields AccessDeniedException.
     devicesHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: [
-        'iot:OpenTunnel',
-        'iot:CloseTunnel',
-        'iot:DescribeTunnel',
-        'iot:ListTunnels',
-        'iot:ListTagsForResource',
-        'iot:RotateTunnelAccessToken',
-      ],
-      // nosec: iam-resource-wildcard — AWS IoT Secure Tunneling OpenTunnel does
-      // not support resource-level permissions (the tunnel does not yet exist
-      // when OpenTunnel is called), and iot:ListTunnels is an account-scoped
-      // list operation; both must remain on '*'. The remaining Close/Describe/
-      // RotateTunnelAccessToken actions are bundled with them in this single
-      // grant. This statement is NOT one of the I1–I17 scanner findings.
+      actions: ['iot:OpenTunnel', 'iot:ListTunnels', 'iot:ListTagsForResource'],
+      // nosec: iam-resource-wildcard. iot:OpenTunnel and iot:ListTunnels have no
+      // resource-level permissions, and the read-only iot:ListTagsForResource
+      // has none for tunnels; the other tunnel actions are scoped below.
       resources: ['*'],
     }));
+    devicesHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:CloseTunnel', 'iot:DescribeTunnel', 'iot:RotateTunnelAccessToken'],
+      // OpenTunnel generates the tunnel ids. Region '*' because a same-account
+      // use case opens tunnels in its own region with this role.
+      resources: [`arn:aws:iot:*:${cdk.Aws.ACCOUNT_ID}:tunnel/*`],
+    }));
+
+    // Device removal (DELETE /devices/{id}, devices.delete_device) for
+    // same-account use cases. Cross-account use cases get the same actions
+    // on the use-case account's DDAPortalAccessRole (usecase-account-stack.ts).
+    //
+    // DeleteCoreDevice is conditioned on the dda-portal:managed tag the
+    // device list filters on, so only DDA-managed core devices can be
+    // deleted (the handler checks the tag as well).
+    devicesHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['greengrass:DeleteCoreDevice'],
+      resources: ['arn:aws:greengrass:*:*:coreDevices:*'],
+      conditions: {
+        StringEquals: { 'aws:ResourceTag/dda-portal:managed': 'true' },
+      },
+    }));
+    // With delete_thing=true the handler also takes the device's AWS IoT
+    // identity apart: its certificates (deactivated, detached, and deleted
+    // unless another thing shares them), its shadows (iot:DeleteThingShadow
+    // is already on the base role), then the thing. DetachThingPrincipal and
+    // ListPrincipalThings authorize against the certificate ARN.
+    devicesHandler.role?.addToPrincipalPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iot:ListThingPrincipals',
+        'iot:ListPrincipalThings',
+        'iot:DetachThingPrincipal',
+        'iot:UpdateCertificate',
+        'iot:DeleteCertificate',
+        'iot:ListNamedShadowsForThing',
+        'iot:DeleteThing',
+      ],
+      resources: ['arn:aws:iot:*:*:thing/*', 'arn:aws:iot:*:*:cert/*'],
+    }));
+    // The removed device's registrations: queried by use case + name on the
+    // usecase-device-index, deleted by id. (The removal's audit trail is two
+    // PutItem entries, pending then outcome, so the base role's
+    // grantWriteData on the audit log suffices: no dynamodb:Query there.)
+    props.deviceRegistrationsTable.grant(
+      devicesHandler, 'dynamodb:Query', 'dynamodb:DeleteItem');
 
     // Device Logs Lambda Handler
     const deviceLogsHandler = new lambda.Function(this, 'DeviceLogsHandler', {
@@ -561,11 +1250,36 @@ export class ComputeStack extends cdk.Stack {
       role: createLambdaRole('Deployments'),
       environment: {
         ...lambdaEnvironment,
+        ...streamCameraFeatureFloorEnvironment,
         CODE_VERSION: '2025-01-04-deployments',
       },
-      layers: [sharedLayer],
+      // workflow_core: the manual-override path of validate_camera_bindings
+      // lazily imports the catalog, the parameter validator, and (for the
+      // stream node types) stream_url (rtsp-rtmp-stream-cameras
+      // Requirement 9.4). Without the layer that import fails at run time.
+      layers: [sharedLayer, workflowCoreLayer],
       timeout: cdk.Duration.seconds(60),
     });
+
+    // Component store limit auto-remediation sweep: detects devices whose
+    // latest deployment failed with the Nucleus "Component store size limit
+    // reached" rejection, submits a config-only revision raising
+    // componentStoreMaxSizeBytes (no artifact downloads, so it bypasses the
+    // pre-merge store check), then resubmits the blocked deployment once the
+    // remediation completes. State machine lives in deployment tags —
+    // no user intervention required (deployments.remediate_component_store_failures).
+    const storeRemediationRule = new events.Rule(this, 'StoreRemediationScheduleRule', {
+      ruleName: 'dda-portal-component-store-remediation',
+      description:
+        'Auto-remediates Greengrass "Component store size limit reached" ' +
+        'deployment failures without user intervention',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+    });
+    storeRemediationRule.addTarget(new targets.LambdaFunction(deploymentsHandler, {
+      event: events.RuleTargetInput.fromObject({
+        action: 'remediate-component-store-limit',
+      }),
+    }));
 
     // Auth Lambda Handler
     const authHandler = new lambda.Function(this, 'AuthHandler', {
@@ -604,7 +1318,7 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         COGNITO_USER_POOL_ID: props.userPool.userPoolId,
         COGNITO_REGION: cdk.Aws.REGION,
-        ALLOWED_AUDIENCES: '', // Configure based on your needs
+        ALLOWED_AUDIENCES: props.userPoolClientId ?? '', // The app client ids the authorizer accepts
         ISSUER_WHITELIST: '', // Configure based on your identity providers
       },
       layers: [jwtLayer],
@@ -674,17 +1388,95 @@ export class ComputeStack extends cdk.Stack {
     });
 
     // Training Lambda Handler
+    // ---------------------------------------------------------------------
+    // Object Detection training — portal-detection-training Req 8.1–8.3 and
+    // rfdetr-training-and-transfer-learning Req 3.4.
+    //
+    // training.py launches datasets/detection_training/train.py (YOLO) or
+    // train_rfdetr.py (RF-DETR) as a SageMaker script-mode job. At job
+    // creation it tars the chosen entry point, ITS requirements file (renamed
+    // to requirements.txt), the shared _common.py and the two converter files
+    // FLAT into sourcedir.tar.gz (train*.py resolve their siblings by name;
+    // SageMaker extracts the archive flat), so the Lambda asset must carry all
+    // of them. They live in datasets/ (outside backend/), so the
+    // TrainingHandler asset is bundled: functions/ plus a detection_training/
+    // subdir holding exactly these seven files. The bundler runs locally
+    // (plain file copies); the Docker image is only the fallback CDK requires
+    // when no local shell is available. Both paths copy this one list.
+    // ---------------------------------------------------------------------
+    const functionsDir = path.join(__dirname, '../../backend/functions');
+    const datasetsDir = path.join(__dirname, '../../../datasets');
+    const detectionTrainingFiles = [
+      'detection_training/train.py',
+      'detection_training/train_rfdetr.py',
+      'detection_training/_common.py',
+      'detection_training/requirements.txt',
+      'detection_training/requirements-rfdetr.txt',
+      'manifest_to_detector_dataset.py',
+      'dedupe_frames.py',
+    ];
+    for (const rel of detectionTrainingFiles) {
+      const abs = path.join(datasetsDir, rel);
+      if (!fs.existsSync(abs)) {
+        throw new Error(
+          `Detection training entry-point file missing: ${abs}. ` +
+            'training.py bundles datasets/detection_training/* into the TrainingHandler asset.'
+        );
+      }
+    }
+    // The DLC image is resolved per use-case region in the backend
+    // (detection_training.resolve_detection_training_image); this context key
+    // only overrides it, e.g. -c detectionTrainingImage=<uri>.
+    const detectionTrainingImageContext = this.node.tryGetContext('detectionTrainingImage');
+    const detectionTrainingImage =
+      typeof detectionTrainingImageContext === 'string' ? detectionTrainingImageContext.trim() : '';
+
+    const trainingHandlerCode = lambda.Code.fromAsset(functionsDir, {
+      bundling: {
+        image: cdk.DockerImage.fromRegistry('public.ecr.aws/amazonlinux/amazonlinux:2023'),
+        volumes: [{ hostPath: datasetsDir, containerPath: '/datasets' }],
+        command: [
+          'bash',
+          '-c',
+          'cp -r /asset-input/. /asset-output/ && mkdir -p /asset-output/detection_training && ' +
+            detectionTrainingFiles
+              .map(rel => `cp /datasets/${rel} /asset-output/detection_training/`)
+              .join(' && '),
+        ],
+        local: {
+          tryBundle(outputDir: string): boolean {
+            try {
+              fs.cpSync(functionsDir, outputDir, { recursive: true });
+              const target = path.join(outputDir, 'detection_training');
+              fs.mkdirSync(target, { recursive: true });
+              for (const rel of detectionTrainingFiles) {
+                fs.copyFileSync(path.join(datasetsDir, rel), path.join(target, path.basename(rel)));
+              }
+              return true;
+            } catch (err) {
+              // Fall back to the Docker bundling above.
+              return false;
+            }
+          },
+        },
+      },
+    });
+
     const trainingHandler = new lambda.Function(this, 'TrainingHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'training.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      code: trainingHandlerCode,
       role: createLambdaRole('Training'),
       environment: {
         ...lambdaEnvironment,
-        CODE_VERSION: '2024-12-08-v1', // Force update - fixed job name validation
+        CODE_VERSION: '2026-09-13-v1', // Force update - object detection (YOLO) training path
+        DETECTION_TRAINING_IMAGE: detectionTrainingImage,
       },
       layers: [sharedLayer],
-      timeout: cdk.Duration.seconds(60), // Longer timeout for SageMaker API calls
+      // Detection jobs tar + upload the entry point before the SageMaker call;
+      // 512 MB / 120 s leaves ample headroom over the previous 128 MB / 60 s.
+      memorySize: 512,
+      timeout: cdk.Duration.seconds(120),
     });
 
     // Compilation Lambda Handler
@@ -733,6 +1525,13 @@ export class ComputeStack extends cdk.Stack {
     // Update packaging handler environment with Greengrass function name
     packagingHandler.addEnvironment('GREENGRASS_PUBLISH_FUNCTION_NAME', greengrassPublishHandler.functionName);
 
+    // detector-checkpoint-import (Requirement 7.5): sync-on-read
+    // (training.get_training_job) may win the InProgress -> Finalizing claim
+    // for a Conversion_Record and then invokes Packaging asynchronously to
+    // finalize it. TrainingEventsHandler gets the same wiring below.
+    trainingHandler.addEnvironment('PACKAGING_FUNCTION_NAME', packagingHandler.functionName);
+    packagingHandler.grantInvoke(trainingHandler);
+
     // Components Lambda Handler for Greengrass Component Browser
     const componentsHandler = new lambda.Function(this, 'ComponentsHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
@@ -778,6 +1577,16 @@ export class ComputeStack extends cdk.Stack {
       environment: {
         ...lambdaEnvironment,
         DATA_ACCOUNTS_TABLE: props.dataAccountsTable.tableName,
+        // list_bedrock_model_options reports the resolved Model_Image_Limit
+        // per option so the wizard's attach/omit hint uses the same source
+        // the request paths do (llm-autolabel-prompt-tuning Req 7.1, 7.5).
+        LLM_MODEL_IMAGE_LIMITS: llmModelImageLimits,
+        // Same bootstrap for the resolved Model_Token_Limit reported beside
+        // each option's image_limit, so the Effective_Token_Budget the wizard
+        // pre-fills is resolved from the same source the preview and the
+        // autolabel worker resolve it from
+        // (llm-model-token-and-image-sizing Req 1.6, 1.8).
+        LLM_MODEL_TOKEN_LIMITS: llmModelTokenLimits,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(30),
@@ -803,6 +1612,48 @@ export class ComputeStack extends cdk.Stack {
     // Grant Model Import Lambda permission to invoke compilation
     compilationHandler.grantInvoke(modelImportHandler);
 
+    // Export_Image repository for imported detector checkpoints
+    // (detector-checkpoint-import design D2 / Requirement 5.5). The image is
+    // built and pushed out of band by edge-cv-portal/detector-export-image/
+    // build-and-push.sh and handed to the portal by digest
+    // (-c detectorExportImage=<repo-uri>@sha256:<digest>). A CDK
+    // DockerImageAsset is not used: it lands in the bootstrap repository,
+    // whose policy cannot grant use-case accounts a pull. RETAIN, so a stack
+    // teardown never deletes the image a Conversion_Record names.
+    const detectorExportRepository = new ecr.Repository(this, 'DetectorExportRepository', {
+      repositoryName: 'dda-detector-export',
+      imageScanOnPush: true,
+      imageTagMutability: ecr.TagMutability.IMMUTABLE,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    // Conversion_Jobs run in the use case's account under its
+    // DDASageMakerExecutionRole, which SageMaker uses to pull the image. That
+    // role already allows ECR pulls on '*' (usecase-account-stack.ts), so the
+    // repository policy is the only grant a cross-account pull needs. Concrete
+    // role ARNs only, taken from the trusted use-case account list the portal
+    // already scopes sts:AssumeRole to. Verified single-account only (spike,
+    // docs/detector-checkpoint-import-spike.md).
+    detectorExportRepository.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'UseCaseSageMakerExecutionRolePull',
+      effect: iam.Effect.ALLOW,
+      principals: props.trustedUseCaseAccountIds.map(
+        (id) => new iam.ArnPrincipal(`arn:aws:iam::${id}:role/DDASageMakerExecutionRole`)
+      ),
+      actions: [
+        'ecr:BatchCheckLayerAvailability',
+        'ecr:BatchGetImage',
+        'ecr:GetDownloadUrlForLayer',
+      ],
+    }));
+    new cdk.CfnOutput(this, 'DetectorExportRepositoryUri', {
+      value: detectorExportRepository.repositoryUri,
+      description: 'ECR repository for the detector checkpoint Export_Image (build-and-push.sh --push)',
+    });
+    // '' when unset: conversion is then reported as not configured (503).
+    const detectorExportImage = resolveDetectorExportImage(
+      this.node.tryGetContext('detectorExportImage'),
+    );
+
     // Model Converter Lambda Handler for auto-generating DDA metadata
     const modelConverterHandler = new lambda.Function(this, 'ModelConverterHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
@@ -813,6 +1664,9 @@ export class ComputeStack extends cdk.Stack {
         ...lambdaEnvironment,
         MODEL_IMPORT_FUNCTION_NAME: modelImportHandler.functionName,
         CODE_VERSION: '2025-01-10-converter',
+        // detector-checkpoint-import: the pinned Export_Image; '' disables
+        // conversion (convert -> 503, inspect -> convertible: false).
+        DETECTOR_EXPORT_IMAGE: detectorExportImage,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(600), // 10 minutes for large model conversion
@@ -854,6 +1708,1814 @@ export class ComputeStack extends cdk.Stack {
     // Grant Audit Logs Lambda read access to the audit log table
     props.auditLogTable.grantReadData(auditLogsHandler);
 
+    // ------------------------------------------------------------------
+    // Camera Registry Sync (camera-registry-sync)
+    // Edge devices report their Camera_Source inventory into the
+    // dda-camera-registry named shadow; a per-use-case IoT topic rule on
+    // $aws/things/+/shadow/name/dda-camera-registry/update/documents
+    // (provisioned by the UseCaseAccountStack during use-case onboarding)
+    // forwards each shadow documents event to the SQS queue below, where the
+    // Portal_Sync_Service Lambda (camera_sync.py) reduces it into the
+    // dda-portal-camera-registry table.
+    // ------------------------------------------------------------------
+
+    // SQS-managed SSE (R14.3). Use-case accounts may send to this queue. SSE-SQS
+    // needs no KMS permission from any sender, while an AWS managed key can't be
+    // used across accounts (R14.4). The DLQ matches its source queue.
+
+    // Dead-letter queue for shadow-report events that repeatedly fail
+    // processing (malformed/unparseable reports are also dead-lettered
+    // explicitly by the handler without blocking the batch).
+    const cameraShadowReportDlq = new sqs.Queue(this, 'CameraShadowReportDLQ', {
+      queueName: 'dda-portal-camera-shadow-reports-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+
+    // Shadow-report queue fed by the per-use-case IoT topic rules. The
+    // visibility timeout is a multiple of the consumer Lambda timeout per
+    // the SQS event-source guidance.
+    const cameraShadowReportQueue = new sqs.Queue(this, 'CameraShadowReportQueue', {
+      queueName: 'dda-portal-camera-shadow-reports',
+      visibilityTimeout: cdk.Duration.seconds(180),
+      retentionPeriod: cdk.Duration.days(4),
+      enforceSSL: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      deadLetterQueue: {
+        queue: cameraShadowReportDlq,
+        maxReceiveCount: 3,
+      },
+    });
+
+    // Cross-account queue policy: an IoT topic rule delivers to SQS through
+    // its rule role, an IAM principal in the (use-case) account where the
+    // rule runs. Allow SendMessage from the trusted UseCase accounts plus
+    // this portal account (same-account use cases).
+    cameraShadowReportQueue.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'AllowUseCaseAccountIotRuleDelivery',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['sqs:SendMessage'],
+      resources: [cameraShadowReportQueue.queueArn],
+      conditions: {
+        StringEquals: {
+          'aws:PrincipalAccount': Array.from(
+            new Set([...props.trustedUseCaseAccountIds, cdk.Aws.ACCOUNT_ID])
+          ),
+        },
+      },
+    }));
+
+    // Portal_Sync_Service ingest Lambda (camera_sync.py) — consumes shadow
+    // documents events from the queue and applies the reduce_report sync
+    // reducer per camera source into the camera registry table.
+    const cameraSyncHandler = new lambda.Function(this, 'CameraSyncHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'camera_sync.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('CameraSync'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-02-14-camera-sync',
+        CAMERA_SHADOW_REPORT_DLQ_URL: cameraShadowReportDlq.queueUrl,
+      },
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    cameraSyncHandler.addEventSource(new SqsEventSource(cameraShadowReportQueue, {
+      batchSize: 10,
+      reportBatchItemFailures: true,
+    }));
+
+    // The handler dead-letters malformed reports explicitly (in addition to
+    // the redrive policy above).
+    cameraShadowReportDlq.grantSendMessages(cameraSyncHandler);
+
+    // Portal-account IoT topic rule for the SINGLE-ACCOUNT topology (portal
+    // account == use-case account): forwards every dda-camera-registry shadow
+    // documents event to the shadow-report queue above. Cross-account use-case
+    // accounts get the equivalent rule from the UseCaseAccountStack instead
+    // (condition-gated there to the cross-account case). Deliberately distinct
+    // rule name and CDK-generated role name so this never collides with the
+    // fixed-name UseCaseAccountStack copies (or resources created manually
+    // before this fix existed — see the camera-shadow-sync-provisioning spec
+    // migration note).
+    const cameraShadowRuleRole = new iam.Role(this, 'CameraShadowRuleRole', {
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com'),
+      description:
+        'Role for the portal-account dda-camera-registry shadow IoT topic rule ' +
+        'to deliver shadow documents events to the DDA Portal shadow-report queue',
+    });
+    cameraShadowRuleRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SendCameraShadowReports',
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:SendMessage'],
+      resources: [cameraShadowReportQueue.queueArn],
+    }));
+
+    new iot.CfnTopicRule(this, 'CameraRegistryShadowRule', {
+      ruleName: 'dda_camera_registry_shadow_documents_portal',
+      topicRulePayload: {
+        // topic(3) is the thing name in $aws/things/{thing}/shadow/...
+        sql: "SELECT *, topic(3) AS thing_name FROM '$aws/things/+/shadow/name/dda-camera-registry/update/documents'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        description:
+          'Forward dda-camera-registry shadow documents events to the DDA ' +
+          'Portal camera shadow-report queue (single-account topology)',
+        actions: [
+          {
+            sqs: {
+              queueUrl: cameraShadowReportQueue.queueUrl,
+              roleArn: cameraShadowRuleRole.roleArn,
+              useBase64: false,
+            },
+          },
+        ],
+      },
+    });
+
+    // Camera_Registry API Lambda (camera_registry.py) — device cameras
+    // read/mutate routes, conflict listing/re-apply, and on-demand refresh
+    // (GetThingShadow pull through the assumed use-case role).
+    // The Portal_Pin_API routes (cloud-static-camera-provisioning task
+    // 4.1) live in the same handler: the Image_Transport is the GDK
+    // component bucket (created out-of-band by
+    // gdk-component-build-and-publish.sh — every onboarded device
+    // account's TES role can already read it), images live under the
+    // static-image-pins/ prefix, and pin submissions decode up to 50 MB
+    // with Pillow (imaging layer attached below, memory sized for the
+    // decode).
+    const componentBucketNameForPins = `dda-component-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}`;
+    const staticImagePinPrefix = 'static-image-pins';
+
+    const cameraRegistryHandler = new lambda.Function(this, 'CameraRegistryHandler', {
+      // python3.12: the attached imaging layer's Pillow needs glibc >= 2.28.
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'camera_registry.handler',
+      // The functions directory asset bundles camera_sync.py and
+      // pin_requests.py alongside camera_registry.py (both are imported
+      // by the handler module).
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('CameraRegistry'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-02-14-camera-registry',
+        COMPONENT_BUCKET: componentBucketNameForPins,
+      },
+      // workflow_core: the stream camera body validation and view
+      // redaction import workflow_core.stream_url (rtsp-rtmp-stream-cameras
+      // design component 7), so the rules are shared, not copied.
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(30),
+      // ≥ 1024 MB for the 50 MB staged-image download + Pillow decode of
+      // the pin submit route (design Decision 2).
+      memorySize: 1024,
+    });
+
+    // Prefix-scoped Image_Transport grant: presigned staging PUTs,
+    // HeadObject/GetObject validation reads, the canonical CopyObject
+    // (GetObject on the staging source + PutObject on the canonical
+    // destination), and staged/canonical object deletes — all confined to
+    // the static-image-pins/ prefix of the component bucket.
+    cameraRegistryHandler.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'StaticImagePinPrefixAccess',
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
+      resources: [
+        `arn:aws:s3:::${componentBucketNameForPins}/${staticImagePinPrefix}/*`,
+      ],
+    }));
+
+    // Portal-managed stream camera credentials in single-account setups
+    // (rtsp-rtmp-stream-cameras Requirements 5.3, 5.9, 6.6). The same two
+    // grants as the DDAPortalAccessRole in usecase-account-stack.ts, used
+    // when the Use_Case lives in the Portal account itself. The Secrets
+    // Manager grant is write-only: GetSecretValue is deliberately absent.
+    cameraRegistryHandler.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'StreamCameraCredentialWrite',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'secretsmanager:CreateSecret',
+        'secretsmanager:PutSecretValue',
+        'secretsmanager:UpdateSecretVersionStage',
+        'secretsmanager:DescribeSecret',
+        'secretsmanager:DeleteSecret',
+        'secretsmanager:RestoreSecret',
+        'secretsmanager:TagResource',
+      ],
+      resources: [
+        `arn:aws:secretsmanager:*:${cdk.Aws.ACCOUNT_ID}:secret:dda-portal/stream-camera-credentials/*`,
+      ],
+    }));
+    cameraRegistryHandler.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'StreamCameraDeviceReadGrant',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:GetRolePolicy', 'iam:PutRolePolicy'],
+      resources: [
+        `arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/GreengrassV2TokenExchangeRole`,
+      ],
+    }));
+
+    // The SQS ingest handler transitions Pin_Requests to terminal states
+    // (applied/failed) and deletes the canonical pin object best-effort on
+    // each terminal transition (pin_requests.py, Open Decision 4).
+    cameraSyncHandler.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'StaticImagePinCanonicalCleanup',
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:DeleteObject'],
+      resources: [
+        `arn:aws:s3:::${componentBucketNameForPins}/${staticImagePinPrefix}/*`,
+      ],
+    }));
+
+    // Staging-prefix lifecycle backstop (Req 2.7's infrastructure half,
+    // the dda_labeling preview-prefix precedent): presigned-PUT staging
+    // objects the submit route never consumed expire after 1 day.
+    // Canonical objects are deleted by the Portal when their Pin_Request
+    // leaves pending, so no rule covers them. The component bucket is
+    // created out-of-band by the GDK publish script (not CDK-managed), so
+    // the rule is applied through a custom resource; the bucket carries no
+    // other lifecycle configuration (this PUT owns the whole config).
+    const stagingLifecycleRule = {
+      ID: 'dda-static-image-pin-staging-expiry',
+      Status: 'Enabled',
+      Filter: { Prefix: `${staticImagePinPrefix}/staging/` },
+      Expiration: { Days: 1 },
+      AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
+    };
+    new cr.AwsCustomResource(this, 'StaticImagePinStagingLifecycle', {
+      onCreate: {
+        service: 'S3',
+        action: 'putBucketLifecycleConfiguration',
+        parameters: {
+          Bucket: componentBucketNameForPins,
+          LifecycleConfiguration: { Rules: [stagingLifecycleRule] },
+        },
+        physicalResourceId: cr.PhysicalResourceId.of(
+          `${componentBucketNameForPins}/${stagingLifecycleRule.ID}`,
+        ),
+      },
+      onUpdate: {
+        service: 'S3',
+        action: 'putBucketLifecycleConfiguration',
+        parameters: {
+          Bucket: componentBucketNameForPins,
+          LifecycleConfiguration: { Rules: [stagingLifecycleRule] },
+        },
+        physicalResourceId: cr.PhysicalResourceId.of(
+          `${componentBucketNameForPins}/${stagingLifecycleRule.ID}`,
+        ),
+      },
+      // No onDelete: removing the portal stacks must not silently drop the
+      // expiry backstop for a bucket the stacks do not own.
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['s3:PutLifecycleConfiguration'],
+          resources: [`arn:aws:s3:::${componentBucketNameForPins}`],
+        }),
+      ]),
+    });
+
+    // Browser CORS for the pin upload path (design Decision 2): the pin
+    // flow PUTs the image bytes straight from the portal origin to a
+    // presigned staging key on this bucket, and a cross-origin PUT with an
+    // image Content-Type is preflighted. Without a CORS rule S3 rejects
+    // the preflight and the browser reports a bare NetworkError (seen on
+    // 2026-09-14). The bucket is not CDK-managed (see above), so the rule
+    // is applied through a custom resource that mirrors the declarative
+    // rule on PortalArtifactsBucket (storage-stack.ts): the CloudFront
+    // origin when known, any origin before the first frontend deployment
+    // — access is still gated by the presigned URLs themselves. This PUT
+    // owns the bucket's whole CORS configuration (no other rule exists).
+    const pinUploadCorsRule = {
+      AllowedOrigins: props.cloudFrontDomain
+        ? [`https://${props.cloudFrontDomain}`]
+        : ['*'],
+      AllowedMethods: ['PUT', 'GET', 'HEAD'],
+      AllowedHeaders: ['*'],
+      ExposeHeaders: ['ETag'],
+      MaxAgeSeconds: 3600,
+    };
+    const pinUploadCorsCall = {
+      service: 'S3',
+      action: 'putBucketCors',
+      parameters: {
+        Bucket: componentBucketNameForPins,
+        CORSConfiguration: { CORSRules: [pinUploadCorsRule] },
+      },
+      // The origin is part of the physical id so a domain change
+      // re-applies the rule instead of being treated as a no-op update.
+      physicalResourceId: cr.PhysicalResourceId.of(
+        `${componentBucketNameForPins}/static-image-pin-cors/${pinUploadCorsRule.AllowedOrigins[0]}`,
+      ),
+    };
+    new cr.AwsCustomResource(this, 'StaticImagePinUploadCors', {
+      onCreate: pinUploadCorsCall,
+      onUpdate: pinUploadCorsCall,
+      // No onDelete, for the same reason as the lifecycle rule above.
+      policy: cr.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['s3:PutBucketCORS'],
+          resources: [`arn:aws:s3:::${componentBucketNameForPins}`],
+        }),
+      ]),
+    });
+
+    // Deploy-time Camera_Binding delivery: deployments.py writes
+    // desired.bindings["{workflowId}/{version}"] into each target thing's
+    // dda-camera-bindings named shadow at deployment submission. IAM scopes
+    // shadow actions to the thing ARN (named shadows share the thing
+    // resource); this explicit iot-data grant keeps the camera-bindings
+    // shadow write working independently of the base-role IoT statement.
+    deploymentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iot:GetThingShadow',
+        'iot:UpdateThingShadow',
+      ],
+      resources: ['arn:aws:iot:*:*:thing/*'],
+    }));
+
+    // ------------------------------------------------------------------
+    // Portal User Manager (portal-user-manager, task 5.1)
+    // PortalAdmin-only Cognito account management (user_admin.py) and the
+    // Account_Sync_Service portal side (account_sync.py): accounts are
+    // delivered to each edge device over the dda-user-accounts named
+    // shadow; the device acks via reported.ackSyncId, forwarded by an IoT
+    // topic rule into the SQS queue below and ingested back into the
+    // per-device sync-state table. An EventBridge rate(5 minutes)
+    // schedule drives retries and the 60-second ack-timeout sweep.
+    // ------------------------------------------------------------------
+
+    // Verified SES sender for temporary-password delivery (design D11):
+    // Cognito cannot email a temporary password to an existing CONFIRMED
+    // user, so user_admin.py sends it via SES from this address. The
+    // address (or an address on a verified domain identity) must be
+    // verified in SES in this account/region before the forgot-password
+    // flow is used; user_admin.py rejects the action when unset.
+    const sesSenderAddress = new cdk.CfnParameter(this, 'SesSenderAddress', {
+      type: 'String',
+      default: '',
+      description:
+        'Verified SES sender address for User_Manager temporary-password ' +
+        'emails (portal-user-manager design D11). Leave empty to disable ' +
+        'the forgot-password flow.',
+    });
+
+    // Customer managed key for the two portal-account tables (R14.5). One key
+    // serves both, because the same principals use them. Rotation is on. The
+    // key is retained like the tables: a retained table whose key is deleted
+    // can't be read.
+    const accountTablesKey = new kms.Key(this, 'AccountTablesKey', {
+      alias: 'dda-portal/account-tables',
+      description:
+        'DDA Portal: encryption at rest for dda-portal-edge-credentials and ' +
+        'dda-portal-account-sync. Disabling or deleting it makes both tables unreadable.',
+      enableKeyRotation: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Credential-verifier table (design D3/D4): salted one-way PBKDF2
+    // verifiers captured by user_admin.py password flows; never contains
+    // plaintext. Read at listing time for the edgeCapable flag and by the
+    // sync staging path.
+    const edgeCredentialsTable = new dynamodb.Table(this, 'EdgeCredentialsTable', {
+      tableName: 'dda-portal-edge-credentials',
+      partitionKey: {
+        name: 'username',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: accountTablesKey,
+    });
+
+    // Per-device account-sync state (staged account set + syncId, status,
+    // attemptAt/lastSyncAt, pendingChanges) — the Account_Sync_Service
+    // reducer state (Reqs 7.4-7.9).
+    const accountSyncTable = new dynamodb.Table(this, 'AccountSyncTable', {
+      tableName: 'dda-portal-account-sync',
+      partitionKey: {
+        name: 'device_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: accountTablesKey,
+    });
+
+    // SQS-managed SSE (R14.3). Use-case accounts may send to this queue. SSE-SQS
+    // needs no KMS permission from any sender, while an AWS managed key can't be
+    // used across accounts (R14.4). The DLQ matches its source queue.
+
+    // Dead-letter queue for ack events that repeatedly fail processing
+    // (malformed acks are also dead-lettered explicitly by the handler
+    // without blocking the batch — camera-registry-sync pattern).
+    const accountSyncAckDlq = new sqs.Queue(this, 'AccountSyncAckDLQ', {
+      queueName: 'dda-portal-account-sync-acks-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+
+    // Ack queue fed by the dda-user-accounts shadow topic rule(s). The
+    // visibility timeout is a multiple of the consumer Lambda timeout per
+    // the SQS event-source guidance.
+    const accountSyncAckQueue = new sqs.Queue(this, 'AccountSyncAckQueue', {
+      queueName: 'dda-portal-account-sync-acks',
+      visibilityTimeout: cdk.Duration.seconds(180),
+      retentionPeriod: cdk.Duration.days(4),
+      enforceSSL: true,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      deadLetterQueue: {
+        queue: accountSyncAckDlq,
+        maxReceiveCount: 3,
+      },
+    });
+
+    // Cross-account queue policy: an IoT topic rule delivers to SQS
+    // through its rule role, an IAM principal in the account where the
+    // rule runs. Allow SendMessage from the trusted UseCase accounts
+    // (devices whose shadows live there) plus this portal account.
+    accountSyncAckQueue.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'AllowUseCaseAccountIotRuleDelivery',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['sqs:SendMessage'],
+      resources: [accountSyncAckQueue.queueArn],
+      conditions: {
+        StringEquals: {
+          'aws:PrincipalAccount': Array.from(
+            new Set([...props.trustedUseCaseAccountIds, cdk.Aws.ACCOUNT_ID])
+          ),
+        },
+      },
+    }));
+
+    // Portal-account IoT topic rule forwarding every dda-user-accounts
+    // shadow update/documents event (device acks) to the ack queue.
+    // topic(3) is the thing name in $aws/things/{thing}/shadow/... —
+    // account_sync.py's ack parser requires the injected thing_name.
+    const userAccountsShadowRuleRole = new iam.Role(this, 'UserAccountsShadowRuleRole', {
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com'),
+      description:
+        'Role for the dda-user-accounts shadow IoT topic rule to deliver ' +
+        'shadow documents events to the DDA Portal account-sync ack queue',
+    });
+    userAccountsShadowRuleRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SendAccountSyncAcks',
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:SendMessage'],
+      resources: [accountSyncAckQueue.queueArn],
+    }));
+
+    new iot.CfnTopicRule(this, 'UserAccountsShadowRule', {
+      ruleName: 'dda_user_accounts_shadow_documents',
+      topicRulePayload: {
+        sql: "SELECT *, topic(3) AS thing_name FROM '$aws/things/+/shadow/name/dda-user-accounts/update/documents'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        description:
+          'Forward dda-user-accounts shadow documents events to the DDA ' +
+          'Portal account-sync ack queue',
+        actions: [
+          {
+            sqs: {
+              queueUrl: accountSyncAckQueue.queueUrl,
+              roleArn: userAccountsShadowRuleRole.roleArn,
+              useBase64: false,
+            },
+          },
+        ],
+      },
+    });
+
+    // Account_Sync_Service Lambda (account_sync.py) — three entry paths
+    // routed by event shape: SQS records -> ack ingest, direct
+    // {action: 'sync_attempt'} invoke from user_admin.py, EventBridge
+    // scheduled event -> timeout sweep + pending-changes delivery pass.
+    // Shadow writes go through the base-role IoT grant (Get/Update
+    // ThingShadow on thing/*) or the assumed use-case role for
+    // cross-account devices (camera_registry.py pattern).
+    const accountSyncHandler = new lambda.Function(this, 'AccountSyncHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'account_sync.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('AccountSync'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-06-account-sync',
+        ACCOUNT_SYNC_TABLE: accountSyncTable.tableName,
+        ACCOUNT_SYNC_ACK_DLQ_URL: accountSyncAckDlq.queueUrl,
+      },
+      layers: [sharedLayer],
+      // The scheduled pass attempts delivery for every device with
+      // pending changes in one invocation.
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    accountSyncHandler.addEventSource(new SqsEventSource(accountSyncAckQueue, {
+      batchSize: 10,
+      reportBatchItemFailures: true,
+    }));
+
+    // The handler dead-letters malformed acks explicitly (in addition to
+    // the redrive policy above).
+    accountSyncAckDlq.grantSendMessages(accountSyncHandler);
+    accountSyncTable.grantReadWriteData(accountSyncHandler);
+
+    // DELETE /devices/{id} drops the removed device's account-sync row, so
+    // the 5-minute pass stops retrying its pending changes.
+    devicesHandler.addEnvironment('ACCOUNT_SYNC_TABLE', accountSyncTable.tableName);
+    accountSyncTable.grant(devicesHandler, 'dynamodb:DeleteItem');
+
+    // Retry/timeout driver: WHILE a device has undelivered pending
+    // changes, delivery is attempted at intervals not exceeding 5 minutes
+    // (Req 7.7); the same pass marks in_progress rows older than 60 s
+    // without an ack as failed / device unreachable (Req 7.9).
+    const accountSyncScheduleRule = new events.Rule(this, 'AccountSyncScheduleRule', {
+      ruleName: 'dda-portal-account-sync-schedule',
+      description:
+        'Drives Account_Sync_Service retries and ack-timeout sweeps ' +
+        '(portal-user-manager Reqs 7.7, 7.9)',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+    });
+    accountSyncScheduleRule.addTarget(new targets.LambdaFunction(accountSyncHandler));
+
+    // User_Manager admin API Lambda (user_admin.py) — PortalAdmin-only
+    // Cognito account management behind /admin/* (routes attached by the
+    // UserAdminApiStack below). Separate function so the cognito-idp
+    // admin and SES grants stay scoped to it alone (design D1).
+    // Held in a local so the out-of-band-administration detection rule below
+    // can exclude exactly this role's CloudTrail sessions (Req 6.3).
+    const userAdminRole = createLambdaRole('UserAdmin');
+    const userAdminHandler = new lambda.Function(this, 'UserAdminHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'user_admin.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: userAdminRole,
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-06-user-admin',
+        EDGE_CREDENTIALS_TABLE: edgeCredentialsTable.tableName,
+        ACCOUNT_SYNC_TABLE: accountSyncTable.tableName,
+        ACCOUNT_SYNC_FUNCTION: accountSyncHandler.functionName,
+        SES_SENDER_ADDRESS: sesSenderAddress.valueAsString,
+      },
+      layers: [sharedLayer],
+      // Full-pool list_users pagination (listing + last-PortalAdmin guard).
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    edgeCredentialsTable.grantReadWriteData(userAdminHandler);
+    accountSyncTable.grantReadWriteData(userAdminHandler);
+
+    // Key access for every principal of the two tables, in a policy of its own
+    // that both tables depend on. CloudFormation therefore attaches key access
+    // before it switches either table to the key. grantReadWriteData adds the
+    // same grant to the AccountSync and UserAdmin default policies, but those
+    // policies reference the tables and update after them. DevicesRole gets key
+    // access only here: Table.grant() with an explicit action list adds none.
+    const accountTablesKeyAccess = new iam.Policy(this, 'AccountTablesKeyAccess', {
+      roles: [accountSyncHandler.role!, userAdminRole, devicesHandler.role!],
+      statements: [new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['kms:Decrypt', 'kms:DescribeKey', 'kms:Encrypt', 'kms:ReEncrypt*', 'kms:GenerateDataKey*'],
+        resources: [accountTablesKey.keyArn],
+      })],
+    });
+    edgeCredentialsTable.node.addDependency(accountTablesKeyAccess);
+    accountSyncTable.node.addDependency(accountTablesKeyAccess);
+
+    // finalize_audit_event (shared_utils.py) recovers the audit table's
+    // (event_id, timestamp) range key with a dynamodb:Query before the
+    // terminal update_item — the base createLambdaRole only grants
+    // grantWriteData, so without this the deployed handler 500s after
+    // every mutation's Cognito effect (user-manager-datalabeler-role,
+    // design Decisions 3-4). Exactly the missing action, narrower than
+    // grantReadData (no Scan/GetItem), scoped to this handler only.
+    props.auditLogTable.grant(userAdminHandler, 'dynamodb:Query');
+    // Immediate sync attempt after staging (the 5-minute schedule is the
+    // fallback when the invoke fails).
+    accountSyncHandler.grantInvoke(userAdminHandler);
+
+    // Cognito admin operations scoped to the portal user pool and granted
+    // ONLY to user_admin.py (task 5.1): account listing/inspection,
+    // password set (permanent/temporary), and custom:role updates.
+    // Extended (task 15.1) with account life-cycle operations: creation,
+    // enable/disable, and deletion.
+    userAdminHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'cognito-idp:AdminSetUserPassword',
+        'cognito-idp:AdminUpdateUserAttributes',
+        'cognito-idp:ListUsers',
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminCreateUser',
+        'cognito-idp:AdminEnableUser',
+        'cognito-idp:AdminDisableUser',
+        'cognito-idp:AdminDeleteUser',
+      ],
+      resources: [props.userPool.userPoolArn],
+    }));
+
+    // SES send for temporary-password delivery (design D11). Scoped to
+    // this account's verified identities: SES authorizes SendEmail
+    // against the identity of the Source address — an address identity
+    // or the domain identity covering it — so identity/* (rather than a
+    // single address ARN) keeps domain-verified senders working.
+    userAdminHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ses:SendEmail'],
+      resources: [
+        `arn:aws:ses:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:identity/*`,
+      ],
+    }));
+
+    // ------------------------------------------------------------------
+    // Detection: Cognito administration performed OUTSIDE the portal
+    // (portal-jwt-role-privilege-escalation Requirement 6, design
+    // Decision 8).
+    //
+    // The verified incident was a pool user created, used to submit a build,
+    // and deleted within 6 seconds through the Cognito admin APIs directly —
+    // no portal route involved, so nothing in the portal's own audit trail
+    // recorded the provisioning. This rule makes that visible.
+    //
+    // DETECTION ONLY. It prevents nothing: an actor holding
+    // cognito-idp:Admin* can still make these calls (and one holding
+    // events:DisableRule/DeleteRule can silence the signal). The actual
+    // control is the Portal_Identity registry enforced in the shared RBAC
+    // layer (PORTAL_REGISTRY_ENFORCED) — an out-of-band Cognito user has no
+    // registry row and is therefore denied. Restricting cognito-idp:Admin*
+    // by SCP or permission boundary is the complementary preventive control
+    // and lives outside this repo (see ADMIN_GUIDE.md, task 6.4).
+    //
+    // PREREQUISITE: "AWS API Call via CloudTrail" events only reach
+    // EventBridge in a region where a CloudTrail trail (or an
+    // organization trail) is logging management events. This stack does
+    // NOT create a trail: portal accounts typically already have an
+    // account/organization trail, and creating a second one would duplicate
+    // both the delivery and its cost. Verifying the trail exists is an
+    // operator step in the runbook.
+    // ------------------------------------------------------------------
+
+    // The pool mutations that can hand out portal access or erase its
+    // attribution (Req 6.1). AdminCreateUser + AdminSetUserPassword mint a
+    // usable account; AdminUpdateUserAttributes writes custom:role (the
+    // claim the incident abused); AdminAddUserToGroup is the group-based
+    // variant; AdminEnableUser/AdminDisableUser flip usability;
+    // AdminDeleteUser is what made the incident's actor unidentifiable.
+    const outOfBandCognitoAdminEvents = [
+      'AdminCreateUser',
+      'AdminSetUserPassword',
+      'AdminUpdateUserAttributes',
+      'AdminAddUserToGroup',
+      'AdminEnableUser',
+      'AdminDisableUser',
+      'AdminDeleteUser',
+    ];
+
+    // Subscriptions (email/chat/ticketing) are managed out of band, as for
+    // the build fleet's alert topic — the portal does not own who is paged.
+    const cognitoAdminActivityTopic = new sns.Topic(this, 'CognitoAdminActivityTopic', {
+      topicName: 'dda-portal-cognito-admin-alerts',
+      displayName: 'DDA portal: Cognito pool administration outside the portal',
+    });
+
+    const cognitoAdminActivityRule = new events.Rule(this, 'CognitoAdminActivityRule', {
+      ruleName: 'dda-portal-cognito-admin-activity',
+      description:
+        'Raises a detection signal when the DDA portal user pool is ' +
+        'administered by any principal other than the portal User Manager ' +
+        'Lambda role (portal-jwt-role-privilege-escalation Req 6)',
+      eventPattern: {
+        source: ['aws.cognito-idp'],
+        detailType: ['AWS API Call via CloudTrail'],
+        detail: {
+          eventSource: ['cognito-idp.amazonaws.com'],
+          eventName: outOfBandCognitoAdminEvents,
+          // Scoped to THIS portal pool: other pools in the account (there
+          // are several) are not this spec's concern and would be noise.
+          requestParameters: {
+            userPoolId: [props.userPool.userPoolId],
+          },
+          // Exclusion of the portal's own User Manager (Req 6.3). The
+          // handler calls Cognito with its Lambda execution role, so
+          // CloudTrail records userIdentity.type='AssumedRole' with
+          // sessionContext.sessionIssuer.arn = that role's ARN.
+          //
+          // The two arms are an OR because "anything-but" only matches when
+          // the field is PRESENT: a caller that is not an assumed role (IAM
+          // user, root, federated) has no sessionContext.sessionIssuer, so
+          // a lone anything-but on the issuer ARN would silently ignore
+          // exactly the direct-IAM-user case. userIdentity.type is always
+          // present in a CloudTrail record, so arm 1 catches every
+          // non-assumed-role caller and arm 2 catches every assumed role
+          // that is not the User Manager.
+          $or: [
+            { userIdentity: { type: [{ 'anything-but': ['AssumedRole'] }] } },
+            {
+              userIdentity: {
+                sessionContext: {
+                  sessionIssuer: {
+                    arn: [{ 'anything-but': [userAdminRole.roleArn] }],
+                  },
+                },
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    // The signal carries the event name, caller ARN, source IP, user agent
+    // and event time (Req 6.2) — the same attribution the audit rows now
+    // record, so an out-of-band mutation can be correlated with whatever
+    // the resulting principal did in the portal. eventId/userPoolId are
+    // included so a responder can pull the full record with
+    // `aws cloudtrail lookup-events`.
+    cognitoAdminActivityRule.addTarget(new targets.SnsTopic(cognitoAdminActivityTopic, {
+      message: events.RuleTargetInput.fromObject({
+        alert: 'Cognito administration outside the DDA portal User Manager',
+        eventName: events.EventField.fromPath('$.detail.eventName'),
+        callerArn: events.EventField.fromPath('$.detail.userIdentity.arn'),
+        callerType: events.EventField.fromPath('$.detail.userIdentity.type'),
+        sourceIp: events.EventField.fromPath('$.detail.sourceIPAddress'),
+        userAgent: events.EventField.fromPath('$.detail.userAgent'),
+        eventTime: events.EventField.fromPath('$.detail.eventTime'),
+        userPoolId: events.EventField.fromPath('$.detail.requestParameters.userPoolId'),
+        eventId: events.EventField.fromPath('$.detail.eventID'),
+        awsRegion: events.EventField.fromPath('$.detail.awsRegion'),
+      }),
+    }));
+
+    new cdk.CfnOutput(this, 'CognitoAdminActivityTopicArn', {
+      value: cognitoAdminActivityTopic.topicArn,
+      description:
+        'SNS topic for out-of-band Cognito pool administration alerts. ' +
+        'Subscribe operators to it; requires a CloudTrail trail logging ' +
+        'management events in this region for the rule to fire.',
+    });
+
+    // ------------------------------------------------------------------
+    // DDA Data Labeling (dda-data-labeling, task 14.1)
+    // In-house labeling backend: dda_labeling.py (API), dda_labeling_worker.py
+    // (async distribution / notifications / manifest generation),
+    // dda_autolabel_worker.py (SQS consumer for Bedrock/SAM pre-labeling)
+    // and the optional dda_sam_worker container-image Lambda.
+    // Requirements: 6.5, 8.1, 12.8
+    // ------------------------------------------------------------------
+
+    // Pillow imaging layer for the labeling functions (mask rendering,
+    // Image_Downscaler, dimension probes): bundled at synth time via CDK
+    // asset bundling.
+    //
+    // BUGFIX (dda-imaging-layer-empty): this asset was previously the raw
+    // backend/layers/imaging directory, relying on build.sh having been
+    // run manually to create python/ before deploy — when it wasn't, an
+    // EMPTY layer (only build.sh + requirements.txt) synthesized and
+    // deployed cleanly, and the DDA labeling functions failed at runtime
+    // with "No module named 'PIL'". Bundling makes synth itself produce
+    // the populated layer: the local tryBundle path runs pip on the host
+    // with the same manylinux wheel targeting as build.sh (fast, no Docker
+    // needed); if it fails, CDK falls back to the Docker bundling image.
+    // The bundling options mirror the SyntheticDataStack's
+    // SyntheticImagingLayer byte-for-byte so both stacks stage one
+    // identical asset (equal Content.S3Key). build.sh remains valid for
+    // manual/standalone layer builds.
+    const imagingLayerSourceDir = path.join(__dirname, '../../backend/layers/imaging');
+    const imagingLayer = new lambda.LayerVersion(this, 'ImagingLayer', {
+      code: lambda.Code.fromAsset(imagingLayerSourceDir, {
+        bundling: {
+          image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+          command: [
+            'bash',
+            '-c',
+            'pip install -r requirements.txt -t /asset-output/python',
+          ],
+          local: {
+            tryBundle(outputDir: string): boolean {
+              try {
+                // Same wheel targeting as build.sh: Pillow ships native
+                // extensions, so force the manylinux wheel matching the
+                // Lambda runtime (Python 3.12, x86_64) regardless of host.
+                // Pillow >= 12 publishes only manylinux_2_28 wheels, which
+                // need the glibc 2.34 of the python3.12 runtime (Amazon
+                // Linux 2023); python3.11 (Amazon Linux 2, glibc 2.26)
+                // cannot load them.
+                execSync(
+                  [
+                    'pip install',
+                    `-r ${path.join(imagingLayerSourceDir, 'requirements.txt')}`,
+                    `-t ${path.join(outputDir, 'python')}`,
+                    '--platform manylinux_2_28_x86_64',
+                    '--implementation cp',
+                    '--python-version 3.12',
+                    '--only-binary=:all:',
+                  ].join(' '),
+                  { stdio: ['ignore', 'pipe', 'pipe'] }
+                );
+                return true;
+              } catch {
+                // Fall back to the Docker bundling image.
+                return false;
+              }
+            },
+          },
+        },
+      }),
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
+      description:
+        'Pillow imaging layer for DDA labeling mask rendering (built by ' +
+        'backend/layers/imaging/build.sh)',
+    });
+
+    // The same imagingLayer LayerVersion the labeling functions attach:
+    // the Portal_Pin_API pin submit route (camera_registry.py) decodes
+    // staged uploads with Pillow via the lazy-import imaging-layer
+    // convention (cloud-static-camera-provisioning task 4.1).
+    cameraRegistryHandler.addLayers(imagingLayer);
+
+    // Video layer (static-camera-video-loop, design Decision 8): the
+    // LocalServer's OpenCV build (opencv-python-headless 4.11.0.86 with its
+    // bundled FFmpeg, plus numpy) for the Portal_Video_Pin_API, which
+    // validates a staged video by decoding its first and last frames with
+    // the device's own video_loop.py. About 190 MB unzipped (cv2/data
+    // removed), so it is attached only to CameraVideoPinHandler below.
+    // Bundled at synth time like the ImagingLayer: the local step
+    // (build.sh) installs the x86_64 manylinux wheels from a per-requirements
+    // cache and hardlinks them into the asset; the Docker bundling image is
+    // the fallback.
+    const videoLayerSourceDir = path.join(__dirname, '../../backend/layers/video');
+    const videoLayer = new lambda.LayerVersion(this, 'VideoLayer', {
+      code: lambda.Code.fromAsset(videoLayerSourceDir, {
+        bundling: {
+          image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+          command: [
+            'bash',
+            '-c',
+            'pip install -r requirements.txt -t /asset-output/python ' +
+              '--only-binary=:all: --no-compile && ' +
+              'rm -rf /asset-output/python/cv2/data',
+          ],
+          local: {
+            tryBundle(outputDir: string): boolean {
+              try {
+                execFileSync('bash', [path.join(videoLayerSourceDir, 'build.sh'), outputDir], {
+                  stdio: ['ignore', 'pipe', 'pipe'],
+                });
+                return true;
+              } catch {
+                // Fall back to the Docker bundling image.
+                return false;
+              }
+            },
+          },
+        },
+      }),
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
+      compatibleArchitectures: [lambda.Architecture.X86_64],
+      description:
+        'OpenCV video layer (opencv-python-headless 4.11.0.86, numpy 1.26.4) ' +
+        'for the Portal video pin validation (static-camera-video-loop)',
+    });
+
+    // Portal_Video_Pin_API Lambda (static-camera-video-loop, design
+    // Decision 8): the four /cameras/static-video… routes. Same code asset
+    // as CameraRegistryHandler (the route handlers live in
+    // camera_registry.py; camera_video_pin.py narrows this function to the
+    // video routes) and the SAME role: the registry table, devices/audit
+    // tables, use-case STS, and the static-image-pins/ prefix grant (which
+    // covers the video keys under static-image-pins/{deviceId}/video/) all
+    // apply unchanged.
+    //
+    // Video_Validation (up to 60 s of decoding) cannot fit the API Gateway
+    // integration timeout, so the pin route hands it to this same function
+    // as an asynchronous Event invocation (camera_registry.
+    // run_video_validation). Hence the fixed function name (the
+    // environment cannot Ref the function itself; the WorkflowGenerator
+    // pattern), the self-invoke grant below, and no async retries (a job
+    // that dies leaves its record validating, which the status view shows
+    // as expired after 5 minutes).
+    // Sizing: a 100 MB staged video is streamed to /tmp (1 GiB ephemeral
+    // storage) and probed in a child process bounded at 60 s; 2048 MB
+    // gives the decoder CPU headroom, and the 120 s timeout covers the
+    // download before the probe and the copy and shadow write after it.
+    // CameraRegistryHandler is unchanged.
+    const CAMERA_VIDEO_PIN_FUNCTION_NAME = 'dda-portal-camera-video-pin';
+    const cameraVideoPinFunctionArn =
+      `arn:aws:lambda:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}` +
+      `:function:${CAMERA_VIDEO_PIN_FUNCTION_NAME}`;
+    const cameraVideoPinHandler = new lambda.Function(this, 'CameraVideoPinHandler', {
+      functionName: CAMERA_VIDEO_PIN_FUNCTION_NAME,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      architecture: lambda.Architecture.X86_64,
+      handler: 'camera_video_pin.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: cameraRegistryHandler.role!,
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-09-26-camera-video-pin',
+        COMPONENT_BUCKET: componentBucketNameForPins,
+        VIDEO_VALIDATION_FUNCTION: CAMERA_VIDEO_PIN_FUNCTION_NAME,
+      },
+      layers: [sharedLayer, videoLayer],
+      timeout: cdk.Duration.seconds(120),
+      memorySize: 2048,
+      ephemeralStorageSize: cdk.Size.gibibytes(1),
+    });
+    // The pin route's Event self-invocation. The fixed-name ARN rather than
+    // grantInvoke(self): the function depends on its role's default policy,
+    // so referencing the function ARN token there would be a cycle.
+    cameraVideoPinHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [cameraVideoPinFunctionArn],
+    }));
+    cameraVideoPinHandler.configureAsyncInvoke({
+      retryAttempts: 0,
+      maxEventAge: cdk.Duration.minutes(5),
+    });
+
+    // The AWS managed SQS key (R14.3). Only Lambda roles in this account and SQS
+    // redrive use these queues, and that key's policy admits them through SQS
+    // without a grant. A sender in another account or an AWS service sender
+    // would need SSE-SQS or a customer managed key instead.
+
+    // Auto-label queue + DLQ (camera-shadow queue pattern). The visibility
+    // timeout equals the consumer Lambda timeout (300 s) so a message is
+    // never redelivered while its Bedrock/SAM inference is still running;
+    // after 3 failed receives the message dead-letters.
+    const ddaAutolabelDlq = new sqs.Queue(this, 'DdaAutolabelDLQ', {
+      queueName: 'dda-portal-autolabel-queue-dlq',
+      retentionPeriod: cdk.Duration.days(14),
+      enforceSSL: true,
+      encryption: sqs.QueueEncryption.KMS_MANAGED,
+    });
+
+    const ddaAutolabelQueue = new sqs.Queue(this, 'DdaAutolabelQueue', {
+      queueName: 'dda-portal-autolabel-queue',
+      visibilityTimeout: cdk.Duration.seconds(300),
+      retentionPeriod: cdk.Duration.days(4),
+      enforceSSL: true,
+      encryption: sqs.QueueEncryption.KMS_MANAGED,
+      deadLetterQueue: {
+        queue: ddaAutolabelDlq,
+        maxReceiveCount: 3,
+      },
+    });
+
+    // Async worker (dda_labeling_worker.py): task distribution/rebalancing,
+    // SES notifications, and manifest generation (segmentation mask
+    // rendering with Pillow is why it gets 2 GB / 900 s).
+    const ddaLabelingWorker = new lambda.Function(this, 'DdaLabelingWorker', {
+      // python3.12: the attached imaging layer's Pillow needs glibc >= 2.28.
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'dda_labeling_worker.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('DdaLabelingWorker'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-27-dda-labeling',
+        AUTOLABEL_QUEUE_URL: ddaAutolabelQueue.queueUrl,
+        // Same verified SES sender the User_Manager uses; unset => the
+        // worker records notifications_skipped=true and proceeds (Req 6.5).
+        SES_SENDER_ADDRESS: sesSenderAddress.valueAsString,
+        // Portal frontend domain for the labeler-workspace deep links in
+        // notification emails (https://{PORTAL_DOMAIN}/labeler?job={job_id}).
+        // Same optional cloudFrontDomain source the data-management handler
+        // uses for CLOUDFRONT_DOMAIN; absent until the frontend stack exists.
+        ...(props.cloudFrontDomain && { PORTAL_DOMAIN: props.cloudFrontDomain }),
+      },
+      layers: [sharedLayer, imagingLayer],
+      timeout: cdk.Duration.seconds(900),
+      memorySize: 2048,
+    });
+
+    // The distributor fans one auto-label message per image onto the queue.
+    ddaAutolabelQueue.grantSendMessages(ddaLabelingWorker);
+
+    // Assignment-notification emails (identity/* — the user_admin pattern:
+    // SES authorizes SendEmail against the address or covering domain
+    // identity of the Source address).
+    ddaLabelingWorker.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ses:SendEmail'],
+      resources: [
+        `arn:aws:ses:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:identity/*`,
+      ],
+    }));
+
+    // API handler (dda_labeling.py): team management, DDA job creation
+    // (delegated from labeling.py), labeler task APIs, admin review.
+    const ddaLabelingHandler = new lambda.Function(this, 'DdaLabelingHandler', {
+      // python3.12: the attached imaging layer's Pillow needs glibc >= 2.28.
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'dda_labeling.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('DdaLabeling'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-27-dda-labeling',
+        DDA_LABELING_WORKER_FUNCTION_NAME: ddaLabelingWorker.functionName,
+        // Per-model Model_Image_Limit for few-shot attachment in
+        // Prompt_Tuning_Preview requests (llm-autolabel-prompt-tuning
+        // Req 7.1) — the same value the autolabel worker resolves, so
+        // preview and labeling time attach the same example subset.
+        LLM_MODEL_IMAGE_LIMITS: llmModelImageLimits,
+        // Per-model Model_Token_Limit bootstrap for the Effective_Token_Budget
+        // resolved once at Preview_Run start; the same value the autolabel
+        // worker reads, which is what makes the previewed and the labeling-time
+        // maxTokens equal (llm-model-token-and-image-sizing Req 1.6, 1.8).
+        LLM_MODEL_TOKEN_LIMITS: llmModelTokenLimits,
+      },
+      // The same imagingLayer LayerVersion DdaLabelingWorker attaches above —
+      // one Pillow/libjpeg-turbo/zlib build shared by every function that runs
+      // the Image_Downscaler, which is the environmental precondition for the
+      // byte-identical downscale output the preview and the autolabel worker
+      // must produce (llm-model-token-and-image-sizing Req 6.1, 6.6). Pillow is
+      // imported lazily inside the re-encode path, so Downscale_Off pays
+      // nothing for the attachment.
+      layers: [sharedLayer, imagingLayer],
+      // 900 s is a cap, not a reservation: the HTTP routes still answer in
+      // well under a second, but the same function also runs the async
+      // Prompt_Tuning_Preview executor, which is up to 5 sequential model
+      // invocations at 120 s each plus S3 reads
+      // (llm-autolabel-prompt-tuning Req 3.3).
+      timeout: cdk.Duration.seconds(900),
+      // Up from the 128 MB default: the Image_Downscaler accepts sources up to
+      // Max_Source_Pixel_Count (100 M pixels), whose Pillow decode buffer plus
+      // the resized buffer and the encoder working set peaks in the 400-500 MB
+      // region, which 128 MB cannot hold at all. 2048 MB also sits above the
+      // ~1769 MB point where Lambda allocates a full vCPU, and CPU is what
+      // decides whether the 5 s Downscale_Duration_Bound is met; it matches
+      // DdaLabelingWorker's allocation so there is one number for Pillow in
+      // this stack (llm-model-token-and-image-sizing Req 6.11).
+      memorySize: 2048,
+    });
+    this.ddaLabelingHandler = ddaLabelingHandler;
+
+    // Job creation / membership changes async-invoke the worker
+    // ({action: 'distribute'|'generate_manifest'}).
+    ddaLabelingWorker.grantInvoke(ddaLabelingHandler);
+
+    // Prompt_Tuning_Preview: POST /labeling-preview/runs validates and
+    // returns 202, then async-invokes THIS function with
+    // {action: 'execute_preview_run'} to run the samples past API Gateway's
+    // 29 s integration bound (llm-autolabel-prompt-tuning Req 3.3). The
+    // executor resolves its own name from context.function_name — an
+    // environment variable would be a CloudFormation self-reference.
+    //
+    // The self-invoke grant CANNOT go through grantInvoke: that statement
+    // lands in a policy owned by the role construct, and the Lambda function
+    // depends on its role's whole subtree, so a policy referencing the
+    // function's ARN closes a dependency cycle
+    // (policy -> function -> policy) and the template becomes undeployable.
+    // A standalone policy attached to the same role is a sibling of the
+    // function instead of a child of the role, so the only edge left is
+    // policy -> function.
+    new iam.Policy(this, 'DdaLabelingSelfInvokePolicy', {
+      roles: [ddaLabelingHandler.role!],
+      statements: [
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['lambda:InvokeFunction'],
+          resources: [
+            ddaLabelingHandler.functionArn,
+            `${ddaLabelingHandler.functionArn}:*`,
+          ],
+        }),
+      ],
+    });
+
+    // Bedrock vision pre-labeling for preview runs, with the same
+    // foundation-model + inference-profile resource scope the autolabel
+    // worker uses (the model id is request configuration, not a fixed ARN).
+    // Preview calls the identical shared invocation path the Auto_Labeler
+    // does, so it needs the identical grant
+    // (llm-autolabel-prompt-tuning Req 3.3).
+    ddaLabelingHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        'arn:aws:bedrock:*::foundation-model/*',
+        `arn:aws:bedrock:*:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
+
+    // labeling.py delegates DDA job creation in-process to
+    // dda_labeling.create_dda_job (import, same Lambda), which async-invokes
+    // the worker — so the existing LabelingHandler needs the same wiring.
+    labelingHandler.addEnvironment(
+      'DDA_LABELING_WORKER_FUNCTION_NAME',
+      ddaLabelingWorker.functionName,
+    );
+    ddaLabelingWorker.grantInvoke(labelingHandler);
+
+    // Team-member resolution (member identities/emails come from Cognito):
+    // the handler validates the Data_Labeler role on add-member and the
+    // worker resolves recipient emails for notifications.
+    //
+    // labelingHandler needs the same grant: POST /labeling runs there and
+    // delegates in-process to create_dda_job, which re-resolves every team
+    // member's Data_Labeler role from Cognito at creation time (Req 4.8).
+    // Without it every member lookup fails closed and job creation is
+    // rejected with "no members with the Data_Labeler role".
+    for (const fn of [labelingHandler, ddaLabelingHandler, ddaLabelingWorker]) {
+      fn.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'cognito-idp:ListUsers',
+          'cognito-idp:AdminGetUser',
+        ],
+        resources: [props.userPool.userPoolArn],
+      }));
+    }
+
+    // Auto-label SQS consumer (dda_autolabel_worker.py): Bedrock Converse /
+    // SAM pre-labeling per image. Returns partial batch responses, hence
+    // reportBatchItemFailures.
+    const ddaAutolabelWorker = new lambda.Function(this, 'DdaAutolabelWorker', {
+      // python3.12: the attached imaging layer's Pillow needs glibc >= 2.28.
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'dda_autolabel_worker.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('DdaAutolabelWorker'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-02-27-dda-labeling',
+        // Per-model Model_Image_Limit bounding few-shot example attachment
+        // at labeling time (llm-autolabel-prompt-tuning Req 7.1); shared
+        // with the preview path so both attach the same example subset.
+        LLM_MODEL_IMAGE_LIMITS: llmModelImageLimits,
+        // Per-model Model_Token_Limit bootstrap for jobs whose record carries
+        // no valid Token_Budget_Selection; delivered through the same mechanism
+        // as LLM_MODEL_IMAGE_LIMITS and read from the same persisted settings
+        // item the preview reads (llm-model-token-and-image-sizing Req 1.6, 1.8).
+        LLM_MODEL_TOKEN_LIMITS: llmModelTokenLimits,
+      },
+      // The same imagingLayer LayerVersion DdaLabelingWorker and
+      // DdaLabelingHandler attach: one Pillow build across every function that
+      // runs the Image_Downscaler, so the preview and labeling time emit
+      // byte-identical downscaled bytes for the same source and setting
+      // (llm-model-token-and-image-sizing Req 6.1, 6.6).
+      layers: [sharedLayer, imagingLayer],
+      timeout: cdk.Duration.seconds(300),
+      // Up from the 128 MB default, for the same reason as
+      // DdaLabelingHandler: a worst-case accepted source (100 M pixels) peaks
+      // around 400-500 MB across the Pillow decode buffer, the resized buffer
+      // and the encoder working set, and 2048 MB is above the ~1769 MB
+      // full-vCPU threshold that the 5 s Downscale_Duration_Bound depends on
+      // (llm-model-token-and-image-sizing Req 6.11). Negligible cost here:
+      // these invocations are already dominated by a 120 s model call.
+      memorySize: 2048,
+    });
+
+    ddaAutolabelWorker.addEventSource(new SqsEventSource(ddaAutolabelQueue, {
+      batchSize: 5,
+      reportBatchItemFailures: true,
+    }));
+
+    // Bedrock vision pre-labeling via the Converse API (authorized by
+    // bedrock:InvokeModel). The model id is runtime job configuration, so
+    // the grant covers foundation models and inference profiles rather than
+    // a fixed model ARN (workflow-generator pattern).
+    ddaAutolabelWorker.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        'arn:aws:bedrock:*::foundation-model/*',
+        `arn:aws:bedrock:*:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
+
+    // SAM worker (dda_sam_worker): container-image Lambda bundling a CPU
+    // ONNX SAM variant (backend/sam-worker/Dockerfile). Building the image
+    // downloads the model archive and produces a multi-GB Docker build, so
+    // it is gated behind the `deploySamWorker` CDK context flag
+    // (-c deploySamWorker=true; default OFF) — ordinary portal deployments
+    // must not require Docker or the model download. When disabled,
+    // SAM_WORKER_FUNCTION_NAME is simply absent from the autolabel worker
+    // environment and SAM-model jobs report pre-label failures instead.
+    const deploySamWorkerContext = this.node.tryGetContext('deploySamWorker');
+    const deploySamWorker =
+      deploySamWorkerContext === true || deploySamWorkerContext === 'true';
+    if (deploySamWorker) {
+      // The bundled model is overridable per deployment
+      // (-c samModelArchiveUrl=<zip-with-onnx-exports>). The Dockerfile
+      // default is MobileSAM (fast, coarse); sam_vit_b_01ec64.zip from
+      // the same HuggingFace repo is a substantially better fit when
+      // pre-label quality matters. ViT-L/ViT-H exports exceed the
+      // autolabel worker's 120 s per-image invocation bound (Req 8.5)
+      // on CPU and must not be deployed here.
+      const samModelArchiveUrl =
+        this.node.tryGetContext('samModelArchiveUrl') as string | undefined;
+
+      // Image platform and function architecture are pinned together and
+      // explicitly: with neither set, the image inherits the build host's
+      // architecture while the function silently stays x86_64, so building
+      // on an ARM host (e.g. the arm64 build server this repo ships)
+      // produces a function that fails every invoke with
+      // Runtime.InvalidEntrypoint / ProcessSpawnFailed. Pinning amd64
+      // keeps the SAM worker consistent with every other Lambda in this
+      // stack; on an ARM build host the image is produced through qemu
+      // emulation, which is slower but correct.
+      const ddaSamWorker = new lambda.DockerImageFunction(this, 'DdaSamWorker', {
+        code: lambda.DockerImageCode.fromImageAsset(
+          path.join(__dirname, '../../backend/sam-worker'),
+          {
+            // Untracked Python bytecode in the build context would otherwise
+            // change this asset's hash and turn a configuration deploy into a
+            // multi-gigabyte image rebuild — see container-asset-excludes.ts.
+            exclude: PYTHON_CONTAINER_ASSET_EXCLUDES,
+            platform: ecrAssets.Platform.LINUX_AMD64,
+            ...(samModelArchiveUrl
+              ? { buildArgs: { SAM_MODEL_ARCHIVE_URL: samModelArchiveUrl } }
+              : {}),
+          },
+        ),
+        architecture: lambda.Architecture.X86_64,
+        description:
+          'DDA labeling SAM pre-label worker (CPU ONNX SAM region proposals)',
+        memorySize: 10240,
+        timeout: cdk.Duration.seconds(300),
+        // Automatic-mask-generation tuning (read by handler.py, all
+        // env-var overridable). Denser prompt grid + stricter IoU keep
+        // than the handler defaults (8 / 0.7): small-defect datasets
+        // need the extra prompts to hit thin regions, and the stricter
+        // keep discards the junk proposals a denser grid also produces.
+        // The lower area floor admits thin structures (cracks/gaps)
+        // that a 0.05% floor would drop.
+        environment: {
+          SAM_POINTS_PER_SIDE: '16',
+          SAM_PRED_IOU_THRESHOLD: '0.88',
+          SAM_MIN_AREA_FRACTION: '0.0002',
+        },
+      });
+
+      // Synchronous invoke from the autolabel worker (bounded at 120 s
+      // wall-clock in dda_autolabel_worker.py). The image is passed inline
+      // (base64) or as a presigned URL, so the SAM worker needs no S3/table
+      // grants of its own.
+      ddaAutolabelWorker.addEnvironment(
+        'SAM_WORKER_FUNCTION_NAME',
+        ddaSamWorker.functionName,
+      );
+      ddaSamWorker.grantInvoke(ddaAutolabelWorker);
+    }
+
+    // Grounded-SAM worker (dda_grounded_sam_worker): container-image Lambda
+    // bundling CPU ONNX Grounding DINO + a SAM mask model
+    // (backend/grounded-sam-worker/Dockerfile). The `deployGroundedSamWorker`
+    // CDK context flag defaults ON (portal-deploy-flag-hardening): four
+    // flag-less deploys each DELETED the live worker under the old
+    // default-OFF gate, breaking grounded-sam pre-labeling and the
+    // prompt-tuning preview until someone redeployed with the flag. Only an
+    // explicit false (-c deployGroundedSamWorker=false — the deliberate
+    // teardown path) omits the worker now; absent, true, 'true', and any
+    // unrecognized value deploy it. Default-on does not force multi-GB
+    // builds on routine deploys: synth only stages the small source
+    // directory, the docker build runs at deploy time via cdk-assets and is
+    // ECR-cached by source fingerprint (the gsam-preview-infra.test.ts-
+    // verified fact) — the image rebuilds only when grounded-sam-worker/
+    // source changes. Flag-off degradation semantics are unchanged: when
+    // disabled, GROUNDED_SAM_WORKER_FUNCTION_NAME is simply absent from the
+    // autolabel worker environment and grounded-sam jobs report pre-label
+    // failures instead.
+    const deployGroundedSamWorker = groundedSamWorkerEnabled(
+      this.node.tryGetContext('deployGroundedSamWorker'),
+    );
+    if (deployGroundedSamWorker) {
+      // The baked models are overridable per deployment
+      // (-c groundedSamDinoModelUrl=... / -c groundedSamDinoTokenizerUrl=...
+      // / -c groundedSamModelArchiveUrl=...). Each build arg is passed only
+      // when its context value is set, so the Dockerfile's pinned defaults
+      // (grounding-dino-tiny ONNX, its tokenizer.json, and the MobileSAM
+      // archive) stay in force otherwise.
+      const dinoModelUrl =
+        this.node.tryGetContext('groundedSamDinoModelUrl') as string | undefined;
+      const dinoTokenizerUrl =
+        this.node.tryGetContext('groundedSamDinoTokenizerUrl') as string | undefined;
+      const samArchiveUrl =
+        this.node.tryGetContext('groundedSamModelArchiveUrl') as string | undefined;
+
+      // Image platform and function architecture are pinned together and
+      // explicitly: with neither set, the image inherits the build host's
+      // architecture while the function silently stays x86_64, so building
+      // on an ARM host (e.g. the arm64 build server this repo ships)
+      // produces a function that fails every invoke with
+      // Runtime.InvalidEntrypoint / ProcessSpawnFailed. Pinning amd64
+      // keeps the Grounded-SAM worker consistent with every other Lambda
+      // in this stack; on an ARM build host the image is produced through
+      // qemu emulation, which is slower but correct.
+      const ddaGroundedSamWorker = new lambda.DockerImageFunction(
+        this,
+        'DdaGroundedSamWorker',
+        {
+          code: lambda.DockerImageCode.fromImageAsset(
+            path.join(__dirname, '../../backend/grounded-sam-worker'),
+            {
+              // Two stray __pycache__/*.pyc files in this context moved the
+              // asset hash and sent two portal deploys into a multi-hour
+              // rebuild of the Grounding DINO + SAM image that was already
+              // published. Excluding them keeps the hash stable — see
+              // container-asset-excludes.ts for the measured hashes.
+              exclude: PYTHON_CONTAINER_ASSET_EXCLUDES,
+              platform: ecrAssets.Platform.LINUX_AMD64,
+              buildArgs: {
+                ...(dinoModelUrl
+                  ? { GROUNDING_DINO_MODEL_URL: dinoModelUrl }
+                  : {}),
+                ...(dinoTokenizerUrl
+                  ? { GROUNDING_DINO_TOKENIZER_URL: dinoTokenizerUrl }
+                  : {}),
+                ...(samArchiveUrl
+                  ? { SAM_MODEL_ARCHIVE_URL: samArchiveUrl }
+                  : {}),
+              },
+            },
+          ),
+          architecture: lambda.Architecture.X86_64,
+          description:
+            'DDA labeling Grounded-SAM pre-label worker (CPU ONNX Grounding DINO + SAM)',
+          memorySize: 10240,
+          timeout: cdk.Duration.seconds(300),
+          // No threshold environment block: the handler's own defaults
+          // (box 0.35, text 0.25, NMS IoU 0.8, max detections 20) are the
+          // intended values for this worker — contrast DdaSamWorker, whose
+          // tuned grid values differ from its handler defaults. Retuning
+          // is a Lambda env-var change, not a redeploy.
+        },
+      );
+
+      // Synchronous invoke from the autolabel worker (bounded at 240 s
+      // wall-clock in dda_autolabel_worker.py — CPU Grounding DINO latency;
+      // the sam family's 120 s bound is untouched). The image is passed as
+      // a presigned URL, so the grounded-sam worker needs no S3/table
+      // grants of its own.
+      ddaAutolabelWorker.addEnvironment(
+        'GROUNDED_SAM_WORKER_FUNCTION_NAME',
+        ddaGroundedSamWorker.functionName,
+      );
+      ddaGroundedSamWorker.grantInvoke(ddaAutolabelWorker);
+
+      // Prompt_Tuning_Preview for the grounded-sam family: the preview
+      // executor runs in DdaLabelingHandler and invokes the worker
+      // synchronously per sample (grounded-sam-prompt-tuning-preview
+      // Req 8.1). Flag off → no env entry, no grant: the preview start
+      // route then rejects grounded-sam runs with the not-deployed
+      // message (Req 6.1) while job creation keeps its Req 5.4
+      // degradation.
+      ddaLabelingHandler.addEnvironment(
+        'GROUNDED_SAM_WORKER_FUNCTION_NAME',
+        ddaGroundedSamWorker.functionName,
+      );
+      ddaGroundedSamWorker.grantInvoke(ddaLabelingHandler);
+    }
+
+    // ------------------------------------------------------------------
+    // Workflow Manager Lambda functions
+    // Handler modules (workflows.py, workflow_validation.py,
+    // workflow_packaging.py, workflow_generator.py, workflow_testing.py)
+    // live in backend/functions alongside the existing handlers.
+    // ------------------------------------------------------------------
+
+    // Workflows Lambda Handler (Workflow_Store API - CRUD, versioning, duplicate)
+    const workflowsHandler = new lambda.Function(this, 'WorkflowsHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflows.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('Workflows'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflows',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    // Workflow Validation Lambda Handler (validate endpoint + node catalog)
+    const workflowValidationHandler = new lambda.Function(this, 'WorkflowValidationHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_validation.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowValidation'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-validation',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(60),
+    });
+
+    // Workflow Packaging Lambda Handler (Component_Packager - compile, assemble
+    // per-arch artifacts, register Greengrass Workflow_Component)
+    const workflowPackagingHandler = new lambda.Function(this, 'WorkflowPackagingHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_packaging.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowPackaging'),
+      environment: {
+        ...lambdaEnvironment,
+        ...streamCameraFeatureFloorEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-packaging',
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(300), // compile + multi-arch artifact staging
+      memorySize: 1024,
+      ephemeralStorageSize: cdk.Size.gibibytes(4), // plugin artifact assembly
+    });
+
+    // Workflow Generator Lambda Handler (Bedrock prompt-based generation)
+    //
+    // Fixed function name so the Lambda's environment can carry its own
+    // function name (async submit/worker self-invocation,
+    // workflow-manager-gaps) and the role can scope lambda:InvokeFunction to
+    // exactly this function — a CloudFormation resource cannot Ref itself
+    // from its own Environment, so the name must be a synth-time constant.
+    // Same fixed-name pattern as the SyntheticDataStack handler.
+    const WORKFLOW_GENERATOR_FUNCTION_NAME = 'dda-portal-workflow-generator';
+    const workflowGeneratorFunctionArn =
+      `arn:aws:lambda:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}` +
+      `:function:${WORKFLOW_GENERATOR_FUNCTION_NAME}`;
+    const workflowGeneratorHandler = new lambda.Function(this, 'WorkflowGeneratorHandler', {
+      functionName: WORKFLOW_GENERATOR_FUNCTION_NAME,
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_generator.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowGenerator'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-generator',
+        // Self-invocation target for the async generation worker
+        // (submit_generation Event-invokes this same function with a
+        // workflow_gen_worker payload; the handler falls back to
+        // AWS_LAMBDA_FUNCTION_NAME when unset).
+        WORKFLOW_GENERATOR_FUNCTION_NAME,
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      // Bedrock invocation timeout is configurable up to 240s; leave headroom
+      timeout: cdk.Duration.seconds(270),
+    });
+
+    // Async submit/poll generation (workflow-manager-gaps): grant the
+    // generator role lambda:InvokeFunction on its own function so
+    // submit_generation can Event-invoke the background worker (the
+    // ddaLabelingWorker.grantInvoke pattern, self-directed). The grant uses
+    // the fixed-name ARN rather than grantInvoke(self) because the Function
+    // resource depends on its role's default policy — referencing the
+    // function ARN token from there would be a dependency cycle (see
+    // NodeGeneratorSelfInvokePolicy in node-designer-stack.ts).
+    workflowGeneratorHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [workflowGeneratorFunctionArn],
+    }));
+
+    // Never retry the async generation worker: an abnormally terminated
+    // worker must surface as failed via the status endpoint's reaper
+    // (GENERATION_ABNORMAL_TERMINATION) rather than being silently re-run
+    // after the reaper already fired (Req 3.6). Synthesizes an
+    // AWS::Lambda::EventInvokeConfig with MaximumRetryAttempts: 0.
+    workflowGeneratorHandler.configureAsyncInvoke({
+      retryAttempts: 0,
+    });
+
+    // Grant the generator permission to invoke the configured Bedrock model via
+    // the Converse API. The model identifier is runtime configuration
+    // (Bedrock_Configuration in the settings table), so the grant covers
+    // foundation models and inference profiles rather than a fixed model ARN.
+    workflowGeneratorHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        'arn:aws:bedrock:*::foundation-model/*',
+        `arn:aws:bedrock:*:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
+
+    // ------------------------------------------------------------------
+    // Merged Node_Type_Catalog resolution (custom-node-designer task 9.2):
+    // the workflow store / validation / generator handlers read the
+    // Use_Case's registered Custom_Node_Types and the Lifecycle_State of
+    // their backing Plugin_Record versions. Those tables live in the
+    // NodeDesignerStack, which already depends on this stack's REST API —
+    // referencing its table tokens here would create a circular
+    // cross-stack reference, so the FIXED physical table names declared
+    // in node-designer-stack.ts are used instead (the same fixed-name
+    // pattern that stack uses for its simulator state machine ARN). The
+    // handlers degrade to the built-in catalog when the tables are not
+    // deployed.
+    const CUSTOM_NODE_TYPES_TABLE_NAME = 'dda-portal-custom-node-types';
+    const PLUGIN_RECORDS_TABLE_NAME = 'dda-portal-plugin-records';
+    const catalogConsumerHandlers = [
+      workflowsHandler,
+      workflowValidationHandler,
+      workflowGeneratorHandler,
+      // Component_Packager (custom-node-designer task 10.1): compiles
+      // against the merged catalog and loads the backing Plugin_Records
+      // for the custom-plugin packaging gates and artifact verification.
+      workflowPackagingHandler,
+      // Deployment_Service (custom-node-designer task 10.5): loads the
+      // backing Plugin_Records of a deployment's dependency closure for
+      // the pre-submit lifecycle and architecture gates.
+      deploymentsHandler,
+      // Component listing (custom-node-designer task 10.8): joins
+      // dda.plugin.* Plugin_Components with their backing Plugin_Record's
+      // Lifecycle_State for the deployment screen (Requirement 16.2).
+      componentsHandler,
+    ];
+    for (const handler of catalogConsumerHandlers) {
+      handler.addEnvironment('CUSTOM_NODE_TYPES_TABLE', CUSTOM_NODE_TYPES_TABLE_NAME);
+      handler.addEnvironment('PLUGIN_RECORDS_TABLE', PLUGIN_RECORDS_TABLE_NAME);
+      handler.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'dynamodb:GetItem',
+          'dynamodb:BatchGetItem',
+          'dynamodb:Query',
+          'dynamodb:Scan',
+        ],
+        resources: [
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${CUSTOM_NODE_TYPES_TABLE_NAME}`,
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${CUSTOM_NODE_TYPES_TABLE_NAME}/index/*`,
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${PLUGIN_RECORDS_TABLE_NAME}`,
+          `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:table/${PLUGIN_RECORDS_TABLE_NAME}/index/*`,
+        ],
+      }));
+    }
+
+    // Custom-plugin artifact verification (custom-node-designer task 10.1,
+    // Requirement 10.4): the Component_Packager KMS-Verifies each custom
+    // Plugin_Artifact signature against the portal signing key. The key
+    // lives in the NodeDesignerStack (same circular-reference constraint as
+    // the tables above), so its FIXED alias declared in
+    // node-designer-stack.ts is referenced instead of the key ARN; the
+    // grant is scoped to requests made through that alias.
+    const PLUGIN_SIGNING_KEY_ALIAS = 'alias/dda-portal/plugin-signing';
+    workflowPackagingHandler.addEnvironment(
+      'PLUGIN_SIGNING_KEY_ARN',
+      `arn:aws:kms:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:${PLUGIN_SIGNING_KEY_ALIAS}`,
+    );
+    workflowPackagingHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['kms:Verify', 'kms:DescribeKey'],
+      resources: [`arn:aws:kms:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:key/*`],
+      conditions: {
+        StringEquals: { 'kms:RequestAlias': PLUGIN_SIGNING_KEY_ALIAS },
+      },
+    }));
+
+    // The data-accounts handler serves the Bedrock model dropdown on the
+    // settings page (GET /data-accounts/bedrock-configuration/models) by
+    // listing inference profiles and foundation models. These are list
+    // actions without resource-level scoping, hence resource '*'.
+    dataAccountsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:ListFoundationModels',
+        'bedrock:ListInferenceProfiles',
+      ],
+      resources: ['*'],
+    }));
+
+    // Workflow Testing Lambda Handler (Workflow_Test_Runner API - test dataset
+    // upload/list, test run start/status/results). The Step Functions state
+    // machine and Fargate sandbox live in the test-runner stack; its ARN is
+    // wired in as TEST_RUN_STATE_MACHINE_ARN (with a settings-table fallback
+    // inside the handler for environments without the test-runner stack).
+    //
+    // Triton model staging (workflow_model_staging.py): starting a test run
+    // resolves every model_inference node's model against MODELS_TABLE,
+    // reads the CPU-variant component recipe (greengrass:GetComponent), and
+    // streams the model artifact zip from the use-case data bucket into the
+    // portal artifacts bucket for the sandbox. All of that is covered by the
+    // shared createLambdaRole grants (Greengrass components:* read, the
+    // S3 data-plane grant — bounded by dataBucketAllowlist when configured —
+    // and the models table), so NO additional IAM grant is added; the
+    // sandbox task role stays portal-artifacts-only (Requirement 12.9).
+    // The artifact copy (models can be >100 MB) is why this handler gets a
+    // longer timeout and more memory than the other workflow handlers.
+    const workflowTestingHandler = new lambda.Function(this, 'WorkflowTestingHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_testing.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowTesting'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2025-01-25-workflow-testing',
+        ...(props.testRunStateMachine && {
+          TEST_RUN_STATE_MACHINE_ARN: props.testRunStateMachine.stateMachineArn,
+        }),
+      },
+      layers: [sharedLayer, workflowCoreLayer],
+      timeout: cdk.Duration.seconds(300), // model artifact staging copy
+      memorySize: 1024,
+    });
+
+    // Allow the testing handler to start test-run executions and poll their
+    // status (states:StartExecution + DescribeExecution and related reads).
+    if (props.testRunStateMachine) {
+      props.testRunStateMachine.grantStartExecution(workflowTestingHandler);
+      props.testRunStateMachine.grantRead(workflowTestingHandler);
+    }
+
+    // ------------------------------------------------------------------
+    // VLM/LLM Anomaly Tuning (quality-prompt-tuning, task 5.2)
+    //
+    // workflow_tuning.py serves every /workflow-tuning/anomaly/** route
+    // (registered by WorkflowTuningApiStack below), runs the Bedrock_Scorer
+    // in chunked self-invoked steps and dispatches/polls Device_Score_Jobs
+    // through each device's dda-workflow-tuning named shadow.
+    //
+    // The Tuning_Session store (dda-portal-workflow-tuning) is created by
+    // the StorageStack. It is referenced here by its FIXED physical name
+    // rather than as a ComputeStack prop — the same fixed-name pattern this
+    // stack already uses for the Node_Designer tables — so the table can be
+    // added without changing the constructor signature every existing
+    // infrastructure test enumerates.
+    // ------------------------------------------------------------------
+    const WORKFLOW_TUNING_TABLE_NAME = 'dda-portal-workflow-tuning';
+    const workflowTuningTableArn =
+      `arn:aws:dynamodb:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}` +
+      `:table/${WORKFLOW_TUNING_TABLE_NAME}`;
+    const workflowTuningHandler = new lambda.Function(this, 'WorkflowTuningHandler', {
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'workflow_tuning.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
+      role: createLambdaRole('WorkflowTuning'),
+      environment: {
+        ...lambdaEnvironment,
+        CODE_VERSION: '2026-09-16-workflow-tuning',
+        WORKFLOW_TUNING_TABLE: WORKFLOW_TUNING_TABLE_NAME,
+      },
+      // workflow_core.anomaly_invocation (the shared Invocation_Builder the
+      // executor, the Bedrock_Scorer and the device job runner all build
+      // through) lives in the workflow_core layer.
+      layers: [sharedLayer, workflowCoreLayer],
+      // 900 s is a cap, not a reservation: the HTTP routes answer in well
+      // under a second, but the same function also runs the self-invoked
+      // Bedrock_Scorer steps (up to 100 Converse invocations at 4 threads,
+      // Req 6.8) and the Device_Score_Job poll steps.
+      timeout: cdk.Duration.seconds(900),
+      // Score_Run steps hold a bounded set of sample images in memory while
+      // 4 threads invoke Bedrock; the images never touch DynamoDB (Req 9.5).
+      memorySize: 1024,
+    });
+
+    // The Tuning_Session store. Granted to THIS function only (no other
+    // handler reads or writes tuning state).
+    workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:BatchGetItem',
+        'dynamodb:Query',
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+        'dynamodb:DeleteItem',
+        'dynamodb:BatchWriteItem',
+        'dynamodb:ConditionCheckItem',
+      ],
+      resources: [workflowTuningTableArn, `${workflowTuningTableArn}/index/*`],
+    }));
+
+    // Bedrock_Scorer replay (Req 6.1, 6.3): the same foundation-model +
+    // inference-profile grant shape the other Bedrock callers use — the
+    // model id is the Tunable_Node's `model` parameter, i.e. request
+    // configuration rather than a fixed ARN.
+    workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [
+        'arn:aws:bedrock:*::foundation-model/*',
+        `arn:aws:bedrock:*:${cdk.Aws.ACCOUNT_ID}:inference-profile/*`,
+      ],
+    }));
+
+    // Chunked execution (Req 6.8, 10.4) and Device_Score_Job polling
+    // (Req 6.12): POST .../score-runs returns 202 and Event-invokes THIS
+    // function with {action: 'execute_score_run'|'poll_score_job'} so the
+    // work runs past API Gateway's 29 s integration bound; each step
+    // re-invokes itself with the next cursor.
+    //
+    // The self-invoke grant CANNOT go through grantInvoke: that statement
+    // lands in a policy owned by the role construct, and the Lambda
+    // function depends on its role's whole subtree, so a policy referencing
+    // the function's ARN closes a dependency cycle (policy -> function ->
+    // policy). A standalone policy attached to the same role is a sibling
+    // of the function instead of a child of the role, so the only edge left
+    // is policy -> function (the DdaLabelingSelfInvokePolicy /
+    // NodeGeneratorSelfInvokePolicy pattern).
+    new iam.Policy(this, 'WorkflowTuningSelfInvokePolicy', {
+      roles: [workflowTuningHandler.role!],
+      statements: [
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ['lambda:InvokeFunction'],
+          resources: [
+            workflowTuningHandler.functionArn,
+            `${workflowTuningHandler.functionArn}:*`,
+          ],
+        }),
+      ],
+    });
+
+    // Device_Score_Job delivery (Req 6.9): desired.jobs[jobId] is written
+    // into the target device's dda-workflow-tuning named shadow and
+    // reported.jobs[jobId] read back, through the Use_Case's assumed-role
+    // iot-data client (the deliver_camera_bindings path). IAM scopes shadow
+    // actions to the thing ARN — named shadows share the thing resource —
+    // and this explicit grant keeps the tuning shadow working
+    // independently of the base-role IoT statement.
+    workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iot:GetThingShadow',
+        'iot:UpdateThingShadow',
+      ],
+      resources: ['arn:aws:iot:*:*:thing/*'],
+    }));
+
+    // Sample_Store objects (Req 9.4): sample bytes and job manifests are
+    // read, job manifests and outcome batches written, and a deleted
+    // session's run objects removed — all strictly inside the
+    // `workflow-tuning/` prefix of the Use_Case's bucket, which is what
+    // bounds this function's object access (cross-account access still
+    // goes through the assumed DDAPortalAccessRole in the UseCase account).
+    // The base Lambda role's data-plane grant covers Get/PutObject on the
+    // configured buckets; DeleteObject is granted here and ONLY under the
+    // tuning prefix, on the same allowlist-scoped bucket set as that base
+    // grant (dataBucketArns) — never on a bare bucket-name wildcard.
+    workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:GetObject',
+        's3:PutObject',
+        's3:DeleteObject',
+      ],
+      resources: dataBucketArns.map((arn) => `${arn}/workflow-tuning/*`),
+    }));
+
+    // Sample_Store retention (Req 2.9): deployments.py applies this
+    // feature's lifecycle rules (samples at the Use_Case retention, job and
+    // session artifacts at 30 days) to the Use_Case's inference results
+    // bucket when it delivers the export configuration. The bucket is
+    // created outside these stacks (and may live in another account), so
+    // the rules cannot be declared in infrastructure; this is the one
+    // control-plane S3 action the deployment path needs, scoped to the
+    // inference-results bucket family. The application is best-effort — a
+    // deployment never fails on it — so an operator who withholds this
+    // permission only loses automatic expiry.
+    deploymentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:GetLifecycleConfiguration',
+        's3:PutLifecycleConfiguration',
+      ],
+      resources: ['arn:aws:s3:::dda-inference-results-*'],
+    }));
+
+    // Shadow size limit from the account quota (static-camera-video-loop
+    // task 10): deployments.py reads the AWS IoT "Maximum size of a JSON
+    // state document" quota (iotcore/L-A295A064) and carries it into
+    // ShadowManager's shadowDocumentSizeLimitBytes, from which the device
+    // derives its camera report cap. Read-only and scoped to that one
+    // quota; single-account Use_Cases read it with this role (cross-account
+    // ones through DDAPortalAccessRole). Best-effort: without it the limit
+    // stays at ShadowManager's 8 KB default.
+    deploymentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['servicequotas:GetServiceQuota'],
+      resources: [`arn:aws:servicequotas:*:${cdk.Aws.ACCOUNT_ID}:iotcore/L-A295A064`],
+    }));
+
     // Grant SharedComponents Lambda permission to update the GDK component bucket policy
     // This is needed to add new usecase accounts to the bucket policy during onboarding
     const componentBucketName = `dda-component-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}`;
@@ -894,6 +3556,13 @@ export class ComputeStack extends cdk.Stack {
       displayName: 'DDA Portal Training Alerts',
       topicName: 'dda-portal-training-alerts',
     });
+    // Encryption at rest with the AWS managed SNS key (R14.1). The only
+    // publishers are the TrainingEvents and CompilationEvents Lambda roles in
+    // this account, which that key's policy admits without a KMS grant. An AWS
+    // service publisher (CloudWatch alarm, EventBridge target) can't use the
+    // AWS managed key and would need a customer managed key whose key policy
+    // admits that service (R14.2).
+    (trainingAlertTopic.node.defaultChild as sns.CfnTopic).kmsMasterKeyId = 'alias/aws/sns';
 
     // Training Events Lambda Handler (for EventBridge)
     const trainingEventsHandler = new lambda.Function(this, 'TrainingEventsHandler', {
@@ -905,6 +3574,10 @@ export class ComputeStack extends cdk.Stack {
         ...lambdaEnvironment,
         ALERT_TOPIC_ARN: trainingAlertTopic.topicArn,
         COMPILATION_FUNCTION_NAME: compilationHandler.functionName,
+        // detector-checkpoint-import: the finalize invoke for a
+        // Conversion_Record whose InProgress -> Finalizing claim this
+        // handler wins (Requirement 7.5).
+        PACKAGING_FUNCTION_NAME: packagingHandler.functionName,
       },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(60),
@@ -915,6 +3588,8 @@ export class ComputeStack extends cdk.Stack {
     
     // Grant permission to invoke compilation Lambda
     compilationHandler.grantInvoke(trainingEventsHandler);
+    // ... and the Packaging Lambda (conversion finalize, see above)
+    packagingHandler.grantInvoke(trainingEventsHandler);
 
     // Compilation Events Lambda Handler (for EventBridge)
     const compilationEventsHandler = new lambda.Function(this, 'CompilationEventsHandler', {
@@ -990,6 +3665,7 @@ export class ComputeStack extends cdk.Stack {
     // 3. Or automatically via a custom resource (implemented below)
 
     // Custom resource to enable SageMaker EventBridge integration
+    const SAGEMAKER_ENABLER_RULE_NAME = 'sagemaker-eventbridge-enabler';
     const enableSageMakerEventBridge = new lambda.Function(this, 'EnableSageMakerEventBridge', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'index.handler',
@@ -1010,7 +3686,7 @@ def handler(event, context):
             
             # Enable SageMaker events by creating a rule that captures all SageMaker events
             # This effectively enables SageMaker to send events to EventBridge
-            rule_name = 'sagemaker-eventbridge-enabler'
+            rule_name = '${SAGEMAKER_ENABLER_RULE_NAME}'
             
             try:
                 events_client.put_rule(
@@ -1049,7 +3725,7 @@ def handler(event, context):
         elif event['RequestType'] == 'Delete':
             # Clean up the enabler rule on stack deletion
             events_client = boto3.client('events')
-            rule_name = 'sagemaker-eventbridge-enabler'
+            rule_name = '${SAGEMAKER_ENABLER_RULE_NAME}'
             
             try:
                 events_client.delete_rule(Name=rule_name)
@@ -1074,12 +3750,14 @@ def handler(event, context):
     // Grant permissions to the custom resource Lambda
     enableSageMakerEventBridge.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: [
-        'events:PutRule',
-        'events:DeleteRule',
-        'events:DescribeRule',
-        'events:ListRules',
+      actions: ['events:PutRule', 'events:DeleteRule', 'events:DescribeRule'],
+      resources: [
+        `arn:aws:events:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:rule/${SAGEMAKER_ENABLER_RULE_NAME}`,
       ],
+    }));
+    enableSageMakerEventBridge.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['events:ListRules'], // no resource-level permissions
       resources: ['*'],
     }));
 
@@ -1151,6 +3829,11 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
       sharedComponentsHandler,
       dataAccountsHandler,
       auditLogsHandler,
+      workflowsHandler,
+      workflowValidationHandler,
+      workflowPackagingHandler,
+      workflowGeneratorHandler,
+      workflowTestingHandler,
       lambdaEnvironment,
       createLambdaRole,
       sharedLayer,
@@ -1158,6 +3841,141 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
 
     this.api = apiGatewayStack.api;
     this.apiUrl = apiGatewayStack.apiUrl;
+
+    // Camera_Registry routes (camera-registry-sync) in their own nested
+    // stack: the ApiGateway nested stack sits at the CloudFormation
+    // 500-resource limit, so the camera routes import the Rest API and the
+    // /devices/{id} resource by id and attach there — the same pattern as
+    // NodeDesignerApiStack.
+    const cameraRegistryApiStack = new CameraRegistryApiStack(this, 'CameraRegistryApi', {
+      restApiId: apiGatewayStack.api.restApiId,
+      restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+      deviceResourceId: apiGatewayStack.deviceResourceId,
+      // Must match ApiGatewayStack deployOptions.stageName.
+      stageName: 'v1',
+      userPool: props.userPool,
+      cameraRegistryHandler,
+      cameraVideoPinHandler,
+    });
+    // The stage re-pointing deployment inside CameraRegistryApiStack needs
+    // the ApiGatewayStack's stage (and its own deployment) to exist first.
+    cameraRegistryApiStack.addDependency(apiGatewayStack);
+
+    // User_Manager admin routes (portal-user-manager) in their own nested
+    // stack for the same 500-resource-limit reason; every /admin/* method
+    // is behind the JWT authorizer (Requirement 1.7).
+    const userAdminApiStack = new UserAdminApiStack(this, 'UserAdminApi', {
+      restApiId: apiGatewayStack.api.restApiId,
+      restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+      // Must match ApiGatewayStack deployOptions.stageName.
+      stageName: 'v1',
+      userPool: props.userPool,
+      userAdminHandler,
+    });
+    userAdminApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (both nested stacks
+    // deploy against the same stage).
+    userAdminApiStack.addDependency(cameraRegistryApiStack);
+
+    // Station Quick Setup routes (station-quick-setup) in their own nested
+    // stack for the same 500-resource-limit reason. The JWT
+    // /device-registrations routes sit behind the Cognito authorizer; the
+    // /quick-setup/* routes use AuthorizationType.NONE (Setup_Token validated
+    // in-handler) plus method-level throttling for defense-in-depth (Req 3.9).
+    const quickSetupApiStack = new QuickSetupApiStack(this, 'QuickSetupApi', {
+      restApiId: apiGatewayStack.api.restApiId,
+      restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+      // Must match ApiGatewayStack deployOptions.stageName.
+      stageName: 'v1',
+      userPool: props.userPool,
+      deviceRegistrationsHandler,
+      quickSetupHandler,
+    });
+    quickSetupApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (all nested API stacks
+    // deploy against the same 'v1' stage).
+    quickSetupApiStack.addDependency(cameraRegistryApiStack);
+    quickSetupApiStack.addDependency(userAdminApiStack);
+
+    // DDA data labeling routes (dda-data-labeling, task 14.2) in their own
+    // nested stack for the same 500-resource-limit reason. /labeling-teams*
+    // and /labeler* attach at the imported API root; /labeling/{id}/stop and
+    // /labeling/{id}/review* attach under the ApiGatewayStack-owned
+    // /labeling/{id} resource via its exported resource id. Requests are
+    // JWT-authorized at the gateway; RBAC (Requirements 2.5, 3.7, 11.4) is
+    // enforced in dda_labeling.py / labeling.py.
+    const ddaLabelingApiStack = new DdaLabelingApiStack(this, 'DdaLabelingApi', {
+      restApiId: apiGatewayStack.api.restApiId,
+      restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+      labelingJobResourceId: apiGatewayStack.labelingJobResourceId,
+      // Must match ApiGatewayStack deployOptions.stageName.
+      stageName: 'v1',
+      userPool: props.userPool,
+      ddaLabelingHandler,
+      labelingHandler,
+    });
+    ddaLabelingApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (all nested API stacks
+    // deploy against the same 'v1' stage).
+    ddaLabelingApiStack.addDependency(cameraRegistryApiStack);
+    ddaLabelingApiStack.addDependency(userAdminApiStack);
+    ddaLabelingApiStack.addDependency(quickSetupApiStack);
+
+    // Workflow Manager gaps routes (workflow-manager-gaps, task 10.3) in
+    // their own nested stack for the same 500-resource-limit reason.
+    // GET /workflows/generate/{job_id} (generation job status) attaches
+    // under the ApiGatewayStack-owned /workflows/generate resource and
+    // PATCH /workflows/{id}/name (metadata-only rename) under
+    // /workflows/{id}, both via their exported resource ids.
+    const workflowManagerGapsApiStack = new WorkflowManagerGapsApiStack(
+      this,
+      'WorkflowManagerGapsApi',
+      {
+        restApiId: apiGatewayStack.api.restApiId,
+        restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+        workflowGenerateResourceId: apiGatewayStack.workflowGenerateResourceId,
+        workflowResourceId: apiGatewayStack.workflowResourceId,
+        // Must match ApiGatewayStack deployOptions.stageName.
+        stageName: 'v1',
+        userPool: props.userPool,
+        workflowGeneratorHandler,
+        workflowsHandler,
+      },
+    );
+    workflowManagerGapsApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (all nested API stacks
+    // deploy against the same 'v1' stage).
+    workflowManagerGapsApiStack.addDependency(cameraRegistryApiStack);
+    workflowManagerGapsApiStack.addDependency(userAdminApiStack);
+    workflowManagerGapsApiStack.addDependency(quickSetupApiStack);
+    workflowManagerGapsApiStack.addDependency(ddaLabelingApiStack);
+
+    // VLM/LLM Anomaly Tuning routes (quality-prompt-tuning, task 5.2) in
+    // their own nested stack for the same 500-resource-limit reason. The
+    // whole /workflow-tuning/anomaly/** tree attaches at the imported API
+    // root and is served by workflow_tuning.py; requests are JWT-authorized
+    // at the gateway and the per-operation workflow permission is enforced
+    // in the handler (Requirements 9.1, 9.2).
+    const workflowTuningApiStack = new WorkflowTuningApiStack(
+      this,
+      'WorkflowTuningApi',
+      {
+        restApiId: apiGatewayStack.api.restApiId,
+        restApiRootResourceId: apiGatewayStack.api.restApiRootResourceId,
+        // Must match ApiGatewayStack deployOptions.stageName.
+        stageName: 'v1',
+        userPool: props.userPool,
+        workflowTuningHandler,
+      },
+    );
+    workflowTuningApiStack.addDependency(apiGatewayStack);
+    // Serialize the stage re-pointing deployments (all nested API stacks
+    // deploy against the same 'v1' stage).
+    workflowTuningApiStack.addDependency(cameraRegistryApiStack);
+    workflowTuningApiStack.addDependency(userAdminApiStack);
+    workflowTuningApiStack.addDependency(quickSetupApiStack);
+    workflowTuningApiStack.addDependency(ddaLabelingApiStack);
+    workflowTuningApiStack.addDependency(workflowManagerGapsApiStack);
 
     // Custom Resource to update UseCases Lambda environment variable with API Gateway ID
     // This avoids circular dependency by updating the Lambda AFTER both resources are created

@@ -29,6 +29,7 @@ import os
 
 from enum import Enum
 from marshmallow import fields, post_load, Schema, validate, validates_schema, ValidationError
+from model import stream_source
 import logging
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,20 @@ class ImageSourceType(ExtendedEnum):
     FOLDER = "Folder"
     ICAM = "ICam"
     NVIDIA_CSI = "NvidiaCSI"
+    # Network stream cameras (rtsp-rtmp-stream-cameras Requirement 4.1): the
+    # Stream_URL lives in ``location``, the settings in the configuration's
+    # ``streamSettings``, and the credentials in the Credential_Store only.
+    RTSP = "RTSP"
+    RTMP = "RTMP"
+
+
+#: The stream Image_Source types (see model.stream_source).
+STREAM_SOURCE_TYPES = (ImageSourceType.RTSP, ImageSourceType.RTMP)
+
+
+def is_stream_source_type(source_type) -> bool:
+    """Whether ``source_type`` (a member or its value) is RTSP or RTMP."""
+    return stream_source.is_stream_source_type(source_type)
 
 
 class ImageSource:
@@ -114,6 +129,21 @@ class ImageSourceSchema(Schema):
                     missing_params.append(required_value)
             if missing_params:
                 raise ValidationError('{} required when image source type is Icam'.format(missing_params))
+
+        elif stream_source.is_stream_source_type(data.get('type')):
+            # A stream Image_Source keeps its Stream_URL in ``location``,
+            # checked with the shared Stream_URL rules (rtsp-rtmp-stream-
+            # cameras Requirements 4.1, 4.2), and captures into its own
+            # folder like a camera.
+            missing_params = [name for name in ('location', 'imageCapturePath', 'imageSourceConfigId')
+                              if not data.get(name)]
+            if missing_params:
+                raise ValidationError('{} required when image source type is {}'.format(
+                    missing_params, data.get('type')))
+            try:
+                stream_source.validate_stream_url(data.get('type'), data.get('location'))
+            except stream_source.StreamSourceError as error:
+                raise ValidationError(error.as_messages())
 
     @post_load
     def make_image_source(self, data, **kwargs):

@@ -23,9 +23,13 @@ fi
 COMPONENT_NAME=$1
 VERSION=$2
 ARCHITECTURE=`uname -m`
-# Single source of truth for the DDA interpreter version. Threaded to the
-# edgemlsdk build (`-y`) and the docker-compose build args (`PYTHON_VERSION`)
-# so the version is set once. Override via the PYTHON_VERSION env var.
+# Single source of truth for the tooling/edgemlsdk interpreter version (and,
+# outside JP6, for the DDA backend as well). Threaded to the edgemlsdk build
+# (`-y`) so the cp311-linked Triton Python-backend stub stays on 3.11 on every
+# target. On JP6 the DDA backend interpreter is split off into
+# BACKEND_PYTHON_VERSION (derived below, 3.10) because the Jetson AI Lab vLLM
+# wheels are cp310-only; JP5/x86 backends keep using this value unchanged.
+# Override via the PYTHON_VERSION env var.
 PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
 export PYTHON_VERSION
 
@@ -50,34 +54,57 @@ else
   echo "WARNING: skipping interpreter-version audit guard (python3 or test/python_version_audit.py not found)."
 fi
 
-# change to 20.04 or 18.04
-IMAGE_VER="18.04"
-#IMAGE_VER="20.04"
 BUILDKIT_PROGRESS=plain
 export BUILDKIT_PROGRESS
+# Base-image Ubuntu release (edgemlsdk -u and the generic Dockerfile's OS
+# build arg): the build host's own release.
 IMAGE_VER=$(grep "DISTRIB_RELEASE" /etc/lsb-release | cut -d'=' -f2)
 
 # Export as environment variable
 export IMAGE_VER 
 
-# Determine the JetPack target from the component name.
-# JP5 components are named with "JP5" (e.g. aws.edgeml.dda.LocalServer.arm64JP5),
-# JP6 components with "JP6" (e.g. aws.edgeml.dda.LocalServer.arm64JP6).
-IS_JP5=0
-IS_JP6=0
-JETPACK_ARG=""
-if echo "$COMPONENT_NAME" | grep -q "JP6"; then
-    IS_JP6=1
-    JETPACK_ARG="6"
-elif echo "$COMPONENT_NAME" | grep -q "JP5"; then
-    IS_JP5=1
-    JETPACK_ARG="5"
+# Determine the build target from the component name (JP5/JP6/JP7/Nvidia
+# tokens). The derivation lives in the sourceable helper
+# scripts/build-target-derivation.sh (spec: jetpack7-support) — the single
+# source of truth, property-testable without running a build.
+# derive_build_target sets IS_JP5/IS_JP6/IS_JP7/IS_X86_NVIDIA and JETPACK_ARG,
+# and exports BACKEND_DOCKERFILE per the derivation table (JP5 -> an L4T r35.x
+# base, JP6 -> r36.x, JP7 -> a CUDA 13.0 Ubuntu 24.04 arm64 base, Nvidia ->
+# Dockerfile.x86_64_nvidia, no token -> the default CPU-only Dockerfile).
+# resolve_onnxruntime_gpu (called below, after the derivation) sets
+# ONNXRUNTIME_GPU with the existing ONNXRUNTIME_GPU=0 opt-out semantics.
+. "$(dirname "$0")/scripts/build-target-derivation.sh"
+derive_build_target "$COMPONENT_NAME"
+
+# The generic arm64 CPU component (an aarch64 build with no JetPack token)
+# is an Ubuntu 22.04 image whatever the build host runs: only the JetPack 5
+# target stays on 20.04, and its plugin build image
+# (dda-plugin-build:arm64_cpu) and platform record are 22.04 / GStreamer
+# 1.20.
+if [ "$ARCHITECTURE" = "aarch64" ] && [ "$IS_JP5$IS_JP6$IS_JP7" = "000" ]; then
+  IMAGE_VER=22.04
+  export IMAGE_VER
 fi
+
+# DDA backend interpreter: 3.10 on JP6 (the Jetson AI Lab vLLM wheels are
+# cp310-only), 3.11 elsewhere ($PYTHON_VERSION — JP5/x86 behavior unchanged).
+# Threaded to the docker-compose backend build (`PYTHON_VERSION` build arg) and
+# to the in-image backend test/security-gate run below. The edgemlsdk build
+# stays on $PYTHON_VERSION regardless (the Triton stub is cp311-linked).
+if [ "$IS_JP6" = "1" ]; then
+  BACKEND_PYTHON_VERSION="${BACKEND_PYTHON_VERSION:-3.10}"
+else
+  BACKEND_PYTHON_VERSION="$PYTHON_VERSION"
+fi
+export BACKEND_PYTHON_VERSION
 
 echo "Ubuntu version: $IMAGE_VER"
 echo "Architecture: $ARCHITECTURE"
 echo "JetPack 5: $IS_JP5"
 echo "JetPack 6: $IS_JP6"
+echo "JetPack 7: $IS_JP7"
+echo "x86 NVIDIA: $IS_X86_NVIDIA"
+echo "Backend python: $BACKEND_PYTHON_VERSION (edgemlsdk/tooling python: $PYTHON_VERSION)"
 # copy recipe to greengrass-build
 cp recipe.yaml ./greengrass-build/recipes
 
@@ -86,7 +113,29 @@ rm -rf ./custom-build
 mkdir -p ./custom-build/$COMPONENT_NAME
 
 # build Docker images
-# to save build time, remove "--no-cache" parameter
+#
+# Docker layer cache policy (DDA_BUILD_NO_CACHE). Historically both
+# docker-compose build invocations below hard-coded --no-cache, so every
+# build recompiled everything from source — on JP7 that is the ~1-2 h GPU
+# onnxruntime build PLUS the multi-hour from-source vLLM wheel compile, even
+# when the change under test was a single late layer. The cache is now reused
+# by default so iteration builds reuse those layers, and --no-cache is
+# opt-in for the cases that genuinely need a provably clean image:
+#
+#   DDA_BUILD_NO_CACHE=1 ./gdk-component-build-and-publish.sh ...
+#
+# Set it for release/publish builds where reproducibility from scratch
+# matters, or when a base image or apt pin changed in a way Docker cannot
+# see. Note the cache is only reused when the earlier Dockerfile layers are
+# byte-identical: editing a line invalidates that layer and everything after
+# it, which is why the expensive compiles sit early in Dockerfile.jp7.
+DOCKER_BUILD_CACHE_ARGS=""
+if [ "${DDA_BUILD_NO_CACHE:-0}" = "1" ]; then
+  DOCKER_BUILD_CACHE_ARGS="--no-cache"
+  echo "Docker layer cache: DISABLED (DDA_BUILD_NO_CACHE=1) — full rebuild"
+else
+  echo "Docker layer cache: ENABLED (set DDA_BUILD_NO_CACHE=1 for a clean rebuild)"
+fi
 cd src
 #edgemlsdk
 cd edgemlsdk/
@@ -130,28 +179,22 @@ docker cp $id:/tars/triton_installation_files.tar.gz  $(pwd)/backend/edgemlsdk/
 docker rm -v $id
 echo done copying binaries
 # rest of the application
-# Select the backend Dockerfile: JP5 uses an L4T r35.x base, JP6 an L4T r36.x base.
-if [ "$IS_JP6" = "1" ]; then
-  export BACKEND_DOCKERFILE="Dockerfile.jp6"
-elif [ "$IS_JP5" = "1" ]; then
-  export BACKEND_DOCKERFILE="Dockerfile.jp5"
-else
-  export BACKEND_DOCKERFILE="Dockerfile"
-fi
+# The backend Dockerfile was selected by derive_build_target above (helper
+# scripts/build-target-derivation.sh): JP5 uses an L4T r35.x base, JP6 an L4T
+# r36.x base, JP7 a CUDA 13.0 Ubuntu 24.04 arm64 base, x86 NVIDIA a CUDA x86
+# base (Dockerfile.x86_64_nvidia), everything else the default CPU-only
+# Dockerfile.
 echo "Backend Dockerfile: $BACKEND_DOCKERFILE"
 
-# ── GPU ONNX Runtime (JP5/JP6) ─────────────────────────────────────────────
-# The OnnxRunner uses a GPU (CUDA/TensorRT) onnxruntime built from source in the
-# backend image. GPU is enabled by default on JetPack 5 and 6; JetPack 4 stays
-# CPU-only (its native python 3.6 has no compatible build path) and x86 uses the
-# CPU wheel. The source build is long and memory-heavy (~1-2h), so it can be
-# turned off for a fast CPU-only build with ONNXRUNTIME_GPU=0.
-if [ "$IS_JP6" = "1" ] || [ "$IS_JP5" = "1" ]; then
-  export ONNXRUNTIME_GPU="${ONNXRUNTIME_GPU:-1}"
-else
-  export ONNXRUNTIME_GPU=0
-fi
-echo "ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU (1=build GPU onnxruntime from source; JP5/JP6 only. Set 0 for fast CPU-only build)"
+# ── GPU ONNX Runtime (JP5/JP6/JP7/x86 NVIDIA) ───────────────────────────────
+# The OnnxRunner uses a GPU (CUDA/TensorRT) onnxruntime in the backend image.
+# GPU is enabled by default on JetPack 5, 6 and 7 (built from source, ~1-2h,
+# can be turned off for a fast CPU-only build with ONNXRUNTIME_GPU=0) and on
+# the x86 NVIDIA target (prebuilt x86_64 onnxruntime-gpu wheel). The default
+# and the ONNXRUNTIME_GPU=0 opt-out live in resolve_onnxruntime_gpu (helper
+# sourced above); non-GPU targets are forced to 0 exactly as before.
+resolve_onnxruntime_gpu
+echo "ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU (1=GPU onnxruntime: source build on JP5/JP6/JP7, prebuilt wheel on x86 NVIDIA. Set 0 for fast CPU-only build)"
 
 echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 # Select profiles by architecture. The `tegra` service targets Jetson
@@ -159,12 +202,15 @@ echo "Building docker-compose images from $(pwd)/docker-compose.yaml"
 # forces an emulated arm64 build that fails compiling Python from source
 # ("cannot compute sizeof (long double)"). x86_64 uses only `generic`.
 if [ "$ARCHITECTURE" = "x86_64" ]; then
-  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" --no-cache \
+  # ONNXRUNTIME_GPU is passed explicitly (as on arm) so the x86 NVIDIA target's
+  # Dockerfile.x86_64_nvidia installs the GPU onnxruntime wheel; plain x86
+  # builds keep ONNXRUNTIME_GPU=0 (CPU wheel).
+  docker-compose --profile generic -f docker-compose.yaml build --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU $DOCKER_BUILD_CACHE_ARGS \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 else
   docker-compose --profile tegra --profile generic -f docker-compose.yaml build \
-    --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
-    --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU --no-cache \
+    --build-arg OS=$IMAGE_VER --build-arg PYTHON_VERSION="$BACKEND_PYTHON_VERSION" \
+    --build-arg ONNXRUNTIME_GPU=$ONNXRUNTIME_GPU $DOCKER_BUILD_CACHE_ARGS \
     || { echo "ERROR: docker-compose build failed"; exit 1; }
 fi
 cd ..
@@ -184,10 +230,12 @@ else
   # PYTHON_VERSION is passed into the container via `-e` so the single-quoted
   # bash -c body stays intact (no fragile quote-breaking in the outer shell);
   # `python${PYTHON_VERSION}` is then expanded by the container's shell at run
-  # time, resolving to the live 3.11 interpreter inside the image.
+  # time, resolving to the image's DDA backend interpreter
+  # (BACKEND_PYTHON_VERSION: 3.10 on JP6, 3.11 on JP5/x86) so the tests and
+  # security gates execute under the interpreter the backend actually runs on.
   docker run --rm \
     -v "$REPO_ROOT":/repo -w /repo \
-    -e PYTHON_VERSION="$PYTHON_VERSION" \
+    -e PYTHON_VERSION="$BACKEND_PYTHON_VERSION" \
     --entrypoint bash flask-app -c '
       set -e
       python${PYTHON_VERSION} -m pip install --no-cache-dir --quiet pytest pytest-cov sarge testfixtures hypothesis
@@ -202,6 +250,18 @@ else
         test/backend-test/utils/test_user_group_management_utils.py \
         test/backend-test/utils/test_dda_user_management_utils.py \
         test/backend-test/host_scripts/test_docker_profile_selection.py -v
+
+      # ── Stream camera components gate ─────────────────────────────────────
+      # (spec: rtsp-rtmp-stream-cameras, Requirements 17.2, 17.3). Fails the
+      # build when this image lacks a GStreamer element of the RTSP or RTMP
+      # ingest heads or of the decode tail, PyAV with FFmpeg 6.1 or later and
+      # its flv demuxer and rtmp protocol, or H.264/H.265 software decoding,
+      # RTMP H.265 over Enhanced FLV included. --noconftest: the suite
+      # conftest mocks gi, and this gate needs the real GStreamer.
+      echo "Running stream camera components gate..."
+      DDA_STREAM_COMPONENT_GATE=1 python${PYTHON_VERSION} -m pytest --noconftest \
+        test/backend-test/stream_ingest/test_image_stream_components.py -v
+      echo "Stream camera components gate passed."
 
       # ── Security injection / deserialization gate ─────────────────────────
       # (spec: security-injection-deserialization-fixes). A single green gate:
@@ -305,7 +365,7 @@ else
       #      pinned requests version < 2.32.4 (CVE-2024-47081) reappears at
       #      station_install/setup_station.sh or src/backend/requirements.txt
       #      (the two Python-3.11 pin sites), or if the documented B324
-      #      RFC-2617 digest-auth allowlist drifts. Unpinned system-python3.6
+      #      RFC-2617 digest-auth allowlist drifts. Unpinned system-python3
       #      installs and out-of-scope pins are never flagged.
       #   2. Fix-checking + negative-fixture suite — the in-scope pins stay
       #      >= 2.32.4, the B324 accepted false positive stays documented, and a
@@ -324,13 +384,43 @@ fi
 
 # save Docker images as tar
 echo "save docker images as tarvballs"
-# Use stdout redirection rather than `docker save --output`. Under snap Docker,
-# `--output` writes a transient `.tmp-<name><rand>` file in the destination dir
-# and renames it; that temp file would briefly appear in the staging dir and
-# break the packaging `zip` (exit 18 "could not open for reading"). Redirecting
-# stdout lets the shell create the final file directly — no snap temp file.
-docker save flask-app > ./custom-build/$COMPONENT_NAME/flask-app.tar
-docker save react-webapp > ./custom-build/$COMPONENT_NAME/react-webapp.tar
+# Save via `docker save --output` to a .partial name, then atomically mv
+# into place. NEITHER historical form works bare under snap Docker:
+#  - `docker save <img> > <file>` fails under the SSM RunShellScript
+#    context with "write /dev/stdout: bad file descriptor" (EBADF),
+#    leaving a 0-byte tar (portal job d844a5fb, 2026-08-09).
+#  - bare `--output <final-name>` writes a transient `.tmp-<name><rand>`
+#    in the destination dir and renames it, which raced the old recursive
+#    packaging zip (exit 18).
+# The .partial suffix + atomic same-dir mv means the final tar name only
+# ever exists complete; transient `.tmp-*`/`.partial` names are policed by
+# the pre-zip `rm -f .tmp-*` cleanup and the explicit ZIP_MEMBERS list
+# with its `-x '*/.tmp-*'` exclusion below. The integrity guard makes any
+# residual save failure loud — a 0-byte or truncated tar can never reach
+# the zip silently.
+save_image_tar() {
+  local image=$1 dest=$2
+  rm -f "$dest" "$dest.partial"
+  if ! docker save --output "$dest.partial" "$image"; then
+    echo "ERROR: docker save $image failed."
+    echo "  docker: $(docker --version 2>/dev/null || echo 'version unavailable')"
+    echo "  Staging dir:"
+    ls -lh "$(dirname "$dest")" || true
+    echo "  Disk free:"
+    df -h "$(dirname "$dest")" || true
+    exit 1
+  fi
+  mv "$dest.partial" "$dest"
+  local size
+  size=$(stat -c%s "$dest")
+  if [ "$size" -lt 1048576 ] || ! tar -tf "$dest" > /dev/null; then
+    echo "ERROR: saved image tar $dest failed integrity check (size ${size} bytes)."
+    exit 1
+  fi
+  echo "Saved $image -> $dest ($size bytes, tar structure OK)"
+}
+save_image_tar flask-app ./custom-build/$COMPONENT_NAME/flask-app.tar
+save_image_tar react-webapp ./custom-build/$COMPONENT_NAME/react-webapp.tar
 
 # include docker-compose.yaml in archive
 cp src/docker-compose.yaml ./custom-build/$COMPONENT_NAME/

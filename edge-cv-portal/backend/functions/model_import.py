@@ -3,9 +3,13 @@ Model Import Lambda functions
 Implements BYOM (Bring Your Own Model) functionality
 Allows importing pre-trained models that conform to DDA format
 """
+import copy
 import json
 import os
+import re
 import logging
+from dataclasses import asdict
+from decimal import Decimal
 from typing import Dict, Any, List, Tuple
 from datetime import datetime
 import boto3
@@ -14,7 +18,7 @@ import uuid
 import tarfile
 import tempfile
 import shutil
-from urllib.parse import urlparse
+import time
 import yaml
 
 # Import shared utilities
@@ -22,8 +26,17 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields
+    check_user_access, validate_required_fields, get_usecase_client,
+    get_s3_client_for_bucket, parse_s3_uri, assert_bucket_allowed,
+    BucketConfigError, bucket_config_error_response
 )
+
+# Preflight Fit_Check (pure sizing module bundled in this functions dir)
+from vllm_fit_check import estimate_weights, evaluate_fit
+
+# Vocabulary of the fine-tunable checkpoint kinds Smart Import may declare
+# (rfdetr-training-and-transfer-learning Requirement 7).
+from checkpoint_probe import FINE_TUNABLE_KINDS
 
 # Configure logging
 logger = logging.getLogger()
@@ -31,7 +44,6 @@ logger.setLevel(logging.INFO)
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
-sts = boto3.client('sts')
 
 # Environment variables
 TRAINING_JOBS_TABLE = os.environ.get('TRAINING_JOBS_TABLE')
@@ -44,29 +56,751 @@ REQUIRED_FILES = {
     'export_artifacts/manifest.json': 'Model metadata and compilable models info'
 }
 
+# ---------------------------------------------------------------------------
+# vLLM model registration — pure validation and defaults
+# ---------------------------------------------------------------------------
 
-def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
-    """Assume cross-account role for UseCase Account access.
+# Hugging Face model identifier: {org}/{name} (e.g. "facebook/opt-125m")
+HF_MODEL_ID_RE = re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9._-]*)/[A-Za-z0-9._-]+$')
 
-    Single-account setups store the account *root* ARN
-    (arn:aws:iam::ACCOUNT_ID:root), which is not an assumable role — assuming it
-    fails with AccessDenied. In that case use the Lambda's own execution role
-    (same-account access) via the default credential chain.
+# vLLM_Engine_Configuration settings, defaults, and accepted ranges.
+# The stored/serialized configuration always contains every key below;
+# unknown supplied keys are rejected (fail closed).
+ENGINE_DEFAULTS = {
+    'dtype': 'auto',
+    'gpu_memory_utilization': 0.5,
+    'max_model_len': 2048,
+    'tensor_parallel_size': 1,
+    'enforce_eager': True,
+    # Multimodal items the engine may accept per prompt. Authored and SIZED
+    # here (jp6-vllm-kv-cache-oom-regression, Decision 1) rather than
+    # defaulted on the device: the value drives vLLM's multimodal profiling
+    # peak, so an unbudgeted device-side default is invisible to every
+    # sizing surface by construction (defect 1.4). Named exactly as vLLM's
+    # EngineArgs field so it propagates verbatim into model.json with no
+    # translation anywhere (Requirement 3.3).
+    #
+    # `video: 0` is part of the DEFAULT deliberately. Video is never an input
+    # in this product (inputs are camera frames and folder images), but vLLM
+    # sizes its worst case from the multimodal limits it is given and its own
+    # per-modality default is 1 — verbatim from the engine's warning on
+    # `ryanorinagxdevkithomelabjp622` (LocalServer.arm64JP6 1.0.62,
+    # 2026-08-19): "worst-case total number of multimodal tokens (32768) ...
+    # out of which {'image': 16384, 'video': 16384} are reserved for
+    # multi-modal embeddings". Half that worst case is video the product
+    # never sends. Measured on that device, same model, same
+    # `gpu_memory_utilization = 0.55`:
+    #   * {'image': 1, 'video': 0} -> activation peak 2.47 GiB, KV 6.43 GiB,
+    #     Maximum concurrency 29.41x, READY.
+    #   * {'image': 1} (video UNBOUND) -> activation peak 4.93 GiB, KV
+    #     0.20 GiB, concurrency 0.89x, FAILED ("max seq len (4096) is larger
+    #     than the maximum number of tokens that can be stored in KV cache
+    #     (3664)").
+    # Bounding video to 0 HALVES the measured activation peak (4.93 -> 2.47
+    # GiB) and was the only schema-expressible configuration measured to
+    # serve `qwen2-5-vl-7b-instruct-awq` on JP6 with real headroom, so it is
+    # what a newly authored record gets by default. A model that genuinely
+    # takes video authors its own count explicitly.
+    'limit_mm_per_prompt': {'image': 1, 'video': 0}
+}
+
+ENGINE_DTYPE_VALUES = ('auto', 'float16', 'bfloat16', 'float32')
+
+# limit_mm_per_prompt accepts the modality keys below, each mapped to an
+# integer in its own inclusive range; every OTHER sub-key is rejected
+# fail-closed with a per-field finding.
+#
+# `image` keeps its 1..8 range: two-image reference generation
+# (vlm-anomaly-reference-parity Requirement 6.6) needs {'image': 2}, and a
+# vision-language model that accepts no image at all is not a configuration
+# this portal authors.
+#
+# `video` accepts **0**, and that is the whole point of its range starting
+# there. MEASURED on `ryanorinagxdevkithomelabjp622` (LocalServer.arm64JP6
+# 1.0.62, MemTotal 29.96 GiB), from vLLM's own profiling output:
+#   * `gpu_memory_utilization=0.55` + {'image': 1, 'video': 0} →
+#     weights 6.59 | non_torch 0.98 | activation peak 2.47 | KV 6.43 GiB,
+#     Maximum concurrency 29.41x, READY.
+#   * `gpu_memory_utilization=0.55` + {'image': 1} (video UNBOUND) →
+#     weights 6.59 | non_torch 4.76 | activation peak 4.93 | KV 0.20 GiB,
+#     concurrency 0.89x, FAILED ("max seq len (4096) is larger than the
+#     maximum number of tokens that can be stored in KV cache (3664)").
+# vLLM's own warning explains why: the worst-case multimodal budget is 32768
+# tokens, {'image': 16384, 'video': 16384} — HALF of it reserved for video on
+# a model only ever asked for images. Bounding video to 0 halves the
+# activation peak (4.93 → 2.47 GiB) and is the ONLY configuration measured to
+# serve this model with real headroom, so the authored schema must be able to
+# express it.
+LIMIT_MM_PER_PROMPT_KEY = 'image'
+LIMIT_MM_VIDEO_KEY = 'video'
+LIMIT_MM_ACCEPTED_KEYS = (LIMIT_MM_PER_PROMPT_KEY, LIMIT_MM_VIDEO_KEY)
+LIMIT_MM_IMAGE_MIN = 1
+LIMIT_MM_IMAGE_MAX = 8
+LIMIT_MM_VIDEO_MIN = 0
+LIMIT_MM_VIDEO_MAX = 8
+#: Per-modality inclusive ranges, keyed by sub-key.
+LIMIT_MM_RANGES = {
+    LIMIT_MM_PER_PROMPT_KEY: (LIMIT_MM_IMAGE_MIN, LIMIT_MM_IMAGE_MAX),
+    LIMIT_MM_VIDEO_KEY: (LIMIT_MM_VIDEO_MIN, LIMIT_MM_VIDEO_MAX),
+}
+
+
+def _validate_engine_setting(key: str, value: Any) -> str:
+    """Validate one known engine setting. Returns a reason string when the
+    value is outside its accepted range, or '' when the value is valid."""
+    if key == 'dtype':
+        if value not in ENGINE_DTYPE_VALUES:
+            return f"dtype must be one of {'|'.join(ENGINE_DTYPE_VALUES)}"
+    elif key == 'gpu_memory_utilization':
+        # bool is an int subclass — reject explicitly
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 'gpu_memory_utilization must be a number in (0.0, 1.0]'
+        if not (0.0 < float(value) <= 1.0):
+            return 'gpu_memory_utilization must be in (0.0, 1.0]'
+    elif key == 'max_model_len':
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 'max_model_len must be an integer >= 1'
+        if value < 1:
+            return 'max_model_len must be an integer >= 1'
+    elif key == 'tensor_parallel_size':
+        if isinstance(value, bool) or not isinstance(value, int):
+            return 'tensor_parallel_size must be an integer >= 1'
+        if value < 1:
+            return 'tensor_parallel_size must be an integer >= 1'
+    elif key == 'enforce_eager':
+        if not isinstance(value, bool):
+            return 'enforce_eager must be a boolean'
+    elif key == 'limit_mm_per_prompt':
+        # Accept an optional "image" (1..8) and an optional "video" (0..8),
+        # at least one of them; every other sub-key is rejected fail-closed
+        # (jp6-vllm-kv-cache-oom-regression Decision 1). Bounding "video" to
+        # 0 is what stops vLLM reserving half of its 32768-token worst-case
+        # multimodal budget for a modality the model is never asked for.
+        shape = (f'limit_mm_per_prompt must be an object with an optional '
+                 f'"{LIMIT_MM_PER_PROMPT_KEY}" (integer {LIMIT_MM_IMAGE_MIN}..'
+                 f'{LIMIT_MM_IMAGE_MAX}) and an optional '
+                 f'"{LIMIT_MM_VIDEO_KEY}" (integer {LIMIT_MM_VIDEO_MIN}..'
+                 f'{LIMIT_MM_VIDEO_MAX}) key')
+        if isinstance(value, bool) or not isinstance(value, dict):
+            return shape
+        unknown = sorted(str(k) for k in value if k not in LIMIT_MM_RANGES)
+        if unknown:
+            return (f'{shape}; the accepted keys are '
+                    f'"{LIMIT_MM_PER_PROMPT_KEY}" and '
+                    f'"{LIMIT_MM_VIDEO_KEY}" (rejected: '
+                    f'{", ".join(unknown)})')
+        if not value:
+            return (f'{shape}; at least one of '
+                    f'"{LIMIT_MM_PER_PROMPT_KEY}", "{LIMIT_MM_VIDEO_KEY}" '
+                    f'is required')
+        for sub_key in LIMIT_MM_ACCEPTED_KEYS:
+            if sub_key not in value:
+                continue
+            minimum, maximum = LIMIT_MM_RANGES[sub_key]
+            count = value[sub_key]
+            # bool is an int subclass — reject explicitly
+            if isinstance(count, bool) or not isinstance(count, int):
+                return (f'limit_mm_per_prompt.{sub_key} must be an integer '
+                        f'in {minimum}..{maximum}')
+            if not (minimum <= count <= maximum):
+                return (f'limit_mm_per_prompt.{sub_key} must be an integer '
+                        f'in {minimum}..{maximum}')
+    return ''
+
+
+def validate_vllm_registration(body: Dict) -> List[Dict]:
+    """Validate a vLLM model registration request body.
+
+    Returns the complete list of validation findings; [] means valid.
+    - exactly one of huggingface_model_id / s3_model_artifact (1.1, 1.6, 1.9)
+    - huggingface_model_id matches HF_MODEL_ID_RE when present (1.11)
+    - s3_model_artifact is an s3:// URI ending in .tar.gz when present
+    - every supplied engine setting is a known key within its accepted
+      range (1.10) — unknown keys rejected (fail closed)
+    Each finding carries {field, value, reason}.
     """
-    if role_arn and role_arn.endswith(':root'):
-        logger.info("Single-account setup (root ARN) — using Lambda execution role credentials")
-        return {'is_default_credentials': True}
+    findings = []
+
+    hf_model_id = body.get('huggingface_model_id')
+    s3_artifact = body.get('s3_model_artifact')
+
+    # Source XOR: exactly one of huggingface_model_id / s3_model_artifact
+    if not hf_model_id and not s3_artifact:
+        findings.append({
+            'field': 'huggingface_model_id | s3_model_artifact',
+            'value': None,
+            'reason': 'exactly one source is required: provide either '
+                      'huggingface_model_id or s3_model_artifact'
+        })
+    elif hf_model_id and s3_artifact:
+        findings.append({
+            'field': 'huggingface_model_id | s3_model_artifact',
+            'value': {'huggingface_model_id': hf_model_id,
+                      's3_model_artifact': s3_artifact},
+            'reason': 'exactly one source must be provided, not both'
+        })
+
+    # Malformed Hugging Face model ID
+    if hf_model_id:
+        if not isinstance(hf_model_id, str) or not HF_MODEL_ID_RE.match(hf_model_id):
+            findings.append({
+                'field': 'huggingface_model_id',
+                'value': hf_model_id,
+                'reason': 'malformed Hugging Face model ID: expected '
+                          '{organization}/{model_name} (e.g. facebook/opt-125m)'
+            })
+
+    # S3 artifact must be an s3:// URI ending in .tar.gz
+    if s3_artifact:
+        if not isinstance(s3_artifact, str) or \
+                not s3_artifact.startswith('s3://') or \
+                not s3_artifact.endswith('.tar.gz'):
+            findings.append({
+                'field': 's3_model_artifact',
+                'value': s3_artifact,
+                'reason': 's3_model_artifact must be an s3:// URI ending in .tar.gz'
+            })
+
+    # Engine configuration: unknown keys rejected fail-closed,
+    # known keys validated against their accepted ranges
+    engine_configuration = body.get('engine_configuration') or {}
+    if not isinstance(engine_configuration, dict):
+        findings.append({
+            'field': 'engine_configuration',
+            'value': engine_configuration,
+            'reason': 'engine_configuration must be an object'
+        })
+    else:
+        for key, value in engine_configuration.items():
+            if key not in ENGINE_DEFAULTS:
+                findings.append({
+                    'field': f'engine_configuration.{key}',
+                    'value': value,
+                    'reason': f'unknown engine setting: {key}'
+                })
+                continue
+            reason = _validate_engine_setting(key, value)
+            if reason:
+                findings.append({
+                    'field': f'engine_configuration.{key}',
+                    'value': value,
+                    'reason': reason
+                })
+
+    return findings
+
+
+def resolve_engine_configuration(supplied: Dict) -> Dict:
+    """Overlay supplied engine settings on ENGINE_DEFAULTS.
+
+    The result contains every defined setting: supplied values keep their
+    values, omitted settings get their documented defaults (1.2, 1.3).
+
+    The copy is deep so a nested default (``limit_mm_per_prompt``) can never
+    be aliased into a caller's resolved configuration.
+    """
+    resolved = copy.deepcopy(ENGINE_DEFAULTS)
+    for key, value in (supplied or {}).items():
+        if key in ENGINE_DEFAULTS:
+            resolved[key] = value
+    return resolved
+
+
+def _to_dynamo_compatible(value: Any) -> Any:
+    """Recursively convert floats to Decimal for DynamoDB storage."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _to_dynamo_compatible(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_dynamo_compatible(v) for v in value]
+    return value
+
+
+def _decimal_to_native(value: Any) -> Any:
+    """Recursively convert DynamoDB Decimals back to native numbers."""
+    if isinstance(value, Decimal):
+        return int(value) if value % 1 == 0 else float(value)
+    if isinstance(value, dict):
+        return {k: _decimal_to_native(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decimal_to_native(v) for v in value]
+    return value
+
+
+# JP5 vLLM support flag: off by default (JP5 vLLM support is not shipped;
+# the env var exists so a future JP5 enablement is a deploy-time flag flip,
+# never a code change here). Mirrors packaging.py / greengrass_publish.py.
+JP5_VLLM_ENABLED = os.environ.get('JP5_VLLM_ENABLED', 'false').lower() == 'true'
+
+
+def vllm_supported_architectures() -> List[str]:
+    """Supported Target_Architecture set for vLLM_Model_Components:
+    always arm64_jp6 and arm64_jp7, arm64_jp5 only when JP5 support is
+    flagged on, never a CPU-only architecture. Mirrors
+    packaging.vllm_supported_architectures."""
+    archs = ['arm64_jp6', 'arm64_jp7']
+    if JP5_VLLM_ENABLED:
+        archs.append('arm64_jp5')
+    return archs
+
+
+def evaluate_fit_check(record: Dict) -> Dict:
+    """Evaluate the non-blocking preflight Fit_Check for a vLLM_Model_Record.
+
+    Estimates the on-GPU weight size (Hugging Face metadata or S3 artifact
+    size) and evaluates the fit against every supported Target_Architecture
+    (Requirements 3.1, 3.5). Never raises and never blocks: any estimation
+    failure degrades to status 'unverified' (Requirement 3.4).
+
+    Returns {status: 'passed'|'warnings'|'unverified',
+             estimate: {total_bytes, method, detail} | None,
+             findings: [{arch, fits, budget_bytes, required_bytes, message}]}.
+    """
     try:
-        response = sts.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=session_name,
-            ExternalId=external_id,
-            DurationSeconds=3600
+        s3_head = None
+        model_source = record.get('model_source') or {}
+        if isinstance(model_source, dict) and model_source.get('s3_model_artifact'):
+            # S3-sourced records need a Use_Case-account client for HEAD.
+            # The artifact's bucket is bound to the use case's configured
+            # buckets first; a refusal (BucketNotAllowed) is one more
+            # estimation failure -> 'unverified' below.
+            usecase = get_usecase_details(record['usecase_id'])
+            artifact_bucket, _artifact_key = parse_s3_uri(
+                model_source['s3_model_artifact'])
+            assert_bucket_allowed(usecase, artifact_bucket, 'vllm-fit-check')
+            s3_head = get_usecase_client('s3', usecase).head_object
+
+        estimate = estimate_weights(record, s3_head=s3_head)
+        if estimate is None:
+            return {
+                'status': 'unverified',
+                'estimate': None,
+                'findings': [],
+                'message': 'Model weight size could not be estimated; '
+                           'the fit could not be verified.'
+            }
+
+        findings = evaluate_fit(
+            record.get('engine_configuration') or {},
+            estimate,
+            vllm_supported_architectures()
         )
-        return response['Credentials']
-    except ClientError as e:
-        logger.error(f"Error assuming role {role_arn}: {str(e)}")
-        raise
+        status = 'warnings' if any(not f.fits for f in findings) else 'passed'
+        return {
+            'status': status,
+            'estimate': {
+                'total_bytes': estimate.total_bytes,
+                'method': estimate.method,
+                'detail': estimate.detail
+            },
+            'findings': [asdict(f) for f in findings]
+        }
+    except Exception as e:  # noqa: BLE001 — the fit check never blocks (3.4)
+        logger.warning(f"Fit check evaluation failed, reporting unverified: {e}")
+        return {
+            'status': 'unverified',
+            'estimate': None,
+            'findings': [],
+            'message': 'Model weight size could not be estimated; '
+                       'the fit could not be verified.'
+        }
+
+
+def register_vllm_model(event: Dict, context: Any) -> Dict:
+    """
+    Register a vLLM model record (no labeling, no training)
+    POST /api/v1/models/vllm
+
+    Request body:
+    {
+        "usecase_id": "string",
+        "model_name": "string",
+        "model_version": "string",
+        "huggingface_model_id": "org/name",              // XOR
+        "s3_model_artifact": "s3://bucket/path.tar.gz",  // XOR
+        "engine_configuration": { ... },  // optional, partial
+        "description": "string"  // optional
+    }
+    """
+    try:
+        # Extract user info
+        user = get_user_from_event(event)
+        user_id = user['user_id']
+
+        # Parse request body
+        body = json.loads(event.get('body', '{}'))
+
+        # Validate required fields
+        required_fields = ['usecase_id', 'model_name', 'model_version']
+        error = validate_required_fields(body, required_fields)
+        if error:
+            return create_response(400, {'error': error})
+
+        usecase_id = body['usecase_id']
+        model_name = body['model_name'].strip()
+        model_version = body['model_version'].strip()
+        description = body.get('description', '')
+
+        # Check user access (DataScientist role required), matching import_model
+        if not check_user_access(user_id, usecase_id, 'DataScientist'):
+            return create_response(403, {'error': 'Insufficient permissions'})
+
+        # Validate the registration request — any finding means no record
+        # is written and nothing is marked publish-eligible (1.5)
+        findings = validate_vllm_registration(body)
+        if findings:
+            return create_response(400, {
+                'error': 'vLLM model registration validation failed',
+                'findings': findings
+            })
+
+        hf_model_id = body.get('huggingface_model_id')
+        s3_artifact = body.get('s3_model_artifact')
+
+        # Get use case details
+        usecase = get_usecase_details(usecase_id)
+
+        # For S3-sourced registrations, verify the artifact is readable from
+        # the Use_Case account BEFORE any write (1.7). The bucket is bound
+        # to the use case's configured buckets before the client is built
+        # (use-case bucket configuration, design §3); require_key is
+        # intended — the field must already end in .tar.gz.
+        if s3_artifact:
+            bucket, key = parse_s3_uri(s3_artifact, require_key=True)
+            assert_bucket_allowed(usecase, bucket, 'vllm-register',
+                                  actor=user, event=event)
+            try:
+                s3_client = get_usecase_client('s3', usecase)
+                s3_client.head_object(Bucket=bucket, Key=key)
+            except ClientError as e:
+                logger.error(f"S3 model artifact not readable: {s3_artifact}: {str(e)}")
+                return create_response(400, {
+                    'error': f'S3 model artifact is not readable from the '
+                             f'use case account: {s3_artifact}',
+                    's3_model_artifact': s3_artifact
+                })
+
+        # Complete engine configuration: supplied values overlaid on defaults (1.2)
+        engine_configuration = resolve_engine_configuration(
+            body.get('engine_configuration') or {})
+
+        # Exactly one source (already validated)
+        model_source = ({'huggingface_model_id': hf_model_id} if hf_model_id
+                        else {'s3_model_artifact': s3_artifact})
+
+        # DynamoDB-compatible copy (floats as Decimal) used for both the
+        # record write and the audit event details
+        engine_configuration_ddb = _to_dynamo_compatible(engine_configuration)
+
+        # Store the vLLM_Model_Record in the training-jobs table (1.3)
+        training_id = str(uuid.uuid4())
+        table = dynamodb.Table(TRAINING_JOBS_TABLE)
+        timestamp = int(datetime.utcnow().timestamp() * 1000)
+
+        training_item = {
+            'training_id': training_id,
+            'usecase_id': usecase_id,
+            'model_name': model_name,
+            'model_version': model_version,
+            'model_type': 'vllm',
+            'source': 'vllm',
+            'description': description,
+            'status': 'Completed',  # publish-eligible immediately, like BYOM
+            'publish_eligible': True,
+            'model_source': model_source,
+            'engine_configuration': engine_configuration_ddb,
+            'created_by': user['email'],
+            'created_at': timestamp,
+            'updated_at': timestamp
+        }
+
+        table.put_item(Item=training_item)
+
+        # Log audit event
+        log_audit_event(
+            user_id=user_id,
+            action='register_vllm_model',
+            resource_type='training_job',
+            resource_id=training_id,
+            result='success',
+            details={
+                'model_name': model_name,
+                'model_version': model_version,
+                'model_source': model_source,
+                'engine_configuration': engine_configuration_ddb
+            }
+        )
+
+        logger.info(f"vLLM model registered successfully: {training_id}")
+
+        # Non-blocking preflight fit check over the just-written record
+        # against every supported Target_Architecture (Requirements 3.4,
+        # 3.5). evaluate_fit_check never raises and never blocks —
+        # registration has already succeeded regardless of the outcome.
+        fit_record = dict(training_item)
+        fit_record['engine_configuration'] = engine_configuration
+        fit_check = evaluate_fit_check(fit_record)
+
+        # Publish-eligible with zero labeling and zero training steps (1.4)
+        return create_response(201, {
+            'training_id': training_id,
+            'publish_eligible': True,
+            'labeling_steps': 0,
+            'training_steps': 0,
+            'fit_check': fit_check
+        })
+
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return create_response(400, {'error': str(e)})
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return create_response(500, {'error': 'Internal server error'})
+
+
+def get_vllm_engine_spec(event: Dict, context: Any) -> Dict:
+    """
+    Get the vLLM engine configuration specification
+    GET /api/v1/models/vllm/engine-spec
+    """
+    spec = {
+        'description': 'vLLM engine configuration settings, defaults, and '
+                       'accepted ranges. Omitted settings receive their '
+                       'documented default values at registration time.',
+        'settings': {
+            'dtype': {
+                'default': ENGINE_DEFAULTS['dtype'],
+                'type': 'string',
+                'accepted_values': list(ENGINE_DTYPE_VALUES),
+                'description': 'Data type for model weights and activations.'
+            },
+            'gpu_memory_utilization': {
+                'default': ENGINE_DEFAULTS['gpu_memory_utilization'],
+                'type': 'number',
+                'range': '(0.0, 1.0]',
+                'description': 'Fraction of GPU memory the vLLM engine may '
+                               'use. Defaults conservatively because the GPU '
+                               'is shared with vision model inference.'
+            },
+            'max_model_len': {
+                'default': ENGINE_DEFAULTS['max_model_len'],
+                'type': 'integer',
+                'range': '>= 1',
+                'description': 'Maximum model context length (prompt plus '
+                               'generated tokens).'
+            },
+            'tensor_parallel_size': {
+                'default': ENGINE_DEFAULTS['tensor_parallel_size'],
+                'type': 'integer',
+                'range': '>= 1',
+                'description': 'Number of GPUs for tensor-parallel execution.'
+            },
+            'enforce_eager': {
+                'default': ENGINE_DEFAULTS['enforce_eager'],
+                'type': 'boolean',
+                'range': 'true | false',
+                'description': 'Disable CUDA graph capture and always execute '
+                               'the model in eager mode.'
+            },
+            'limit_mm_per_prompt': {
+                'default': ENGINE_DEFAULTS['limit_mm_per_prompt'],
+                'type': 'object',
+                'range': f'{{"{LIMIT_MM_PER_PROMPT_KEY}": '
+                         f'<integer {LIMIT_MM_IMAGE_MIN}..'
+                         f'{LIMIT_MM_IMAGE_MAX}>, '
+                         f'"{LIMIT_MM_VIDEO_KEY}": <integer '
+                         f'{LIMIT_MM_VIDEO_MIN}..{LIMIT_MM_VIDEO_MAX}>}} '
+                         f'(both keys optional, at least one required)',
+                'accepted_keys': list(LIMIT_MM_ACCEPTED_KEYS),
+                'description': 'Multimodal items the engine may accept per '
+                               'prompt. Raising a count increases the '
+                               'engine\'s profiling peak (more GPU memory is '
+                               'reserved for activations, leaving less for '
+                               'the KV cache), so size it deliberately. '
+                               'Two-image reference generation '
+                               '(vlm-anomaly-reference-parity Requirement '
+                               '6.6) requires {"image": 2}; text-only and '
+                               'single-image models should stay at '
+                               '{"image": 1}. Set "video": 0 on a model that '
+                               'is only ever asked for images: vLLM '
+                               'otherwise reserves half of its worst-case '
+                               'multimodal token budget for video, and '
+                               'bounding it to 0 was measured on JP6 to '
+                               'halve the activation peak (4.93 GiB -> 2.47 '
+                               'GiB) and to turn a failing load into one '
+                               'serving with 6.43 GiB of KV cache.'
+            }
+        },
+        'source': {
+            'description': 'Exactly one source must be provided.',
+            'huggingface_model_id': {
+                'type': 'string',
+                'format': '{organization}/{model_name}',
+                'example': 'facebook/opt-125m'
+            },
+            's3_model_artifact': {
+                'type': 'string',
+                'format': 's3:// URI ending in .tar.gz',
+                'example': 's3://bucket/path/llm.tar.gz'
+            }
+        }
+    }
+
+    return create_response(200, spec)
+
+
+# Path shape for the engine-configuration update endpoint (routing + fallback
+# training_id extraction when pathParameters is absent).
+VLLM_ENGINE_CONFIG_PATH_RE = re.compile(
+    r'/models/vllm/([^/]+)/engine-configuration/?$')
+
+
+def update_vllm_engine_configuration(event: Dict, context: Any) -> Dict:
+    """
+    Update the stored Engine_Configuration of a registered vLLM model
+    PUT /api/v1/models/vllm/{training_id}/engine-configuration
+
+    Request body: either the partial engine settings object directly, or
+    wrapped as {"engine_configuration": {...}}. Every supplied setting is
+    validated with the registration rules (unknown keys rejected fail
+    closed, Requirement 2.2); valid settings are overlaid onto the stored
+    configuration and written back (Requirement 2.1). The response carries
+    the complete updated configuration, a re-package/publish notice, and a
+    non-blocking fit-check result (Requirements 2.4, 3.5).
+    """
+    try:
+        user = get_user_from_event(event)
+        user_id = user['user_id']
+
+        # training_id from the path
+        path_params = event.get('pathParameters') or {}
+        training_id = path_params.get('training_id')
+        if not training_id:
+            match = VLLM_ENGINE_CONFIG_PATH_RE.search(event.get('path', ''))
+            training_id = match.group(1) if match else None
+        if not training_id:
+            return create_response(400, {
+                'error': 'training_id path parameter is required'})
+
+        # Supplied settings: accept the settings object directly or wrapped
+        # under an engine_configuration key
+        body = json.loads(event.get('body') or '{}')
+        if not isinstance(body, dict):
+            return create_response(400, {
+                'error': 'Request body must be a JSON object of engine settings'})
+        supplied = body.get('engine_configuration') \
+            if isinstance(body.get('engine_configuration'), dict) else body
+
+        # Load the record
+        table = dynamodb.Table(TRAINING_JOBS_TABLE)
+        response = table.get_item(Key={'training_id': training_id})
+        if 'Item' not in response:
+            return create_response(404, {
+                'error': f'Model {training_id} not found'})
+        record = response['Item']
+
+        # Reject non-vLLM records (Requirement 2.3)
+        if record.get('model_type') != 'vllm' and record.get('source') != 'vllm':
+            return create_response(400, {
+                'error': f'Model {training_id} is not a vLLM model record; '
+                         f'an engine configuration can only be updated on '
+                         f'vLLM models'})
+
+        # RBAC: DataScientist on the use case, mirroring registration
+        if not check_user_access(user_id, record.get('usecase_id'), 'DataScientist'):
+            return create_response(403, {'error': 'Insufficient permissions'})
+
+        # Validate every supplied setting with the registration rules —
+        # unknown keys rejected fail closed (Requirement 2.2); any finding
+        # leaves the stored configuration unchanged
+        findings = []
+        if not supplied:
+            findings.append({
+                'field': 'engine_configuration',
+                'value': supplied,
+                'reason': 'at least one engine setting must be supplied'
+            })
+        else:
+            for key, value in supplied.items():
+                if key not in ENGINE_DEFAULTS:
+                    findings.append({
+                        'field': f'engine_configuration.{key}',
+                        'value': value,
+                        'reason': f'unknown engine setting: {key}'
+                    })
+                    continue
+                reason = _validate_engine_setting(key, value)
+                if reason:
+                    findings.append({
+                        'field': f'engine_configuration.{key}',
+                        'value': value,
+                        'reason': reason
+                    })
+        if findings:
+            return create_response(400, {
+                'error': 'Engine configuration update validation failed',
+                'findings': findings
+            })
+
+        # Overlay the supplied settings onto the stored configuration
+        # (Requirement 2.1). resolve_engine_configuration backfills any
+        # missing setting with its documented default, so the result is
+        # always the complete configuration.
+        previous = resolve_engine_configuration(
+            _decimal_to_native(record.get('engine_configuration') or {}))
+        updated = dict(previous)
+        updated.update(supplied)
+
+        updated_ddb = _to_dynamo_compatible(updated)
+        timestamp = int(datetime.utcnow().timestamp() * 1000)
+        table.update_item(
+            Key={'training_id': training_id},
+            UpdateExpression='SET engine_configuration = :cfg, updated_at = :ts',
+            ExpressionAttributeValues={':cfg': updated_ddb, ':ts': timestamp}
+        )
+
+        # Audit with before/after values (Requirement 2.6)
+        log_audit_event(
+            user_id=user_id,
+            action='update_vllm_engine_configuration',
+            resource_type='training_job',
+            resource_id=training_id,
+            result='success',
+            details={
+                'model_name': record.get('model_name'),
+                'model_version': record.get('model_version'),
+                'previous_engine_configuration': _to_dynamo_compatible(previous),
+                'updated_engine_configuration': updated_ddb
+            }
+        )
+
+        logger.info(f"vLLM engine configuration updated: {training_id}")
+
+        # Non-blocking fit check against the updated configuration (3.5)
+        updated_record = dict(record)
+        updated_record['engine_configuration'] = updated
+        fit_check = evaluate_fit_check(updated_record)
+
+        return create_response(200, {
+            'training_id': training_id,
+            'engine_configuration': updated,
+            'notice': 'Engine configuration updated. The change takes '
+                      'effect only after the model is packaged and '
+                      'published again.',
+            'fit_check': fit_check
+        })
+
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return create_response(400, {'error': str(e)})
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return create_response(500, {'error': 'Internal server error'})
 
 
 def get_usecase_details(usecase_id: str) -> Dict:
@@ -269,32 +1003,27 @@ def validate_dimensions_match(
         )
 
 
-def validate_model_artifact(model_s3_uri: str, credentials: Dict) -> Dict:
+def validate_model_artifact(model_s3_uri: str, usecase: Dict, *, purpose: str) -> Dict:
     """
     Download and validate model artifact structure
     Returns: validation result with extracted metadata
+
+    The S3 client comes from `get_s3_client_for_bucket`, which binds the
+    artifact's bucket to the use case's configured buckets before any STS
+    call and selects the role the portal uses for that bucket (the Data
+    Account role for `data_s3_bucket` on a separate-Data-Account use case).
+    A refused bucket raises BucketConfigError here, before any download,
+    even for a caller that skipped the handler's own pre-check.
     """
     temp_dir = None
     validation_errors = []
     validation_warnings = []
     
     try:
-        # Parse S3 URI
-        parsed = urlparse(model_s3_uri)
-        bucket = parsed.netloc
-        key = parsed.path.lstrip('/')
-        
-        # Create S3 client (assumed role for multi-account; Lambda execution
-        # role for single-account setups where the root ARN can't be assumed).
-        if credentials.get('is_default_credentials'):
-            s3_client = boto3.client('s3')
-        else:
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=credentials['AccessKeyId'],
-                aws_secret_access_key=credentials['SecretAccessKey'],
-                aws_session_token=credentials['SessionToken']
-            )
+        # Parse S3 URI and obtain the bucket-bound client
+        bucket, key = parse_s3_uri(model_s3_uri)
+        s3_client = get_s3_client_for_bucket(
+            usecase, bucket, f"{purpose}-{int(time.time())}"[:64])
         
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_validation_")
@@ -388,6 +1117,10 @@ def validate_model_artifact(model_s3_uri: str, credentials: Dict) -> Dict:
         
     except ModelValidationError:
         raise
+    except BucketConfigError:
+        # A refused or malformed bucket is the caller's 400 body, not a
+        # validation failure of the artifact.
+        raise
     except Exception as e:
         logger.error(f"Unexpected error during validation: {str(e)}")
         raise ModelValidationError(f"Validation failed: {str(e)}")
@@ -425,8 +1158,9 @@ def validate_model(event: Dict, context: Any) -> Dict:
         usecase_id = body['usecase_id']
         model_s3_uri = body['model_s3_uri'].strip()
         
-        # Check user access
-        if not check_user_access(user_id, usecase_id):
+        # Check user access (DataScientist role required, the same gate as
+        # import_model: validation performs the same privileged download)
+        if not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Validate S3 URI format
@@ -443,15 +1177,15 @@ def validate_model(event: Dict, context: Any) -> Dict:
         # Get use case details
         usecase = get_usecase_details(usecase_id)
         
-        # Assume cross-account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            f"validate-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
-        )
+        # Bind the artifact's bucket to the use case's configured buckets
+        # before any credential step (use-case bucket configuration, §3)
+        bucket, _key = parse_s3_uri(model_s3_uri)
+        assert_bucket_allowed(usecase, bucket, 'model-validate',
+                              actor=user, event=event)
         
-        # Validate model artifact
-        validation_result = validate_model_artifact(model_s3_uri, credentials)
+        # Validate model artifact (the client is bucket-bound inside)
+        validation_result = validate_model_artifact(
+            model_s3_uri, usecase, purpose='model-validate')
         
         return create_response(200, validation_result)
         
@@ -462,12 +1196,74 @@ def validate_model(event: Dict, context: Any) -> Dict:
             'error': e.message,
             'details': e.details
         })
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         return create_response(400, {'error': str(e)})
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         return create_response(500, {'error': 'Internal server error'})
+
+
+# Arch each fine-tunable checkpoint kind belongs to (mirrors checkpoint_probe).
+FINE_TUNABLE_ARCHES = ('yolo', 'rf_detr')
+
+
+def validate_fine_tunable(raw: Any, usecase_bucket: str) -> Tuple[Any, str]:
+    """Validate the optional ``fine_tunable`` field of an import body.
+
+    Smart Import (model_converter.convert_model) sends it when it kept the
+    original ``.pt``/``.pth`` as a sidecar object; a direct POST never does.
+    Returns ``(value, error)``: ``(None, '')`` when the field is absent/null,
+    ``(dict, '')`` for a well-formed descriptor, else ``(None, <reason>)``.
+
+    The record is what later feeds ``resolve_base_model('imported', ...)`` and
+    therefore ``BASE_WEIGHTS_S3`` for a SageMaker job, so ``checkpoint_s3`` is
+    pinned to THIS use case's bucket under the converter's prefix — a caller
+    cannot point a base model at an arbitrary object.
+    """
+    if raw is None:
+        return None, ''
+    if not isinstance(raw, dict):
+        return None, 'fine_tunable must be an object or null'
+
+    arch = raw.get('arch')
+    if arch not in FINE_TUNABLE_ARCHES:
+        return None, (
+            f"fine_tunable.arch must be one of: {', '.join(FINE_TUNABLE_ARCHES)}")
+
+    kind = raw.get('kind')
+    if kind not in FINE_TUNABLE_KINDS:
+        return None, (
+            f"fine_tunable.kind must be one of: {', '.join(FINE_TUNABLE_KINDS)}")
+
+    checkpoint_s3 = raw.get('checkpoint_s3')
+    expected_prefix = f"s3://{usecase_bucket}/converted-models/"
+    if (not isinstance(checkpoint_s3, str)
+            or not checkpoint_s3.startswith(expected_prefix)
+            or len(checkpoint_s3) <= len(expected_prefix)):
+        return None, (
+            f"fine_tunable.checkpoint_s3 must be an S3 URI under {expected_prefix}")
+
+    class_names = raw.get('class_names')
+    if class_names is not None and (
+            not isinstance(class_names, list)
+            or not all(isinstance(n, str) for n in class_names)):
+        return None, 'fine_tunable.class_names must be a list of strings or null'
+
+    num_classes = raw.get('num_classes')
+    if num_classes is not None and (
+            isinstance(num_classes, bool) or not isinstance(num_classes, int)):
+        return None, 'fine_tunable.num_classes must be an integer or null'
+
+    return {
+        'arch': arch,
+        'kind': kind,
+        'checkpoint_s3': checkpoint_s3,
+        'class_names': class_names,
+        'num_classes': num_classes,
+    }, ''
 
 
 def import_model(event: Dict, context: Any) -> Dict:
@@ -483,7 +1279,14 @@ def import_model(event: Dict, context: Any) -> Dict:
         "model_s3_uri": "s3://bucket/path/model.tar.gz",
         "description": "string",  // optional
         "auto_compile": true,  // optional, default false
-        "compilation_targets": ["x86_64-cpu", "jetson-xavier"]  // optional
+        "compilation_targets": ["x86_64-cpu", "jetson-xavier-jp5"],  // optional
+        "fine_tunable": {  // optional; set by Smart Import when it kept the checkpoint
+            "arch": "yolo" | "rf_detr",
+            "kind": "ultralytics_checkpoint" | "rfdetr_checkpoint",
+            "checkpoint_s3": "s3://<usecase bucket>/converted-models/.../checkpoint.pt",
+            "class_names": ["..."] | null,
+            "num_classes": 1 | null
+        }
     }
     """
     try:
@@ -507,6 +1310,7 @@ def import_model(event: Dict, context: Any) -> Dict:
         description = body.get('description', '')
         auto_compile = body.get('auto_compile', False)
         compilation_targets = body.get('compilation_targets', [])
+        raw_fine_tunable = body.get('fine_tunable')
         
         # Check user access (DataScientist role required)
         if not check_user_access(user_id, usecase_id, 'DataScientist'):
@@ -525,17 +1329,25 @@ def import_model(event: Dict, context: Any) -> Dict:
         
         # Get use case details
         usecase = get_usecase_details(usecase_id)
+
+        # Optional fine-tunable checkpoint descriptor (Requirement 7). Checked
+        # before any S3 work so a malformed descriptor costs nothing.
+        fine_tunable, ft_error = validate_fine_tunable(
+            raw_fine_tunable, usecase.get('s3_bucket', ''))
+        if ft_error:
+            return create_response(400, {'error': ft_error})
         
-        # Assume cross-account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            f"import-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
-        )
+        # Bind the artifact's bucket to the use case's configured buckets
+        # before any credential step (use-case bucket configuration, §3);
+        # the persisted artifact_s3 is therefore always inside that set.
+        bucket, _key = parse_s3_uri(model_s3_uri)
+        assert_bucket_allowed(usecase, bucket, 'model-import',
+                              actor=user, event=event)
         
-        # Validate model artifact
+        # Validate model artifact (the client is bucket-bound inside)
         logger.info(f"Validating model artifact: {model_s3_uri}")
-        validation_result = validate_model_artifact(model_s3_uri, credentials)
+        validation_result = validate_model_artifact(
+            model_s3_uri, usecase, purpose='model-import')
         
         if not validation_result.get('valid'):
             return create_response(400, {
@@ -547,8 +1359,13 @@ def import_model(event: Dict, context: Any) -> Dict:
         training_id = str(uuid.uuid4())
         
         # Determine model type from validation
-        metadata = validation_result['metadata']
+        # Shallow copy so validation_result (also persisted and echoed in the
+        # response) keeps its original shape.
+        metadata = dict(validation_result['metadata'])
         model_type = metadata.get('model_type', 'imported')
+        # Always explicit (null when Smart Import kept nothing / direct import)
+        # so Model Detail and resolve_base_model never have to guess.
+        metadata['fine_tunable'] = fine_tunable
         
         # Map model type to standard types if possible
         model_type_mapping = {
@@ -663,6 +1480,8 @@ def import_model(event: Dict, context: Any) -> Dict:
             'error': f'Model validation failed: {e.message}',
             'details': e.details
         })
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         return create_response(400, {'error': str(e)})
@@ -723,7 +1542,6 @@ def get_model_format_spec(event: Dict, context: Any) -> Dict:
             'Model file must be PyTorch 1.8 compatible'
         ],
         'supported_compilation_targets': [
-            'jetson-xavier',
             'jetson-xavier-jp5',
             'jetson-xavier-jp6',
             'x86_64-cpu',
@@ -760,6 +1578,12 @@ def handler(event: Dict, context: Any) -> Dict:
             return validate_model(event, context)
         elif http_method == 'POST' and '/models/import' in path:
             return import_model(event, context)
+        elif http_method == 'POST' and '/models/vllm' in path:
+            return register_vllm_model(event, context)
+        elif http_method == 'GET' and '/models/vllm/engine-spec' in path:
+            return get_vllm_engine_spec(event, context)
+        elif http_method == 'PUT' and VLLM_ENGINE_CONFIG_PATH_RE.search(path):
+            return update_vllm_engine_configuration(event, context)
         elif http_method == 'GET' and '/models/format-spec' in path:
             return get_model_format_spec(event, context)
         else:

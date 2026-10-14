@@ -15,8 +15,12 @@ import TrainingDetail from './pages/TrainingDetail';
 import CreateTraining from './pages/CreateTraining';
 import ImportModel from './pages/ImportModel';
 import SmartImport from './pages/SmartImport';
+import RegisterLlm from './pages/RegisterLlm';
 import Labeling from './pages/Labeling';
 import LabelingDetail from './pages/LabelingDetail';
+import LabelingTeams from './pages/labeling/LabelingTeams';
+import AdminReview from './pages/labeling/AdminReview';
+import LabelerWorkspace from './pages/labeler/LabelerWorkspace';
 import CreateLabelingJob from './pages/CreateLabelingJob';
 import DatasetBrowser from './pages/DatasetBrowser';
 import DataManagement from './pages/DataManagement';
@@ -26,12 +30,36 @@ import CreateDeployment from './pages/CreateDeployment';
 import Components from './pages/Components';
 import ComponentDetail from './pages/ComponentDetail';
 import ComponentConfiguration from './pages/ComponentConfiguration';
+import WorkflowBuilder from './pages/workflows/WorkflowBuilder';
+import PluginLibrary from './pages/node-designer/PluginLibrary';
+import PluginDetail from './pages/node-designer/PluginDetail';
+import CreateWizard from './pages/node-designer/CreateWizard';
+import GeneratePanel from './pages/node-designer/GeneratePanel';
+import RegistrationWizard from './pages/node-designer/RegistrationWizard';
+import ReviewQueue from './pages/node-designer/ReviewQueue';
+import SimulatorView from './pages/node-designer/SimulatorView';
+import ImportView from './pages/node-designer/ImportView';
+import GitConnections from './pages/node-designer/GitConnections';
+import BuildsPage from './pages/builds/BuildsPage';
+import BuildDetail from './pages/builds/BuildDetail';
+import SyntheticData from './pages/synthetic/SyntheticData';
+import SyntheticSessionDetail from './pages/synthetic/SyntheticSessionDetail';
+import WorkflowTuningLanding from './pages/workflow-tuning/WorkflowTuningLanding';
+import AnomalyTuningOverview from './pages/workflow-tuning/AnomalyTuningOverview';
+import AnomalyTuningSession from './pages/workflow-tuning/AnomalyTuningSession';
 import Settings from './pages/Settings';
 import AuditLogs from './pages/AuditLogs';
+import UserManager from './pages/admin/UserManager';
+import FleetPage from './pages/admin/FleetPage';
 import Login from './pages/Login';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
+import RequireRole from './components/RequireRole';
+import DataLabelerRedirect from './components/DataLabelerRedirect';
 import GlobalLoadingBar from './components/GlobalLoadingBar';
+import { BUILDS_ACCESS_ROLES } from './utils/buildsAccess';
+import { SYNTHETIC_ACCESS_ROLES } from './utils/syntheticAccess';
+import { WORKFLOW_TUNING_ACCESS_ROLES } from './utils/workflowTuningAccess';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -56,7 +84,14 @@ function App() {
                 path="/"
                 element={
                   <ProtectedRoute>
-                    <Layout />
+                    {/* DataLabeler-only users are confined to /labeler:
+                        every other route under the authenticated layout
+                        redirects there without rendering the page
+                        (dda-data-labeling Req 2.7; multi-role users are
+                        unaffected, Req 2.8). */}
+                    <DataLabelerRedirect>
+                      <Layout />
+                    </DataLabelerRedirect>
                   </ProtectedRoute>
                 }
               >
@@ -65,15 +100,42 @@ function App() {
                 <Route path="usecases" element={<UseCases />} />
                 <Route path="usecases/onboard" element={<UseCaseOnboarding />} />
                 <Route path="labeling" element={<Labeling />} />
+                {/* Labeler workspace — the only destination for
+                    DataLabeler-only users (dda-data-labeling Req 2.2, 2.7). */}
+                <Route path="labeler" element={<LabelerWorkspace />} />
                 <Route path="labeling/datasets" element={<DatasetBrowser />} />
                 <Route path="data" element={<DataManagement />} />
                 <Route path="labeling/create" element={<CreateLabelingJob />} />
+                {/* Labeling team management is admin-only UI gating
+                    (dda-data-labeling Req 3.7); server-side RBAC
+                    (labeling-teams:manage) remains the authority. */}
+                <Route
+                  path="labeling/teams"
+                  element={
+                    <RequireRole roles={['UseCaseAdmin', 'PortalAdmin']}>
+                      <LabelingTeams />
+                    </RequireRole>
+                  }
+                />
+                {/* Skip-verification Admin Review is admin-only UI gating
+                    (dda-data-labeling Req 9.1); server-side authorization on
+                    the review APIs remains the authority. Registered before
+                    labeling/:jobId so the review path wins the match. */}
+                <Route
+                  path="labeling/:jobId/review"
+                  element={
+                    <RequireRole roles={['UseCaseAdmin', 'PortalAdmin']}>
+                      <AdminReview />
+                    </RequireRole>
+                  }
+                />
                 <Route path="labeling/:jobId" element={<LabelingDetail />} />
                 <Route path="devices" element={<Devices />} />
                 <Route path="devices/:deviceId" element={<DeviceDetail />} />
                 <Route path="models" element={<Models />} />
                 <Route path="models/import" element={<ImportModel />} />
                 <Route path="models/smart-import" element={<SmartImport />} />
+                <Route path="models/register-llm" element={<RegisterLlm />} />
                 <Route path="models/:modelId" element={<ModelDetail />} />
                 <Route path="training" element={<Training />} />
                 <Route path="training/create" element={<CreateTraining />} />
@@ -84,7 +146,99 @@ function App() {
                 <Route path="components" element={<Components />} />
                 <Route path="components/:arn" element={<ComponentDetail />} />
                 <Route path="components/configure" element={<ComponentConfiguration />} />
+                <Route path="workflows/builder" element={<WorkflowBuilder />} />
+                <Route path="workflows/builder/:workflowId" element={<WorkflowBuilder />} />
+                <Route path="node-designer" element={<PluginLibrary />} />
+                <Route path="node-designer/create" element={<CreateWizard />} />
+                <Route path="node-designer/generate" element={<GeneratePanel />} />
+                <Route path="node-designer/import" element={<ImportView />} />
+                <Route path="node-designer/git-connections" element={<GitConnections />} />
+                <Route path="node-designer/plugins/:pluginId" element={<PluginDetail />} />
+                <Route path="node-designer/plugins/:pluginId/register" element={<RegistrationWizard />} />
+                <Route path="node-designer/review" element={<ReviewQueue />} />
+                <Route
+                  path="node-designer/plugins/:pluginId/versions/:version/simulate"
+                  element={<SimulatorView />}
+                />
+                {/* Builds surface is role-gated (bugfix Req 2.5/2.6): roles without
+                    builds access are redirected instead of rendering a 403-banner page.
+                    Server-side RBAC remains the ultimate authority (Req 2.7). */}
+                <Route
+                  path="builds"
+                  element={
+                    <RequireRole roles={BUILDS_ACCESS_ROLES}>
+                      <BuildsPage />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="builds/:buildJobId"
+                  element={
+                    <RequireRole roles={BUILDS_ACCESS_ROLES}>
+                      <BuildDetail />
+                    </RequireRole>
+                  }
+                />
+                {/* Synthetic data generation workspace is limited to
+                    Data_Scientist_Access roles (synthetic-defect-data-generation
+                    Req 9.3); server-side RBAC remains the ultimate authority
+                    (Req 9.1, 9.2). */}
+                <Route
+                  path="synthetic"
+                  element={
+                    <RequireRole roles={SYNTHETIC_ACCESS_ROLES}>
+                      <SyntheticData />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="synthetic/:sessionId"
+                  element={
+                    <RequireRole roles={SYNTHETIC_ACCESS_ROLES}>
+                      <SyntheticSessionDetail />
+                    </RequireRole>
+                  }
+                />
+                {/* Workflow Tuning section — limited to the roles that may
+                    edit workflows (quality-prompt-tuning Req 1.1); every
+                    /workflow-tuning/anomaly/** API route independently
+                    authorizes the workflow and audits denials (Req 9.1, 9.2). */}
+                <Route
+                  path="workflow-tuning"
+                  element={
+                    <RequireRole roles={WORKFLOW_TUNING_ACCESS_ROLES}>
+                      <WorkflowTuningLanding />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="workflow-tuning/anomaly"
+                  element={
+                    <RequireRole roles={WORKFLOW_TUNING_ACCESS_ROLES}>
+                      <AnomalyTuningOverview />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="workflow-tuning/anomaly/sessions/:sessionId"
+                  element={
+                    <RequireRole roles={WORKFLOW_TUNING_ACCESS_ROLES}>
+                      <AnomalyTuningSession />
+                    </RequireRole>
+                  }
+                />
                 <Route path="settings" element={<Settings />} />
+                <Route path="admin/user-manager" element={<UserManager />} />
+                {/* Build Fleet stays PortalAdmin-only (Req 3.6). FleetPage's own
+                    PortalAdmin check remains as a second defensive layer. */}
+                <Route
+                  path="admin/fleet"
+                  element={
+                    <RequireRole roles={['PortalAdmin']}>
+                      <FleetPage />
+                    </RequireRole>
+                  }
+                />
                 <Route path="audit" element={<AuditLogs />} />
               </Route>
             </Routes>

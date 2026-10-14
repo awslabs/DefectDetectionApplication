@@ -18,6 +18,9 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
+import { useAuth } from '../contexts/AuthContext';
+import BedrockConfigurationSettings from '../components/BedrockConfigurationSettings';
+import BuildInfrastructureSettings from '../components/BuildInfrastructureSettings';
 
 interface DataAccount {
   data_account_id: string;
@@ -36,6 +39,8 @@ interface DataAccount {
 }
 
 export default function Settings() {
+  const { user } = useAuth();
+  const isPortalAdmin = user?.role === 'PortalAdmin';
   const [activeTab, setActiveTab] = useState('data-accounts');
   const [dataAccounts, setDataAccounts] = useState<DataAccount[]>([]);
   const [loading, setLoading] = useState(false);
@@ -398,6 +403,25 @@ export default function Settings() {
               label: 'Data Accounts',
               content: <DataAccountsTab />,
             },
+            // Bedrock_Configuration (workflow-manager Requirement 10.6):
+            // visible and editable only for PortalAdmin.
+            ...(isPortalAdmin
+              ? [
+                  {
+                    id: 'bedrock-configuration',
+                    label: 'Bedrock Configuration',
+                    content: <BedrockConfigurationSettings />,
+                  },
+                  // Build infrastructure configuration
+                  // (portal-build-fleet-and-workflow-gates Req 9.1, 9.5):
+                  // changes are PortalAdmin-only (Req 9.6).
+                  {
+                    id: 'build-infrastructure',
+                    label: 'Build Infrastructure',
+                    content: <BuildInfrastructureSettings />,
+                  },
+                ]
+              : []),
             {
               id: 'general',
               label: 'General',

@@ -1,0 +1,1132 @@
+"""
+Portal_Sync_Service - camera registry sync reduction core.
+
+Feature: camera-registry-sync (task 5.1).
+
+Pure, side-effect-free reduction of incoming edge camera reports against
+the current Camera_Registry state, plus the SQS ingest handler (task 5.4)
+that applies `reduce_report` per camera source and `stamp_meta` per
+report, persisting the outcomes to the `dda-portal-camera-registry`
+table scoped to the device's `usecase_id` (Req 1.4).
+
+Reduction rules (design "Portal_Sync_Service" section):
+  - discard_stale: incoming.version < registry_entry.version (Req 3.5)
+  - ack matching the entry's portal_change_id -> upsert, synced (Req 5.3)
+  - failure entry for the entry's portal_change_id -> failed + reason (Req 5.4)
+  - conflict exactly when a pending portal change is unacknowledged and the
+    edge content differs from the pending content: edge wins, and a
+    ConflictEvent carries both versions, the resolution, and the
+    timestamp (Reqs 6.1, 6.2, 6.3)
+  - a reported deletion while a portal update is pending resolves as
+    deletion-retained with a ConflictEvent (Req 6.5)
+  - every processed report stamps the device META item: last_report_at,
+    never_synced cleared (Req 3.2)
+
+The reducer is idempotent under duplicate and out-of-order delivery:
+re-applying an already-applied report reproduces the same registry entry
+(version-guarded), and replaying a report whose conflict was already
+resolved reduces to a plain upsert without emitting a second event.
+"""
+import json
+import logging
+import os
+import time
+import uuid
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# SyncOutcome actions
+ACTION_UPSERT = "upsert"
+ACTION_DISCARD_STALE = "discard_stale"
+ACTION_CONFLICT = "conflict"
+
+# Registry entry sync statuses
+SYNC_STATUS_SYNCED = "synced"
+SYNC_STATUS_PENDING = "pending"
+SYNC_STATUS_FAILED = "failed"
+
+# Conflict resolutions
+RESOLUTION_EDGE_RETAINED = "edge-retained"
+RESOLUTION_DELETION_RETAINED = "deletion-retained"
+
+# Fields that constitute a Camera_Source's comparable "content" for
+# conflict classification (Req 6.1). Sync metadata, capability metadata,
+# and version counters are deliberately excluded.
+_CONTENT_FIELDS = ("name", "type", "params")
+
+# Portal-originated change operation carried in pending_content.
+_OP_DELETE = "delete"
+
+# The device-side defaults of the stream Camera_Source settings
+# (rtsp-rtmp-stream-cameras design "Stream Camera_Source params"). The
+# Portal leaves an unset setting absent and the device applies its default,
+# so a converged stream entry reports these values for settings the pending
+# portal content never mentioned. Conflict classification treats an absent
+# setting and its default as equal; stored content is never rewritten.
+_STREAM_PARAM_DEFAULTS = {
+    "RTSP": {"transport": "tcp", "latencyMs": 200, "decoder": "auto",
+             "maxFrameDimension": 1920, "stallTimeoutS": 10,
+             "credentialsConfigured": False},
+    "RTMP": {"decoder": "auto", "maxFrameDimension": 1920,
+             "stallTimeoutS": 10, "credentialsConfigured": False},
+}
+
+
+@dataclass(frozen=True)
+class ConflictEvent:
+    """Record of a detected Conflict (Req 6.3).
+
+    Carries both conflicting versions, the resolution applied, and the
+    timestamp. `edge_version` is None when the edge state is a deletion
+    (deletion-retained, Req 6.5).
+    """
+
+    camera_source_id: Optional[str]
+    edge_version: Optional[Dict[str, Any]]
+    portal_version: Optional[Dict[str, Any]]
+    resolution: str
+    created_at: int
+
+
+@dataclass(frozen=True)
+class SyncOutcome:
+    """Result of reducing one incoming camera-source report.
+
+    action: upsert | discard_stale | conflict
+    entry:  the resulting registry entry to persist; None means the
+            entry is deleted (or, for discard_stale with no prior
+            entry, that there is nothing to persist)
+    conflict_event: present exactly when action == conflict
+    """
+
+    action: str
+    entry: Optional[Dict[str, Any]]
+    conflict_event: Optional[ConflictEvent] = None
+
+
+def _content_of(source: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Project a camera-source-shaped dict onto its comparable content."""
+    if not source:
+        return {}
+    return {field: source.get(field) for field in _CONTENT_FIELDS}
+
+
+def _comparable_content(source: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The content conflict classification compares (Req 6.1).
+
+    Equal to :func:`_content_of` for every type except the stream types,
+    whose ``params`` are completed with the device-side setting defaults
+    (``_STREAM_PARAM_DEFAULTS``) so a device that applied a pending change
+    and reports its effective settings compares equal to that change.
+    """
+    content = _content_of(source)
+    defaults = _STREAM_PARAM_DEFAULTS.get(content.get("type"))
+    params = content.get("params")
+    if defaults and isinstance(params, dict):
+        content["params"] = {**defaults, **params}
+    return content
+
+
+def _is_failure_entry(incoming: Dict[str, Any]) -> bool:
+    """Failure entries carry a reason (and no camera content)."""
+    return incoming.get("status") == "failed" or (
+        "reason" in incoming and "version" not in incoming
+    )
+
+
+def _is_deletion(incoming: Optional[Dict[str, Any]]) -> bool:
+    """A reported deletion: the source vanished from a full report.
+
+    The ingest handler represents it as None or {"deleted": True}.
+    """
+    return incoming is None or incoming.get("deleted") is True
+
+
+#: Portal-owned registry keys no report carries (rtsp-rtmp-stream-cameras
+#: task 29, design component 8 "Secret record and create mirrors"): the
+#: camera's Credential_Vault secret, and the id of the camera a create
+#: mirror stands for. Kept on every entry rebuilt from a report.
+_PORTAL_OWNED_KEYS = ("credential_secret_arn", "alias_of")
+
+
+def _carry_identity(
+    entry: Dict[str, Any], registry_entry: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Preserve identity/scoping attributes from the existing entry
+    (Req 1.4), and the Portal-owned keys (task 29)."""
+    if registry_entry:
+        for key in ("usecase_id", "camera_source_id", "device_id",
+                    *_PORTAL_OWNED_KEYS):
+            if key in registry_entry:
+                entry.setdefault(key, registry_entry[key])
+    return entry
+
+
+def _entry_from_incoming(
+    registry_entry: Optional[Dict[str, Any]],
+    incoming: Dict[str, Any],
+    now_ms: int,
+) -> Dict[str, Any]:
+    """Build the upserted registry entry from an edge camera report (Req 1.1)."""
+    entry: Dict[str, Any] = {
+        "name": incoming.get("name"),
+        "type": incoming.get("type"),
+        "params": incoming.get("params", {}),
+        "capabilities": incoming.get("capabilities", {}),
+        "origin": incoming.get("origin"),
+        "version": incoming.get("version"),
+        "last_reported_at": now_ms,
+        "absent": bool(incoming.get("absent", False)),
+        "sync_status": SYNC_STATUS_SYNCED,
+    }
+    if entry["absent"] and incoming.get("absentSince") is not None:
+        entry["absent_since"] = incoming["absentSince"]
+    return _carry_identity(entry, registry_entry)
+
+
+def _reduce_failure(
+    registry_entry: Optional[Dict[str, Any]], incoming: Dict[str, Any]
+) -> SyncOutcome:
+    """A portal-originated change failed to apply on the device (Req 5.4)."""
+    if registry_entry is None:
+        # No entry to mark; a failure for an unknown source is stale noise.
+        return SyncOutcome(ACTION_DISCARD_STALE, None)
+    change_id = incoming.get("portalChangeId")
+    if change_id != registry_entry.get("portal_change_id"):
+        # Failure report for a superseded change: keep the current entry.
+        return SyncOutcome(ACTION_DISCARD_STALE, registry_entry)
+    entry = dict(registry_entry)
+    entry["sync_status"] = SYNC_STATUS_FAILED
+    entry["failure_reason"] = incoming.get("reason")
+    return SyncOutcome(ACTION_UPSERT, entry)
+
+
+def _reduce_deletion(
+    registry_entry: Optional[Dict[str, Any]], now_ms: int
+) -> SyncOutcome:
+    """The source disappeared from the device's full report."""
+    if registry_entry is None:
+        # Already gone; duplicate delivery is a no-op (idempotent).
+        return SyncOutcome(ACTION_UPSERT, None)
+    pending_content = registry_entry.get("pending_content") or {}
+    if registry_entry.get("sync_status") == SYNC_STATUS_PENDING:
+        if pending_content.get("op") == _OP_DELETE:
+            # Portal wanted the deletion too: agreement, not a conflict.
+            return SyncOutcome(ACTION_UPSERT, None)
+        # Edge deletion vs pending portal modification: deletion wins (Req 6.5).
+        return SyncOutcome(
+            ACTION_CONFLICT,
+            None,
+            ConflictEvent(
+                camera_source_id=registry_entry.get("camera_source_id"),
+                edge_version=None,
+                portal_version=pending_content or None,
+                resolution=RESOLUTION_DELETION_RETAINED,
+                created_at=now_ms,
+            ),
+        )
+    return SyncOutcome(ACTION_UPSERT, None)
+
+
+def reduce_report(
+    registry_entry: Optional[Dict[str, Any]],
+    incoming: Optional[Dict[str, Any]],
+    now_ms: int,
+) -> SyncOutcome:
+    """Reduce one incoming camera-source state against the registry entry.
+
+    Args:
+        registry_entry: the current Camera_Registry entry for this source,
+            or None when the source is unknown to the registry.
+        incoming: the source's state from the edge report - a camera map
+            (design reported-document shape), a failure entry
+            ({reason, portalChangeId}), or a deletion marker
+            (None / {"deleted": True}) for a source missing from a
+            full report.
+        now_ms: report processing timestamp (epoch milliseconds).
+
+    Returns:
+        SyncOutcome with the action, the resulting entry (None = deleted),
+        and a ConflictEvent exactly when a Conflict was classified.
+    """
+    if incoming is None or _is_deletion(incoming):
+        return _reduce_deletion(registry_entry, now_ms)
+    if _is_failure_entry(incoming):
+        return _reduce_failure(registry_entry, incoming)
+
+    # Version-guarded staleness discard (Req 3.5).
+    if registry_entry is not None and (
+        (incoming.get("version") or 0) < (registry_entry.get("version") or 0)
+    ):
+        return SyncOutcome(ACTION_DISCARD_STALE, registry_entry)
+
+    entry = _entry_from_incoming(registry_entry, incoming, now_ms)
+
+    if (
+        registry_entry is not None
+        and registry_entry.get("sync_status") == SYNC_STATUS_PENDING
+    ):
+        if incoming.get("ack") == registry_entry.get("portal_change_id"):
+            # Device acknowledged the pending portal change (Req 5.3).
+            return SyncOutcome(ACTION_UPSERT, entry)
+        pending_content = registry_entry.get("pending_content") or {}
+        if _comparable_content(incoming) != _comparable_content(
+                pending_content):
+            # Unacknowledged pending change and diverging edge content:
+            # Conflict (Req 6.1). Edge wins (Req 6.2); both versions are
+            # preserved in the event (Req 6.3).
+            return SyncOutcome(
+                ACTION_CONFLICT,
+                entry,
+                ConflictEvent(
+                    camera_source_id=registry_entry.get("camera_source_id"),
+                    edge_version=_content_of(incoming),
+                    portal_version=pending_content or None,
+                    resolution=RESOLUTION_EDGE_RETAINED,
+                    created_at=now_ms,
+                ),
+            )
+        # Edge content equals the pending portal content without an ack:
+        # the states converged, so the change is effectively applied.
+        return SyncOutcome(ACTION_UPSERT, entry)
+
+    return SyncOutcome(ACTION_UPSERT, entry)
+
+
+def stamp_meta(
+    meta_entry: Optional[Dict[str, Any]], now_ms: int
+) -> Dict[str, Any]:
+    """Stamp the device META item for a processed report (Reqs 1.6, 3.2).
+
+    Sets last_report_at and clears never_synced; idempotent.
+    """
+    meta = dict(meta_entry) if meta_entry else {}
+    meta["last_report_at"] = now_ms
+    meta["never_synced"] = False
+    return meta
+
+
+def create_aliases(
+    entries: Dict[str, Dict[str, Any]], cameras: Dict[str, Any]
+) -> Dict[str, str]:
+    """The Portal stream creates a report acknowledges under an id of the
+    device's own: ``{alias_csid: created_csid}`` (rtsp-rtmp-stream-cameras
+    task 29, design component 8 "Secret record and create mirrors").
+
+    The device stores every create under ``cfg-<imageSourceId>`` and, for
+    one report, mirrors it under the Portal's id. Each reported key whose
+    ``ack`` equals the ``portal_change_id`` of a pending create stored
+    under another id is the camera that create made, and the create's own
+    entry is its mirror. Only stream creates are linked (a
+    ``pending_content.type`` that is a key of ``_STREAM_PARAM_DEFAULTS``:
+    ``RTSP`` or ``RTMP``), because only the stream rules read the link;
+    every other type's items stay as they were (Requirement 18.3).
+
+    Pure: it reads the registry as loaded before the event, so the order
+    of the reported keys does not matter.
+    """
+    creates: Dict[str, str] = {}
+    for csid, entry in (entries or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        pending = entry.get("pending_content")
+        change_id = entry.get("portal_change_id")
+        if (entry.get("sync_status") == SYNC_STATUS_PENDING
+                and isinstance(pending, dict)
+                and pending.get("op") == "create"
+                and isinstance(pending.get("type"), str)
+                and pending["type"] in _STREAM_PARAM_DEFAULTS
+                and isinstance(change_id, str) and change_id):
+            creates[change_id] = csid
+    links: Dict[str, str] = {}
+    for reported_csid, incoming in (cameras or {}).items():
+        if not isinstance(incoming, dict):
+            continue
+        ack = incoming.get("ack")
+        alias = creates.get(ack) if isinstance(ack, str) else None
+        if alias is not None and alias != reported_csid:
+            links[alias] = reported_csid
+    return links
+
+
+# ---------------------------------------------------------------------------
+# SQS ingest handler (task 5.4)
+#
+# The per-use-case IoT topic rule
+#   SELECT *, topic(3) AS thing_name
+#   FROM '$aws/things/+/shadow/name/dda-camera-registry/update/documents'
+# forwards every shadow documents event to the shadow-report queue. Each SQS
+# record body is the shadow documents payload plus the rule-added thing_name.
+#
+# Batch semantics (partial batch responses, ReportBatchItemFailures):
+#   - transient persistence errors -> the record's messageId is returned in
+#     batchItemFailures so only that record is retried
+#   - malformed / unparseable reports -> logged and dead-lettered via an
+#     explicit SendMessage to the DLQ, NOT reported as batch failures, so a
+#     bad report never blocks or poisons the batch
+# ---------------------------------------------------------------------------
+
+# Sort-key conventions of the dda-portal-camera-registry table (design
+# "Data Models"): PK device_id, SK item-type-prefixed.
+SK_CAMERA_PREFIX = "CAMERA#"
+SK_META = "META"
+SK_CONFLICT_PREFIX = "CONFLICT#"
+
+# The Sync_Channel named shadow (camera-registry-sync design) — needed
+# here for the stale-key cleanup write below.
+SHADOW_NAME = "dda-camera-registry"
+
+# The fixed virtual Static_Image_Camera identifier and its registry SK
+# (feature cloud-static-camera-provisioning, Requirement 6.1/6.2).
+STATIC_IMAGE_CAMERA_ID = "static-image-camera"
+SK_STATIC_IMAGE_CAMERA = f"{SK_CAMERA_PREFIX}{STATIC_IMAGE_CAMERA_ID}"
+
+# The second virtual camera, the Static_Video_Camera (feature
+# static-camera-video-loop), and its registry SK.
+STATIC_VIDEO_CAMERA_ID = "static-video-camera"
+SK_STATIC_VIDEO_CAMERA = f"{SK_CAMERA_PREFIX}{STATIC_VIDEO_CAMERA_ID}"
+
+#: The Camera_Source ids a device names itself (rtsp-rtmp-stream-cameras
+#: Requirements 5.11 and 5.12): `cfg-<imageSourceId>` for a configured
+#: Image_Source, and the discovery-managed ids `disc-…`, `arv-…`,
+#: `static-image-camera` and `static-video-camera`. An entry that ends in
+#: "-" is a prefix, and any other is an exact id. The same list as the
+#: device's camera_sync/agent.py (_CONFIGURED_PREFIX,
+#: ABSENCE_TRACKED_PREFIXES and ABSENCE_TRACKED_IDS), pinned to it by the
+#: id-list parity test in test_camera_shadow_sync_integration.py.
+CFG_OR_DISCOVERY_MANAGED_IDS = ("cfg-", "disc-", "arv-",
+                                STATIC_IMAGE_CAMERA_ID, STATIC_VIDEO_CAMERA_ID)
+
+
+def is_cfg_or_discovery_managed(csid: Any) -> bool:
+    """True for a `cfg-` or discovery-managed id, matched as the device
+    matches it: `startswith` for a prefix, `==` for an exact id."""
+    return isinstance(csid, str) and any(
+        csid.startswith(rule) if rule.endswith("-") else csid == rule
+        for rule in CFG_OR_DISCOVERY_MANAGED_IDS)
+
+
+def _failure_pins(csid: str, entry: Dict[str, Any], failure: Any) -> bool:
+    """A reported failure keeps its entry out of the deletion path, except
+    for an entry pending a Portal delete whose id is neither a `cfg-` id
+    nor discovery-managed, and whose failure belongs to an earlier change
+    (Requirement 5.12). A failure without a `portalChangeId` cannot be told
+    apart from a failure of this delete, so it still pins the entry."""
+    if is_cfg_or_discovery_managed(csid):
+        return True
+    change_id = failure.get("portalChangeId") if isinstance(failure, dict) \
+        else None
+    pending_delete = (entry.get("sync_status") == SYNC_STATUS_PENDING
+                      and (entry.get("pending_content") or {}).get("op")
+                      == _OP_DELETE)
+    return not (pending_delete and change_id is not None
+                and change_id != entry.get("portal_change_id"))
+
+
+class MalformedReport(Exception):
+    """A shadow-report record that can never be processed (dead-letter it)."""
+
+
+def _dynamodb():
+    """DynamoDB resource, created lazily so test mocks are honored."""
+    import boto3
+
+    return boto3.resource("dynamodb")
+
+
+def _registry_table():
+    table_name = os.environ.get("CAMERA_REGISTRY_TABLE")
+    if not table_name:
+        raise RuntimeError("CAMERA_REGISTRY_TABLE not configured")
+    return _dynamodb().Table(table_name)
+
+
+_pin_cleanup_s3_client = None
+
+
+def _pin_s3_client():
+    """Lazy S3 client for the best-effort canonical pin-object cleanup on
+    terminal Pin_Request transitions (created lazily so test mocks are
+    honored, cached like the iot/dynamodb clients)."""
+    global _pin_cleanup_s3_client
+    if _pin_cleanup_s3_client is None:
+        import boto3
+
+        _pin_cleanup_s3_client = boto3.client("s3")
+    return _pin_cleanup_s3_client
+
+
+def _process_pin_section(table, thing_name: str, reported: Dict[str, Any],
+                         now_ms: int, usecase_id: Optional[str] = None) -> None:
+    """Route ``reported.staticImagePin`` to the Pin_Request reducer
+    (cloud-static-camera-provisioning task 3.1).
+
+    Section isolation by construction: any failure here — a malformed
+    pin section, a missing pin_requests module, a persistence error — is
+    logged and skipped without affecting the camera reduction (which has
+    already been persisted when this runs). Duplicate documents-event
+    re-reduction is a condition-guarded no-op inside
+    apply_pin_confirmation (Reqs 4.1, 4.8, 5.6, 7.5).
+
+    Applied REMOVE convergence (Req 6.2, second hardware finding —
+    jetson-thor1 / LocalServer.arm64JP7 1.0.23): deployed device builds
+    OMIT the static camera from the post-unpin full report, but AWS IoT
+    shadow updates MERGE nested maps, so the omitted key persists in the
+    shadow document and every subsequent documents event keeps
+    re-upserting the stale entry as present. When a remove confirmation
+    transitions its Pin_Request to ``applied``, this handler therefore
+    (a) marks the device's ``CAMERA#static-image-camera`` registry entry
+    absent (running AFTER the camera reduction, so it wins within this
+    event), and (b) best-effort clears the stale shadow key with an
+    explicit null so future events stop resurrecting the entry. The
+    condition-guarded transition inside apply_pin_confirmation makes the
+    convergence run at most once per remove Pin_Request.
+    """
+    pin_section = reported.get("staticImagePin")
+    if pin_section is None:
+        return  # absent section: nothing to do (tolerant)
+    try:
+        # Bundled into the same Lambda asset (the camera_registry.py
+        # precedent); imported lazily so a packaging regression degrades
+        # to a logged skip instead of breaking camera ingestion.
+        import pin_requests
+
+        outcome = pin_requests.apply_pin_confirmation(
+            table, thing_name, pin_section, now_ms=now_ms,
+            s3_client=_pin_s3_client())
+        if outcome == pin_requests.STATUS_APPLIED and \
+                _confirmed_op(table, thing_name, pin_section) == \
+                pin_requests.OP_REMOVE:
+            _converge_static_camera_removal(
+                table, thing_name, usecase_id, pin_section, now_ms)
+    except Exception:  # noqa: BLE001 — section isolation (task 3.1)
+        logger.exception(
+            "Skipping malformed/unprocessable reported.staticImagePin "
+            "section for '%s' (camera reduction unaffected)", thing_name)
+
+
+def _process_video_pin_section(table, thing_name: str,
+                               reported: Dict[str, Any], now_ms: int) -> None:
+    """Route ``reported.staticVideoPin`` to the Video_Pin_Request family
+    (feature static-camera-video-loop, design Decision 10), with the same
+    section isolation as :func:`_process_pin_section`.
+
+    An applied remove marks ``CAMERA#static-video-camera`` absent right
+    away, so the registry converges without waiting for the device's next
+    inventory report. Unlike the image camera, no shadow-key cleanup is
+    needed: every device build that knows the video camera reports it
+    explicitly absent after an unpin, so there is no stale key to clear.
+    """
+    pin_section = reported.get("staticVideoPin")
+    if pin_section is None:
+        return  # absent section: nothing to do (tolerant)
+    try:
+        import pin_requests
+
+        prefix = pin_requests.SK_VIDEO_PIN_REQUEST_PREFIX
+        outcome = pin_requests.apply_pin_confirmation(
+            table, thing_name, pin_section, now_ms=now_ms,
+            s3_client=_pin_s3_client(), sk_prefix=prefix)
+        if outcome != pin_requests.STATUS_APPLIED:
+            return
+        op = pin_section.get("op")
+        if not op:
+            item = pin_requests.get_pin_request_item(
+                table, thing_name, str(pin_section.get("requestId")),
+                sk_prefix=prefix)
+            op = (item or {}).get("op")
+        if op == pin_requests.OP_REMOVE:
+            try:
+                completed = int(pin_section.get("completedAtEpochMs"))
+            except (TypeError, ValueError):
+                completed = int(now_ms)
+            _mark_camera_entry_absent(table, thing_name,
+                                      SK_STATIC_VIDEO_CAMERA, completed)
+    except Exception:  # noqa: BLE001 — section isolation
+        logger.exception(
+            "Skipping malformed/unprocessable reported.staticVideoPin "
+            "section for '%s' (camera reduction unaffected)", thing_name)
+
+
+# Device_Stream_Capabilities (rtsp-rtmp-stream-cameras Requirement 16.5,
+# design components 8 and 12): the device reports them under
+# ``reported.deviceCapabilities.streamIngest`` and the reducer keeps a
+# sanitized copy on the device META item.
+DEVICE_CAPABILITIES_SECTION = "deviceCapabilities"
+STREAM_INGEST_CAPABILITIES = "streamIngest"
+META_STREAM_CAPABILITIES = "stream_capabilities"
+
+_CAPABILITY_FLAGS = ("rtsp", "rtmp", "tls")
+_CAPABILITY_VERSIONS = ("gstreamer", "pyav", "ffmpeg")
+_DECODER_KINDS = ("hardware", "software")
+#: Bounds on what a device can make the Portal store: at most this many
+#: codecs, and version / decoder-element strings of at most this length.
+_MAX_CAPABILITY_CODECS = 16
+_MAX_CAPABILITY_TEXT = 64
+_CODEC_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
+
+
+def _capability_text(value: Any) -> Optional[str]:
+    if isinstance(value, str) and 0 < len(value) <= _MAX_CAPABILITY_TEXT:
+        return value
+    return None
+
+
+def sanitize_stream_capabilities(section: Any) -> Dict[str, Any]:
+    """The Device_Stream_Capabilities the Portal stores and shows.
+
+    A projection onto the documented shape: boolean ``rtsp`` / ``rtmp`` /
+    ``tls`` flags, ``codecs`` mapping a lowercase codec name to its
+    ``hardware`` / ``software`` decoder element (a path the device cannot
+    decode with is absent), the ``gstreamer`` / ``pyav`` / ``ffmpeg``
+    versions, and ``probedAtMs``. Unknown keys, wrongly typed values and oversized strings
+    are dropped, so a device can never make the Portal store arbitrary or
+    unbounded data. Raises ``ValueError`` when the section is not an object.
+    """
+    if not isinstance(section, dict):
+        raise ValueError("deviceCapabilities.streamIngest is not an object")
+    capabilities: Dict[str, Any] = {}
+    for flag in _CAPABILITY_FLAGS:
+        if isinstance(section.get(flag), bool):
+            capabilities[flag] = section[flag]
+    for key in _CAPABILITY_VERSIONS:
+        text = _capability_text(section.get(key))
+        if text is not None:
+            capabilities[key] = text
+    probed = section.get("probedAtMs")
+    if isinstance(probed, (int, Decimal)) and not isinstance(probed, bool) \
+            and probed >= 0:
+        capabilities["probedAtMs"] = int(probed)
+    codecs = section.get("codecs")
+    if isinstance(codecs, dict):
+        kept: Dict[str, Any] = {}
+        for name in sorted(codecs, key=str):
+            if len(kept) >= _MAX_CAPABILITY_CODECS:
+                break
+            decoders = codecs[name]
+            if not (isinstance(name, str)
+                    and 0 < len(name) <= _MAX_CAPABILITY_TEXT
+                    and set(name) <= _CODEC_NAME_CHARS
+                    and isinstance(decoders, dict)):
+                continue
+            elements = {kind: _capability_text(decoders.get(kind))
+                        for kind in _DECODER_KINDS}
+            kept[name] = {kind: element for kind, element in elements.items()
+                          if element is not None}
+        capabilities["codecs"] = kept
+    return capabilities
+
+
+def _process_capabilities_section(meta_item: Dict[str, Any],
+                                  thing_name: str,
+                                  reported: Dict[str, Any]) -> None:
+    """Store ``reported.deviceCapabilities.streamIngest`` on the META item
+    as ``stream_capabilities`` (Req 16.5).
+
+    Isolated like :func:`_process_pin_section`: a malformed section is
+    logged and skipped, and never affects the camera reduction (already
+    persisted when this runs) or the META stamp. An absent section leaves
+    the stored value as it was: a report from a LocalServer without stream
+    support simply carries none.
+    """
+    section = reported.get(DEVICE_CAPABILITIES_SECTION)
+    if section is None:
+        return
+    try:
+        if not isinstance(section, dict):
+            raise ValueError("deviceCapabilities is not an object")
+        stream_ingest = section.get(STREAM_INGEST_CAPABILITIES)
+        if stream_ingest is None:
+            return
+        meta_item[META_STREAM_CAPABILITIES] = \
+            sanitize_stream_capabilities(stream_ingest)
+    except Exception:  # noqa: BLE001 — section isolation, like the pin path
+        logger.exception(
+            "Skipping malformed reported.deviceCapabilities section for "
+            "'%s' (camera reduction unaffected)", thing_name)
+
+
+def _confirmed_op(table, device_id: str,
+                  pin_section: Dict[str, Any]) -> Optional[str]:
+    """The confirmed Pin_Request's operation type: from the device's echo
+    (which carries every desired field verbatim), falling back to the
+    stored item for a defensive echo missing ``op``."""
+    op = pin_section.get("op")
+    if op:
+        return str(op)
+    import pin_requests
+
+    request_id = pin_section.get("requestId")
+    if not request_id:
+        return None
+    item = pin_requests.get_pin_request_item(
+        table, device_id, str(request_id))
+    return (item or {}).get("op")
+
+
+def _converge_static_camera_removal(table, device_id: str,
+                                    usecase_id: Optional[str],
+                                    pin_section: Dict[str, Any],
+                                    now_ms: int) -> None:
+    """Registry + shadow convergence for an applied remove Pin_Request
+    (Req 6.2 mitigation for deployed device builds — see
+    ``_process_pin_section``). Both steps are best-effort and isolated:
+    a failure is logged, never fatal to the ingest."""
+    try:
+        completed = int(pin_section.get("completedAtEpochMs"))
+    except (TypeError, ValueError):
+        completed = int(now_ms)
+    try:
+        _mark_static_camera_absent(table, device_id, completed)
+    except Exception:  # noqa: BLE001 — best-effort convergence
+        logger.exception(
+            "Could not mark the static-image camera registry entry "
+            "absent for '%s' after an applied remove", device_id)
+    _clear_static_camera_shadow_key(device_id, usecase_id)
+
+
+def _mark_static_camera_absent(table, device_id: str,
+                               absent_since_ms: int) -> bool:
+    """Mark the device's ``CAMERA#static-image-camera`` registry entry
+    absent with the given timestamp — only when the entry exists and is
+    not already absent (an existing absence keeps its original
+    ``absent_since``). Returns whether the entry was transitioned."""
+    return _mark_camera_entry_absent(table, device_id,
+                                     SK_STATIC_IMAGE_CAMERA, absent_since_ms)
+
+
+def _mark_camera_entry_absent(table, device_id: str, sk: str,
+                              absent_since_ms: int) -> bool:
+    """Mark one registry camera entry (``sk``) absent with the given
+    timestamp, under the same existence / not-already-absent condition as
+    :func:`_mark_static_camera_absent`."""
+    from botocore.exceptions import ClientError
+
+    try:
+        table.update_item(
+            Key={"device_id": device_id, "sk": sk},
+            UpdateExpression="SET absent = :true, absent_since = :since",
+            ConditionExpression=(
+                "attribute_exists(sk) AND "
+                "(attribute_not_exists(absent) OR absent = :false)"),
+            ExpressionAttributeValues={
+                ":true": True,
+                ":false": False,
+                ":since": int(absent_since_ms),
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == \
+                "ConditionalCheckFailedException":
+            return False  # no entry, or already absent — nothing to do
+        raise
+
+
+def iot_data_client(usecase_id: str):
+    """Assumed-role (or single-account) iot-data client for the Use_Case
+    (the camera_registry.py seam, replicated as a module attribute so
+    tests can install recording fakes). Imported lazily: the shared
+    layer provides shared_utils on the deployed Lambda."""
+    from shared_utils import (
+        get_usecase, get_usecase_client, get_usecase_region,
+    )
+
+    usecase = get_usecase(usecase_id)
+    return get_usecase_client("iot-data", usecase,
+                              region=get_usecase_region(usecase))
+
+
+def _clear_static_camera_shadow_key(device_id: str,
+                                    usecase_id: Optional[str]) -> None:
+    """Best-effort removal of the stale ``reported.cameras
+    .static-image-camera`` key from the device's Sync_Channel shadow.
+
+    Shadow updates merge nested maps, so an explicit null is the only
+    way to delete the key a deployed device build stopped reporting;
+    once cleared, subsequent documents events no longer resurrect the
+    entry as present. Any failure (unresolvable use case, assume-role or
+    shadow-write error) is logged only — the registry absent-marking
+    above already corrects this event, and the next applied remove (or a
+    device build reporting the entry explicitly absent) re-converges.
+    """
+    if not usecase_id:
+        logger.warning(
+            "No usecase_id available for '%s'; skipping the static-image "
+            "camera shadow key cleanup", device_id)
+        return
+    try:
+        client = iot_data_client(usecase_id)
+        client.update_thing_shadow(
+            thingName=device_id,
+            shadowName=SHADOW_NAME,
+            payload=json.dumps({"state": {"reported": {
+                "cameras": {STATIC_IMAGE_CAMERA_ID: None}}}}),
+        )
+        logger.info(
+            "Cleared the stale reported.cameras.%s shadow key for '%s'",
+            STATIC_IMAGE_CAMERA_ID, device_id)
+    except Exception:  # noqa: BLE001 — best-effort cleanup only
+        logger.exception(
+            "Could not clear the stale static-image camera shadow key "
+            "for '%s' (will keep converging via absent-marking)", device_id)
+
+
+def _resolve_usecase_id(thing_name: str) -> Optional[str]:
+    """The device's usecase_id from the portal devices table (Req 1.4)."""
+    devices_table = os.environ.get("DEVICES_TABLE")
+    if not devices_table:
+        return None
+    response = _dynamodb().Table(devices_table).get_item(
+        Key={"device_id": thing_name}
+    )
+    usecase_id = (response.get("Item") or {}).get("usecase_id")
+    return str(usecase_id) if usecase_id else None
+
+
+def _parse_record(record: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Extract (thing_name, reported document | None) from one SQS record.
+
+    Returns None for the report when the shadow document carries no
+    reported state (e.g. a desired-only update on a never-reported shadow)
+    — nothing to ingest, not an error.
+
+    The returned reported document also carries ``reported.staticImagePin``
+    when present (cloud-static-camera-provisioning task 3.1) — extracted
+    tolerantly: an absent section means nothing to do, and a malformed
+    section is never a MalformedReport (it is isolated at process time so
+    the camera path is untouched).
+
+    Raises MalformedReport for anything that can never be processed.
+    """
+    try:
+        # parse_float=Decimal: camera params may carry non-integral numbers
+        # and DynamoDB rejects Python floats.
+        body = json.loads(record.get("body") or "", parse_float=Decimal)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise MalformedReport(f"unparseable message body: {exc}") from exc
+    if not isinstance(body, dict):
+        raise MalformedReport("message body is not a JSON object")
+
+    thing_name = body.get("thing_name")
+    if not thing_name or not isinstance(thing_name, str):
+        raise MalformedReport("missing thing_name (topic rule SELECT)")
+
+    state = ((body.get("current") or {}).get("state")) or {}
+    if not isinstance(state, dict):
+        raise MalformedReport("current.state is not an object")
+    reported = state.get("reported")
+    if reported is None:
+        return thing_name, None
+    if not isinstance(reported, dict):
+        raise MalformedReport("current.state.reported is not an object")
+
+    cameras = reported.get("cameras", {})
+    if not isinstance(cameras, dict) or any(
+        not isinstance(value, dict) for value in cameras.values()
+    ):
+        raise MalformedReport("reported.cameras is not a map of objects")
+    failures = reported.get("failures", {})
+    if not isinstance(failures, dict) or any(
+        not isinstance(value, dict) for value in failures.values()
+    ):
+        raise MalformedReport("reported.failures is not a map of objects")
+
+    return thing_name, reported
+
+
+def _load_registry_state(
+    table, device_id: str
+) -> Tuple[Dict[str, Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Current camera entries (keyed by camera_source_id) and META item."""
+    from boto3.dynamodb.conditions import Key
+
+    entries: Dict[str, Dict[str, Any]] = {}
+    meta: Optional[Dict[str, Any]] = None
+    kwargs: Dict[str, Any] = {
+        "KeyConditionExpression": Key("device_id").eq(device_id)
+    }
+    while True:
+        response = table.query(**kwargs)
+        for item in response.get("Items", []):
+            sk = item.get("sk", "")
+            if sk == SK_META:
+                meta = item
+            elif sk.startswith(SK_CAMERA_PREFIX):
+                entries[sk[len(SK_CAMERA_PREFIX):]] = item
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+        kwargs["ExclusiveStartKey"] = last_key
+    return entries, meta
+
+
+def _strip_empty(value: Any) -> Any:
+    """Drop None values (DynamoDB stores them as NULL noise) recursively."""
+    if isinstance(value, dict):
+        return {k: _strip_empty(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_strip_empty(v) for v in value]
+    return value
+
+
+def _persist_outcome(
+    table,
+    device_id: str,
+    usecase_id: str,
+    csid: str,
+    outcome: SyncOutcome,
+) -> None:
+    """Write one SyncOutcome: camera item upsert/delete + conflict event."""
+    if outcome.conflict_event is not None:
+        conflict = outcome.conflict_event
+        table.put_item(Item=_strip_empty({
+            "device_id": device_id,
+            "sk": f"{SK_CONFLICT_PREFIX}{conflict.created_at}#{uuid.uuid4()}",
+            "usecase_id": usecase_id,
+            "camera_source_id": csid,
+            "edge_version": conflict.edge_version,
+            "portal_version": conflict.portal_version,
+            "resolution": conflict.resolution,
+            "created_at": conflict.created_at,
+        }))
+
+    if outcome.action == ACTION_DISCARD_STALE:
+        return  # Req 3.5: the recorded (newer) entry stays untouched.
+
+    camera_key = {"device_id": device_id, "sk": f"{SK_CAMERA_PREFIX}{csid}"}
+    if outcome.entry is None:
+        table.delete_item(Key=camera_key)
+        return
+    item = dict(outcome.entry)
+    item.update(camera_key)
+    item["camera_source_id"] = csid
+    item["usecase_id"] = usecase_id  # Req 1.4: scoped to the device's use case
+    table.put_item(Item=_strip_empty(item))
+
+
+def _deletion_candidates(
+    entries: Dict[str, Dict[str, Any]], reported: Dict[str, Any]
+) -> list:
+    """Registry sources missing from the full report -> reported deletions.
+
+    A reported failure keeps its entry out of the deletion path
+    (:func:`_failure_pins`), except an entry pending a Portal delete whose
+    id is neither `cfg-` nor discovery-managed and whose failure belongs
+    to an earlier change (rtsp-rtmp-stream-cameras Requirement 5.12): a
+    shadow update merges nested maps, so a create's failure stays in every
+    later documents event, and must not keep a deleted camera forever.
+
+    Entries whose pending portal change is a `create` are excluded: the
+    device never had the source, so its absence from a full report is
+    expected delivery lag, not an edge deletion.
+    """
+    cameras = reported.get("cameras", {})
+    failures = reported.get("failures", {})
+    candidates = []
+    for csid, entry in entries.items():
+        if csid in cameras:
+            continue
+        if csid in failures and _failure_pins(csid, entry, failures[csid]):
+            continue
+        pending_content = entry.get("pending_content") or {}
+        if (
+            entry.get("sync_status") == SYNC_STATUS_PENDING
+            and pending_content.get("op") == "create"
+        ):
+            continue
+        candidates.append(csid)
+    return candidates
+
+
+def _link_create(
+    outcome: SyncOutcome,
+    csid: str,
+    links: Dict[str, str],
+    created_by: Dict[str, str],
+    entries: Dict[str, Dict[str, Any]],
+) -> SyncOutcome:
+    """Apply a stream create's link (:func:`create_aliases`) to one camera
+    outcome (task 29, design component 8).
+
+    The created entry, the device's own key, gets the create's
+    ``credential_secret_arn`` when it has none, so the routes act on the
+    camera's secret after the re-key. The create's own entry, the mirror,
+    gets ``alias_of``: the created id. A discarded or deleted outcome is
+    returned as it is; :class:`SyncOutcome` is frozen, so a linked outcome
+    is a new one.
+    """
+    if outcome.action == ACTION_DISCARD_STALE or outcome.entry is None:
+        return outcome
+    entry = outcome.entry
+    alias = created_by.get(csid)
+    if alias is not None and not entry.get("credential_secret_arn"):
+        record = (entries.get(alias) or {}).get("credential_secret_arn")
+        if record:
+            entry = {**entry, "credential_secret_arn": record}
+    if csid in links:
+        entry = {**entry, "alias_of": links[csid]}
+    if entry is outcome.entry:
+        return outcome
+    return SyncOutcome(outcome.action, entry, outcome.conflict_event)
+
+
+def _process_report(
+    thing_name: str,
+    reported: Dict[str, Any],
+    usecase_id: Optional[str] = None,
+) -> None:
+    """Reduce one shadow report into the registry (Reqs 1.4, 3.2).
+
+    `usecase_id` may be supplied by callers that already resolved and
+    authorized the device's Use_Case (the camera_registry.py refresh
+    route, which runs this same reduction over an on-demand
+    GetThingShadow pull); the SQS ingest path resolves it from the
+    devices table.
+    """
+    if usecase_id is None:
+        usecase_id = _resolve_usecase_id(thing_name)
+    if not usecase_id:
+        raise MalformedReport(
+            f"device '{thing_name}' has no usecase_id in the devices table"
+        )
+
+    table = _registry_table()
+    entries, meta = _load_registry_state(table, thing_name)
+
+    reported_at = reported.get("reportedAt")
+    now_ms = int(reported_at) if reported_at is not None else int(time.time() * 1000)
+
+    # Stream creates the device acknowledged under an id of its own
+    # (task 29), from the registry as loaded before this event.
+    links = create_aliases(entries, reported.get("cameras", {}))
+    created_by = {created: alias for alias, created in links.items()}
+
+    # Camera state entries from the report.
+    for csid, incoming in reported.get("cameras", {}).items():
+        outcome = reduce_report(entries.get(csid), incoming, now_ms)
+        outcome = _link_create(outcome, csid, links, created_by, entries)
+        _persist_outcome(table, thing_name, usecase_id, csid, outcome)
+
+    # Failure entries: portal-originated changes the device rejected (5.4).
+    for csid, failure in reported.get("failures", {}).items():
+        incoming = {"status": "failed", **failure}
+        outcome = reduce_report(entries.get(csid), incoming, now_ms)
+        _persist_outcome(table, thing_name, usecase_id, csid, outcome)
+
+    # Sources missing from the full report: reported deletions.
+    for csid in _deletion_candidates(entries, reported):
+        if csid == STATIC_IMAGE_CAMERA_ID:
+            # Req 6.2: the virtual Static_Image_Camera is absence-tracked,
+            # never deleted. Once the mitigation's shadow-key null (or a
+            # device build predating the entry) removes the key from the
+            # report entirely, keep the recorded entry ABSENT instead of
+            # running the deletion reduction; already-absent entries keep
+            # their original absent_since (condition-guarded no-op).
+            try:
+                _mark_static_camera_absent(table, thing_name, now_ms)
+            except Exception:  # noqa: BLE001 — isolation, like the pin path
+                logger.exception(
+                    "Could not absence-mark the static-image camera "
+                    "registry entry for '%s'", thing_name)
+            continue
+        if csid == STATIC_VIDEO_CAMERA_ID:
+            # The Static_Video_Camera is absence-tracked the same way
+            # (static-camera-video-loop): never deleted by omission.
+            try:
+                _mark_camera_entry_absent(table, thing_name,
+                                          SK_STATIC_VIDEO_CAMERA, now_ms)
+            except Exception:  # noqa: BLE001 — isolation, like the pin path
+                logger.exception(
+                    "Could not absence-mark the static-video camera "
+                    "registry entry for '%s'", thing_name)
+            continue
+        outcome = reduce_report(entries.get(csid), None, now_ms)
+        _persist_outcome(table, thing_name, usecase_id, csid, outcome)
+
+    # Static-image Pin_Request confirmations (cloud-static-camera-
+    # provisioning task 3.1): reported.staticImagePin routes to the pin
+    # reducer, isolated from the camera reduction above. Runs AFTER the
+    # camera reduction so the applied-remove convergence's absent-marking
+    # wins over the stale (shadow-merged) present entry within this event.
+    _process_pin_section(table, thing_name, reported, now_ms,
+                         usecase_id=usecase_id)
+    # Static-video Video_Pin_Request confirmations (static-camera-video-
+    # loop): reported.staticVideoPin, isolated the same way.
+    _process_video_pin_section(table, thing_name, reported, now_ms)
+
+    # Every processed report stamps the device META item (Reqs 1.6, 3.2).
+    meta_item = stamp_meta(meta, now_ms)
+    # Device_Stream_Capabilities ride on the same META write (rtsp-rtmp-
+    # stream-cameras Req 16.5), isolated from everything above.
+    _process_capabilities_section(meta_item, thing_name, reported)
+    meta_item["device_id"] = thing_name
+    meta_item["sk"] = SK_META
+    meta_item["usecase_id"] = usecase_id
+    table.put_item(Item=_strip_empty(meta_item))
+
+
+def _dead_letter(record: Dict[str, Any], reason: str) -> bool:
+    """Send a malformed record to the DLQ; True when the send succeeded."""
+    import boto3
+
+    dlq_url = os.environ.get("CAMERA_SHADOW_REPORT_DLQ_URL")
+    if not dlq_url:
+        logger.error("CAMERA_SHADOW_REPORT_DLQ_URL not configured; "
+                      "cannot dead-letter malformed report")
+        return False
+    try:
+        boto3.client("sqs").send_message(
+            QueueUrl=dlq_url,
+            MessageBody=record.get("body") or "",
+            MessageAttributes={
+                "deadLetterReason": {
+                    "DataType": "String",
+                    # SQS message attributes cap at 256 chars comfortably
+                    "StringValue": reason[:256] or "unknown",
+                },
+            },
+        )
+        return True
+    except Exception:  # noqa: BLE001 - DLQ send is best-effort
+        logger.exception("Failed to dead-letter malformed shadow report")
+        return False
+
+
+def handler(event, context):
+    """SQS ingest: reduce shadow documents events into the Camera_Registry.
+
+    Returns a partial batch response ({"batchItemFailures": [...]}) so that
+    transient persistence errors retry only the affected record. Malformed
+    or unparseable reports are logged and dead-lettered explicitly and are
+    NOT reported as batch failures (they would never succeed on retry).
+    """
+    batch_item_failures = []
+    for record in (event or {}).get("Records", []):
+        message_id = record.get("messageId")
+        try:
+            thing_name, reported = _parse_record(record)
+            if reported is None:
+                logger.info(
+                    "Shadow documents event for '%s' carries no reported "
+                    "state; nothing to ingest", thing_name)
+                continue
+            _process_report(thing_name, reported)
+        except MalformedReport as exc:
+            logger.error(
+                "Malformed camera shadow report (message %s): %s",
+                message_id, exc)
+            if not _dead_letter(record, str(exc)) and message_id:
+                # Could not preserve the message; let SQS retry/redrive it.
+                batch_item_failures.append({"itemIdentifier": message_id})
+        except Exception:  # noqa: BLE001 - transient failure: retry the record
+            logger.exception(
+                "Transient failure processing camera shadow report "
+                "(message %s); reporting batch item failure", message_id)
+            if message_id:
+                batch_item_failures.append({"itemIdentifier": message_id})
+    return {"batchItemFailures": batch_item_failures}

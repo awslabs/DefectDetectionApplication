@@ -101,6 +101,9 @@ class PanoramaSDK(ConanFile):
         elif version == "22.04":
             print("found ubuntu 22.04",sys.stderr)
             self.requires("civetweb/1.16")
+        elif version == "24.04":
+            print("found ubuntu 24.04",sys.stderr)
+            self.requires("civetweb/1.16")
         else:
             raise Exception("Not a supported OS - missing civetweb 1.15 or 1.16 for OS="+str(version))
 

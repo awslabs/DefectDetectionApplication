@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
+import { normalizeCloudFrontDomain } from './context-helpers';
 
 export class StorageStack extends cdk.Stack {
   public readonly useCasesTable: dynamodb.Table;
@@ -17,6 +18,16 @@ export class StorageStack extends cdk.Stack {
   public readonly componentsTable: dynamodb.Table;
   public readonly sharedComponentsTable: dynamodb.Table;
   public readonly dataAccountsTable: dynamodb.Table;
+  public readonly workflowsTable: dynamodb.Table;
+  public readonly workflowVersionsTable: dynamodb.Table;
+  public readonly testDatasetsTable: dynamodb.Table;
+  public readonly testRunsTable: dynamodb.Table;
+  public readonly workflowChatSessionsTable: dynamodb.Table;
+  public readonly cameraRegistryTable: dynamodb.Table;
+  public readonly deviceRegistrationsTable: dynamodb.Table;
+  public readonly labelingTeamsTable: dynamodb.Table;
+  public readonly labelingTasksTable: dynamodb.Table;
+  public readonly workflowTuningTable: dynamodb.Table;
   public readonly portalArtifactsBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -235,6 +246,19 @@ export class StorageStack extends cdk.Stack {
       },
     });
 
+    // Deployment-gate lookup for vLLM model components
+    // (vllm-triton-inference Requirements 3.3, 8.6): greengrass_publish.py
+    // materializes a top-level component_name attribute on published vLLM
+    // records so deployments.py can resolve a model-vllm-* component back
+    // to its record's supported_architectures.
+    this.trainingJobsTable.addGlobalSecondaryIndex({
+      indexName: 'component_name-index',
+      partitionKey: {
+        name: 'component_name',
+        type: dynamodb.AttributeType.STRING,
+      },
+    });
+
     // Models Table
     this.modelsTable = new dynamodb.Table(this, 'ModelsTable', {
       tableName: 'dda-portal-models',
@@ -445,16 +469,350 @@ export class StorageStack extends cdk.Stack {
       },
     });
 
+    // Workflows Table - Workflow Manager workflow metadata (Workflow_Store)
+    this.workflowsTable = new dynamodb.Table(this, 'WorkflowsTable', {
+      tableName: 'dda-portal-workflows',
+      partitionKey: {
+        name: 'workflow_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    this.workflowsTable.addGlobalSecondaryIndex({
+      indexName: 'usecase-workflows-index',
+      partitionKey: {
+        name: 'usecase_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'created_at',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+    });
+
+    // WorkflowVersions Table - immutable per-save workflow versions
+    this.workflowVersionsTable = new dynamodb.Table(this, 'WorkflowVersionsTable', {
+      tableName: 'dda-portal-workflow-versions',
+      partitionKey: {
+        name: 'workflow_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'version',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // TestDatasets Table - canned sample-input datasets for workflow test runs
+    this.testDatasetsTable = new dynamodb.Table(this, 'TestDatasetsTable', {
+      tableName: 'dda-portal-test-datasets',
+      partitionKey: {
+        name: 'dataset_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    this.testDatasetsTable.addGlobalSecondaryIndex({
+      indexName: 'usecase-datasets-index',
+      partitionKey: {
+        name: 'usecase_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'created_at',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+    });
+
+    // TestRuns Table - Workflow_Test_Runner execution records
+    this.testRunsTable = new dynamodb.Table(this, 'TestRunsTable', {
+      tableName: 'dda-portal-test-runs',
+      partitionKey: {
+        name: 'test_run_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    this.testRunsTable.addGlobalSecondaryIndex({
+      indexName: 'workflow-runs-index',
+      partitionKey: {
+        name: 'workflow_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'started_at',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+    });
+
+    // WorkflowChatSessions Table - prompt-based generation chat sessions (TTL'd)
+    this.workflowChatSessionsTable = new dynamodb.Table(this, 'WorkflowChatSessionsTable', {
+      tableName: 'dda-portal-workflow-chat-sessions',
+      partitionKey: {
+        name: 'session_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // CameraRegistry Table - per-device Camera_Source inventory synced from
+    // edge devices (camera-registry-sync). One partition per device (thing
+    // name) with item-type-prefixed sort keys:
+    //   CAMERA#{camera_source_id} — camera source entries with sync metadata
+    //   META                      — device meta (last_report_at, never_synced)
+    //   CONFLICT#{ts}#{uuid}      — conflict events, co-located with the device
+    this.cameraRegistryTable = new dynamodb.Table(this, 'CameraRegistryTable', {
+      tableName: 'dda-portal-camera-registry',
+      partitionKey: {
+        name: 'device_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'sk',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Use_Case-scoped listings and authorization checks (every item carries
+    // the usecase_id of its device).
+    this.cameraRegistryTable.addGlobalSecondaryIndex({
+      indexName: 'usecase-index',
+      partitionKey: {
+        name: 'usecase_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+    });
+
+    // DeviceRegistrations Table - pending-station registrations for Station
+    // Quick Setup (station-quick-setup). One partition per registration
+    // (registration_id) holding the device name, Device_Group, Use_Case,
+    // Setup_Status, and Setup_Token metadata (hash only). The same table
+    // also holds invalid-token rate-limit counters under synthetic
+    // `RATELIMIT#{source_ip}` partition keys. The `ttl` time-to-live
+    // attribute is set ONLY on RATELIMIT# items so they auto-expire;
+    // registration items never carry `ttl` and are retained.
+    this.deviceRegistrationsTable = new dynamodb.Table(this, 'DeviceRegistrationsTable', {
+      tableName: 'dda-portal-device-registrations',
+      partitionKey: {
+        name: 'registration_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Use_Case-scoped listings and device-name uniqueness checks
+    // (Requirements 1.1, 1.3): query registrations by Use_Case, keyed by
+    // device name.
+    this.deviceRegistrationsTable.addGlobalSecondaryIndex({
+      indexName: 'usecase-device-index',
+      partitionKey: {
+        name: 'usecase_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'device_name',
+        type: dynamodb.AttributeType.STRING,
+      },
+    });
+
+    // LabelingTeams Table - DDA labeling teams (dda-data-labeling). Single-table
+    // layout: one partition per team (team_id) with item-type-prefixed sort keys:
+    //   META             — team metadata (usecase_id, team_name, created_at, created_by)
+    //   MEMBER#{user_id} — team member entries (user_id, email, added_at, added_by)
+    this.labelingTeamsTable = new dynamodb.Table(this, 'LabelingTeamsTable', {
+      tableName: 'dda-portal-labeling-teams',
+      partitionKey: {
+        name: 'team_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'sk',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Use_Case-scoped team listings and per-use-case name uniqueness checks
+    // (only META items carry usecase_id/created_at, so the index holds META
+    // items only).
+    this.labelingTeamsTable.addGlobalSecondaryIndex({
+      indexName: 'usecase-teams-index',
+      partitionKey: {
+        name: 'usecase_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'created_at',
+        type: dynamodb.AttributeType.NUMBER,
+      },
+    });
+
+    // LabelingTasks Table - DDA labeling task assignments (dda-data-labeling).
+    // One item per (job, image): task_id is 'task-<zero-padded index>';
+    // assignee_user_id is a Cognito sub, 'UNASSIGNED', or 'AUTO' (skip-verification).
+    // Also holds Prompt_Tuning_Preview run state (llm-autolabel-prompt-tuning):
+    // 'PREVIEW#{run_id}' run/sample items and 'PREVIEWLOCK#{usecase_id}'
+    // in-flight locks, which carry a 'ttl'. TTL is cleanup only — expiry
+    // correctness stays with the explicit 'expires_at' comparisons in the
+    // conditional lock claim and in reads (Req 8.8).
+    this.labelingTasksTable = new dynamodb.Table(this, 'LabelingTasksTable', {
+      tableName: 'dda-portal-labeling-tasks',
+      partitionKey: {
+        name: 'job_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'task_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // Labeler-scoped task lookups: a labeler's assignments across jobs
+    // (GET /labeler/jobs) and per-job unsubmitted counts.
+    this.labelingTasksTable.addGlobalSecondaryIndex({
+      indexName: 'assignee-index',
+      partitionKey: {
+        name: 'assignee_user_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'job_id',
+        type: dynamodb.AttributeType.STRING,
+      },
+    });
+
+    // WorkflowTuning Table - VLM/LLM Anomaly Tuning state (quality-prompt-tuning,
+    // task 5.2). Single table, generic `pk`/`sk` keys, holding everything a
+    // Tuning_Session owns:
+    //   pk `SESSION#{sessionId}` / sk `META`                 — the session
+    //   pk `SESSION#{sessionId}` / sk `SAMPLE#{sampleId}`    — indexed Tuning_Samples
+    //                                                          (sidecar fields + Label;
+    //                                                          NEVER image bytes, Req 9.5)
+    //   pk `SESSION#{sessionId}` / sk `CAND#{candidateId}`   — Candidates
+    //   pk `SESSION#{sessionId}` / sk `RUN#{runId}`          — Score_Runs
+    //   pk `SESSION#{sessionId}` / sk `RUNLOCK`              — the one-run-in-progress lock (Req 6.10)
+    //   pk `WF#{workflowId}`     / sk `NODE#{nodeId}`        — session uniqueness per
+    //                                                          (workflow, node) (Req 10.2)
+    //   pk `RUN#{runId}`         / sk `OUT#{sampleId}#{repeat}` — Sample_Outcomes
+    // Sample_Outcome items carry a 90-day `ttl`; every other item type is
+    // retained until the session is deleted, so TTL is cleanup only and never
+    // decides correctness. No secondary index: every access path is a query on
+    // one partition (a session's items, or a run's outcomes).
+    this.workflowTuningTable = new dynamodb.Table(this, 'WorkflowTuningTable', {
+      tableName: 'dda-portal-workflow-tuning',
+      partitionKey: {
+        name: 'pk',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'sk',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      timeToLiveAttribute: 'ttl',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     // Portal Artifacts Bucket - stores shared component artifacts (dda-LocalServer)
     // Note: For cross-account Greengrass component access, we use the GDK component bucket
     // (dda-component-{region}-{account}) which is configured with cross-account access
     // via the gdk-component-build-and-publish.sh script.
+    // Browser-based test-dataset uploads (Workflow_Test_Runner) go directly
+    // to this bucket via presigned multipart URLs, so the bucket needs CORS
+    // for the portal origin. The CloudFront domain is passed via the same
+    // `cloudFrontDomain` CDK context the compute stack uses; before the
+    // first frontend deployment (domain unknown) any origin is allowed —
+    // access is still gated by the presigned URLs themselves.
+    // Normalized through the Domain_Normalizer (portal-deploy-flag-hardening
+    // Req 3.2/3.3/3.6): any spelling (bare, scheme-prefixed, trailing-slashed)
+    // yields the bare domain, so the ternary below emits exactly one scheme.
+    const corsCloudFrontDomain = normalizeCloudFrontDomain(
+      this.node.tryGetContext('cloudFrontDomain'),
+    );
     this.portalArtifactsBucket = new s3.Bucket(this, 'PortalArtifactsBucket', {
       bucketName: `dda-portal-artifacts-${this.account}-${this.region}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       versioned: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      cors: [
+        {
+          allowedOrigins: corsCloudFrontDomain
+            ? [`https://${corsCloudFrontDomain}`]
+            : ['*'],
+          allowedMethods: [
+            s3.HttpMethods.GET,
+            s3.HttpMethods.PUT,
+            s3.HttpMethods.POST,
+            s3.HttpMethods.HEAD,
+          ],
+          allowedHeaders: ['*'],
+          // Multipart uploads read each part's ETag from the response.
+          exposedHeaders: ['ETag'],
+          maxAge: 3600,
+        },
+      ],
+      lifecycleRules: [
+        {
+          // 'labeling-previews/' holds ephemeral Prompt_Tuning_Preview result
+          // payloads (llm-autolabel-prompt-tuning, Req 1.6/3.5) — they are not
+          // pipeline Pre_Label artifacts and are referenced by no Labeling_Job,
+          // so they are expired a day after a preview run writes them.
+          id: 'ExpireLabelingPreviews',
+          prefix: 'labeling-previews/',
+          enabled: true,
+          expiration: cdk.Duration.days(1),
+          noncurrentVersionExpiration: cdk.Duration.days(1),
+        },
+      ],
     });
 
     // Outputs
@@ -521,6 +879,56 @@ export class StorageStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'DataAccountsTableName', {
       value: this.dataAccountsTable.tableName,
       description: 'DataAccounts DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'WorkflowsTableName', {
+      value: this.workflowsTable.tableName,
+      description: 'Workflows DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'WorkflowVersionsTableName', {
+      value: this.workflowVersionsTable.tableName,
+      description: 'WorkflowVersions DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'TestDatasetsTableName', {
+      value: this.testDatasetsTable.tableName,
+      description: 'TestDatasets DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'TestRunsTableName', {
+      value: this.testRunsTable.tableName,
+      description: 'TestRuns DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'WorkflowChatSessionsTableName', {
+      value: this.workflowChatSessionsTable.tableName,
+      description: 'WorkflowChatSessions DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'CameraRegistryTableName', {
+      value: this.cameraRegistryTable.tableName,
+      description: 'CameraRegistry DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'DeviceRegistrationsTableName', {
+      value: this.deviceRegistrationsTable.tableName,
+      description: 'DeviceRegistrations DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'LabelingTeamsTableName', {
+      value: this.labelingTeamsTable.tableName,
+      description: 'LabelingTeams DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'LabelingTasksTableName', {
+      value: this.labelingTasksTable.tableName,
+      description: 'LabelingTasks DynamoDB Table Name',
+    });
+
+    new cdk.CfnOutput(this, 'WorkflowTuningTableName', {
+      value: this.workflowTuningTable.tableName,
+      description: 'WorkflowTuning (VLM/LLM Anomaly Tuning) DynamoDB Table Name',
     });
 
     new cdk.CfnOutput(this, 'PortalArtifactsBucketName', {

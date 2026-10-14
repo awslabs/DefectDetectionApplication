@@ -1,0 +1,47 @@
+# dda-plugin-build:arm64_jp7 - Jetson JetPack 7 (Thor) plugin build image
+# (linux/arm64, native ARM build on a CodeBuild ARM fleet).
+#
+# custom-node-source-lifecycle Requirement 7.2: the SAME digest-pinned CUDA 13
+# Ubuntu 24.04 arm64 base as the JetPack 7 LocalServer image
+# (src/backend/Dockerfile.jp7, spec jetpack7-support). NVIDIA publishes no
+# l4t-jetpack container for Jetson Linux r38.x, so the CUDA 13.0 devel image is
+# the toolchain-parity base: noble ships GStreamer 1.24, meson 1.3, gcc 13.
+# Pullable without NGC auth.
+FROM nvcr.io/nvidia/cuda:13.0.2-devel-ubuntu24.04@sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Ubuntu 24.04: apt meson (1.3) satisfies the scaffold's >= 0.60.
+# python3-dev (3.12) provides the python3-embed pkg-config dependency the
+# scaffold's C skeleton links against. Package names verified on noble/arm64
+# (same set as Dockerfile.arm64_jp6; no renames affect this list).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        meson \
+        ninja-build \
+        cmake \
+        autoconf \
+        automake \
+        libtool \
+        git \
+        python3 \
+        python3-dev \
+        python3-pip \
+        libgstreamer1.0-dev \
+        libgstreamer-plugins-base1.0-dev \
+        libgstreamer-plugins-bad1.0-dev \
+        ca-certificates \
+        curl \
+        unzip \
+        xxd \
+    && rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2 (S3 staging/promotion + KMS signing in the entrypoint).
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" \
+        -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp \
+    && /tmp/aws/install \
+    && rm -rf /tmp/awscliv2.zip /tmp/aws
+
+COPY dda-plugin-build /usr/local/bin/dda-plugin-build
+RUN chmod +x /usr/local/bin/dda-plugin-build

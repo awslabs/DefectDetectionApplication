@@ -14,8 +14,17 @@
 import unittest
 from unittest.mock import patch, MagicMock
 from utils.gg_utils import list_gg_components
+from utils.ipc_client import reset_ipc_client
 
 class TestListComponents(unittest.TestCase):
+    def setUp(self):
+        # gg_utils now reuses one process-wide IPC client (DD-19576); drop any
+        # cached client so each test's patched connect() is exercised fresh.
+        reset_ipc_client()
+
+    def tearDown(self):
+        reset_ipc_client()
+
     @patch('awsiot.greengrasscoreipc.connect')
     def test_list_component_running_components(self, mock_connect):
         # Create a mock IPC client

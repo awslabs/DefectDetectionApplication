@@ -45,10 +45,41 @@ from utils.common import CameraStatusEnum
 from data_models.common import CameraStatusModel
 import time
 from exceptions.api.aravis_camera_exception import AravisCameraException
+from utils.static_image_camera import (
+    STATIC_IMAGE_CAMERA_ID,
+    StaticImageUnavailableError,
+    get_store as get_static_image_store,
+)
+from utils.static_video_camera import (
+    STATIC_VIDEO_CAMERA_ID,
+    StaticVideoUnavailableError,
+    get_store as get_static_video_store,
+)
 
-from threading import Lock
+from threading import RLock
 
-get_frame_lock = Lock()
+#: Serializes every operation that OPENS, CLOSES or GRABS FROM a camera.
+#:
+#: A USB3Vision device admits exactly one claim, so two overlapping opens make
+#: the second fail with ``LIBUSB_ERROR_BUSY`` and leave the cached ``Camera``
+#: broken -- every later open then fails the same way and the camera is
+#: stranded until the process restarts. Observed on a DLAP-701 when saving an
+#: Image_Source ROI while the ~2 Hz live preview was polling: two ``Connecting``
+#: log lines 26 ms apart, then ``LIBUSB_ERROR_BUSY`` on the second.
+#:
+#: ``get_camera_frame`` held this lock around its own lazy ``connect_camera``,
+#: but ``connect_camera`` / ``disconnect_camera`` reached directly from an
+#: endpoint or a config-change reconnect took nothing, so a grab and an open
+#: could run concurrently. All three now acquire it.
+#:
+#: RLock, not Lock: ``get_camera_frame`` already holds it when it calls
+#: ``connect_camera``, so a plain lock would self-deadlock on that nesting.
+#:
+#: Waits are bounded -- ``Camera.get_frame`` pops with a timeout derived from
+#: the exposure -- so a reconnect queued behind an in-flight grab cannot hang
+#: indefinitely, and serialising the two is what we want anyway: a reconnect
+#: must not tear the device out from under a grab in progress.
+get_frame_lock = RLock()
 
 # Upper bound for how long to wait for a single frame before giving up, on top
 # of the configured exposure time. Prevents a stalled USB/GenICam transfer from
@@ -77,26 +108,76 @@ FRAME_POP_TIMEOUT_MARGIN_US = 5_000_000  # 5s beyond the exposure time
 # (de)serializer on this call site is replaced.
 # ---------------------------------------------------------------------------
 def encode_frame(frame):
-    """Serialize a ``{'data','height','width'}`` frame dict (or ``None``) into the
-    non-executable length-prefixed JSON-header + raw-bytes transport."""
+    """Serialize a ``{'data','height','width'[,'pixel_format']}`` frame dict
+    (or ``None``) into the non-executable length-prefixed JSON-header +
+    raw-bytes transport. ``pixel_format`` is the optional camera pixel
+    format tag (see :func:`gst_pixel_format`); absent for older callers."""
     if frame is None:
         header = json.dumps({"null": True}).encode("utf-8")
         return struct.pack(">I", len(header)) + header
-    header = json.dumps(
-        {"null": False, "height": frame["height"], "width": frame["width"]}
-    ).encode("utf-8")
+    header_fields = {
+        "null": False, "height": frame["height"], "width": frame["width"],
+    }
+    if frame.get("pixel_format"):
+        header_fields["pixel_format"] = frame["pixel_format"]
+    header = json.dumps(header_fields).encode("utf-8")
     return struct.pack(">I", len(header)) + header + bytes(frame["data"])
 
 
 def decode_frame(buf):
     """Inverse of :func:`encode_frame`. Returns the identical
-    ``{'data','height','width'}`` dict, or ``None`` for the null/timeout frame."""
+    ``{'data','height','width'[,'pixel_format']}`` dict, or ``None`` for the
+    null/timeout frame."""
     (hlen,) = struct.unpack(">I", buf[:4])
     header = json.loads(buf[4:4 + hlen].decode("utf-8"))
     if header.get("null"):
         return None
     data = buf[4 + hlen:]
-    return {"data": data, "height": header["height"], "width": header["width"]}
+    frame = {"data": data, "height": header["height"], "width": header["width"]}
+    if header.get("pixel_format"):
+        frame["pixel_format"] = header["pixel_format"]
+    return frame
+
+
+# ---------------------------------------------------------------------------
+# Camera pixel format -> portable tag (aravis workflow feed correctness).
+#
+# The workflow Frame_Feed path pushes the RAW grabbed bytes into an appsrc;
+# without the camera's actual pixel format the executor can only guess from
+# bytes-per-pixel, and a Bayer mosaic (1 byte/pixel, like Mono8) gets
+# mislabeled GRAY8 — downstream then treats the un-demosaiced mosaic as a
+# grayscale image (garbage frames). The classic Image_Source pipeline avoids
+# this only because its configured conversion chain (e.g.
+# `video/x-bayer,format=bggr ! bayer2rgb`) carries the knowledge; the feed
+# path needs it from the buffer itself.
+# ---------------------------------------------------------------------------
+
+#: GenICam PFNC pixel format codes -> portable tag. Raw formats map to the
+#: GStreamer video/x-raw format name; Bayer mosaics map to "bayer:<pattern>"
+#: (the video/x-raw vs video/x-bayer split is the consumer's concern).
+#: Values are the PFNC constants Aravis.PIXEL_FORMAT_* resolve to, inlined so
+#: the map is usable in tests without the Aravis runtime.
+_PFNC_TO_TAG = {
+    0x01080001: "GRAY8",         # Mono8
+    0x01080008: "bayer:grbg",    # BayerGR8
+    0x01080009: "bayer:rggb",    # BayerRG8
+    0x0108000A: "bayer:gbrg",    # BayerGB8
+    0x0108000B: "bayer:bggr",    # BayerBG8
+    0x02180014: "RGB",           # RGB8Packed
+    0x02180015: "BGR",           # BGR8Packed
+    0x02200016: "RGBA",          # RGBA8Packed
+    0x02200017: "BGRA",          # BGRA8Packed
+}
+
+
+def gst_pixel_format(pfnc_code):
+    """The portable pixel-format tag for a GenICam PFNC code, or ``None``
+    for unknown/unmapped formats (the caller falls back to the historic
+    bytes-per-pixel guess)."""
+    try:
+        return _PFNC_TO_TAG.get(int(pfnc_code))
+    except (TypeError, ValueError):
+        return None
 
 # Tier 2 GenICam controls surfaced under "Advanced settings". Scoped to the
 # "safe" controls that are persisted and don't affect the stream payload /
@@ -520,6 +601,19 @@ class Camera():
                 #update camera connection status 
                 self.update_camera_status(CameraStatusEnum.CONNECTED)
                 data_dict = {'data': data, 'height': ht, 'width': wd}
+                # Tag the frame with the camera's actual pixel format so the
+                # workflow Frame_Feed can set truthful appsrc caps (a Bayer
+                # mosaic must not be mislabeled GRAY8). Best-effort: older
+                # Aravis bindings without the getter just omit the tag.
+                try:
+                    pixel_format = gst_pixel_format(
+                        arv_buffer.get_image_pixel_format())
+                    if pixel_format:
+                        data_dict['pixel_format'] = pixel_format
+                except Exception:
+                    logger.debug(
+                        f"Camera ID {self.camera_id}: pixel format "
+                        "unavailable on this Aravis buffer; frame untagged")
                 encoded_data = encode_frame(data_dict)
                 self._lock.release()
                 return encoded_data
@@ -544,6 +638,24 @@ def get_all_camera_statuses():
     return status_objs
 
 def get_camera_status(camera_id):
+    # Static_Image_Camera short-circuit (feature: static-image-camera-source):
+    # the virtual camera is "connected" exactly while a Pinned_Image exists.
+    # Never touches camera_objects.
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        pinned = get_static_image_store().is_pinned()
+        return CameraStatusModel(
+            status=CameraStatusEnum.CONNECTED if pinned else CameraStatusEnum.DISCONNECTED,
+            lastUpdatedTime=time.time(),
+        )
+    # Static_Video_Camera short-circuit (feature: static-camera-video-loop):
+    # "connected" exactly while a Pinned_Video exists; never touches
+    # camera_objects.
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        pinned = get_static_video_store().is_pinned()
+        return CameraStatusModel(
+            status=CameraStatusEnum.CONNECTED if pinned else CameraStatusEnum.DISCONNECTED,
+            lastUpdatedTime=time.time(),
+        )
     camera = camera_objects.get(camera_id) 
     if camera:
         return camera.get_status()
@@ -553,18 +665,44 @@ def connect_camera(camera_id):
     if not camera_id:
         raise AravisCameraException("Camera ID is required")
 
-    if camera_id in camera_objects:
-        disconnect_camera(camera_id)
+    # Static_Image_Camera short-circuit: "connecting" is an existence check on
+    # the Pinned_Image; never construct a manager_base.Camera for the static
+    # id (there is no device to open).
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        if get_static_image_store().is_pinned():
+            return True
+        raise AravisCameraException(
+            f"Static image camera '{STATIC_IMAGE_CAMERA_ID}' is not available "
+            f"because no image is pinned. Pin an image through the static "
+            f"image pin API before using this camera."
+        )
 
-    camera = manager_base.Camera(camera_id)
-    camera_objects[camera_id] = camera
-    camera_status = get_camera_status(camera_id)
+    # Static_Video_Camera short-circuit: an existence check on the
+    # Pinned_Video; no device is opened for the virtual camera.
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        if get_static_video_store().is_pinned():
+            return True
+        raise AravisCameraException(
+            f"Static video camera '{STATIC_VIDEO_CAMERA_ID}' is not available "
+            f"because no video is pinned. Pin a video through the static "
+            f"video pin API before using this camera."
+        )
 
-    if camera_status.status == CameraStatusEnum.CONNECTED:
-        return True
-    else: # Connection Failed
-        disconnect_camera(camera_id)
-        raise AravisCameraException(camera_status.error)
+    # Serialized against every other open/close/grab: overlapping opens make the
+    # second fail LIBUSB_ERROR_BUSY and strand the device (see get_frame_lock).
+    with get_frame_lock:
+        if camera_id in camera_objects:
+            disconnect_camera(camera_id)
+
+        camera = manager_base.Camera(camera_id)
+        camera_objects[camera_id] = camera
+        camera_status = get_camera_status(camera_id)
+
+        if camera_status.status == CameraStatusEnum.CONNECTED:
+            return True
+        else: # Connection Failed
+            disconnect_camera(camera_id)
+            raise AravisCameraException(camera_status.error)
 
 
 def get_camera_feature_bounds(camera_id):
@@ -578,6 +716,14 @@ def get_camera_feature_bounds(camera_id):
     """
     if not camera_id:
         raise AravisCameraException("Camera ID is required")
+
+    # Static_Image_Camera short-circuit: no GenICam feature map exists and the
+    # static id must never be "connected on demand" — explicit empty bounds.
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        return {}
+    # Static_Video_Camera: same — no feature map, never connected on demand.
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        return {}
 
     camera = camera_objects.get(camera_id)
     if camera is None:
@@ -596,6 +742,17 @@ def apply_camera_features(camera_id, features):
     """
     if not camera_id:
         raise AravisCameraException("Camera ID is required")
+
+    # Static_Image_Camera short-circuit: advanced GenICam features are
+    # meaningless for the virtual camera — accepted and ignored (Req 3.4
+    # spirit), and never connect anything.
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        return {}
+    # Static_Video_Camera: accepted and ignored the same way (video
+    # Requirement 3.7).
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        return {}
+
     if not features:
         return {}
 
@@ -614,22 +771,34 @@ def _disconnect_camera(camera_id):
         camera.disconnect()
 
 def disconnect_camera(camera_id):
-    logger.info(f'Deleting camera: {camera_id}')
-    if camera_id in camera_objects:
-        _disconnect_camera(camera_id)
-        del camera_objects[camera_id]
-        logger.info(f"Deleted camera {camera_id}")
-    return True
+    # Static_Image_Camera short-circuit: nothing is ever held open for the
+    # static id, so disconnect is a successful no-op.
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        return True
+    # Static_Video_Camera: nothing is held open here either (the per-process
+    # decoder belongs to the video store), so disconnect is a no-op too.
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        return True
+    # Serialized with opens and grabs: releasing the claim while another thread
+    # is opening or grabbing is how the device ends up stranded.
+    with get_frame_lock:
+        logger.info(f'Deleting camera: {camera_id}')
+        if camera_id in camera_objects:
+            _disconnect_camera(camera_id)
+            del camera_objects[camera_id]
+            logger.info(f"Deleted camera {camera_id}")
+        return True
 
 def disconnect_all_cameras():
-    if camera_objects:
-        logger.info('Disconnecting all cameras')
-        for camera_id in camera_objects:
-            _disconnect_camera(camera_id)
-        del camera_objects
-        logger.info('Deleted all cameras')
-    else:
-        logger.info("No cameras found during disconnect process")
+    with get_frame_lock:
+        if camera_objects:
+            logger.info('Disconnecting all cameras')
+            for camera_id in camera_objects:
+                _disconnect_camera(camera_id)
+            del camera_objects
+            logger.info('Deleted all cameras')
+        else:
+            logger.info("No cameras found during disconnect process")
 
 def _get_camera_frame(camera_id, camera, camera_config):
     try:
@@ -665,22 +834,48 @@ def get_camera_frame(camera_id, camera_config=None):
     raises ``Exception`` on no-frame/failure (the contract ``digital_input_*`` /
     ``workflow`` / capture / preview callers rely on to surface an HTTP error).
     """
-    get_frame_lock.acquire()
-    if camera_id not in camera_objects:
-        logger.error("Attempting to create camera object")
-        connect_camera(camera_id)
+    # Static_Image_Camera short-circuit (feature: static-image-camera-source):
+    # serve the decoded Pinned_Image BEFORE touching get_frame_lock,
+    # camera_objects, or connect_camera, so physical acquisitions are
+    # structurally undisturbed (Req 3.6, 5.7, 7.4). Acquisition config
+    # (gain/exposure/advancedSettings) is accepted and ignored (Req 3.4).
+    if camera_id == STATIC_IMAGE_CAMERA_ID:
+        try:
+            return get_static_image_store().get_frame()
+        except StaticImageUnavailableError as err:
+            raise Exception(
+                f"Unable to get camera frame for camera id: {camera_id}: {err}"
+            ) from err
+    # Static_Video_Camera short-circuit (feature: static-camera-video-loop):
+    # the frame at the current Loop_Position, served BEFORE get_frame_lock
+    # and camera_objects exactly like the image camera (video Requirements
+    # 3.1, 3.7, 4.9). Acquisition config is accepted and ignored.
+    if camera_id == STATIC_VIDEO_CAMERA_ID:
+        try:
+            return get_static_video_store().get_frame()
+        except StaticVideoUnavailableError as err:
+            raise Exception(
+                f"Unable to get camera frame for camera id: {camera_id}: {err}"
+            ) from err
+    # The lock covers the lazy open too, and a with-block releases it on
+    # every exit. It used to be acquired before the try/finally, so a camera
+    # that could not be opened left it held by the failing thread and every
+    # other thread's open/grab/close blocked until the process restarted
+    # (camera-grab-lock-leak). The exceptions callers see are unchanged.
+    with get_frame_lock:
+        if camera_id not in camera_objects:
+            logger.error("Attempting to create camera object")
+            connect_camera(camera_id)
 
-    camera = camera_objects.get(camera_id)
-    if camera is None:
-        logger.error(f"Camera not found for ID {camera_id}")
-        raise Exception(f"Camera not able to connect for ID {camera_id}")
-    try:
-        frame = _get_camera_frame(camera_id, camera, camera_config)
-        if frame is not None:
-            return frame
-        else:
+        camera = camera_objects.get(camera_id)
+        if camera is None:
+            logger.error(f"Camera not found for ID {camera_id}")
+            raise Exception(f"Camera not able to connect for ID {camera_id}")
+        try:
+            frame = _get_camera_frame(camera_id, camera, camera_config)
+            if frame is not None:
+                return frame
+            else:
+                raise Exception(f"Unable to get camera frame for camera id: {camera_id}")
+        except Exception:
             raise Exception(f"Unable to get camera frame for camera id: {camera_id}")
-    except Exception:
-        raise Exception(f"Unable to get camera frame for camera id: {camera_id}")
-    finally:
-        get_frame_lock.release()

@@ -1,0 +1,449 @@
+/*
+ *
+ * Copyright 2025 Amazon Web Services, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ */
+import axios from "axios";
+import { Connection } from "config/Interface";
+import { MaskBackground } from "api/WorkflowAPI";
+import type { StreamHealth } from "components/image-source/types";
+
+// Endpoint constants are built locally from the read-only Connection export
+// so config/Interface.tsx stays untouched.
+const REGISTRATIONS_ENDPOINT = `${Connection.ENDPOINT}/workflows/registrations`;
+const EXECUTIONS_ENDPOINT = `${Connection.ENDPOINT}/workflows/executions`;
+
+export type RegistrationStatus = "registered" | "invalid";
+export type ExecutionStatus = "pending" | "running" | "completed" | "failed";
+
+export interface WorkflowRegistration {
+  registrationId: string;
+  workflowId: string;
+  /**
+   * Human-friendly workflow name from the deployed manifest. Null for packages
+   * built before the packager emitted it; callers fall back to workflowId.
+   */
+  name?: string | null;
+  version: string;
+  arch: string;
+  artifactPath: string;
+  status: RegistrationStatus;
+  /** Epoch seconds. */
+  registeredAt: number;
+  /** Present only when status is not "registered". */
+  invalidReason?: string;
+}
+
+export interface WorkflowExecution {
+  executionId: string;
+  registrationId: string;
+  status: ExecutionStatus;
+  /** Epoch seconds; null until the execution starts. */
+  startedAt: number | null;
+  /** Epoch seconds; null until the execution finishes. */
+  finishedAt: number | null;
+  failingNodeId: string | null;
+  error: string | null;
+  /**
+   * Whether this run routed capture artifacts (terminal File_Output_Node),
+   * i.e. it has viewable image results. Drives the "View results" link.
+   */
+  hasImageResults: boolean;
+  /** The per-run capture id used to locate artifacts; null when none. */
+  captureId: string | null;
+  /** The per-run artifact output directory; null when none. */
+  outputDir: string | null;
+}
+
+export interface WorkflowRegistrationDetails extends WorkflowRegistration {
+  executions: WorkflowExecution[];
+}
+
+/**
+ * A single viewable image produced by a run.
+ *
+ * `kind: "node"` entries are the additive per-inference-node frames
+ * (vlm-bedrock-parity Requirement 4.3): one entry per persisted
+ * `(nodeId, port)` pair, served by `workflowExecutionNodeImageUrl`. The
+ * `output` entry is emitted only when the run's base output artifact exists,
+ * so a node-image-only run carries no `output` entry at all.
+ */
+export interface WorkflowExecutionResultImage {
+  kind: "output" | "input" | "node";
+  hasOverlay: boolean;
+  /**
+   * Present on the `output` entry: the run has a server-rendered overlay
+   * image (`{capture_id}.overlay.jpg`, e.g. detection boxes) served by
+   * `workflowExecutionOverlayImageUrl` (run-detection-visibility R4.4).
+   */
+  hasOverlayImage?: boolean;
+  /** Present on `kind: "node"` entries: the inference node's id. */
+  nodeId?: string;
+  /** Present on `kind: "node"` entries: the node input port (`in`/`reference`). */
+  port?: string;
+}
+
+/** Response shape of the run results-metadata endpoint. */
+export interface WorkflowExecutionResults {
+  hasImageResults: boolean;
+  captureId: string | null;
+  images: WorkflowExecutionResultImage[];
+}
+
+/**
+ * Response shape of the run overlay endpoint, in the exact form the existing
+ * on-device overlay pipeline (`getMaskImageProp` / `setupMaskImage`) consumes.
+ */
+export interface WorkflowExecutionOverlay {
+  maskImage: string | null;
+  maskBackground: MaskBackground | null;
+}
+
+/** Per-node run status for a single node. */
+export interface NodeRunStatus {
+  status: string;
+  detail?: string;
+  /** Execution duration in milliseconds; additive (node-execution-timing R2.1). */
+  durationMs?: number;
+}
+
+/** Map of nodeId to its run status. */
+export type NodeStatusMap = Record<string, NodeRunStatus>;
+
+/** A single node in the authored workflow graph, with its layout position. */
+export interface WorkflowGraphNode {
+  id: string;
+  type: string;
+  position: { x: number; y: number };
+  // Authored nodes carry additional parameters the renderer may ignore.
+  [key: string]: unknown;
+}
+
+/** A directed connection between two nodes in the workflow graph. */
+export interface WorkflowGraphConnection {
+  [key: string]: unknown;
+}
+
+/** The authored workflow.json graph used to render the run-status graph. */
+export interface WorkflowGraph {
+  schemaVersion: string;
+  nodes: WorkflowGraphNode[];
+  connections: WorkflowGraphConnection[];
+}
+
+export async function listWorkflowRegistrations(): Promise<
+  WorkflowRegistration[]
+> {
+  const { data } = await axios.get<WorkflowRegistration[]>(
+    REGISTRATIONS_ENDPOINT,
+  );
+  return data;
+}
+
+export async function getWorkflowRegistration(
+  id: string,
+): Promise<WorkflowRegistrationDetails> {
+  const { data } = await axios.get<WorkflowRegistrationDetails>(
+    `${REGISTRATIONS_ENDPOINT}/${id}`,
+  );
+  return data;
+}
+
+export async function triggerWorkflowRegistration(
+  id: string,
+): Promise<WorkflowExecution> {
+  const { data } = await axios.post<WorkflowExecution>(
+    `${REGISTRATIONS_ENDPOINT}/${id}/trigger`,
+  );
+  return data;
+}
+
+/** The bounds of the recent-executions list (the API clamps to 1..50). */
+export const REGISTRATION_EXECUTIONS_LIMIT_MAX = 50;
+
+export interface ListRegistrationExecutionsOptions {
+  /** At most this many executions, 1 to 50; the API's default is 10. */
+  limit?: number;
+  /**
+   * Only the Notable_Runs of a continuous workflow: those that failed, sent
+   * an output, or recorded an event gate transition (rtsp-rtmp-stream-cameras
+   * Requirement 16.2).
+   */
+  notable?: boolean;
+}
+
+/** The newest executions of one registration, newest first. */
+export async function listRegistrationExecutions(
+  id: string,
+  { limit, notable }: ListRegistrationExecutionsOptions = {},
+): Promise<WorkflowExecution[]> {
+  const { data } = await axios.get<WorkflowExecution[]>(
+    `${REGISTRATIONS_ENDPOINT}/${id}/executions`,
+    {
+      params: {
+        ...(limit !== undefined && { limit }),
+        ...(notable && { notable: true }),
+      },
+    },
+  );
+  return data;
+}
+
+/** The state of a continuous workflow (rtsp-rtmp-stream-cameras Req. 16.2). */
+export type ContinuousState =
+  | "running"
+  | "paused"
+  | "waiting_for_stream"
+  | "waiting_for_model";
+
+/**
+ * The per-registration counters of a continuous workflow, which survive run
+ * deletion (Requirement 12.5).
+ */
+export interface ContinuousCounters {
+  started: number;
+  completed: number;
+  failed: number;
+  skippedBusy: number;
+  skippedNoNewFrame: number;
+  notable: number;
+  outputsSent: number;
+  streamUnavailable: number;
+  /**
+   * Model waits: one per wait for a model to become READY in Triton. Older
+   * devices do not report it, so it is optional.
+   */
+  modelUnavailable?: number;
+}
+
+/**
+ * Why the Continuous_Runner is not starting runs: the model it waits for
+ * (the `modelReadiness` document of the Continuous status).
+ */
+export interface ModelReadiness {
+  /** The model name of the document's `emltriton` element. */
+  model: string;
+  /** The deployed repository name it resolved to. */
+  tritonModel: string;
+  /**
+   * `READY` | `LOADING` | `UNLOADING` | `UNAVAILABLE` | `UNKNOWN`, or the
+   * gate's own `NOT_DEPLOYED` and `INCOMPLETE`.
+   */
+  state: string;
+  reason: string | null;
+  /** Epoch milliseconds: when this wait began. */
+  sinceMs: number;
+  /** True once the wait has lasted longer than 300 s. */
+  stalled: boolean;
+}
+
+/**
+ * The Continuous status of a registration whose Stream_Camera_Source_Node
+ * runs in `continuous` mode (GET /workflows/registrations/{id}/continuous).
+ */
+export interface ContinuousStatus {
+  registrationId: string;
+  state: ContinuousState;
+  configuredFps: number;
+  /** Runs per second over the last 60 seconds; 0 while paused. */
+  effectiveFps: number;
+  counters: Partial<ContinuousCounters>;
+  streamHealth: StreamHealth | null;
+  /** Epoch milliseconds; null unless paused. */
+  pausedAtMs: number | null;
+  cameraSourceId: string;
+  runInProgress: boolean;
+  /**
+   * The model the runner waits for while the state is `waiting_for_model`,
+   * null otherwise. Older devices omit the field.
+   */
+  modelReadiness?: ModelReadiness | null;
+}
+
+function isNotFound(error: unknown): boolean {
+  return (
+    (error as { response?: { status?: number } })?.response?.status === 404
+  );
+}
+
+/**
+ * The Continuous status of a registration, or null when it does not run
+ * continuously (the API answers 404 for those).
+ */
+export async function getContinuousStatus(
+  id: string,
+): Promise<ContinuousStatus | null> {
+  try {
+    const { data } = await axios.get<ContinuousStatus>(
+      `${REGISTRATIONS_ENDPOINT}/${id}/continuous`,
+    );
+    return data;
+  } catch (error) {
+    if (isNotFound(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/** Pause a continuous workflow; the pause persists across restarts. */
+export async function pauseContinuousWorkflow(
+  id: string,
+): Promise<ContinuousStatus> {
+  const { data } = await axios.post<ContinuousStatus>(
+    `${REGISTRATIONS_ENDPOINT}/${id}/continuous/pause`,
+  );
+  return data;
+}
+
+/** Resume a paused continuous workflow. */
+export async function resumeContinuousWorkflow(
+  id: string,
+): Promise<ContinuousStatus> {
+  const { data } = await axios.post<ContinuousStatus>(
+    `${REGISTRATIONS_ENDPOINT}/${id}/continuous/resume`,
+  );
+  return data;
+}
+
+export async function getWorkflowExecution(
+  id: string,
+): Promise<WorkflowExecution> {
+  const { data } = await axios.get<WorkflowExecution>(
+    `${EXECUTIONS_ENDPOINT}/${id}`,
+  );
+  return data;
+}
+
+/** Results metadata (viewable images + overlay availability) for a run. */
+export async function getWorkflowExecutionResults(
+  id: string,
+): Promise<WorkflowExecutionResults> {
+  const { data } = await axios.get<WorkflowExecutionResults>(
+    `${EXECUTIONS_ENDPOINT}/${id}/results`,
+  );
+  return data;
+}
+
+/**
+ * The per-execution run log as plain text. The backend responds 200 with an
+ * empty body when the log is not yet available, so the caller gets "" rather
+ * than an error.
+ */
+export async function getWorkflowExecutionLog(id: string): Promise<string> {
+  const { data } = await axios.get<string>(`${EXECUTIONS_ENDPOINT}/${id}/log`, {
+    responseType: "text",
+    // Keep the raw text; axios otherwise tries to JSON-parse string bodies.
+    transformResponse: (value) => value,
+  });
+  return data ?? "";
+}
+
+/** The mask overlay (base64 + background) for a run, or nulls when absent. */
+export async function getWorkflowExecutionOverlay(
+  id: string,
+): Promise<WorkflowExecutionOverlay> {
+  const { data } = await axios.get<WorkflowExecutionOverlay>(
+    `${EXECUTIONS_ENDPOINT}/${id}/overlay`,
+  );
+  return data;
+}
+
+/** The run's metadata JSON ({capture_id}.json), or {} when unavailable. */
+export type WorkflowExecutionMetadata = Record<string, unknown>;
+
+/**
+ * The run metadata (final tag values, including each LLM node's
+ * `generated_text` and Bedrock's merged fields). The backend responds 200
+ * with `{}` when the metadata artifact is unavailable, so the caller never
+ * sees an error for a missing file.
+ */
+export async function getWorkflowExecutionMetadata(
+  id: string,
+): Promise<WorkflowExecutionMetadata> {
+  const { data } = await axios.get<WorkflowExecutionMetadata>(
+    `${EXECUTIONS_ENDPOINT}/${id}/metadata`,
+  );
+  return data;
+}
+
+/** Per-node run status map for a run, addressable by nodeId. */
+export async function getWorkflowExecutionNodeStatus(
+  id: string,
+): Promise<NodeStatusMap> {
+  const { data } = await axios.get<NodeStatusMap>(
+    `${EXECUTIONS_ENDPOINT}/${id}/node-status`,
+  );
+  return data;
+}
+
+/** The authored workflow.json graph (nodes + connections) for a registration. */
+export async function getWorkflowRegistrationGraph(
+  id: string,
+): Promise<WorkflowGraph> {
+  const { data } = await axios.get<WorkflowGraph>(
+    `${REGISTRATIONS_ENDPOINT}/${id}/graph`,
+  );
+  return data;
+}
+
+/**
+ * Build the base output-image URL for a run, appending the auth token as a
+ * query parameter when auth is enabled (mirroring how the result-history view
+ * builds capture-image URLs, since the image is served on a download route
+ * that reads the token from the query string).
+ */
+export function workflowExecutionOutputImageUrl(
+  id: string,
+  token?: string,
+): string {
+  const base = `${EXECUTIONS_ENDPOINT}/${id}/output-image`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+/**
+ * Build the URL of a run's server-rendered overlay image (the frame with the
+ * model's boxes and labels drawn in), token-aware exactly like
+ * `workflowExecutionOutputImageUrl` (run-detection-visibility R4.1, R4.3).
+ */
+export function workflowExecutionOverlayImageUrl(
+  id: string,
+  token?: string,
+): string {
+  const base = `${EXECUTIONS_ENDPOINT}/${id}/overlay-image`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+/**
+ * Build the URL for one persisted inference-node frame of a run
+ * (vlm-bedrock-parity Requirement 4.3).
+ *
+ * Mirrors `workflowExecutionOutputImageUrl`: the node/port selectors and the
+ * auth token (when auth is enabled) all ride the query string, because the
+ * frame is served on a download route that reads the token from the query
+ * parameters and a browser `<img>` cannot attach an Authorization header.
+ */
+export function workflowExecutionNodeImageUrl(
+  id: string,
+  nodeId: string,
+  port: string,
+  token?: string,
+): string {
+  const params = new URLSearchParams({ nodeId, port });
+  if (token) {
+    params.set("token", token);
+  }
+  return `${EXECUTIONS_ENDPOINT}/${id}/node-image?${params.toString()}`;
+}

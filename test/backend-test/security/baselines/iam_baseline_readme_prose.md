@@ -172,11 +172,11 @@ DDA consists of several key components:
 - **Supported Platforms**:
   - x86_64 CPU systems
   - ARM64 CPU systems
-  - NVIDIA Jetson devices (Xavier Only with Jetpack 4.X, JP5+ coming soon)
+  - NVIDIA Jetson devices (JetPack 5, 6 and 7)
 - **Supported Operating Systems**:
   - X86 Ubuntu 20.04, 22.04, (24.04 coming soon)
-  - Jetson devices currently Jetpack 4.X
-  - ARM64 - Ubuntu 18.04-22.04
+  - Jetson devices: JetPack 5.x, 6.x, 7.x
+  - ARM64 - Ubuntu 20.04-24.04
 
 ### Supported Cameras and Sensors
 
@@ -185,7 +185,7 @@ DDA consists of several key components:
 - Advantech ICAM-520/ICAM-540
 - JAI/Zebra GO-X GigE Cameras
 - Basler/Cognex Ace GigE Cameras
-- RTSP/ONVIF Cameras (via folder input)
+- RTSP cameras (`rtsp://`, `rtsps://`), including ONVIF cameras through their RTSP stream, and RTMP streams (`rtmp://`, `rtmps://`), with H.264 or H.265 video. H.265 over RTMP needs an Enhanced RTMP source, such as FFmpeg 6.1 or later, or a recent OBS. Stream cameras work in deployed workflows, triggered or continuous, and in live preview and image capture. Credentials are stored on the device and never placed in the stream URL.
 
 **Input Sensors**:
 - NVIDIA Jetson sysfs compatible beam/presence sensors, etc
@@ -245,12 +245,12 @@ DDA consists of several key components:
    
    **The EC2 build instance depends on the edge device configuration:**
    
-   **If your edge device is ARM64 (Jetson Xavier, ARM64 systems):**
+   **If your edge device is ARM64 (Jetson, ARM64 CPU systems):**
    ```bash
-   # Launch Ubuntu 18.04 ARM64, g4dn.2xlarge
+   # Launch Ubuntu 20.04 ARM64 (JetPack 5 / arm64 CPU builds)
    # Storage: 512GB, Security: SSH (port 22)
    # Attach IAM role: dda-build-role
-   # AMI: Find Ubuntu 18.04 in AWS Marketplace → [Ryan to add details]
+   # AMI: Ubuntu 20.04 LTS ARM64 (see README.md for the JP6/JP7 build hosts)
    ```
    
    **If your edge device is x86_64 CPU (Intel/AMD systems):**
@@ -479,6 +479,19 @@ sudo tail -f /greengrass/v2/logs/<mode-name>.log
 - Verify IAM permissions for Greengrass service role
 - Check S3 bucket policies and access permissions
 
+**Retained MQTT publish denied** (workflow MQTT Publish node with "Retain message" checked):
+- AWS IoT Core authorizes the MQTT retain bit as a separate action, `iot:RetainPublish`. It
+  belongs in the core device's **IoT policy** (the policy attached to the Greengrass core
+  certificate, e.g. `GreengrassV2IoTThingPolicy`), next to `iot:Publish` on the same topic
+  resources — never on `"Resource": "*"`. It is not an IAM role permission, so the
+  `dda-greengrass-policy` above is unchanged.
+- Required only if a workflow's MQTT Publish node has Retain message enabled; devices provisioned
+  through the portal already get it, an already-provisioned core device needs it added by hand.
+  See `station_install/README.md`, "Retained MQTT Publish Denied", for the policy snippet.
+- Do not retain on a topic that is also an MQTT trigger of a workflow: the broker replays the
+  retained message on every new subscription, so the workflow re-runs itself on every
+  LocalServer restart or reconnect.
+
 **Frontend not accessible**:
 ```bash
 # Check port forwarding for remote access
@@ -570,8 +583,24 @@ gst-inspect-1.0 emlcapture
 # Test camera connectivity (if using USB camera)
 gst-launch-1.0 v4l2src device=/dev/video0 ! videoconvert ! autovideosink
 
-# Test RTSP camera connectivity
-gst-launch-1.0 rtspsrc location=rtsp://camera-ip:554/stream ! decodebin ! autovideosink
+# Test an RTSP or RTMP camera: open its image source in the LocalServer UI and
+# choose "Test connection". It reports the codec, resolution, frame rate and
+# decoder, or a failure category such as authentication_failed, not_found,
+# unsupported_codec or tls_verification_failed. The same test and the
+# camera's stream health from the API (with station login enabled, add
+# -H "Authorization: Bearer <token>"):
+curl -X POST http://localhost:5000/image-sources/<image-source-id>/test-connection
+curl http://localhost:5000/image-sources/<image-source-id>/stream-health
+
+# Decode a few seconds of an RTSP stream inside the backend container, with no
+# display needed (add user-id=<user> user-pw=<password> to rtspsrc for a
+# camera that requires credentials):
+docker exec -it <backend-container-name> gst-launch-1.0 -e \
+  rtspsrc location=rtsp://camera-ip:554/stream protocols=tcp ! \
+  decodebin ! videoconvert ! fakesink num-buffers=100
+
+# A camera's most recent failure stays in its stream health (lastError, with
+# credentials redacted) after the camera recovers.
 ```
 
 **Pipeline Crashes and Debugging**:

@@ -32,6 +32,11 @@ export interface ApiGatewayStackProps extends cdk.NestedStackProps {
   sharedComponentsHandler: lambda.Function;
   dataAccountsHandler: lambda.Function;
   auditLogsHandler: lambda.Function;
+  workflowsHandler: lambda.Function;
+  workflowValidationHandler: lambda.Function;
+  workflowPackagingHandler: lambda.Function;
+  workflowGeneratorHandler: lambda.Function;
+  workflowTestingHandler: lambda.Function;
   lambdaEnvironment: { [key: string]: string };
   createLambdaRole: (name: string) => iam.Role;
   sharedLayer: lambda.LayerVersion;
@@ -40,6 +45,36 @@ export interface ApiGatewayStackProps extends cdk.NestedStackProps {
 export class ApiGatewayStack extends cdk.NestedStack {
   public readonly api: apigateway.RestApi;
   public readonly apiUrl: string;
+  /**
+   * Resource id of /devices/{id}. The Camera_Registry routes
+   * (camera-registry-sync) attach under this resource from their own nested
+   * stack (CameraRegistryApiStack) because this stack sits at the
+   * CloudFormation 500-resource limit.
+   */
+  public readonly deviceResourceId: string;
+  /**
+   * Resource id of /labeling/{id}. The DDA labeling /stop and /review*
+   * routes (dda-data-labeling) attach under this resource from their own
+   * nested stack (DdaLabelingApiStack) for the same 500-resource-limit
+   * reason.
+   */
+  public readonly labelingJobResourceId: string;
+
+  /**
+   * Resource id of /workflows/generate. The workflow-manager-gaps
+   * generation status route (GET /workflows/generate/{job_id}) attaches
+   * under this resource from its own nested stack
+   * (WorkflowManagerGapsApiStack) for the same 500-resource-limit reason.
+   */
+  public readonly workflowGenerateResourceId: string;
+
+  /**
+   * Resource id of /workflows/{id}. The workflow-manager-gaps rename route
+   * (PATCH /workflows/{id}/name) attaches under this resource from its own
+   * nested stack (WorkflowManagerGapsApiStack) for the same
+   * 500-resource-limit reason.
+   */
+  public readonly workflowResourceId: string;
 
   constructor(scope: Construct, id: string, props: ApiGatewayStackProps) {
     super(scope, id, props);
@@ -56,6 +91,20 @@ export class ApiGatewayStack extends cdk.NestedStack {
         // loggingLevel: apigateway.MethodLoggingLevel.INFO,
         // dataTraceEnabled: true,
         metricsEnabled: true,
+        // Per-method throttling for the token-authenticated Station Quick Setup
+        // routes (station-quick-setup Req 3.9, ~10 rps / burst 20). These
+        // methods live in the QuickSetupApi nested stack, but their stage-level
+        // throttle must be set here on the stage OWNER: a CfnDeployment that
+        // re-points an already-existing stage cannot carry a StageDescription
+        // ("StageDescription cannot be specified when stage referenced by
+        // StageName already exists"). Keys are literal "{resourcePath}/{httpMethod}"
+        // strings, so no cross-stack construct reference is needed.
+        methodOptions: {
+          '/quick-setup/bootstrap/GET': { throttlingRateLimit: 10, throttlingBurstLimit: 20 },
+          '/quick-setup/bundle/POST': { throttlingRateLimit: 10, throttlingBurstLimit: 20 },
+          '/quick-setup/credentials/POST': { throttlingRateLimit: 10, throttlingBurstLimit: 20 },
+          '/quick-setup/status/POST': { throttlingRateLimit: 10, throttlingBurstLimit: 20 },
+        },
       },
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
@@ -70,6 +119,29 @@ export class ApiGatewayStack extends cdk.NestedStack {
       },
     });
 
+    // Gateway-generated error responses (401 expired/missing token, 403,
+    // 5xx) do not pass through the Lambda handlers and therefore carry no
+    // CORS headers by default — browsers then surface an opaque
+    // "NetworkError" instead of the real status. Attach CORS headers to
+    // the gateway responses so the frontend can show meaningful errors
+    // (e.g. session expired) and trigger re-authentication.
+    this.api.addGatewayResponse('Default4xxWithCors', {
+      type: apigateway.ResponseType.DEFAULT_4XX,
+      responseHeaders: {
+        'Access-Control-Allow-Origin': "'*'",
+        'Access-Control-Allow-Headers':
+          "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
+      },
+    });
+    this.api.addGatewayResponse('Default5xxWithCors', {
+      type: apigateway.ResponseType.DEFAULT_5XX,
+      responseHeaders: {
+        'Access-Control-Allow-Origin': "'*'",
+        'Access-Control-Allow-Headers':
+          "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
+      },
+    });
+
     // Cognito Authorizer
     const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'CognitoAuthorizer', {
       cognitoUserPools: [props.userPool],
@@ -77,30 +149,76 @@ export class ApiGatewayStack extends cdk.NestedStack {
       identitySource: 'method.request.header.Authorization',
     });
 
-    // Create Lambda integrations
-    const authIntegration = new apigateway.LambdaIntegration(props.authHandler);
-    const userManagementIntegration = new apigateway.LambdaIntegration(props.userManagementHandler);
-    const useCasesIntegration = new apigateway.LambdaIntegration(props.useCasesHandler);
-    const devicesIntegration = new apigateway.LambdaIntegration(props.devicesHandler);
-    const deviceLogsIntegration = new apigateway.LambdaIntegration(props.deviceLogsHandler);
-    const deviceLogsAnalyzerIntegration = new apigateway.LambdaIntegration(props.deviceLogsAnalyzerHandler);
-    const deploymentsIntegration = new apigateway.LambdaIntegration(props.deploymentsHandler);
-    const dataManagementIntegration = new apigateway.LambdaIntegration(props.dataManagementHandler);
-    const datasetsIntegration = new apigateway.LambdaIntegration(props.datasetsHandler);
-    const capturesIntegration = new apigateway.LambdaIntegration(props.capturesHandler);
-    const preLabeledDatasetsIntegration = new apigateway.LambdaIntegration(props.preLabeledDatasetsHandler);
-    const labelingIntegration = new apigateway.LambdaIntegration(props.labelingHandler);
-    const trainingIntegration = new apigateway.LambdaIntegration(props.trainingHandler);
-    const compilationIntegration = new apigateway.LambdaIntegration(props.compilationHandler);
-    const packagingIntegration = new apigateway.LambdaIntegration(props.packagingHandler);
-    const greengrassPublishIntegration = new apigateway.LambdaIntegration(props.greengrassPublishHandler);
-    const modelsIntegration = new apigateway.LambdaIntegration(props.modelsHandler);
-    const modelImportIntegration = new apigateway.LambdaIntegration(props.modelImportHandler);
-    const modelConverterIntegration = new apigateway.LambdaIntegration(props.modelConverterHandler);
-    const componentsIntegration = new apigateway.LambdaIntegration(props.componentsHandler);
-    const sharedComponentsIntegration = new apigateway.LambdaIntegration(props.sharedComponentsHandler);
-    const dataAccountsIntegration = new apigateway.LambdaIntegration(props.dataAccountsHandler);
-    const auditLogsIntegration = new apigateway.LambdaIntegration(props.auditLogsHandler);
+    // ------------------------------------------------------------------
+    // Lambda integrations.
+    //
+    // CDK's default LambdaIntegration adds one AWS::Lambda::Permission per
+    // API method (two with console test-invoke enabled), which pushed this
+    // nested stack past the CloudFormation 500-resource limit (~205
+    // permissions) when the vllm-triton-inference routes were added.
+    //
+    // Instead, each handler is integrated through an ARN-imported reference
+    // (skipPermissions: true) so CDK generates NO per-method permissions,
+    // and a single API-wide permission is granted per function with a
+    // wildcard SourceArn:
+    //   arn:aws:execute-api:{region}:{account}:{apiId}/*/*/*
+    // That ARN is a strict superset of the per-method grants (the stage
+    // wildcard also covers the console test-invoke stage), so invocation
+    // behavior is unchanged while the permission count drops from ~2 per
+    // method to exactly 1 per Lambda function.
+    // ------------------------------------------------------------------
+    const lambdaIntegration = (
+      name: string,
+      handler: lambda.IFunction,
+    ): apigateway.LambdaIntegration => {
+      new lambda.CfnPermission(this, `${name}ApiInvokePermission`, {
+        action: 'lambda:InvokeFunction',
+        functionName: handler.functionArn,
+        principal: 'apigateway.amazonaws.com',
+        sourceArn: this.api.arnForExecuteApi(), // {apiId}/*/*/*
+      });
+      // Re-import the function by ARN so LambdaIntegration/Method.bind skips
+      // its automatic per-method AWS::Lambda::Permission resources — the
+      // single API-wide permission above already covers every method.
+      // sameEnvironment: false disables permission creation on the import
+      // (canCreatePermissions), and skipPermissions: true marks that as
+      // intentional (suppresses the UnclearLambdaEnvironment warning).
+      const importedHandler = lambda.Function.fromFunctionAttributes(this, `${name}IntegrationTarget`, {
+        functionArn: handler.functionArn,
+        sameEnvironment: false,
+        skipPermissions: true,
+      });
+      return new apigateway.LambdaIntegration(importedHandler);
+    };
+
+    const authIntegration = lambdaIntegration('Auth', props.authHandler);
+    const userManagementIntegration = lambdaIntegration('UserManagement', props.userManagementHandler);
+    const useCasesIntegration = lambdaIntegration('UseCases', props.useCasesHandler);
+    const devicesIntegration = lambdaIntegration('Devices', props.devicesHandler);
+    const deviceLogsIntegration = lambdaIntegration('DeviceLogs', props.deviceLogsHandler);
+    const deviceLogsAnalyzerIntegration = lambdaIntegration('DeviceLogsAnalyzer', props.deviceLogsAnalyzerHandler);
+    const deploymentsIntegration = lambdaIntegration('Deployments', props.deploymentsHandler);
+    const dataManagementIntegration = lambdaIntegration('DataManagement', props.dataManagementHandler);
+    const datasetsIntegration = lambdaIntegration('Datasets', props.datasetsHandler);
+    const capturesIntegration = lambdaIntegration('Captures', props.capturesHandler);
+    const preLabeledDatasetsIntegration = lambdaIntegration('PreLabeledDatasets', props.preLabeledDatasetsHandler);
+    const labelingIntegration = lambdaIntegration('Labeling', props.labelingHandler);
+    const trainingIntegration = lambdaIntegration('Training', props.trainingHandler);
+    const compilationIntegration = lambdaIntegration('Compilation', props.compilationHandler);
+    const packagingIntegration = lambdaIntegration('Packaging', props.packagingHandler);
+    const greengrassPublishIntegration = lambdaIntegration('GreengrassPublish', props.greengrassPublishHandler);
+    const modelsIntegration = lambdaIntegration('Models', props.modelsHandler);
+    const modelImportIntegration = lambdaIntegration('ModelImport', props.modelImportHandler);
+    const modelConverterIntegration = lambdaIntegration('ModelConverter', props.modelConverterHandler);
+    const componentsIntegration = lambdaIntegration('Components', props.componentsHandler);
+    const sharedComponentsIntegration = lambdaIntegration('SharedComponents', props.sharedComponentsHandler);
+    const dataAccountsIntegration = lambdaIntegration('DataAccounts', props.dataAccountsHandler);
+    const auditLogsIntegration = lambdaIntegration('AuditLogs', props.auditLogsHandler);
+    const workflowsIntegration = lambdaIntegration('Workflows', props.workflowsHandler);
+    const workflowValidationIntegration = lambdaIntegration('WorkflowValidation', props.workflowValidationHandler);
+    const workflowPackagingIntegration = lambdaIntegration('WorkflowPackaging', props.workflowPackagingHandler);
+    const workflowGeneratorIntegration = lambdaIntegration('WorkflowGenerator', props.workflowGeneratorHandler);
+    const workflowTestingIntegration = lambdaIntegration('WorkflowTesting', props.workflowTestingHandler);
 
     // Auth endpoints
     const authResource = this.api.root.addResource('auth');
@@ -302,6 +420,7 @@ export class ApiGatewayStack extends cdk.NestedStack {
     });
 
     const labelingJobResource = labelingResource.addResource('{id}');
+    this.labelingJobResourceId = labelingJobResource.resourceId;
     labelingJobResource.addMethod('GET', labelingIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
@@ -327,7 +446,21 @@ export class ApiGatewayStack extends cdk.NestedStack {
     });
 
     const deviceResource = devicesResource.addResource('{id}');
+    this.deviceResourceId = deviceResource.resourceId;
     deviceResource.addMethod('GET', devicesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    // PUT /devices/{id} — portal-recorded device attributes: the
+    // UseCaseAdmin-set test_device flag and the recorded
+    // target_architecture (custom-node-designer task 10.5).
+    deviceResource.addMethod('PUT', devicesIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    // DELETE /devices/{id} — remove a DDA-managed device (manage_devices),
+    // optionally with its AWS IoT thing (?delete_thing=true).
+    deviceResource.addMethod('DELETE', devicesIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
@@ -368,6 +501,12 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
+
+    // Camera_Registry endpoints (camera-registry-sync) live in their own
+    // nested stack (CameraRegistryApiStack) — this nested stack sits at the
+    // CloudFormation 500-resource limit, the same reason the Node_Designer
+    // routes moved to NodeDesignerApiStack. The device resource id is
+    // exported below so the camera routes can attach under /devices/{id}.
 
     // Deployments endpoints
     const deploymentsResource = this.api.root.addResource('deployments');
@@ -472,6 +611,28 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
+    // vLLM model registration (vllm-triton-inference)
+    const modelVllmResource = modelsResource.addResource('vllm');
+    modelVllmResource.addMethod('POST', modelImportIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const modelVllmEngineSpecResource = modelVllmResource.addResource('engine-spec');
+    modelVllmEngineSpecResource.addMethod('GET', modelImportIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Post-import engine-configuration editing (vllm-sizing-and-packaging-errors)
+    const modelVllmTrainingResource = modelVllmResource.addResource('{training_id}');
+    const modelVllmEngineConfigResource =
+      modelVllmTrainingResource.addResource('engine-configuration');
+    modelVllmEngineConfigResource.addMethod('PUT', modelImportIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
     const modelConvertResource = modelsResource.addResource('convert');
     modelConvertResource.addMethod('POST', modelConverterIntegration, {
       authorizer,
@@ -480,6 +641,13 @@ export class ApiGatewayStack extends cdk.NestedStack {
 
     const modelInspectResource = modelsResource.addResource('inspect');
     modelInspectResource.addMethod('POST', modelConverterIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    // detector-checkpoint-import Requirement 3: presigned PUT for a browser
+    // upload of a .pt / .pth / .onnx into a server-issued staging key.
+    const modelUploadUrlResource = modelsResource.addResource('upload-url');
+    modelUploadUrlResource.addMethod('POST', modelConverterIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
@@ -550,7 +718,7 @@ export class ApiGatewayStack extends cdk.NestedStack {
       timeout: cdk.Duration.seconds(60),
     });
 
-    const componentConfigurationIntegration = new apigateway.LambdaIntegration(componentConfigurationHandler);
+    const componentConfigurationIntegration = lambdaIntegration('ComponentConfiguration', componentConfigurationHandler);
 
     const schemaResource = componentsResource.addResource('schema');
     schemaResource.addMethod('GET', componentConfigurationIntegration, {
@@ -619,6 +787,150 @@ export class ApiGatewayStack extends cdk.NestedStack {
 
     const testConnectionResource = dataAccountIdResource.addResource('test');
     testConnectionResource.addMethod('POST', dataAccountsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Invokable Bedrock model options for the settings-page model dropdown;
+    // served on the reserved 'bedrock-configuration' id:
+    // GET /data-accounts/bedrock-configuration/models
+    const dataAccountModelsResource = dataAccountIdResource.addResource('models');
+    dataAccountModelsResource.addMethod('GET', dataAccountsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Per-model output token limits (llm-model-token-and-image-sizing
+    // Requirements 4.1, 4.3). Like /models above, these ride the reserved
+    // 'bedrock-configuration' data-account id:
+    //   GET/PUT /data-accounts/bedrock-configuration/token-limits
+    // Authorization beyond the Cognito authorizer is the PortalAdmin
+    // 'bedrock-config:write' gate enforced inside
+    // data_accounts.handle_bedrock_configuration, which dispatches this path
+    // ahead of the bare GET/PUT, so the write gate and its denied-attempt
+    // audit entry are inherited unchanged.
+    const dataAccountTokenLimitsResource = dataAccountIdResource.addResource('token-limits');
+    dataAccountTokenLimitsResource.addMethod('GET', dataAccountsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    dataAccountTokenLimitsResource.addMethod('PUT', dataAccountsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Workflow Manager endpoints
+    const workflowsResource = this.api.root.addResource('workflows');
+    workflowsResource.addMethod('GET', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    workflowsResource.addMethod('POST', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Static 'node-catalog' resource — sibling of the {id} path param; API
+    // Gateway prefers static segments for exact matches (same pattern as
+    // /devices/{id}/logs/analyze above).
+    const nodeCatalogResource = workflowsResource.addResource('node-catalog');
+    nodeCatalogResource.addMethod('GET', workflowValidationIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Prompt-based workflow generation (Bedrock chat sessions)
+    const workflowGenerateResource = workflowsResource.addResource('generate');
+    this.workflowGenerateResourceId = workflowGenerateResource.resourceId;
+    workflowGenerateResource.addMethod('POST', workflowGeneratorIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowResource = workflowsResource.addResource('{id}');
+    this.workflowResourceId = workflowResource.resourceId;
+    workflowResource.addMethod('GET', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    workflowResource.addMethod('PUT', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    workflowResource.addMethod('DELETE', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowDuplicateResource = workflowResource.addResource('duplicate');
+    workflowDuplicateResource.addMethod('POST', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowVersionsResource = workflowResource.addResource('versions');
+    workflowVersionsResource.addMethod('GET', workflowsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowValidateResource = workflowResource.addResource('validate');
+    workflowValidateResource.addMethod('POST', workflowValidationIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowPackageResource = workflowResource.addResource('package');
+    workflowPackageResource.addMethod('POST', workflowPackagingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const workflowTestRunsResource = workflowResource.addResource('test-runs');
+    workflowTestRunsResource.addMethod('POST', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    workflowTestRunsResource.addMethod('GET', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Test datasets (canned sample inputs for workflow test runs)
+    const testDatasetsResource = this.api.root.addResource('test-datasets');
+    testDatasetsResource.addMethod('GET', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    testDatasetsResource.addMethod('POST', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    const testDatasetResource = testDatasetsResource.addResource('{id}');
+    testDatasetResource.addMethod('GET', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+    testDatasetResource.addMethod('DELETE', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Test runs (status and per-node results)
+    const testRunsResource = this.api.root.addResource('test-runs');
+    const testRunResource = testRunsResource.addResource('{id}');
+    testRunResource.addMethod('GET', workflowTestingIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
+
+    // Custom node code assist (custom-node-code-assist): prompt-to-code
+    // generation for custom Python nodes. Reuses the WorkflowGeneratorHandler
+    // bundle — the handler dispatches on resource == '/code-assist' — so no
+    // new Lambda or compute-stack change is needed.
+    const codeAssistResource = this.api.root.addResource('code-assist');
+    codeAssistResource.addMethod('POST', workflowGeneratorIntegration, {
       authorizer,
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });

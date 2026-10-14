@@ -334,7 +334,14 @@ class TritonPythonModel:
                     dataset_details[TritonPythonModel.DATASET_IMAGE_HEIGHT_MANIFEST_KEY],
                 )
         log.debug(f"loaded model dataset_details = {dataset_image_dimensions}")
+        model_graph = manifest[TritonPythonModel.MODEL_GRAPH_MANIFEST_KEY]
+        # Mirror lfv_model_template.py: merge the top-level detection block
+        # into the stages so detection postprocessors see configured thresholds.
+        detection_config = manifest.get("detection")
+        if isinstance(detection_config, dict):
+            for stage in model_graph.get("stages", []):
+                stage.setdefault("detection", detection_config)
         return (
-            ModelConfig(manifest[TritonPythonModel.MODEL_GRAPH_MANIFEST_KEY]),
+            ModelConfig(model_graph),
             dataset_image_dimensions,
         )

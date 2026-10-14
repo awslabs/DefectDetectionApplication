@@ -29,23 +29,18 @@ COPY dda_triton/model_conversion_requirements.txt ./model_conversion_requirement
 
 COPY edge_ml1_p_camera_management ./edge_ml1_p_camera_management
 COPY edgeagent ./edgeagent
-# Pre-build the PINNED awscrt==0.14.7 (transitive dep of awsiotsdk==1.11.9) so its
-# vendored aws-lc is linked correctly. awscrt 0.14.7 always builds and statically
-# links its own bundled aws-lc (BoringSSL) — it has no flag to opt out — but on
-# this image the system OpenSSL static archive (/usr/lib/<triplet>/libcrypto.a,
-# from libssl-dev) sits EARLIER on the linker search path than awscrt's vendored
-# libcrypto.a, so the final `_awscrt*.so` link resolves `-l:libcrypto.a` against
-# system OpenSSL, which lacks the AWS-LC AEAD API. Result at import:
-# `undefined symbol: EVP_aead_aes_128_gcm_tls13`. Temporarily move the system
-# static archive aside (its .so + headers stay in place for every other build)
-# while awscrt compiles so the linker falls through to the vendored aws-lc lib,
-# then restore it. This pre-install satisfies awsiotsdk's pin so prereqs_install.sh
-# below does not rebuild awscrt. The awscrt/awsiotsdk versions are unchanged.
-RUN ARCH_TRIPLET="$(gcc -dumpmachine)" && LC="/usr/lib/${ARCH_TRIPLET}/libcrypto.a" && \
-    if [ -f "$LC" ]; then mv "$LC" "${LC}.bak"; fi && \
-    python3 -m pip install --no-cache-dir --no-binary :all: awscrt==0.14.7 && \
-    if [ -f "${LC}.bak" ]; then mv "${LC}.bak" "$LC"; fi && \
-    python3 -c "import awscrt.mqtt; print('awscrt vendored aws-lc link OK')"
+# Pre-install the PINNED awscrt==0.36.1 (the exact transitive dep of
+# awsiotsdk==1.31.0) from its official manylinux wheel. The old JetPack-4-era
+# awscrt==0.14.7 source-build (with the libcrypto.a shuffle to dodge the
+# vendored aws-lc / system OpenSSL link collision) is gone: modern awscrt
+# ships prebuilt wheels for this platform, and 0.14.7's aws-c-event-stream
+# carried the fatal "Continuation ref count has gone negative" abort that
+# crash-looped the backend over Greengrass IPC (awscrt-event-stream-crash
+# fix). --only-binary guarantees the wheel is used (no source build, no
+# OpenSSL trap). This pre-install satisfies awsiotsdk's pin so
+# prereqs_install.sh below does not re-resolve awscrt.
+RUN python3 -m pip install --no-cache-dir --only-binary :all: awscrt==0.36.1 && \
+    python3 -c "import awscrt.mqtt, awscrt.eventstream; print('awscrt wheel OK')"
 RUN ./edge_ml1_p_camera_management/prereqs_install.sh 
 # Bake the pinned model conversion dependencies into the image at build time so they
 # are already present and importable at container startup, removing the need for a
@@ -57,17 +52,22 @@ RUN python3.11 -m pip install --no-cache-dir -r ./model_conversion_requirements.
 # RF-DETR object-detection + segmentation models). Without it those models fail
 # to initialize in the Triton python stub with "ModuleNotFoundError: No module
 # named 'onnxruntime'" and sit in LOADING forever (DLR/Neo models are
-# unaffected — engines import lazily per-runner). JP5/JP6 install this too; JP4
-# was the only target missing it. JetPack 4 (CUDA 10.2, L4T r32) has no
-# supported GPU onnxruntime build path, so this is CPU-only: the onnxruntime
-# 1.16.3 cp311 aarch64 manylinux_2_17 wheel installs on this glibc 2.27
-# (Ubuntu 18.04) base, and OnnxRunner falls back to the CPU provider.
+# unaffected — engines import lazily per-runner). The JetPack images build a
+# GPU onnxruntime; this image serves the CPU targets (x86_64 and the generic
+# arm64 CPU component), so it installs the onnxruntime 1.16.3 cp311
+# manylinux_2_17 CPU wheel and OnnxRunner uses the CPU provider.
 ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
 RUN python3.11 -m pip install --no-cache-dir ${ONNXRUNTIME_SPEC}
 RUN ./edge_ml1_p_camera_management/install_aravis.sh
 RUN python3.11 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
 RUN apt update -y
-RUN apt-get install libssl1.1 -y
+# libssl1.1 (OpenSSL 1.1 runtime) exists only through focal; on
+# jammy the base already ships libssl3 and the edgemlsdk debs carry their
+# own OpenSSL 3.x (openssl.deb). Gate on the base's own /etc/os-release:
+# the OS build-arg is out of scope in RUN (declared only before FROM).
+RUN . /etc/os-release && if [ "$VERSION_ID" = "18.04" ] || [ "$VERSION_ID" = "20.04" ] ; then \
+    apt-get install libssl1.1 -y; \
+    fi
 RUN apt update -y
 RUN apt install libexif12 libcurl4 libarchive13 gstreamer1.0-tools gstreamer1.0-libav ffmpeg -y
 RUN if [ "$OS" = "18.04" ] ; then \
@@ -79,6 +79,10 @@ RUN find / -name "libpython3.11.so.1.0" -print
 RUN apt clean -y
 
 COPY app.py ./
+# Docker healthcheck helper (edge-deploy-reliability, Defect B): compose runs
+# `python3 /healthcheck.py` as the backend healthcheck. Lands at /healthcheck.py
+# (no WORKDIR is set, so ./ is /).
+COPY healthcheck.py ./
 COPY logging.conf ./
 COPY dao ./dao
 COPY utils ./utils
@@ -98,6 +102,24 @@ COPY defect_detection_config ./defect_detection_config
 COPY dda_logging ./dda_logging
 COPY endpoints ./endpoints
 COPY data_models ./data_models
+COPY camera_discovery ./camera_discovery
+COPY camera_sync ./camera_sync
+COPY workflow_engine ./workflow_engine
+# rtsp-rtmp-stream-cameras: the Stream_Ingest_Service package. A new module
+# needs its own COPY: resources/accessors/image_source_accessor.py imports it
+# at module load, so without this line the backend cannot start.
+COPY stream_ingest ./stream_ingest
+# vllm-triton-inference (Requirements 4.1, 8.7): the companion vLLM runtime
+# package. Every new src/backend module needs a COPY line here — missing ones
+# have caused startup regressions (endpoints/text_generation.py imports
+# vllm_runtime.manager at module load). The other modules this feature adds
+# ride existing COPYs: endpoints/text_generation.py (COPY endpoints),
+# workflow_engine/llm_inference.py + vendored catalog (COPY workflow_engine),
+# dda_triton/vllm_model_prep.py (COPY dda_triton),
+# utils/feature_configs_utils.py (COPY utils), app.py (COPY app.py).
+COPY vllm_runtime ./vllm_runtime
+COPY local_auth ./local_auth
+COPY user_accounts_sync ./user_accounts_sync
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY dda_triton ./dda_triton

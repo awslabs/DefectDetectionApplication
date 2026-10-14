@@ -2,9 +2,1434 @@
  * API service for making HTTP requests to the backend
  */
 import { getConfig } from '../config';
-import { UseCase, Device, User, S3Bucket } from '../types';
+import { UseCase, Device, User, UserRole, S3Bucket } from '../types';
 import type { Capture } from '../components/ResultsViewer';
+import type {
+  NodeTypeDescriptor,
+  TestDataset,
+  TestDatasetCompletedFile,
+  TestDatasetUploadInitiation,
+  WorkflowDefinition,
+  WorkflowGenerationResult,
+  WorkflowSummary,
+  WorkflowTestRun,
+  WorkflowTestRunDetail,
+  WorkflowValidationRun,
+  WorkflowValidationStatus,
+} from '../pages/workflows/types';
+import type {
+  CameraMutationResponse,
+  CameraSourceMutationBody,
+  DeviceCameraConflictsResponse,
+  DeviceCamerasResponse,
+  StaticImagePinStatusResponse,
+  StaticImagePinSubmitResponse,
+  StaticImageUploadUrlResponse,
+  StaticVideoPinStatusResponse,
+  StaticVideoPinSubmitResponse,
+  StaticVideoUploadUrlResponse,
+  StaticVideoValidationSubmitResponse,
+} from '../pages/workflows/cameraReference';
+import type { CameraBindingContext } from '../pages/deployments/cameraBindings';
+import type {
+  BuildBranchesResponse,
+  BuildJob,
+  BuildJobsPage,
+  BuildLogsPage,
+  SubmitBuildRequest,
+  SubmitBuildResponse,
+} from '../pages/builds/types';
+import type {
+  CreateSyntheticSessionBody,
+  SyntheticApprovalBody,
+  SyntheticGenerateBody,
+  SyntheticGenerateResponse,
+  SyntheticIntegrateResponse,
+  SyntheticModelsResponse,
+  SyntheticPromptTemplateResponse,
+  SyntheticRetrainBody,
+  SyntheticSession,
+  SyntheticSessionDetailResponse,
+  SyntheticSessionSummary,
+} from '../pages/synthetic/types';
+import type {
+  ApplyCandidateBody,
+  ApplyCandidateResponse,
+  CancelScoreRunResponse,
+  CandidatePreviewResponse,
+  CreateTuningSessionBody,
+  CreateTuningSessionResponse,
+  DeleteTuningCandidateResponse,
+  DeleteTuningSessionResponse,
+  ListScoreRunOutcomesParams,
+  ListTuningSamplesParams,
+  ListTuningSamplesResponse,
+  RefreshTuningSessionResponse,
+  ScoreRunDiffResponse,
+  ScoreRunOutcomesResponse,
+  ScoreRunResponse,
+  SetSelectionResponse,
+  SetTuningLabelsBody,
+  SetTuningLabelsResponse,
+  StartScoreRunBody,
+  StartScoreRunResponse,
+  SyntheticNegativesResponse,
+  TuningCandidateBody,
+  TuningCandidateResponse,
+  TuningOverviewResponse,
+  TuningSessionResponse,
+} from '../pages/workflow-tuning/types';
+import { groupDetectionBaseModels } from '../utils/detectionBaseModels';
 import { beginRequest, endRequest } from './loadingBus';
+import { fetchAuthSession } from 'aws-amplify/auth';
+import { redirectToLogin } from './sessionRedirect';
+
+/**
+ * Error thrown for API failures. Workflow Manager endpoints use the
+ * structured error envelope {error: {code, message, details}}; `code`
+ * and `details` are carried through so callers can act on them (e.g.
+ * the deployment ids of a rejected workflow delete, Requirement 5.6).
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status?: number,
+    public readonly code?: string,
+    public readonly details?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+// Use-case bucket configuration API types (spec:
+// portal-usecase-bucket-config, design §5.3, §5.5, §10.1).
+
+/** Response of PUT /usecases/{id} with additional_s3_buckets_add / _remove. */
+export interface UsecaseBucketUpdateResponse {
+  message: string;
+  added: string[];
+  already_present: string[];
+  removed: string[];
+  not_present: string[];
+  /** The computed allowed set after the write (configured + additional). */
+  allowed_s3_buckets: string[];
+}
+
+/** The bucket entry POST /s3-buckets answers with (201). */
+export interface CreatedS3Bucket extends S3Bucket {
+  portal_created: true;
+  /** Tag keys written on the bucket (dda-portal:*). */
+  tags: string[];
+  abac: 'enabled' | 'failed';
+  /** True when the bucket was also added to the given use case. */
+  added_to_usecase: boolean;
+  /** Present when `usecase_id` was given and the add did not happen. */
+  add_error?: {
+    error_code: 'usecase_not_found' | 'bucket_not_eligible' | 'usecase_update_failed';
+    reason?: string;
+    remedy: string;
+  };
+}
+
+/** One entry of GET /users/me/usecases. */
+export interface MyUsecaseEntry {
+  usecase_id: string;
+  name?: string;
+  description?: string;
+  owner?: string;
+  /** The caller's role on this use case as the RBAC manager resolves it. */
+  user_role: UserRole | null;
+  created_at?: number;
+  account_id?: string;
+}
+
+export interface MyUsecasesResponse {
+  usecases: MyUsecaseEntry[];
+  total_count: number;
+  is_super_user: boolean;
+}
+
+// Code_Assistant API types (custom-node-code-assist).
+
+/**
+ * Runtime entry-point contract of the node type being edited. `plugin_source`
+ * (custom-node-source-lifecycle 5.9) covers the non-Python files of a
+ * Plugin_Scaffold: the complete replacement content of one file.
+ */
+export type CodeAssistContract =
+  | 'process_frame'
+  | 'process_frame_or_handle'
+  | 'frame_hook'
+  | 'produce_frame'
+  | 'plugin_source';
+
+/** Error material attached to a code-assist request (custom-node-source-lifecycle 5). */
+export interface CodeAssistDiagnostics {
+  kind: 'build' | 'simulation' | 'user';
+  /** The failing Target_Architecture for build diagnostics. */
+  architecture?: string;
+  /** At most 16 KiB; the panel keeps the tail and flags truncation. */
+  text: string;
+  truncated?: boolean;
+}
+
+/** One `POST /code-assist` request body. */
+export interface CodeAssistRequest {
+  usecase_id: string;
+  surface: 'workflow-builder' | 'node-designer';
+  contract: CodeAssistContract;
+  /** 1..4,000 chars with at least one non-whitespace character. */
+  prompt: string;
+  /** Present iff the editor holds a non-whitespace character (2.6, 2.10). */
+  current_code?: string;
+  context?: {
+    nodeType?: string;
+    parameters?: { name: string; param_type: string; description?: string }[];
+    /** Source_Editor multi-file context (custom-node-source-lifecycle 5.6). */
+    active_file?: string;
+    files?: Record<string, string>;
+    file_paths?: string[];
+    kind?: 'scaffold' | 'generated' | 'imported';
+  };
+  diagnostics?: CodeAssistDiagnostics;
+}
+
+/** Successful code-assist result; nothing is persisted server-side. */
+export interface CodeAssistResponse {
+  code: string;
+  notes: string;
+  model_id: string;
+  contract: CodeAssistContract;
+  /** The Source_Tree file the code applies to (node-designer surface, 5.7). */
+  target_file?: string;
+}
+
+// User admin types (portal-user-manager).
+
+/**
+ * One Cognito account as returned by `GET /api/v1/admin/users`
+ * (portal-user-manager Requirement 2.1). `role` is the Portal_Role from
+ * the `custom:role` attribute (default `Viewer`); `user_status` is the
+ * Cognito status (e.g. CONFIRMED, FORCE_CHANGE_PASSWORD); `edge_capable`
+ * is true when a credential verifier has been captured for the account,
+ * making it usable for local edge login.
+ */
+export interface AdminAccount {
+  username: string;
+  email: string;
+  email_verified: boolean;
+  role: string;
+  user_status: string;
+  enabled: boolean;
+  edge_capable: boolean;
+}
+
+/** Response of `GET /api/v1/admin/users` (user_admin.py). */
+export interface AdminUsersResponse {
+  users: AdminAccount[];
+  total_count: number;
+}
+
+/**
+ * One edge device row of `GET /api/v1/admin/edge-sync/devices`
+ * (portal-user-manager Requirement 7.4): the devices table joined with
+ * the `dda-portal-account-sync` sync-state table. `lastSyncStatus` /
+ * `lastSyncAt` are absent for devices that have never been synced;
+ * `failureReason` accompanies a `failed` status (e.g. "device
+ * unreachable").
+ */
+export interface EdgeSyncDevice {
+  device_id: string;
+  lastSyncStatus?: 'pending' | 'in_progress' | 'success' | 'failed' | null;
+  /** Epoch milliseconds of the last successful sync. */
+  lastSyncAt?: number | null;
+  pendingChanges?: boolean;
+  failureReason?: string | null;
+}
+
+// Build infrastructure configuration types
+// (portal-build-fleet-and-workflow-gates Requirement 9).
+
+/**
+ * Effective build infrastructure configuration as returned by
+ * `GET /build-config`: stored values merged over the documented defaults
+ * (arm64 m6g.4xlarge, x86_64 m6i.4xlarge, 100 GB, us-east-1, 4 h,
+ * spot off, source_ref null = repository default branch).
+ */
+export interface BuildInfrastructureConfig {
+  arm64_instance_type: string;
+  x86_64_instance_type: string;
+  volume_size_gb: number;
+  region: string;
+  max_runtime_hours: number;
+  use_spot_for_ephemeral: boolean;
+  /** null means "the repository's default branch". */
+  source_ref: string | null;
+  /**
+   * Operator-controlled repository the submission form defaults to
+   * (build-source-selection Req 1.5); the documented default is the
+   * DDA repository.
+   */
+  default_repository: string;
+  /**
+   * Organization-wide default Ubuntu flavor applied when a launch
+   * omits `ubuntu_flavor` (ubuntu-pro-build-servers Req 6.1, 6.2);
+   * the documented default is `standard`.
+   */
+  ubuntu_flavor?: BuildServerUbuntuFlavor;
+}
+
+/**
+ * One per-parameter rejection from `PUT /build-config`
+ * (CONFIG_INVALID `details.errors`, Requirement 9.5): the failed
+ * validation rule, the invalid parameter, and a user-readable message.
+ */
+export interface BuildConfigValidationError {
+  rule: string;
+  parameter?: string;
+  message: string;
+}
+
+/** One applied change recorded by `PUT /build-config` (Requirement 9.4). */
+export interface BuildConfigChange {
+  parameter: string;
+  prior_value: unknown;
+  new_value: unknown;
+}
+
+/**
+ * Partial configuration update for `PUT /build-config`. Values are sent
+ * as entered (the backend validates and rejects atomically with
+ * per-parameter errors); null reverts a field to its documented default.
+ */
+export type BuildInfrastructureConfigUpdate = Partial<
+  Record<keyof BuildInfrastructureConfig, string | number | boolean | null>
+>;
+
+/** Response of `GET /api/v1/admin/edge-sync/devices` (user_admin.py). */
+export interface EdgeSyncDevicesResponse {
+  devices: EdgeSyncDevice[];
+  count: number;
+}
+
+// Build fleet types (portal-build-fleet-and-workflow-gates).
+
+/**
+ * EC2 lifecycle state of a Dedicated_Build_Server — exactly the six
+ * states of Requirement 6.1.
+ */
+export type BuildServerLifecycleState =
+  | 'pending'
+  | 'running'
+  | 'stopping'
+  | 'stopped'
+  | 'shutting-down'
+  | 'terminated';
+
+/** CPU architecture of a Dedicated_Build_Server (Requirement 6.5). */
+export type BuildServerArchitecture = 'arm64' | 'x86_64';
+
+/**
+ * Ubuntu LTS release of a Dedicated_Build_Server host: 22.04 is the
+ * default (existing behavior); 24.04 (noble) is the JetPack 7 (JP7)
+ * build host and is arm64 only (jetpack7-support design §10).
+ */
+export type BuildServerUbuntuVersion = '22.04' | '24.04';
+
+/**
+ * Ubuntu flavor of a Dedicated_Build_Server (ubuntu-pro-build-servers):
+ * `pro` is Ubuntu Pro (extended security maintenance), `standard` the
+ * regular Ubuntu server offering.
+ */
+export type BuildServerUbuntuFlavor = 'pro' | 'standard';
+
+/**
+ * Marker of an accepted fleet action that has not yet reached its
+ * expected lifecycle state (build_fleet.py, Requirement 6.11). The
+ * dispatcher reports the action failed when `deadline` (epoch ms)
+ * passes before `expected_state` is observed.
+ */
+export interface BuildServerPendingAction {
+  action: 'launch' | 'start' | 'stop' | 'terminate';
+  requested_by: string;
+  /** Epoch milliseconds. */
+  requested_at: number;
+  /** Epoch milliseconds; 10 minutes after the action was accepted. */
+  deadline: number;
+  expected_state: BuildServerLifecycleState;
+}
+
+/**
+ * One Dedicated_Build_Server as returned by `GET /build-servers`
+ * (build_fleet.py, Requirement 6.1): name, instance identifier,
+ * instance type, CPU architecture, lifecycle state (reconciled live
+ * against EC2), the running Build_Job when one exists, and the time of
+ * the last state change.
+ */
+export interface BuildServer {
+  server_id: string;
+  name: string;
+  instance_id: string;
+  instance_type: string;
+  cpu_architecture: BuildServerArchitecture;
+  /**
+   * Ubuntu release the server was launched with; absent on servers
+   * launched before the JP7 (24.04) option existed — those are 22.04
+   * hosts.
+   */
+  ubuntu_version?: BuildServerUbuntuVersion;
+  /**
+   * Effective Ubuntu flavor; the backend reports 'standard' for servers
+   * launched before flavor selection existed (ubuntu-pro-build-servers
+   * Req 3.3, 4.4).
+   */
+  ubuntu_flavor?: BuildServerUbuntuFlavor;
+  lifecycle_state: BuildServerLifecycleState;
+  /** Present iff a Build_Job is currently running on the server. */
+  running_build_job_id?: string | null;
+  /** Epoch milliseconds of the last lifecycle state change. */
+  last_state_change_at?: number | null;
+  pending_action?: BuildServerPendingAction | null;
+  created_by?: string;
+  created_at?: number;
+  terminated_at?: number | null;
+}
+
+/** Response of `GET /build-servers` (build_fleet.py). */
+export interface BuildServersResponse {
+  servers: BuildServer[];
+}
+
+// vLLM model registration types (vllm-triton-inference).
+
+/**
+ * One validation finding from `POST /api/v1/models/vllm` (model_import.py,
+ * Requirements 1.1/1.9/1.10/1.11): a 400 response carries the complete
+ * finding list, each naming the offending field and value.
+ */
+export interface VllmRegistrationFinding {
+  field: string;
+  value: unknown;
+  reason: string;
+}
+
+/** One engine setting of `GET /api/v1/models/vllm/engine-spec`. */
+export interface VllmEngineSettingSpec {
+  default: string | number | boolean | Record<string, number>;
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'object';
+  accepted_values?: string[];
+  /** Sub-keys an `object` setting accepts (e.g. `limit_mm_per_prompt`). */
+  accepted_keys?: string[];
+  range?: string;
+  description: string;
+}
+
+/** Response of `GET /api/v1/models/vllm/engine-spec` (model_import.py). */
+export interface VllmEngineSpec {
+  description: string;
+  settings: Record<string, VllmEngineSettingSpec>;
+  source: {
+    description: string;
+    huggingface_model_id: { type: string; format: string; example: string };
+    s3_model_artifact: { type: string; format: string; example: string };
+  };
+}
+
+/**
+ * The publish write-back map on a vLLM_Model_Record
+ * (greengrass_publish.py task 4.2): carries the component identity and
+ * the supported Target_Architecture set shown on the model detail view
+ * (Requirement 3.8).
+ */
+export interface VllmPublishedComponent {
+  component_name: string;
+  component_version: string;
+  supported_architectures: string[];
+  runtime: string;
+  component_arns: Record<string, string>;
+  published_at: number;
+}
+
+// vLLM engine-configuration types (vllm-sizing-and-packaging-errors).
+
+/**
+ * The resolved Engine_Configuration stored on a vLLM_Model_Record
+ * (dtype, gpu_memory_utilization, max_model_len, tensor_parallel_size,
+ * enforce_eager). Returned on the model detail response (Requirement 1.2)
+ * and by the engine-configuration update endpoint (Requirement 2.4).
+ */
+export type VllmEngineConfiguration = Record<
+  string,
+  string | number | boolean | Record<string, number>
+>;
+
+/**
+ * One per-architecture finding of a preflight Fit_Check evaluation.
+ *
+ * The first five fields are the ORIGINAL contract and are unchanged in name
+ * and type. Everything below them is the ADDITIVE term breakdown behind
+ * `fits` that `vllm_fit_check.FitFinding` gained in
+ * `jp6-vllm-kv-cache-oom-regression` (design Decision 2, File 7), declared
+ * **optional** on purpose: findings serialized before that change omit the
+ * fields entirely, and every existing consumer reads only `message` — which
+ * already states each term with its number — so absence must keep rendering
+ * exactly as today (Requirements 2.1, 2.3, 3.1).
+ */
+export interface VllmFitCheckFinding {
+  arch: string;
+  fits: boolean;
+  budget_bytes: number;
+  required_bytes: number;
+  message: string;
+  /** Estimated on-GPU weight size charged against the budget. */
+  weights_bytes?: number;
+  /** Estimated PyTorch activation/profiling peak — an ESTIMATE, not measured. */
+  activation_bytes?: number;
+  /** Serving-margin floor reserved for the KV cache. */
+  kv_floor_bytes?: number;
+  /** Memory co-resident consumers hold on the shared (unified) device. */
+  co_tenancy_bytes?: number;
+  /**
+   * Ceiling on `gpu_memory_utilization` for this architecture; `null` when
+   * no cap is known (the backend omits rather than invents one).
+   */
+  fraction_cap?: number | null;
+  /** Effective `limit_mm_per_prompt.image` the activation term scales with. */
+  images_per_prompt?: number;
+  /** Which conditions failed: `'budget'` | `'co_tenancy'`. */
+  failed_conditions?: string[];
+  /** Soft warnings on a verdict: `'thin_margin'` | `'near_cap'`. */
+  warnings?: string[];
+}
+
+/**
+ * Non-blocking Fit_Check result carried on registration and
+ * engine-configuration update responses (Requirements 3.4, 3.5).
+ */
+export interface VllmFitCheckResult {
+  status: 'passed' | 'warnings' | 'unverified';
+  estimate: {
+    total_bytes: number;
+    method: string;
+    detail: string;
+  } | null;
+  findings: VllmFitCheckFinding[];
+  message?: string;
+}
+
+/**
+ * Response of `PUT /api/v1/models/vllm/{training_id}/engine-configuration`
+ * (model_import.py update_vllm_engine_configuration): the complete updated
+ * configuration, a re-package/publish notice, and a fit-check result
+ * (Requirements 2.4, 3.5). A 400 rejection carries the finding list as
+ * `details.findings` on the thrown ApiError (Requirement 2.2).
+ */
+export interface VllmEngineConfigurationUpdateResponse {
+  training_id: string;
+  engine_configuration: VllmEngineConfiguration;
+  notice: string;
+  fit_check: VllmFitCheckResult;
+}
+
+// Station Quick Setup types (station-quick-setup).
+
+/** Lifecycle state of a Device_Registration (Setup_Status). */
+export type SetupStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'expired'
+  | 'failed';
+
+/**
+ * The portal-side record of a pending Station as returned by the
+ * device-registration routes (station-quick-setup Requirements 1.1, 6.3).
+ * Token material is never included — only the token expiry is surfaced.
+ */
+export interface DeviceRegistration {
+  registration_id: string;
+  usecase_id: string;
+  device_name: string;
+  device_group: string;
+  status: SetupStatus;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  /** Epoch seconds; <= creation/regeneration time + 90 min. */
+  token_expires_at: number;
+  /** Present when status is `failed`; truncated to <=1024 chars. */
+  error_summary?: string;
+}
+
+/** Body of `POST /device-registrations` (Requirement 1.1). */
+export interface RegisterDeviceInput {
+  device_name: string;
+  device_group: string;
+  usecase_id: string;
+}
+
+/**
+ * Response of `POST /device-registrations` and
+ * `POST /device-registrations/{id}/command`: the persisted registration
+ * plus the one-line Setup_Command embedding the Setup_Token and the token
+ * expiry (station-quick-setup Requirements 2.1, 2.5).
+ */
+export interface RegistrationWithCommand {
+  registration: DeviceRegistration;
+  setup_command: string;
+  token_expires_at: number;
+}
+
+/** Response of `GET /device-registrations` (Requirement 6.3). */
+export interface DeviceRegistrationsResponse {
+  registrations: DeviceRegistration[];
+  count: number;
+}
+
+/** Response of `DELETE /devices/{id}` (devices.py delete_device). */
+export interface DeleteDeviceResponse {
+  deleted: boolean;
+  device_id: string;
+  usecase_id: string;
+  delete_thing: boolean;
+  thing_deleted: boolean;
+  certificates_deactivated: string[];
+  certificates_deleted: string[];
+  shadows_deleted: string[];
+  /** Portal rows removed per kind of record. */
+  portal_records_deleted?: {
+    device_record: number;
+    camera_registry: number;
+    account_sync: number;
+    registrations: number;
+  };
+  /** Non-fatal clean-up problems (e.g. a certificate shared with another thing). */
+  warnings: string[];
+}
+
+/**
+ * Response of `GET /device-registrations/thing-groups`: existing IoT Thing
+ * Group names from the Use_Case account for Device_Group selection
+ * (station-quick-setup Requirement 1.7).
+ */
+export interface ThingGroupsResponse {
+  thing_groups: string[];
+  count: number;
+}
+
+// DDA labeling types (dda-data-labeling).
+
+/** One Labeling_Team member (dda-data-labeling Requirement 3.8). */
+export interface LabelingTeamMember {
+  user_id: string;
+  email: string;
+  added_at?: number;
+  added_by?: string;
+}
+
+/**
+ * One Labeling_Team as returned by `GET /labeling-teams?usecase_id=`,
+ * including the current member list with identities and emails
+ * (dda-data-labeling Requirement 3.8).
+ */
+export interface LabelingTeam {
+  team_id: string;
+  usecase_id: string;
+  team_name: string;
+  members: LabelingTeamMember[];
+  created_at?: number;
+  created_by?: string;
+}
+
+/**
+ * Per-member submitted/remaining counts on a DDA job detail
+ * (dda-data-labeling Requirement 11.2).
+ */
+export interface LabelingMemberProgress {
+  user_id: string;
+  email?: string;
+  submitted: number;
+  remaining: number;
+}
+
+/**
+ * A terminally failed notification recipient recorded on the job
+ * (dda-data-labeling Requirement 6.4).
+ */
+export interface LabelingNotificationFailure {
+  email: string;
+  reason: string;
+}
+
+/**
+ * One job row of `GET /labeler/jobs`: a job in which the caller holds at
+ * least one unsubmitted Task_Assignment, with submitted/remaining counts
+ * (dda-data-labeling Requirements 2.4, 7.10).
+ */
+export interface LabelerJobSummary {
+  job_id: string;
+  job_name: string;
+  task_type: string;
+  label_set: string[];
+  submitted_count: number;
+  remaining_count: number;
+  withheld_count?: number;
+  instructions?: string;
+}
+
+/** A classless-or-classed region/box of a Pre_Label or annotation. */
+export interface DdaBoundingBox {
+  /** Label_Set class; null for unclassified SAM proposals. */
+  class: string | null;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  /**
+   * Region_Score — optional worker-reported confidence carried on
+   * grounded-sam preview result payloads for display beside the class name
+   * (grounded-sam-prompt-tuning-preview Requirement 5.3). Absent on every
+   * other payload; no existing consumer reads it.
+   */
+  score?: number;
+}
+
+/** RLE-encoded mask region keyed to a Label_Set class. */
+export interface DdaMaskRegion {
+  /** Label_Set class; null for unclassified SAM proposals. */
+  class: string | null;
+  /**
+   * Run-length-encoded bitmap of the region as the backend's canonical
+   * space-separated counts string (column-major, starting with the
+   * zero-run) — e.g. "4 1 4". This is the shape the submit validator
+   * requires and the SAM pre-label worker produces; the LLM auto-label
+   * backend likewise writes and validates a string.
+   */
+  rle: string;
+  /**
+   * Region_Score — optional worker-reported confidence carried on
+   * grounded-sam preview result payloads for display beside the class name
+   * (grounded-sam-prompt-tuning-preview Requirement 5.3). Absent on every
+   * other payload; no existing consumer reads it.
+   */
+  score?: number;
+}
+
+/**
+ * Modality-tagged annotation payload used for both Pre_Labels returned by
+ * the labeler APIs and submissions sent to `POST /labeler/tasks/{id}/submit`
+ * (dda-data-labeling Requirements 7.3–7.5, 7.7, 8.3).
+ */
+export interface DdaAnnotation {
+  /**
+   * The job's labeling modality ('Classification' | 'Segmentation' |
+   * 'ObjectDetection'). Required on submissions: the server rejects any
+   * annotation whose modality does not match the job's task type.
+   */
+  modality?: string;
+  /** Binary_Classification selection: 'normal' | 'anomaly'. */
+  label?: string;
+  /** Object_Detection boxes (pixel coordinates within image bounds). */
+  boxes?: DdaBoundingBox[];
+  /** Semantic_Segmentation regions (RLE-encoded, label-indexed). */
+  regions?: DdaMaskRegion[];
+  /**
+   * Image bounds for ObjectDetection submissions; the server validates
+   * every box against these dimensions.
+   */
+  image_size?: { width: number; height: number };
+  /** Image pixel dimensions the regions/boxes are expressed against. */
+  image_width?: number;
+  image_height?: number;
+}
+
+/**
+ * Response of `GET /labeler/jobs/{jobId}/next`: the next presentable
+ * unsubmitted Task_Assignment with a 15-minute presigned image URL,
+ * Pre_Label (when available), instructions and example-image URLs, or a
+ * completion payload when zero presentable tasks remain
+ * (dda-data-labeling Requirements 7.1, 7.2, 7.11, 8.3, 12.6).
+ */
+export interface LabelerNextTaskResponse {
+  /** True when the labeler has no presentable unsubmitted tasks left. */
+  complete: boolean;
+  /**
+   * Task fields are flat on the payload (not nested under a `task`
+   * object) — the shape is pinned by the backend's labeler API tests.
+   * All are absent on the completion payload (`complete: true`).
+   */
+  task_id?: string;
+  job_id?: string;
+  image_url?: string;
+  /** Epoch seconds when the presigned image URL expires. */
+  image_url_expires_at?: number;
+  prelabel?: DdaAnnotation;
+  task_type?: string;
+  label_set?: string[];
+  instructions?: string;
+  /** Presigned example-image URLs; kinds with none stored are omitted. */
+  example_images?: { good?: string[]; bad?: string[] };
+  submitted_count: number;
+  remaining_count: number;
+  withheld_count?: number;
+}
+
+// Labeling job cleanup, work stealing, and podium types
+// (labeling-job-cleanup-work-stealing-and-podium).
+
+/**
+ * One ranked Winner_Podium entry of the Podium_Ranking: place 1-3, the
+ * submitter's Submitted-task count, and their Final_Submission_Timestamp;
+ * `email` is carried exactly when the submitter is a current member of the
+ * job's Labeling_Team (labeling-job-cleanup-work-stealing-and-podium
+ * Requirements 7.4, 7.5, 8.2).
+ */
+export interface PodiumEntry {
+  place: 1 | 2 | 3;
+  user_id: string;
+  email?: string;
+  submitted: number;
+  /** Epoch seconds of the submitter's last submission within the job. */
+  final_submitted_at: number;
+}
+
+/**
+ * Response of `GET /labeler/jobs/{jobId}/pool`: the job's team-pool state
+ * for the caller — the exact count of Stealable_Tasks (zero unless the job
+ * is InProgress), the Job_Complete condition, and the `podium` list exactly
+ * when Job_Complete holds (labeling-job-cleanup-work-stealing-and-podium
+ * Requirements 6.1, 8.2).
+ */
+export interface LabelerJobPoolResponse {
+  job_id: string;
+  stealable_count: number;
+  job_complete: boolean;
+  podium?: PodiumEntry[];
+}
+
+/**
+ * Response of `POST /labeler/jobs/{jobId}/steal`: the one Task_Assignment
+ * transferred to the caller, the Donor it was taken from (a teammate's sub
+ * or `UNASSIGNED`), and the count of Stealable_Tasks remaining after the
+ * transfer (labeling-job-cleanup-work-stealing-and-podium Requirement 5.1).
+ */
+export interface StealTaskResponse {
+  task_id: string;
+  job_id: string;
+  stolen_from: string;
+  stealable_count: number;
+}
+
+/**
+ * One per-image row of `GET /labeling/{id}/review`: the auto-labeled
+ * result or failed status plus the current accept/reject decision
+ * (dda-data-labeling Requirements 9.5, 9.6, 9.10).
+ */
+export interface ReviewItem {
+  task_id: string;
+  image_key: string;
+  image_url?: string;
+  status: 'succeeded' | 'failed';
+  annotation?: DdaAnnotation;
+  autolabel_error?: string;
+  decision?: 'accepted' | 'rejected';
+}
+
+/** Response of `GET /labeling/{id}/review` (paginated). */
+export interface ReviewResponse {
+  job_id: string;
+  items: ReviewItem[];
+  count: number;
+  next_token?: string;
+  review_finalized?: boolean;
+}
+
+// Prompt_Tuning_Preview types (llm-autolabel-prompt-tuning).
+
+/**
+ * The single category assigned to a failed Preview_Result
+ * (llm-autolabel-prompt-tuning Requirement 9.6). The first three are
+ * produced by the shared invocation module the Auto_Labeler also uses;
+ * the last three are produced by the executor's pre-invocation steps and
+ * imply zero model invocations for that Sample_Image.
+ */
+export type PreviewFailureCategory =
+  | 'model_error'
+  | 'timeout'
+  | 'unusable_model_output'
+  | 'image_access_failure'
+  | 'unsupported_image_content'
+  | 'unreadable_example_image';
+
+/**
+ * One Few_Shot_Example reference in stored order: `position` is per
+ * designation, matching the wizard's per-kind upload order, so the
+ * attachment order is recoverable independently of list ordering
+ * (llm-autolabel-prompt-tuning Requirement 6.4).
+ */
+export interface PreviewFewShotExample {
+  /** `s3://bucket/key` inside the Use_Case data bucket. */
+  ref: string;
+  designation: 'good' | 'bad';
+  position: number;
+}
+
+/**
+ * Body of `POST /labeling-preview/runs`: one Preview_Run over 1..5
+ * Sample_Images with one model, one modality and one Label_Set
+ * (llm-autolabel-prompt-tuning Requirement 1.3). An `llm:` run additionally
+ * carries one Detection_Prompt and one Few_Shot_Option value; a
+ * `grounded-sam` run omits both and instead carries optional per-label
+ * `prompt_overrides` (grounded-sam-prompt-tuning-preview Requirement 2.1).
+ * A 400 enumerates every violated rule, a 403 carries
+ * the fixed `{error: 'Not authorized'}` body, and a 409 indicates another
+ * Preview_Run is already in flight for the caller and Use_Case.
+ */
+export interface StartPreviewRunRequest {
+  usecase_id: string;
+  dataset_prefix: string;
+  /**
+   * `llm:<model_identifier>` or `grounded-sam` — the families the
+   * Preview_API accepts (grounded-sam-prompt-tuning-preview supersedes
+   * the previous llm:-only rule).
+   */
+  model: string;
+  /**
+   * Sent character-for-character; 1..2000 characters after trimming.
+   * Required for `llm:` runs; omitted by `grounded-sam` runs, whose family
+   * has no detection-prompt input (grounded-sam-prompt-tuning-preview).
+   */
+  detection_prompt?: string;
+  task_type: 'Classification' | 'Segmentation' | 'ObjectDetection';
+  label_set: string[];
+  /** 1..5 entries, each a bare object key or an `s3://` URI. */
+  sample_images: string[];
+  /**
+   * Required for `llm:` runs; omitted by `grounded-sam` runs — the
+   * Preview_API rejects a grounded-sam request carrying few-shot
+   * enablement (grounded-sam-prompt-tuning-preview Requirement 3.4).
+   */
+  few_shot?: {
+    enabled: boolean;
+    /** At most 10 per designation; omitted refs are never read. */
+    examples: PreviewFewShotExample[];
+  };
+  /**
+   * Per-label Prompt_Override entries for a `grounded-sam` run, pruned
+   * exactly as job creation prunes them: only entries non-empty after
+   * trimming whose label is in the effective Label_Set, each value
+   * character-for-character as entered
+   * (grounded-sam-prompt-tuning-preview Requirement 2.1). Not sent for
+   * `llm:` runs.
+   */
+  prompt_overrides?: Record<string, string>;
+  /**
+   * Downscale_Setting for every image of the run: one Max_Image_Edge value
+   * from 512 | 768 | 1024 | 1280 | 1536 | 2048, or `null`/omitted for
+   * Downscale_Off (llm-model-token-and-image-sizing Requirements 5.1, 5.3).
+   */
+  downscale_max_edge?: number | null;
+  /**
+   * Token_Budget_Selection, a whole number in [1, 128000]. Omitted when the
+   * control is empty, so the Effective_Token_Budget resolves from the
+   * Model_Token_Limits and the default of 10000 (Requirements 3.4, 3.10).
+   */
+  token_budget?: number;
+}
+
+/** 202 response of `POST /labeling-preview/runs`. */
+export interface StartPreviewRunResponse {
+  run_id: string;
+  sample_count: number;
+  status: 'Running';
+}
+
+/** Lifecycle state of a Preview_Run. */
+export type PreviewRunStatus = 'Running' | 'Completed' | 'Failed';
+
+/** Resolution state of one Sample_Image within a Preview_Run. */
+export type PreviewSampleState = 'Pending' | 'Succeeded' | 'Failed';
+
+/**
+ * One per-Sample_Image entry of the run status response, in request order
+ * for the life of the run (llm-autolabel-prompt-tuning Requirements 3.5,
+ * 4.6). Failure category and reason are duplicated here so a failure
+ * renders without fetching the payload; `result_url` is a presigned GET
+ * for the result payload and is present only once the sample resolves.
+ */
+export interface PreviewResultEntry {
+  index: number;
+  sample_key: string;
+  state: PreviewSampleState;
+  result_url?: string;
+  /** Lifetime of `result_url` in seconds. */
+  result_url_expires_in?: number;
+  failure_category?: PreviewFailureCategory;
+  failure_reason?: string;
+}
+
+/**
+ * Response of `GET /labeling-preview/runs/{runId}`: the run status plus
+ * exactly one entry per requested Sample_Image. A 404 means the run id is
+ * unknown or the run belongs to another user.
+ */
+export interface PreviewRunResponse {
+  run_id: string;
+  status: PreviewRunStatus;
+  sample_count: number;
+  /** Attached/omitted Few_Shot_Example counts actually applied (7.5). */
+  few_shot: {
+    enabled: boolean;
+    attached: number;
+    omitted: number;
+  };
+  /**
+   * The Downscale_Setting applied to the run: a Max_Image_Edge value, or
+   * `null` for Downscale_Off (llm-model-token-and-image-sizing Req 9.8).
+   */
+  downscale_max_edge?: number | null;
+  /** The Effective_Token_Budget applied to every request of the run. */
+  token_budget?: number;
+  results: PreviewResultEntry[];
+}
+
+/**
+ * The result payload fetched once per resolved sample from its
+ * `result_url`. It is not a pipeline Pre_Label artifact: it lives under an
+ * ephemeral `labeling-previews/` prefix and expires after one day
+ * (llm-autolabel-prompt-tuning Requirements 1.6, 3.5). `raw_model_output`
+ * is the model's text character-for-character and is present only for
+ * `unusable_model_output` failures (9.3, 9.8).
+ */
+export interface PreviewResultPayload {
+  sample_key: string;
+  state: PreviewSampleState;
+  prelabel?: DdaAnnotation;
+  /**
+   * Source_Dimensions — the space the Pre_Label geometry is expressed in, so
+   * `PreviewResultCanvas` keeps reading these unchanged
+   * (llm-model-token-and-image-sizing Requirement 7.7).
+   */
+  image_width?: number;
+  image_height?: number;
+  /** Source_Dimensions, named explicitly for the sizing display (Req 5.4). */
+  source_width?: number;
+  source_height?: number;
+  /** Sent_Dimensions — the Downscaled_Image actually sent (Req 5.4, 5.10). */
+  sent_width?: number;
+  sent_height?: number;
+  /** The applied Downscale_Setting, `null` for Downscale_Off (Req 5.10). */
+  downscale_max_edge?: number | null;
+  failure_category?: PreviewFailureCategory;
+  failure_reason?: string;
+  raw_model_output?: string;
+}
+
+// Asynchronous workflow generation types (workflow-manager-gaps).
+
+/**
+ * 202 response of `POST /workflows/generate`
+ * (workflow_generator.submit_generation, workflow-manager-gaps
+ * Requirements 1.1, 1.7, 1.8): the accepted Generation_Job and the
+ * effective Chat_Session identifier. `session_id` is freshly minted when
+ * the request carried none or an unresolvable one, so callers adopt it
+ * for follow-up prompts.
+ */
+export interface WorkflowGenerationSubmission {
+  job_id: string;
+  session_id: string;
+  usecase_id: string;
+  status: 'pending';
+}
+
+/**
+ * A Generation_Job that has not reached a terminal state: the status
+ * endpoint returns only the job identity and state, never a partial
+ * result (workflow-manager-gaps Requirement 2.8).
+ */
+export interface WorkflowGenerationJobInProgress {
+  job_id: string;
+  status: 'pending' | 'running';
+}
+
+/**
+ * A succeeded Generation_Job: the synchronous endpoint's exact payload
+ * (`WorkflowGenerationResult`) embedded field-for-field beside the job
+ * identity (workflow-manager-gaps Requirement 2.2).
+ */
+export interface WorkflowGenerationJobSucceeded extends WorkflowGenerationResult {
+  job_id: string;
+  status: 'succeeded';
+}
+
+/**
+ * Resolved states of `GET /workflows/generate/{job_id}`, discriminated
+ * on `status`. The third state — a failed Generation_Job — never
+ * resolves: the backend replays the originating Error_Envelope with its
+ * original non-2xx HTTP status (workflow-manager-gaps Requirement 2.3),
+ * so it surfaces as a thrown `ApiError` carrying that status, code,
+ * message, and details (e.g. GENERATION_TIMEOUT, GENERATION_REJECTED,
+ * GENERATION_VALIDATION_INCOMPLETE, GENERATION_ABNORMAL_TERMINATION).
+ */
+export type WorkflowGenerationJobStatus =
+  | WorkflowGenerationJobInProgress
+  | WorkflowGenerationJobSucceeded;
+
+// Detection training types (portal-detection-training +
+// rfdetr-training-and-transfer-learning). The backend's shapes live in
+// detection_training.py / training.py; these mirror them field-for-field.
+
+/** Detector family: single-tensor + NMS (yolo) or two-tensor top-k (rf_detr). */
+export type DetectionArch = 'yolo' | 'rf_detr';
+
+/** RF-DETR Apache-2.0 checkpoints (xlarge/2xlarge are PML-licensed, excluded). */
+export type RfDetrSize = 'nano' | 'small' | 'medium' | 'large';
+
+/** Where a detection run's starting weights come from (Req 6). */
+export type BaseModelKind = 'published' | 'training_job' | 'imported';
+
+/**
+ * `POST /training` `base_model`: `ref` is the published checkpoint name /
+ * RF-DETR size for `published`, otherwise the training_id of the base
+ * record in the same use case.
+ */
+export interface BaseModelRef {
+  kind: BaseModelKind;
+  ref: string;
+}
+
+/** Base_Model_Descriptor persisted as `detection.base_model` (Req 6.6). */
+export interface BaseModelDescriptor {
+  kind: BaseModelKind;
+  ref: string | null;
+  weights_s3?: string | null;
+  member?: string | null;
+  detection_arch: DetectionArch;
+  class_names?: string[] | null;
+}
+
+/** YOLO `hyperparameters` (datasets/detection_training/train.py). */
+export interface YoloHyperparameters {
+  imgsz: number;
+  base_weights: string;
+  epochs: number;
+  batch: number;
+  patience: number;
+  score_threshold: number;
+  iou_threshold: number;
+}
+
+/** RF-DETR `hyperparameters` (train_rfdetr.py) — no imgsz, no IoU (NMS-free). */
+export interface RfDetrHyperparameters {
+  rfdetr_size: RfDetrSize;
+  resolution: number;
+  epochs: number;
+  batch: number;
+  grad_accum: number;
+  lr: number;
+  patience: number;
+  score_threshold: number;
+}
+
+export type DetectionHyperparameters = YoloHyperparameters | RfDetrHyperparameters;
+
+/**
+ * `metadata.fine_tunable` on an imported record (Req 7); null when the import
+ * was ONNX / TorchScript / a bare state_dict. `class_names` is null for
+ * checkpoints that carry no names (published RF-DETR COCO files), in which
+ * case only `num_classes` (the head width) is known.
+ */
+export interface FineTunableCheckpoint {
+  arch: DetectionArch;
+  kind?: string;
+  checkpoint_s3: string;
+  class_names?: string[] | null;
+  num_classes?: number | null;
+}
+
+/**
+ * Detection_Record_Fields (`TrainingJobs.detection`) written by
+ * training.py for an object_detection job. YOLO records carry
+ * imgsz/base_weights/iou_threshold; RF-DETR records carry
+ * rfdetr_size/resolution/grad_accum/lr/top_k. Records written before
+ * RF-DETR existed carry no `detection_arch` and are YOLO.
+ */
+export interface DetectionRecordFields {
+  detection_arch?: DetectionArch;
+  network_input_width: number;
+  network_input_height: number;
+  class_names: string[];
+  num_classes: number;
+  score_threshold: number;
+  preserve_aspect: boolean;
+  epochs?: number;
+  batch?: number;
+  patience?: number;
+  onnx_opset?: number;
+  sourcedir_s3?: string;
+  base_model?: BaseModelDescriptor;
+  // YOLO
+  imgsz?: number;
+  base_weights?: string;
+  iou_threshold?: number;
+  // RF-DETR
+  rfdetr_size?: RfDetrSize;
+  resolution?: number;
+  grad_accum?: number;
+  lr?: number;
+  top_k?: number;
+}
+
+/**
+ * `inspection_result.checkpoint` for a `.pt` / `.pth` source
+ * (detector-checkpoint-import Requirement 2): what the Checkpoint_Probe read
+ * from the file without unpickling it, and whether the portal can convert it
+ * to ONNX. It is a pre-flight verdict only: convert re-classifies the source
+ * server-side and never trusts what the page was shown (Requirement 4.1).
+ */
+export interface CheckpointAssessment {
+  /** 'ultralytics_checkpoint' | 'rfdetr_checkpoint' | 'torchscript' | 'state_dict' | 'legacy_torch' | 'onnx' | 'unknown'. */
+  kind: string;
+  arch: DetectionArch | null;
+  task: string | null;
+  model_class: string | null;
+  head_classes: string[];
+  num_classes: number | null;
+  /** In class-index order; null when the checkpoint stores no names. */
+  class_names: string[] | null;
+  /** YOLO `train_args.imgsz` / RF-DETR `args.resolution` (or the size's native resolution). */
+  train_input_size: number | null;
+  /** The library that saved the checkpoint: 'ultralytics' | 'rfdetr'. */
+  framework: string | null;
+  framework_version: string | null;
+  /** RF-DETR only: the inferred size, when the probe could tell. */
+  rfdetr_size?: RfDetrSize | null;
+  convertible: boolean;
+  /** Every failed condition, in user-facing words (Requirement 2.4). */
+  reasons: string[];
+}
+
+/** `conversion.status` of a Conversion_Record (Requirement 7). */
+export type ConversionStatus = 'InProgress' | 'Finalizing' | 'Completed' | 'Failed';
+
+/**
+ * What the portal's own validator read from the converted ONNX (the graph
+ * facts) plus the job's bounded, display-only claims (exporter, fleet-floor
+ * runtime, Parity_Check maxima), kept on a Completed Conversion_Record.
+ */
+export interface ConversionOnnxSummary {
+  ir_version?: number;
+  opset?: number;
+  input?: number[];
+  outputs?: number[][];
+  output_names?: string[];
+  /** YOLO: anchor count of the [1, 4 + C, N] output. */
+  anchors?: number;
+  /** RF-DETR: query count. */
+  top_k?: number;
+  exporter?: string | null;
+  fleet_floor_onnxruntime?: string | null;
+  parity_max_abs?: { box_max_abs?: number | null; score_max_abs?: number | null };
+  parity_runtimes?: string[];
+  onnx_bytes?: number;
+}
+
+/** `TrainingJobs.conversion` on a Conversion_Record (Requirements 4.6, 7, 11.3). */
+export interface ConversionDetails {
+  status: ConversionStatus;
+  job_name: string;
+  /** The Export_Image, pinned by digest (`…/dda-detector-export@sha256:…`). */
+  export_image?: string;
+  source_s3?: string;
+  source_sha256?: string;
+  source_bytes?: number;
+  source_framework?: string | null;
+  source_framework_version?: string | null;
+  started_at?: number;
+  finalizing_at?: number;
+  completed_at?: number;
+  failed_at?: number;
+  onnx_sha256?: string | null;
+  onnx_summary?: ConversionOnnxSummary;
+}
+
+/** `POST /models/upload-url` (Requirement 3): a presigned PUT for a server-issued key. */
+export interface ModelUploadUrlResponse {
+  upload_url: string;
+  model_s3_uri: string;
+  expires_in: number;
+}
+
+/** `POST /models/convert`, packaged import: an ONNX source or the PyTorch/Neo path. */
+export interface PackagedModelImportResponse {
+  converted_model_s3_uri: string;
+  model_name: string;
+  model_type: string;
+  input_shape: number[];
+  model_info: {
+    type: string;
+    architecture_hints: string[];
+    suggested_type?: string;
+  };
+  message: string;
+  import_result?: {
+    training_id: string;
+    message: string;
+  };
+  training_id?: string;
+  import_error?: string;
+  conversion?: undefined;
+}
+
+/**
+ * `POST /models/convert` for a detector checkpoint with ONNX output
+ * (Requirement 4.2(e)): the Conversion_Job has started and the record exists;
+ * the server validates, packages and publishes when the job finishes, so the
+ * page must not call packaging itself (Requirement 10.5).
+ */
+export interface CheckpointConversionStarted {
+  training_id: string;
+  model_name: string;
+  status: 'InProgress';
+  conversion: { status: ConversionStatus; job_name: string };
+  fine_tunable?: FineTunableCheckpoint | null;
+}
+
+export type ModelConvertResponse = PackagedModelImportResponse | CheckpointConversionStarted;
+
+/** A `TrainingJobs` record as returned by `GET /training` (fields the portal reads). */
+export interface TrainingJobRecord {
+  training_id: string;
+  usecase_id: string;
+  model_name: string;
+  model_version?: string;
+  model_type?: string;
+  status: string;
+  /** 'imported' for Smart Import / Model Import records; absent for trained ones. */
+  source?: string;
+  /** 'onnx' for portal-trained detectors (no Neo step). */
+  runtime?: string;
+  artifact_s3?: string;
+  instance_type?: string;
+  dataset_manifest_s3?: string;
+  hyperparameters?: Record<string, unknown>;
+  metrics?: Record<string, number>;
+  detection?: DetectionRecordFields;
+  metadata?: { fine_tunable?: FineTunableCheckpoint | null; [key: string]: unknown };
+  /** Present only on a Conversion_Record (detector-checkpoint-import). */
+  conversion?: ConversionDetails;
+  created_at: number;
+  [key: string]: unknown;
+}
+
+/** One published (COCO) checkpoint the arch's entry point can start from. */
+export interface PublishedCheckpoint {
+  /** `base_model.ref` / YOLO `base_weights` / RF-DETR `rfdetr_size`. */
+  ref: string;
+  label: string;
+  /** RF-DETR: the size's native square resolution. */
+  native_resolution?: number;
+}
+
+/** What the Base model control offers for one arch (Req 6.1). */
+export interface DetectionBaseModels {
+  arch: DetectionArch;
+  published: PublishedCheckpoint[];
+  /** Completed portal-trained detectors of the same arch, newest first. */
+  trainedDetectors: TrainingJobRecord[];
+  /** Imported records whose `metadata.fine_tunable.arch` matches. */
+  fineTunableImports: TrainingJobRecord[];
+}
+
+/**
+ * Silent_Refresh state — Feature: portal-session-expiry-return-to-page.
+ *
+ * The ID token the client sends is a copy in `localStorage` that `AuthContext`
+ * writes once per page load, so it ages out (Cognito default 1 hour) while
+ * Amplify still holds a renewable session. A 401 therefore usually means
+ * "stale mirror", not "session over" — refresh it and retry rather than
+ * bouncing the user to the login screen (bugfix.md defect B, Requirement 5.1).
+ *
+ * A module-level promise collapses concurrent refreshes: one expiry commonly
+ * 401s several parallel requests at once, and all of them must share a single
+ * refresh (Requirement 5.3, design Decision 6).
+ */
+let refreshInFlight: Promise<string | null> | null = null;
+
+/**
+ * Force Amplify to renew the session and re-mirror the ID token.
+ *
+ * At most one refresh is in flight at a time; concurrent callers await the
+ * same promise and see the same result (Requirement 5.3).
+ *
+ * @returns the fresh ID token, or `null` when the session cannot be refreshed.
+ */
+async function refreshIdToken(): Promise<string | null> {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const session = await fetchAuthSession({ forceRefresh: true });
+        const idToken = session.tokens?.idToken?.toString();
+        if (!idToken) return null;
+        // Keep the existing mirror contract that `AuthContext` also writes.
+        localStorage.setItem('idToken', idToken);
+        return idToken;
+      } catch {
+        // Refresh failure is not an application error — the caller redirects.
+        return null;
+      }
+    })().finally(() => {
+      refreshInFlight = null;
+    });
+  }
+  return refreshInFlight;
+}
+
+/**
+ * The session is over: drop the stale mirror, record where the user was and
+ * send them to `/login` (Requirements 1.1, 5.2).
+ *
+ * `redirectToLogin` owns the save and skips the navigation when the user is
+ * already on `/login`, which is the guard the two 401 handlers used to spell
+ * out inline.
+ */
+function abandonSession(): void {
+  console.error('Authentication failed - token may be expired');
+  localStorage.removeItem('idToken');
+  redirectToLogin();
+}
+
+/**
+ * The shared 401 handler for every portal API client (Requirement 1.3,
+ * design Decisions 6 and 7).
+ *
+ * Performs a Silent_Refresh and, when it succeeds, re-issues the original
+ * request exactly once with the fresh token. `reissue` is invoked at most
+ * once and its response is never fed back through here, so a single retry is
+ * structurally the maximum and no retry loop is possible (Requirement 5.4).
+ *
+ * @param reissue re-runs the original request with a fresh bearer token.
+ * @returns the retried response, or `null` when the refresh failed — in which
+ *          case the Attempted_Location has been recorded and the browser is
+ *          already heading for `/login`.
+ */
+export async function handleUnauthorized(
+  reissue: (freshToken: string) => Promise<Response>
+): Promise<Response | null> {
+  const freshToken = await refreshIdToken();
+  if (freshToken === null) {
+    abandonSession();
+    return null;
+  }
+
+  const retried = await reissue(freshToken);
+  if (retried.status === 401) {
+    // A freshly refreshed token was rejected too: this really is over.
+    abandonSession();
+  }
+  return retried;
+}
 
 class ApiService {
   private get baseUrl(): string {
@@ -27,31 +1452,62 @@ class ApiService {
     }
 
     // Track this request globally so the app-wide activity bar shows while any
-    // API call is in flight.
+    // API call is in flight. The retry below happens inside this same
+    // begin/end span, so the accounting stays balanced (Requirement 5.5).
     beginRequest();
     try {
-      const response = await fetch(`${this.baseUrl}${endpoint}`, {
+      const url = `${this.baseUrl}${endpoint}`;
+      let response = await fetch(url, {
         ...options,
         headers,
       });
 
-      if (!response.ok) {
-        // If 401, token might be expired - redirect to login
-        if (response.status === 401) {
-          console.error('Authentication failed - token may be expired');
-          localStorage.removeItem('idToken');
-          // Redirect to login page
-          if (window.location.pathname !== '/login') {
-            window.location.href = '/login';
-          }
+      // A 401 is usually a stale token mirror, not an ended session: refresh
+      // once, retry once, and only redirect to /login when that fails
+      // (Requirements 5.1-5.6). `handleUnauthorized` is reached only from the
+      // first attempt, so at most one retry can happen.
+      if (response.status === 401) {
+        const retried = await handleUnauthorized((freshToken) =>
+          fetch(url, {
+            ...options,
+            headers: { ...headers, Authorization: `Bearer ${freshToken}` },
+          })
+        );
+        if (retried) {
+          response = retried;
         }
-        
+      }
+
+      if (!response.ok) {
         const error = await response.json().catch(() => ({ error: 'Request failed' }));
-        throw new Error(error.error || `HTTP ${response.status}`);
+        // Structured error envelope: {error: {code, message, details}}
+        if (error.error && typeof error.error === 'object') {
+          throw new ApiError(
+            error.error.message || `HTTP ${response.status}`,
+            response.status,
+            error.error.code,
+            error.error.details
+          );
+        }
+        // Simple error envelope {error: string, ...}: carry the HTTP
+        // status so callers can branch on it (e.g. the delete-account
+        // not-found path, portal-user-manager Requirement 14.11). The
+        // full parsed body rides along as `details` so callers can read
+        // sibling fields (e.g. the vLLM registration `findings` list).
+        throw new ApiError(
+          error.error || `HTTP ${response.status}`,
+          response.status,
+          undefined,
+          error
+        );
       }
 
       return response.json();
     } catch (err: any) {
+      // Structured API errors carry code/details; re-throw untouched.
+      if (err instanceof ApiError) {
+        throw err;
+      }
       // Handle Amplify/AWS errors that have a complex structure
       if (err && typeof err === 'object' && 'message' in err) {
         if (typeof err.message === 'string') {
@@ -79,6 +1535,220 @@ class ApiService {
     return this.request<{ user: User }>('/auth/me');
   }
 
+  // User admin endpoints (portal-user-manager) — PortalAdmin only.
+
+  /**
+   * All portal user accounts from the Cognito user pool
+   * (`user_admin.py`, portal-user-manager Requirement 2.1).
+   */
+  async listAdminUsers(): Promise<AdminUsersResponse> {
+    return this.request<AdminUsersResponse>('/admin/users');
+  }
+
+  /**
+   * Create a new portal user account (`user_admin.py`, portal-user-manager
+   * Requirement 12.1). Cognito emails the invitation with a temporary
+   * password itself — the value never appears in the response (12.10).
+   * A 409 indicates the username already exists (12.5); a 400 identifies
+   * the invalid email or missing field (12.6, 12.7).
+   */
+  async createAdminUser(body: {
+    username: string;
+    email: string;
+    role: string;
+  }): Promise<{ message: string }> {
+    return this.request<{ message: string }>('/admin/users', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Set a new password on an account with the selected permanence
+   * (`user_admin.py`, portal-user-manager Requirements 3.1, 3.2). A 400
+   * response carries the violated Password_Policy rule verbatim (3.3).
+   */
+  async setAdminUserPassword(
+    username: string,
+    body: { password: string; permanent: boolean }
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}/password`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Trigger the forgot-password flow: a temporary password is generated
+   * and emailed to the account's registered address; the value is never
+   * returned to the client (portal-user-manager Requirements 4.1, 4.3).
+   * A 400 response indicates the account has no verified email (4.4).
+   */
+  async sendAdminForgotPassword(username: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}/forgot-password`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Change an account's Portal_Role (`user_admin.py`, portal-user-manager
+   * Requirement 5.1). A 409 response carries the rejection reason, e.g.
+   * the last-PortalAdmin guard (5.3).
+   */
+  async setAdminUserRole(
+    username: string,
+    role: string
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}/role`,
+      { method: 'PUT', body: JSON.stringify({ role }) }
+    );
+  }
+
+  /**
+   * Disable an account (`user_admin.py`, portal-user-manager Requirement
+   * 13.2). An already-disabled account is a 200 no-op returning the
+   * current state (13.6). A 409 response carries the rejection reason,
+   * e.g. the last-PortalAdmin guard (5.3, 13.9); other failures are a 502
+   * with the state unchanged (13.7).
+   */
+  async disableAdminUser(
+    username: string
+  ): Promise<{ message: string; enabled?: boolean }> {
+    return this.request<{ message: string; enabled?: boolean }>(
+      `/admin/users/${encodeURIComponent(username)}/disable`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Enable an account (`user_admin.py`, portal-user-manager Requirement
+   * 13.3). An already-enabled account is a 200 no-op returning the
+   * current state (13.6); other failures are a 502 with the state
+   * unchanged (13.7).
+   */
+  async enableAdminUser(
+    username: string
+  ): Promise<{ message: string; enabled?: boolean }> {
+    return this.request<{ message: string; enabled?: boolean }>(
+      `/admin/users/${encodeURIComponent(username)}/enable`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Delete an account (`user_admin.py`, portal-user-manager Requirement
+   * 14.2). A 409 carries the rejection reason, e.g. the last-PortalAdmin
+   * guard (14.3); a 404 means the account no longer exists in the user
+   * pool (14.11); a partial verifier-cleanup failure returns an error
+   * stating the account was deleted but its verifier record was not
+   * removed (14.10); other failures leave the account unchanged (14.6).
+   */
+  async deleteAdminUser(username: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/users/${encodeURIComponent(username)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * Edge devices with their per-device account-sync state: last sync
+   * status, last sync timestamp, and whether changes are pending
+   * (`user_admin.py`, portal-user-manager Requirement 7.4).
+   */
+  async listEdgeSyncDevices(): Promise<EdgeSyncDevicesResponse> {
+    return this.request<EdgeSyncDevicesResponse>('/admin/edge-sync/devices');
+  }
+
+  /**
+   * Stage the selected accounts for sync to an edge device and trigger
+   * an immediate sync attempt (`user_admin.py`, portal-user-manager
+   * Requirement 7.1).
+   */
+  async syncEdgeDevice(
+    deviceId: string,
+    usernames: string[]
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/admin/edge-sync/devices/${encodeURIComponent(deviceId)}`,
+      { method: 'POST', body: JSON.stringify({ usernames }) }
+    );
+  }
+
+  // Build fleet endpoints (portal-build-fleet-and-workflow-gates).
+
+  /**
+   * The Dedicated_Build_Server fleet list with live EC2 lifecycle state
+   * reconciliation (`build_fleet.py`, Requirement 6.1).
+   */
+  async listBuildServers(): Promise<BuildServersResponse> {
+    return this.request<BuildServersResponse>('/build-servers');
+  }
+
+  /**
+   * Launch a new Dedicated_Build_Server of the selected CPU architecture
+   * (`build_fleet.py`, Requirement 6.5). PortalAdmin only (6.7); a 400
+   * identifies the missing name or invalid architecture. An omitted
+   * `ubuntu_version` means 22.04; 24.04 (the JP7 build host) is
+   * accepted for arm64 only (jetpack7-support design §10). An omitted
+   * `ubuntu_flavor` applies the configured organization default, else
+   * standard Ubuntu (ubuntu-pro-build-servers Req 1.3, 6.1).
+   */
+  async launchBuildServer(body: {
+    name: string;
+    architecture: BuildServerArchitecture;
+    ubuntu_version?: BuildServerUbuntuVersion;
+    ubuntu_flavor?: BuildServerUbuntuFlavor;
+  }): Promise<{ server: BuildServer }> {
+    return this.request<{ server: BuildServer }>('/build-servers', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Start a stopped Dedicated_Build_Server (`build_fleet.py`,
+   * Requirements 6.2, 6.10). PortalAdmin only (6.7); a 409 identifies
+   * the server's current lifecycle state when start is not permitted.
+   */
+  async startBuildServer(serverId: string): Promise<{ server: BuildServer }> {
+    return this.request<{ server: BuildServer }>(
+      `/build-servers/${encodeURIComponent(serverId)}/start`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Stop a running Dedicated_Build_Server with no running Build_Job
+   * (`build_fleet.py`, Requirements 6.3, 6.4, 6.10). PortalAdmin only
+   * (6.7); a 409 identifies the current lifecycle state or the running
+   * Build_Job when stop is not permitted.
+   */
+  async stopBuildServer(serverId: string): Promise<{ server: BuildServer }> {
+    return this.request<{ server: BuildServer }>(
+      `/build-servers/${encodeURIComponent(serverId)}/stop`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Terminate a Dedicated_Build_Server. The request body must echo the
+   * server's exact name as `confirm` — anything else performs no
+   * termination and leaves the server unchanged (`build_fleet.py`,
+   * Requirements 6.6, 6.12). PortalAdmin only (6.7); a 409 identifies a
+   * running Build_Job or a lifecycle state that forbids termination.
+   */
+  async terminateBuildServer(
+    serverId: string,
+    confirm: string
+  ): Promise<{ server: BuildServer }> {
+    return this.request<{ server: BuildServer }>(
+      `/build-servers/${encodeURIComponent(serverId)}`,
+      { method: 'DELETE', body: JSON.stringify({ confirm }) }
+    );
+  }
+
   // UseCase endpoints
   async listUseCases(): Promise<{ usecases: UseCase[]; count: number }> {
     return this.request<{ usecases: UseCase[]; count: number }>('/usecases');
@@ -89,12 +1759,55 @@ class ApiService {
     return this.request<{ buckets: S3Bucket[]; count: number }>('/s3-buckets');
   }
 
-  // Create a new S3 bucket in the current (portal) account with default settings
-  async createS3Bucket(data: { name: string; region?: string }): Promise<{ bucket: S3Bucket }> {
-    return this.request<{ bucket: S3Bucket }>('/s3-buckets', {
+  // Create a new S3 bucket in the current (portal) account with default
+  // settings. The server tags it for the portal (dda-portal:managed,
+  // dda-portal:created-by and, with `usecase_id`, dda-portal:usecase-id),
+  // enables ABAC and, when `usecase_id` is given, adds it to that use case's
+  // additional buckets (spec: portal-usecase-bucket-config, design §5.5).
+  // Without `usecase_id` only a PortalAdmin may call it (403 otherwise).
+  async createS3Bucket(data: {
+    name: string;
+    region?: string;
+    usecase_id?: string;
+  }): Promise<{ bucket: CreatedS3Bucket }> {
+    return this.request<{ bucket: CreatedS3Bucket }>('/s3-buckets', {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // Use-case bucket configuration (spec: portal-usecase-bucket-config,
+  // design §5.3 / §10.1): allow one more bucket for the use case. The server
+  // probes the bucket's eligibility (dda-portal:managed tag, unclaimed) and
+  // refuses with a 400 `bucket_not_eligible` body carrying `reason` and
+  // `remedy`; a name already in the list answers `already_present`.
+  async allowBucketForUsecase(
+    usecaseId: string,
+    bucket: string
+  ): Promise<UsecaseBucketUpdateResponse> {
+    return this.request<UsecaseBucketUpdateResponse>(`/usecases/${usecaseId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ additional_s3_buckets_add: [bucket] }),
+    });
+  }
+
+  // Remove one allowed (additional) bucket from the use case. Configured
+  // buckets (s3_bucket / data_s3_bucket) are not removable this way.
+  async removeAllowedBucket(
+    usecaseId: string,
+    bucket: string
+  ): Promise<UsecaseBucketUpdateResponse> {
+    return this.request<UsecaseBucketUpdateResponse>(`/usecases/${usecaseId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ additional_s3_buckets_remove: [bucket] }),
+    });
+  }
+
+  // The caller's accessible use cases with the role held on each, resolved
+  // server-side through the RBAC manager (so it is authoritative in both
+  // registry-enforcement modes, unlike the JWT role claim).
+  async getMyUsecases(): Promise<MyUsecasesResponse> {
+    return this.request<MyUsecasesResponse>('/users/me/usecases');
   }
 
   // Dataset endpoints
@@ -143,10 +1856,23 @@ class ApiService {
     usecase_id: string;
     prefix: string;
     limit?: number;
+    offset?: number;
+    /**
+     * Comma-separated extensions restricting the listing (e.g.
+     * 'jpg,jpeg,png'), matched case-insensitively against the object key
+     * suffix. When omitted the backend's default six-extension set
+     * applies unchanged, and `total_found` / `has_more` / paging span
+     * exactly the filtered set (llm-autolabel-prompt-tuning
+     * Requirements 2.1, 2.7).
+     */
+    extensions?: string;
   }): Promise<{
     prefix: string;
     bucket: string;
     total_found: number;
+    offset: number;
+    limit: number;
+    has_more: boolean;
     images: Array<{
       key: string;
       filename: string;
@@ -160,6 +1886,8 @@ class ApiService {
       usecase_id: params.usecase_id,
       prefix: params.prefix,
       ...(params.limit && { limit: params.limit.toString() }),
+      ...(params.offset !== undefined && { offset: params.offset.toString() }),
+      ...(params.extensions && { extensions: params.extensions }),
     });
     return this.request(`/datasets/preview?${queryParams}`);
   }
@@ -342,6 +2070,313 @@ class ApiService {
     return this.request<{ device: Device }>(`/devices/${id}?usecase_id=${usecaseId}`);
   }
 
+  /**
+   * Record portal-managed device attributes on the Devices table: the
+   * Test_Device flag and/or the DDA Target_Architecture the deployment
+   * architecture gates check. UseCaseAdmin (node-designer:manage) only —
+   * the backend enforces the permission.
+   */
+  async updateDeviceFlags(
+    deviceId: string,
+    usecaseId: string,
+    updates: { test_device?: boolean; target_architecture?: string | null }
+  ): Promise<{
+    device_id: string;
+    usecase_id: string;
+    test_device: boolean;
+    target_architecture: string | null;
+  }> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request(`/devices/${deviceId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ usecase_id: usecaseId, ...updates }),
+    });
+  }
+
+  /**
+   * Remove a DDA-managed device (manage_devices: Operator and above; the
+   * backend enforces it). Deletes the device's Greengrass core device record
+   * and the portal's records for it. With `deleteThing`, the device's AWS IoT
+   * thing, certificates and shadows are deleted first, so it can no longer
+   * connect and must be set up again to come back.
+   */
+  async deleteDevice(
+    deviceId: string,
+    usecaseId: string,
+    options: { deleteThing?: boolean } = {}
+  ): Promise<DeleteDeviceResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    const params = new URLSearchParams({ usecase_id: usecaseId });
+    if (options.deleteThing) {
+      params.set('delete_thing', 'true');
+    }
+    return this.request<DeleteDeviceResponse>(`/devices/${deviceId}?${params}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /**
+   * The device's Camera_Registry entries with computed staleness and the
+   * device's IoT connectivity status (camera-registry-sync Requirements
+   * 1.3, 7.1). Devices that never completed a synchronization return
+   * `state: "never-synced"` rather than a bare empty list.
+   */
+  async getDeviceCameras(deviceId: string, usecaseId: string): Promise<DeviceCamerasResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceCamerasResponse>(
+      `/devices/${deviceId}/cameras?usecase_id=${usecaseId}`
+    );
+  }
+
+  /**
+   * The device's recorded camera-sync conflict events, newest first
+   * (camera-registry-sync Requirement 6.3).
+   */
+  async getDeviceCameraConflicts(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<DeviceCameraConflictsResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceCameraConflictsResponse>(
+      `/devices/${deviceId}/cameras/conflicts?usecase_id=${usecaseId}`
+    );
+  }
+
+  /** Create a portal-managed Camera_Source (Operator, Requirement 5.1). */
+  async createDeviceCamera(
+    deviceId: string,
+    usecaseId: string,
+    body: CameraSourceMutationBody
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras?usecase_id=${usecaseId}`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Update a portal-managed Camera_Source (Operator, Requirement 5.1). */
+  async updateDeviceCamera(
+    deviceId: string,
+    cameraSourceId: string,
+    usecaseId: string,
+    body: CameraSourceMutationBody
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras/${encodeURIComponent(cameraSourceId)}?usecase_id=${usecaseId}`,
+      { method: 'PUT', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Pending-delete a portal-managed Camera_Source (Operator). */
+  async deleteDeviceCamera(
+    deviceId: string,
+    cameraSourceId: string,
+    usecaseId: string
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras/${encodeURIComponent(cameraSourceId)}?usecase_id=${usecaseId}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * Re-issue a conflict's overridden portal version as a new pending
+   * change (Operator, Requirement 6.4).
+   */
+  async reapplyCameraConflict(
+    deviceId: string,
+    conflictId: string,
+    usecaseId: string
+  ): Promise<CameraMutationResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<CameraMutationResponse>(
+      `/devices/${deviceId}/cameras/conflicts/${encodeURIComponent(conflictId)}/reapply?usecase_id=${usecaseId}`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * On-demand refresh: pulls the device's registry shadow through the
+   * same reducer as the ingest path and returns the refreshed inventory.
+   */
+  async refreshDeviceCameras(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<DeviceCamerasResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceCamerasResponse>(
+      `/devices/${deviceId}/cameras/refresh?usecase_id=${usecaseId}`,
+      { method: 'POST' }
+    );
+  }
+
+  // Static-image pin provisioning (cloud-static-camera-provisioning
+  // task 9.1 — Portal_Pin_API routes in camera_registry.py)
+
+  /**
+   * Presigned PUT + staging key for a static-image pin upload (Operator,
+   * cloud-static-camera-provisioning Req 1.1 upload path). The staged
+   * object is validated and copied server-side by the pin submit route.
+   */
+  async getStaticImageUploadUrl(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticImageUploadUrlResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticImageUploadUrlResponse>(
+      `/devices/${deviceId}/cameras/static-image/upload-url?usecase_id=${usecaseId}`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Submit a staged upload as a pin (or replace) Pin_Request for the
+   * device's Static_Image_Camera (Operator, Reqs 1.1-1.5, 7.1).
+   */
+  async pinStaticImage(
+    deviceId: string,
+    usecaseId: string,
+    body: { stagingKey: string; fileName: string }
+  ): Promise<StaticImagePinSubmitResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticImagePinSubmitResponse>(
+      `/devices/${deviceId}/cameras/static-image/pin?usecase_id=${usecaseId}`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Create a removal Pin_Request for the device's Pinned_Image
+   * (Operator, Req 7.2).
+   */
+  async removeStaticImagePin(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticImagePinSubmitResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticImagePinSubmitResponse>(
+      `/devices/${deviceId}/cameras/static-image/pin?usecase_id=${usecaseId}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * The device's static-camera provisioning status: latest Pin_Request,
+   * device-reported pinned state, history, and connectivity while
+   * pending (Viewer, Reqs 1.7, 1.10, 4.4-4.8, 5.7).
+   */
+  async getStaticImagePinStatus(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticImagePinStatusResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticImagePinStatusResponse>(
+      `/devices/${deviceId}/cameras/static-image?usecase_id=${usecaseId}`
+    );
+  }
+
+  // Static-video pin provisioning (static-camera-video-loop —
+  // Portal_Video_Pin_API routes served by the CameraVideoPinHandler)
+
+  /**
+   * Presigned PUT + staging key for a static-video pin upload (Operator).
+   * The staged object is validated (decoded) and copied server-side by
+   * the video pin submit route.
+   */
+  async getStaticVideoUploadUrl(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticVideoUploadUrlResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticVideoUploadUrlResponse>(
+      `/devices/${deviceId}/cameras/static-video/upload-url?usecase_id=${usecaseId}`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Submit a staged upload to pin (or replace) the device's
+   * Static_Video_Camera video (Operator). The Portal validates the video
+   * asynchronously, decoding its first and last frames (up to a minute):
+   * the response (202) only accepts the submission; poll
+   * `getStaticVideoPinStatus` for `validation` and then `latest`.
+   */
+  async pinStaticVideo(
+    deviceId: string,
+    usecaseId: string,
+    body: { stagingKey: string; fileName: string }
+  ): Promise<StaticVideoValidationSubmitResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticVideoValidationSubmitResponse>(
+      `/devices/${deviceId}/cameras/static-video/pin?usecase_id=${usecaseId}`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Create a removal Video_Pin_Request for the device's Pinned_Video (Operator). */
+  async removeStaticVideoPin(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticVideoPinSubmitResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticVideoPinSubmitResponse>(
+      `/devices/${deviceId}/cameras/static-video/pin?usecase_id=${usecaseId}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * The device's static-video provisioning status: the latest submission's
+   * validation, the latest Video_Pin_Request, device-reported state,
+   * history, and connectivity while pending (Viewer).
+   */
+  async getStaticVideoPinStatus(
+    deviceId: string,
+    usecaseId: string
+  ): Promise<StaticVideoPinStatusResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<StaticVideoPinStatusResponse>(
+      `/devices/${deviceId}/cameras/static-video?usecase_id=${usecaseId}`
+    );
+  }
+
   // Device Logs endpoints
   async getDeviceLogGroups(deviceId: string, usecaseId: string): Promise<{
     device_id: string;
@@ -443,6 +2478,10 @@ class ApiService {
     device_id: string;
     enabled: boolean;
     component_version?: string | null;
+    device_arch?: string | null;
+    // Max SecureTunneling version deployable to this arch (e.g. '1.1.3' on
+    // JP5, where >= 2.0.0 is GLIBC-incompatible); null when uncapped.
+    secure_tunneling_max_version?: string | null;
   }> {
     return this.request(`/devices/${deviceId}/ssh-tunnel?usecase_id=${usecaseId}`);
   }
@@ -471,6 +2510,83 @@ class ApiService {
     const qs = new URLSearchParams({ usecase_id: usecaseId });
     if (lifetimeMinutes) qs.set('lifetime_minutes', String(lifetimeMinutes));
     return this.request(`/devices/${deviceId}/ssh-tunnel/open?${qs}`, { method: 'POST' });
+  }
+
+  // Device registration endpoints (station-quick-setup)
+
+  /**
+   * Register a new device from the portal, returning the created
+   * Device_Registration together with the one-line Setup_Command and its
+   * token expiry (station-quick-setup Requirement 1.1). Requires the
+   * manage-devices permission — the backend enforces it. A 400 identifies
+   * each missing/invalid field (1.2, 1.9); a 409 identifies a conflicting
+   * device name (1.3).
+   */
+  async registerDevice(
+    input: RegisterDeviceInput
+  ): Promise<RegistrationWithCommand> {
+    return this.request<RegistrationWithCommand>('/device-registrations', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  /**
+   * List the Device_Registrations for a Use_Case with their Setup_Status
+   * and token expiry, never token material (station-quick-setup
+   * Requirement 6.3).
+   */
+  async listDeviceRegistrations(
+    usecaseId: string
+  ): Promise<DeviceRegistrationsResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<DeviceRegistrationsResponse>(
+      `/device-registrations?usecase_id=${encodeURIComponent(usecaseId)}`
+    );
+  }
+
+  /**
+   * List the existing IoT Thing Group names in the Use_Case account for
+   * Device_Group selection (station-quick-setup Requirement 1.7).
+   */
+  async listThingGroups(usecaseId: string): Promise<ThingGroupsResponse> {
+    if (!usecaseId) {
+      throw new Error('usecase_id is required');
+    }
+    return this.request<ThingGroupsResponse>(
+      `/device-registrations/thing-groups?usecase_id=${encodeURIComponent(usecaseId)}`
+    );
+  }
+
+  /**
+   * Regenerate the Setup_Command for a Device_Registration, invalidating
+   * any prior Setup_Token and returning an updated command (station-quick-
+   * setup Requirements 2.5, 6.4). A 4xx indicates the registration is
+   * already `completed` (2.8).
+   */
+  async regenerateSetupCommand(
+    registrationId: string
+  ): Promise<RegistrationWithCommand> {
+    return this.request<RegistrationWithCommand>(
+      `/device-registrations/${encodeURIComponent(registrationId)}/command`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Delete a non-completed Device_Registration, invalidating its
+   * Setup_Token (station-quick-setup Requirement 6.6). A 4xx indicates the
+   * registration is `completed` and cannot be deleted (6.9).
+   */
+  async deleteDeviceRegistration(
+    registrationId: string
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(
+      `/device-registrations/${encodeURIComponent(registrationId)}`,
+      { method: 'DELETE' }
+    );
   }
 
   // Training endpoints
@@ -527,16 +2643,67 @@ class ApiService {
     job_name: string;
     dataset_prefix: string;
     task_type: string;
-    label_categories: string[];
-    workforce_arn: string;
+    /**
+     * Mandatory Labeling_Backend discriminator (dda-data-labeling
+     * Requirement 1.1): 'GroundTruth' submits through the existing
+     * SageMaker flow unchanged; 'DDA' creates a portal-native job.
+     */
+    labeling_backend: 'DDA' | 'GroundTruth';
+    // Ground Truth fields (labeling_backend='GroundTruth').
+    label_categories?: string[];
+    workforce_arn?: string;
     instructions?: string;
     num_workers_per_object?: number;
     task_time_limit?: number;
     mask_prefix?: string;
     enable_automated_labeling?: boolean;
+    // DDA fields (labeling_backend='DDA', dda-data-labeling
+    // Requirements 4.1-4.4, 8.1, 9.2).
+    label_set?: string[];
+    team_id?: string;
+    example_images?: { good: string[]; bad: string[] };
+    auto_label?: {
+      enabled: boolean;
+      model?: string;
+      detection_prompt?: string;
+      /**
+       * Downscale_Setting persisted with the job for the `llm:` family
+       * only: `null` is Downscale_Off, an integer is one Max_Image_Edge
+       * value (llm-model-token-and-image-sizing Requirements 5.2, 5.7,
+       * 10.4).
+       */
+      downscale_max_edge?: number | null;
+      /**
+       * Token_Budget_Selection persisted with the job for the `llm:`
+       * family only; omitted when the control is empty so the
+       * Effective_Token_Budget resolves from the Model_Token_Limits and
+       * the default (Requirements 3.6, 3.10).
+       */
+      token_budget?: number;
+      /**
+       * Per-label Grounding DINO text prompt overrides for the
+       * `grounded-sam` family only: keys are a subset of the submitted
+       * label_set, values transmitted character-for-character as
+       * entered, and the key is omitted entirely when no override
+       * survives trimming (grounded-sam-autolabel Requirements 2.3,
+       * 2.4).
+       */
+      prompt_overrides?: Record<string, string>;
+    };
+    /**
+     * Few_Shot_Option for the `llm:` auto-label family
+     * (llm-autolabel-prompt-tuning Requirements 6.4, 6.9, 10.6). Persisted
+     * as `auto_label.few_shot`; `enabled: false` is the outcome for a
+     * non-`llm:` selection and omitting the field keeps the pre-feature
+     * job record byte-identical.
+     */
+    few_shot?: { enabled: boolean; examples?: PreviewFewShotExample[] };
+    skip_verification?: boolean;
+    bedrock_model_id?: string;
+    per_label_prompts?: Record<string, string>;
   }): Promise<{
     job_id: string;
-    sagemaker_job_name: string;
+    sagemaker_job_name?: string;
     status: string;
     message: string;
   }> {
@@ -573,6 +2740,58 @@ class ApiService {
       failure_reason?: string;
       console_url?: string;
       worker_portal_url?: string;
+      // DDA job fields (labeling_backend='DDA', dda-data-labeling
+      // Requirements 5.4, 6.4, 6.6, 11.1, 11.2, 11.10).
+      labeling_backend?: 'DDA' | 'GroundTruth';
+      label_set?: string[];
+      team_id?: string;
+      submitted_count?: number;
+      member_progress?: LabelingMemberProgress[];
+      unassigned_count?: number;
+      blocked?: boolean;
+      notifications_skipped?: boolean;
+      notification_failures?: LabelingNotificationFailure[];
+      skip_verification?: boolean;
+      review_ready?: boolean;
+      /**
+       * Set once a Skip_Verification job's admin review has been
+       * finalized; a truthy value makes the job ineligible for the
+       * re-run pre-labels action
+       * (grounded-sam-prompt-guardrails-and-prelabel-retry
+       * Requirements 7.1, 7.2).
+       */
+      review_finalized?: boolean;
+      stopped_at?: number;
+      // Pre-label progress counts over active tasks (llm-auto-labeling
+      // Requirements 10.1, 10.3).
+      prelabel_available_count?: number;
+      prelabel_failed_count?: number;
+      /**
+       * Failure_Reason_Summary: the distinct `prelabel_error` values
+       * among the job's active Failed pre-label tasks, each with its
+       * occurrence count, ordered by descending count and capped at 5
+       * distinct reasons; present only when at least one Failed
+       * pre-label task exists
+       * (grounded-sam-prompt-guardrails-and-prelabel-retry
+       * Requirements 4.1, 4.2).
+       */
+      prelabel_failure_reasons?: { reason: string; count: number }[];
+      // Auto-label configuration persisted on the job item and returned
+      // as-is; `detection_prompt` is present only for the `llm:` family
+      // (llm-auto-labeling Requirement 10.1).
+      auto_label?: {
+        enabled?: boolean;
+        model?: string;
+        detection_prompt?: string;
+        /**
+         * Per-label Grounding DINO text prompt overrides persisted for
+         * the `grounded-sam` family only: keys are a subset of the
+         * job's label_set, values held verbatim as entered; absent for
+         * every other family and for override-free grounded-sam jobs
+         * (grounded-sam-autolabel Requirements 2.3, 2.4).
+         */
+        prompt_overrides?: Record<string, string>;
+      };
     };
   }> {
     return this.request(`/labeling/${jobId}`);
@@ -583,6 +2802,341 @@ class ApiService {
     job_id: string;
   }> {
     return this.request(`/labeling/${jobId}/manifest`);
+  }
+
+  // DDA labeling endpoints (dda-data-labeling).
+
+  /**
+   * List the Labeling_Teams scoped to a Use_Case with each team's member
+   * identities and emails (dda-data-labeling Requirement 3.8).
+   */
+  async listLabelingTeams(usecaseId: string): Promise<{
+    teams: LabelingTeam[];
+    count: number;
+  }> {
+    const queryParams = new URLSearchParams({ usecase_id: usecaseId });
+    return this.request(`/labeling-teams?${queryParams}`);
+  }
+
+  /**
+   * Create a Labeling_Team scoped to a Use_Case (dda-data-labeling
+   * Requirements 3.1, 3.2). A 4xx indicates a name validation failure.
+   */
+  async createLabelingTeam(data: {
+    usecase_id: string;
+    team_name: string;
+  }): Promise<{ team: LabelingTeam; message?: string }> {
+    return this.request('/labeling-teams', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * Add a Data_Labeler user to a Labeling_Team (dda-data-labeling
+   * Requirements 3.3–3.5). A 4xx indicates a missing Data_Labeler role or
+   * duplicate membership.
+   */
+  async addTeamMember(
+    teamId: string,
+    userId: string
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeling-teams/${encodeURIComponent(teamId)}/members`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ user_id: userId }),
+      }
+    );
+  }
+
+  /**
+   * Remove a member from a Labeling_Team; the member's unsubmitted
+   * Task_Assignments in InProgress jobs are reassigned server-side
+   * (dda-data-labeling Requirements 3.6, 5.3, 5.4).
+   */
+  async removeTeamMember(
+    teamId: string,
+    userId: string
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeling-teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * Delete a Labeling_Team (dda-data-labeling Requirement 3.1). A 409
+   * indicates the team is referenced by an InProgress labeling job and
+   * cannot be deleted yet.
+   */
+  async deleteLabelingTeam(teamId: string): Promise<{ message: string }> {
+    return this.request(`/labeling-teams/${encodeURIComponent(teamId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /**
+   * Stop an InProgress DDA Labeling_Job, retaining submitted annotations
+   * (dda-data-labeling Requirements 11.4, 11.5, 11.9). A 4xx indicates the
+   * job is not InProgress; a 5xx indicates the job was not stopped.
+   */
+  async stopLabelingJob(jobId: string): Promise<{
+    job_id: string;
+    status: string;
+    stopped_at?: number;
+    message?: string;
+  }> {
+    return this.request(`/labeling/${encodeURIComponent(jobId)}/stop`, {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * Request deletion of a resting DDA Labeling_Job (status Completed,
+   * Failed, Stopped, DeleteFailed, or Deleting as the idempotent
+   * re-trigger); the 202 answer carries `status: 'Deleting'` and the async
+   * cleanup removes the job's task assignments and pre-label/annotation
+   * artifacts while retaining the dataset images and any generated
+   * training manifest (labeling-job-cleanup-work-stealing-and-podium
+   * Requirements 1.1, 1.5, 4.4). A 400 indicates a Ground Truth job or a
+   * job that must be stopped first; a 404 indicates the job does not
+   * exist.
+   */
+  async deleteLabelingJob(jobId: string): Promise<{
+    job_id: string;
+    status: string;
+    message?: string;
+  }> {
+    return this.request(`/labeling/${encodeURIComponent(jobId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /**
+   * Re-run Pre_Label generation for a DDA Labeling_Job's Failed
+   * pre-label tasks, optionally replacing a grounded-sam job's
+   * `prompt_overrides` in the same request; the body field is omitted
+   * for a pure retry (grounded-sam-prompt-guardrails-and-prelabel-retry
+   * Requirements 5.1, 7.5). A 4xx indicates an ineligible job or a
+   * prompt-guardrail violation; a 202 carries the retried task count.
+   */
+  async rerunPrelabels(
+    jobId: string,
+    body?: { prompt_overrides?: Record<string, string> }
+  ): Promise<{
+    job_id: string;
+    retried_count: number;
+    message?: string;
+  }> {
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/rerun-prelabels`,
+      {
+        method: 'POST',
+        ...(body !== undefined && { body: JSON.stringify(body) }),
+      }
+    );
+  }
+
+  /**
+   * List the jobs in which the caller holds at least one unsubmitted
+   * Task_Assignment, with submitted/remaining counts (dda-data-labeling
+   * Requirements 2.4, 7.10). Empty list when none exist.
+   */
+  async getLabelerJobs(): Promise<{
+    jobs: LabelerJobSummary[];
+    count: number;
+  }> {
+    return this.request('/labeler/jobs');
+  }
+
+  /**
+   * Fetch the caller's next presentable unsubmitted Task_Assignment for a
+   * job — presigned image URL, Pre_Label when available, instructions and
+   * example-image URLs — or the completion payload when none remain
+   * (dda-data-labeling Requirements 7.1, 7.2, 8.3, 12.6).
+   */
+  async getNextTask(jobId: string): Promise<LabelerNextTaskResponse> {
+    return this.request(`/labeler/jobs/${encodeURIComponent(jobId)}/next`);
+  }
+
+  /**
+   * Fetch the job's team-pool state for the caller: the count of
+   * Stealable_Tasks, the Job_Complete condition, and the Winner_Podium
+   * entries exactly when the job is complete
+   * (labeling-job-cleanup-work-stealing-and-podium Requirements 6.1, 8.2).
+   * A 403 indicates the caller is not a current member of the job's
+   * Labeling_Team or the job is missing or Ground Truth.
+   */
+  async getLabelerJobPool(jobId: string): Promise<LabelerJobPoolResponse> {
+    return this.request(`/labeler/jobs/${encodeURIComponent(jobId)}/pool`);
+  }
+
+  /**
+   * Take exactly one Stealable_Task from a teammate (or the UNASSIGNED
+   * pool) in an InProgress team job; the transferred task is then served
+   * through the existing next-task flow
+   * (labeling-job-cleanup-work-stealing-and-podium Requirements 5.1, 6.3).
+   * A 409 indicates no stealable tasks remain or the job is not
+   * InProgress; a 403 indicates the caller is not a current member of the
+   * job's Labeling_Team or the job is missing or Ground Truth.
+   */
+  async stealTask(jobId: string): Promise<StealTaskResponse> {
+    return this.request(`/labeler/jobs/${encodeURIComponent(jobId)}/steal`, {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * Submit the annotation for a Task_Assignment, marking it submitted
+   * (dda-data-labeling Requirements 7.7–7.9, 11.8). A 4xx indicates an
+   * incomplete annotation or a Stopped job; a 5xx means the annotation was
+   * not saved and the task remains unsubmitted.
+   */
+  async submitTask(
+    taskId: string,
+    jobId: string,
+    annotation: DdaAnnotation
+  ): Promise<{
+    message: string;
+    submitted_count?: number;
+    remaining_count?: number;
+  }> {
+    // job_id is required in the body: task ids are only unique within a
+    // job (both are table keys), so the route cannot resolve the task
+    // without it.
+    return this.request(`/labeler/tasks/${encodeURIComponent(taskId)}/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ job_id: jobId, annotation }),
+    });
+  }
+
+  /**
+   * Record that a Task_Assignment's image could not be retrieved or
+   * rendered; the task is withheld from labeling (dda-data-labeling
+   * Requirement 7.12).
+   */
+  async reportPresentationFailure(
+    taskId: string,
+    jobId: string,
+    reason: string
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeler/tasks/${encodeURIComponent(taskId)}/presentation-failure`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ job_id: jobId, reason }),
+      }
+    );
+  }
+
+  /**
+   * Fetch a fresh 15-minute presigned URL for a task's image after the
+   * prior URL expires; client-side annotation state is untouched
+   * (dda-data-labeling Requirement 12.7).
+   */
+  async refreshTaskImageUrl(
+    taskId: string,
+    jobId?: string
+  ): Promise<{
+    image_url: string;
+    image_url_expires_at?: number;
+  }> {
+    // job_id disambiguates when the caller has same-numbered tasks in
+    // more than one job (task ids are only unique within a job).
+    const query = jobId ? `?job_id=${encodeURIComponent(jobId)}` : '';
+    return this.request(
+      `/labeler/tasks/${encodeURIComponent(taskId)}/image-url${query}`
+    );
+  }
+
+  /**
+   * Fetch the paginated Admin_Review results for a Skip_Verification_Mode
+   * job: every dataset image with its auto-labeled result or failed status
+   * and current decision (dda-data-labeling Requirement 9.5).
+   */
+  async getReview(
+    jobId: string,
+    nextToken?: string
+  ): Promise<ReviewResponse> {
+    const query = nextToken
+      ? `?next_token=${encodeURIComponent(nextToken)}`
+      : '';
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/review${query}`
+    );
+  }
+
+  /**
+   * Batch-save accept/reject decisions for Admin_Review results; decisions
+   * remain mutable until the review is finalized (dda-data-labeling
+   * Requirement 9.6).
+   */
+  async saveReviewDecisions(
+    jobId: string,
+    decisions: Record<string, 'accepted' | 'rejected'>
+  ): Promise<{ message: string }> {
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/review/decisions`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ decisions }),
+      }
+    );
+  }
+
+  /**
+   * Finalize the Admin_Review, triggering manifest generation over exactly
+   * the accepted results (dda-data-labeling Requirements 9.7–9.9). A 4xx
+   * indicates undecided results or zero accepted results.
+   */
+  async finalizeReview(jobId: string): Promise<{
+    job_id: string;
+    status?: string;
+    message?: string;
+  }> {
+    return this.request(
+      `/labeling/${encodeURIComponent(jobId)}/review/finalize`,
+      { method: 'POST' }
+    );
+  }
+
+  // Prompt_Tuning_Preview endpoints (llm-autolabel-prompt-tuning).
+  // A Preview_Run is asynchronous: this route starts it and returns its
+  // identifier, and the caller short-polls getPreviewRun for progressive
+  // per-sample results.
+
+  /**
+   * Start a Preview_Run over the selected Sample_Images with the currently
+   * configured model, Detection_Prompt, modality, Label_Set and
+   * Few_Shot_Option (llm-autolabel-prompt-tuning Requirement 1.3). No
+   * Labeling_Job, Task_Assignment or pipeline Pre_Label is created (1.6).
+   * A 400 enumerates every violated validation rule, a 403 carries the
+   * fixed `{error: 'Not authorized'}` body whether or not the Use_Case or
+   * referenced objects exist, and a 409 indicates a Preview_Run is already
+   * in progress for this user and Use_Case.
+   */
+  async startPreviewRun(
+    body: StartPreviewRunRequest
+  ): Promise<StartPreviewRunResponse> {
+    return this.request<StartPreviewRunResponse>('/labeling-preview/runs', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Poll a Preview_Run: its status plus exactly one entry per requested
+   * Sample_Image in request order, each carrying its state and — once
+   * resolved — the failure category and reason plus a presigned
+   * `result_url` for its `PreviewResultPayload`
+   * (llm-autolabel-prompt-tuning Requirements 3.5, 4.6, 9.6). A 404 means
+   * the run id is unknown or the run belongs to another user.
+   */
+  async getPreviewRun(runId: string): Promise<PreviewRunResponse> {
+    return this.request<PreviewRunResponse>(
+      `/labeling-preview/runs/${encodeURIComponent(runId)}`
+    );
   }
 
   async transformManifest(data: {
@@ -624,14 +3178,35 @@ class ApiService {
     dataset_manifest_s3: string;
     instance_type: string;
     max_runtime_seconds?: number;
-    hyperparameters?: Record<string, any>;
+    hyperparameters?: Record<string, any> | DetectionHyperparameters;
     auto_compile?: boolean;
     compilation_targets?: string[];
+    // object_detection only (rfdetr-training-and-transfer-learning Req 3.2 / 6.3):
+    /** Detector family; the backend defaults a missing value to 'yolo'. */
+    detection_arch?: DetectionArch;
+    /** Starting weights; omitted = the arch's published checkpoint. */
+    base_model?: BaseModelRef;
+    /** Optional override of the manifest's class-map order (base-model prefill). */
+    class_names?: string[];
   }): Promise<{ training_job_id: string; message: string }> {
     return this.request<{ training_job_id: string; message: string }>('/training', {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  /**
+   * What the Create Training "Base model" control offers for one detector
+   * family (Req 6.1): the arch's published checkpoints, the use case's
+   * Completed portal-trained detectors of that arch, and its imported
+   * records marked fine-tunable for that arch. A thin client-side filter
+   * over `GET /training` — imported models are `TrainingJobs` records too
+   * (`source='imported'`), and `resolve_base_model` looks every non-published
+   * `ref` up in that table, so no other list is needed and no new Lambda.
+   */
+  async listDetectionBaseModels(usecaseId: string, arch: DetectionArch): Promise<DetectionBaseModels> {
+    const { jobs } = await this.listTrainingJobs(usecaseId);
+    return groupDetectionBaseModels((jobs || []) as TrainingJobRecord[], arch);
   }
 
   async getTrainingLogs(id: string, nextToken?: string): Promise<{ 
@@ -708,7 +3283,12 @@ class ApiService {
   }
 
   // Packaging endpoints
-  async startPackaging(trainingId: string, targets?: string[], autoTriggered?: boolean): Promise<{
+  async startPackaging(
+    trainingId: string,
+    targets?: string[],
+    autoTriggered?: boolean,
+    options?: { signal?: AbortSignal }
+  ): Promise<{
     training_id: string;
     packaged_components: Array<{
       target: string;
@@ -723,6 +3303,8 @@ class ApiService {
       method: 'POST',
       // auto_triggered chains packaging -> greengrass publish (component creation).
       body: JSON.stringify({ targets, auto_triggered: autoTriggered }),
+      // Client-side abort/timeout support only; the request body is unchanged.
+      signal: options?.signal,
     });
   }
 
@@ -732,7 +3314,8 @@ class ApiService {
     componentName: string,
     componentVersion: string,
     friendlyName?: string,
-    targets?: string[]
+    targets?: string[],
+    options?: { signal?: AbortSignal }
   ): Promise<{
     training_id: string;
     component_name: string;
@@ -756,6 +3339,8 @@ class ApiService {
         friendly_name: friendlyName,
         targets,
       }),
+      // Client-side abort/timeout support only; the request body is unchanged.
+      signal: options?.signal,
     });
   }
 
@@ -1093,6 +3678,17 @@ class ApiService {
       auto_rollback?: boolean;
       timeout_seconds?: number;
     };
+    /**
+     * SPECIFIC acknowledgement of de-selected components that stay
+     * installed as resolved dependencies of components still selected
+     * (deployment-preflight-validation 2.14). Additive and optional: the
+     * pre-submit closure validation refuses the first submit with 409
+     * PREFLIGHT_ACKNOWLEDGEMENT_REQUIRED and proceeds on a re-submit
+     * naming EXACTLY the components of that finding. A blanket or stale
+     * acknowledgement does not match, and it never clears a 409
+     * PREFLIGHT_VALIDATION_FAILED blocking finding.
+     */
+    acknowledged_retained_components?: string[];
   }): Promise<{
     deployment_id: string;
     iot_job_id: string;
@@ -1122,6 +3718,91 @@ class ApiService {
   }> {
     return this.request(`/deployments/${deploymentId}?usecase_id=${usecaseId}`, {
       method: 'DELETE',
+    });
+  }
+
+  /**
+   * Deploy-time Camera_Binding context for the CreateDeployment binding
+   * matrix (camera-registry-sync Requirements 8.1, 8.5, 8.9): for each
+   * Camera_Input_Node of the workflow version and each target device,
+   * the device's registered Camera_Sources as binding options with
+   * hint-matching pre-selection. `binding_required: false` skips the
+   * matrix step entirely.
+   */
+  async getCameraBindingContext(params: {
+    usecase_id: string;
+    workflow_id: string;
+    workflow_version?: number;
+    target_devices?: string[];
+    target_thing_group?: string;
+  }): Promise<CameraBindingContext> {
+    const qs = new URLSearchParams({
+      view: 'binding-context',
+      usecase_id: params.usecase_id,
+      workflow_id: params.workflow_id,
+    });
+    if (params.workflow_version !== undefined) {
+      qs.set('workflow_version', String(params.workflow_version));
+    }
+    if (params.target_devices && params.target_devices.length > 0) {
+      qs.set('target_devices', params.target_devices.join(','));
+    }
+    if (params.target_thing_group) {
+      qs.set('target_thing_group', params.target_thing_group);
+    }
+    return this.request(`/deployments?${qs.toString()}`);
+  }
+
+  /**
+   * Deploy a packaged Workflow_Component (component_type: workflow) with
+   * optional deploy-time Camera_Bindings and confirmed warning ids
+   * (camera-registry-sync Requirements 8.2, 8.5, 9.3). Rejections carry
+   * structured codes: 409 CAMERA_BINDINGS_INVALID {errors, warnings},
+   * 409 CAMERA_WARNINGS_UNCONFIRMED {warnings}, 503 REGISTRY_UNAVAILABLE,
+   * and 502 BINDING_DELIVERY_FAILED.
+   */
+  async createWorkflowDeployment(data: {
+    usecase_id: string;
+    workflow_id: string;
+    workflow_version?: number;
+    target_devices?: string[];
+    target_thing_group?: string;
+    deployment_name?: string;
+    rollout_config?: {
+      auto_rollback?: boolean;
+      timeout_seconds?: number;
+    };
+    camera_bindings?: Record<
+      string,
+      Record<string, { cameraSourceId: string } | { override: Record<string, unknown> }>
+    >;
+    confirmed_warnings?: string[];
+    /**
+     * SPECIFIC acknowledgement of de-selected components retained as
+     * resolved dependencies (deployment-preflight-validation 2.14) — the
+     * same additive field the generic submit path carries. See
+     * `createDeployment` above.
+     */
+    acknowledged_retained_components?: string[];
+  }): Promise<{
+    deployment_id: string;
+    iot_job_id: string;
+    iot_job_arn: string;
+    workflow_id: string;
+    workflow_version: number;
+    component_name: string;
+    component_version: string;
+    target_arn: string;
+    target_devices: string[];
+    target_thing_group?: string | null;
+    is_revision: boolean;
+    superseded_deployment_id?: string | null;
+    camera_bindings_delivered: boolean;
+    message: string;
+  }> {
+    return this.request('/deployments', {
+      method: 'POST',
+      body: JSON.stringify({ component_type: 'workflow', ...data }),
     });
   }
 
@@ -1155,6 +3836,11 @@ class ApiService {
       region: string;
       tags?: Record<string, string>;
       is_configured?: boolean;
+      // Use-case bucket configuration (design §5.6): `allowed` marks the
+      // buckets in the use case's allowed set (configured + additional);
+      // `portal_created` the ones the portal created.
+      allowed?: boolean;
+      portal_created?: boolean;
     }>;
     current_data_bucket: string | null;
     target_account?: string;
@@ -1404,7 +4090,12 @@ class ApiService {
         target: string;
         status: string;
         component_package_s3?: string;
+        supported_architectures?: string[];
       }>;
+      published_component?: VllmPublishedComponent;
+      // Stored Engine_Configuration, present for vLLM records only
+      // (models.py get_model, Requirement 1.2).
+      engine_configuration?: VllmEngineConfiguration | null;
       validation_result?: Record<string, unknown>;
       hyperparameters?: Record<string, unknown>;
       instance_type?: string;
@@ -1498,6 +4189,57 @@ class ApiService {
     });
   }
 
+  // vLLM model registration endpoints (vllm-triton-inference)
+
+  /**
+   * Register a vLLM_Model_Record (Requirements 1.1, 1.2). Exactly one of
+   * `huggingface_model_id` / `s3_model_artifact` must be supplied (the API
+   * enforces the XOR); a 400 rejection carries the complete finding list
+   * as `details.findings` on the thrown ApiError.
+   */
+  async registerVllmModel(data: {
+    usecase_id: string;
+    model_name: string;
+    model_version: string;
+    huggingface_model_id?: string;
+    s3_model_artifact?: string;
+    engine_configuration?: VllmEngineConfiguration;
+    description?: string;
+  }): Promise<{
+    training_id: string;
+    publish_eligible: boolean;
+    labeling_steps: number;
+    training_steps: number;
+  }> {
+    return this.request('/models/vllm', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /** Documented vLLM engine settings, defaults, and accepted ranges. */
+  async getVllmEngineSpec(): Promise<VllmEngineSpec> {
+    return this.request('/models/vllm/engine-spec');
+  }
+
+  /**
+   * Update the stored Engine_Configuration of a registered vLLM model
+   * (vllm-sizing-and-packaging-errors, Requirements 2.1–2.4). Supplied
+   * settings are validated against the registration rules and overlaid
+   * onto the stored configuration; a 400 rejection carries the per-field
+   * finding list as `details.findings` on the thrown ApiError. The change
+   * takes effect only after the model is packaged and published again.
+   */
+  async updateVllmEngineConfiguration(
+    trainingId: string,
+    engineConfiguration: VllmEngineConfiguration
+  ): Promise<VllmEngineConfigurationUpdateResponse> {
+    return this.request(`/models/vllm/${trainingId}/engine-configuration`, {
+      method: 'PUT',
+      body: JSON.stringify({ engine_configuration: engineConfiguration }),
+    });
+  }
+
   // Model Converter endpoints (Smart Import)
   async getSupportedModelTypes(): Promise<{
     model_types: Record<string, {
@@ -1535,6 +4277,12 @@ class ApiService {
       num_outputs?: number;
       input_shapes?: (number | null)[][];
       output_shapes?: (number | null)[][];
+      // .pt / .pth sources (detector-checkpoint-import Requirement 2): the
+      // pre-flight block, the class names in index order, and whether the
+      // file is a training checkpoint the portal keeps for fine-tuning.
+      class_names?: string[] | null;
+      checkpoint?: CheckpointAssessment;
+      fine_tunable?: boolean;
     };
     supported_model_types: Record<string, {
       description: string;
@@ -1542,6 +4290,23 @@ class ApiService {
     }>;
   }> {
     return this.request('/models/inspect', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * Presigned PUT for uploading a model file from the browser
+   * (detector-checkpoint-import Requirement 3). The server issues the key
+   * (`model-uploads/<uuid>/<name>` in the use case's own bucket); PUT the
+   * file to `upload_url`, then inspect and convert `model_s3_uri`.
+   */
+  async getModelUploadUrl(data: {
+    usecase_id: string;
+    file_name: string;
+    size_bytes: number;
+  }): Promise<ModelUploadUrlResponse> {
+    return this.request('/models/upload-url', {
       method: 'POST',
       body: JSON.stringify(data),
     });
@@ -1566,24 +4331,13 @@ class ApiService {
     // 'rf_detr' (DETR-family, two tensors, NMS-free top-k). Only used when
     // model_type === 'object_detection'.
     detection_arch?: string;
-  }): Promise<{
-    converted_model_s3_uri: string;
-    model_name: string;
-    model_type: string;
-    input_shape: number[];
-    model_info: {
-      type: string;
-      architecture_hints: string[];
-      suggested_type?: string;
-    };
-    message: string;
-    import_result?: {
-      training_id: string;
-      message: string;
-    };
-    training_id?: string;
-    import_error?: string;
-  }> {
+    // Detection resize geometry: letterbox (true) vs squash (false). Must match
+    // how the model was trained — a mismatch silently degrades detections.
+    preserve_aspect?: boolean;
+  }): Promise<ModelConvertResponse> {
+    // A detector checkpoint with export_format 'onnx' starts a conversion and
+    // answers with the record id and `conversion`; everything else answers
+    // with the packaged import, as before.
     return this.request('/models/convert', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -1729,6 +4483,129 @@ class ApiService {
     });
   }
 
+  // Bedrock_Configuration endpoints (workflow-manager Requirement 10.6).
+  // No dedicated settings route exists in API Gateway, so the configuration
+  // rides the PortalAdmin-only /data-accounts/{id} routes with the reserved
+  // id 'bedrock-configuration' (handled by the data_accounts Lambda).
+  async getBedrockConfiguration(): Promise<{
+    bedrock_configuration: {
+      model_id: string;
+      region: string;
+      max_tokens: number;
+      // null means "unset": the sampling parameter is omitted at invocation.
+      temperature: number | null;
+      top_p: number | null;
+      timeout_seconds: number;
+    };
+    defaults: Record<string, string | number | null>;
+    max_timeout_seconds: number;
+  }> {
+    return this.request('/data-accounts/bedrock-configuration');
+  }
+
+  // Invokable model options (inference profiles + on-demand foundation
+  // models) for the settings-page model dropdown. An empty list with a
+  // 'permissions' hint means the backend lacks the bedrock list
+  // permissions and the UI should fall back to free-text entry.
+  // `image_limit` is the model's Model_Image_Limit resolved from the
+  // backend's configuration (default 20), used by the labeling-job
+  // wizard's few-shot attach/omit hint (llm-autolabel-prompt-tuning
+  // Requirements 7.1, 7.5). `token_limit` is the Effective_Token_Budget the
+  // backend resolves for the model with no selection applied — the value the
+  // wizard pre-fills into the Token_Budget_Selection control
+  // (llm-model-token-and-image-sizing Requirements 1.6, 3.1).
+  async getBedrockModels(): Promise<{
+    models: {
+      id: string;
+      label: string;
+      image_limit?: number;
+      token_limit?: number;
+      // Image_Input_Capability tri-state (llm-model-picker-search-and-image-filter
+      // Requirement 1.4): true = the model accepts image input, false = the
+      // model is positively known text-only, absent = unknown capability —
+      // consumers must never exclude a model whose field is absent.
+      image_input?: boolean;
+    }[];
+    region: string;
+    permissions?: string;
+  }> {
+    return this.request('/data-accounts/bedrock-configuration/models');
+  }
+
+  // Model_Token_Limits endpoints (llm-model-token-and-image-sizing
+  // Requirement 4). The mapping is a settings item independent of the
+  // Bedrock_Configuration, riding the same reserved 'bedrock-configuration'
+  // data-accounts route. `source` reports whether the persisted settings item
+  // or the deploy-time environment bootstrap is currently effective.
+  async getModelTokenLimits(): Promise<{
+    model_token_limits: Record<string, number>;
+    default: number;
+    ceiling: number;
+    source: 'settings' | 'environment';
+  }> {
+    return this.request('/data-accounts/bedrock-configuration/token-limits');
+  }
+
+  // PortalAdmin-only. The submitted mapping REPLACES the persisted one in its
+  // entirety — an omitted model identifier is dropped, and an empty mapping is
+  // a valid state that resolves every model to the default (Req 4.1, 4.8).
+  async updateModelTokenLimits(mapping: Record<string, number>): Promise<{
+    message: string;
+    model_token_limits: Record<string, number>;
+  }> {
+    return this.request('/data-accounts/bedrock-configuration/token-limits', {
+      method: 'PUT',
+      body: JSON.stringify({ model_token_limits: mapping }),
+    });
+  }
+
+  async updateBedrockConfiguration(config: {
+    model_id?: string;
+    region?: string;
+    max_tokens?: number;
+    // An explicit null unsets the sampling parameter (the backend merges
+    // provided keys, so omitting the key keeps the current value).
+    temperature?: number | null;
+    top_p?: number | null;
+    timeout_seconds?: number;
+  }): Promise<{
+    message: string;
+    bedrock_configuration: {
+      model_id: string;
+      region: string;
+      max_tokens: number;
+      temperature: number | null;
+      top_p: number | null;
+      timeout_seconds: number;
+    };
+  }> {
+    return this.request('/data-accounts/bedrock-configuration', {
+      method: 'PUT',
+      body: JSON.stringify(config),
+    });
+  }
+
+  // Build infrastructure configuration endpoints (build_config.py,
+  // portal-build-fleet-and-workflow-gates Requirement 9). GET returns the
+  // effective configuration with documented defaults applied per field
+  // (builds:read); PUT is PortalAdmin-only and applies a partial update
+  // atomically — an invalid update is rejected in full with code
+  // CONFIG_INVALID and per-parameter errors in details.errors
+  // (Requirements 9.1, 9.5).
+  async getBuildConfig(): Promise<{ config: BuildInfrastructureConfig }> {
+    return this.request('/build-config');
+  }
+
+  async updateBuildConfig(config: BuildInfrastructureConfigUpdate): Promise<{
+    config: BuildInfrastructureConfig;
+    changes: BuildConfigChange[];
+  }> {
+    return this.request('/build-config', {
+      method: 'PUT',
+      body: JSON.stringify({ config }),
+    });
+  }
+
   // Component Configuration endpoints
   async getComponentConfigurationSchema(componentName: string): Promise<{
     component_name: string;
@@ -1768,6 +4645,790 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // Workflow Manager endpoints
+  // Node type catalog for the Workflow_Builder Node_Palette (camelCase
+  // wire form of workflow_core.catalog, Requirement 2.8).
+  async getWorkflowNodeCatalog(
+    usecaseId?: string
+  ): Promise<{ nodeTypes: NodeTypeDescriptor[] }> {
+    // With usecase_id the Use_Case's registered Custom_Node_Types are
+    // merged in (test/prod backed only); without it the endpoint serves
+    // the built-in catalog unchanged.
+    const query = usecaseId
+      ? `?usecase_id=${encodeURIComponent(usecaseId)}`
+      : '';
+    return this.request(`/workflows/node-catalog${query}`);
+  }
+
+  // Workflow_Store API (workflows.py): CRUD, versioning, duplication
+  // (Requirements 5.1, 5.2, 5.4, 5.5, 5.7).
+  async listWorkflows(usecaseId?: string): Promise<{ workflows: WorkflowSummary[]; count: number }> {
+    const query = usecaseId ? `?usecase_id=${encodeURIComponent(usecaseId)}` : '';
+    return this.request(`/workflows${query}`);
+  }
+
+  // Create a workflow as version 1 (Requirement 5.1).
+  async createWorkflow(data: {
+    usecase_id: string;
+    name: string;
+    definition: WorkflowDefinition;
+    description?: string;
+  }): Promise<{ workflow: WorkflowSummary; version: number }> {
+    return this.request('/workflows', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Open/load a stored definition, latest version by default (Requirement 5.4).
+  async getWorkflow(
+    workflowId: string,
+    version?: number
+  ): Promise<{
+    workflow: WorkflowSummary;
+    version: number;
+    validation_status?: WorkflowValidationStatus;
+    definition: WorkflowDefinition;
+  }> {
+    const query = version !== undefined ? `?version=${version}` : '';
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}${query}`);
+  }
+
+  // Save changes as a new version; prior versions are retained (Requirement 5.2).
+  async updateWorkflow(
+    workflowId: string,
+    data: { definition: WorkflowDefinition; name?: string; description?: string }
+  ): Promise<{ workflow: WorkflowSummary; version: number }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Metadata-only rename of a workflow's display name (workflows.py
+  // rename_workflow, workflow-manager-gaps Requirements 5.1, 5.2, 5.7).
+  // No definition is sent and no new version is allocated: only `name`
+  // and `updated_at` change on the workflow record. Rejections raise
+  // ApiError with the structured envelope: 400 INVALID_NAME
+  // (empty/whitespace-only or > 128 characters), the existing 403 RBAC
+  // envelope, or the uniform 404 (Requirements 5.3-5.5).
+  async renameWorkflow(
+    workflowId: string,
+    name: string
+  ): Promise<{ workflow: WorkflowSummary }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/name`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  // Delete a workflow and its versions; rejected with 409 and the
+  // referencing deployment ids when active deployments exist (5.5, 5.6).
+  async deleteWorkflow(workflowId: string): Promise<{ workflow_id: string; message: string }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  // Duplicate under a new name (Requirement 5.7).
+  async duplicateWorkflow(
+    workflowId: string,
+    data: { name?: string; description?: string } = {}
+  ): Promise<{ workflow: WorkflowSummary; version: number }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/duplicate`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Version history, newest first (Requirement 5.2).
+  async listWorkflowVersions(workflowId: string): Promise<{
+    workflow_id: string;
+    latest_version: number;
+    versions: Array<{
+      version: number;
+      created_at?: number;
+      created_by?: string;
+      validation_status?: WorkflowValidationStatus;
+      component_arn?: string | null;
+    }>;
+    count: number;
+  }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/versions`);
+  }
+
+  // Run all backend Workflow_Validator checks on a stored version and
+  // return the complete findings list (Requirements 4.8, 4.9).
+  async validateWorkflow(workflowId: string, version?: number): Promise<WorkflowValidationRun> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/validate`, {
+      method: 'POST',
+      body: JSON.stringify(version !== undefined ? { version } : {}),
+    });
+  }
+
+  // Compile, assemble, upload, and register a Workflow_Component
+  // (dda.workflow.{id}) for the selected target architectures so the
+  // workflow becomes deployable from the Create Deployment screen
+  // (workflow_packaging.py, POST /workflows/{id}/package,
+  // Requirements 7.1-7.5, 11.5, 13.3). `version` defaults to the
+  // workflow's latest version. Gate rejections (unsupported/LLM arch,
+  // plugin lifecycle/arch, packaging failure) raise ApiError with the
+  // structured envelope.
+  async packageWorkflow(
+    workflowId: string,
+    data: { architectures: string[]; version?: number }
+  ): Promise<{
+    workflow_id: string;
+    version: number;
+    component_name: string;
+    component_version: string;
+    component_arn: string;
+    architectures: string[];
+    artifacts: Record<string, string>;
+  }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/package`, {
+      method: 'POST',
+      body: JSON.stringify(
+        data.version !== undefined
+          ? { architectures: data.architectures, version: data.version }
+          : { architectures: data.architectures }
+      ),
+    });
+  }
+
+  // Prompt-based workflow generation via the configured Bedrock model,
+  // asynchronous submit/poll transport (workflow_generator.py
+  // submit_generation, workflow-manager-gaps Requirements 1.1, 1.7, 1.8).
+  // Accepted submissions return 202 with the Generation_Job id to poll
+  // via getWorkflowGenerationJob; the generation itself (Bedrock
+  // invocation, Generation_Gate, session persistence) runs in a
+  // background worker. `session_id` continues an existing chat session;
+  // `current_definition` is the canvas snapshot so follow-up prompts
+  // modify rather than regenerate. Synchronous rejections (missing
+  // fields, INVALID_TEMPERATURE, RBAC, USECASE_NOT_FOUND,
+  // GENERATION_NOT_STARTED) raise ApiError with the structured envelope
+  // and create no job (Requirements 1.3, 1.4).
+  // `temperature` (0..1) overrides the configured model temperature for
+  // this invocation only; omitted = use the configured value.
+  async generateWorkflow(data: {
+    usecase_id: string;
+    prompt: string;
+    session_id?: string;
+    current_definition?: WorkflowDefinition;
+    temperature?: number;
+  }): Promise<WorkflowGenerationSubmission> {
+    return this.request('/workflows/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Poll one Generation_Job (workflow_generator.get_generation_job,
+  // workflow-manager-gaps Requirements 2.1, 2.2, 2.8). Resolves with the
+  // in-progress state ({job_id, status}) or, on success, the job identity
+  // plus the synchronous endpoint's exact WorkflowGenerationResult
+  // payload. A failed job rejects with an ApiError replaying the
+  // originating Error_Envelope and HTTP status verbatim (Requirement
+  // 2.3); an unknown, removed, or inaccessible job id rejects with the
+  // uniform 404 JOB_NOT_FOUND envelope (Requirements 2.4, 2.10).
+  async getWorkflowGenerationJob(jobId: string): Promise<WorkflowGenerationJobStatus> {
+    return this.request(`/workflows/generate/${encodeURIComponent(jobId)}`);
+  }
+
+  // Code_Assistant endpoint (custom-node-code-assist): synchronous,
+  // stateless code generation for one custom Python node module.
+  // Failures surface as ApiError with the envelope's code/details so
+  // describeCodeAssistError can categorize them (Requirements 5.1-5.3).
+  async codeAssist(request: CodeAssistRequest): Promise<CodeAssistResponse> {
+    return this.request('/code-assist', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    });
+  }
+
+  // Workflow_Test_Runner endpoints (workflow_testing.py, Requirement 12)
+  // Test_Datasets scoped to the Use_Case (Requirement 12.2).
+  async listTestDatasets(usecaseId?: string): Promise<{ datasets: TestDataset[]; count: number }> {
+    const query = usecaseId ? `?usecase_id=${encodeURIComponent(usecaseId)}` : '';
+    return this.request(`/test-datasets${query}`);
+  }
+
+  // Initiate a dataset upload: declares the file set and returns presigned
+  // multipart upload URLs. No dataset record is written until finalize
+  // verifies the uploaded content (Requirements 12.3, 12.11).
+  async createTestDataset(data: {
+    usecase_id: string;
+    name: string;
+    description?: string;
+    files: Array<{ name: string; size: number; content_type?: string }>;
+  }): Promise<TestDatasetUploadInitiation> {
+    return this.request('/test-datasets', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'initiate', ...data }),
+    });
+  }
+
+  // Finalize a dataset upload: completes the multipart uploads and commits
+  // the Test_Dataset record after server-side verification (12.3, 12.11).
+  async finalizeTestDataset(data: {
+    usecase_id: string;
+    dataset_id: string;
+    name: string;
+    description?: string;
+    files: TestDatasetCompletedFile[];
+  }): Promise<{ dataset: TestDataset }> {
+    return this.request('/test-datasets', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'finalize', ...data }),
+    });
+  }
+
+  // Start a test run of a stored workflow version against a Test_Dataset
+  // (Requirement 12.4; latest version when omitted). `simulated_inference`
+  // configures the outcome injected for simulation-stubbed model
+  // inference nodes — the model itself is not executed in the cloud
+  // sandbox (Requirement 12.6); the backend defaults it when omitted.
+  async startTestRun(
+    workflowId: string,
+    data: {
+      dataset_id: string;
+      version?: number;
+      simulated_inference?: { is_anomalous: boolean; confidence: number };
+    }
+  ): Promise<{ test_run: WorkflowTestRun }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/test-runs`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Test runs of one workflow, newest first.
+  async listTestRuns(
+    workflowId: string
+  ): Promise<{ test_runs: WorkflowTestRun[]; count: number }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/test-runs`);
+  }
+
+  // Test run status plus the per-node results {nodeId, status, outputs,
+  // stubActivity, error} produced so far (Requirements 12.7, 12.10).
+  async getTestRun(testRunId: string): Promise<WorkflowTestRunDetail> {
+    return this.request(`/test-runs/${encodeURIComponent(testRunId)}`);
+  }
+
+  // Build fleet endpoints (portal-build-fleet-and-workflow-gates).
+
+  /**
+   * Submit a build request: one Build_Job is created per selected
+   * Build_Target in request order (Req 1.1, 1.2, 1.3, 2.1).
+   */
+  async submitBuild(data: SubmitBuildRequest): Promise<SubmitBuildResponse> {
+    return this.request('/builds', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * Branches of the selected repository with its default branch
+   * identified, for the submission form's branch dropdown
+   * (build-source-selection Req 3.1). Failures carry a distinct error
+   * code per condition (REPOSITORY_NOT_FOUND, REPOSITORY_FORBIDDEN,
+   * DISCOVERY_RATE_LIMITED, DISCOVERY_TIMEOUT, DISCOVERY_UPSTREAM_ERROR,
+   * REPOSITORY_EMPTY) in the standard envelope; the form falls back to
+   * manual ref entry. The configured default repository comes from the
+   * existing getBuildConfig() read (`default_repository`, Req 1.5).
+   */
+  async listBuildBranches(repository: string): Promise<BuildBranchesResponse> {
+    const query = new URLSearchParams({ repository });
+    return this.request(`/build-branches?${query.toString()}`);
+  }
+
+  /**
+   * One page of the 90-day Build_Job history, most recent first
+   * (Req 4.7). Pass the returned nextToken to fetch the next page.
+   */
+  async listBuilds(params?: {
+    limit?: number;
+    nextToken?: string;
+  }): Promise<BuildJobsPage> {
+    const query = new URLSearchParams();
+    if (params?.limit) query.set('limit', String(params.limit));
+    if (params?.nextToken) query.set('nextToken', params.nextToken);
+    const qs = query.toString();
+    return this.request(`/builds${qs ? `?${qs}` : ''}`);
+  }
+
+  /** Build_Job detail (Req 4.3). */
+  async getBuild(buildJobId: string): Promise<{ job: BuildJob }> {
+    return this.request(`/builds/${encodeURIComponent(buildJobId)}`);
+  }
+
+  /**
+   * One CloudWatch Logs page of the job's build log (Req 4.4).
+   * CloudWatch returns the same nextToken when the page is exhausted;
+   * keep polling that token for new output of a running build.
+   */
+  async getBuildLogs(
+    buildJobId: string,
+    params?: { limit?: number; nextToken?: string }
+  ): Promise<BuildLogsPage> {
+    const query = new URLSearchParams();
+    if (params?.limit) query.set('limit', String(params.limit));
+    if (params?.nextToken) query.set('nextToken', params.nextToken);
+    const qs = query.toString();
+    return this.request(
+      `/builds/${encodeURIComponent(buildJobId)}/logs${qs ? `?${qs}` : ''}`
+    );
+  }
+
+  /**
+   * Cancel a queued or running Build_Job (Req 4.5, 4.6); terminal jobs
+   * are rejected with 409 (Req 4.8).
+   */
+  async cancelBuild(buildJobId: string): Promise<{ job: BuildJob }> {
+    return this.request(`/builds/${encodeURIComponent(buildJobId)}/cancel`, {
+      method: 'POST',
+    });
+  }
+
+  /**
+   * Retry an interrupted Build_Job: creates a new Build_Job with the
+   * same Build_Target and execution mode plus a retry_of reference
+   * (Req 3.6).
+   */
+  async retryBuild(buildJobId: string): Promise<{ job: BuildJob }> {
+    return this.request(`/builds/${encodeURIComponent(buildJobId)}/retry`, {
+      method: 'POST',
+    });
+  }
+
+  // Synthetic defect data generation endpoints
+  // (synthetic-defect-data-generation, synthetic_data.py). All routes are
+  // RBAC-gated server-side to Data_Scientist_Access (Req 9.1, 9.2).
+
+  /**
+   * The Model_Catalog available in the portal region with capability
+   * flags (Req 1.1). When empty, `guidance` identifies the Bedrock
+   * model-access configuration needed (Req 1.3).
+   */
+  async listSyntheticModels(usecaseId: string): Promise<SyntheticModelsResponse> {
+    const query = new URLSearchParams({ usecase_id: usecaseId });
+    return this.request(`/synthetic/models?${query.toString()}`);
+  }
+
+  /**
+   * The stored Prompt_Template for the Use_Case/Object_Type/Defect_Type
+   * key, or the default template (with `is_default: true`) when none is
+   * stored (Req 2.2, 2.3).
+   */
+  async getSyntheticPromptTemplate(params: {
+    usecase_id: string;
+    object_type: string;
+    defect_type: string;
+  }): Promise<SyntheticPromptTemplateResponse> {
+    const query = new URLSearchParams(params);
+    return this.request(`/synthetic/prompt-templates?${query.toString()}`);
+  }
+
+  /** Persist an edited Prompt_Template for the key (Req 2.1, 2.4). */
+  async putSyntheticPromptTemplate(body: {
+    usecase_id: string;
+    object_type: string;
+    defect_type: string;
+    template_text: string;
+  }): Promise<SyntheticPromptTemplateResponse> {
+    return this.request('/synthetic/prompt-templates', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Create a Generation_Session (persisted + audited, Req 10.1, 9.4). */
+  async createSyntheticSession(
+    body: CreateSyntheticSessionBody
+  ): Promise<{ session: SyntheticSession }> {
+    return this.request('/synthetic/sessions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Generation_Sessions of a Use_Case with status + creation time (Req 10.4). */
+  async listSyntheticSessions(
+    usecaseId: string
+  ): Promise<{ sessions: SyntheticSessionSummary[]; count: number }> {
+    const query = new URLSearchParams({ usecase_id: usecaseId });
+    return this.request(`/synthetic/sessions?${query.toString()}`);
+  }
+
+  /**
+   * Full session state: META plus previews with presigned thumbnail URLs
+   * and per-preview resolved prompt text (Req 10.2, 5.2, 5.6).
+   */
+  async getSyntheticSession(
+    sessionId: string
+  ): Promise<SyntheticSessionDetailResponse> {
+    return this.request(`/synthetic/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  /** Update model selection, sources/classification, params (Req 1.2, 3.2-3.4). */
+  async patchSyntheticSession(
+    sessionId: string,
+    body: Partial<CreateSyntheticSessionBody>
+  ): Promise<{ session: SyntheticSession }> {
+    return this.request(`/synthetic/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Start (or re-start with an edited prompt) asynchronous preview
+   * generation; returns 202 with the task count (Req 5.1, 5.3). A 400
+   * carries `unresolved_placeholders` when the template has placeholder
+   * variables missing from the context (Req 2.6).
+   */
+  async generateSyntheticPreviews(
+    sessionId: string,
+    body: SyntheticGenerateBody = {}
+  ): Promise<SyntheticGenerateResponse> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/generate`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Set the approval state for listed preview ids or all (Req 6.1, 6.2). */
+  async setSyntheticPreviewApproval(
+    sessionId: string,
+    body: SyntheticApprovalBody
+  ): Promise<{ updated: number; approval_state: string }> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/previews/approval`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Integrate the approved previews: upload, auto-annotate, and append to
+   * the Data_Manifest; returns the manifest URI and appended record count
+   * (Req 6.3-6.6, 7.1-7.8). Any failure leaves the manifest untouched.
+   */
+  async integrateSyntheticSession(
+    sessionId: string,
+    body: { target_dataset_prefix?: string; target_manifest_key?: string } = {}
+  ): Promise<SyntheticIntegrateResponse> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/integrate`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Create a training job through the existing Training_Subsystem with
+   * dataset_manifest_s3 pre-populated from the integration result and the
+   * originating generation_session_id recorded (Req 8.1-8.3).
+   */
+  async retrainSyntheticSession(
+    sessionId: string,
+    body: SyntheticRetrainBody
+  ): Promise<{ training_job_id: string; message: string }> {
+    return this.request(
+      `/synthetic/sessions/${encodeURIComponent(sessionId)}/retrain`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  // Workflow Tuning — VLM/LLM Anomaly Tuning endpoints
+  // (quality-prompt-tuning, workflow_tuning.py). Every route resolves the
+  // workflow and calls authorize_workflow_access first: `workflow:read` for
+  // GETs, `workflow:edit` for mutations, `workflow:save` for apply
+  // (Requirements 9.1, 9.2). A caller without read access receives the
+  // uniform 404, so hiding the section in the UI is convenience only.
+
+  /**
+   * Workflows of the Use_Case with at least one Tunable_Node in their
+   * latest version, each node's type, model and Sample_Store count, plus
+   * `sampleExportEnabled` so the overview can explain an empty store
+   * (Requirements 1.2, 1.6). `workflowId` narrows the listing to one
+   * workflow (the designer toolbar's preselection, Requirement 1.3).
+   */
+  async listTuningWorkflows(
+    usecaseId: string,
+    workflowId?: string
+  ): Promise<TuningOverviewResponse> {
+    const query = new URLSearchParams({ usecase_id: usecaseId });
+    if (workflowId) {
+      query.set('workflow_id', workflowId);
+    }
+    return this.request<TuningOverviewResponse>(
+      `/workflow-tuning/anomaly/workflows?${query.toString()}`
+    );
+  }
+
+  /**
+   * Create-or-get the Tuning_Session of a `(workflowId, nodeId)` pair: at
+   * most one exists per pair (Requirement 10.2). A new session snapshots
+   * the Baseline_Candidate from the latest version (Requirement 5.1) and
+   * indexes the Sample_Store once (Requirement 3.1); `created` says which
+   * happened. A node that is not a Tunable_Node in the latest version is a
+   * 400 `NODE_NOT_TUNABLE`.
+   */
+  async createTuningSession(
+    body: CreateTuningSessionBody
+  ): Promise<CreateTuningSessionResponse> {
+    return this.request<CreateTuningSessionResponse>(
+      '/workflow-tuning/anomaly/sessions',
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * The session with its Candidates (each carrying its latest Score_Run),
+   * Label counts, baseline version and last refresh summary.
+   */
+  async getTuningSession(sessionId: string): Promise<TuningSessionResponse> {
+    return this.request<TuningSessionResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}`
+    );
+  }
+
+  /**
+   * Additive re-index of the Sample_Store: new samples are added, existing
+   * samples and their Labels are left untouched (Requirement 3.4).
+   */
+  async refreshTuningSession(
+    sessionId: string
+  ): Promise<RefreshTuningSessionResponse> {
+    return this.request<RefreshTuningSessionResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/refresh`,
+      { method: 'POST' }
+    );
+  }
+
+  /**
+   * Delete the session and everything it owns, including its Score_Run
+   * outcome objects; the exported Tuning_Samples stay in the Sample_Store
+   * (Requirements 10.2, 10.5).
+   */
+  async deleteTuningSession(
+    sessionId: string
+  ): Promise<DeleteTuningSessionResponse> {
+    return this.request<DeleteTuningSessionResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * A filtered page of Tuning_Samples with presigned image URLs valid for
+   * `expiresInSeconds` (at most 30 minutes — Requirements 4.4, 4.8).
+   * Booleans are sent only when set, so an unset filter never narrows the
+   * page.
+   */
+  async listTuningSamples(
+    sessionId: string,
+    params: ListTuningSamplesParams = {}
+  ): Promise<ListTuningSamplesResponse> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null || value === '') {
+        continue;
+      }
+      query.set(key, typeof value === 'boolean' ? String(value) : `${value}`);
+    }
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return this.request<ListTuningSamplesResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/samples${suffix}`
+    );
+  }
+
+  /**
+   * Set (or, with `label: null`, clear) the Label of one or many samples;
+   * each change is persisted immediately (Requirements 4.2, 4.3).
+   */
+  async setTuningSampleLabels(
+    sessionId: string,
+    body: SetTuningLabelsBody
+  ): Promise<SetTuningLabelsResponse> {
+    return this.request<SetTuningLabelsResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/samples/labels`,
+      { method: 'PUT', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * Toggle Synthetic_Negatives: enabling creates one NOK sample per
+   * (OK-labelled sample × sibling node with a Reference_Image of the same
+   * execution), disabling removes them and leaves every indexed sample and
+   * Label unchanged (Requirements 4.5, 4.6).
+   */
+  async setTuningSyntheticNegatives(
+    sessionId: string,
+    enabled: boolean
+  ): Promise<SyntheticNegativesResponse> {
+    return this.request<SyntheticNegativesResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/synthetic-negatives`,
+      { method: 'PUT', body: JSON.stringify({ enabled }) }
+    );
+  }
+
+  /** Create a Candidate; duplication is this call with the source's
+   *  Prompt_Set (Requirement 5.2). */
+  async createTuningCandidate(
+    sessionId: string,
+    body: TuningCandidateBody
+  ): Promise<TuningCandidateResponse> {
+    return this.request<TuningCandidateResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/candidates`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Edit a Candidate. The Baseline_Candidate is read-only: a 409
+   *  `BASELINE_READ_ONLY` (Requirements 5.1, 5.2). */
+  async updateTuningCandidate(
+    sessionId: string,
+    candidateId: string,
+    body: TuningCandidateBody
+  ): Promise<TuningCandidateResponse> {
+    return this.request<TuningCandidateResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}`
+      + `/candidates/${encodeURIComponent(candidateId)}`,
+      { method: 'PUT', body: JSON.stringify(body) }
+    );
+  }
+
+  /** Delete a Candidate and its Score_Runs, leaving every other Candidate,
+   *  Score_Run, sample and Label unchanged (Requirement 5.7). */
+  async deleteTuningCandidate(
+    sessionId: string,
+    candidateId: string
+  ): Promise<DeleteTuningCandidateResponse> {
+    return this.request<DeleteTuningCandidateResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}`
+      + `/candidates/${encodeURIComponent(candidateId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * The exact user message (prompt plus the appended Verdict_Instruction)
+   * and system text the Invocation_Builder will send for a Candidate, with
+   * the non-blocking parser-hostile-settings warnings (Requirements
+   * 5.3-5.5). The route carries no session in its path, so the session is
+   * named explicitly.
+   */
+  async getTuningCandidatePreview(
+    candidateId: string,
+    sessionId: string
+  ): Promise<CandidatePreviewResponse> {
+    const query = new URLSearchParams({ session_id: sessionId });
+    return this.request<CandidatePreviewResponse>(
+      `/workflow-tuning/anomaly/candidates/${encodeURIComponent(candidateId)}`
+      + `/preview?${query.toString()}`
+    );
+  }
+
+  /**
+   * Start a Score_Run for a Candidate: 202 with the invocation count it
+   * will issue. A second run in the session is a 409 naming the
+   * in-progress one; repeats outside 1..3 and more than 600 planned
+   * invocations are 400s; a VLM run needs an eligible device
+   * (Requirements 6.6, 6.9, 6.10, 6.13).
+   */
+  async startTuningScoreRun(
+    sessionId: string,
+    body: StartScoreRunBody
+  ): Promise<StartScoreRunResponse> {
+    return this.request<StartScoreRunResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/score-runs`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /** A Score_Run's progress and running Score_Summary (Requirement 6.8). */
+  async getTuningScoreRun(runId: string): Promise<ScoreRunResponse> {
+    return this.request<ScoreRunResponse>(
+      `/workflow-tuning/anomaly/score-runs/${encodeURIComponent(runId)}`
+    );
+  }
+
+  /**
+   * A page of Sample_Outcomes with their samples, filterable by category
+   * and sortable by confidence, each carrying the raw answer and the parse
+   * failure reason (Requirements 7.2, 7.4).
+   */
+  async listTuningScoreRunOutcomes(
+    runId: string,
+    params: ListScoreRunOutcomesParams = {}
+  ): Promise<ScoreRunOutcomesResponse> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null || value === '') {
+        continue;
+      }
+      query.set(key, `${value}`);
+    }
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return this.request<ScoreRunOutcomesResponse>(
+      `/workflow-tuning/anomaly/score-runs/${encodeURIComponent(runId)}/outcomes${suffix}`
+    );
+  }
+
+  /** Cancel a running Score_Run, keeping every outcome it already produced
+   *  (Requirement 6.11). */
+  async cancelTuningScoreRun(runId: string): Promise<CancelScoreRunResponse> {
+    return this.request<CancelScoreRunResponse>(
+      `/workflow-tuning/anomaly/score-runs/${encodeURIComponent(runId)}/cancel`,
+      { method: 'POST' }
+    );
+  }
+
+  /** The samples on which two Score_Runs of the same session produced
+   *  different categories (Requirement 7.3). */
+  async diffTuningScoreRuns(
+    runId: string,
+    otherRunId: string
+  ): Promise<ScoreRunDiffResponse> {
+    return this.request<ScoreRunDiffResponse>(
+      `/workflow-tuning/anomaly/score-runs/${encodeURIComponent(runId)}`
+      + `/diff/${encodeURIComponent(otherRunId)}`
+    );
+  }
+
+  /**
+   * Select the Candidate to apply (`null` clears the selection); the
+   * response carries the selection's latest run and its false-pass count
+   * so the UI can show it prominently (Requirements 7.5, 7.6).
+   */
+  async setTuningSelection(
+    sessionId: string,
+    candidateId: string | null
+  ): Promise<SetSelectionResponse> {
+    return this.request<SetSelectionResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/selection`,
+      { method: 'PUT', body: JSON.stringify({ candidateId }) }
+    );
+  }
+
+  /**
+   * Apply the selected Candidate as a new Workflow_Definition version,
+   * changing exactly the three Prompt_Set parameters through the designer
+   * save path (`workflow:save`, Requirement 8). Requires a completed
+   * Score_Run on the selection (409 otherwise); nothing is validated,
+   * packaged or deployed.
+   */
+  async applyTuningCandidate(
+    sessionId: string,
+    body: ApplyCandidateBody = {}
+  ): Promise<ApplyCandidateResponse> {
+    return this.request<ApplyCandidateResponse>(
+      `/workflow-tuning/anomaly/sessions/${encodeURIComponent(sessionId)}/apply`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
   }
 
   // Manifest Validator endpoints

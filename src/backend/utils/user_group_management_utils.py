@@ -39,6 +39,12 @@ from utils.utils import run_command
 # never be interpreted by useradd/userdel/groupadd/groupdel/gpasswd as an option.
 _POSIX_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
 
+# uid/gid format: 1 to 10 decimal digits. The ids come from deploy-time
+# environment variables, so they are checked before they reach useradd or
+# groupadd. Checked with fullmatch, so a trailing newline can't pass the way
+# it does with match and "$".
+_POSIX_ID_RE = re.compile(r"[0-9]{1,10}")
+
 
 def _require_posix_name(value, kind):
     """Allowlist-validate a user/group name; raise ValueError on rejection so a
@@ -46,6 +52,17 @@ def _require_posix_name(value, kind):
     if not isinstance(value, str) or not _POSIX_NAME_RE.match(value):
         raise ValueError(
             f"Invalid {kind} {value!r}: must match {_POSIX_NAME_RE.pattern} "
+            f"(rejected to prevent option/command injection)"
+        )
+    return value
+
+
+def _require_posix_id(value, kind):
+    """Strict-format-validate a uid/gid; raise ValueError on rejection so a
+    malformed value (e.g. '--help' or '1001 ') never reaches subprocess.run."""
+    if not isinstance(value, str) or not _POSIX_ID_RE.fullmatch(value):
+        raise ValueError(
+            f"Invalid {kind} {value!r}: must be 1 to 10 decimal digits "
             f"(rejected to prevent option/command injection)"
         )
     return value
@@ -88,6 +105,7 @@ def create_user(username, groupname=None, userid=None):
     _require_posix_name(username, "username")
     __command = [ 'useradd', username ]
     if userid:
+        _require_posix_id(userid, "userid")
         __command += [ '--uid', userid ]
     if groupname:
         _require_posix_name(groupname, "groupname")
@@ -162,6 +180,7 @@ def create_group(groupname, groupid=None):
     _require_posix_name(groupname, "groupname")
     __command = [ 'groupadd', groupname ]
     if groupid:
+        _require_posix_id(groupid, "groupid")
         __command += [ '--gid', groupid ]
     return run_command(__command)
 

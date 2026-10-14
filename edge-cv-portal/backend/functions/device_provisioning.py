@@ -239,6 +239,16 @@ def get_provisioning_status(device_id, user):
 def create_default_policy(policy_name):
     """
     Create a default policy for Greengrass devices.
+
+    Includes the IoT data-plane shadow actions (Get/Update/DeleteThingShadow,
+    scoped to the connecting device's own thing): the Greengrass Shadow
+    Manager syncs named shadows (dda-camera-registry, dda-user-accounts,
+    dda-camera-bindings, dda-model-status) to the cloud over the HTTP data
+    plane, which is
+    authorized by these explicit actions rather than the MQTT
+    Publish/Subscribe grants. Without them, cloud sync fails with
+    ForbiddenException (403) and cloud shadow copies go stale, while local
+    shadows keep working (which makes it easy to miss).
     """
     policy_document = {
         "Version": "2012-10-17",
@@ -253,7 +263,11 @@ def create_default_policy(policy_name):
             {
                 "Effect": "Allow",
                 "Action": [
-                    "iot:Publish"
+                    "iot:Publish",
+                    # mqtt-retained-publish: AWS IoT Core evaluates the
+                    # retain bit as a separate action. Same resources as
+                    # iot:Publish, never "*".
+                    "iot:RetainPublish"
                 ],
                 "Resource": [
                     "arn:aws:iot:*:*:topicfilter/$aws/things/${iot:Connection.Thing.ThingName}/*"
@@ -275,6 +289,17 @@ def create_default_policy(policy_name):
                 ],
                 "Resource": [
                     "arn:aws:iot:*:*:topic/$aws/things/${iot:Connection.Thing.ThingName}/*"
+                ]
+            },
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "iot:GetThingShadow",
+                    "iot:UpdateThingShadow",
+                    "iot:DeleteThingShadow"
+                ],
+                "Resource": [
+                    "arn:aws:iot:*:*:thing/${iot:Connection.Thing.ThingName}"
                 ]
             }
         ]

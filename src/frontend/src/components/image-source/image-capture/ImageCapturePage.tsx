@@ -45,7 +45,7 @@ export default function ImageCapturePage(): JSX.Element {
             <h4>Workflow</h4>
           </TextContent>
           <SpaceBetween size={"l"}>
-            <WorkflowSelector workflowId={workflowId} setWorkflowId={(wid): void => navigate(`/capture/${wid}`)} />
+            <WorkflowSelector workflowId={workflowId} setWorkflowId={(wid): void => void navigate(`/capture/${wid}`)} />
             {
               !!workflowId && isLoadingWorkflow && <Spinner size="normal" />
             }

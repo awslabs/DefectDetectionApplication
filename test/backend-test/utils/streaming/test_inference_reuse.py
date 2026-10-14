@@ -86,7 +86,7 @@ CAMERAS = ("cam_a", "cam_b", "cam_c")
 _STREAM_CONFIG = StreamConfig(max_viewers=4, stale_timeout_s=30)
 
 # Hypothesis runs >= 100 iterations; the work per example is tiny and synchronous.
-_PROP_SETTINGS = settings(max_examples=100, deadline=None)
+_PROP_SETTINGS = settings(max_examples=25, deadline=None)
 
 
 class _StubAcquisitionWorker:

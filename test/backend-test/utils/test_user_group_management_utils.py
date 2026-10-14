@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from local_server_base_test_case import LocalServerBaseTestCase
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 # run_command is imported into the module namespace via
 # `from utils.utils import run_command`, so patch it there.
@@ -179,6 +179,52 @@ class TestCreateDeleteUserAndGroup(LocalServerBaseTestCase):
             is_success, output = ug.delete_user_and_group("alice", "staff")
         self.assertFalse(is_success)
         run.assert_called_once_with(["userdel", "--", "alice"])
+
+
+class TestNumericIdValidation(LocalServerBaseTestCase):
+    """security-scan-remediation-high R7: a set uid or gid must be 1 to 10
+    decimal digits before it reaches useradd or groupadd (Requirement 7.2)."""
+
+    REJECTED = ("1001 ", "1001\n", "-1", "--help", "abc")
+
+    def test_malformed_uid_is_rejected_before_run_command(self):
+        from utils import user_group_management_utils as ug
+        for userid in self.REJECTED:
+            with patch(RUN_CMD, return_value=OK) as run:
+                with self.assertRaises(ValueError, msg=repr(userid)) as ctx:
+                    ug.create_user("alice", groupname="staff", userid=userid)
+            self.assertIn(repr(userid), str(ctx.exception))
+            run.assert_not_called()
+
+    def test_malformed_gid_is_rejected_before_run_command(self):
+        from utils import user_group_management_utils as ug
+        for groupid in self.REJECTED:
+            with patch(RUN_CMD, return_value=OK) as run:
+                with self.assertRaises(ValueError, msg=repr(groupid)) as ctx:
+                    ug.create_group("staff", groupid=groupid)
+            self.assertIn(repr(groupid), str(ctx.exception))
+            run.assert_not_called()
+
+    def test_decimal_ids_keep_todays_argv(self):
+        from utils import user_group_management_utils as ug
+        with patch(RUN_CMD, return_value=OK) as run:
+            ug.create_user("alice", groupname="staff", userid="1001")
+            ug.create_group("staff", groupid="1001")
+        self.assertEqual(run.call_args_list, [
+            call(["useradd", "alice", "--uid", "1001", "-g", "staff"]),
+            call(["groupadd", "staff", "--gid", "1001"]),
+        ])
+
+    def test_unset_ids_add_no_option(self):
+        from utils import user_group_management_utils as ug
+        for unset in ("", None):
+            with patch(RUN_CMD, return_value=OK) as run:
+                ug.create_user("alice", groupname="staff", userid=unset)
+                ug.create_group("staff", groupid=unset)
+            self.assertEqual(run.call_args_list, [
+                call(["useradd", "alice", "-g", "staff"]),
+                call(["groupadd", "staff"]),
+            ])
 
 
 class TestGroupMembership(LocalServerBaseTestCase):

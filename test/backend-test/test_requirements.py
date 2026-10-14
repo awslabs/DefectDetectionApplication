@@ -1,0 +1,85 @@
+# Copyright 2025 Amazon Web Services, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Packaged runtime dependency checks for src/backend/requirements.txt.
+
+Bug condition exploration test for the opcua-output-node-bugfix spec
+(Part 1). The ``opcua_write`` output binding's ``_default_opcua_writer``
+imports the OPC UA client; the package providing it must therefore be
+present in the packaged runtime dependency list so it is installed on the
+edge device. dependabot-remediation replaced the unmaintained python-opcua
+(``opcua``, unfixed GHSA-mfpj-3qhm-976m) with its maintained successor
+``asyncua`` (``from asyncua.sync import Client``); python-opcua must not
+come back.
+
+On the UNFIXED tree this test FAILS -- ``opcua`` is absent from
+``requirements.txt`` -- which is the counterexample that confirms Part 1
+of the bug (Bug Analysis 1.1, 1.2). After the fix adds a pinned ``opcua``
+entry it encodes the expected behaviour and PASSES (Expected Behaviour
+2.1).
+
+**Validates: Requirements 1.1, 1.2, 2.1**
+"""
+import os
+import re
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
+BACKEND_REQUIREMENTS = os.path.join(
+    REPO_ROOT, "src", "backend", "requirements.txt"
+)
+
+# Distribution name at the start of a requirement line, e.g. "asyncua" from
+# "asyncua==2.0.1" or "scikit-learn>=1.1.3,<1.2".
+_NAME_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _parse_requirement_names(text):
+    """Return the lower-cased distribution names listed in a requirements
+    file, ignoring blank lines and ``#`` comments."""
+    names = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _NAME_RE.match(line)
+        if match:
+            names.append(match.group(1).lower())
+    return names
+
+
+def test_requirements_file_exists():
+    assert os.path.isfile(BACKEND_REQUIREMENTS), (
+        "expected src/backend/requirements.txt at {0}".format(
+            BACKEND_REQUIREMENTS)
+    )
+
+
+def test_opcua_is_a_packaged_runtime_dependency():
+    """``asyncua`` MUST be listed in the packaged runtime dependency list so
+    ``from asyncua.sync import Client`` succeeds on device, and the
+    unmaintained python-opcua (``opcua``) must not be listed alongside it.
+    """
+    with open(BACKEND_REQUIREMENTS) as f:
+        names = _parse_requirement_names(f.read())
+
+    assert "asyncua" in names, (
+        "'asyncua' is not listed in src/backend/requirements.txt; the "
+        "opcua_write binding's `from asyncua.sync import Client` will raise "
+        "ModuleNotFoundError on the edge device. Listed packages: {0}".format(
+            sorted(names))
+    )
+    assert "opcua" not in names, (
+        "python-opcua ('opcua') is unmaintained with an unfixed advisory "
+        "(GHSA-mfpj-3qhm-976m); asyncua replaces it"
+    )

@@ -1,10 +1,12 @@
 # ==== CONFIGURE =====
-# Use a Node 18 base image
-FROM public.ecr.aws/docker/library/node:18-alpine AS build
+# Use a Node 20 base image (react-router 7 and cypress 15 require Node >= 20)
+FROM public.ecr.aws/docker/library/node:20-alpine AS build
 # Set the working directory to /app inside the container
 WORKDIR /app
 COPY package.json ./
 COPY package-lock.json ./
+# The static build never runs Cypress; skip its ~500 MB binary download.
+ENV CYPRESS_INSTALL_BINARY=0
 RUN npm install
 COPY . /app
 ARG REACT_APP_SERVER_V

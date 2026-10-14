@@ -18,6 +18,12 @@ import {
 } from '@cloudscape-design/components';
 import { CompilationJob, TrainingJob } from '../types';
 import { apiService } from '../services/api';
+import { conversionStatusOf, isDetectorConversionRecord } from '../utils/detectorConversion';
+import { COMPILATION_TARGETS } from '../utils/compilationTargets';
+import {
+  normalizeCompilationStatus,
+  isDiagnosticCompilationJob,
+} from './compilationStatus';
 
 interface CompilationTabProps {
   trainingId: string;
@@ -25,51 +31,9 @@ interface CompilationTabProps {
   onRefresh?: () => void;
 }
 
-// Available compilation targets with descriptions
-const COMPILATION_TARGETS = [
-  {
-    id: 'jetson-xavier',
-    name: 'NVIDIA Jetson Xavier (JetPack 4.x)',
-    description: 'ARM64 with NVIDIA GPU acceleration for edge AI inference (CUDA 10.2, TensorRT 8.2.1)',
-    recommended: true,
-  },
-  {
-    id: 'jetson-xavier-jp5',
-    name: 'NVIDIA Jetson Xavier / Orin (JetPack 5.x)',
-    description: 'ARM64 Jetson Xavier or Orin on JetPack 5 — device runtime CUDA 11.4, TensorRT 8.5.2',
-    recommended: false,
-  },
-  {
-    id: 'jetson-xavier-jp6',
-    name: 'NVIDIA Jetson Orin (JetPack 6.x)',
-    description: 'ARM64 Jetson Orin on JetPack 6 — device runtime CUDA 12.2, TensorRT 8.6.2',
-    recommended: false,
-  },
-  {
-    id: 'x86_64-cpu',
-    name: 'x86_64 CPU',
-    description: 'Standard x86 64-bit CPU-only inference',
-    recommended: true,
-  },
-  {
-    id: 'x86_64-cuda',
-    name: 'x86_64 with CUDA',
-    description: 'x86 64-bit with NVIDIA GPU acceleration',
-    recommended: false,
-  },
-  {
-    id: 'arm64-cpu',
-    name: 'ARM64 CPU',
-    description: 'ARM 64-bit CPU-only inference (e.g., AWS Graviton)',
-    recommended: false,
-  },
-  {
-    id: 'onnx',
-    name: 'ONNX Runtime (portable)',
-    description: 'Export the trained model to ONNX (.onnx) for the pluggable ONNX Runtime engine — runs on Jetson/x86 without Neo/DLR. GPU acceleration (CUDA/TensorRT) is available on JetPack 5 and 6; JetPack 4 runs ONNX on CPU only. See docs/multi-runtime-inference.md.',
-    recommended: false,
-  },
-];
+// Available compilation targets with descriptions: the one list the import
+// pages' auto-compile pickers also use (utils/compilationTargets.ts).
+// (JetPack 4 and its 'jetson-xavier' target are no longer supported.)
 
 export default function CompilationTab({ trainingId, trainingJob, onRefresh }: CompilationTabProps) {
   const [compilationJobs, setCompilationJobs] = useState<CompilationJob[]>(trainingJob.compilation_jobs || []);
@@ -80,7 +44,7 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [showTargetModal, setShowTargetModal] = useState(false);
   const [showPublishModal, setShowPublishModal] = useState(false);
-  const [selectedTargets, setSelectedTargets] = useState<string[]>(['jetson-xavier', 'x86_64-cpu']);
+  const [selectedTargets, setSelectedTargets] = useState<string[]>(['jetson-xavier-jp5', 'x86_64-cpu']);
   const [componentName, setComponentName] = useState(`model-${trainingJob?.model_name?.toLowerCase().replace(/[^a-z0-9-]/g, '-') || 'model'}`);
   const [componentVersion, setComponentVersion] = useState('1.0.0');
   // Existing published versions for the component being published, so the
@@ -142,18 +106,36 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
     console.log('Modal state changed to:', showTargetModal);
   }, [showTargetModal]);
 
-  const getStatusIndicator = (status: CompilationJob['status']) => {
-    switch (status) {
-      case 'Completed':
+  // Classify statuses case-insensitively: portal-synthesized entries carry
+  // 'InProgress' / 'Failed' while SageMaker describe responses are stored
+  // verbatim in uppercase ('STARTING', 'INPROGRESS', 'COMPLETED', 'FAILED'),
+  // so both forms must reach the same arm.
+  const getStatusIndicator = (job: CompilationJob) => {
+    switch (normalizeCompilationStatus(job.status)) {
+      case 'COMPLETED':
         return <StatusIndicator type="success">Completed</StatusIndicator>;
-      case 'InProgress':
+      case 'STARTING':
+      case 'INPROGRESS':
+      case 'IN_PROGRESS':
         return <StatusIndicator type="in-progress">In Progress</StatusIndicator>;
-      case 'Failed':
+      case 'FAILED':
         return <StatusIndicator type="error">Failed</StatusIndicator>;
-      case 'Stopped':
+      case 'STOPPING':
+      case 'STOPPED':
         return <StatusIndicator type="stopped">Stopped</StatusIndicator>;
+      case 'ERROR':
+        // Transient poll fault: the job's true status is unknown and it will
+        // be re-polled — this is NOT a compile outcome. Show the lookup error
+        // so the token is never rendered bare.
+        return (
+          <StatusIndicator type="in-progress">
+            Status unavailable — retrying{job.poll_error ? `: ${job.poll_error}` : ''}
+          </StatusIndicator>
+        );
       default:
-        return <StatusIndicator type="info">{status}</StatusIndicator>;
+        // Unmodeled value — surface it explicitly as unknown rather than
+        // printing a raw token with no context.
+        return <StatusIndicator type="info">Unknown status: {job.status}</StatusIndicator>;
     }
   };
 
@@ -433,11 +415,33 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   // SageMaker Neo compilation. So the compilation-centric gating (empty-state
   // "Start Compilation", and Component Actions gated on completed compilations)
   // must not hide packaging/publish for them.
+  //
+  // Portal-trained Object Detection (YOLO) jobs are the same case: their
+  // training job already exported model.onnx and training.py records
+  // `runtime: 'onnx'` / `model_type: 'object_detection'` (the backend compile
+  // endpoint bypasses Neo for them — portal-detection-training Req 7.1).
   const tj: any = trainingJob;
+  // `runtime: 'onnx'` alone is the signal (matching the backend predicate
+  // detection_training.is_trained_detection_record): an `object_detection`
+  // record WITHOUT it is a TorchScript detector that still goes through Neo.
+  //
+  // A detector Conversion_Record (detector-checkpoint-import Req 11.4) is a
+  // detection ONNX package too: the converted model.onnx is packaged like a
+  // portal-trained detector and never goes through Neo. Its metadata says
+  // PYTORCH / checkpoint.pt (the fine-tunable source), so it is named here
+  // explicitly rather than left to the runtime check alone.
+  const isConversionRecord = isDetectorConversionRecord(tj);
+  const conversionStatus = conversionStatusOf(tj);
   const isOnnxModel =
+    isConversionRecord ||
     String(tj?.metadata?.framework || '').toUpperCase() === 'ONNX' ||
     String(tj?.validation_result?.metadata?.framework || '').toUpperCase() === 'ONNX' ||
-    String(tj?.metadata?.model_file || tj?.metadata?.pt_file || '').toLowerCase().endsWith('.onnx');
+    String(tj?.metadata?.model_file || tj?.metadata?.pt_file || '').toLowerCase().endsWith('.onnx') ||
+    String(tj?.runtime || '').toLowerCase() === 'onnx';
+  // Packaging a conversion that is still running, or that failed, is a 400
+  // (Req 9.7); while Finalizing, Package is how a lost finalize is retried
+  // (Req 7.9), so it stays available then.
+  const conversionBlocksPackaging = conversionStatus === 'InProgress' || conversionStatus === 'Failed';
 
   if (compilationJobs.length === 0 && !isOnnxModel) {
     return (
@@ -608,7 +612,7 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
             {
               id: 'status',
               header: 'Status',
-              cell: (item) => getStatusIndicator(item.status),
+              cell: (item) => getStatusIndicator(item),
               sortingField: 'status',
             },
             {
@@ -631,7 +635,11 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
               header: 'SageMaker Job Name',
               cell: (item) => (
                 <Box fontSize="body-s">
-                  <span style={{ fontFamily: 'monospace' }}>{item.compilation_job_name}</span>
+                  {/* A job that failed to start has no live SageMaker job and
+                      therefore no name — say so instead of an empty cell. */}
+                  <span style={{ fontFamily: 'monospace' }}>
+                    {item.compilation_job_name || 'not started'}
+                  </span>
                 </Box>
               ),
             },
@@ -670,7 +678,21 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
               <Alert type="info">
                 ONNX models run on the pluggable ONNX Runtime engine and don't require
                 SageMaker Neo compilation. Package the model, then publish it as a
-                Greengrass component. One package deploys to all targets (JetPack 5/6, x86).
+                Greengrass component. One package deploys to all targets (JetPack 5/6/7, x86).
+              </Alert>
+            )}
+            {isConversionRecord && (
+              <Alert
+                type={conversionStatus === 'Failed' ? 'error' : 'info'}
+                data-testid="conversion-packaging-note"
+              >
+                {conversionStatus === 'InProgress'
+                  ? 'The checkpoint is still being converted to ONNX. When the job finishes, the portal validates, packages and publishes the component automatically; there is nothing to package yet.'
+                  : conversionStatus === 'Failed'
+                  ? 'The checkpoint conversion failed, so there is no ONNX to package. The reason is shown on the Overview tab.'
+                  : conversionStatus === 'Finalizing'
+                  ? 'The portal is validating and packaging the converted ONNX. If this does not finish, Package Models retries it.'
+                  : 'This model was converted from a detector checkpoint and packaged automatically. Re-package or publish a new version here.'}
               </Alert>
             )}
             
@@ -687,7 +709,7 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
                   <Button
                     onClick={handleStartPackaging}
                     loading={packagingLoading}
-                    disabled={packagingLoading || publishLoading}
+                    disabled={packagingLoading || publishLoading || conversionBlocksPackaging}
                   >
                     {hasPackagedComponents ? 'Re-package Models' : 'Package Models'}
                   </Button>
@@ -788,17 +810,22 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
         </SpaceBetween>
       </Modal>
 
-      {/* Error Details */}
-      {compilationJobs.some(job => job.status === 'Failed') ? (
+      {/* Error Details. The panel is gated on a diagnostic predicate rather
+          than the old exact-match `status === 'Failed'`: any job whose
+          normalized status is FAILED / STOPPED / ERROR, or that carries a
+          recorded reason (failure_reason / error) or a poll fault
+          (poll_error). This surfaces the ONNX no-live-job reason and the
+          uppercase Neo FAILED reasons the exact match always excluded. */}
+      {compilationJobs.some(isDiagnosticCompilationJob) ? (
         <Container header={<Header variant="h2">Compilation Errors</Header>}>
           <SpaceBetween size="m">
             {compilationJobs
-              .filter(job => job.status === 'Failed')
+              .filter(isDiagnosticCompilationJob)
               .map((job, index) => (
                 <Alert key={index} type="error" header={`${job.target} Compilation Failed`}>
                   <SpaceBetween size="s">
                     <Box>
-                      <strong>Job:</strong> {job.compilation_job_name}
+                      <strong>Job:</strong> {job.compilation_job_name || 'not started'}
                     </Box>
                     {job.failure_reason ? (
                       <Box>
@@ -808,6 +835,19 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
                     {job.error ? (
                       <Box>
                         <strong>Error:</strong> {job.error}
+                      </Box>
+                    ) : null}
+                    {/* A poll fault is a status-lookup failure, not a compile
+                        outcome — keep it under its own label so it is never
+                        conflated with the originating reason above. */}
+                    {job.poll_error ? (
+                      <Box>
+                        <strong>Status lookup error:</strong> {job.poll_error}
+                      </Box>
+                    ) : null}
+                    {job.failed_step ? (
+                      <Box>
+                        <strong>Failed step:</strong> {job.failed_step}
                       </Box>
                     ) : null}
                     <Box variant="small" color="text-body-secondary">
@@ -940,7 +980,9 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
 // Helper functions
 function getTargetDescription(target: string): string {
   const descriptions: Record<string, string> = {
-    'jetson-xavier': 'NVIDIA Jetson Xavier — JetPack 4.x (ARM64 + GPU)',
+    // Retired JetPack 4 target: kept so historical compilation jobs still
+    // render a readable label.
+    'jetson-xavier': 'NVIDIA Jetson Xavier — JetPack 4.x (retired)',
     'jetson-xavier-jp5': 'NVIDIA Jetson Xavier / Orin — JetPack 5.x (ARM64 + GPU)',
     'jetson-xavier-jp6': 'NVIDIA Jetson Orin — JetPack 6.x (ARM64 + GPU)',
     'x86_64-cpu': 'x86_64 CPU only',

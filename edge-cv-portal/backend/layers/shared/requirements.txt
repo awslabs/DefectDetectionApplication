@@ -1,3 +1,20 @@
 PyYAML>=6.0
-requests>=2.31.0
-
+# Security floors (Dependabot remediation): requests >= 2.33.0 and
+# urllib3 >= 2.7.0 close the insecure temp-file reuse and the cross-origin
+# proxied-redirect header leak. The vendored python/ snapshot carries
+# requests 2.34.2 / urllib3 2.8.0.
+requests>=2.34.2
+urllib3>=2.8.0
+# AWS SDK vendored into the layer (portal-usecase-bucket-config): the
+# Lambda-managed runtime's bundled boto3/botocore lags releases by months
+# and the use-case bucket configuration needs the S3 PutBucketAbac /
+# GetBucketAbac operations and the S3 Control TagResource /
+# UntagResource / ListTagsForResource bucket-tagging operations. Installed
+# with `pip install --no-deps -t python/` so the vendored urllib3 2.8.0
+# tree above is not touched (botocore accepts urllib3 >=1.25.4,<3).
+boto3==1.43.101
+botocore==1.43.101
+s3transfer==0.19.2
+jmespath==1.1.0
+python-dateutil==2.9.0.post0
+six==1.17.0

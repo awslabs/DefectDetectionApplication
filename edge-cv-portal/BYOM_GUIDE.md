@@ -56,7 +56,7 @@ The Edge CV Portal supports importing pre-trained PyTorch models through the BYO
 
 ### How It Works
 
-1. **Upload** your `.pt` file to S3
+1. **Upload** your `.pt` file to the use case's S3 bucket (or to an Additional S3 bucket a UseCaseAdmin has allowed for it — see [Where to put the model file](#where-to-put-the-model-file))
 2. **Navigate** to Training → Smart Import in the portal
 3. **Select** your use case and enter the S3 URI
 4. **Click** "Inspect Model" - we'll analyze the architecture
@@ -79,17 +79,31 @@ Smart Import can detect:
 - Vision Transformers (ViT)
 - Custom models (with manual type selection)
 
+### Where to put the model file
+
+The portal reads model files only from the **use case's allowed buckets**: the
+use case's configured S3 bucket (and Data S3 bucket), plus any **Additional S3
+buckets** a UseCaseAdmin has allowed for it. Upload the file to the use case's
+bucket, or have a UseCaseAdmin allow your bucket under **Use Cases** → **Edit**
+→ **Allowed buckets** (the bucket must be tagged `dda-portal:managed=true` for
+the portal — see the Admin Guide, "Use case buckets and Additional S3 buckets").
+A URI in any other bucket is refused with `400 bucket_not_allowed`, and the
+Import Model page offers **Allow for this use case** to UseCaseAdmins.
+Validating and importing models requires the **DataScientist** role on the use
+case.
+
 ### Example: YOLOv10 from Databricks
 
 ```bash
 # 1. In Databricks, save your model
 torch.save(model.state_dict(), "/dbfs/models/yolov10_defect.pt")
 
-# 2. Copy to S3
-dbutils.fs.cp("dbfs:/models/yolov10_defect.pt", "s3://my-bucket/models/yolov10_defect.pt")
+# 2. Copy to the use case's S3 bucket (or a bucket a UseCaseAdmin has allowed
+#    for the use case under Additional S3 buckets)
+dbutils.fs.cp("dbfs:/models/yolov10_defect.pt", "s3://<use-case-bucket>/models/yolov10_defect.pt")
 
 # 3. Use Smart Import in the portal with:
-#    - S3 URI: s3://my-bucket/models/yolov10_defect.pt
+#    - S3 URI: s3://<use-case-bucket>/models/yolov10_defect.pt
 #    - Model Type: Object Detection
 #    - Dimensions: 640x640
 ```
@@ -816,8 +830,11 @@ def export_databricks_model(
     # Export using generic function
     export_model_for_dda(model=model, output_path=output_path, **kwargs)
     
-    # Upload to S3
-    dbutils.fs.cp(f"file:{output_path}", f"s3://my-bucket/models/{os.path.basename(output_path)}")
+    # Upload to the use case's S3 bucket (or an Additional S3 bucket a
+    # UseCaseAdmin has allowed for the use case); the portal refuses a model
+    # URI in any other bucket with 400 bucket_not_allowed.
+    usecase_bucket = "<use-case-bucket>"
+    dbutils.fs.cp(f"file:{output_path}", f"s3://{usecase_bucket}/models/{os.path.basename(output_path)}")
 
 # Usage:
 # export_databricks_model(

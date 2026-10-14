@@ -1,0 +1,553 @@
+#
+#  Copyright 2025 Amazon Web Services, Inc.
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+
+"""Workflow engine runtime wiring.
+
+Holds the process-wide WorkflowWatcher instance and the startup entry
+point called from app.py. Startup is wrapped so that any failure in the
+workflow subsystem is logged and contained — it must never affect the
+existing Pipeline_Configuration path (Requirement 13.6).
+"""
+
+import logging
+import threading
+from typing import Optional
+
+from workflow_engine.watcher import WorkflowWatcher
+
+logger = logging.getLogger(__name__)
+
+_watcher: Optional[WorkflowWatcher] = None
+_executor_instance = None
+_trigger_manager = None
+# Stream cameras (rtsp-rtmp-stream-cameras design components 13, 14): the
+# StreamLeaseKeeper and the ContinuousRunnerManager, both None until
+# started (and on a device where they could not start).
+_stream_lease_keeper = None
+_continuous_manager = None
+_lock = threading.Lock()
+
+
+def start_workflow_engine() -> Optional[WorkflowWatcher]:
+    """Start the WorkflowWatcher and register the WorkflowExecutor
+    (idempotent). Returns the watcher or None.
+
+    Called from LocalServer startup. Failures are contained: the rest of
+    LocalServer starts normally and devices without Workflow_Components
+    behave exactly as before.
+    """
+    global _watcher, _executor_instance, _trigger_manager, _stream_lease_keeper
+    global _continuous_manager
+    with _lock:
+        if _watcher is not None:
+            return _watcher
+        # Camera_Binding resolution wiring (camera-registry-sync task
+        # 14.4). Contained separately: without it the watcher runs exactly
+        # as before — documents register with their compiled-in values.
+        binding_store = None
+        inventory_provider = None
+        try:
+            binding_store, inventory_provider = _camera_binding_dependencies()
+        except Exception:  # noqa: BLE001 - feature isolation (11.2)
+            logger.exception(
+                "Camera-binding wiring unavailable; workflows register "
+                "without binding resolution"
+            )
+        try:
+            watcher = WorkflowWatcher(
+                binding_store=binding_store,
+                inventory_provider=inventory_provider,
+            )
+            watcher.start()
+            _watcher = watcher
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "Workflow engine failed to start; continuing without it"
+            )
+            return None
+        # Re-resolution hooks: discovery on_change and bindings-shadow
+        # delta flip invalid registrations to registered when everything
+        # resolves (camera-registry-sync Requirement 10.4). Contained: a
+        # hook failure leaves the running watcher untouched (11.2).
+        try:
+            _wire_camera_binding_hooks(watcher)
+        except Exception:  # noqa: BLE001 - post-start isolation (11.2)
+            logger.exception(
+                "Camera-binding re-resolution hooks could not be wired; "
+                "invalid registrations re-resolve on the watch cycle only"
+            )
+        # Tuning Sample_Export wiring (quality-prompt-tuning Requirements
+        # 2.1, 2.6, 11.3). Contained in its OWN block: without it — and
+        # on every device whose Use_Case has not enabled tuning sample
+        # export — no exporter is installed, the executor's export call
+        # sites are no-ops, and LocalServer behaves exactly as before
+        # the feature.
+        exporter = None
+        try:
+            exporter = _configure_sample_export()
+        except Exception:  # noqa: BLE001 - feature isolation (11.3)
+            logger.exception(
+                "Tuning sample export could not be configured; workflow "
+                "runs proceed without exporting tuning samples"
+            )
+        # One-shot backfill of the samples derivable from the runs this
+        # device has already performed (Requirement 2.7). Its own
+        # contained block, on a daemon thread so startup never waits for
+        # it; a no-op without a configured exporter and after the marker
+        # file records that it ran once.
+        try:
+            if exporter is not None:
+                from workflow_engine.tuning.backfill import start_backfill
+
+                start_backfill(exporter)
+        except Exception:  # noqa: BLE001 - feature isolation (11.3)
+            logger.exception(
+                "Tuning sample backfill could not start; live sample export "
+                "and workflow runs are unaffected"
+            )
+        # Device_Score_Job runner (Requirements 6.4, 6.9, 6.15). Its own
+        # contained block: with tuning unconfigured no runner is
+        # installed, no shadow is subscribed and no S3 client is created,
+        # so LocalServer behaves exactly as before the feature. Job
+        # replay runs on the runner's own worker, never on an executor
+        # thread.
+        try:
+            if exporter is not None:
+                _start_job_runner(exporter)
+        except Exception:  # noqa: BLE001 - feature isolation (11.3)
+            logger.exception(
+                "Tuning job runner could not start; workflow runs and sample "
+                "export are unaffected"
+            )
+        # Continuous run retention (rtsp-rtmp-stream-cameras Requirement
+        # 12). Its own contained block, created before the executor so the
+        # executor can stage continuous runs in RAM. It does no I/O until a
+        # continuous run exists: every other run keeps the capture root,
+        # and its housekeeping starts with the first continuous runner.
+        retention = None
+        try:
+            from workflow_engine.run_retention import RunRetention
+
+            retention = RunRetention()
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "Continuous run retention unavailable; continuous runs write "
+                "to the capture root"
+            )
+        # Finish the continuous runs a previous process left pending or
+        # running (rtsp-rtmp-stream-cameras Requirement 12.9). Its own
+        # contained block, here so it happens before the executor is
+        # registered and before the ContinuousRunnerManager's first
+        # on_registrations_changed — nobody else ever completes those
+        # runs, so without this their staging is never evicted and the
+        # staged count grows with every restart.
+        try:
+            if retention is not None:
+                retention.reconcile_interrupted()
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "Could not finish the continuous runs an earlier process "
+                "left unfinished; their staged artifacts stay until the "
+                "device byte caps evict them"
+            )
+        # Register the pipeline executor so triggered runs execute instead
+        # of staying pending. Contained separately: a broken executor still
+        # leaves discovery/registration/status reporting functional.
+        try:
+            from workflow_engine.output_bindings import OutputBindingProcessor
+            from workflow_engine.pipeline_executor import register_workflow_executor
+
+            # Post-run output bindings: digital output / MQTT / OPC UA
+            # (Requirements 9.4, 9.5, 9.6; task 12.4). The binding
+            # resolution provider hands the executor the watcher's cached
+            # Camera_Binding resolutions so runs execute the substituted
+            # document and the Aravis frame feed sees resolved
+            # assignments (aravis-camera-input Requirement 6.4).
+            _executor_instance = register_workflow_executor(
+                post_run_handler=OutputBindingProcessor(),
+                binding_resolution_provider=watcher.binding_resolution,
+                capture_root_for=(
+                    retention.capture_root_for if retention is not None else None
+                ),
+            )
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "WorkflowExecutor failed to register; triggered runs will "
+                "stay pending"
+            )
+        # Trigger subscription lifecycle (trigger-activation-runtime task
+        # 6.2). Contained in its OWN block (Requirement 12.4): a failure
+        # here logs and LocalServer continues — discovery, registration,
+        # manual triggering, and status reporting stay functional. With
+        # zero trigger-driven workflows registered the manager starts no
+        # threads and opens no connections.
+        try:
+            from workflow_engine.trigger_runtime import (
+                TriggerSubscriptionManager,
+                default_mqtt_transport_factory,
+                default_opcua_transport_factory,
+            )
+
+            # Production transports: the three MQTT paths (tasks 7.1/7.2:
+            # greengrass IPC, aws_iot mutual TLS, plain broker) and the
+            # OPC UA subscribe worker (task 8.1; the Liveness_Watchdog,
+            # auto-fallback, and poll mode land with task 8.2).
+            manager = TriggerSubscriptionManager(
+                mqtt_transport_factory=default_mqtt_transport_factory,
+                opcua_transport_factory=default_opcua_transport_factory,
+            )
+            # Watcher notifications after every sync_once drive the
+            # start-within-10s guarantee (Requirement 6.1); the immediate
+            # call below covers registrations the startup scan already
+            # reconciled before the manager existed.
+            watcher.registrations_listeners.append(
+                manager.on_registrations_changed
+            )
+            manager.on_registrations_changed()
+            _trigger_manager = manager
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "TriggerSubscriptionManager failed to start; trigger-driven "
+                "workflows will not activate"
+            )
+        # Stream leases (rtsp-rtmp-stream-cameras Requirement 10.3). Its
+        # OWN contained block: a registered workflow that reads a stream
+        # camera holds a Stream_Lease on it, so the camera stays connected
+        # and a triggered run finds a fresh frame; a lease refused at the
+        # device session limit reports the registration invalid until
+        # capacity frees. A device without stream workflows never creates
+        # the Stream_Ingest_Service, and a failure here leaves every other
+        # workflow path untouched.
+        try:
+            from workflow_engine.stream_leases import StreamLeaseKeeper
+
+            keeper = StreamLeaseKeeper(
+                resolution_provider=watcher.binding_resolution,
+                resync=watcher._resync_for_bindings,
+            )
+            watcher.lease_refusal_lookup = keeper.refusal_reason
+            watcher.registrations_listeners.append(
+                keeper.on_registrations_changed
+            )
+            keeper.on_registrations_changed()
+            _stream_lease_keeper = keeper
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "StreamLeaseKeeper failed to start; stream workflows connect "
+                "their camera only when a run starts"
+            )
+        # Continuous stream workflows (rtsp-rtmp-stream-cameras Requirement
+        # 11). Its OWN contained block, after the keeper so a runner's
+        # camera is already leased: one runner thread per registered
+        # workflow whose stream node runs in continuous mode. With none
+        # registered, no thread starts.
+        try:
+            from workflow_engine.continuous_runner import ContinuousRunnerManager
+
+            continuous = ContinuousRunnerManager(
+                resolution_provider=watcher.binding_resolution,
+                retention=retention,
+            )
+            if retention is not None:
+                retention.add_housekeeping_task(continuous.persist_counters)
+            watcher.registrations_listeners.append(
+                continuous.on_registrations_changed
+            )
+            continuous.on_registrations_changed()
+            _continuous_manager = continuous
+        except Exception:  # noqa: BLE001 - never take LocalServer down
+            logger.exception(
+                "ContinuousRunnerManager failed to start; continuous stream "
+                "workflows will not run"
+            )
+    return _watcher
+
+
+def _configure_sample_export():
+    """Read the ``workflowTuning`` LocalServer component configuration
+    once at startup and install the tuning Sample_Exporter it describes
+    (quality-prompt-tuning Requirements 2.1, 2.6, 11.3).
+
+    Returns the exporter, or ``None`` when export is disabled or
+    unconfigured — the state in which no queue is allocated, no S3
+    client is created and no S3 request is ever issued. Imports are
+    deferred: the IPC configuration reader only exists on-device, so
+    everywhere else this raises and the caller degrades to no exporter.
+    """
+    from defect_detection_config.defect_detection_config import (
+        DefectDetectionConfig,
+    )
+    from utils.ipc_client import get_ipc_client
+    from workflow_engine.tuning.sample_export import (
+        configure_sample_exporter,
+    )
+
+    reader = DefectDetectionConfig(get_ipc_client())
+    configuration = reader.get_component_config(
+        reader.get_local_server_component_name())
+    return configure_sample_exporter(configuration)
+
+
+def _start_job_runner(exporter):
+    """Install the Device_Score_Job runner and subscribe to the
+    ``dda-workflow-tuning`` shadow delta (quality-prompt-tuning
+    Requirements 6.4, 6.9, 6.15).
+
+    Follows the camera-bindings wiring exactly: the runner reads the
+    shadow through the device's existing ``IoTShadowAccessor`` and the
+    delta arrives on the MQTT ``SubscriptionHandler`` pattern, whose
+    blocking ``subscribe()`` gets its own daemon thread. Imports are
+    deferred: ``utils.server_setup`` connects Greengrass IPC at import
+    time, which only exists on-device — everywhere else this raises and
+    the caller degrades to no job runner.
+    """
+    from utils import server_setup
+    from workflow_engine.tuning.job_runner import (
+        make_tuning_shadow_handler,
+        start_job_runner,
+        tuning_delta_topic_prefix,
+    )
+
+    runner = start_job_runner(
+        exporter, shadow_accessor=server_setup.iot_shadow_accessor)
+    if runner is None:
+        return None
+
+    from mqtt.SubscriptionHandler import SubscriptionHandler
+
+    subscription = SubscriptionHandler(
+        tuning_delta_topic_prefix(runner.thing_name, runner.shadow_name),
+        make_tuning_shadow_handler(runner),
+        server_setup.publish_handler,
+    )
+
+    def _subscribe():
+        try:
+            subscription.subscribe()
+        except Exception:  # noqa: BLE001 - subscription isolation (11.2)
+            logger.exception(
+                "Workflow-tuning shadow subscription failed; Device_Score_"
+                "Jobs are picked up on the next LocalServer restart"
+            )
+
+    threading.Thread(
+        target=_subscribe, name="workflow-tuning-shadow-subscription",
+        daemon=True,
+    ).start()
+    return runner
+
+
+def _camera_binding_dependencies():
+    """The CameraBindingStore and local-inventory provider for the watcher
+    (camera-registry-sync Requirements 10.1, 10.2, 12.4).
+
+    Imports are deferred: ``utils.server_setup`` connects Greengrass IPC at
+    import time, which only exists on-device — in every other environment
+    this raises and the caller degrades to an unwired watcher.
+    """
+    from utils import server_setup
+    from workflow_engine.camera_binding_store import CameraBindingStore
+
+    store = CameraBindingStore(server_setup.iot_shadow_accessor)
+
+    def inventory_provider():
+        """The ``build_inventory`` merge of Image_Source records (through
+        the existing accessor, read-only — 11.3) and the latest discovery
+        snapshot; the discovery global may still be starting up, in which
+        case configured sources alone form the inventory.
+
+        The Static_Image_Camera pin state is passed too
+        (static-camera-workflow-binding-invisible, Requirements 2.1, 2.5):
+        ``build_inventory`` appends the virtual ``static-image-camera``
+        entry only when ``static_image_pinned`` is true, and this provider
+        used to call it with two arguments — so a workflow bound to that
+        camera was permanently rejected with ``missing camera source
+        static-image-camera`` while every other device surface reported the
+        camera present (measured on jetson-thor1, 2026-09-22).
+
+        ``static_image_absent_since`` is deliberately NOT passed (design.md
+        Decision 3). Its value means "when absence was first established",
+        is derived from the pin worker's marker and is stabilized across
+        restarts so the reported *shadow* does not churn; the local resolver
+        never reads ``absent`` or ``absentSince`` at all, so supplying one
+        here would put a meaningless timestamp in a typed field. The
+        consequence is deliberate and recorded: unpinning flips the
+        registration to invalid within one poll tick, and re-pinning
+        restores it through the existing re-resolution hooks.
+        """
+        from camera_sync.inventory import build_inventory
+        from dao.sqlite_db.sqlite_db_operations import SessionLocal
+        from utils.static_image_camera import get_store
+
+        # Guarded exactly as the Edge_Sync_Agent guards it
+        # (camera_sync/agent.py). This is load-bearing, not defensive
+        # boilerplate: get_store() constructs StaticImageStore, whose
+        # __init__ reads os.environ["COMPONENT_WORK_PATH"] and therefore
+        # raises KeyError off-device, and the watcher converts ANY provider
+        # exception into an EMPTY inventory — which would mark every camera
+        # binding on the device invalid, turning a static-camera bug into a
+        # total outage (Requirement 2.5).
+        static_image_pinned = False
+        static_image_metadata = None
+        try:
+            status = get_store().status()
+            static_image_pinned = bool(status.get("pinned"))
+            static_image_metadata = status.get("metadata")
+        except Exception:  # noqa: BLE001 - never empty the inventory
+            logger.exception(
+                "Static image pin state could not be read; resolving camera "
+                "bindings without the static camera entry"
+            )
+
+        # The Static_Video_Camera (static-camera-video-loop, Requirement
+        # 4.4), guarded exactly like the image state and separately from
+        # it, so a video store failure never drops the image entry or
+        # empties the inventory. `static_video_absent_since` is not passed,
+        # for the same reason as the image one.
+        static_video_pinned = False
+        static_video_metadata = None
+        try:
+            from utils.static_video_camera import get_store as get_video_store
+
+            video_status = get_video_store().status()
+            static_video_pinned = bool(video_status.get("pinned"))
+            static_video_metadata = video_status.get("metadata")
+        except Exception:  # noqa: BLE001 - never empty the inventory
+            logger.exception(
+                "Static video pin state could not be read; resolving camera "
+                "bindings without the static video camera entry"
+            )
+
+        camera_discovery = getattr(server_setup, "camera_discovery", None)
+        snapshot = (
+            camera_discovery.latest_snapshot if camera_discovery is not None else None
+        )
+        with SessionLocal() as session:
+            image_sources = server_setup.image_source_accessor.list_image_sources(
+                None, session
+            )
+            return build_inventory(
+                image_sources,
+                snapshot,
+                static_image_pinned=static_image_pinned,
+                static_image_metadata=static_image_metadata,
+                static_video_pinned=static_video_pinned,
+                static_video_metadata=static_video_metadata,
+            )
+
+    return store, inventory_provider
+
+
+def _wire_camera_binding_hooks(watcher: WorkflowWatcher) -> None:
+    """Hook the running watcher's re-resolution into discovery ``on_change``
+    and the bindings-shadow delta (Requirement 10.4)."""
+    if watcher.binding_store is None:
+        return
+
+    from utils import server_setup
+    from workflow_engine.camera_binding_store import (
+        bindings_delta_topic_prefix,
+        make_bindings_shadow_handler,
+    )
+
+    # Discovery inventory changes re-resolve invalid registrations; the
+    # listener runs after (and isolated from) the Edge_Sync_Agent's own
+    # on_change consumer (11.2).
+    server_setup.add_discovery_change_listener(watcher.on_discovery_change)
+
+    # Bindings-shadow delta subscription, following the existing MQTT
+    # SubscriptionHandler pattern. subscribe() blocks to keep its stream
+    # alive, so it gets its own daemon thread.
+    from mqtt.SubscriptionHandler import SubscriptionHandler
+
+    store = watcher.binding_store
+    subscription = SubscriptionHandler(
+        bindings_delta_topic_prefix(store.thing_name, store.shadow_name),
+        make_bindings_shadow_handler(watcher),
+        server_setup.publish_handler,
+    )
+
+    def _subscribe():
+        try:
+            subscription.subscribe()
+        except Exception:  # noqa: BLE001 - subscription isolation (11.2)
+            logger.exception(
+                "Camera-bindings shadow subscription failed; binding changes "
+                "apply on the next watch cycle or restart"
+            )
+
+    threading.Thread(
+        target=_subscribe, name="camera-bindings-shadow-subscription", daemon=True
+    ).start()
+
+
+def get_watcher() -> Optional[WorkflowWatcher]:
+    return _watcher
+
+
+def get_trigger_manager():
+    """The process-wide TriggerSubscriptionManager, or None when the
+    trigger subsystem could not start (mirrors :func:`get_watcher`)."""
+    return _trigger_manager
+
+
+def trigger_health(registration_id: str) -> list:
+    """A registration's Trigger_Health records in wire form (empty for
+    unknown/trigger-less registrations or when the manager is not
+    running) — the api.py source for the additive ``triggerHealth``
+    field (task 9.1)."""
+    manager = get_trigger_manager()
+    if manager is None:
+        return []
+    return manager.health(registration_id)
+
+
+def invalid_reason(registration_id: str) -> Optional[str]:
+    """Reported reason for an invalid registration, when the watcher knows it."""
+    watcher = get_watcher()
+    if watcher is None:
+        return None
+    return watcher.invalid_reason(registration_id)
+
+
+def get_stream_lease_keeper():
+    """The process-wide StreamLeaseKeeper, or None (mirrors
+    :func:`get_trigger_manager`)."""
+    return _stream_lease_keeper
+
+
+def get_continuous_manager():
+    """The process-wide ContinuousRunnerManager, or None."""
+    return _continuous_manager
+
+
+def notable_execution_ids(registration_id: str) -> list:
+    """A continuous registration's retained Notable_Runs, newest first;
+    empty for any other registration or without run retention."""
+    manager = get_continuous_manager()
+    if manager is None:
+        return []
+    return manager.notable_execution_ids(registration_id) or []
+
+
+def continuous_status(registration_id: str) -> Optional[dict]:
+    """The Continuous status document of a registration whose stream node
+    runs in ``continuous`` mode (design "Continuous status"), or None for
+    any other registration and when the runner manager is not running."""
+    manager = get_continuous_manager()
+    if manager is None:
+        return None
+    return manager.status(registration_id)

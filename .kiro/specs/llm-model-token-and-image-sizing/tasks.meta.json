@@ -1,0 +1,744 @@
+{
+  "pbtResults": {
+    "2.2 Write property test for budget resolution": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656057747
+    },
+    "1.2 Write property test for the downscale algebra": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656050577
+    },
+    "2.4 Write property test for the coordinate space transform": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656059123
+    },
+    "1.3 Write property test for downscaler bounds and totality": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656052257
+    },
+    "5.2 Write property test for token-limit write isolation": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656067116
+    },
+    "5.3 Write property test for global Bedrock configuration preservation": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656072471
+    },
+    "4.4 Write property test for sent-dimension agreement": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656065670
+    },
+    "7.5 Write property test for sizing validation guards": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656073884
+    },
+    "9.1 Write property test for budget plumbing": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656079360
+    },
+    "9.4 Write property test for few-shot downscaling": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656088007
+    },
+    "9.3 Write property test for the unconfigured-sizing preservation": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656086494
+    },
+    "9.2 Extend the preview/worker request identity property test": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656080956
+    },
+    "9.6 Write property test for untouched families and dimension determination": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656095225
+    },
+    "9.5 Extend the preview run outcomes property test": {
+      "status": "passed",
+      "lastRunTimestamp": 1788656093476
+    }
+  },
+  "executionHistory": {
+    "1.2 Write property test for the downscale algebra": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630898356
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630974139
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788632537125
+      }
+    ],
+    "1.3 Write property test for downscaler bounds and totality": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630900118
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630976074
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788633725868
+      }
+    ],
+    "2.2 Write property test for budget resolution": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630901399
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630977803
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788632538743
+      }
+    ],
+    "2.4 Write property test for the coordinate space transform": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630902858
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630979159
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788632540140
+      }
+    ],
+    "2.5 Write unit tests for the resolver and the scale-back": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630904169
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630981091
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788635564334
+      }
+    ],
+    "3. Checkpoint - Ensure all tests pass": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630905508
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788656249843
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788656264803
+      }
+    ],
+    "4.2 Update both callers for the new return shape and delegate the header parsers": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630906739
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788633751858
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788635566253
+      }
+    ],
+    "4.3 Extend the `dda_llm_prelabel` unit tests": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630907919
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788633753679
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788635567261
+      }
+    ],
+    "4.4 Write property test for sent-dimension agreement": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630909150
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788637072941
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788638703786
+      }
+    ],
+    "5.1 Add the token-limits item, routes and loader to `data_accounts.py`": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630910513
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788632542180
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788633727560
+      }
+    ],
+    "5.2 Write property test for token-limit write isolation": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630911650
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788633755571
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788635569089
+      }
+    ],
+    "5.3 Write property test for global Bedrock configuration preservation": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630912880
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788633756835
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788635570439
+      }
+    ],
+    "5.4 Write unit tests for the settings surface": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630914272
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788635587946
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788637048743
+      }
+    ],
+    "6. Checkpoint - Ensure all tests pass": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630915488
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788656270993
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788656277032
+      }
+    ],
+    "7.1 Add request validation, run state and reporting to `dda_labeling.py`": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630916720
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788637074670
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788638705784
+      }
+    ],
+    "7.2 Plumb the executor and the result payload in `dda_labeling.py`": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630917955
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788638720505
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788641627097
+      }
+    ],
+    "7.3 Persist both values with the Labeling_Job record in `dda_labeling.py`": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630919029
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788641629032
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788642234969
+      }
+    ],
+    "7.4 Write unit tests for the preview routes, executor and job creation": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630920303
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788642247055
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788645497848
+      }
+    ],
+    "7.5 Write property test for sizing validation guards": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630921519
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788638722188
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788639981364
+      }
+    ],
+    "8.1 Read both values off the job record in `dda_autolabel_worker.py`": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630922596
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788637075947
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788638707207
+      }
+    ],
+    "8.2 Extend the worker few-shot unit tests": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630923774
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788638723311
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788639982850
+      }
+    ],
+    "9.1 Write property test for budget plumbing": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630925043
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788642248410
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788645499960
+      }
+    ],
+    "9.2 Extend the preview/worker request identity property test": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630926241
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788642250517
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788645501439
+      }
+    ],
+    "9.3 Write property test for the unconfigured-sizing preservation": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630927496
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788642252387
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788645503471
+      }
+    ],
+    "9.4 Write property test for few-shot downscaling": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630928890
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788642253677
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788645505663
+      }
+    ],
+    "9.5 Extend the preview run outcomes property test": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630930107
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788645512426
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788649220317
+      }
+    ],
+    "9.6 Write property test for untouched families and dimension determination": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630931500
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788645513413
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788646614386
+      }
+    ],
+    "9.7 Write integration tests for the sizing flow": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630932722
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788649226949
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788650656194
+      }
+    ],
+    "10. Checkpoint - Ensure all tests pass": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630934119
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788656283367
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788656289260
+      }
+    ],
+    "11.2 Add the sizing state to `CreateLabelingJob.tsx`": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630935384
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788635589647
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788637050727
+      }
+    ],
+    "11.4 Extend the preview property tests with the sizing controls": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630936748
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788637077868
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788638708997
+      }
+    ],
+    "11.5 Write frontend unit tests for the controls and the canvas guard": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630938036
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788637079478
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788638710690
+      }
+    ],
+    "12.3 Write CDK assertion tests for the sizing infrastructure": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630939325
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788632544311
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788633729215
+      }
+    ],
+    "13. Checkpoint - Ensure all tests pass": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630940596
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788656295629
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788656301711
+      }
+    ],
+    "14.1 Run the non-regression inventory and confirm zero rebaselines": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630941789
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788650671408
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788651359081
+      }
+    ],
+    "14.2 Run the full verification sweep": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788630943043
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788651366777
+      },
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788656242524
+      }
+    ],
+    "1. Implement the Image_Downscaler shared-layer module": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788633727065
+      }
+    ],
+    "12. Wire the infrastructure": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788633730590
+      }
+    ],
+    "2. Implement the token budget resolver and the coordinate scale-back (pure)": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788635565666
+      }
+    ],
+    "5. Implement the Model_Token_Limits settings surface": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788637050132
+      }
+    ],
+    "4. Extend the shared chokepoint and update both callers": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788638705171
+      }
+    ],
+    "11. Implement the frontend controls and sizing display": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788638712091
+      }
+    ],
+    "8. Wire the Auto_Labeler for labeling time": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788639984132
+      }
+    ],
+    "7. Wire the Preview_API for both sizing inputs": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788645499059
+      }
+    ],
+    "9. Verify the two paths agree, end to end": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788650657589
+      }
+    ],
+    "14. Verification": [
+      {
+        "executionId": "a92f7743-ce5e-4ff9-9725-bd4d70470483",
+        "chatSessionId": "sess_de664591-223a-4340-a494-20c84779aeb4",
+        "timestamp": 1788656243648
+      }
+    ]
+  }
+}

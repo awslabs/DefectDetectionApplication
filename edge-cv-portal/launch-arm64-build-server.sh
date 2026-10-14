@@ -16,7 +16,13 @@
 #   --iam-profile PROFILE    IAM instance profile name (default: dda-build-role)
 #   --volume-size SIZE       Root volume size in GB (default: 100)
 #   --region REGION          AWS region (default: us-east-1)
-#   --ami-id AMI             AMI ID (default: Ubuntu Pro 18.04 ARM64)
+#   --ami-id AMI             AMI ID (default: latest Ubuntu ARM64 AMI for --ubuntu-version)
+#   --ubuntu-version VER     Ubuntu LTS version for the default AMI lookup:
+#                            18.04 (default), 20.04, 22.04, or 24.04
+#                            (use 24.04 for JP7 build servers; see README "JetPack 7
+#                            (JP7) Build Server" section for provisioning steps)
+#   --flavor FLAVOR          Ubuntu flavor: pro (Ubuntu Pro) or standard
+#                            (default: standard)
 #   --dry-run                Show what would be created without creating
 #   --help                   Show this help message
 
@@ -32,6 +38,8 @@ IAM_PROFILE="dda-build-role"
 VOLUME_SIZE=100
 REGION="us-east-1"
 AMI_ID=""
+UBUNTU_VERSION="18.04"
+UBUNTU_FLAVOR="standard"
 DRY_RUN=false
 
 # Parse command line arguments
@@ -73,12 +81,20 @@ while [[ $# -gt 0 ]]; do
             AMI_ID="$2"
             shift 2
             ;;
+        --ubuntu-version)
+            UBUNTU_VERSION="$2"
+            shift 2
+            ;;
+        --flavor)
+            UBUNTU_FLAVOR="$2"
+            shift 2
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
             ;;
         --help)
-            head -30 "$0" | tail -28
+            head -27 "$0" | tail -26
             exit 0
             ;;
         *)
@@ -87,6 +103,14 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Validate the Ubuntu flavor immediately after argument parsing, before any
+# AWS API call (ubuntu-pro-build-servers Req 5.5): only the exact values
+# 'pro' and 'standard' are accepted — no silent fallback in either direction.
+if [ "$UBUNTU_FLAVOR" != "pro" ] && [ "$UBUNTU_FLAVOR" != "standard" ]; then
+    echo "Error: Unsupported --flavor '$UBUNTU_FLAVOR' (supported values: pro, standard)"
+    exit 1
+fi
 
 # Validate required parameters
 if [ -z "$KEY_NAME" ]; then
@@ -296,36 +320,47 @@ fi
 
 echo ""
 
-# Find Ubuntu Pro 18.04 ARM64 AMI if not specified
+# Find the Ubuntu ARM64 AMI for the requested release if not specified.
+# 18.04 (bionic) remains the default for the existing JP4/JP5/JP6 flow;
+# --ubuntu-version 24.04 (noble) provisions a JetPack 7 (JP7) build server
+# (see the README "JetPack 7 (JP7) Build Server" section).
 if [ -z "$AMI_ID" ]; then
-    echo "Finding latest Ubuntu Pro 18.04 ARM64 AMI..."
+    case "$UBUNTU_VERSION" in
+        18.04) UBUNTU_CODENAME="bionic"; UBUNTU_SSD_PATH="hvm-ssd" ;;
+        20.04) UBUNTU_CODENAME="focal";  UBUNTU_SSD_PATH="hvm-ssd" ;;
+        22.04) UBUNTU_CODENAME="jammy";  UBUNTU_SSD_PATH="hvm-ssd" ;;
+        24.04) UBUNTU_CODENAME="noble";  UBUNTU_SSD_PATH="hvm-ssd-gp3" ;;
+        *)
+            echo "Error: Unsupported --ubuntu-version '$UBUNTU_VERSION' (supported: 18.04, 20.04, 22.04, 24.04)"
+            echo "Alternatively, specify --ami-id manually"
+            exit 1
+            ;;
+    esac
+
+    # Single flavor-selected DescribeImages query (ubuntu-pro-build-servers
+    # Req 5.2, 5.3, 5.4): the selected flavor's name pattern is the only one
+    # queried — a failed lookup exits nonzero without ever querying the
+    # other flavor (no silent fallback in either direction).
+    if [ "$UBUNTU_FLAVOR" = "pro" ]; then
+        NAME_FILTER="ubuntu-pro-server/images/${UBUNTU_SSD_PATH}/ubuntu-${UBUNTU_CODENAME}-${UBUNTU_VERSION}-arm64-pro-server-*"
+    else
+        NAME_FILTER="ubuntu/images/${UBUNTU_SSD_PATH}/ubuntu-${UBUNTU_CODENAME}-${UBUNTU_VERSION}-arm64-server-*"
+    fi
+
+    echo "Finding latest Ubuntu ${UBUNTU_FLAVOR} ${UBUNTU_VERSION} ARM64 AMI..."
     AMI_ID=$(aws ec2 describe-images \
         --region "$REGION" \
         --owners 099720109477 \
         --filters \
-            "Name=name,Values=ubuntu-pro-server/images/hvm-ssd/ubuntu-bionic-18.04-arm64-pro-server-*" \
+            "Name=name,Values=${NAME_FILTER}" \
             "Name=architecture,Values=arm64" \
             "Name=state,Values=available" \
         --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
         --output text 2>/dev/null || echo "")
-    
+
     if [ -z "$AMI_ID" ] || [ "$AMI_ID" == "None" ]; then
-        # Fallback to standard Ubuntu 18.04 ARM64
-        echo "Ubuntu Pro not found, trying standard Ubuntu 18.04 ARM64..."
-        AMI_ID=$(aws ec2 describe-images \
-            --region "$REGION" \
-            --owners 099720109477 \
-            --filters \
-                "Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-bionic-18.04-arm64-server-*" \
-                "Name=architecture,Values=arm64" \
-                "Name=state,Values=available" \
-            --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
-            --output text 2>/dev/null || echo "")
-    fi
-    
-    if [ -z "$AMI_ID" ] || [ "$AMI_ID" == "None" ]; then
-        echo "Error: Could not find Ubuntu 18.04 ARM64 AMI"
-        echo "Please specify --ami-id manually"
+        echo "Error: Could not find an Ubuntu ${UBUNTU_FLAVOR} ${UBUNTU_VERSION} ARM64 AMI"
+        echo "Specify --ami-id manually, or check the flavor/release combination"
         exit 1
     fi
 fi
@@ -385,6 +420,8 @@ echo "  Security Group:   $SECURITY_GROUP_ID"
 echo "  Subnet:           ${SUBNET_ID:-default}"
 echo "  IAM Profile:      $IAM_PROFILE"
 echo "  Volume Size:      ${VOLUME_SIZE}GB"
+echo "  Ubuntu Version:   ${UBUNTU_VERSION}"
+echo "  Ubuntu Flavor:    ${UBUNTU_FLAVOR}"
 echo "  Region:           $REGION"
 echo ""
 
@@ -450,6 +487,14 @@ echo "  git clone https://github.com/awslabs/DefectDetectionApplication"
 echo "  cd DefectDetectionApplication"
 echo "  ./setup-build-server.sh"
 echo ""
-echo "Then build the ARM64 component:"
-echo "  ./gdk-component-build-and-publish.sh"
+if [ "$UBUNTU_VERSION" = "24.04" ]; then
+    echo "Ubuntu 24.04 (JP7 build server): follow the README section"
+    echo "'JetPack 7 (JP7) Build Server (Ubuntu 24.04 arm64)' for the noble-specific"
+    echo "prerequisites (Docker Engine + buildx and the docker-compose command shim),"
+    echo "then build the JP7 component:"
+    echo "  ./gdk-component-build-and-publish.sh aarch64 7"
+else
+    echo "Then build the ARM64 component:"
+    echo "  ./gdk-component-build-and-publish.sh"
+fi
 echo ""

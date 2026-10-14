@@ -20,6 +20,7 @@ import { ImageSourceType } from "../types";
 import { NAME_REGEX } from "../../regex";
 import { NAME_MAX, DESCRIPTION_MAX } from "components/form/constants";
 import { PATH_MAX } from "../constants";
+import { isStreamType, streamSchemaFields } from "../stream/streamForm";
 
 export const schema = yup.object({
   type: yup.mixed<ImageSourceType>().oneOf(Object.values(ImageSourceType)),
@@ -110,5 +111,26 @@ export const schema = yup.object({
           `Folder path is too long. A folder path can have a maximum of ${PATH_MAX} characters.`,
         ),
   }),
+  // RTSP/RTMP cameras (rtsp-rtmp-stream-cameras Requirement 4.1).
+  streamName: yup.string().when("type", {
+    is: isStreamType,
+    then: (schema) =>
+      schema
+        .required("An image source name is required.")
+        .matches(NAME_REGEX, "Image source name contains invalid characters.")
+        .max(
+          NAME_MAX,
+          `Image source name is too long. An image source name can have a maximum of ${NAME_MAX} characters.`,
+        ),
+  }),
+  streamDescription: yup.string().when("type", {
+    is: isStreamType,
+    then: (schema) =>
+      schema.max(
+        DESCRIPTION_MAX,
+        `Description is too long. A description can have a maximum of ${DESCRIPTION_MAX} characters.`,
+      ),
+  }),
+  ...streamSchemaFields,
 });
 export type SchemaType = yup.InferType<typeof schema>;

@@ -251,7 +251,7 @@ function WorkflowsHeader(props: WorkflowsHeaderProps): JSX.Element {
           </Button>
           <Button
             variant="primary"
-            onClick={(): void => navigate(editWorkflowUrl || "")}
+            onClick={(): void => void navigate(editWorkflowUrl || "")}
             disabled={!editWorkflowUrl}
           >
             Edit workflow

@@ -58,6 +58,11 @@ export default function SideNav({ station }: SideNavProps): JSX.Element {
           items: [
             { type: "link", text: "Image sources", href: "/image-sources" },
             { type: "link", text: "Workflows", href: "/workflows" },
+            {
+              type: "link",
+              text: "Deployed workflows",
+              href: "/deployed-workflows",
+            },
             { type: "link", text: "Deployed models", href: "/models" },
           ],
         },

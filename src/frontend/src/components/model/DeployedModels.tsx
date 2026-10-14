@@ -30,7 +30,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ModelDefaultConfigs } from "./types";
 import { modelTypeLabel, modelShapeString } from "./helpers";
 import { AppDescriptions } from "config/Interface";
-import { listModels } from "api/FeatureConfigurationAPI";
+import { listFeatureConfigurations } from "api/FeatureConfigurationAPI";
 
 import EdgeUICollectionPreferences from "components/collection-preferences/EdgeUICollectionPreferences";
 import EmptyTable from "../empty-table/EmptyTable";
@@ -53,9 +53,12 @@ type ModelTableHeaderProps = {
 
 export default function DeployedModels(): JSX.Element {
   const listQuery = useQuery({
-    queryKey: ["listModels"],
+    queryKey: ["listFeatureConfigurations"],
     queryFn: async () => {
-      const models = await listModels();
+      // Unfiltered fetcher: the Deployed models page must show ALL deployed
+      // models (including VllmModel entries). The legacy `isAssignableModel`
+      // filter in `listModels()` belongs to workflow assignment only.
+      const models = await listFeatureConfigurations();
       const modelItems: ModelTableItem[] = models.map(
         (model: FeatureConfiguration) => {
           return {

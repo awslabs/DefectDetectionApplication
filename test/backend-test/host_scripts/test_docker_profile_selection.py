@@ -66,7 +66,8 @@ def _run_profile_decision(is_gpu, arch):
 
 class TestDockerProfileSelection(unittest.TestCase):
     def test_gpu_aarch64_selects_tegra(self):
-        # GPU-capable Jetson (JP4 Xavier or JP5 Orin) must use tegra (CUDA mounts).
+        # GPU-capable Jetson (JetPack 5/6/7) must use tegra (CUDA mounts); a
+        # non-Jetson arm64 CPU host (no GPU) gets generic, below.
         self.assertEqual(_run_profile_decision(1, "aarch64"), "tegra")
 
     def test_no_gpu_aarch64_selects_generic(self):

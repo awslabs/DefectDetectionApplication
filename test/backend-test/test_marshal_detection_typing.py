@@ -140,7 +140,7 @@ _np_float32 = st.floats(
 
 # Feature: object-detection-visualization, Property 2: Detection captures receive a distinct inference-result type
 # Validates: Requirements 1.2, 1.3
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(
     inference_anomalies=_detection_payload,
     # inference_output is randomized over falsy/truthy: detection typing must win

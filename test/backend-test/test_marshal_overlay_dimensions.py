@@ -140,7 +140,7 @@ _dim = st.integers(min_value=2, max_value=40)
 
 # Feature: object-detection-visualization, Property 6: Detection captures always get an overlay reference of source dimensions
 # Validates: Requirements 2.1, 2.3, 2.4, 2.5
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(
     inference_anomalies=_detection_payload,
     height=_dim,

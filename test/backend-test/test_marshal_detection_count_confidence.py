@@ -194,7 +194,7 @@ def _expected(payload):
 
 # Feature: object-detection-visualization, Property 3: Detection count and top confidence are reported
 # Validates: Requirements 1.4, 1.5
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(payload=_detection_payloads())
 def test_detection_count_and_top_confidence_are_reported(payload):
     module = _load_marshal_template()

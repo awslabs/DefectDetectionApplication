@@ -31,14 +31,29 @@ Both stacks ARE wired into synthesizable CDK app entrypoints. When the CDK
 toolchain is available, the test re-synths each with the canonical fixture
 context (``portalAccountId=111111111111``, ``externalId=fixture-eid``,
 ``trustedUseCaseAccountIds=222222222222,333333333333``, region ``us-east-1``)
-and asserts the emitted IAM statement multiset equals the committed FIXED
-baseline (an identity guard against future live-tree drift).
+and asserts the emitted IAM grants equal the committed FIXED baseline (an
+identity guard against future live-tree drift). The live comparison is at
+grant-atom granularity (one effect/action/resource/condition tuple per
+action x resource, see ``iam_grant_atoms``) so an aws-cdk-lib upgrade that
+only regroups the statements a grant method emits is not reported as drift,
+while any permission added or removed still is.
 
 Independently of the toolchain, ``test_baseline_drift_confined_to_I*`` compares
 the committed unfixed and fixed baselines and asserts the ONLY differences are
 the enumerated I1–I4 statement rewrites recorded in
 ``iam_baseline_cdk_i_changes.json`` — which is exactly the preservation
 guarantee: every statement that is not one of the I1–I4 rewrites is unchanged.
+
+**Post-fix record (security-scan-remediation-high).** The owner-approved
+``iam_baseline_post_fix_changes.json`` records later narrowing of the FIXED
+baselines, which ``iam_post_fix_approved_additions.json`` can't express: each
+``rescope`` replaces one statement by narrower ones in its carrier, and each
+``refreshed_resources`` entry takes its encryption properties (or, for a KMS
+key or alias, the whole resource) from a fresh synth. The drift test reverses
+the rescopes before its I1–I4 comparison, so the Unfixed_Snapshots never
+change; ``test_post_fix_rescopes_only_narrow``,
+``test_refreshed_resources_match_synth`` and ``test_unfixed_snapshots_unchanged``
+check the record itself.
 
     NOTE on the statement MULTISET view: the I1 fix splits one broad
     ``PolicyStatement`` into several narrow ones. Once a role's inline policy
@@ -70,6 +85,8 @@ Run:
     python3 -m pytest test/backend-test/security/preservation/test_preservation_iam_cdk_synth.py \
         -p no:cacheprovider --noconftest -v
 """
+import collections
+import hashlib
 import json
 import os
 import re
@@ -82,7 +99,9 @@ import pytest
 from _iam_preservation_support import (
     REPO_ROOT,
     read_repo_file,
+    iam_grant_atoms,
     iam_statements_multiset,
+    statement_grant_atoms,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -128,6 +147,38 @@ def _synth_template(stack, app):
         env = dict(os.environ)
         env["CDK_DEFAULT_ACCOUNT"] = "111111111111"
         env["CDK_DEFAULT_REGION"] = "us-east-1"
+        # Hermetic fixture: the CDK CLI resolves the *ambient* AWS credentials
+        # (env keys / profile / container creds / EC2 IMDS instance role) to
+        # look up the caller account and then OVERWRITES CDK_DEFAULT_ACCOUNT in
+        # the app subprocess with the REAL account id, silently clobbering the
+        # fixture value above (observed on an EC2 box with an instance role:
+        # every account-bearing statement synthesized with the live account and
+        # the identity diff exploded with false drift). Strip every ambient
+        # credential source so the lookup fails and the fixture account is the
+        # one the app sees — this is environment isolation, not a weakening of
+        # any assertion.
+        for key in (
+            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_ROLE_ARN",
+        ):
+            env.pop(key, None)
+        # The shared-config files are REDIRECTED, not unset: unsetting
+        # AWS_SHARED_CREDENTIALS_FILE / AWS_CONFIG_FILE makes the SDK fall back
+        # to its DEFAULTS (~/.aws/credentials, ~/.aws/config), so on any
+        # developer box with a configured default profile the CLI still
+        # resolves a caller account and clobbers the fixture value — the very
+        # leak this block exists to prevent (observed here: the fixture
+        # portalAccountId synthesized as 111111111111 while every
+        # `this.account` statement carried the real account, producing false
+        # drift in DDAPortalUseCaseAccountStack). Point them at paths that
+        # cannot exist instead.
+        env["AWS_SHARED_CREDENTIALS_FILE"] = os.path.join(
+            outdir, "no-such-credentials")
+        env["AWS_CONFIG_FILE"] = os.path.join(outdir, "no-such-config")
+        env["AWS_EC2_METADATA_DISABLED"] = "true"
         try:
             subprocess.run(
                 cmd, cwd=INFRA_DIR, env=env, timeout=600,
@@ -156,6 +207,69 @@ def _i_changes():
         return json.load(fh)
 
 
+def _approved_additions(stack):
+    """Return a Counter of the statements this stack is REVIEWED to synthesize on
+    top of its fixed baseline.
+
+    Features merged after the I1–I4 rewrite legitimately add IAM statements. Those
+    are recorded here — not folded into ``iam_baseline_cdk_i_changes.json``, which
+    must keep describing only the I1–I4 rewrite so that
+    ``test_baseline_drift_confined_to_I1_I4`` keeps proving that confinement, and
+    not merged into the fixed baseline template, which stays the reviewed F'(X)
+    capture. Anything the tree synthesizes that is neither in the baseline nor in
+    this allowlist still fails the gate, and removals still fail unconditionally.
+    """
+    path = os.path.join(BASELINES, "iam_post_fix_approved_additions.json")
+    if not os.path.exists(path):
+        return collections.Counter()
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    entry = (data.get("stacks") or {}).get(stack) or {}
+    return collections.Counter(entry.get("approved_additions") or [])
+
+
+POST_FIX_RECORD = os.path.join(BASELINES, "iam_baseline_post_fix_changes.json")
+# Properties a refreshed resource takes from the synth, and the resource types
+# a refresh adds whole (design "R14 and R15 fixtures and deploy constraints").
+ENCRYPTION_PROPERTIES = ("KmsMasterKeyId", "SqsManagedSseEnabled", "SSESpecification")
+WHOLE_RESOURCE_TYPES = ("AWS::KMS::Key", "AWS::KMS::Alias")
+
+
+def _post_fix_entry(stack):
+    """This stack's entry in the owner-approved post-fix record: its
+    ``rescopes``, ``refreshed_resources`` and ``unfixed_snapshot_sha256``."""
+    with open(POST_FIX_RECORD, encoding="utf-8") as fh:
+        data = json.load(fh)
+    return (data.get("stacks") or {}).get(stack) or {}
+
+
+def _reverse_rescopes(stack, fixed_ms):
+    """Return the FIXED baseline's statement multiset with every recorded
+    rescope undone: each ``added`` statement taken out, each ``removed`` one
+    put back. Every recorded ``added`` statement must be in the baseline."""
+    ms = collections.Counter(fixed_ms)
+    for rescope in _post_fix_entry(stack).get("rescopes") or []:
+        for stmt in rescope["added"]:
+            assert ms[stmt] > 0, (
+                f"{stack}: recorded rescope statement missing from the fixed "
+                f"baseline ({rescope['carrier']}): {stmt}"
+            )
+            ms[stmt] -= 1
+        for stmt in rescope["removed"]:
+            ms[stmt] += 1
+    return +ms
+
+
+_SYNTH_CACHE = {}
+
+
+def _fresh_synth(stack):
+    """One fixture synth per stack per run, shared by the synth tests."""
+    if stack not in _SYNTH_CACHE:
+        _SYNTH_CACHE[stack] = _synth_template(stack, SYNTH_STACKS[stack][2])
+    return _SYNTH_CACHE[stack]
+
+
 # --------------------------------------------------------------------------- #
 # Synth mode (I1–I4) — live synth vs the committed FIXED baseline (identity)
 # --------------------------------------------------------------------------- #
@@ -167,19 +281,54 @@ def test_synth_iam_statements_match_fixed_baseline(stack):
             "CDK toolchain unavailable (or IAM_SKIP_CDK_SYNTH set); the "
             "baseline-diff layer below still proves I1–I4 confinement."
         )
-    fixed_file, _unfixed_file, app = SYNTH_STACKS[stack]
-    fresh = _synth_template(stack, app)
+    fixed_file = SYNTH_STACKS[stack][0]
+    fresh = _fresh_synth(stack)
     if fresh is None:
         pytest.skip(
             f"cdk synth for {stack} did not produce a template in this "
             f"environment; the baseline-diff layer covers it."
         )
-    fresh_ms = iam_statements_multiset(fresh)
-    baseline_ms = iam_statements_multiset(_load_baseline_template(fixed_file))
-    assert fresh_ms == baseline_ms, (
-        f"{stack}: live-synthesized IAM statements drifted from the committed "
-        f"fixed baseline (F'(X)). Re-inspect and regenerate the baseline only "
-        f"after confirming the drift is confined to I1–I4."
+    # Grant-atom sets (see iam_grant_atoms): stable across CDK statement
+    # regrouping, exact on every permission.
+    fresh_ms = iam_grant_atoms(fresh)
+    baseline_ms = iam_grant_atoms(_load_baseline_template(fixed_file))
+    approved_ms = collections.Counter()
+    for canonical, count in _approved_additions(stack).items():
+        for atom in statement_grant_atoms(json.loads(canonical)):
+            approved_ms[atom] += count
+
+    # Removals are never acceptable: a statement disappearing means a grant the
+    # baseline recorded is gone, which the allowlist must not be able to excuse.
+    removed = baseline_ms - fresh_ms
+    assert not removed, (
+        f"{stack}: statements recorded in the fixed baseline (F'(X)) are NO LONGER "
+        f"synthesized. This is a regression, not growth, and cannot be approved "
+        f"via iam_post_fix_approved_additions.json.\n"
+        f"missing: {sorted(removed)[:5]}"
+    )
+
+    unreviewed = fresh_ms - baseline_ms - approved_ms
+    assert not unreviewed, (
+        f"{stack}: the live tree synthesizes IAM statements that are in neither the "
+        f"fixed baseline (F'(X)) nor the reviewed additions allowlist. Inspect them, "
+        f"then either fix the grant or add it to "
+        f"iam_post_fix_approved_additions.json with its attribution. Do NOT "
+        f"regenerate the fixed baseline: that would fold the change into the "
+        f"recorded I1–I4 rewrite.\n"
+        f"unreviewed ({sum(unreviewed.values())}): {sorted(unreviewed)[:5]}"
+    )
+
+    # The allowlist must not rot: every approved statement has to still be real.
+    stale = approved_ms - fresh_ms
+    assert not stale, (
+        f"{stack}: iam_post_fix_approved_additions.json approves statements the tree "
+        f"no longer synthesizes; drop them so the allowlist keeps describing reality.\n"
+        f"stale: {sorted(stale)[:5]}"
+    )
+
+    assert fresh_ms == baseline_ms + approved_ms, (
+        f"{stack}: live-synthesized IAM statements do not equal the fixed baseline "
+        f"plus the reviewed additions."
     )
 
 
@@ -193,7 +342,10 @@ def test_synth_iam_statements_match_fixed_baseline(stack):
 def test_baseline_drift_confined_to_I1_I4(stack):
     fixed_file, unfixed_file, _app = SYNTH_STACKS[stack]
     unfixed_ms = iam_statements_multiset(_load_baseline_template(unfixed_file))
-    fixed_ms = iam_statements_multiset(_load_baseline_template(fixed_file))
+    # The owner-approved post-fix rescopes are reversed first, so the I1–I4
+    # comparison below runs unchanged against the untouched Unfixed_Snapshot.
+    fixed_ms = _reverse_rescopes(
+        stack, iam_statements_multiset(_load_baseline_template(fixed_file)))
 
     removed = unfixed_ms - fixed_ms   # in unfixed, gone in fixed
     added = fixed_ms - unfixed_ms      # new in fixed
@@ -225,6 +377,88 @@ def test_baseline_drift_confined_to_I1_I4(stack):
         f"{stack}: statements outside the recorded I1–I4 rewrites are not "
         f"byte-for-byte identical between F(X) and F'(X)"
     )
+
+
+def _actions(stmt):
+    value = stmt.get("Action", [])
+    return set(value if isinstance(value, list) else [value])
+
+
+@pytest.mark.parametrize("stack", list(SYNTH_STACKS))
+# Validates: security-scan-remediation-high Requirements 15.1, 15.2, 15.4
+# (Property 9: rescopes only narrow).
+def test_post_fix_rescopes_only_narrow(stack):
+    fixed_ms = iam_statements_multiset(_load_baseline_template(SYNTH_STACKS[stack][0]))
+    for rescope in _post_fix_entry(stack).get("rescopes") or []:
+        where = f"{stack} {rescope['carrier']}"
+        removed = [json.loads(s) for s in rescope["removed"]]
+        added = [json.loads(s) for s in rescope["added"]]
+        assert removed and added, f"{where}: a rescope needs removed and added statements"
+        for stmt in removed + added:
+            assert not {"NotAction", "NotResource", "NotPrincipal"} & set(stmt), (
+                f"{where}: rescopes support Action/Resource statements only: {stmt}")
+        # Narrowing from '*' only: any resource set is narrower, so no grant widens.
+        for stmt in removed:
+            assert stmt.get("Resource") == "*", f"{where}: removed statement not on '*': {stmt}"
+        # Same effect and condition, so the split changes resources only.
+        shape = {(s["Effect"], json.dumps(s.get("Condition"), sort_keys=True)) for s in removed + added}
+        assert len(shape) == 1, f"{where}: effect or condition differs across the rescope: {shape}"
+        # Exactly the removed actions: none gained, none lost (Requirement 15.4).
+        removed_actions = set().union(*map(_actions, removed))
+        added_actions = set().union(*map(_actions, added))
+        assert added_actions == removed_actions, (
+            f"{where}: gained {sorted(added_actions - removed_actions)}, "
+            f"lost {sorted(removed_actions - added_actions)}")
+        # Only the recorded unscopable actions stay on '*' (Requirement 15.2).
+        unscopable = set(rescope["unscopable_actions"])
+        assert unscopable <= removed_actions, f"{where}: unscopable actions not in the removed statement"
+        for stmt in added:
+            resources = stmt["Resource"] if isinstance(stmt["Resource"], list) else [stmt["Resource"]]
+            if "*" in resources:
+                assert _actions(stmt) <= unscopable, (
+                    f"{where}: scopable actions on '*': {sorted(_actions(stmt) - unscopable)}")
+        # The rescope is applied: no removed statement remains in the fixed baseline.
+        for stmt in rescope["removed"]:
+            assert fixed_ms[stmt] == 0, f"{where}: removed statement still in the fixed baseline"
+
+
+@pytest.mark.parametrize("stack", list(SYNTH_STACKS))
+# Validates: security-scan-remediation-high Requirements 16.3, 17.5 — the
+# refreshed Baseline_Template resources equal a fresh synth.
+def test_refreshed_resources_match_synth(stack):
+    if not _cdk_available():
+        pytest.skip(
+            "CDK toolchain unavailable (or IAM_SKIP_CDK_SYNTH set); the refreshed "
+            "resources are compared with a fresh synth on the host."
+        )
+    refreshed = _post_fix_entry(stack).get("refreshed_resources") or []
+    if not refreshed:
+        return
+    fresh = _fresh_synth(stack)
+    if fresh is None:
+        pytest.skip(f"cdk synth for {stack} did not produce a template in this environment.")
+    fixed = _load_baseline_template(SYNTH_STACKS[stack][0])["Resources"]
+    for lid in refreshed:
+        assert lid in fixed and lid in fresh["Resources"], f"{stack}: {lid} missing"
+        new = fresh["Resources"][lid]
+        if new["Type"] in WHOLE_RESOURCE_TYPES:
+            assert fixed[lid] == new, f"{stack}: {lid} differs from the fresh synth"
+            continue
+        got = {k: fixed[lid].get("Properties", {}).get(k) for k in ENCRYPTION_PROPERTIES}
+        want = {k: new.get("Properties", {}).get(k) for k in ENCRYPTION_PROPERTIES}
+        assert any(v is not None for v in want.values()), f"{stack}: {lid} is unencrypted in the synth"
+        assert got == want, f"{stack}: {lid} encryption {got} != synth {want}"
+
+
+@pytest.mark.parametrize("stack", list(SYNTH_STACKS))
+# Validates: security-scan-remediation-high Requirement 16.4 — the
+# Unfixed_Snapshots are never edited.
+def test_unfixed_snapshots_unchanged(stack):
+    expected = _post_fix_entry(stack).get("unfixed_snapshot_sha256")
+    assert expected, f"{stack}: no unfixed_snapshot_sha256 in the post-fix record"
+    with open(os.path.join(BASELINES, SYNTH_STACKS[stack][1]), "rb") as fh:
+        assert hashlib.sha256(fh.read()).hexdigest() == expected, (
+            f"{stack}: {SYNTH_STACKS[stack][1]} changed; the Unfixed_Snapshots are never edited")
 
 
 # Validates: Requirements 3.3, 3.4 — the I3/I4 fix wires the tag Condition; the

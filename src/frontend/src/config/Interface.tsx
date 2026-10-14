@@ -86,6 +86,8 @@ export const APIList = {
   getStation: `${Connection.ENDPOINT}/system/station`,
   getCapture: `${Connection.ENDPOINT}/workflows/{workflow_id}/capture-details/{capture_id}`,
   getAuthConfig: `${Connection.ENDPOINT}/authorization-configurations`,
+  getLocalAuthStatus: `${Connection.ENDPOINT}/local-auth/status`,
+  postLocalAuthLogin: `${Connection.ENDPOINT}/local-auth/login`,
 };
 
 export const AppDescriptions = {

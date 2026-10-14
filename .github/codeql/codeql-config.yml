@@ -1,0 +1,36 @@
+# CodeQL configuration used by .github/workflows/codeql.yml.
+#
+# Third-party packages are vendored into the portal Lambda layers with pip. Their
+# findings belong to the upstream projects, so they are not scanned here. Each entry
+# is a package that pip installed (see its *.dist-info/RECORD). First-party modules
+# in the same directories (shared_utils.py, rbac_utils.py, workflow_core/, ...) are
+# still scanned, so do not replace these entries with the parent directory.
+#
+# When a package is added to a layer, add its import roots here.
+name: DefectDetectionApplication CodeQL configuration
+
+paths-ignore:
+  # edge-cv-portal/backend/layers/shared/python
+  - edge-cv-portal/backend/layers/shared/python/bin
+  - edge-cv-portal/backend/layers/shared/python/boto3
+  - edge-cv-portal/backend/layers/shared/python/botocore
+  - edge-cv-portal/backend/layers/shared/python/certifi
+  - edge-cv-portal/backend/layers/shared/python/charset_normalizer
+  - edge-cv-portal/backend/layers/shared/python/dateutil
+  - edge-cv-portal/backend/layers/shared/python/idna
+  - edge-cv-portal/backend/layers/shared/python/jmespath
+  - edge-cv-portal/backend/layers/shared/python/requests
+  - edge-cv-portal/backend/layers/shared/python/s3transfer
+  - edge-cv-portal/backend/layers/shared/python/six.py
+  - edge-cv-portal/backend/layers/shared/python/urllib3
+  - edge-cv-portal/backend/layers/shared/python/yaml
+  - edge-cv-portal/backend/layers/shared/python/_yaml
+  # edge-cv-portal/backend/layers/workflow_core/python
+  - edge-cv-portal/backend/layers/workflow_core/python/attr
+  - edge-cv-portal/backend/layers/workflow_core/python/attrs
+  - edge-cv-portal/backend/layers/workflow_core/python/bin
+  - edge-cv-portal/backend/layers/workflow_core/python/jsonschema
+  - edge-cv-portal/backend/layers/workflow_core/python/jsonschema_specifications
+  - edge-cv-portal/backend/layers/workflow_core/python/referencing
+  - edge-cv-portal/backend/layers/workflow_core/python/rpds
+  - edge-cv-portal/backend/layers/workflow_core/python/typing_extensions.py

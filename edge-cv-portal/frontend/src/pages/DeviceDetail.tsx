@@ -20,10 +20,34 @@ import {
   Spinner,
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
-import { Device, InstalledComponent, DeviceDeployment } from '../types';
+import { Device, InstalledComponent, DeviceDeployment, ModelProviderStatus } from '../types';
+import DeviceCamerasTab from '../components/DeviceCamerasTab';
+import DeviceStreamCapabilitiesPanel, {
+  isStreamCapabilities,
+} from '../components/DeviceStreamCapabilitiesPanel';
+import {
+  DeviceStreamCapabilities,
+  STATIC_IMAGE_FOCUS_PARAM,
+  STATIC_IMAGE_FOCUS_VALUE,
+  STATIC_VIDEO_FOCUS_VALUE,
+} from './workflows/cameraReference';
 import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
 import RemoteAccessTab from '../components/RemoteAccessTab';
 import ResultsTab from '../components/ResultsTab';
+import RemoveDevicesModal, {
+  RemoveDevicesResult,
+  removalNotice,
+} from '../components/RemoveDevicesModal';
+
+/** Keep in sync with devices.py TARGET_ARCHITECTURES. */
+const TARGET_ARCHITECTURE_OPTIONS = [
+  { label: 'x86_64', value: 'x86_64' },
+  { label: 'x86_64_nvidia', value: 'x86_64_nvidia' },
+  { label: 'arm64_cpu (generic ARM64 CPU)', value: 'arm64_cpu' },
+  { label: 'arm64_jp5 (JetPack 5)', value: 'arm64_jp5' },
+  { label: 'arm64_jp6 (JetPack 6)', value: 'arm64_jp6' },
+  { label: 'arm64_jp7 (JetPack 7)', value: 'arm64_jp7' },
+];
 
 interface LogGroup {
   log_group_name: string;
@@ -47,13 +71,38 @@ export default function DeviceDetail() {
   const { deviceId } = useParams<{ deviceId: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const [activeTabId, setActiveTabId] = useState('overview');
+  // ?tab= deep-links a specific tab (e.g. the Workflow_Builder camera
+  // picker's "Pin a static test image…" shortcut targets tab=cameras).
+  const [activeTabId, setActiveTabId] = useState(searchParams.get('tab') || 'overview');
   const [showRestartModal, setShowRestartModal] = useState(false);
+  const [showRemoveModal, setShowRemoveModal] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
   const [device, setDevice] = useState<Device | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Target Architecture editor (Devices-table attribute the deployment
+  // architecture gates check; a device without one fails closed).
+  const [editingArch, setEditingArch] = useState(false);
+  const [archSelection, setArchSelection] = useState<string | null>(null);
+  const [archSaving, setArchSaving] = useState(false);
+  const [archError, setArchError] = useState<string | null>(null);
+
   const usecaseId = searchParams.get('usecase_id');
+
+  // ?focus=static-image accompanies the pin shortcut's ?tab=cameras: the
+  // Cameras tab brings the "Static image camera" panel into view and
+  // flags it on arrival, so the pin controls are not left off-screen
+  // below the cameras table (static-image-camera-binding-and-pin-
+  // discoverability Requirement 2.5). Passed as a prop — DeviceCamerasTab
+  // stays router-independent.
+  const focusStaticImage =
+    searchParams.get(STATIC_IMAGE_FOCUS_PARAM) === STATIC_IMAGE_FOCUS_VALUE;
+  // ?focus=static-video: the same arrival for the "Pin a test video…"
+  // shortcut and the "Static video camera" panel (static-camera-video-loop
+  // Requirement 9.7).
+  const focusStaticVideo =
+    searchParams.get(STATIC_IMAGE_FOCUS_PARAM) === STATIC_VIDEO_FOCUS_VALUE;
 
   // Logs state
   const [logGroups, setLogGroups] = useState<LogGroup[]>([]);
@@ -76,6 +125,32 @@ export default function DeviceDetail() {
       setError('Use case ID is required');
       setLoading(false);
     }
+  }, [deviceId, usecaseId]);
+
+  // Device_Stream_Capabilities (rtsp-rtmp-stream-cameras Requirement 16.5)
+  // come with the camera registry read, and only once the device has
+  // reported them. A failed read hides the panel and nothing else: the
+  // rest of the page does not depend on it.
+  const [streamCapabilities, setStreamCapabilities] =
+    useState<DeviceStreamCapabilities | null>(null);
+  useEffect(() => {
+    if (!deviceId || !usecaseId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await apiService.getDeviceCameras(deviceId, usecaseId);
+        const reported = response?.stream_capabilities;
+        if (!cancelled) {
+          setStreamCapabilities(isStreamCapabilities(reported) ? reported : null);
+        }
+      } catch (err) {
+        console.warn('Failed to load the device stream capabilities:', err);
+        if (!cancelled) setStreamCapabilities(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [deviceId, usecaseId]);
 
   // Load log groups when switching to logs tab
@@ -196,6 +271,67 @@ export default function DeviceDetail() {
     }
   };
 
+  /** Suggested Target_Architecture derived from the installed LocalServer
+   *  component name suffix (e.g. ...LocalServer.arm64JP6 -> arm64_jp6). */
+  const suggestTargetArchitecture = (d: Device): string | null => {
+    const localServer = (d.installed_components || []).find((c) =>
+      c.componentName?.startsWith('aws.edgeml.dda.LocalServer')
+    );
+    if (!localServer) return null;
+    const suffix = localServer.componentName.split('.').pop() || '';
+    const map: Record<string, string> = {
+      arm64JP7: 'arm64_jp7',
+      arm64JP6: 'arm64_jp6',
+      arm64JP5: 'arm64_jp5',
+      arm64: 'arm64_cpu',
+      aarch64: 'arm64_cpu',
+      amd64: 'x86_64',
+    };
+    return map[suffix] ?? null;
+  };
+
+  const startEditingArch = () => {
+    if (!device) return;
+    setArchError(null);
+    setArchSelection(
+      device.target_architecture ?? suggestTargetArchitecture(device)
+    );
+    setEditingArch(true);
+  };
+
+  // Removed: back to the device list, which shows the outcome. Failed: stay
+  // here and show why.
+  const handleRemoveComplete = (result: RemoveDevicesResult) => {
+    setShowRemoveModal(false);
+    const notice = removalNotice(result);
+    if (notice) {
+      navigate(`/devices?usecase_id=${usecaseId}`, {
+        state: { removalNotice: notice },
+      });
+      return;
+    }
+    setRemoveError(result.failed[0]?.message ?? 'Failed to remove the device');
+  };
+
+  const saveTargetArchitecture = async () => {
+    if (!deviceId || !usecaseId) return;
+    try {
+      setArchSaving(true);
+      setArchError(null);
+      const result = await apiService.updateDeviceFlags(deviceId, usecaseId, {
+        target_architecture: archSelection,
+      });
+      setDevice((prev) =>
+        prev ? { ...prev, target_architecture: result.target_architecture } : prev
+      );
+      setEditingArch(false);
+    } catch (err: any) {
+      setArchError(err.message || 'Failed to update target architecture');
+    } finally {
+      setArchSaving(false);
+    }
+  };
+
   const getStatusIndicator = (status: string) => {
     const statusLower = status?.toLowerCase() || 'unknown';
     switch (statusLower) {
@@ -258,6 +394,24 @@ export default function DeviceDetail() {
     return new Date(timestamp).toLocaleString();
   };
 
+  /** Provider badge for a `dda-model-status` shadow model entry
+   *  (spec: model-gpu-fallback-visibility). No badge when provider info
+   *  is absent for the model (partial documents are expected). */
+  const getProviderBadge = (entry: ModelProviderStatus | null | undefined) => {
+    if (!entry) return null;
+    if (entry.gpuActive === true) {
+      return <Badge color="green">GPU</Badge>;
+    }
+    if (entry.gpuRequested === true) {
+      // GPU requested but not active — the silent-fallback signal.
+      return <Badge color="red">CPU fallback</Badge>;
+    }
+    if (entry.gpuRequested === false) {
+      return <Badge color="grey">CPU</Badge>;
+    }
+    return null;
+  };
+
   if (loading) {
     return <Box>Loading device details...</Box>;
   }
@@ -280,6 +434,16 @@ export default function DeviceDetail() {
     );
   }
 
+  // Deployed-models panel data from the additive `model_status` field (the
+  // reported `dda-model-status` shadow). Null/absent document or an empty
+  // `models` map means "no information" — the panel does not render and the
+  // rest of the page is untouched (spec: model-gpu-fallback-visibility,
+  // Decision 6).
+  const modelStatus = device.model_status;
+  const deployedModels = Object.entries(modelStatus?.models ?? {}).map(
+    ([name, entry]) => ({ name, entry })
+  );
+
   return (
     <SpaceBetween size="l">
       {/* Breadcrumb */}
@@ -296,6 +460,12 @@ export default function DeviceDetail() {
         }}
       />
 
+      {removeError && (
+        <Alert type="error" dismissible onDismiss={() => setRemoveError(null)}>
+          {`Could not remove ${device.device_id}: ${removeError}`}
+        </Alert>
+      )}
+
       {/* Header */}
       <Header
         variant="h1"
@@ -304,6 +474,15 @@ export default function DeviceDetail() {
             <Button onClick={() => navigate(`/devices?usecase_id=${usecaseId}`)}>Back to Devices</Button>
             <Button iconName="refresh" onClick={loadDevice}>Refresh</Button>
             <Button onClick={() => setShowRestartModal(true)}>Restart Greengrass</Button>
+            <Button
+              onClick={() => {
+                setRemoveError(null);
+                setShowRemoveModal(true);
+              }}
+              data-testid="remove-device-button"
+            >
+              Remove device
+            </Button>
           </SpaceBetween>
         }
       >
@@ -361,11 +540,132 @@ export default function DeviceDetail() {
                         { label: 'Greengrass Version', value: device.greengrass_version || '-' },
                         { label: 'Platform', value: device.platform || '-' },
                         { label: 'Architecture', value: device.architecture || '-' },
+                        {
+                          label: 'Target Architecture (DDA)',
+                          value: editingArch ? (
+                            <SpaceBetween size="xs">
+                              <SpaceBetween direction="horizontal" size="xs">
+                                <Select
+                                  selectedOption={
+                                    archSelection
+                                      ? { label: archSelection, value: archSelection }
+                                      : null
+                                  }
+                                  onChange={({ detail }) =>
+                                    setArchSelection(detail.selectedOption.value ?? null)
+                                  }
+                                  options={TARGET_ARCHITECTURE_OPTIONS}
+                                  placeholder="Select architecture"
+                                  disabled={archSaving}
+                                />
+                                <Button
+                                  variant="primary"
+                                  loading={archSaving}
+                                  disabled={!archSelection}
+                                  onClick={saveTargetArchitecture}
+                                >
+                                  Save
+                                </Button>
+                                <Button
+                                  variant="link"
+                                  disabled={archSaving}
+                                  onClick={() => setEditingArch(false)}
+                                >
+                                  Cancel
+                                </Button>
+                              </SpaceBetween>
+                              {archError && (
+                                <Box color="text-status-error" fontSize="body-s">
+                                  {archError}
+                                </Box>
+                              )}
+                            </SpaceBetween>
+                          ) : (
+                            <SpaceBetween direction="horizontal" size="xs">
+                              {device.target_architecture ? (
+                                <Badge color="blue">{device.target_architecture}</Badge>
+                              ) : (
+                                <Box color="text-status-warning" variant="span">
+                                  Not recorded — vLLM/plugin deployments will be rejected
+                                </Box>
+                              )}
+                              <Button
+                                variant="inline-link"
+                                iconName="edit"
+                                onClick={startEditingArch}
+                              >
+                                Edit
+                              </Button>
+                            </SpaceBetween>
+                          ),
+                        },
                         { label: 'Last Status Update', value: formatTimestamp(device.last_status_update) },
                       ]}
                     />
                   </ColumnLayout>
                 </Container>
+
+                {deployedModels.length > 0 && (
+                  <Container
+                    header={
+                      <Header
+                        variant="h2"
+                        counter={`(${deployedModels.length})`}
+                        description={
+                          modelStatus?.updatedAt
+                            ? `Reported by the device at ${formatTimestamp(modelStatus.updatedAt)}`
+                            : undefined
+                        }
+                      >
+                        Deployed models
+                      </Header>
+                    }
+                  >
+                    <SpaceBetween size="m">
+                      {modelStatus?.gpuDegraded && (
+                        <Alert type="warning" header="GPU inference degraded">
+                          GPU inference degraded — {modelStatus.gpuChainModels ?? 0}{' '}
+                          GPU-chain models loaded, none has an active GPU provider;
+                          models are serving on CPU fallback
+                          {modelStatus.updatedAt
+                            ? ` (reported ${formatTimestamp(modelStatus.updatedAt)})`
+                            : ''}
+                        </Alert>
+                      )}
+                      <Table
+                        resizableColumns
+                        items={deployedModels}
+                        columnDefinitions={[
+                          {
+                            id: 'name',
+                            header: 'Model',
+                            cell: (item) => item.name,
+                            sortingField: 'name',
+                          },
+                          {
+                            id: 'status',
+                            header: 'Status',
+                            cell: (item) => item.entry?.status || '-',
+                          },
+                          {
+                            id: 'provider',
+                            header: 'Execution provider',
+                            cell: (item) => getProviderBadge(item.entry) ?? '-',
+                          },
+                        ]}
+                        empty={
+                          <Box textAlign="center" color="inherit">
+                            No model status reported
+                          </Box>
+                        }
+                      />
+                    </SpaceBetween>
+                  </Container>
+                )}
+
+                {streamCapabilities && (
+                  <DeviceStreamCapabilitiesPanel capabilities={streamCapabilities} />
+                )}
 
                 {device.tags && Object.keys(device.tags).length > 0 && (
                   <Container header={<Header variant="h2">Tags</Header>}>
@@ -498,6 +798,18 @@ export default function DeviceDetail() {
                   }
                 />
               </Container>
+            ),
+          },
+          {
+            id: 'cameras',
+            label: 'Cameras',
+            content: (
+              <DeviceCamerasTab
+                deviceId={device.device_id}
+                usecaseId={usecaseId || ''}
+                focusStaticImage={focusStaticImage}
+                focusStaticVideo={focusStaticVideo}
+              />
             ),
           },
           {
@@ -796,6 +1108,16 @@ export default function DeviceDetail() {
           </Alert>
         </SpaceBetween>
       </Modal>
+
+      {/* Remove Modal */}
+      {showRemoveModal && usecaseId && (
+        <RemoveDevicesModal
+          deviceIds={[device.device_id]}
+          usecaseId={usecaseId}
+          onDismiss={() => setShowRemoveModal(false)}
+          onComplete={handleRemoveComplete}
+        />
+      )}
     </SpaceBetween>
   );
 }

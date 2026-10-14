@@ -1,0 +1,10 @@
+{
+  "pbtResults": {
+    "1. Write bug condition exploration test (BEFORE implementing the fix)": {
+      "status": "passed",
+      "failingExample": "All 6 exploration tests FAILED on the unfixed tree as required (failure confirms both defects). Hypothesis shrunk falsifying example (Part A property, verbatim): test_property_rc75_terminal_failed_is_never_command_execution_failed(response_code=75, noise_before='', noise_after='', stderr='', status_details='Failed', current_status='building') -> Classification(decided=True, status='failed', error_code='COMMAND_EXECUTION_FAILED', authority=5, reason='invocation Failed with non-zero response'). Part B: rc-75 ephemeral settlement hard-fails and plans terminal_effects.compute_cleanup='pending' (runner termination-watchdog eligible while lock-holder runs). Part C: find_command_by_comment returns None for the prior attempt's command (dda-build:851042a7-…:88dcd6b8 vs current 6c6b5483); overlapping-tick stale snapshot issues a second SendCommand and clobbers the first attempt claim; recovery resends without cancel/attach -> two concurrently live commands ['1b538196', 'cmd-conditional-resend'].",
+      "lastRunTimestamp": 1788966589600
+    }
+  },
+  "executionHistory": {}
+}

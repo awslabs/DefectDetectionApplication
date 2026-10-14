@@ -1,7 +1,13 @@
 #!/bin/bash
-# Build the JP6 and JP5 LocalServer components SEQUENTIALLY via GDK.
+# Build the per-JetPack LocalServer components SEQUENTIALLY via GDK.
 #
-# Sequential is REQUIRED (see .kiro/steering/builds.md): the two targets share
+# Each JetPack target N (5, 6 or 7) is built as the explicitly-tagged
+# component aws.edgeml.dda.LocalServer.arm64JP${N} (COMPONENT_PREFIX + N).
+# JetPack 4 is no longer supported. The bare aws.edgeml.dda.LocalServer.arm64
+# name is the generic arm64 CPU (non-Jetson) component; it is not built here
+# (use ./gdk-component-build-and-publish.sh aarch64 cpu).
+#
+# Sequential is REQUIRED (see .kiro/steering/builds.md): the targets share
 # greengrass-build/, custom-build/, and the docker image tags
 # (edgemlsdk / flask-app / react-webapp), so concurrent runs clobber each other
 # and corrupt model versioning. This wrapper builds one target fully before
@@ -12,6 +18,14 @@
 #   ./run_jp_builds.sh                # build JP6 then JP5 (default)
 #   TARGETS="6" ./run_jp_builds.sh    # build only JP6
 #   TARGETS="5 6" ./run_jp_builds.sh  # build JP5 then JP6
+#   TARGETS="7" ./run_jp_builds.sh    # build only JP7 (aws.edgeml.dda.LocalServer.arm64JP7)
+#
+# gdk-config.json holds ONE component at a time (the gdk config schema enforces
+# exactly one key under "component"), so the JP7 entry is written the same way
+# as the others — write_config swaps it in per target:
+#   aws.edgeml.dda.LocalServer.arm64JP7 with custom build command
+#   `bash build-custom.sh aws.edgeml.dda.LocalServer.arm64JP7 NEXT_PATCH`
+# (jetpack7-support Requirement 4.1).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -74,6 +88,14 @@ build_target () {
 
 OVERALL=0
 for jp in $TARGETS; do
+  case "$jp" in
+    5|6|7) ;;
+    *)
+      echo "### JP${jp}: unsupported target (supported: 5 6 7; JetPack 4 is no longer supported) ###"
+      OVERALL=1
+      continue
+      ;;
+  esac
   echo "### JP${jp} build starting ###"
   build_target "$jp" || OVERALL=1
 done

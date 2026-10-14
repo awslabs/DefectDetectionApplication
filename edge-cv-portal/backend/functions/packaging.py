@@ -11,8 +11,9 @@ Version: 2.0.0 - Simplified packaging without storage management utilities
 import json
 import os
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
+from decimal import Decimal
 import boto3
 from botocore.exceptions import ClientError
 import uuid
@@ -32,6 +33,29 @@ from shared_utils import (
     check_user_access, validate_required_fields,
     is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
 )
+
+# Shared model-name sanitization transform (same functions bundle):
+# single source of truth for the packaged/served name alignment
+# (vllm-model-name-mismatch Requirement 2.2).
+from model_naming import safe_model_name
+
+# Portal-trained Object Detection (YOLO / RF-DETR): record predicate + the
+# device manifest builder shared with training.py (portal-detection-training,
+# rfdetr-training-and-transfer-learning).
+from detection_training import (
+    RFDETR_TOP_K,
+    STAGE_TYPE_FOR_ARCH,
+    build_detection_device_manifest,
+    is_trained_detection_record,
+    normalize_detection_arch,
+)
+
+# Imported-detector conversions (detector-checkpoint-import): the record
+# predicate, the untrusted-artifact validator and the Finalizing transitions.
+import detector_conversion as dconv
+# Fleet-floor IR header fix for trained detection graphs (onnxruntime 1.16.3
+# on JP5 and the CPU / x86 images loads IR <= 9).
+from onnx_fleet_ir import FLEET_MAX_IR, normalize_fleet_ir_version
 
 # Configure logging
 logger = logging.getLogger()
@@ -318,6 +342,394 @@ def package_onnx_component(trained_model_s3: str, s3_client, usecase: Dict) -> s
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def _decimal_plain(value, default):
+    """Decimal/str/int -> float or int for manifest JSON; `default` on None."""
+    if value is None:
+        return default
+    if isinstance(value, Decimal):
+        return int(value) if value % 1 == 0 else float(value)
+    return value
+
+
+def _is_3d_int_shape(shape) -> bool:
+    """True for a trainer-recorded ONNX tensor shape like [1, 5, 33600]."""
+    return isinstance(shape, list) and len(shape) == 3 \
+        and all(isinstance(d, int) for d in shape)
+
+
+def package_trained_detection_component(trained_model_s3: str, training_job: Dict,
+                                        s3_client, usecase: Dict) -> str:
+    """Build the Greengrass model-component ZIP for a portal-trained Object
+    Detection (YOLO or RF-DETR) job — no Neo, one architecture-agnostic
+    artifact.
+
+    The training job (datasets/detection_training/train.py or
+    train_rfdetr.py) writes a FLAT artifact: model.onnx + the fine-tunable
+    checkpoint (best.pt / checkpoint_best_total.pth) + training_metadata.json
+    at the tar root, with no manifest of its own. The device manifest is
+    therefore synthesized here from the Detection_Record_Fields training.py
+    persisted on the record (`detection.{detection_arch, network_input_width,
+    class_names, num_classes, score_threshold, iou_threshold | top_k,
+    preserve_aspect}`), through the same builder Smart Import's manifest is
+    pinned to (detection_training.build_detection_device_manifest), and laid
+    out exactly like package_onnx_component's payload: manifest.json at the
+    ZIP root and model.onnx NESTED under the stage_type dir
+    (yolo_object_detection/ or rf_detr_object_detection/). Only model.onnx
+    ships; the checkpoint stays in the training artifact.
+
+    `detection_arch` comes from the record, falling back to
+    training_metadata.json, then 'yolo' (legacy records predate the field).
+    training_metadata.json's `imgsz` (YOLO) / `resolution` (RF-DETR) is the
+    size the ONNX graph was actually exported at, so it wins over the record
+    when both exist (portal-detection-training Req 5.5).
+    """
+    temp_dir = None
+    try:
+        parsed = urlparse(trained_model_s3)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip('/')
+
+        temp_dir = tempfile.mkdtemp(prefix="dda_det_pkg_")
+        local_tar = os.path.join(temp_dir, 'model.tar.gz')
+        logger.info(f"Downloading trained detection artifact from {trained_model_s3}")
+        s3_client.download_file(bucket, key, local_tar)
+
+        extract_dir = os.path.join(temp_dir, 'extracted')
+        os.makedirs(extract_dir, exist_ok=True)
+        with tarfile.open(local_tar, 'r:gz') as tar:
+            tar.extractall(extract_dir)
+        os.remove(local_tar)
+
+        onnx_src = None
+        meta_path = None
+        for root, _dirs, files in os.walk(extract_dir):
+            for f in files:
+                if f.endswith('.onnx') and onnx_src is None:
+                    onnx_src = os.path.join(root, f)
+                elif f == 'training_metadata.json' and meta_path is None:
+                    meta_path = os.path.join(root, f)
+        if not onnx_src:
+            raise FileNotFoundError(
+                "No .onnx model file found in trained detection artifact")
+        # The YOLO trainer's onnx 1.17 re-serialization stamps ir_version 10
+        # on an opset-17 graph, which onnxruntime 1.16.3 (JP5, CPU / x86
+        # images) refuses to load. Lower the header to what the graph needs
+        # (only the ir_version varint changes); a no-op for IR <= 9.
+        ir_fix = normalize_fleet_ir_version(onnx_src)
+        if ir_fix.changed:
+            logger.info(f"Trained detection model.onnx: {ir_fix.reason}")
+        elif ir_fix.before is not None and ir_fix.before > FLEET_MAX_IR:
+            logger.warning(f"Trained detection model.onnx IR {ir_fix.before} left as is "
+                           f"({ir_fix.reason}); it will not load on JP5 / CPU images")
+
+        meta = {}
+        if meta_path:
+            try:
+                with open(meta_path, 'r') as fh:
+                    meta = json.load(fh) or {}
+            except (OSError, ValueError) as e:
+                logger.warning(f"training_metadata.json unreadable, using record fields only: {e}")
+
+        det = training_job.get('detection') or {}
+        # Arch: record -> training_metadata.json -> 'yolo' (legacy records).
+        detection_arch = normalize_detection_arch(
+            det.get('detection_arch') or meta.get('detection_arch') or 'yolo')
+        is_rf_detr = detection_arch == 'rf_detr'
+
+        record_input = _decimal_plain(det.get('network_input_width'), None)
+        # train_rfdetr.py records the export size as `resolution`; train.py as
+        # `imgsz`. Either wins over the record (it is what the graph was
+        # exported at); fall back to the other key for robustness.
+        artifact_input = meta.get('resolution') if is_rf_detr else meta.get('imgsz')
+        if artifact_input is None:
+            artifact_input = meta.get('imgsz') if is_rf_detr else meta.get('resolution')
+        if artifact_input is not None and record_input is not None \
+                and int(artifact_input) != int(record_input):
+            logger.warning(
+                f"Detection network input mismatch: artifact exported at {artifact_input}, "
+                f"record says {record_input}; using the artifact's size")
+        network_input = int(artifact_input if artifact_input is not None else (record_input or 1280))
+
+        class_names = [str(c) for c in (det.get('class_names') or [])]
+        num_classes = int(_decimal_plain(det.get('num_classes'), None) or len(class_names) or 1)
+        hints = meta.get('device_manifest_hints') or {}
+        score_threshold = float(_decimal_plain(
+            det.get('score_threshold'), hints.get('score_threshold', 0.25)))
+        # preserve_aspect: record -> hints -> arch default (YOLO letterboxes,
+        # RF-DETR square-resizes — see build_detection_device_manifest).
+        preserve_aspect = det.get('preserve_aspect', hints.get('preserve_aspect', not is_rf_detr))
+
+        if is_rf_detr:
+            # NMS-free decoding: `top_k` query slots, no iou_threshold. The
+            # trainer's recorded Q is the graph's real query count and wins.
+            top_k = int(_decimal_plain(
+                meta.get('top_k', det.get('top_k')), hints.get('top_k', RFDETR_TOP_K)))
+            manifest = build_detection_device_manifest(
+                image_width=network_input,
+                image_height=network_input,
+                num_classes=num_classes,
+                class_names=class_names or None,
+                score_threshold=score_threshold,
+                preserve_aspect=bool(preserve_aspect),
+                detection_arch=detection_arch,
+                top_k=top_k,
+            )
+        else:
+            iou_threshold = float(_decimal_plain(
+                det.get('iou_threshold'), hints.get('iou_threshold', 0.45)))
+            manifest = build_detection_device_manifest(
+                image_width=network_input,
+                image_height=network_input,
+                num_classes=num_classes,
+                class_names=class_names or None,
+                score_threshold=score_threshold,
+                iou_threshold=iou_threshold,
+                preserve_aspect=bool(preserve_aspect),
+            )
+        # The exported graph's real output shape replaces the nominal
+        # [1, C+4, 8400] the builder emits (parity with generate_dda_package)
+        # when the trainer recorded it. The device never reads it (the
+        # RF-DETR postprocessor identifies boxes/logits by runtime tensor
+        # shape and ModelConfig ignores unknown stage keys), so it is
+        # informational:
+        #  - yolo:    `onnx_output_shape` [1, C+4, N] (e.g. [1, 5, 33600] at 1280).
+        #  - rf_detr: `onnx_output_shapes` [[1, Q, 4], [1, Q, C]] — the manifest
+        #    schema carries ONE `output_shape`, so it gets the logits tensor
+        #    [1, Q, C] (encodes both Q and C) and both tensors are kept under
+        #    `output_shapes` for anyone inspecting the package.
+        stage0 = manifest['model_graph']['stages'][0]
+        if is_rf_detr:
+            real_shapes = meta.get('onnx_output_shapes')
+            if isinstance(real_shapes, list) and len(real_shapes) == 2 \
+                    and all(_is_3d_int_shape(s) for s in real_shapes):
+                logits_shape = next(
+                    (s for s in real_shapes if s[-1] == num_classes),
+                    next((s for s in real_shapes if s[-1] != 4), real_shapes[-1]))
+                stage0['output_shape'] = list(logits_shape)
+                stage0['output_shapes'] = [list(s) for s in real_shapes]
+        else:
+            real_shape = meta.get('onnx_output_shape')
+            if _is_3d_int_shape(real_shape):
+                stage0['output_shape'] = real_shape
+
+        payload_dir = os.path.join(temp_dir, 'payload')
+        stage_dir = os.path.join(payload_dir, STAGE_TYPE_FOR_ARCH[detection_arch])
+        os.makedirs(stage_dir, exist_ok=True)
+        with open(os.path.join(payload_dir, 'manifest.json'), 'w') as f:
+            json.dump(manifest, f, indent=2)
+        shutil.copy(onnx_src, os.path.join(stage_dir, manifest['runtime_artifact']))
+
+        component_uuid = str(uuid.uuid4()).split('-')[-1]
+        zip_filename = f"{component_uuid}_greengrass_model_component.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _dirs, files in os.walk(payload_dir):
+                for file in files:
+                    fp = os.path.join(root, file)
+                    zipf.write(fp, os.path.relpath(fp, payload_dir))
+
+        s3_key = f"model_artifacts/model-{component_uuid}/{zip_filename}"
+        s3_uri = f"s3://{usecase['s3_bucket']}/{s3_key}"
+        logger.info(f"Uploading trained detection component package to {s3_uri} "
+                    f"(arch {detection_arch}, input {network_input}, classes {class_names}, "
+                    f"preserve_aspect={bool(preserve_aspect)})")
+        s3_client.upload_file(zip_path, usecase['s3_bucket'], s3_key)
+        return s3_uri
+    except Exception as e:
+        logger.error(f"Error packaging trained detection component: {str(e)}")
+        raise
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ── vLLM bypass — pure pieces ───────────────────────────────────────────────
+# JetPack 5 vLLM support is feature-flagged (design: JP5_VLLM_ENABLED, default
+# off). This Lambda is bundled with the shared layer only (compute-stack.ts
+# gives PackagingHandler `layers: [sharedLayer]` — no workflow_core layer), so
+# the flag is read from the environment here; the catalog's module-level flag
+# in workflow_core.catalog.models is the source of truth mirrored by this
+# env var at deploy time.
+JP5_VLLM_ENABLED = os.environ.get('JP5_VLLM_ENABLED', 'false').lower() == 'true'
+
+
+class VllmPackagingError(Exception):
+    """Triton_vLLM_Repository generation / engine-configuration serialization
+    failure. Raised before any artifact upload so the record's published
+    state is never touched (Requirement 2.8)."""
+
+
+def is_vllm_record(training_job: Dict) -> bool:
+    """True if this model record is a vLLM_Model_Record (LLM served through
+    the Triton vLLM backend) rather than a vision model."""
+    return training_job.get('source') == 'vllm' or \
+        str(training_job.get('model_type', '')).lower() == 'vllm'
+
+
+def _decimal_to_native(obj):
+    """Convert Decimal objects from DynamoDB to native Python types"""
+    if isinstance(obj, Decimal):
+        return float(obj) if obj % 1 else int(obj)
+    elif isinstance(obj, dict):
+        return {k: _decimal_to_native(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_decimal_to_native(i) for i in obj]
+    return obj
+
+
+def _safe_model_name(model_name: str) -> str:
+    """Sanitized model name — same transform _trigger_component_creation uses
+    to derive `model-{safe_model_name}` component names, reused here so the
+    repository directory matches the eventual `model-vllm-{safe_model_name}`
+    component naming. Delegates to the shared single source of truth
+    (model_naming.safe_model_name, vllm-model-name-mismatch 2.2)."""
+    return safe_model_name(model_name)
+
+
+# Repository-relative sentinel written as the vLLM "model" reference for
+# S3-sourced records; vllm_model_prep.py rewrites it to the absolute
+# device-local weights path after Greengrass unpacks the artifact (2.2).
+VLLM_S3_MODEL_SENTINEL = './weights'
+
+# config.pbtxt for the Triton vLLM backend: backend declaration plus the
+# decoupled model transaction policy stanza the vllm_backend samples use.
+VLLM_CONFIG_PBTXT = (
+    'backend: "vllm"\n'
+    '\n'
+    'model_transaction_policy {\n'
+    '  decoupled: True\n'
+    '}\n'
+)
+
+
+def generate_vllm_repository(record: Dict) -> Dict[str, str]:
+    """Pure: vLLM_Model_Record -> {relative_path: file_content}.
+
+    Emits exactly the two files of a Triton_vLLM_Repository:
+      {model_name}/1/model.json   — the record's complete resolved
+                                    vLLM_Engine_Configuration, with "model"
+                                    set to the HF ID (HF source) or the
+                                    repository-relative './weights' sentinel
+                                    (S3 source)  (2.1-2.3)
+      {model_name}/config.pbtxt   — 'backend: "vllm"' plus the decoupled
+                                    model transaction policy stanza
+
+    Raises VllmPackagingError on any serialization failure (2.8).
+    """
+    try:
+        model_name = _safe_model_name(record.get('model_name') or '')
+        if not model_name:
+            raise ValueError('vLLM_Model_Record has no usable model_name')
+
+        engine_configuration = record.get('engine_configuration')
+        if not isinstance(engine_configuration, dict) or not engine_configuration:
+            raise ValueError(
+                'vLLM_Model_Record has no resolved engine_configuration')
+
+        model_source = record.get('model_source') or {}
+        hf_model_id = model_source.get('huggingface_model_id')
+        s3_artifact = model_source.get('s3_model_artifact')
+        if hf_model_id:
+            model_reference = hf_model_id
+        elif s3_artifact:
+            model_reference = VLLM_S3_MODEL_SENTINEL
+        else:
+            raise ValueError(
+                'vLLM_Model_Record has neither a huggingface_model_id nor '
+                'an s3_model_artifact source reference')
+
+        # DynamoDB returns numbers as Decimal — serialize them as JSON numbers.
+        model_json = dict(_decimal_to_native(engine_configuration))
+        model_json['model'] = model_reference
+
+        return {
+            f'{model_name}/1/model.json': json.dumps(model_json, indent=2),
+            f'{model_name}/config.pbtxt': VLLM_CONFIG_PBTXT,
+        }
+    except VllmPackagingError:
+        raise
+    except Exception as e:
+        raise VllmPackagingError(
+            f'Triton vLLM repository generation failed: {e}') from e
+
+
+def vllm_supported_architectures() -> List[str]:
+    """Supported Target_Architecture set for vLLM_Model_Components:
+    always arm64_jp6 and arm64_jp7, arm64_jp5 only when JP5 support is
+    flagged on, never a CPU-only architecture (2.5)."""
+    archs = ['arm64_jp6', 'arm64_jp7']
+    if JP5_VLLM_ENABLED:
+        archs.append('arm64_jp5')
+    return archs
+
+
+# Target_Architecture -> packaging target name (the `packaged_components`
+# `target` key publish and deployment consume). vLLM only ever packages
+# the Jetson targets vllm_supported_architectures() allows — never a CPU-only arch.
+VLLM_ARCH_TO_TARGET = {
+    'arm64_jp6': 'jetson-xavier-jp6',
+    'arm64_jp7': 'jetson-xavier-jp7',   # id reserved by workflow_packaging.py
+    'arm64_jp5': 'jetson-xavier-jp5',
+}
+
+
+# Target_Architecture -> compiled-ONNX packaging target id. One compiled
+# ONNX artifact packages one entry per supported JetPack (per-JetPack
+# components: Greengrass ComponentDependencies is top-level, so each
+# JetPack needs its own component with its own LocalServer HARD dep).
+# KEEP IN SYNC with greengrass_publish.py TARGET_TO_LOCAL_SERVER /
+# TARGET_TO_PLATFORM and workflow_packaging.py's arm64_jp7 acceptance.
+ONNX_ARCH_TO_TARGET = {
+    'arm64_jp5': 'onnx-jetson-xavier-jp5',
+    'arm64_jp6': 'onnx-jetson-xavier-jp6',
+    'arm64_jp7': 'onnx-jetson-xavier-jp7',
+}
+ONNX_COMPILED_TARGETS = list(ONNX_ARCH_TO_TARGET.values())
+
+
+def package_vllm_component(record: Dict, s3_client, usecase: Dict) -> str:
+    """Assemble and upload the vLLM_Model_Component ZIP for one record.
+
+    Strict ordering (2.6, 2.8): the Triton_vLLM_Repository is generated
+    first — a VllmPackagingError raised here propagates before anything
+    is uploaded — then the tree is written to a temp dir, zipped, and
+    uploaded to `model_artifacts/model-{uuid}/…zip` in the Use_Case
+    bucket (same key scheme as the other packagers).
+
+    Returns the component package S3 URI.
+    """
+    # Generation before any upload (2.8).
+    repository_files = generate_vllm_repository(record)
+
+    temp_dir = None
+    try:
+        temp_dir = tempfile.mkdtemp(prefix="dda_vllm_pkg_")
+        payload_dir = os.path.join(temp_dir, 'payload')
+        for relative_path, content in repository_files.items():
+            file_path = os.path.join(payload_dir, relative_path)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            with open(file_path, 'w') as f:
+                f.write(content)
+
+        component_uuid = str(uuid.uuid4()).split('-')[-1]
+        zip_filename = f"{component_uuid}_greengrass_model_component.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _dirs, files in os.walk(payload_dir):
+                for file in files:
+                    fp = os.path.join(root, file)
+                    zipf.write(fp, os.path.relpath(fp, payload_dir))
+
+        s3_key = f"model_artifacts/model-{component_uuid}/{zip_filename}"
+        s3_uri = f"s3://{usecase['s3_bucket']}/{s3_key}"
+        logger.info(f"Uploading vLLM component package to {s3_uri}")
+        s3_client.upload_file(zip_path, usecase['s3_bucket'], s3_key)
+        return s3_uri
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def package_component(training_id: str, target: str, compiled_model_s3: str, 
                      dda_manifest: Dict, s3_client, usecase: Dict) -> str:
     """
@@ -326,7 +738,7 @@ def package_component(training_id: str, target: str, compiled_model_s3: str,
     
     Args:
         training_id: Training job ID
-        target: Compilation target (e.g., 'jetson-xavier')
+        target: Compilation target (e.g., 'jetson-xavier-jp5')
         compiled_model_s3: S3 URI of the compiled model
         dda_manifest: DDA-compatible manifest dict
         s3_client: boto3 S3 client (already configured with appropriate credentials)
@@ -412,6 +824,111 @@ def package_component(training_id: str, target: str, compiled_model_s3: str,
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def package_compiled_onnx_component(compiled_model_s3: str, dda_manifest: Dict,
+                                    s3_client, usecase: Dict) -> str:
+    """Build the Greengrass model-component ZIP for a compiled (torch.onnx.export)
+    ONNX artifact — ONE architecture-agnostic payload that packaging fans out
+    into per-JetPack `packaged_components` entries (ONNX_COMPILED_TARGETS).
+
+    Mirrors package_onnx_component's proven on-device payload shape:
+    `manifest.json` at the ZIP root with top-level `runtime: 'onnx'` and
+    `runtime_artifact`, and the .onnx artifact NESTED under the stage_type dir
+    so the OnnxRunner resolves <version_dir>/<stage_type>/<runtime_artifact>.
+    The manifest is derived from the Phase 1 create_dda_manifest output:
+    `model_graph` and `dataset` are kept, `compilable_models` is DROPPED (it
+    names the .pt input that is not in this ZIP; the device reader never
+    consults it).
+
+    Args:
+        compiled_model_s3: S3 URI of the export training job's model.tar.gz
+            (the export script writes model.onnx into /opt/ml/model, so the
+            archive holds it at the root — but scan recursively for tolerance)
+        dda_manifest: the Phase 1 create_dda_manifest output
+        s3_client: boto3 S3 client (already configured with credentials)
+        usecase: Use case details dict
+
+    Returns:
+        S3 URI of the uploaded component package ZIP
+    """
+    temp_dir = None
+    try:
+        parsed = urlparse(compiled_model_s3)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip('/')
+
+        temp_dir = tempfile.mkdtemp(prefix="dda_compiled_onnx_pkg_")
+        local_tar = os.path.join(temp_dir, 'model.tar.gz')
+        logger.info(f"Downloading compiled ONNX export from {compiled_model_s3}")
+        s3_client.download_file(bucket, key, local_tar)
+
+        extract_dir = os.path.join(temp_dir, 'extracted')
+        os.makedirs(extract_dir, exist_ok=True)
+        with tarfile.open(local_tar, 'r:gz') as tar:
+            tar.extractall(extract_dir)
+        os.remove(local_tar)
+
+        # Locate the .onnx artifact by recursive scan (same tolerance as the
+        # BYO-import path).
+        onnx_src = None
+        for root, _dirs, files in os.walk(extract_dir):
+            for f in files:
+                if f.endswith('.onnx'):
+                    onnx_src = os.path.join(root, f)
+                    break
+            if onnx_src:
+                break
+        if not onnx_src:
+            raise FileNotFoundError(
+                "No .onnx model file found in compiled ONNX export archive")
+        onnx_file = os.path.basename(onnx_src)
+
+        # Compiled_ONNX_Manifest: model_graph + dataset from the Phase 1
+        # manifest, plus the runtime keys the on-device __load_runtime_config
+        # needs to select the OnnxRunner (absent runtime defaults to DLR —
+        # wrong for ONNX artifacts, and JP7 ships no DLR at all).
+        manifest = {
+            'model_graph': dda_manifest['model_graph'],
+            'dataset': dda_manifest.get('dataset'),
+            'runtime': 'onnx',
+            'runtime_artifact': onnx_file,
+        }
+        if manifest['dataset'] is None:
+            del manifest['dataset']
+
+        # Assemble the payload: manifest.json at the root and the ONNX
+        # artifact nested under the stage_type dir.
+        payload_dir = os.path.join(temp_dir, 'payload')
+        os.makedirs(payload_dir, exist_ok=True)
+        with open(os.path.join(payload_dir, 'manifest.json'), 'w') as f:
+            json.dump(manifest, f, indent=2)
+
+        stage_type = dda_manifest['model_graph']['stages'][0]['type']
+        stage_dir = os.path.join(payload_dir, stage_type)
+        os.makedirs(stage_dir, exist_ok=True)
+        shutil.copy(onnx_src, os.path.join(stage_dir, onnx_file))
+
+        component_uuid = str(uuid.uuid4()).split('-')[-1]
+        zip_filename = f"{component_uuid}_greengrass_model_component.zip"
+        zip_path = os.path.join(temp_dir, zip_filename)
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _dirs, files in os.walk(payload_dir):
+                for file in files:
+                    fp = os.path.join(root, file)
+                    zipf.write(fp, os.path.relpath(fp, payload_dir))
+
+        s3_key = f"model_artifacts/model-{component_uuid}/{zip_filename}"
+        s3_uri = f"s3://{usecase['s3_bucket']}/{s3_key}"
+        logger.info(f"Uploading compiled ONNX component package to {s3_uri}")
+        s3_client.upload_file(zip_path, usecase['s3_bucket'], s3_key)
+        return s3_uri
+    except Exception as e:
+        logger.error(f"Error packaging compiled ONNX component: {str(e)}")
+        raise
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def _trigger_component_creation(training_id: str, training_job: Dict) -> None:
     """Asynchronously invoke greengrass_publish to auto-create the component
     after successful packaging. Best-effort — never fails the caller."""
@@ -451,6 +968,157 @@ def _trigger_component_creation(training_id: str, training_job: Dict) -> None:
         logger.error(f"Error triggering automatic component creation: {str(e)}")
 
 
+DETECTOR_CONVERSION_TARGETS = ['jetson-xavier-jp5', 'jetson-xavier-jp6', 'jetson-xavier-jp7',
+                               'x86_64-cpu']
+
+
+def _fail_conversion(table, training_id: str, training_job: Dict, user_id: str,
+                     error: 'dconv.ConversionValidationError', finalizing: bool) -> Dict:
+    """Finalizing -> Failed (conditional) for an artifact that failed
+    validation; nothing is packaged or published (Req 8.6)."""
+    if finalizing:
+        dconv.apply_conversion_transition(table, training_id, dconv.plan_finalize_transition(
+            success=False, now_ms=int(datetime.utcnow().timestamp() * 1000),
+            failure_reason=str(error)))
+    log_audit_event(
+        user_id=user_id, action='package_components', resource_type='training_job',
+        resource_id=training_id, result='failure',
+        details={'conversion': True, 'rule': error.rule, 'error': str(error)[:500]},
+    )
+    return create_response(422, {'error': str(error), 'rule': error.rule})
+
+
+def package_detector_conversion(training_id: str, training_job: Dict, body: Dict, user_id: str,
+                                requested_targets: Optional[List[str]]) -> Dict:
+    """Package a Conversion_Record (detector-checkpoint-import Requirements
+    7.9, 8 and 9).
+
+    InProgress -> 400 (still converting); Failed -> 400 with its reason.
+    Finalizing (the async finalize, or the Package action retrying a lost
+    invoke) and Completed (a re-package) both: HeadObject cap -> download ->
+    validate_conversion_artifact (the output is untrusted) ->
+    package_trained_detection_component, unchanged -> a conditional
+    Finalizing -> Completed with the validated ONNX facts. Component creation
+    follows the finalize that won, or an auto-triggered re-package.
+    """
+    usecase_id = training_job['usecase_id']
+    conv_status = dconv.conversion_status(training_job)
+    if conv_status == dconv.CONVERSION_IN_PROGRESS:
+        return create_response(400, {'error': 'The checkpoint conversion is still running'})
+    if conv_status == dconv.CONVERSION_FAILED:
+        return create_response(400, {
+            'error': training_job.get('failure_reason') or 'The checkpoint conversion failed'})
+    if conv_status not in (dconv.CONVERSION_FINALIZING, dconv.CONVERSION_COMPLETED):
+        return create_response(400, {'error': f"Unknown conversion status {conv_status!r}"})
+    if conv_status == dconv.CONVERSION_COMPLETED and body.get('finalize_conversion'):
+        # A repeated finalize (e.g. an async-invoke retry) never re-packages
+        # or re-publishes; an explicit Package action still re-packages.
+        return create_response(200, {
+            'training_id': training_id,
+            'packaged_components': training_job.get('packaged_components') or [],
+            'message': 'Conversion already finalized',
+            'component_creation_triggered': False,
+        })
+    finalizing = conv_status == dconv.CONVERSION_FINALIZING
+    table = dynamodb.Table(TRAINING_JOBS_TABLE)
+
+    artifact_s3 = training_job.get('artifact_s3')
+    if not artifact_s3:
+        return _fail_conversion(table, training_id, training_job, user_id,
+                                dconv.ConversionValidationError('artifact', 'the record has no artifact_s3'),
+                                finalizing)
+    usecase = get_usecase(usecase_id)
+    s3_usecase = get_usecase_client(
+        's3', usecase,
+        session_name=f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64])
+    parsed = urlparse(artifact_s3)
+    bucket, key = parsed.netloc, parsed.path.lstrip('/')
+
+    # Req 8.1: size before bytes.
+    try:
+        head = s3_usecase.head_object(Bucket=bucket, Key=key)
+    except ClientError as e:
+        if str(e.response.get('Error', {}).get('Code')) in ('404', 'NoSuchKey', 'NotFound'):
+            return _fail_conversion(table, training_id, training_job, user_id,
+                                    dconv.ConversionValidationError('artifact', f'{artifact_s3} does not exist'),
+                                    finalizing)
+        raise
+    size = int(head.get('ContentLength') or 0)
+    if size > dconv.ARTIFACT_SIZE_CAP:
+        return _fail_conversion(table, training_id, training_job, user_id,
+                                dconv.ConversionValidationError(
+                                    'size', f'artifact is {size} bytes; the limit is {dconv.ARTIFACT_SIZE_CAP}'),
+                                finalizing)
+
+    # Req 8.2-8.5: the artifact is attacker-controlled until validated.
+    temp_dir = tempfile.mkdtemp(prefix="dda_conv_validate_")
+    try:
+        local_tar = os.path.join(temp_dir, 'model.tar.gz')
+        s3_usecase.download_file(bucket, key, local_tar)
+        work = os.path.join(temp_dir, 'members')
+        os.makedirs(work)
+        try:
+            validated = dconv.validate_conversion_artifact(local_tar, training_job, work)
+        except dconv.ConversionValidationError as e:
+            logger.error(f"Conversion artifact for {training_id} rejected: {e}")
+            return _fail_conversion(table, training_id, training_job, user_id, e, finalizing)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Req 9.2: exactly the trained-detection packager. Its extractall is safe
+    # on this tarball: it has just been proven to hold exactly two regular
+    # files (design section 7).
+    targets = requested_targets or list(DETECTOR_CONVERSION_TARGETS)
+    try:
+        component_s3_uri = package_trained_detection_component(
+            artifact_s3, training_job, s3_usecase, usecase)
+    except Exception as e:
+        # The record stays Finalizing / Completed: the Package action retries.
+        logger.error(f"Conversion component packaging failed: {str(e)}")
+        return create_response(500, {'error': f"Failed to package detection component: {str(e)}"})
+    packaged_components = [
+        {'target': t, 'component_package_s3': component_s3_uri, 'status': 'packaged'}
+        for t in targets
+    ]
+
+    now_ms = int(datetime.utcnow().timestamp() * 1000)
+    if finalizing:
+        won = dconv.apply_conversion_transition(table, training_id, dconv.plan_finalize_transition(
+            success=True, now_ms=now_ms, packaged_components=packaged_components,
+            onnx_sha256=validated.onnx_sha256, onnx_summary=validated.summary))
+        if not won:
+            # Another finalize completed (or failed) the record first; its
+            # component is the published one.
+            logger.info(f"Conversion {training_id} was finalized concurrently; not publishing again")
+            return create_response(409, {
+                'error': 'The conversion was finalized by another request',
+                'training_id': training_id})
+    else:
+        table.update_item(
+            Key={'training_id': training_id},
+            UpdateExpression='SET packaged_components = :components, updated_at = :updated',
+            ExpressionAttributeValues={':components': packaged_components, ':updated': now_ms},
+        )
+    log_audit_event(
+        user_id=user_id, action='package_components', resource_type='training_job',
+        resource_id=training_id, result='success',
+        details={'targets': targets, 'packaged_count': len(targets), 'runtime': 'onnx',
+                 'model_type': 'object_detection', 'conversion': True,
+                 'onnx_sha256': validated.onnx_sha256,
+                 'source_sha256': (training_job.get('conversion') or {}).get('source_sha256')},
+    )
+    trigger = finalizing or bool(body.get('auto_triggered'))
+    if trigger:
+        _trigger_component_creation(training_id, training_job)
+    return create_response(200, {
+        'training_id': training_id,
+        'packaged_components': packaged_components,
+        'message': f'Packaged converted detection (ONNX) component for {len(targets)} target(s)',
+        'component_creation_triggered': trigger,
+        'conversion': {'status': dconv.CONVERSION_COMPLETED, 'onnx_sha256': validated.onnx_sha256},
+    })
+
+
 def package_components(event: Dict, context: Any) -> Dict:
     """
     Package compiled models as Greengrass components
@@ -458,7 +1126,7 @@ def package_components(event: Dict, context: Any) -> Dict:
     
     Request body:
     {
-        "targets": ["jetson-xavier", "x86_64-cpu"]  // Optional, defaults to all compiled targets
+        "targets": ["jetson-xavier-jp5", "x86_64-cpu"]  // Optional, defaults to all compiled targets
     }
     """
     try:
@@ -484,6 +1152,151 @@ def package_components(event: Dict, context: Any) -> Dict:
         if user_id != 'system' and not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
 
+        # ── vLLM bypass ────────────────────────────────────────────────────
+        # vLLM_Model_Records need no Neo compilation and no trained-model
+        # artifact: the component payload is the generated Triton vLLM
+        # repository itself. Vision records (trained, imported PyTorch,
+        # imported ONNX) never enter this branch (8.2). Strict ordering —
+        # generation → upload → DynamoDB update — so a failure at any step
+        # reports the failing step and leaves the record's packaged /
+        # published state unchanged, keeping publish retryable (2.6, 2.8).
+        if is_vllm_record(training_job):
+            usecase = get_usecase(usecase_id)
+            s3_usecase = get_usecase_client(
+                's3', usecase,
+                session_name=f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64])
+
+            supported_architectures = vllm_supported_architectures()
+            vllm_targets = [VLLM_ARCH_TO_TARGET[a] for a in supported_architectures]
+            logger.info(f"vLLM record: packaging one artifact for targets {vllm_targets}")
+            try:
+                component_s3_uri = package_vllm_component(training_job, s3_usecase, usecase)
+            except VllmPackagingError as e:
+                # Repository generation / engine-configuration serialization
+                # failed: nothing was uploaded, the record is untouched (2.8).
+                logger.error(f"vLLM repository generation failed: {str(e)}")
+                return create_response(500, {
+                    'error': str(e),
+                    'failed_step': 'repository_generation',
+                })
+            except Exception as e:
+                # Artifact assembly/upload failed after generation succeeded:
+                # no packaged_components written, retryable (2.6).
+                logger.error(f"vLLM component artifact upload failed: {str(e)}")
+                return create_response(500, {
+                    'error': f"Failed to upload vLLM component artifact: {str(e)}",
+                    'failed_step': 'artifact_upload',
+                })
+
+            packaged_components = [
+                {
+                    'target': target,
+                    'component_package_s3': component_s3_uri,
+                    'status': 'packaged',
+                    'supported_architectures': supported_architectures,
+                }
+                for target in vllm_targets
+            ]
+            try:
+                table = dynamodb.Table(TRAINING_JOBS_TABLE)
+                timestamp = int(datetime.utcnow().timestamp() * 1000)
+                table.update_item(
+                    Key={'training_id': training_id},
+                    UpdateExpression='SET packaged_components = :components, updated_at = :updated',
+                    ExpressionAttributeValues={
+                        ':components': packaged_components, ':updated': timestamp},
+                )
+            except Exception as e:
+                logger.error(f"vLLM packaged_components record update failed: {str(e)}")
+                return create_response(500, {
+                    'error': f"Failed to record packaged vLLM components: {str(e)}",
+                    'failed_step': 'record_update',
+                })
+            log_audit_event(
+                user_id=user_id, action='package_components', resource_type='training_job',
+                resource_id=training_id, result='success',
+                details={'targets': vllm_targets, 'packaged_count': len(vllm_targets),
+                         'runtime': 'vllm'},
+            )
+            auto_triggered = body.get('auto_triggered', False)
+            if auto_triggered:
+                _trigger_component_creation(training_id, training_job)
+            return create_response(200, {
+                'training_id': training_id,
+                'packaged_components': packaged_components,
+                'message': f'Packaged vLLM component for {len(vllm_targets)} target(s)',
+                'component_creation_triggered': auto_triggered,
+            })
+
+        # ── Imported detector conversion (detector-checkpoint-import) ─────
+        # A Conversion_Record's model.onnx came out of an isolated job that
+        # ran attacker-controllable code: it is validated before it is
+        # packaged, by the trained-detection packager below. Routed before
+        # both the trained-detection and imported-ONNX blocks, which a
+        # Conversion_Record never matches (Req 9.1).
+        if dconv.is_detector_conversion_record(training_job):
+            return package_detector_conversion(training_id, training_job, body, user_id,
+                                               requested_targets)
+
+        # ── Trained detection (ONNX) bypass ────────────────────────────────
+        # Portal-trained Object Detection jobs already exported model.onnx in
+        # the training job, so like imported ONNX they need no Neo compilation
+        # and one architecture-agnostic package serves every target. Kept as
+        # its own block (not merged into the import branch below) so the
+        # imported-ONNX code stays textually identical
+        # (portal-detection-training Req 5.2, 5.8).
+        if is_trained_detection_record(training_job):
+            if training_job.get('status') != 'Completed':
+                return create_response(400, {
+                    'error': f"Training job must be completed. Current status: {training_job.get('status')}"
+                })
+            trained_model_s3 = training_job.get('artifact_s3')
+            if not trained_model_s3:
+                return create_response(400, {'error': 'Training job has no model artifact'})
+            usecase = get_usecase(usecase_id)
+            s3_usecase = get_usecase_client(
+                's3', usecase,
+                session_name=f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64])
+
+            detection_targets = requested_targets or [
+                'jetson-xavier-jp5', 'jetson-xavier-jp6', 'jetson-xavier-jp7',
+                'x86_64-cpu']
+            logger.info(f"Trained detection: packaging one ONNX artifact for targets {detection_targets}")
+            try:
+                component_s3_uri = package_trained_detection_component(
+                    trained_model_s3, training_job, s3_usecase, usecase)
+            except Exception as e:
+                logger.error(f"Trained detection component packaging failed: {str(e)}")
+                return create_response(500, {
+                    'error': f"Failed to package detection component: {str(e)}"})
+
+            packaged_components = [
+                {'target': t, 'component_package_s3': component_s3_uri, 'status': 'packaged'}
+                for t in detection_targets
+            ]
+            table = dynamodb.Table(TRAINING_JOBS_TABLE)
+            timestamp = int(datetime.utcnow().timestamp() * 1000)
+            table.update_item(
+                Key={'training_id': training_id},
+                UpdateExpression='SET packaged_components = :components, updated_at = :updated',
+                ExpressionAttributeValues={':components': packaged_components, ':updated': timestamp},
+            )
+            log_audit_event(
+                user_id=user_id, action='package_components', resource_type='training_job',
+                resource_id=training_id, result='success',
+                details={'targets': detection_targets, 'packaged_count': len(detection_targets),
+                         'runtime': 'onnx', 'model_type': 'object_detection'},
+            )
+            auto_triggered = body.get('auto_triggered', False)
+            if auto_triggered:
+                _trigger_component_creation(training_id, training_job)
+            return create_response(200, {
+                'training_id': training_id,
+                'packaged_components': packaged_components,
+                'message': f'Packaged detection (ONNX) component for {len(detection_targets)} target(s)',
+                'component_creation_triggered': auto_triggered,
+            })
+
         # ── ONNX bypass ────────────────────────────────────────────────────
         # Imported ONNX models need no Neo compilation and no per-target
         # compiled artifact: one architecture-agnostic package deploys to every
@@ -499,7 +1312,9 @@ def package_components(event: Dict, context: Any) -> Dict:
                 's3', usecase,
                 session_name=f"pkg-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64])
 
-            onnx_targets = requested_targets or ['jetson-xavier-jp5', 'jetson-xavier-jp6', 'x86_64-cpu']
+            onnx_targets = requested_targets or [
+                'jetson-xavier-jp5', 'jetson-xavier-jp6', 'jetson-xavier-jp7',
+                'x86_64-cpu']
             logger.info(f"ONNX import: packaging one artifact for targets {onnx_targets}")
             try:
                 component_s3_uri = package_onnx_component(trained_model_s3, s3_usecase, usecase)
@@ -543,13 +1358,24 @@ def package_components(event: Dict, context: Any) -> Dict:
         if not completed_jobs:
             return create_response(400, {'error': 'No completed compilation jobs found'})
         
-        # Filter by requested targets if specified
+        # Filter by requested targets if specified. The compiled-ONNX export
+        # entry keeps its 'onnx' compile-target id here (the id the UI
+        # requests); the per-JetPack fan-out below expands it.
         if requested_targets:
             completed_jobs = [j for j in completed_jobs if j['target'] in requested_targets]
             if not completed_jobs:
                 return create_response(400, {
                     'error': f"No completed compilation jobs for requested targets: {requested_targets}"
                 })
+
+        # Partition the compiled-ONNX export entry (torch.onnx.export) from
+        # the Neo-compiled jobs: the ONNX artifact is architecture-agnostic
+        # and fans out into per-JetPack entries (ONNX_COMPILED_TARGETS)
+        # instead of the generic per-device Neo Phase 2 packaging.
+        onnx_export_jobs = [j for j in completed_jobs
+                            if j.get('target') == 'onnx'
+                            or j.get('export_format') == 'onnx']
+        neo_jobs = [j for j in completed_jobs if j not in onnx_export_jobs]
         
         # Get use case details
         usecase = get_usecase(usecase_id)
@@ -576,7 +1402,7 @@ def package_components(event: Dict, context: Any) -> Dict:
         # Phase 2: Package each compiled model
         packaged_components = []
         
-        for i, job in enumerate(completed_jobs):
+        for i, job in enumerate(neo_jobs):
             target = job['target']
             compiled_model_s3 = job.get('compiled_model_s3')
             
@@ -584,7 +1410,7 @@ def package_components(event: Dict, context: Any) -> Dict:
                 logger.warning(f"No compiled model S3 URI for target {target}, skipping")
                 continue
             
-            logger.info(f"Phase 2: Packaging component for target {target} ({i+1}/{len(completed_jobs)})")
+            logger.info(f"Phase 2: Packaging component for target {target} ({i+1}/{len(neo_jobs)})")
             
             try:
                 component_s3_uri = package_component(
@@ -611,6 +1437,40 @@ def package_components(event: Dict, context: Any) -> Dict:
                     'status': 'failed',
                     'error': str(e)
                 })
+
+        # Compiled-ONNX fan-out: package the ONE exported artifact once and
+        # emit one entry per per-JetPack ONNX target (at most one export
+        # entry per record — COMPILATION_TARGETS has one 'onnx' key).
+        for job in onnx_export_jobs:
+            compiled_model_s3 = job.get('compiled_model_s3')
+            if not compiled_model_s3:
+                logger.warning("No compiled model S3 URI for ONNX export entry, skipping")
+                continue
+
+            logger.info(
+                f"Phase 2: Packaging compiled ONNX component "
+                f"(fan-out targets: {ONNX_COMPILED_TARGETS})")
+            try:
+                component_s3_uri = package_compiled_onnx_component(
+                    compiled_model_s3,
+                    dda_manifest,
+                    s3_usecase,
+                    usecase
+                )
+                packaged_components += [
+                    {'target': t, 'component_package_s3': component_s3_uri,
+                     'status': 'packaged'}
+                    for t in ONNX_COMPILED_TARGETS
+                ]
+                logger.info(
+                    f"Successfully packaged compiled ONNX component for "
+                    f"{len(ONNX_COMPILED_TARGETS)} target(s)")
+            except Exception as e:
+                logger.error(f"Error packaging compiled ONNX component: {str(e)}")
+                packaged_components += [
+                    {'target': t, 'status': 'failed', 'error': str(e)}
+                    for t in ONNX_COMPILED_TARGETS
+                ]
         
         # Update training job with packaged components
         table = dynamodb.Table(TRAINING_JOBS_TABLE)

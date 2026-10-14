@@ -36,6 +36,17 @@ os.environ["TRITON_INSTALL_DIR"]= "/opt/tritonserver"
 # /usr/local/bin/python3.11 on the from-source generic image.
 import sys
 os.environ["PYTHONHOME"] = sys.executable
+
+# Hypothesis profiles: cap property tests at 25 examples for fast local runs.
+# Explicit @settings(max_examples=...) decorators on individual tests take
+# precedence over the profile; keep them at or below this budget. Override
+# with HYPOTHESIS_PROFILE=ci for a larger run. Mirrors the setup in
+# workflow_engine/conftest.py ("engine-fast"/"ci"), which remains compatible.
+from hypothesis import settings as _hyp_settings
+
+_hyp_settings.register_profile("fast", max_examples=25, deadline=None)
+_hyp_settings.register_profile("ci", max_examples=100)
+_hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "fast"))
 def import_mocker(name, *args,**kwargs):
     if name == 'dda_logging.logger':
         return mock_logger
@@ -61,7 +72,13 @@ def mock_log_fixture():
 
 @pytest.fixture(scope="function")
 def caplog(request, caplog):
-    request.cls.caplog = caplog
+    """Expose pytest's caplog to unittest-style classes as ``self.caplog``
+    while still returning the real fixture, so plain pytest tests that take
+    ``caplog`` as a parameter receive it (previously they got None, which
+    broke any test written against vanilla caplog semantics)."""
+    if request.cls is not None:
+        request.cls.caplog = caplog
+    return caplog
 
 @pytest.fixture(scope="session",autouse=True)
 def setup_teardown_actions():

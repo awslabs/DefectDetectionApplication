@@ -35,7 +35,7 @@ apt-get install -y --no-install-recommends wget build-essential ninja-build || {
 }
 
 echo "Downloading Aravis..."
-wget https://github.com/AravisProject/aravis/releases/download/0.8.26/aravis-0.8.26.tar.xz || {
+wget --tries=5 --waitretry=30 --retry-on-http-error=429,500,502,503 https://github.com/AravisProject/aravis/releases/download/0.8.26/aravis-0.8.26.tar.xz || {
     echo "Failed to download Aravis"
     exit 1
 }

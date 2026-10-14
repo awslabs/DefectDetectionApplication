@@ -1,0 +1,2113 @@
+#
+#  Copyright 2025 Amazon Web Services, Inc.
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#   You may obtain a copy of the License at
+#
+#       http://www.apache.org/licenses/LICENSE-2.0
+#
+#   Unless required by applicable law or agreed to in writing, software
+#   distributed under the License is distributed on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#
+
+"""Custom_Python_Node bridge — the ``emlpython`` element (Requirement 9.8).
+
+The compiled document maps a ``custom_python`` node to a single
+``emlpython`` element carrying ``handler-path`` (the node's
+``python/{nodeId}/handler.py`` inside the Workflow_Component artifacts).
+There is no compiled GStreamer plugin behind that factory; instead the
+executor manages the bridge itself, exactly as the design prescribes:
+
+- **Launch-string rewrite** (pure functions): every ``emlpython`` element
+  is replaced by an ``appsink name=py_in_{nodeId}`` / ``appsrc
+  name=py_out_{nodeId}`` pair, splitting the segment so the rendered
+  string stays in the dialect ``Gst.parse_launch`` accepts. Both
+  synthetic elements keep the custom node's ``nodeId`` so bus errors map
+  back to the node (Requirement 9.7).
+- **Subprocess isolation**: the user's ``handler.py`` runs in a separate
+  Python process spawned with a bounded address space
+  (``RLIMIT_AS``) and a per-frame wall-clock limit enforced by the
+  bridge. User code never runs inside the LocalServer process.
+- **Framed stdin/stdout protocol**: each message is a 4-byte big-endian
+  header length, a UTF-8 JSON header, then ``header["frameSize"]`` raw
+  frame bytes. Executor -> handler headers carry ``nodeId``, ``width``,
+  ``height``, ``format`` and ``metadata``; handler -> executor headers
+  carry ``status`` (``ok``/``error``), ``metadata`` and the transformed
+  frame. The handler contract is ``process_frame(frame, metadata)``
+  (NumPy-array based, preferred) or ``handle(frame_bytes, metadata) ->
+  (frame_bytes, metadata)`` (raw bytes).
+- **Failure containment**: non-zero exit, wall-clock timeout, memory
+  exhaustion, handler exceptions, and protocol violations all raise
+  :class:`CustomPythonNodeError` carrying the ``node_id`` — the executor
+  records the run as failed with that node identified and nothing else
+  is affected (Requirements 9.8, 13.7).
+
+The protocol/subprocess/limit logic below is dependency-free and unit
+tested with real subprocesses; only :func:`run_bridged_pipeline` touches
+GStreamer (lazily imported), mirroring the patterns of
+``GstPipelineManager.run_pipeline``.
+"""
+
+import json
+import logging
+import os
+import re
+import select
+import struct
+import subprocess
+import sys
+import threading
+import time
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
+
+from workflow_engine import detections
+from workflow_engine.gst_plugins import FORK_REGISTRY_LOCK
+
+logger = logging.getLogger(__name__)
+
+#: Factory name the compiler emits for custom_python nodes.
+BRIDGE_FACTORY = "emlpython"
+#: Factory name the compiler emits for model_inference nodes (the
+#: proprietary Triton inference element).
+MODEL_INFERENCE_FACTORY = "emltriton"
+#: Element argument carrying the handler path (relative to the
+#: Workflow_Component artifact directory).
+HANDLER_PATH_ARG = "handler-path"
+
+#: Per-frame wall-clock limit for one handler invocation.
+DEFAULT_WALL_CLOCK_LIMIT_SEC = 10.0
+#: Address-space bound for the handler subprocess (RLIMIT_AS).
+#: RLIMIT_AS limits *virtual* address space, not resident memory.
+#: NumPy's OpenBLAS and OpenCV both spawn one worker thread per CPU at
+#: import/first-use, and each thread's stack reservation counts against
+#: RLIMIT_AS — on many-core hosts the reservations alone exceed any
+#: reasonable cap and ``import numpy`` hangs (it does not fail cleanly).
+#: The bridge therefore caps those pools to one thread via environment
+#: variables (see ``_THREAD_CAP_ENV`` in ``_start_locked``), which was
+#: verified to let numpy + cv2 import and process 4K frames comfortably
+#: within 512 MB. The limit stays configurable per bridge via the
+#: ``memory_limit_bytes`` constructor parameter.
+DEFAULT_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
+
+#: Frame_Producer wall-clock limit — one ``produce_frame`` invocation
+#: covers a remote object fetch plus a decode, so it is wider than the
+#: per-frame limit and configurable independently of it via the
+#: environment (Requirement 6.2).
+DEFAULT_PRODUCER_WALL_CLOCK_LIMIT_SEC = 30.0
+PRODUCER_WALL_CLOCK_ENV = "DDA_PYTHON_SOURCE_WALL_CLOCK_SEC"
+#: Frame_Producer subprocess memory limit (RLIMIT_AS), configurable
+#: independently of the per-frame limit via the environment
+#: (Requirement 6.3).
+DEFAULT_PRODUCER_MEMORY_LIMIT_BYTES = DEFAULT_MEMORY_LIMIT_BYTES
+PRODUCER_MEMORY_LIMIT_ENV = "DDA_PYTHON_SOURCE_MEMORY_LIMIT_BYTES"
+
+#: Thread-pool caps applied to the handler subprocess environment when a
+#: memory limit is in force (values already set by the operator win).
+#: Without these, OpenBLAS (numpy) and OpenCV size their pools to the
+#: host CPU count and the per-thread stack reservations blow through
+#: RLIMIT_AS — OpenBLAS then *hangs* inside ``import numpy`` instead of
+#: failing, stalling the subprocess until the per-frame wall-clock
+#: limit kills it.
+_THREAD_CAP_ENV = {
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENCV_FOR_THREADS_NUM": "1",
+}
+
+#: Protocol sanity bounds — anything past these is a protocol violation.
+MAX_HEADER_BYTES = 1 << 20
+MAX_FRAME_BYTES = 1 << 30
+
+_HEADER_LEN = struct.Struct(">I")
+
+_NAME_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _safe_name(node_id: str) -> str:
+    return _NAME_SAFE_RE.sub("_", str(node_id))
+
+
+def sink_name(node_id: str) -> str:
+    """Name of the executor-managed appsink feeding the node's subprocess."""
+    return "py_in_{0}".format(_safe_name(node_id))
+
+
+def src_name(node_id: str) -> str:
+    """Name of the executor-managed appsrc fed by the node's subprocess."""
+    return "py_out_{0}".format(_safe_name(node_id))
+
+
+class CustomPythonNodeError(Exception):
+    """A Custom_Python_Node failure, identified by its node id.
+
+    ``node_id`` lets the executor set ``failing_node_id`` directly —
+    the failure fails only that workflow run (Requirements 9.8, 13.7).
+    """
+
+    def __init__(self, node_id: Optional[str], message: str) -> None:
+        self.node_id = node_id
+        super().__init__(
+            "Custom Python node '{0}': {1}".format(node_id, message)
+        )
+
+
+# ---------------------------------------------------------------------------
+# Framed protocol (shared by the bridge; the runner embeds its own copy)
+# ---------------------------------------------------------------------------
+
+
+def write_message(stream, header: Dict[str, Any], frame: bytes = b"") -> None:
+    """Write one framed message: length-prefixed JSON header + frame bytes."""
+    header = dict(header)
+    header["frameSize"] = len(frame)
+    raw = json.dumps(header).encode("utf-8")
+    stream.write(_HEADER_LEN.pack(len(raw)))
+    stream.write(raw)
+    if frame:
+        stream.write(frame)
+    stream.flush()
+
+
+class ProtocolViolation(Exception):
+    """The peer wrote something that is not a valid protocol message."""
+
+
+def decode_header(raw: bytes) -> Dict[str, Any]:
+    """Parse and sanity-check a JSON header, or raise ProtocolViolation."""
+    try:
+        header = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        raise ProtocolViolation("invalid JSON header: {0}".format(e))
+    if not isinstance(header, dict):
+        raise ProtocolViolation("header is not a JSON object")
+    frame_size = header.get("frameSize", 0)
+    if not isinstance(frame_size, int) or not 0 <= frame_size <= MAX_FRAME_BYTES:
+        raise ProtocolViolation(
+            "invalid frameSize {0!r}".format(frame_size)
+        )
+    return header
+
+
+# ---------------------------------------------------------------------------
+# Frame_Helpers module source (``dda_frames``), executed inside the handler
+# subprocess. Self-contained on purpose: it must not import LocalServer
+# modules, and it is importable standalone (exec into a fresh module
+# namespace) for direct testing. The runner registers it in ``sys.modules``
+# as ``dda_frames`` before the handler loads, so handlers can
+# ``import dda_frames`` without the node shipping extra artifact files
+# (Requirement 5.1).
+# ---------------------------------------------------------------------------
+
+HELPERS_SOURCE = r'''
+"""dda_frames — frame helpers for Custom Python handlers.
+
+Provides frame/array conversion (``to_array``/``to_bytes``), the
+current frame's caps (``frame_info``), image loading from local disk,
+S3, or HTTP(S) (``load_image``), and raw byte fetching (``load_bytes``).
+All functions raise ``ValueError`` with a descriptive message on bad
+input.
+"""
+
+#: Supported Pixel_Formats and their channel counts.
+FORMAT_CHANNELS = {"RGB": 3, "BGR": 3, "RGBA": 4, "GRAY8": 1}
+
+#: Bounded network timeout applied to every HTTP(S) fetch, in seconds
+#: (Requirement 4.4). Kept below the Frame_Producer wall-clock limit so
+#: an unresponsive endpoint cannot hold the producer open past it.
+HTTP_TIMEOUT_SEC = 20.0
+
+_current_frame = None
+_s3_client = None
+
+#: Allowed URI prefixes for helper fetches; the empty tuple permits
+#: everything (Requirement 5.3). Set per invocation by the runner via
+#: ``_set_allowed_prefixes`` — never by handler code.
+_allowed_prefixes = ()
+#: Source strings fetched through the helpers since the last
+#: ``_set_allowed_prefixes`` call (Requirement 5.4).
+_fetched = []
+
+
+def _set_current(info):
+    """Set (info dict) or clear (None) the per-invocation frame context.
+
+    Called by the runner around each handler invocation; not part of the
+    public handler API.
+    """
+    global _current_frame
+    _current_frame = dict(info) if info is not None else None
+
+
+def frame_info():
+    """``{'width': int, 'height': int, 'format': str}`` for the frame
+    whose handler invocation is in progress; None outside an invocation."""
+    return dict(_current_frame) if _current_frame is not None else None
+
+
+def _require_numpy(what):
+    try:
+        import numpy
+        return numpy
+    except ImportError:
+        raise ValueError(
+            "{0}: NumPy is not importable in the handler "
+            "subprocess".format(what)
+        )
+
+
+def _require_cv2(what):
+    try:
+        import cv2
+        return cv2
+    except ImportError:
+        raise ValueError(
+            "{0}: OpenCV (cv2) is not importable in the handler "
+            "subprocess".format(what)
+        )
+
+
+def to_array(frame_bytes, width, height, format):
+    """Raw frame bytes -> NumPy uint8 array (H x W x C; H x W for GRAY8).
+
+    The row stride is ``len(frame_bytes) // height``; each row's first
+    ``width * channels`` bytes are taken, tolerating row padding in the
+    frame bytes.
+    """
+    np = _require_numpy("to_array")
+    if format not in FORMAT_CHANNELS:
+        raise ValueError(
+            "to_array: unsupported format '{0}' (supported: {1})".format(
+                format, ", ".join(sorted(FORMAT_CHANNELS))
+            )
+        )
+    if not isinstance(width, int) or not isinstance(height, int) \
+            or width <= 0 or height <= 0:
+        raise ValueError(
+            "to_array: invalid dimensions {0!r}x{1!r}".format(width, height)
+        )
+    frame_bytes = bytes(frame_bytes)
+    channels = FORMAT_CHANNELS[format]
+    row_bytes = width * channels
+    stride = len(frame_bytes) // height
+    if stride < row_bytes:
+        raise ValueError(
+            "to_array: frame bytes too short: got {0} bytes for "
+            "{1}x{2} {3}, which needs at least {4} bytes".format(
+                len(frame_bytes), width, height, format, row_bytes * height
+            )
+        )
+    rows = np.frombuffer(
+        frame_bytes[: stride * height], dtype=np.uint8
+    ).reshape(height, stride)[:, :row_bytes]
+    array = rows.copy()
+    if channels == 1:
+        return array.reshape(height, width)
+    return array.reshape(height, width, channels)
+
+
+def to_bytes(array):
+    """NumPy uint8 array -> contiguous raw frame bytes (no padding)."""
+    np = _require_numpy("to_bytes")
+    if not isinstance(array, np.ndarray):
+        raise ValueError(
+            "to_bytes: expected a NumPy array, got {0}".format(
+                type(array).__name__
+            )
+        )
+    if array.dtype != np.uint8:
+        raise ValueError(
+            "to_bytes: expected a uint8 array, got dtype {0}".format(
+                array.dtype
+            )
+        )
+    return np.ascontiguousarray(array).tobytes()
+
+
+def _decode_image(source, data):
+    np = _require_numpy("load_image: '{0}'".format(source))
+    cv2 = _require_cv2("load_image: '{0}'".format(source))
+    buffer = np.frombuffer(data, dtype=np.uint8)
+    image = cv2.imdecode(buffer, cv2.IMREAD_UNCHANGED)
+    if image is not None and image.ndim == 2 and image.dtype == np.uint8:
+        return image  # grayscale sources decode to a 2-D array
+    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)  # 8-bit BGR
+    if image is None:
+        raise ValueError(
+            "load_image: content of '{0}' could not be decoded as an "
+            "image".format(source)
+        )
+    return image
+
+
+def _set_allowed_prefixes(prefixes):
+    """Set the allowed URI prefixes and reset the fetched-sources record.
+
+    Runner-only hook, called before each Frame_Producer invocation with
+    the node's ``allowed_uri_prefixes`` (Requirements 5.1, 5.3); not part
+    of the public handler API.
+    """
+    global _allowed_prefixes, _fetched
+    _allowed_prefixes = tuple(str(p) for p in (prefixes or ()))
+    _fetched = []
+
+
+def _fetched_sources():
+    """Source strings fetched since the last ``_set_allowed_prefixes``.
+
+    Runner-only hook so the executor can log every fetch a
+    Frame_Producer made (Requirement 5.4); not part of the public
+    handler API.
+    """
+    return list(_fetched)
+
+
+def _check_allowed(source):
+    """Raise ``ValueError`` when prefixes are declared and none matches
+    the source (Requirements 5.1, 5.2). An empty declaration permits
+    every source (Requirement 5.3)."""
+    if not _allowed_prefixes:
+        return
+    for prefix in _allowed_prefixes:
+        if source.startswith(prefix):
+            return
+    raise ValueError(
+        "fetch of '{0}' denied: the source is outside the node's "
+        "allowed URI prefixes".format(source)
+    )
+
+
+def _https_context():
+    """Verified TLS context for ``https://`` fetches.
+
+    This runtime's OpenSSL carries no default CA store
+    (``ssl.get_default_verify_paths()`` returns ``None, None``), so an
+    unassisted ``urlopen`` fails EVERY https fetch with
+    CERTIFICATE_VERIFY_FAILED even though certifi's bundle and the
+    system bundle are both present on disk. The bundle is therefore
+    named explicitly, preferring certifi and falling back to the
+    distribution bundles.
+
+    Verification and hostname checking stay ON in every branch: a fetch
+    whose certificate cannot be verified fails, and is never silently
+    trusted.
+    """
+    import ssl
+
+    try:
+        import certifi
+    except ImportError:
+        pass
+    else:
+        try:
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            pass
+    import os
+
+    for bundle in (
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+    ):
+        if os.path.exists(bundle):
+            try:
+                return ssl.create_default_context(cafile=bundle)
+            except Exception:
+                continue
+    return ssl.create_default_context()
+
+
+def _fetch_http(source):
+    """HTTP(S) fetch with the bounded timeout (Requirement 4.4);
+    non-success status, timeout, and connection failures raise
+    ``ValueError`` naming the source (Requirement 4.5)."""
+    import urllib.request
+
+    options = {"timeout": HTTP_TIMEOUT_SEC}
+    if source.startswith("https://"):
+        options["context"] = _https_context()
+    try:
+        with urllib.request.urlopen(source, **options) as response:
+            status = getattr(response, "status", None)
+            if status is None:  # pragma: no cover - pre-3.9 fallback
+                status = response.getcode()
+            data = response.read()
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(
+            "could not fetch '{0}': {1}".format(source, e)
+        )
+    if not 200 <= int(status) < 300:
+        raise ValueError(
+            "could not fetch '{0}': HTTP status {1} is not a "
+            "success".format(source, status)
+        )
+    return data
+
+
+def _fetch_bytes(source, s3_client=None):
+    """source -> raw bytes. Dispatches ``http(s)://`` (bounded-timeout
+    urllib fetch), ``s3://bucket/key`` (boto3), and local paths.
+    Applies the prefix gate and records the source first."""
+    source = str(source)
+    _check_allowed(source)
+    _fetched.append(source)
+    if source.startswith("http://") or source.startswith("https://"):
+        data = _fetch_http(source)
+    elif source.startswith("s3://"):
+        remainder = source[len("s3://"):]
+        bucket, _, key = remainder.partition("/")
+        if not bucket or not key:
+            raise ValueError(
+                "load_image: malformed S3 URI '{0}' (expected "
+                "s3://bucket/key)".format(source)
+            )
+        if s3_client is None:
+            try:
+                import boto3
+            except ImportError:
+                raise ValueError(
+                    "load_image: cannot fetch '{0}': boto3 is not "
+                    "installed".format(source)
+                )
+            global _s3_client
+            if _s3_client is None:
+                _s3_client = boto3.client("s3")
+            s3_client = _s3_client
+        try:
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            data = response["Body"].read()
+        except Exception as e:
+            raise ValueError(
+                "load_image: could not fetch '{0}': {1}".format(source, e)
+            )
+    else:
+        try:
+            with open(source, "rb") as f:
+                data = f.read()
+        except (OSError, ValueError) as e:
+            raise ValueError(
+                "load_image: could not read '{0}': {1}".format(source, e)
+            )
+    return data
+
+
+def load_bytes(source):
+    """Raw bytes of a local path, ``s3://bucket/key`` URI, or
+    ``http(s)://`` URL, without decoding them as an image
+    (Requirement 4.3).
+
+    Raises ``ValueError`` naming the source on a missing file, malformed
+    URI, fetch failure, or a source outside the node's allowed prefixes.
+    """
+    return _fetch_bytes(source)
+
+
+def load_image(source, s3_client=None):
+    """Local path, ``s3://bucket/key``, or ``http(s)://`` URL -> uint8
+    image array in OpenCV BGR channel order (single-channel images
+    decode to a 2-D array).
+
+    Raises ``ValueError`` naming the source on a missing file, malformed
+    URI, fetch failure, undecodable content, or missing boto3.
+    ``s3_client`` is injectable for tests; by default a lazily created
+    boto3 client using the device's ambient AWS credentials.
+    """
+    source = str(source)
+    data = _fetch_bytes(source, s3_client=s3_client)
+    return _decode_image(source, data)
+'''
+
+
+# ---------------------------------------------------------------------------
+# Runner script executed inside the subprocess (self-contained on purpose:
+# the subprocess must not depend on LocalServer being importable)
+# ---------------------------------------------------------------------------
+
+#: The handler contract: ``handler.py`` defines either
+#: ``process_frame(frame, metadata)`` (NumPy-array contract, preferred
+#: when both are present — Requirement 3.7) or
+#: ``handle(frame_bytes, metadata) -> (frame_bytes, metadata)`` (the
+#: pre-existing raw-bytes contract — Requirement 3.6). Returning
+#: ``None`` passes the input frame through. stdout belongs to the
+#: protocol — handlers must not print to it.
+#:
+#: The runner is assembled with ``HELPERS_SOURCE`` (embedded via repr,
+#: keeping the script self-contained for ``python -c``): it registers
+#: the ``dda_frames`` module in ``sys.modules`` before the handler
+#: loads (Requirement 5.1) and best-effort binds ``cv2``/``np``/
+#: ``numpy`` on the handler module before its code executes
+#: (Requirements 4.1-4.3).
+RUNNER_SOURCE = "_HELPERS_SOURCE = " + repr(HELPERS_SOURCE) + "\n" + r'''
+import importlib
+import importlib.util
+import json
+import os
+import struct
+import sys
+import traceback
+import types
+
+
+def _read_exact(stream, n):
+    data = b""
+    while len(data) < n:
+        chunk = stream.read(n - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
+
+
+def _write(stream, header, frame):
+    header = dict(header)
+    header["frameSize"] = len(frame)
+    raw = json.dumps(header).encode("utf-8")
+    stream.write(struct.pack(">I", len(raw)))
+    stream.write(raw)
+    if frame:
+        stream.write(frame)
+    stream.flush()
+
+
+def _load_dda_frames():
+    """Register the embedded Frame_Helpers module as ``dda_frames``
+    before the handler loads (Requirement 5.1)."""
+    module = types.ModuleType("dda_frames")
+    exec(_HELPERS_SOURCE, module.__dict__)
+    sys.modules["dda_frames"] = module
+    return module
+
+
+def _invoke_process_frame(process_frame, dda_frames, frame, metadata, info):
+    """One process_frame invocation (Requirements 3.1-3.5)."""
+    width = info.get("width")
+    height = info.get("height")
+    frame_format = info.get("format")
+    if frame_format not in dda_frames.FORMAT_CHANNELS:
+        raise ValueError(
+            "process_frame: unsupported frame format {0!r} "
+            "(supported: {1})".format(
+                frame_format,
+                ", ".join(sorted(dda_frames.FORMAT_CHANNELS)),
+            )
+        )
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise ValueError(
+            "process_frame: the stream caps are missing frame "
+            "dimensions (width={0!r}, height={1!r})".format(width, height)
+        )
+    try:
+        import numpy as np
+    except ImportError:
+        raise ValueError(
+            "process_frame requires NumPy, which is not importable "
+            "in the handler subprocess"
+        )
+    array = dda_frames.to_array(frame, width, height, frame_format)
+    result = process_frame(array, metadata)
+    if result is None:
+        return frame, metadata  # pass-through (Requirement 3.3)
+    if not isinstance(result, np.ndarray):
+        raise ValueError(
+            "process_frame must return None or a NumPy array of "
+            "shape {0} and dtype {1}, got {2}".format(
+                array.shape, array.dtype, type(result).__name__
+            )
+        )
+    if result.shape != array.shape or result.dtype != array.dtype:
+        raise ValueError(
+            "process_frame returned an array of shape {0} and dtype "
+            "{1}; expected shape {2} and dtype {3}".format(
+                result.shape, result.dtype, array.shape, array.dtype
+            )
+        )
+    # Write pixel rows back into a copy of the input bytes at the
+    # original row stride: byte length and row padding are preserved
+    # so the appsrc caps stay valid (Requirement 3.2).
+    channels = dda_frames.FORMAT_CHANNELS[frame_format]
+    row_bytes = width * channels
+    stride = len(frame) // height
+    out = bytearray(frame)
+    pixels = np.ascontiguousarray(result).tobytes()
+    for row in range(height):
+        out[row * stride:row * stride + row_bytes] = (
+            pixels[row * row_bytes:(row + 1) * row_bytes]
+        )
+    return bytes(out), metadata
+
+
+def _invoke_handle(handle, frame, metadata):
+    """One handle invocation — the pre-existing raw-bytes contract,
+    unchanged in behavior (Requirement 3.6)."""
+    result = handle(frame, metadata)
+    if isinstance(result, tuple):
+        out_frame, out_meta = result
+    else:
+        out_frame, out_meta = result, {}
+    if out_frame is None:
+        out_frame = frame
+    if not isinstance(out_frame, (bytes, bytearray)):
+        raise TypeError(
+            "handle() must return frame bytes, got "
+            + type(out_frame).__name__
+        )
+    return out_frame, out_meta
+
+
+#: Pixel_Formats a Frame_Producer may declare, and their channel counts.
+_PRODUCE_FORMATS = {"RGB": 3, "RGBA": 4, "GRAY8": 1}
+
+_PRODUCE_ACCEPTED = (
+    "produce_frame must return a uint8 NumPy array (HxW grayscale, "
+    "HxWx3 BGR, or HxWx4 BGRA), a mapping with 'array' and 'format' "
+    "(RGB, RGBA, or GRAY8), or a mapping with 'data', 'width', "
+    "'height', and 'format'"
+)
+
+
+def _resolve_produced_array(np, array):
+    """A bare NumPy array return -> (bytes, width, height, format):
+    2-D is GRAY8, 3-channel is OpenCV BGR converted to RGB, 4-channel
+    is BGRA converted to RGBA (Requirements 3.3, 3.4, 3.5)."""
+    if array.dtype != np.uint8:
+        raise ValueError(
+            "produce_frame returned an array of unsupported dtype "
+            "{0}; {1}".format(array.dtype, _PRODUCE_ACCEPTED)
+        )
+    if array.ndim == 2:
+        height, width = array.shape
+        return (np.ascontiguousarray(array).tobytes(),
+                width, height, "GRAY8")
+    if array.ndim == 3 and array.shape[2] == 3:
+        height, width = array.shape[:2]
+        rgb = np.ascontiguousarray(array[:, :, ::-1])
+        return rgb.tobytes(), width, height, "RGB"
+    if array.ndim == 3 and array.shape[2] == 4:
+        height, width = array.shape[:2]
+        rgba = np.ascontiguousarray(array[:, :, [2, 1, 0, 3]])
+        return rgba.tobytes(), width, height, "RGBA"
+    raise ValueError(
+        "produce_frame returned an array of unsupported shape "
+        "{0}; {1}".format(array.shape, _PRODUCE_ACCEPTED)
+    )
+
+
+def _resolve_produced_mapping(np, mapping):
+    """A mapping return -> (bytes, width, height, format). The
+    ``{"array", "format"}`` shape carries the array's bytes under the
+    stated format with NO channel conversion (Requirement 3.6); the
+    ``{"data", "width", "height", "format"}`` shape passes raw bytes,
+    dims, and format through (Requirement 3.7). Unsupported formats
+    and byte lengths inconsistent with the declared dims are errors
+    describing the inconsistency (Requirement 3.10)."""
+    if "array" in mapping:
+        fmt = mapping.get("format")
+        if fmt not in _PRODUCE_FORMATS:
+            raise ValueError(
+                "produce_frame returned a mapping with unsupported "
+                "format {0!r}: the format must be one of {1}".format(
+                    fmt, ", ".join(sorted(_PRODUCE_FORMATS))
+                )
+            )
+        array = mapping["array"]
+        if np is None or not isinstance(array, np.ndarray) \
+                or array.dtype != np.uint8:
+            raise ValueError(
+                "produce_frame returned a mapping whose 'array' is not "
+                "a uint8 NumPy array; {0}".format(_PRODUCE_ACCEPTED)
+            )
+        channels = _PRODUCE_FORMATS[fmt]
+        if channels == 1:
+            if array.ndim != 2:
+                raise ValueError(
+                    "produce_frame returned an array of shape {0} "
+                    "under format {1}, which needs a 2-D array".format(
+                        array.shape, fmt
+                    )
+                )
+            height, width = array.shape
+        else:
+            if array.ndim != 3 or array.shape[2] != channels:
+                raise ValueError(
+                    "produce_frame returned an array of shape {0} "
+                    "under format {1}, which needs {2} channels".format(
+                        array.shape, fmt, channels
+                    )
+                )
+            height, width = array.shape[:2]
+        return (np.ascontiguousarray(array).tobytes(),
+                width, height, fmt)
+    missing = [key for key in ("data", "width", "height", "format")
+               if key not in mapping]
+    if missing:
+        raise ValueError(
+            "produce_frame returned a mapping missing {0}; {1}".format(
+                ", ".join(missing), _PRODUCE_ACCEPTED
+            )
+        )
+    fmt = mapping["format"]
+    if fmt not in _PRODUCE_FORMATS:
+        raise ValueError(
+            "produce_frame returned a mapping with unsupported format "
+            "{0!r}: the format must be one of {1}".format(
+                fmt, ", ".join(sorted(_PRODUCE_FORMATS))
+            )
+        )
+    data = mapping["data"]
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError(
+            "produce_frame returned a mapping whose 'data' is not "
+            "bytes; {0}".format(_PRODUCE_ACCEPTED)
+        )
+    width = mapping["width"]
+    height = mapping["height"]
+    if not isinstance(width, int) or not isinstance(height, int) \
+            or isinstance(width, bool) or isinstance(height, bool) \
+            or width <= 0 or height <= 0:
+        raise ValueError(
+            "produce_frame returned invalid frame dimensions "
+            "{0!r}x{1!r}".format(width, height)
+        )
+    expected = width * height * _PRODUCE_FORMATS[fmt]
+    if len(data) != expected:
+        raise ValueError(
+            "produce_frame returned {0} frame bytes for {1}x{2} {3}, "
+            "which needs exactly {4} bytes".format(
+                len(data), width, height, fmt, expected
+            )
+        )
+    return bytes(data), width, height, fmt
+
+
+def _resolve_produced_frame(result):
+    """produce_frame return value -> (frame_bytes, width, height,
+    format), implementing the Produced_Frame resolution table
+    (Requirements 3.3-3.10). Anything outside the accepted shapes
+    raises ValueError describing the defect."""
+    if result is None:
+        raise ValueError(
+            "produce_frame returned None: a source must produce a frame"
+        )
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+    if np is not None and isinstance(result, np.ndarray):
+        return _resolve_produced_array(np, result)
+    if isinstance(result, dict):
+        return _resolve_produced_mapping(np, result)
+    raise ValueError(
+        "produce_frame returned {0}; {1}".format(
+            type(result).__name__, _PRODUCE_ACCEPTED
+        )
+    )
+
+
+def main():
+    handler_path = sys.argv[1]
+    stdin = sys.stdin.buffer
+    stdout = sys.stdout.buffer
+    # Let the handler import siblings shipped in its python/{nodeId}/ dir.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(handler_path)))
+    try:
+        dda_frames = _load_dda_frames()
+        spec = importlib.util.spec_from_file_location(
+            "dda_custom_python_handler", handler_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        # Best-effort pre-imports before the handler code executes; an
+        # import failure leaves the binding absent, affecting only
+        # handlers that reference it (Requirements 4.1-4.3).
+        for module_name, binding in (
+            ("cv2", "cv2"),
+            ("numpy", "np"),
+            ("numpy", "numpy"),
+        ):
+            try:
+                setattr(
+                    module, binding, importlib.import_module(module_name)
+                )
+            except Exception:
+                pass
+        spec.loader.exec_module(module)
+        process_frame = getattr(module, "process_frame", None)
+        handle = getattr(module, "handle", None)
+        produce_frame = getattr(module, "produce_frame", None)
+        process_frame = process_frame if callable(process_frame) else None
+        handle = handle if callable(handle) else None
+        produce_frame = produce_frame if callable(produce_frame) else None
+        if process_frame is None and handle is None and produce_frame is None:
+            raise TypeError(
+                "handler.py defines none of "
+                "produce_frame(context), "
+                "process_frame(frame, metadata), or "
+                "handle(frame_bytes, metadata)"
+            )
+    except BaseException:
+        _write(stdout, {"status": "error",
+                        "error": traceback.format_exc(limit=20)}, b"")
+        sys.exit(2)
+
+    while True:
+        prefix = _read_exact(stdin, 4)
+        if prefix is None:
+            return  # clean shutdown: executor closed our stdin
+        (header_len,) = struct.unpack(">I", prefix)
+        raw_header = _read_exact(stdin, header_len)
+        if raw_header is None:
+            return
+        header = json.loads(raw_header.decode("utf-8"))
+        frame = _read_exact(stdin, int(header.get("frameSize", 0))) or b""
+        if header.get("op") == "produce":
+            # One Frame_Producer invocation (Requirement 3.1). Requests
+            # without an ``op`` field fall through to the per-frame path
+            # below, bit-identical to the pre-produce protocol
+            # (Requirements 6.6, 11.3).
+            try:
+                if produce_frame is None:
+                    # process_frame/handle are never invoked for a
+                    # produce request (Requirements 3.2, 3.11).
+                    raise TypeError(
+                        "handler.py does not define produce_frame("
+                        "context), the entry point required to produce "
+                        "a frame"
+                    )
+                dda_frames._set_allowed_prefixes(
+                    header.get("allowedUriPrefixes") or ()
+                )
+                result = produce_frame(header.get("context") or {})
+                out_bytes, width, height, out_format = (
+                    _resolve_produced_frame(result)
+                )
+                metadata = {}
+                if isinstance(result, dict) and isinstance(
+                    result.get("metadata"), dict
+                ):
+                    metadata = result["metadata"]
+                _write(
+                    stdout,
+                    {"status": "ok", "width": width, "height": height,
+                     "format": out_format, "metadata": metadata,
+                     "fetchedSources": dda_frames._fetched_sources()},
+                    out_bytes,
+                )
+            except BaseException:
+                _write(stdout, {"status": "error",
+                                "error": traceback.format_exc(limit=20)},
+                       b"")
+                sys.exit(1)
+            continue
+        try:
+            if process_frame is None and handle is None:
+                raise TypeError(
+                    "handler.py defines neither "
+                    "process_frame(frame, metadata) nor "
+                    "handle(frame_bytes, metadata), which are required "
+                    "to process frames"
+                )
+            metadata = header.get("metadata") or {}
+            info = {"width": header.get("width"),
+                    "height": header.get("height"),
+                    "format": header.get("format")}
+            metadata["frame"] = info  # Requirement 3.9
+            dda_frames._set_current(info)  # Requirement 5.6
+            try:
+                if process_frame is not None:
+                    out_frame, out_meta = _invoke_process_frame(
+                        process_frame, dda_frames, frame, metadata, info
+                    )
+                else:
+                    out_frame, out_meta = _invoke_handle(
+                        handle, frame, metadata
+                    )
+            finally:
+                dda_frames._set_current(None)
+            _write(stdout, {"status": "ok", "metadata": out_meta or {}},
+                   bytes(out_frame))
+        except BaseException:
+            _write(stdout, {"status": "error",
+                            "error": traceback.format_exc(limit=20)}, b"")
+            sys.exit(1)
+
+
+main()
+'''
+
+
+def _memory_limit_preexec(limit_bytes: Optional[int]):
+    """A preexec_fn applying RLIMIT_AS in the child, or None when
+    unlimited/unsupported (non-POSIX)."""
+    if not limit_bytes:
+        return None
+    try:
+        import resource  # noqa: F401 - POSIX only
+    except ImportError:  # pragma: no cover - non-POSIX
+        return None
+
+    def _apply():
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+
+    return _apply
+
+
+class _Timeout(Exception):
+    pass
+
+
+class _PeerClosed(Exception):
+    pass
+
+
+# ---------------------------------------------------------------------------
+# The bridge: one subprocess per Custom_Python_Node per run
+# ---------------------------------------------------------------------------
+
+
+class CustomPythonBridge:
+    """Runs one node's ``handler.py`` in a limited subprocess and pumps
+    frames through the framed stdin/stdout protocol.
+
+    Every failure mode (missing handler, non-zero exit, wall-clock
+    timeout, memory exhaustion, handler exception, protocol violation)
+    raises :class:`CustomPythonNodeError` naming the node, and leaves the
+    subprocess terminated.
+    """
+
+    def __init__(
+        self,
+        node_id: str,
+        handler_path: str,
+        wall_clock_limit_sec: float = DEFAULT_WALL_CLOCK_LIMIT_SEC,
+        memory_limit_bytes: Optional[int] = DEFAULT_MEMORY_LIMIT_BYTES,
+        python_executable: Optional[str] = None,
+    ) -> None:
+        self.node_id = node_id
+        self.sink_name = sink_name(node_id)
+        self.src_name = src_name(node_id)
+        self._handler_path = handler_path
+        self._wall_clock_limit_sec = wall_clock_limit_sec
+        self._memory_limit_bytes = memory_limit_bytes
+        self._python_executable = python_executable or sys.executable
+        self._process: Optional[subprocess.Popen] = None
+        self._lock = threading.Lock()
+        #: Sources the last ``produce_frame`` fetched through
+        #: ``dda_frames``, for the executor's run log (Requirement 5.4).
+        self.fetched_sources: List[str] = []
+
+    # -- lifecycle ------------------------------------------------------
+
+    def start(self) -> None:
+        """Spawn the handler subprocess (idempotent)."""
+        with self._lock:
+            self._start_locked()
+
+    def _start_locked(self) -> None:
+        if self._process is not None and self._process.poll() is None:
+            return
+        if not self._handler_path or not os.path.isfile(self._handler_path):
+            raise CustomPythonNodeError(
+                self.node_id,
+                "handler not found at '{0}'".format(self._handler_path),
+            )
+        # PYTHONHOME (when set, e.g. for Triton's embedded interpreter
+        # lookup) targets a different interpreter layout and would break
+        # the spawned CPython's own bootstrap — the handler subprocess
+        # runs the executor's interpreter with its default home.
+        env = dict(os.environ)
+        env.pop("PYTHONHOME", None)
+        if self._memory_limit_bytes:
+            # Cap the OpenBLAS/OpenMP/OpenCV thread pools so their
+            # per-thread stack reservations fit under RLIMIT_AS; an
+            # uncapped OpenBLAS hangs inside ``import numpy`` on
+            # many-core hosts (see _THREAD_CAP_ENV). Operator-set
+            # values take precedence.
+            for key, value in _THREAD_CAP_ENV.items():
+                env.setdefault(key, value)
+        # ``preexec_fn`` forces the fork(+exec) spawn path, and CPython's
+        # before-fork handlers acquire the import lock — which a sibling
+        # thread's gi/Gst registry scan can hold while waiting on
+        # GLib-internal locks. FORK_REGISTRY_LOCK serializes this fork
+        # against those registry sections (see its docstring in
+        # workflow_engine.gst_plugins for the production deadlock this
+        # prevents). Lock ordering: we already hold the instance
+        # ``self._lock`` here and acquire the global lock inside it; the
+        # registry sections never touch instance locks, so no cycle.
+        with FORK_REGISTRY_LOCK:
+            self._process = subprocess.Popen(
+                [self._python_executable, "-c", RUNNER_SOURCE,
+                 self._handler_path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=_memory_limit_preexec(self._memory_limit_bytes),
+                close_fds=True,
+                env=env,
+            )
+        logger.info(
+            "Custom Python node '%s': handler subprocess %s started "
+            "(wall-clock %.1fs/frame, memory %s bytes)",
+            self.node_id,
+            self._process.pid,
+            self._wall_clock_limit_sec,
+            self._memory_limit_bytes,
+        )
+
+    def stop(self) -> None:
+        """Terminate the subprocess (idempotent, never raises)."""
+        with self._lock:
+            process, self._process = self._process, None
+        if process is None:
+            return
+        try:
+            if process.stdin:
+                process.stdin.close()  # EOF -> runner exits cleanly
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        except Exception:  # noqa: BLE001 - best-effort teardown
+            logger.exception(
+                "Custom Python node '%s': error stopping subprocess",
+                self.node_id,
+            )
+        finally:
+            for stream in (process.stdout, process.stderr):
+                try:
+                    if stream:
+                        stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    # -- frame processing -----------------------------------------------
+
+    def process_frame(
+        self,
+        frame: bytes,
+        metadata: Optional[Dict[str, Any]] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        frame_format: Optional[str] = None,
+    ) -> Tuple[bytes, Dict[str, Any]]:
+        """One handler invocation: send the frame, return the handler's
+        ``(frame_bytes, metadata)`` within the wall-clock limit."""
+        with self._lock:
+            self._start_locked()
+            deadline = time.monotonic() + self._wall_clock_limit_sec
+            header = {
+                "nodeId": self.node_id,
+                "width": width,
+                "height": height,
+                "format": frame_format,
+                "metadata": metadata or {},
+            }
+            try:
+                write_message(self._process.stdin, header, frame)
+            except (BrokenPipeError, OSError):
+                raise self._death_error("exited while receiving a frame")
+            try:
+                response, out_frame = self._read_response(deadline)
+            except _Timeout:
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id,
+                    "exceeded the {0:g}s wall-clock limit for one "
+                    "frame".format(self._wall_clock_limit_sec),
+                )
+            except _PeerClosed:
+                raise self._death_error("exited without answering a frame")
+            except ProtocolViolation as e:
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id, "protocol violation: {0}".format(e)
+                )
+            if response.get("status") != "ok":
+                error = str(
+                    response.get("error") or "handler reported an error"
+                ).strip()
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id, "handler failed: {0}".format(error)
+                )
+            return out_frame, response.get("metadata") or {}
+
+    # -- frame production -------------------------------------------------
+
+    def produce_frame(
+        self,
+        context: Optional[Dict[str, Any]],
+        allowed_uri_prefixes: Tuple[str, ...] = (),
+    ) -> Tuple[bytes, int, int, str, Dict[str, Any]]:
+        """One Frame_Producer invocation: send a ``produce`` request
+        carrying the run's Trigger_Context and the node's allowed URI
+        prefixes, and return ``(frame_bytes, width, height, format,
+        metadata)`` within the bridge's wall-clock limit.
+
+        Timeout, subprocess death, protocol violations, and handler
+        errors raise :class:`CustomPythonNodeError` naming the node; the
+        timeout message states the limit (Requirement 6.4). The sources
+        the producer fetched through ``dda_frames`` are recorded on
+        ``self.fetched_sources`` for the executor to log
+        (Requirement 5.4).
+        """
+        with self._lock:
+            self._start_locked()
+            deadline = time.monotonic() + self._wall_clock_limit_sec
+            header = {
+                "op": "produce",
+                "nodeId": self.node_id,
+                "context": context or {},
+                "allowedUriPrefixes": list(allowed_uri_prefixes or ()),
+            }
+            try:
+                write_message(self._process.stdin, header, b"")
+            except (BrokenPipeError, OSError):
+                raise self._death_error(
+                    "exited while receiving a produce request"
+                )
+            try:
+                response, out_frame = self._read_response(deadline)
+            except _Timeout:
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id,
+                    "exceeded the {0:g}s wall-clock limit for producing "
+                    "the frame".format(self._wall_clock_limit_sec),
+                )
+            except _PeerClosed:
+                raise self._death_error(
+                    "exited without answering a produce request"
+                )
+            except ProtocolViolation as e:
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id, "protocol violation: {0}".format(e)
+                )
+            if response.get("status") != "ok":
+                error = str(
+                    response.get("error") or "producer reported an error"
+                ).strip()
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id, "producer failed: {0}".format(error)
+                )
+            width = response.get("width")
+            height = response.get("height")
+            frame_format = response.get("format")
+            if (
+                not isinstance(width, int)
+                or not isinstance(height, int)
+                or not isinstance(frame_format, str)
+            ):
+                self._kill_locked()
+                raise CustomPythonNodeError(
+                    self.node_id,
+                    "protocol violation: produce response is missing "
+                    "the frame dimensions or format",
+                )
+            self.fetched_sources = [
+                str(source)
+                for source in (response.get("fetchedSources") or [])
+            ]
+            return (
+                out_frame,
+                width,
+                height,
+                frame_format,
+                response.get("metadata") or {},
+            )
+
+    # -- internals ------------------------------------------------------
+
+    def _read_response(self, deadline: float) -> Tuple[Dict[str, Any], bytes]:
+        prefix = self._read_exact(4, deadline)
+        (header_len,) = _HEADER_LEN.unpack(prefix)
+        if header_len > MAX_HEADER_BYTES:
+            raise ProtocolViolation(
+                "header length {0} exceeds the {1}-byte bound".format(
+                    header_len, MAX_HEADER_BYTES
+                )
+            )
+        header = decode_header(self._read_exact(header_len, deadline))
+        frame = self._read_exact(int(header.get("frameSize", 0)), deadline)
+        return header, frame
+
+    def _read_exact(self, n: int, deadline: float) -> bytes:
+        """Read exactly n bytes from the subprocess stdout before the
+        deadline, or raise _Timeout/_PeerClosed."""
+        if n == 0:
+            return b""
+        fd = self._process.stdout.fileno()
+        buf = bytearray()
+        while len(buf) < n:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _Timeout()
+            ready, _, _ = select.select([fd], [], [], min(remaining, 0.5))
+            if not ready:
+                continue
+            chunk = os.read(fd, n - len(buf))
+            if not chunk:
+                raise _PeerClosed()
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _kill_locked(self) -> None:
+        process, self._process = self._process, None
+        if process is None:
+            return
+        try:
+            process.kill()
+            process.wait(timeout=2)
+        except Exception:  # noqa: BLE001 - best-effort
+            pass
+        finally:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                try:
+                    if stream:
+                        stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _death_error(self, what: str) -> CustomPythonNodeError:
+        """Build the node error for a subprocess that died on its own,
+        folding in the exit code and a stderr tail."""
+        process, self._process = self._process, None
+        returncode = None
+        stderr_tail = ""
+        if process is not None:
+            try:
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+                returncode = process.returncode
+                if process.stderr:
+                    stderr_tail = (
+                        process.stderr.read() or b""
+                    ).decode("utf-8", "replace")[-2000:].strip()
+            except Exception:  # noqa: BLE001 - best-effort diagnostics
+                pass
+            finally:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    try:
+                        if stream:
+                            stream.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        message = "subprocess {0} (exit code {1})".format(what, returncode)
+        if returncode is not None and returncode < 0:
+            message += " — killed by signal, possibly over the memory limit"
+        if stderr_tail:
+            message += ": {0}".format(stderr_tail)
+        return CustomPythonNodeError(self.node_id, message)
+
+
+# ---------------------------------------------------------------------------
+# Compiled-document rewrite (pure functions, no GStreamer)
+# ---------------------------------------------------------------------------
+
+
+class BridgeSpec(NamedTuple):
+    """One emlpython element found in the compiled document."""
+
+    node_id: str
+    handler_path: str  # relative to the component artifact directory
+    sink_name: str
+    src_name: str
+
+
+def bridge_specs(document: Dict) -> List[BridgeSpec]:
+    """Every emlpython element in the document, in render order."""
+    specs = []
+    for segment in document.get("segments", []):
+        for element in segment.get("elements", []):
+            if element.get("factory") != BRIDGE_FACTORY:
+                continue
+            node_id = element.get("nodeId")
+            specs.append(
+                BridgeSpec(
+                    node_id=node_id,
+                    handler_path=element.get("args", {}).get(
+                        HANDLER_PATH_ARG
+                    ),
+                    sink_name=sink_name(node_id),
+                    src_name=src_name(node_id),
+                )
+            )
+    return specs
+
+
+#: Caps pinned on every bridge appsink. Without a constraint the appsink
+#: negotiates whatever upstream proposes; measured on jetson-thor1
+#: (JP7, GStreamer 1.24) the unconstrained bridge appsink settled on
+#: RGBA64_LE caps over a 1-byte/pixel buffer, and Bayer camera sources
+#: delivered RGBx — a format the handler runtime's FORMAT_CHANNELS
+#: rejects before the user's code ever runs. Pinning RGB makes the
+#: upstream videoconvert do the conversion and guarantees the pump hands
+#: handlers a format the process_frame contract supports.
+BRIDGE_APPSINK_CAPS = "video/x-raw,format=RGB"
+
+
+def _appsink_element(node_id: str) -> Dict:
+    return {
+        "nodeId": node_id,
+        "factory": "appsink",
+        "args": {
+            "name": sink_name(node_id),
+            "emit-signals": True,
+            "sync": False,
+            "max-buffers": 1,
+            "caps": BRIDGE_APPSINK_CAPS,
+        },
+    }
+
+
+def _appsrc_element(node_id: str) -> Dict:
+    return {
+        "nodeId": node_id,
+        "factory": "appsrc",
+        "args": {
+            "name": src_name(node_id),
+            "is-live": True,
+            "format": "time",
+            "block": True,
+        },
+    }
+
+
+def rewrite_document(document: Dict) -> Dict:
+    """The document with every emlpython element replaced by the
+    executor-managed appsink/appsrc pair.
+
+    The containing segment is split at the bridge: the upstream part ends
+    with the appsink (keeping the segment's ``from`` tee reference) and
+    the downstream part starts with the appsrc (carrying the segment's
+    ``linkTo`` funnel reference when it is the last part). Rendering the
+    result stays within the ``Gst.parse_launch`` dialect the executor
+    already runs. Documents without emlpython elements are returned
+    unchanged (same content).
+    """
+    rewritten = dict(document)
+    segments: List[Dict] = []
+    for segment in document.get("segments", []):
+        segments.extend(_split_segment(segment))
+    rewritten["segments"] = segments
+    return rewritten
+
+
+def _split_segment(segment: Dict) -> List[Dict]:
+    parts: List[Dict] = []
+    current = {
+        key: value
+        for key, value in segment.items()
+        if key not in ("elements", "linkTo")
+    }
+    current["elements"] = []
+    base_name = segment.get("name", "s")
+    split_index = 0
+    for element in segment.get("elements", []):
+        if element.get("factory") == BRIDGE_FACTORY:
+            node_id = element.get("nodeId")
+            current["elements"].append(_appsink_element(node_id))
+            parts.append(current)
+            split_index += 1
+            current = {
+                "name": "{0}_py{1}".format(base_name, split_index),
+                "elements": [_appsrc_element(node_id)],
+            }
+        else:
+            current["elements"].append(element)
+    if segment.get("linkTo"):
+        current["linkTo"] = segment["linkTo"]
+    elif (
+        current["elements"]
+        and current["elements"][-1].get("factory") == "appsrc"
+        and str(
+            current["elements"][-1].get("args", {}).get("name", "")
+        ).startswith("py_out_")
+    ):
+        # A trailing bridge appsrc with nothing downstream (a Custom
+        # Python node whose only consumers are executor bindings, e.g.
+        # mqtt_publish). An unlinked appsrc src pad fails the pipeline
+        # with "Internal data stream error / streaming stopped, reason
+        # not-linked" the moment the pump pushes into it — measured on
+        # jetson-thor1 once the preroll deadlock below was fixed.
+        # Terminate it so the pumped buffer has somewhere to go.
+        current["elements"].append(
+            {"nodeId": None, "factory": "fakesink", "args": {"sync": False}}
+        )
+    parts.append(current)
+    return parts
+
+
+def _artifact_handler_path(
+    node_id: Optional[str], artifact_path: str, relative: str
+) -> str:
+    """The handler path joined onto the component artifact directory.
+
+    The compiled document names the handler relative to the artifact
+    (``python/{nodeId}/handler.py``). Its real path must lie strictly
+    inside the artifact directory's real path, so an absolute path, a
+    ``..`` segment or a symlink can't make another file on the device
+    the handler. Containment is checked, not the layout. The joined
+    path is returned, not the resolved one, so a valid document keeps
+    today's handler path string.
+    """
+    if not artifact_path:
+        raise CustomPythonNodeError(
+            node_id, "component artifact directory is unknown"
+        )
+    joined = os.path.join(artifact_path, relative)
+    try:
+        root = os.path.realpath(artifact_path)
+        resolved = os.path.realpath(joined)
+    except ValueError:  # an embedded NUL can't name a file inside
+        root = resolved = None
+    if (
+        resolved is None
+        or resolved == root
+        or os.path.commonpath([root, resolved]) != root
+    ):
+        raise CustomPythonNodeError(
+            node_id,
+            "handler path '{0}' resolves outside the component artifact "
+            "directory".format(relative),
+        )
+    return joined
+
+
+def build_bridges(
+    specs: List[BridgeSpec],
+    artifact_path: str,
+    wall_clock_limit_sec: float = DEFAULT_WALL_CLOCK_LIMIT_SEC,
+    memory_limit_bytes: Optional[int] = DEFAULT_MEMORY_LIMIT_BYTES,
+) -> List[CustomPythonBridge]:
+    """One CustomPythonBridge per spec, handler paths joined onto the
+    component artifact directory and confined to it
+    (:func:`_artifact_handler_path`)."""
+    bridges = []
+    for spec in specs:
+        if not spec.handler_path:
+            raise CustomPythonNodeError(
+                spec.node_id,
+                "compiled document does not specify {0}".format(
+                    HANDLER_PATH_ARG
+                ),
+            )
+        bridges.append(
+            CustomPythonBridge(
+                node_id=spec.node_id,
+                handler_path=_artifact_handler_path(
+                    spec.node_id, artifact_path, spec.handler_path
+                ),
+                wall_clock_limit_sec=wall_clock_limit_sec,
+                memory_limit_bytes=memory_limit_bytes,
+            )
+        )
+    return bridges
+
+
+def producer_wall_clock_limit_sec() -> float:
+    """The Frame_Producer wall-clock limit: the environment override
+    when it parses as a positive number, the default otherwise
+    (Requirement 6.2)."""
+    raw = os.environ.get(PRODUCER_WALL_CLOCK_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            value = None
+        if value is not None and value > 0:
+            return value
+        logger.warning(
+            "Ignoring invalid %s=%r; using the default %.1fs",
+            PRODUCER_WALL_CLOCK_ENV, raw,
+            DEFAULT_PRODUCER_WALL_CLOCK_LIMIT_SEC,
+        )
+    return DEFAULT_PRODUCER_WALL_CLOCK_LIMIT_SEC
+
+
+def producer_memory_limit_bytes() -> Optional[int]:
+    """The Frame_Producer memory limit: the environment override when
+    it parses as a positive integer, the default otherwise
+    (Requirement 6.3)."""
+    raw = os.environ.get(PRODUCER_MEMORY_LIMIT_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = None
+        if value is not None and value > 0:
+            return value
+        logger.warning(
+            "Ignoring invalid %s=%r; using the default %d bytes",
+            PRODUCER_MEMORY_LIMIT_ENV, raw,
+            DEFAULT_PRODUCER_MEMORY_LIMIT_BYTES,
+        )
+    return DEFAULT_PRODUCER_MEMORY_LIMIT_BYTES
+
+
+def build_producer_bridge(feed, artifact_path: str) -> CustomPythonBridge:
+    """One producer bridge for a planned Python source feed, mirroring
+    :func:`build_bridges` for a single node.
+
+    ``feed`` is duck-typed: any object carrying ``node_id`` and
+    ``handler_path`` (the artifact-relative handler path) attributes —
+    the planner's ``PythonSourceFeed``. The subprocess spawn is the same
+    ``_start_locked`` path every per-frame bridge uses (interpreter, env
+    passthrough, thread caps, RLIMIT_AS preexec — Requirement 6.1),
+    under the producer limits (Requirements 6.2, 6.3).
+    """
+    handler_path = getattr(feed, "handler_path", None)
+    if not handler_path:
+        raise CustomPythonNodeError(
+            getattr(feed, "node_id", None),
+            "planned source feed does not specify a handler path",
+        )
+    return CustomPythonBridge(
+        node_id=feed.node_id,
+        handler_path=_artifact_handler_path(
+            feed.node_id, artifact_path, handler_path
+        ),
+        wall_clock_limit_sec=producer_wall_clock_limit_sec(),
+        memory_limit_bytes=producer_memory_limit_bytes(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Detections injection for stream-downstream custom nodes
+# (detection-guided-bedrock-inspection, Requirement 1.10)
+# ---------------------------------------------------------------------------
+
+#: Poll budget for the bridge pump's detections read: the marshal writes
+#: the capture record while ``emltriton`` processes the buffer — before
+#: that same buffer reaches the bridge appsink — but the broker file
+#: write may be asynchronous, so the pump waits a bounded time for the
+#: record to land (design Risk 2). Budget exhaustion is a degraded path
+#: (metadata keys absent, warning in the run log), never a failure.
+DETECTIONS_POLL_BUDGET_SEC = 2.0
+#: Interval between detections poll attempts.
+DETECTIONS_POLL_INTERVAL_SEC = 0.05
+
+
+def detection_downstream_node_ids(document: Dict) -> FrozenSet[str]:
+    """The custom-python node ids stream-downstream of a
+    ``model_inference`` element in the compiled document.
+
+    Determined from segment element order: within a segment, a bridge
+    (``emlpython``) element is downstream when an ``emltriton`` element
+    precedes it; the state propagates across segment links — a segment
+    ``from`` a tee inherits the state at the tee's position, and a
+    funnel is downstream when any segment feeding it (``linkTo``) ends
+    downstream. Computed to fixpoint so segment order in the document
+    does not matter.
+
+    Covers both ``custom_python`` and ``custom_python_preprocess``
+    nodes — the compiler emits the same ``emlpython`` factory for both.
+    """
+    segments = [
+        segment
+        for segment in (document or {}).get("segments", [])
+        if isinstance(segment, dict)
+    ]
+    downstream_nodes: set = set()
+    named_state: Dict[str, bool] = {}  # element name -> downstream there
+    link_state: Dict[str, bool] = {}  # funnel name -> a feeder is downstream
+    changed = True
+    while changed:
+        changed = False
+        for segment in segments:
+            state = bool(named_state.get(segment.get("from"), False))
+            for element in segment.get("elements", []):
+                if not isinstance(element, dict):
+                    continue
+                factory = element.get("factory")
+                if factory == BRIDGE_FACTORY and state:
+                    node_id = element.get("nodeId")
+                    if node_id is not None and node_id not in downstream_nodes:
+                        downstream_nodes.add(node_id)
+                        changed = True
+                if factory == MODEL_INFERENCE_FACTORY:
+                    state = True
+                name = (element.get("args") or {}).get("name")
+                if name:
+                    # A funnel merges streams: downstream when any
+                    # feeding segment ends downstream.
+                    state = state or bool(link_state.get(name, False))
+                    if state and not named_state.get(name, False):
+                        named_state[name] = True
+                        changed = True
+            link_to = segment.get("linkTo")
+            if link_to and state and not link_state.get(link_to, False):
+                link_state[link_to] = True
+                changed = True
+    return frozenset(downstream_nodes)
+
+
+class DetectionsInjector:
+    """Builds the per-frame metadata the bridge pump hands to custom
+    node handlers, injecting the run's Detection_List for nodes
+    stream-downstream of ``model_inference`` (Requirement 1.10).
+
+    For a downstream node the injector polls
+    ``detections.read_detections`` (via ``detections.merge_detections``)
+    up to ``poll_budget_sec`` with ``poll_interval_sec`` between
+    attempts, then merges ``detections``/``detection_count``
+    (Detection_IDs included) into the frame metadata. The Detection_List
+    is built through the **shared run-state cache** — the same ``cache``
+    dict the executor passes to its post-pipeline
+    ``detections.merge_detections`` call — so the handler and every
+    post-pipeline consumer see identical entries with identical
+    Detection_IDs (design Property 1).
+
+    Budget exhaustion is a degraded path: the metadata keys stay absent
+    and a warning lands in the run log — never a failure. Nodes NOT
+    downstream of ``model_inference`` get byte-identical metadata to
+    today's (the empty dict), with no poll and no file access.
+
+    Constructed by the executor per run (the executor owns
+    ``output_dir``/``capture_id``, the registration's graph document,
+    and the run-state cache) and handed to :func:`run_bridged_pipeline`
+    via its optional ``detections_injector`` parameter.
+    """
+
+    def __init__(
+        self,
+        downstream_node_ids,
+        output_dir: Optional[str],
+        capture_id: Optional[str],
+        graph_document: Optional[dict] = None,
+        cache: Optional[dict] = None,
+        poll_budget_sec: float = DETECTIONS_POLL_BUDGET_SEC,
+        poll_interval_sec: float = DETECTIONS_POLL_INTERVAL_SEC,
+        trigger_context: Optional[dict] = None,
+    ) -> None:
+        #: ADDITIVE: the run's Trigger_Context, handed to EVERY custom
+        #: node under metadata["trigger"] so a per-frame handler can reach
+        #: the payload that started the run — the same context (topic,
+        #: payload, payload_json, qos, timestamp) the custom_python_source
+        #: Frame_Producer already receives through produce_frame(context).
+        #: Without it a frames handler cannot resolve payload-carried
+        #: references (e.g. rendering the trigger's design image), because
+        #: the frame metadata carried only detections. ``None`` keeps the
+        #: dispatched metadata byte-identical to before.
+        self._trigger_context = trigger_context
+        self._downstream_node_ids = frozenset(downstream_node_ids or ())
+        self._output_dir = output_dir
+        self._capture_id = capture_id
+        self._graph_document = graph_document
+        #: The shared run-state cache (``detections.CACHE_KEY_DETECTIONS``):
+        #: the executor passes the SAME dict to its post-pipeline
+        #: ``merge_detections`` call, pinning ID identity (Property 1).
+        self.cache = cache if cache is not None else {}
+        self._poll_budget_sec = poll_budget_sec
+        self._poll_interval_sec = poll_interval_sec
+        self._exhausted = False
+
+    def metadata_for(self, node_id: Optional[str]) -> Dict[str, Any]:
+        """The metadata dict for one frame dispatch to ``node_id``.
+
+        Downstream nodes get ``{"detections": [...], "detection_count":
+        N}`` when the run's detections are (or become, within the poll
+        budget) readable; otherwise — and for every non-downstream
+        node — the empty dict, byte-identical to today's dispatch.
+        """
+        metadata: Dict[str, Any] = {}
+        if self._trigger_context:
+            # A shallow copy per dispatch: a handler mutating its metadata
+            # can never corrupt the run's context or another node's view.
+            metadata["trigger"] = dict(self._trigger_context)
+        if node_id not in self._downstream_node_ids:
+            return metadata
+        deadline = time.monotonic() + self._poll_budget_sec
+        while True:
+            merged = detections.merge_detections(
+                metadata,
+                self._output_dir,
+                self._capture_id,
+                self._graph_document,
+                self.cache,
+            )
+            if merged is not None:
+                return metadata
+            if self._exhausted:
+                # The budget was already spent for this run; do not
+                # stall subsequent frames (one cheap read per frame in
+                # case the record lands late).
+                return metadata
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(self._poll_interval_sec, remaining))
+        self._exhausted = True
+        logger.warning(
+            "Custom Python node '%s': the run's detections were not "
+            "readable within the %.1fs poll budget; dispatching frames "
+            "without 'detections'/'detection_count' metadata "
+            "(Requirement 1.10 degraded path)",
+            node_id,
+            self._poll_budget_sec,
+        )
+        return metadata
+
+
+# ---------------------------------------------------------------------------
+# GStreamer wiring (lazy gi import; mirrors GstPipelineManager.run_pipeline)
+# ---------------------------------------------------------------------------
+
+
+def _fed_frame_caps(launch_string: str, frame_data: Dict[str, Any]) -> str:
+    """Caps string for the fed ``appsrc``: the frame's explicit format
+    when it declares one (a Produced_Frame always does — Requirement
+    7.2), otherwise the launch string's ``caps=`` clause; the frame's
+    width/height are appended either way — the same single-frame model
+    ``GstPipelineManager.create_buffer`` implements."""
+    width = frame_data.get("width")
+    height = frame_data.get("height")
+    frame_format = frame_data.get("format")
+    if frame_format:
+        return "video/x-raw,format={0},width={1},height={2}".format(
+            frame_format, width, height
+        )
+    match = re.search(r"caps=([^!]+)", launch_string)
+    base = match.group(1).strip() if match else "video/x-raw"
+    return "{0},width={1},height={2}".format(base, width, height)
+
+
+def run_bridged_pipeline(
+    launch_string: str,
+    bridges: List[CustomPythonBridge],
+    latency_metrics=None,
+    frame_data: Optional[Dict[str, Any]] = None,
+    detections_injector: Optional[DetectionsInjector] = None,
+) -> dict:
+    """Run a rewritten launch string, pumping each appsink through its
+    node's subprocess and into the paired appsrc.
+
+    Mirrors ``GstPipelineManager.run_pipeline`` (bus watch capturing
+    errors outside the GLib callback, one-shot watchdog, tag parsing via
+    ``parse_msg``) so workflow runs with Custom_Python_Nodes inherit the
+    same error capture and emltriton tag handling. Bridge failures quit
+    the loop and re-raise as :class:`CustomPythonNodeError`, failing only
+    this run with the node identified (Requirements 9.8, 13.7).
+
+    ``frame_data`` (optional) feeds a produced frame into the run: the
+    element named ``appsrc`` — the renamed fed source — gets its caps
+    from the frame's explicit format/dims, one wrapped buffer is pushed,
+    and EOS is emitted, exactly the single-frame model
+    ``GstPipelineManager.run_pipeline`` implements (Requirement 7.4).
+    ``frame_data=None`` (every pre-existing caller) changes nothing
+    (Requirement 11.1).
+
+    ``detections_injector`` (optional) supplies the per-node frame
+    metadata: the pump asks it — before each frame dispatch — for the
+    node's metadata, injecting the run's Detection_List for custom
+    nodes stream-downstream of ``model_inference`` (Requirement 1.10).
+    ``detections_injector=None`` (every pre-existing caller) keeps the
+    dispatched metadata byte-identical to today's empty dict.
+    """
+    import gi
+
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst, GLib
+
+    from exceptions.api.gst_pipeline_exception import (
+        PipelineExecutionException,
+        PipelineSyntaxException,
+    )
+    from gi.repository.GLib import GError
+    from gstreamer.frame_stride import reconcile_to_caps_stride
+    from dda_triton.native_calls import TRITON_NATIVE_LOCK
+    from gstreamer.gst_pipeline import PIPELINE_TIMEOUT_SEC, GstPipelineManager, release_bus_watch
+
+    manager = GstPipelineManager()  # reused for its parse_msg tag parsing
+    parsed_tag_values: dict = {}
+    pipeline_error: dict = {}
+    pipeline = None
+    loop = None
+    # Released in ``finally`` (see gst_pipeline.release_bus_watch).
+    watched_bus = None
+    bus_handler_id = None
+
+    def fail(message, error=None):
+        if "message" not in pipeline_error:
+            pipeline_error["message"] = message
+            pipeline_error["error"] = error
+        if loop is not None and loop.is_running():
+            loop.quit()
+        return False  # one-shot when scheduled via GLib.idle_add
+
+    def on_message(bus, message):
+        acceptable = [
+            Gst.MessageType.ERROR,
+            Gst.MessageType.EOS,
+            Gst.MessageType.TAG,
+        ]
+        if message.type not in acceptable:
+            return
+        if message.type == Gst.MessageType.ERROR:
+            err, dbg = message.parse_error()
+            src = message.src.get_name() if message.src else "unknown"
+            logger.error("Pipeline ERROR - %s : %s", src, err.message)
+            fail(
+                "Pipeline failed with: {0}. {1}".format(
+                    err.message, dbg if dbg else ""
+                )
+            )
+            return
+        parsed_tag_values.update(
+            manager.parse_msg(message, latency_metrics=latency_metrics)
+        )
+        if message.type != Gst.MessageType.TAG:
+            loop.quit()
+
+    def make_bridge_handlers(bridge, src_element, caps_applied):
+        """The ``new-preroll`` + ``new-sample`` handler pair for one
+        bridge appsink, sharing a single pump.
+
+        BOTH signals must pump (the preroll deadlock, measured on
+        jetson-thor1): pipelines whose sinks sit downstream of a bridge
+        appsrc cannot finish prerolling until the bridge pushes a
+        buffer, but ``new-sample`` only fires in PLAYING, which the
+        pipeline cannot reach until every sink prerolls. Interrogating
+        the stalled pipeline showed it wedged in the PAUSED->PLAYING
+        async transition with un-pulled preroll samples sitting in both
+        bridge appsinks and the downstream multifilesink starved —
+        the 120 s "no EOS/ERROR" watchdog timeout every Custom Python
+        workflow hit. Pumping the preroll sample breaks the cycle; the
+        same buffer is then re-delivered as the first ``new-sample`` in
+        PLAYING, so the pump dedups on buffer identity.
+        """
+        pumped_ids = []
+
+        def pump(sample):
+            buffer = sample.get_buffer()
+            identity = (buffer.pts, buffer.offset, buffer.get_size())
+            if identity in pumped_ids:
+                return Gst.FlowReturn.OK
+            pumped_ids.append(identity)
+            del pumped_ids[:-8]  # bounded: dedup only needs recent history
+            ok, mapinfo = buffer.map(Gst.MapFlags.READ)
+            if not ok:
+                GLib.idle_add(
+                    fail,
+                    "could not map input buffer",
+                    CustomPythonNodeError(
+                        bridge.node_id, "could not map input buffer"
+                    ),
+                )
+                return Gst.FlowReturn.ERROR
+            try:
+                data = bytes(mapinfo.data)
+            finally:
+                buffer.unmap(mapinfo)
+            caps = sample.get_caps()
+            width = height = frame_format = None
+            if caps is not None and caps.get_size() > 0:
+                structure = caps.get_structure(0)
+                frame_format = structure.get_string("format")
+                has_width, value = structure.get_int("width")
+                width = value if has_width else None
+                has_height, value = structure.get_int("height")
+                height = value if has_height else None
+                if not caps_applied:
+                    src_element.set_property("caps", caps)
+                    caps_applied.append(True)
+            # Detections injection before frame dispatch (Requirement
+            # 1.10): downstream nodes get the run's Detection_List
+            # (bounded poll inside metadata_for); every other node —
+            # and every injector-less run — gets today's empty dict.
+            if detections_injector is not None:
+                frame_metadata = detections_injector.metadata_for(
+                    bridge.node_id
+                )
+            else:
+                frame_metadata = {}
+            try:
+                out_bytes, _out_meta = bridge.process_frame(
+                    data,
+                    metadata=frame_metadata,
+                    width=width,
+                    height=height,
+                    frame_format=frame_format,
+                )
+            except CustomPythonNodeError as e:
+                GLib.idle_add(fail, str(e), e)
+                return Gst.FlowReturn.ERROR
+            # Reconcile the handler's output with the NEGOTIATED caps this
+            # appsrc is pushing under, so a raw handle()-contract node that
+            # returns a tightly packed buffer against padded caps cannot push
+            # a short buffer (``_invoke_process_frame`` already writes rows
+            # back at the input's own stride, so for the process_frame
+            # contract this is a no-op returning the same object).
+            # strict=False deliberately: this site is mid-stream and a new
+            # exception here would fail runs that work today.
+            out_bytes = reconcile_to_caps_stride(
+                out_bytes,
+                caps.to_string() if caps is not None else "",
+                width,
+                height,
+                strict=False,
+            )
+            out_buffer = Gst.Buffer.new_wrapped(out_bytes)
+            out_buffer.pts = buffer.pts
+            out_buffer.dts = buffer.dts
+            out_buffer.duration = buffer.duration
+            src_element.emit("push-buffer", out_buffer)
+            return Gst.FlowReturn.OK
+
+        def on_new_preroll(sink):
+            sample = sink.emit("pull-preroll")
+            if sample is None:
+                return Gst.FlowReturn.OK
+            return pump(sample)
+
+        def on_new_sample(sink):
+            sample = sink.emit("pull-sample")
+            if sample is None:
+                return Gst.FlowReturn.OK
+            return pump(sample)
+
+        return on_new_preroll, on_new_sample
+
+    try:
+        # Start every handler subprocess first: a missing/broken handler
+        # fails the run before the pipeline ever goes to PLAYING.
+        for bridge in bridges:
+            bridge.start()
+
+        Gst.init(None)
+        try:
+            pipeline = Gst.parse_launch(launch_string)
+        except GError as e:
+            raise PipelineSyntaxException(str(e))
+        loop = GLib.MainLoop()
+
+        fed_source = None
+        fed_buffer = None
+        if frame_data:
+            # The renamed fed source (the executor names the planned
+            # feed's element ``appsrc``): explicit caps from the frame's
+            # declared format/dims, one buffer, then EOS (Req 7.4).
+            fed_source = pipeline.get_by_name("appsrc")
+            if fed_source is None:
+                raise PipelineExecutionException(
+                    "fed appsrc element missing from the pipeline"
+                )
+            # ONE caps string, used for both the property and the
+            # reconciliation, so the declared caps and the buffer layout
+            # cannot disagree.
+            fed_caps = _fed_frame_caps(launch_string, frame_data)
+            fed_source.set_property("caps", Gst.Caps.from_string(fed_caps))
+            fed_source.set_property("block", True)
+            fed_source.set_property("format", Gst.Format.TIME)
+            # Same up-front reconciliation as create_buffer: a Produced_Frame
+            # of unaligned width is tightly packed, and these caps imply
+            # GST_ROUND_UP_4 rows. The frame dict is never mutated — only the
+            # bytes handed to Gst.Buffer.new_wrapped.
+            fed_buffer = Gst.Buffer.new_wrapped(
+                reconcile_to_caps_stride(
+                    frame_data["data"],
+                    fed_caps,
+                    frame_data.get("width"),
+                    frame_data.get("height"),
+                    strict=True,
+                )
+            )
+
+        for bridge in bridges:
+            sink = pipeline.get_by_name(bridge.sink_name)
+            src = pipeline.get_by_name(bridge.src_name)
+            if sink is None or src is None:
+                raise CustomPythonNodeError(
+                    bridge.node_id,
+                    "bridge elements {0}/{1} missing from the "
+                    "pipeline".format(bridge.sink_name, bridge.src_name),
+                )
+            on_preroll, on_sample = make_bridge_handlers(bridge, src, [])
+            # BOTH signals pump (see make_bridge_handlers: the preroll
+            # deadlock). new-preroll fires during the PAUSED transition,
+            # new-sample in PLAYING; the shared dedup keeps the buffer
+            # that is delivered on both from being processed twice.
+            sink.connect("new-preroll", on_preroll)
+            sink.connect("new-sample", on_sample)
+            # Propagate upstream EOS through the bridge boundary.
+            sink.connect(
+                "eos",
+                lambda _sink, _src=src: _src.emit("end-of-stream"),
+            )
+
+        bus = pipeline.get_bus()
+        bus.add_signal_watch()
+        watched_bus = bus
+        bus_handler_id = bus.connect("message", on_message)
+
+        def _watchdog():
+            if loop.is_running():
+                fail(
+                    "Pipeline timed out after {0}s without completing "
+                    "(no EOS/ERROR received).".format(PIPELINE_TIMEOUT_SEC)
+                )
+            return False  # one-shot
+
+        watchdog_id = GLib.timeout_add_seconds(PIPELINE_TIMEOUT_SEC, _watchdog)
+
+        # emltriton initializes during this call; see TRITON_NATIVE_LOCK.
+        with TRITON_NATIVE_LOCK:
+            ret = pipeline.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            # Synchronous failure: the loop never ran, so drain any ERROR the
+            # failing element already posted to the bus (e.g. a Triton
+            # "failed to load '<model>'" / invalid-model-name error) and
+            # surface it instead of the opaque "check logs above this".
+            detail = ""
+            try:
+                err_msg = bus.timed_pop_filtered(0, Gst.MessageType.ERROR)
+                if err_msg is not None:
+                    gerror, dbg = err_msg.parse_error()
+                    src = err_msg.src.get_name() if err_msg.src else "pipeline"
+                    detail = " {0}: {1}{2}".format(
+                        src, gerror.message,
+                        " ({0})".format(dbg) if dbg else "")
+            except Exception:  # noqa: BLE001 - best-effort error enrichment
+                pass
+            try:
+                GLib.source_remove(watchdog_id)
+            except Exception:  # noqa: BLE001 - already removed
+                pass
+            if detail:
+                raise PipelineExecutionException(
+                    "Pipeline failed to change state to PLAYING -{0}".format(detail)
+                )
+            raise PipelineExecutionException(
+                "Pipeline failed to change state to PLAYING, "
+                "check logs above this."
+            )
+        if fed_source is not None:
+            fed_source.emit("push-buffer", fed_buffer)
+            fed_source.emit("end-of-stream")
+        loop.run()
+        try:
+            GLib.source_remove(watchdog_id)
+        except Exception:  # noqa: BLE001 - already removed
+            pass
+        if pipeline_error:
+            if pipeline_error.get("error") is not None:
+                raise pipeline_error["error"]
+            raise PipelineExecutionException(pipeline_error["message"])
+    finally:
+        if pipeline is not None:
+            pipeline.set_state(Gst.State.NULL)
+        release_bus_watch(watched_bus, bus_handler_id)
+        for bridge in bridges:
+            bridge.stop()
+    return parsed_tag_values

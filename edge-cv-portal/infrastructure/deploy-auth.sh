@@ -83,10 +83,11 @@ else
   export SSO_ENABLED=false
 fi
 
-# Check if CDK is installed
-if ! command -v cdk &> /dev/null; then
-  echo "Error: AWS CDK is not installed"
-  echo "Please install it with: npm install -g aws-cdk"
+# The CDK CLI comes from the project's devDependencies (installed below) and
+# runs through npx: aws-cdk-lib emits a cloud-assembly schema an older global
+# `cdk` cannot read.
+if ! command -v npx &> /dev/null; then
+  echo "Error: npx (Node.js) is not installed"
   exit 1
 fi
 
@@ -108,14 +109,14 @@ npm run build
 echo "Checking CDK bootstrap status..."
 if ! aws cloudformation describe-stacks --stack-name CDKToolkit --region "$REGION" &>/dev/null; then
   echo "CDK not bootstrapped in this region. Bootstrapping..."
-  cdk bootstrap --region "$REGION"
+  npx cdk bootstrap --region "$REGION"
 else
   echo "CDK already bootstrapped in this region"
 fi
 
 # Deploy the auth stack
 echo "Deploying EdgeCVPortalAuthStack..."
-cdk deploy EdgeCVPortalAuthStack --require-approval never
+npx cdk deploy EdgeCVPortalAuthStack --require-approval never
 
 # Display outputs
 echo ""

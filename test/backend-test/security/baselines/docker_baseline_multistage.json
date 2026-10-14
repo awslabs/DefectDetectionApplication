@@ -9,6 +9,7 @@
   ],
   "backend_jp6_stages": [
     "cuda114",
+    "trt8",
     null
   ],
   "edgemlsdk_jp5_stages": [

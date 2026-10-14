@@ -32,6 +32,7 @@ interface Props {
 export default function RemoteAccessTab({ deviceId, usecaseId }: Props) {
   const [enabled, setEnabled] = useState(false);
   const [componentVersion, setComponentVersion] = useState<string | null>(null);
+  const [maxVersion, setMaxVersion] = useState<string | null>(null);
   const [osUser, setOsUser] = useState('ggc_user');
   const [statusLoading, setStatusLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -51,6 +52,7 @@ export default function RemoteAccessTab({ deviceId, usecaseId }: Props) {
       const s = await apiService.getSshTunnelStatus(deviceId, usecaseId);
       setEnabled(s.enabled);
       setComponentVersion(s.component_version || null);
+      setMaxVersion(s.secure_tunneling_max_version || null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load tunnel status');
     } finally {
@@ -209,6 +211,16 @@ export default function RemoteAccessTab({ deviceId, usecaseId }: Props) {
             device (merged with its existing components). Allow a minute for the
             device to pull it before opening a session.
           </Box>
+
+          {maxVersion && (
+            <Alert type="info" header="Version pinned for this device">
+              This device runs JetPack 5 (GLIBC 2.31), which is incompatible with{' '}
+              <code>aws.greengrass.SecureTunneling</code> 2.0.0 and newer. The
+              portal pins it to <strong>v{maxVersion}</strong> here — the newest
+              compatible release — so enabling remote access can't break the
+              device with a version it can't run.
+            </Alert>
+          )}
 
           <div>
             <Button

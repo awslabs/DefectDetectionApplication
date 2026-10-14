@@ -186,6 +186,122 @@ def iam_statements_multiset(template):
     return counter
 
 
+def _as_list(value):
+    return value if isinstance(value, list) else [value]
+
+
+def statement_grant_atoms(stmt):
+    """Expand one IAM statement into its grant atoms: one canonical
+    ``(effect, action-key, action, resource-key, resource, condition,
+    principal)`` tuple per action x resource pair.
+
+    Two statement sets with equal atoms grant exactly the same permissions,
+    however the actions and resources are grouped into statements. ``Sid``
+    is dropped (it never changes what is granted).
+    """
+    action_key = "NotAction" if "NotAction" in stmt else "Action"
+    resource_key = "NotResource" if "NotResource" in stmt else "Resource"
+    condition = json.dumps(stmt.get("Condition"), sort_keys=True)
+    principal = json.dumps(
+        stmt.get("Principal", stmt.get("NotPrincipal")), sort_keys=True)
+    effect = stmt.get("Effect")
+    atoms = set()
+    for action in _as_list(stmt.get(action_key)):
+        for resource in _as_list(stmt.get(resource_key)):
+            atoms.add((effect, action_key, json.dumps(action, sort_keys=True),
+                       resource_key, json.dumps(resource, sort_keys=True),
+                       condition, principal))
+    return atoms
+
+
+def _policy_documents(template):
+    """Yield every IAM PolicyDocument the multiset views read, one per
+    carrier (``AWS::IAM::Policy``, ``AWS::IAM::ManagedPolicy``, inline
+    ``AWS::IAM::Role`` ``Policies``)."""
+    for res in template.get("Resources", {}).values():
+        ty = res.get("Type", "")
+        props = res.get("Properties", {})
+        if ty in ("AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"):
+            if props.get("PolicyDocument") is not None:
+                yield props["PolicyDocument"]
+        elif ty == "AWS::IAM::Role":
+            for pol in props.get("Policies", []) or []:
+                if pol.get("PolicyDocument") is not None:
+                    yield pol["PolicyDocument"]
+
+
+def _grantee(kind, ref):
+    """Canonical name of an IAM principal carrier (``Role:<logicalId>``)."""
+    if isinstance(ref, dict) and "Ref" in ref:
+        return kind + ":" + str(ref["Ref"])
+    return kind + ":" + json.dumps(ref, sort_keys=True)
+
+
+def _grantee_documents(template):
+    """Yield ``(grantees, PolicyDocument)`` for every IAM PolicyDocument
+    :func:`_policy_documents` reads. ``grantees`` is the set of principal
+    carriers the document is attached to: the ``Roles`` / ``Users`` /
+    ``Groups`` of an ``AWS::IAM::Policy`` or ``AWS::IAM::ManagedPolicy``
+    (plus every role whose ``ManagedPolicyArns`` references that managed
+    policy), or the owning role of an inline ``Policies`` entry. A document
+    attached to nothing is its own carrier, so its atoms still count."""
+    resources = template.get("Resources", {})
+    referenced_by = {}
+    for lid, res in resources.items():
+        if res.get("Type") == "AWS::IAM::Role":
+            arns = (res.get("Properties", {}) or {}).get("ManagedPolicyArns") or []
+            for arn in _as_list(arns):
+                if isinstance(arn, dict) and "Ref" in arn:
+                    referenced_by.setdefault(arn["Ref"], set()).add("Role:" + lid)
+    for lid, res in resources.items():
+        ty = res.get("Type", "")
+        props = res.get("Properties", {}) or {}
+        if ty in ("AWS::IAM::Policy", "AWS::IAM::ManagedPolicy"):
+            if props.get("PolicyDocument") is None:
+                continue
+            grantees = set(referenced_by.get(lid, ()))
+            for key, kind in (("Roles", "Role"), ("Users", "User"), ("Groups", "Group")):
+                for ref in _as_list(props.get(key) or []):
+                    grantees.add(_grantee(kind, ref))
+            yield (grantees or {"Unattached:" + lid}), props["PolicyDocument"]
+        elif ty == "AWS::IAM::Role":
+            for pol in props.get("Policies", []) or []:
+                if pol.get("PolicyDocument") is not None:
+                    yield {"Role:" + lid}, pol["PolicyDocument"]
+
+
+def iam_grant_atoms(template):
+    """Return a ``collections.Counter`` of grant atoms
+    (:func:`statement_grant_atoms`): each IAM principal (role, user or
+    group) contributes each atom it is granted once, whichever and however
+    many of its policy documents carry it, so the count is the number of
+    principals holding the grant.
+
+    This is the granularity the live-synth identity gate compares at. It is
+    stable across aws-cdk-lib releases that regroup the statements a grant
+    method emits (aws-cdk-lib >= 2.260 moves the DynamoDB stream actions
+    ``GetRecords`` / ``GetShardIterator`` out of the table-action statement
+    into a statement of their own) and across how CDK spreads a role's
+    statements over its default policy and OverflowPolicy managed policies
+    (policy minimization merges a grant that two of one role's documents
+    both carried into one), while still pinning every action granted on
+    every resource under every condition, and how many principals hold it.
+    """
+    from collections import Counter
+
+    granted = {}
+    for grantees, pd in _grantee_documents(template):
+        atoms = set()
+        for stmt in pd.get("Statement", []) or []:
+            atoms |= statement_grant_atoms(stmt)
+        for grantee in grantees:
+            granted.setdefault(grantee, set()).update(atoms)
+    counter = Counter()
+    for atoms in granted.values():
+        counter.update(atoms)
+    return counter
+
+
 def iam_statements_from_template(template):
     """Return a deterministic, canonical view of every IAM PolicyDocument in a
     synthesized CloudFormation template.

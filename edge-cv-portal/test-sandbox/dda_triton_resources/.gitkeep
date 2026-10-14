@@ -1,0 +1,6 @@
+# Staged at image build time (see ../README.md "Staging the DDA Triton
+# conversion resources"): the python-backend model templates and app
+# packages from src/backend that harness/model_staging.py copies into
+# each staged Triton model repository entry. The image builds with this
+# directory empty; model staging then fails at runtime with a clear
+# per-node error instead of a Triton crash.

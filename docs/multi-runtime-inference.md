@@ -131,6 +131,81 @@ Unchanged behavior. Keeps bundled-`libdlr.so` loading, `dlr_device_type`,
 - Requires the NVIDIA Jetson PyTorch wheel matching the JetPack — heaviest
   dependency; gate behind a build arg so DLR/ONNX-only images stay smaller.
 
+### 5.4 ONNX execution-provider visibility (Active_Provider_Record)
+
+(Spec: `model-gpu-fallback-visibility`.) ONNX Runtime's CUDA→CPU fallback is
+by design and used to be **silent**: a model whose CUDA EP failed to
+initialize served READY on CPU with no DDA-visible signal (the jetson-thor1
+Aug 14–15 device-wide outage). The provider-selection **contract in §5.2 is
+unchanged** — fallback still serves — but every `OnnxRunner` load is now
+observable:
+
+- **Active_Provider_Record.** After creating the session, the runner calls
+  `session.get_providers()` and writes `dda_active_providers.json` into the
+  **model version dir** (`base_<model>/<v>/`, the parent of the stage dir).
+  The write is **atomic** (temp file + `os.replace` in the same dir — readers
+  never see a torn file) and failure-isolated (a bookkeeping failure logs a
+  warning and never fails the load). Shape: `modelId`, `runtime`, a
+  **per-stage** map (`requestedProviders`, `activeProviders`, `gpuRequested`,
+  `gpuActive` per stage), a **model-level aggregate** (`gpuRequested` = any
+  stage requested a GPU provider; `gpuActive` = every GPU-requesting stage
+  obtained one — a single fallen-back stage degrades the model; TRT-requested
+  with CUDA-active counts as active), and `updatedAt`. Each load rewrites the
+  record for the currently loaded instance.
+
+  ```json
+  {
+    "modelId": "yolo_test",
+    "runtime": "onnx",
+    "stages": {
+      "stage_model": {
+        "requestedProviders": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        "activeProviders": ["CPUExecutionProvider"],
+        "gpuRequested": true,
+        "gpuActive": false
+      }
+    },
+    "gpuRequested": true,
+    "gpuActive": false,
+    "updatedAt": "2026-08-15T20:23:13Z"
+  }
+  ```
+
+- **Logs.** The stub logs the ACTIVE providers at INFO on **every** load, and
+  a prominent WARNING on GPU fallback (requested chain + active providers +
+  "DEGRADED on CPU until the model is reloaded") only when a GPU provider was
+  requested and none is active. CPU-by-design models (`device: "cpu"`) never
+  warn and never count as degraded.
+
+- **Status surface.** The backend (`dda_triton/provider_visibility.py`) reads
+  the record (highest integer version dir) and merges it additively into each
+  Triton entry of `GET /feature-configurations` as
+  `defaultConfiguration.executionProviderInfo` (`requestedProviders`,
+  `activeProviders`, `gpuRequested`, `gpuActive`, derived `gpuFallback`,
+  `updatedAt`).
+
+- **Device-level signal.** `GET /feature-configurations/gpu-status` aggregates
+  the records: `gpuDegraded` is true iff at least one recorded GPU-chain model
+  is loaded and **none** of them holds an active GPU provider, plus
+  `gpuChainModels` / `gpuActiveModels` counts and a per-model map. Transitions
+  log (WARNING on entering degraded, INFO on recovery).
+
+- **Cloud mirror.** The same snapshot is reported (debounced, reported-state
+  only, failure-isolated) into the `dda-model-status` **named shadow**
+  (`utils/model_status_shadow.py`), which the portal reads to render per-model
+  GPU / CPU-fallback / CPU badges and the device-level degraded alert on the
+  device detail page.
+
+- **Propagation note (absence means "no information").** The runner code is a
+  **per-model copy** staged by `model_convertor.py`, so deploying a new
+  LocalServer does NOT refresh already-deployed models: the record first
+  appears after the model component's next restart (reboot, Nucleus restart,
+  or model redeploy). Until then there is simply no
+  `dda_active_providers.json`, and every consumer treats absence as "no
+  information" — no `executionProviderInfo` field, no contribution to
+  `gpu-status` in either direction, no badge in the portal. Absence is never a
+  false signal.
+
 ## 6. Packaging changes (`model_convertor.py`)
 
 - Read `manifest["runtime"]` (default `dlr`).
@@ -168,8 +243,9 @@ sample before implementing.
     prebuilt Jetson GPU wheels target each JetPack's *native* python (3.8 on
     r35, 3.10 on r36), not the 3.9 the container uses, and PyPI's
     onnxruntime-gpu is x86_64-only.
-  - **JetPack 4: CPU only.** Its native python is 3.6 (EOL) and there is no
-    compatible cp39 GPU build path; the portal compile UI notes this.
+  - **CPU images (x86_64, generic arm64 CPU): CPU only.** They install the
+    onnxruntime CPU wheel. (JetPack 4, previously CPU-only here, is no longer
+    supported.)
   OnnxRunner auto-selects TensorRT → CUDA → CPU providers, so the same code path
   works for either wheel.
 - `torch` — Jetson wheel, **only if PyTorch runtime ships in v1**; gate behind a
@@ -445,6 +521,30 @@ Caveat: "compile to ONNX" and "package" are currently two Smart-Import steps
 export output directly into packaging is a follow-up. On-device validation
 pending.
 
+> **Amendment note** (see `.kiro/specs/onnx-compile-error-diagnostics/`): the
+> compile step's *success* path was validated end to end as stated above, but
+> its start-failure path destroyed its own diagnostics on the first status poll
+> (the poller described a fabricated job name with the wrong API and overwrote
+> the originating error). Fixed by the referenced spec, which establishes three
+> contracts: (1) `error` / `failure_reason` are **write-once with respect to
+> polling** — a poll never overwrites them, poll faults land in `poll_error`;
+> (2) a failed ONNX start writes **no** `compilation_job_name` and carries
+> `job_started: false`, so no describe call is ever issued for it; (3) every
+> `compilation_jobs` entry is routed to its describe API (training vs. Neo
+> compilation, or none) by the shared `classify_poll_kind` in the
+> `compilation_status` layer module.
+
+> **Amendment note** (see `.kiro/specs/onnx-jetson-publish-packaging/`):
+> compiled ONNX exports (`target=onnx`) now package **per-JetPack** — one
+> upload fans out to `onnx-jetson-xavier-jp5/-jp6/-jp7` entries, each ZIP
+> carrying a `runtime: "onnx"` + `runtime_artifact` manifest — and publish as
+> per-JetPack components with `aarch64` recipes and the matching
+> `LocalServer.arm64JP{N}` HARD dependency, so the compile→package→publish
+> chain above is closed for Jetson (the auto-chaining caveat no longer blocks
+> Jetson delivery). BYO ONNX imports with no explicit target list now default
+> to JetPack 5/6/**7** plus x86. ONNX is the **only** vision runtime on JP7
+> (DLR/Neo is not carried there).
+
 ## 21. RF-DETR detection architecture (DETR-family decoder)
 
 YOLO is not the only object-detection export a user may bring. RF-DETR (and the
@@ -546,3 +646,144 @@ Caveat: the RF-DETR decoder is verified against synthetic two-tensor outputs
 vary by exporter — the shape-based tensor ID handles order, but a real
 end-to-end export/device run is still pending. RF-DETR normalized-cxcywh and
 sigmoid scoring are the documented DETR-family conventions.
+
+## 22. vLLM Hugging Face weight cache (persistence & disk cleanup)
+
+HF-sourced vLLM model components cache their downloaded weights on the
+device under `HF_HOME=/aws_dda/hf_cache` (set in the `environment` of all
+three backend services in `src/docker-compose.yaml`). Because `/aws_dda`
+is a persistent read-write bind mount, the cache survives backend
+container recreation: after the first download, the post-restart reload
+(driven by the backend's vLLM reconciler, §23 — the cache by itself never
+re-issues a load) reads the weights from the local cache, with no
+re-download and no dependency on huggingface.co being reachable.
+
+### 22.1 Caches accumulate — undeployment does NOT remove them
+
+Each HF model's weights live under:
+
+```
+/aws_dda/hf_cache/hub/models--{org}--{name}
+```
+
+(e.g. `/aws_dda/hf_cache/hub/models--Qwen--Qwen2.5-VL-7B-Instruct-AWQ`,
+~6 GB for a 7B AWQ model).
+
+Component undeployment does **not** delete these caches. The model
+component's Shutdown script (`vllm_model_prep.py --cleanup`) removes only
+the staged Triton model repository under `/aws_dda/dda_triton/`, never
+the HF cache — deliberately, so a redeploy of the same model does not pay
+the full re-download again, and because safe automatic eviction would
+require cross-component reference counting (another deployed component
+may use the same HF model ID). Caches from undeployed models therefore
+accumulate under `/aws_dda/hf_cache/hub/` until removed manually.
+
+### 22.2 Manual cleanup (small-disk devices)
+
+To reclaim disk space, remove a model's cache tree **while that model is
+not deployed** (and no other deployed vLLM component references the same
+HF model ID):
+
+```bash
+rm -rf /aws_dda/hf_cache/hub/models--{org}--{name}
+```
+
+For example:
+
+```bash
+rm -rf "/aws_dda/hf_cache/hub/models--Qwen--Qwen2.5-VL-7B-Instruct-AWQ"
+```
+
+If the model is deployed again later, the first load simply re-downloads
+the weights (requires huggingface.co reachability, same as any first
+download). To see what is using space: `du -sh /aws_dda/hf_cache/hub/*`.
+
+## 23. vLLM post-restart lifecycle (reconciler + unload tombstone)
+
+(Spec: `vllm-model-reload-after-backend-restart`.) The vLLM load used to be
+a **one-shot** action: the model component's Startup
+(`vllm_model_prep.py`) stages the Triton-style repository under
+`VLLM_MODEL_DIR` and POSTs one load to the backend's runtime server, but
+the loaded engine lives **in the backend process** — recreated empty on
+every backend start. A backend restart (crash, `docker restart`, the
+awscrt abort class) therefore used to orphan every loaded model: staged on
+disk, component RUNNING, yet `models: {}` forever, every generate 409,
+status stuck "LOADING", until a human restarted the model component. That
+is fixed by a reconciler in the backend itself.
+
+### 23.1 The `Vllm_Reconciler`
+
+`src/backend/vllm_runtime/reconciler.py` (`VllmReconciler`), started by
+`app.py::start_vllm_runtime()` after the runtime server is up, as one
+daemon thread named `vllm-reconciler` (vLLM-free images — JP5 default,
+x86 — never import or construct it; their startup sequence is unchanged):
+
+- **One-shot scan.** One snapshot of the model repository at backend
+  start: models in state STAGED (explicitly unloaded / tombstoned models
+  are excluded — see §23.2), sorted by name for a deterministic order. No
+  periodic re-scan; every backend start runs a fresh one.
+- **Sequential loopback re-drive.** Each candidate load is issued through
+  the SAME loopback model-control endpoint the component Startup uses —
+  `POST http://127.0.0.1:{VLLM_RUNTIME_PORT}/v2/repository/models/{m}/load`
+  — never `manager.load()` directly, so engine construction happens on the
+  runtime server's event loop and concurrent loads (e.g. a component
+  Startup racing the reconciler on a fresh deploy) serialize to exactly
+  ONE engine construction. The state is re-checked right before each POST
+  and LOADING/READY models are skipped.
+- **Bounded retries.** `RECONCILE_RETRY_BACKOFF_SECONDS = (30, 120, 480)`
+  — 4 attempts total, ~10.5 min worst case, never a retry storm. Each
+  failed attempt applies the same KV-cache-OOM single unload→reload
+  recovery the component Startup uses. On exhaustion the model stays
+  FAILED with the retained failure reason and one prominent ERROR log
+  names the model, the reason, and that automatic retries are exhausted.
+  One model's failure never stops the scan for the others.
+
+This also makes the `vllm_model_prep.py` `LOAD_UNREACHABLE` diagnostic's
+promise — "the model **stays staged for the next LocalServer start**" —
+actually true: the staged repository always survived on disk, but before
+the reconciler nothing ever scanned it and re-issued the load. The
+reconciler is what redeems that promise (the prep script itself is
+unchanged).
+
+### 23.2 The `Unload_Tombstone` (`.dda_explicit_unload`)
+
+Reconciliation must distinguish "desired but orphaned by a restart" from
+"explicitly stopped". An explicit unload (model-control
+`POST .../unload`) writes a marker file
+`VLLM_MODEL_DIR/{model}/.dda_explicit_unload` (content is triage-only
+JSON with a UTC timestamp; its mere existence is what counts):
+
+- **Unload suppresses.** A staged-but-tombstoned model is skipped by the
+  reconciler and stays unloaded across restarts. The unload itself always
+  succeeds and frees the engine — a marker write failure is logged and
+  never fails the unload.
+- **Load / re-stage re-arms.** An explicit load clears the marker as its
+  first action, and the component Startup's atomic re-stage
+  (`shutil.rmtree` + `os.rename` directory replace) removes it wholesale
+  with the old directory — a redeploy re-arms reconciliation with zero
+  `vllm_model_prep.py` changes.
+- **`--cleanup` removes everything.** The component Shutdown's
+  `vllm_model_prep.py --cleanup` removes the staged directory, marker
+  included — nothing left staged, nothing scanned, no litter, never
+  resurrected.
+
+### 23.3 Truthful status vocabulary
+
+The status surfaces (feature-config API and the text-generation 409
+category) now tell the truth about the post-restart lifecycle:
+
+- **UNLOADED → "STOPPED".** A staged-but-tombstoned model reports the new
+  reporting-only `UNLOADED` state, mapped to the existing device status
+  vocabulary as `STOPPED` in feature-config and to the `unloaded` 409
+  category in text-generation — a generate against an explicitly unloaded
+  model fails fast instead of burning the workflow binding's 240 s poll
+  budget (the binding polls only on "loading").
+- **STAGED → "LOADING" is now guaranteed.** This mapping used to assume "a
+  load request is on the way" with no mechanism behind it after a restart.
+  It is retained because the reconciler makes it true by construction:
+  first deploy — the component Startup's load; after a restart — the
+  reconciler's re-drive; bounded time in both cases.
+- **FAILED with retained reason after exhaustion.** When the retry
+  schedule is exhausted, the model reports FAILED with the retained
+  backend failure reason — never an indefinite "LOADING" with no load in
+  flight.

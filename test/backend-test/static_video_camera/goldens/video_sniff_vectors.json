@@ -1,0 +1,155 @@
+{
+  "description": "Shared container-sniff vectors for the static-camera-video-loop spec. Both the device utils/video_loop.py and the Portal functions/video_loop.py copy must map every head_hex to expected (null = not a supported video).",
+  "vectors": [
+    {
+      "name": "ISO-BMFF ftyp isom",
+      "head_hex": "000000186674797069736f6d0000020069736f6d6d703431",
+      "expected": "MP4"
+    },
+    {
+      "name": "ISO-BMFF ftyp mp42",
+      "head_hex": "00000018667479706d703432000002006d7034326d703431",
+      "expected": "MP4"
+    },
+    {
+      "name": "ISO-BMFF ftyp M4V",
+      "head_hex": "00000018667479704d345620000002004d3456206d703431",
+      "expected": "MP4"
+    },
+    {
+      "name": "ISO-BMFF ftyp 3gp4",
+      "head_hex": "00000018667479703367703400000200336770346d703431",
+      "expected": "MP4"
+    },
+    {
+      "name": "ISO-BMFF ftyp avc1",
+      "head_hex": "00000018667479706176633100000200617663316d703431",
+      "expected": "MP4"
+    },
+    {
+      "name": "ISO-BMFF ftyp qt (QuickTime)",
+      "head_hex": "00000018667479707174202000000200717420206d703431",
+      "expected": "MOV"
+    },
+    {
+      "name": "ISO-BMFF ftyp heic (still image)",
+      "head_hex": "00000018667479706865696300000200686569636d703431",
+      "expected": null
+    },
+    {
+      "name": "ISO-BMFF ftyp mif1 (still image)",
+      "head_hex": "00000018667479706d696631000002006d6966316d703431",
+      "expected": null
+    },
+    {
+      "name": "ISO-BMFF ftyp avif (still image)",
+      "head_hex": "00000018667479706176696600000200617669666d703431",
+      "expected": null
+    },
+    {
+      "name": "ftyp with implausible box size 5",
+      "head_hex": "000000056674797069736f6d0000000000000000",
+      "expected": null
+    },
+    {
+      "name": "ftyp truncated to 10 bytes",
+      "head_hex": "00000018667479706973",
+      "expected": null
+    },
+    {
+      "name": "QuickTime leading moov atom",
+      "head_hex": "000001006d6f6f7600000000000000000000000000000000",
+      "expected": "MOV"
+    },
+    {
+      "name": "QuickTime leading wide atom",
+      "head_hex": "0000000877696465000010006d646174",
+      "expected": "MOV"
+    },
+    {
+      "name": "QuickTime leading mdat atom",
+      "head_hex": "000020006d6461740000000000000000",
+      "expected": "MOV"
+    },
+    {
+      "name": "QuickTime leading free atom",
+      "head_hex": "00000010667265650000000000000000",
+      "expected": "MOV"
+    },
+    {
+      "name": "QuickTime mdat with size 0 (to end of file)",
+      "head_hex": "000000006d6461740000000000000000",
+      "expected": "MOV"
+    },
+    {
+      "name": "QuickTime moov with implausible size 7",
+      "head_hex": "000000076d6f6f760000000000000000",
+      "expected": null
+    },
+    {
+      "name": "RIFF AVI",
+      "head_hex": "5249464600100000415649204c4953540000000000000000",
+      "expected": "AVI"
+    },
+    {
+      "name": "RIFF WAVE (audio)",
+      "head_hex": "524946460010000057415645666d74200000000000000000",
+      "expected": null
+    },
+    {
+      "name": "RIFF WEBP (image)",
+      "head_hex": "524946460010000057454250565038200000000000000000",
+      "expected": null
+    },
+    {
+      "name": "EBML DocType webm",
+      "head_hex": "1a45dfa39f4286810142f7810142f2810442f381084282847765626d4287810442858102",
+      "expected": "WEBM"
+    },
+    {
+      "name": "EBML DocType matroska",
+      "head_hex": "1a45dfa3a34286810142f7810142f2810442f381084282886d6174726f736b614287810442858102",
+      "expected": "MKV"
+    },
+    {
+      "name": "EBML magic only",
+      "head_hex": "1a45dfa3",
+      "expected": "MKV"
+    },
+    {
+      "name": "JPEG SOI",
+      "head_hex": "ffd8ffe000104a46494600010100",
+      "expected": null
+    },
+    {
+      "name": "PNG signature",
+      "head_hex": "89504e470d0a1a0a0000000d49484452",
+      "expected": null
+    },
+    {
+      "name": "BMP header",
+      "head_hex": "424d00100000000000000000000000000000",
+      "expected": null
+    },
+    {
+      "name": "GIF89a",
+      "head_hex": "47494638396110001000",
+      "expected": null
+    },
+    {
+      "name": "MPEG-TS sync bytes",
+      "head_hex": "47400010ffffffffffffffffffffffff",
+      "expected": null
+    },
+    {
+      "name": "empty",
+      "head_hex": "",
+      "expected": null
+    },
+    {
+      "name": "text",
+      "head_hex": "74686973206973206e6f74206120766964656f20617420616c6c",
+      "expected": null
+    }
+  ]
+}

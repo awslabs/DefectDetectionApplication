@@ -1,0 +1,165 @@
+# DDA backend image for the AMD64_NVIDIA target
+# (aws.edgeml.dda.LocalServer.amd64Nvidia): x86_64 hosts with the NVIDIA GPU
+# runtime. Selected by build-custom.sh via BACKEND_DOCKERFILE=Dockerfile.x86_64_nvidia
+# when the component name contains "Nvidia".
+#
+# Structure follows src/backend/Dockerfile (the CPU x86/arm64 image) with two
+# differences:
+#   * Base: nvidia/cuda cudnn-devel (Ubuntu 22.04) instead of
+#     public.ecr.aws/ubuntu/ubuntu:${OS} — full CUDA 12.6 toolkit + cuDNN 9,
+#     following the plugin-image precedent
+#     (edge-cv-portal/plugin-build-images/Dockerfile.x86_64_nvidia). Building
+#     does not require a GPU, only the toolkit; at runtime the NVIDIA
+#     Container Toolkit injects the driver libraries (docker-compose
+#     backend_generic_nvidia service).
+#   * ONNX Runtime: with ONNXRUNTIME_GPU=1 (the build-custom.sh default for
+#     this target) the prebuilt x86_64 onnxruntime-gpu wheel is installed —
+#     PyPI ships GPU wheels for x86_64 (unlike Jetson, where JP5/JP6 must
+#     build from source) — giving the OnnxRunner the CUDA/TensorRT execution
+#     providers against the base image's CUDA 12.6.
+ARG OS
+FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y software-properties-common wget build-essential cmake libffi-dev zlib1g-dev libssl-dev libsqlite3-dev gdb
+RUN apt-get update
+RUN wget https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
+RUN tar -xzf Python-3.11.9.tgz
+RUN cd Python-3.11.9 && \
+    ./configure --enable-optimizations --enable-shared && \
+    make -j$(nproc) && \
+    make install
+RUN find / -name "libpython3.11.so.1.0" -print
+RUN update-alternatives --install /usr/local/bin/python3 python3 /usr/local/bin/python3.11 1 \
+    && update-alternatives --set python3 /usr/local/bin/python3.11
+
+# NOTE: the plain x86 Dockerfile installs gcc-11 from the ubuntu-toolchain-r
+# PPA (its ${OS} base can be older than 22.04). This image's Ubuntu 22.04 base
+# already defaults to gcc-11 (installed by build-essential above), so no PPA
+# or compiler swap is needed here.
+
+RUN apt-get install --only-upgrade ncurses-base
+RUN apt-get install --only-upgrade ncurses-bin
+RUN apt-get update && apt-get install -y libb64-0d && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt ./
+COPY dda_triton/model_conversion_requirements.txt ./model_conversion_requirements.txt
+
+COPY edge_ml1_p_camera_management ./edge_ml1_p_camera_management
+COPY edgeagent ./edgeagent
+# Pre-install the PINNED awscrt==0.36.1 (the exact transitive dep of
+# awsiotsdk==1.31.0) from its official manylinux wheel. The old JetPack-4-era
+# awscrt==0.14.7 source-build (with the libcrypto.a shuffle to dodge the
+# vendored aws-lc / system OpenSSL link collision) is gone: modern awscrt
+# ships prebuilt wheels for this platform, and 0.14.7's aws-c-event-stream
+# carried the fatal "Continuation ref count has gone negative" abort that
+# crash-looped the backend over Greengrass IPC (awscrt-event-stream-crash
+# fix). --only-binary guarantees the wheel is used (no source build, no
+# OpenSSL trap). This pre-install satisfies awsiotsdk's pin so
+# prereqs_install.sh below does not re-resolve awscrt.
+RUN python3 -m pip install --no-cache-dir --only-binary :all: awscrt==0.36.1 && \
+    python3 -c "import awscrt.mqtt, awscrt.eventstream; print('awscrt wheel OK')"
+RUN ./edge_ml1_p_camera_management/prereqs_install.sh
+# Bake the pinned model conversion dependencies into the image at build time so they
+# are already present and importable at container startup, removing the need for a
+# network-dependent runtime pip install on offline/air-gapped devices.
+RUN python3.11 -m pip install --no-cache-dir -r ./model_conversion_requirements.txt
+# ── ONNX Runtime for the pluggable ONNX inference engine ───────────────────
+# The OnnxRunner in dda_triton/resources_for_copy/inference_runtimes.py imports
+# onnxruntime lazily when a model's manifest declares runtime="onnx". Two
+# modes, selected by the ONNXRUNTIME_GPU build-arg (build-custom.sh defaults
+# it to 1 for this target):
+#   * GPU (ONNXRUNTIME_GPU=1, default here): prebuilt x86_64 onnxruntime-gpu
+#     wheel. The 1.20.x line pairs with CUDA 12.x + cuDNN 9 — exactly this
+#     base image — and matches the line the JP6 source build produces
+#     (v1.20.1). PyPI no longer serves the 1.20.1 wheel, so this pins the
+#     1.20.2 patch release of the same line. No GPU is needed at build time;
+#     the CUDA/TensorRT execution providers resolve their driver libs at
+#     runtime (NVIDIA Container Toolkit).
+#   * CPU (ONNXRUNTIME_GPU=0): the same CPU wheel as the plain x86 image, for
+#     fast non-GPU rebuilds. The two packages must not coexist, so exactly one
+#     is installed.
+ARG ONNXRUNTIME_SPEC=onnxruntime==1.16.3
+ARG ONNXRUNTIME_GPU=0
+ARG ONNXRUNTIME_GPU_SPEC=onnxruntime-gpu==1.20.2
+RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
+        python3.11 -m pip install --no-cache-dir ${ONNXRUNTIME_GPU_SPEC}; \
+    else \
+        python3.11 -m pip install --no-cache-dir ${ONNXRUNTIME_SPEC}; \
+    fi
+RUN ./edge_ml1_p_camera_management/install_aravis.sh
+RUN python3.11 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
+RUN apt update -y
+# Ubuntu 22.04 ships OpenSSL 3 (libssl3, pulled in by the base); the plain x86
+# image's libssl1.1 install does not apply on this base (the package does not
+# exist in jammy). Components needing OpenSSL 1.1 get it from the edgemlsdk
+# openssl.deb installed by install_edgemlsdk.sh below.
+RUN apt update -y
+RUN apt install libexif12 libcurl4 libarchive13 gstreamer1.0-tools gstreamer1.0-libav ffmpeg -y
+
+RUN find / -name "libpython3.11.so.1.0" -print
+
+RUN apt clean -y
+
+COPY app.py ./
+COPY logging.conf ./
+COPY dao ./dao
+COPY utils ./utils
+# Verify Nvidia CSI config is correct
+RUN echo "Verifying Nvidia CSI configuration..." && \
+    grep -A 5 "Nvidia CSI" ./utils/config/default_camera_configurations.json && \
+    echo "Config verification complete"
+COPY metrics ./metrics
+COPY model ./model
+COPY mqtt ./mqtt
+COPY resources ./resources
+COPY gstreamer ./gstreamer
+COPY triggers ./triggers
+COPY exceptions ./exceptions
+COPY snapshot ./snapshot
+COPY defect_detection_config ./defect_detection_config
+COPY dda_logging ./dda_logging
+COPY endpoints ./endpoints
+COPY data_models ./data_models
+COPY camera_discovery ./camera_discovery
+COPY camera_sync ./camera_sync
+COPY workflow_engine ./workflow_engine
+# rtsp-rtmp-stream-cameras: the Stream_Ingest_Service package. A new module
+# needs its own COPY: resources/accessors/image_source_accessor.py imports it
+# at module load, so without this line the backend cannot start.
+COPY stream_ingest ./stream_ingest
+# vllm-triton-inference (Requirements 4.1, 8.7): the companion vLLM runtime
+# package. Every new src/backend module needs a COPY line here — missing ones
+# have caused startup regressions (endpoints/text_generation.py imports
+# vllm_runtime.manager at module load). The other modules this feature adds
+# ride existing COPYs: endpoints/text_generation.py (COPY endpoints),
+# workflow_engine/llm_inference.py + vendored catalog (COPY workflow_engine),
+# dda_triton/vllm_model_prep.py (COPY dda_triton),
+# utils/feature_configs_utils.py (COPY utils), app.py (COPY app.py).
+COPY vllm_runtime ./vllm_runtime
+COPY local_auth ./local_auth
+COPY user_accounts_sync ./user_accounts_sync
+COPY alembic ./alembic
+COPY alembic.ini ./
+COPY dda_triton ./dda_triton
+COPY lyra_anomalies_mask_utils ./lyra_anomalies_mask_utils
+COPY lyra_science_processing_utils ./lyra_science_processing_utils
+CMD ["python3.11", "app.py"]
+
+# Temporary to fix CVE-2024-24806 and CVE-2024-0553 until slim-buster base image is fixed
+RUN apt-get update \
+    # Install build tools (if needed for compiling)
+    && apt-get install -y --no-install-recommends build-essential \
+    # Install tools for managing libraries
+    libgnutls28-dev libuv1 \
+    # Clean up to reduce image size
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+## TODO: Remove copy edgemlsdk files here. Change to direct build in Docker
+# To test and build - Copy artifacts file to /src/backend/edgemlsdk
+COPY edgemlsdk ./edgemlsdk
+RUN ./edge_ml1_p_camera_management/install_edgemlsdk.sh
+COPY dlr_disable_phone_home.py ./
+RUN python3.11 dlr_disable_phone_home.py
+
+#TODO:change to user to scope the permission. Currently needed to persist the TinyDB data
+USER root

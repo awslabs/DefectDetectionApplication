@@ -20,6 +20,7 @@ import { ImageSourceType } from "../types";
 import { NAME_REGEX } from "../../regex";
 import { DESCRIPTION_MAX, NAME_MAX } from "components/form/constants";
 import { PATH_MAX } from "../constants";
+import { streamSchemaFields } from "../stream/streamForm";
 
 export const schema = yup.object({
   type: yup.mixed<ImageSourceType>().oneOf(Object.values(ImageSourceType)),
@@ -47,5 +48,7 @@ export const schema = yup.object({
           `Folder path is too long. A folder path can have a maximum of ${PATH_MAX} characters.`,
         ),
   }),
+  // RTSP/RTMP cameras (rtsp-rtmp-stream-cameras Requirement 4.1).
+  ...streamSchemaFields,
 });
 export type SchemaType = yup.InferType<typeof schema>;

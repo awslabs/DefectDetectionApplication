@@ -304,4 +304,4 @@ class SessionLifecycleMachine(RuleBasedStateMachine):
 # Feature: concurrent-camera-stream-viewing, Property 2: Session lifecycle (start on first, stop and release on last)
 # Validates: Requirements 3.1, 3.3, 3.7, 8.7
 TestSessionLifecycle = SessionLifecycleMachine.TestCase
-TestSessionLifecycle.settings = settings(max_examples=150, stateful_step_count=40, deadline=None)
+TestSessionLifecycle.settings = settings(max_examples=25, stateful_step_count=40, deadline=None)

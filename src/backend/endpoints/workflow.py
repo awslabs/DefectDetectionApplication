@@ -53,7 +53,8 @@ from metrics.collector import Timer
 from utils.camera_manager import get_camera_frame
 from utils.common import DIOProcessHealthStatusEnum
 from resources.accessors.image_source_accessor import ImageSourceAccessor
-from model.image_source import ImageSourceType
+from model.image_source import ImageSourceType, is_stream_source_type
+from model.stream_source import CLASSIC_PIPELINE_REJECTION
 from metrics.latency_metrics import LatencyMetrics
 from endpoints.route.access_log_router import get_api_router
 from utils.server_setup import workflow_metadata_accessor
@@ -68,6 +69,51 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def validate_model_readiness(workflow):
+    """Reject a run whose Triton model is not ready, naming the model.
+
+    Bugfix: `.kiro/specs/cold-model-first-run-failure/` (Requirements 2.1,
+    2.3; design.md Decision 6 — one helper, both run paths).
+
+    Nothing on this path read model state, and `emltriton` enqueues the load
+    then checks readiness on the very next line with no wait, so a run
+    against a converted-but-still-loading model failed the GStreamer state
+    change and reported only "Pipeline failed to change state to PLAYING",
+    steering the operator toward a phantom pipeline bug.
+
+    Raises 503 — the same status this module's other unavailability guard
+    uses — with a detail naming the model and its state. Waiting happens
+    inside the gate; only a timeout or a terminal state reaches here.
+    """
+    configurations = workflow.get("featureConfigurations")
+    if not configurations:
+        return
+    model_name = (configurations[0] or {}).get("modelName")
+    if not model_name:
+        return
+
+    try:
+        from dda_triton.model_readiness import ensure_model_ready
+    except Exception:  # noqa: BLE001 - gate plumbing must not block a run
+        logger.exception(
+            "Triton readiness gate unavailable; continuing without it"
+        )
+        return
+
+    try:
+        outcome = ensure_model_ready(model_name, model_name)
+    except Exception:  # noqa: BLE001 - see above
+        logger.exception(
+            "Triton readiness check raised for model %s; continuing without "
+            "it", model_name
+        )
+        return
+
+    if not outcome.ready:
+        logger.error("Refusing to run the workflow: %s", outcome.message)
+        raise HTTPException(status_code=503, detail=outcome.message)
 
 
 def validate_workflow_requirements(workflow):
@@ -119,23 +165,67 @@ def configure_image_source_and_run_pipeline(workflow:Workflow, db: Session, late
     ## DD-18130: Add support for smart cameras
     elif image_source_dict.get("type") == ImageSourceType.ICAM or image_source_dict.get("type") == ImageSourceType.NVIDIA_CSI:
         return gst_pipeline_executor.execute_workflow_pipeline(workflow, db, latency_metrics=latency_metrics)
+    elif is_stream_source_type(image_source_dict.get("type")):
+        # rtsp-rtmp-stream-cameras Requirement 4.8 (the configuration is
+        # already rejected; this guards a record that predates the check).
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=CLASSIC_PIPELINE_REJECTION)
     return "", {}
 
+def _identifier(source, key):
+    """Best-effort id lookup on a dict-or-model. Safe to call from an except
+    block: it never raises, so it cannot mask the failure being reported."""
+    if source is None:
+        return None
+    try:
+        if hasattr(source, "get"):
+            return source.get(key)
+        return getattr(source, key, None)
+    except Exception:
+        return None
+
 def save_full_inference_result(inference_result, workflow):
-    with Timer(metric_name="InferenceResultStoringTime"):
-        if inference_result.get("image"):
-            del inference_result["image"]
-        inference_result["captureType"] = INFERENCE
-        db_inference_res = inference_results_utils.convert_inference_res_to_save_in_db(inference_result, workflow)
-        with SessionLocal() as session:
-            inference_result_accessor.store_inference_result(session, db_inference_res)
+    """Persist a completed inference result.
+
+    Runs as a FastAPI BackgroundTask AFTER the response has already been sent, so
+    a failure here can never reach the caller. Log it at ERROR naming the
+    workflow and the capture, then swallow it: letting it escape the background
+    task anonymously is how a persistence failure stayed invisible.
+    """
+    workflow_id = _identifier(workflow, "workflowId")
+    capture_id = _identifier(inference_result, "captureId")
+    try:
+        with Timer(metric_name="InferenceResultStoringTime"):
+            if inference_result.get("image"):
+                del inference_result["image"]
+            inference_result["captureType"] = INFERENCE
+            db_inference_res = inference_results_utils.convert_inference_res_to_save_in_db(inference_result, workflow)
+            with SessionLocal() as session:
+                inference_result_accessor.store_inference_result(session, db_inference_res)
+    except Exception as err:
+        logger.error(
+            "Failed to store inference result for workflow %s, capture %s: %s",
+            workflow_id, capture_id, err, exc_info=True
+        )
 
 def read_full_results_and_save(workflow, db, trigger_timestamp, capture_id, latency_metrics):
-    result = read_inference_result(workflow, capture_id)
-    latency_metrics.commit_timestamps(db, result["captureId"])
-    total_processing_time = (latency_metrics.get_timestamp(INFERENCE_RECEIVED_TIMESTAMP) - trigger_timestamp) * 1000
-    result["processingTime"] = total_processing_time
-    save_full_inference_result(result, workflow)
+    """Read the full inference result and persist it.
+
+    The returnPartialResultsEarly background task. Same contract as
+    save_full_inference_result: the response is already sent, so a failure is
+    logged identifiably and swallowed rather than escaping anonymously.
+    """
+    workflow_id = _identifier(workflow, "workflowId")
+    try:
+        result = read_inference_result(workflow, capture_id)
+        latency_metrics.commit_timestamps(db, result["captureId"])
+        total_processing_time = (latency_metrics.get_timestamp(INFERENCE_RECEIVED_TIMESTAMP) - trigger_timestamp) * 1000
+        result["processingTime"] = total_processing_time
+        save_full_inference_result(result, workflow)
+    except Exception as err:
+        logger.error(
+            "Failed to read and store inference result for workflow %s, capture %s: %s",
+            workflow_id, capture_id, err, exc_info=True
+        )
 
 @router.post("/workflows/{workflow_id}/run")
 async def run_inference_for_stream(
@@ -152,6 +242,16 @@ async def run_inference_for_stream(
 
     workflow = workflow_accessor.get_workflow_by_id(workflow_id, db)
     validate_workflow_requirements(workflow)
+
+    # Triton readiness gate (cold-model-first-run-failure Requirements 2.1,
+    # 2.2, 2.3). Runs BEFORE the pipeline is built, which is what fixes both
+    # reported harms on this path: the operator gets an error naming the
+    # model and its state instead of the generic "Pipeline failed to change
+    # state to PLAYING", and because the run never reaches
+    # `execute_workflow_pipeline`'s catch-all, a folder-source image is no
+    # longer moved to failed/ by a transient not-ready condition
+    # (design.md Decision 7 — fixed by ordering, not by a special case).
+    validate_model_readiness(workflow)
 
     # Run inference if workflow configures a model
     if workflow.get("featureConfigurations"):
@@ -197,6 +297,8 @@ async def run_inference_for_stream(
                 status_code=HTTP_400_BAD_REQUEST,
                 detail=f"Server cannot start capture task for folder type image source",
             )
+        if is_stream_source_type(image_source_dict.get("type")):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=CLASSIC_PIPELINE_REJECTION)
 
         # Add capture task
         image_count = data.get("captureImageCount")

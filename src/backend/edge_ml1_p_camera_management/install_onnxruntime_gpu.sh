@@ -22,14 +22,15 @@
 # JetPack's *native* python (3.8 on JP5/r35, 3.10 on JP6/r36), not the 3.9 the
 # DDA backend container is standardized on. PyPI's onnxruntime-gpu wheels are
 # x86_64-only. So a GPU build for aarch64 + the container cp3xx must be compiled here. The
-# build links against the CUDA/cuDNN/TensorRT that ship in the l4t-jetpack base
-# image, so the resulting wheel matches the device runtime.
+# build links against the CUDA/cuDNN/TensorRT that ship in the container base
+# image (l4t-jetpack on JP5/JP6; the CUDA 13 noble base plus pinned dev
+# packages on JP7), so the resulting wheel matches the device runtime.
 #
 # This is a LONG build (~1-2 h, RAM-hungry). It is gated in the Dockerfiles by
 # the ONNXRUNTIME_GPU build-arg so routine/CPU builds stay fast.
 #
 # Required env:
-#   JETPACK_MAJOR        5 | 6   (selects ORT version + CUDA arch defaults)
+#   JETPACK_MAJOR        5 | 6 | 7   (selects ORT version + CUDA arch defaults)
 # Optional env (override the per-JetPack defaults):
 #   ONNXRUNTIME_VERSION  git tag of onnxruntime to build (e.g. v1.16.3)
 #   CUDA_ARCHITECTURES   semicolon list (e.g. "72;87")
@@ -40,30 +41,46 @@ set -e
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-# Build against the DDA container interpreter. After update-alternatives, the
-# python3 alternative points at PYTHON_VERSION (default 3.11), so the produced
-# wheel is tagged for whatever python the container actually runs (cp3xx).
+# Build against the interpreter selected by PYBIN. The build step below runs
+# ORT's build driver under ${PYBIN} directly, so the produced wheel is tagged
+# (cp3xx) for exactly this interpreter — regardless of where the python3
+# alternative points. Default: python3 (JP5/x86 behavior unchanged).
 PYBIN="${PYBIN:-python3}"
 JETPACK_MAJOR="${JETPACK_MAJOR:-}"
 CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 
 # ── Per-JetPack defaults (verified pairings) ───────────────────────────────
-#  JP5 (L4T r35): CUDA 11.4, TensorRT 8.5.2 -> onnxruntime 1.16.3.
-#                 Xavier (sm_72) + Orin (sm_87).
-#  JP6 (L4T r36): CUDA 12.2, TensorRT 8.6   -> onnxruntime 1.17.1
-#                 (first series with solid CUDA-12 support). Orin (sm_87).
+#  JP5 (L4T r35):   CUDA 11.4, TensorRT 8.5.2 -> onnxruntime 1.16.3.
+#                   Xavier (sm_72) + Orin (sm_87).
+#  JP6 (L4T r36.4): CUDA 12.6, TensorRT 10.3, cuDNN 9.3 -> onnxruntime 1.20.1
+#                   (ORT TRT-EP matrix: 1.17 supports only TRT 8.6; TRT-10
+#                   support starts at 1.18; the 1.20 line pairs with TRT 10.x
+#                   + CUDA 12.0-12.6 + cuDNN 9 — the last line whose CUDA
+#                   range matches the r36.4 base). Orin (sm_87).
+#  JP7 (L4T r38.x): CUDA 13.0, TensorRT 10.13, cuDNN 9.x -> onnxruntime 1.23
+#                   line (the first line with CUDA 13 build support; v1.23.2
+#                   is its latest patch tag). Thor (sm_110).
 case "$JETPACK_MAJOR" in
     5)
         ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.16.3}"
         CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-72;87}"
         ;;
     6)
-        ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.17.1}"
+        ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.20.1}"
         CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-87}"
         ;;
+    7)
+        ONNXRUNTIME_VERSION="${ONNXRUNTIME_VERSION:-v1.23.2}"
+        CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES:-110}"
+        # CUDA 13 deprecates longlong4 (use longlong4_16a/_32a); ORT
+        # v1.23.2's bert attention kernels still reference it and the CI
+        # build treats deprecation warnings as errors. JP7-only.
+        ORT_EXTRA_BUILD_FLAGS="--compile_no_warning_as_error"
+        ;;
     *)
-        echo "ERROR: JETPACK_MAJOR must be 5 or 6 (got '${JETPACK_MAJOR}')." >&2
-        echo "       GPU onnxruntime is not supported on JetPack 4." >&2
+        echo "ERROR: JETPACK_MAJOR must be 5, 6 or 7 (got '${JETPACK_MAJOR}')." >&2
+        echo "       GPU onnxruntime is built for JetPack 5/6/7 only; the CPU images" >&2
+        echo "       (x86_64, generic arm64) use the onnxruntime CPU wheel." >&2
         exit 1
         ;;
 esac
@@ -84,8 +101,8 @@ echo "   build jobs        : ${ORT_BUILD_JOBS}"
 echo "=========================================================="
 
 if [ ! -d "${CUDA_HOME}" ]; then
-    echo "ERROR: CUDA toolkit not found at ${CUDA_HOME}. The l4t-jetpack base" >&2
-    echo "       image is required (it ships CUDA/cuDNN/TensorRT dev files)." >&2
+    echo "ERROR: CUDA toolkit not found at ${CUDA_HOME}. The base image must" >&2
+    echo "       provide the CUDA toolkit development files (cuda-toolkit)." >&2
     exit 1
 fi
 
@@ -101,7 +118,7 @@ TENSORRT_HOME="${TENSORRT_HOME:-/usr}"
 if ! ls /usr/include/aarch64-linux-gnu/NvInfer.h >/dev/null 2>&1 \
    && ! ls /usr/include/NvInfer.h >/dev/null 2>&1; then
     echo "ERROR: TensorRT headers (NvInfer.h) not found. The base image must" >&2
-    echo "       include the TensorRT dev package (l4t-jetpack does)." >&2
+    echo "       include the TensorRT dev package (libnvinfer-dev)." >&2
     exit 1
 fi
 
@@ -129,7 +146,8 @@ fi
 # defaults gcc to gcc-11, so for JetPack 5 we install gcc-10 and point nvcc at
 # it via CMAKE_CUDA_HOST_COMPILER, leaving the image's host gcc-11 untouched
 # (only nvcc's host compiler changes). JetPack 6 (CUDA 12.2) supports gcc-11,
-# so it needs no override.
+# and JetPack 7 (CUDA 13.0) supports noble's default gcc-13, so neither needs
+# an override.
 CUDA_HOST_COMPILER_DEFINE=""
 if [ "${JETPACK_MAJOR}" = "5" ]; then
     echo "JetPack 5 / CUDA 11.4: installing gcc-10 for nvcc host compiler"
@@ -174,7 +192,7 @@ if [ -f cmake/deps.txt ]; then
         EIGEN_NAME=$(echo "${EIGEN_LINE}" | cut -d';' -f1)
         EIGEN_URL=$(echo "${EIGEN_LINE}" | cut -d';' -f2)
         echo "Re-pinning eigen hash from ${EIGEN_URL}"
-        if wget -q -O /tmp/eigen_dep.zip "${EIGEN_URL}"; then
+        if wget -q --tries=5 --waitretry=30 --retry-on-http-error=429,500,502,503 -O /tmp/eigen_dep.zip "${EIGEN_URL}"; then
             EIGEN_SHA=$(sha1sum /tmp/eigen_dep.zip | cut -d' ' -f1)
             rm -f /tmp/eigen_dep.zip
             sed -i "s|^${EIGEN_NAME};.*|${EIGEN_NAME};${EIGEN_URL};${EIGEN_SHA}|" cmake/deps.txt
@@ -186,17 +204,26 @@ if [ -f cmake/deps.txt ]; then
 fi
 
 # ── Build: Release wheel with CUDA + TensorRT execution providers ──────────
-# --build_wheel produces a pip-installable .whl tagged for the active python
-# (cp3xx for the container python). CMAKE_CUDA_ARCHITECTURES restricts codegen to the target Jetson SoC(s)
+# --build_wheel produces a pip-installable .whl tagged (cp3xx) for the python
+# that runs the build driver. ORT's ./build.sh is a thin wrapper that invokes
+# `python3 tools/ci_build/build.py "$@"` — i.e. whatever the python3
+# alternative points at, which on JP6 is the 3.10 DDA interpreter, NOT
+# necessarily ${PYBIN}. Run the driver under ${PYBIN} directly so the wheel's
+# tag always matches the interpreter we install into below. Pass the same
+# --build_dir the wrapper would have injected (build/Linux) so the wheel
+# lands where the install step below expects it.
+# CMAKE_CUDA_ARCHITECTURES restricts codegen to the target Jetson SoC(s)
 # to keep build time/size down.
 echo "Building (this is the long step)..."
-./build.sh \
+${PYBIN} ./tools/ci_build/build.py \
+    --build_dir build/Linux \
     --config Release \
     --update --build \
     --parallel "${ORT_BUILD_JOBS}" \
     --build_wheel \
     --skip_tests \
     --allow_running_as_root \
+    ${ORT_EXTRA_BUILD_FLAGS:-} \
     --use_cuda --cuda_home "${CUDA_HOME}" --cudnn_home "${CUDNN_HOME}" \
     --use_tensorrt --tensorrt_home "${TENSORRT_HOME}" \
     --cmake_extra_defines \
@@ -205,7 +232,7 @@ echo "Building (this is the long step)..."
         ${CUDA_HOST_COMPILER_DEFINE} \
         onnxruntime_BUILD_UNIT_TESTS=OFF
 
-# ── Install the produced wheel into python3.9 ──────────────────────────────
+# ── Install the produced wheel into the ${PYBIN} interpreter ───────────────
 WHL=$(ls build/Linux/Release/dist/onnxruntime_gpu-*-cp*-*aarch64*.whl 2>/dev/null | head -1)
 if [ -z "${WHL}" ]; then
     echo "ERROR: build produced no aarch64 onnxruntime_gpu wheel." >&2

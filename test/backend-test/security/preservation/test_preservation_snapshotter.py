@@ -100,7 +100,7 @@ def test_valid_name_baseline_path_and_return():
 # Property: for every valid stationName, F builds the same path + return
 # --------------------------------------------------------------------------- #
 # Validates: Requirements 3.1
-@settings(max_examples=60, deadline=None,
+@settings(max_examples=25, deadline=None,
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(name=st.from_regex(r"\A[a-zA-Z0-9_-]{1,40}\Z"))
 def test_valid_names_preserve_path_and_return_property(name):

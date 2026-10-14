@@ -10,6 +10,13 @@ WARNINGS=()
 # Get the Ubuntu release version
 UBUNTU_VERSION=$(lsb_release -rs)
 
+# JetPack 4 / Ubuntu 18.04 hosts are no longer supported; stop before any
+# provisioning step runs (the oldest supported release is Ubuntu 20.04).
+if [ "$UBUNTU_VERSION" = "18.04" ]; then
+    echo "❌ Ubuntu 18.04 (JetPack 4) is no longer supported by DDA; use Ubuntu 20.04 or newer." >&2
+    exit 1
+fi
+
 # Helper function to run commands with logging
 run_cmd() {
     local cmd="$@"
@@ -35,6 +42,69 @@ add_warning() {
     WARNINGS+=("$1")
     echo "⚠️  $1" | tee -a "$LOG_FILE"
 }
+
+# --- apt/dpkg lock resilience -------------------------------------------------
+# On a freshly imaged device (JetPack first boot), unattended-upgrades typically
+# holds the apt/dpkg locks for several minutes. A plain `apt-get install` then
+# fails with "Could not get lock /var/lib/dpkg/lock-frontend", which previously
+# marked an otherwise-healthy setup as failed (an immediate second run
+# succeeded). Rationale: requirements.md has no criterion covering transient
+# apt-lock resilience; this hardening addresses that observed first-boot
+# failure directly.
+
+APT_LOCK_FILES="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock"
+APT_LOCK_TIMEOUT="${APT_LOCK_TIMEOUT:-300}"   # max seconds to wait for the locks
+APT_LOCK_POLL_INTERVAL=5                       # seconds between lock probes
+
+# Returns 0 if any apt/dpkg lock is currently held by another process.
+apt_lock_held() {
+    # Without fuser we cannot probe the locks; assume free and let apt decide.
+    if ! command -v fuser >/dev/null 2>&1; then
+        return 1
+    fi
+    local lock
+    for lock in $APT_LOCK_FILES; do
+        if [ -e "$lock" ] && fuser "$lock" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Waits up to APT_LOCK_TIMEOUT (~5 minutes) for the apt/dpkg locks to be
+# released, printing periodic progress so the operator knows the script is
+# waiting on unattended-upgrades rather than hung. Returns 0 once free, 1 on
+# timeout (callers proceed anyway and let the apt operation itself fail).
+apt_wait_for_lock() {
+    local waited=0
+    while apt_lock_held; do
+        if [ "$waited" -ge "$APT_LOCK_TIMEOUT" ]; then
+            echo "⚠️  apt/dpkg lock still held after ${APT_LOCK_TIMEOUT}s — proceeding anyway" | tee -a "$LOG_FILE"
+            return 1
+        fi
+        if [ $((waited % 30)) -eq 0 ]; then
+            echo "⏳ Waiting for apt/dpkg lock (likely first-boot unattended-upgrades)... ${waited}s elapsed" | tee -a "$LOG_FILE"
+        fi
+        sleep "$APT_LOCK_POLL_INTERVAL"
+        waited=$((waited + APT_LOCK_POLL_INTERVAL))
+    done
+    return 0
+}
+
+# Wrapper for apt operations: wait for the locks, run the command, and on
+# failure re-wait and retry once before reporting failure. Usage mirrors
+# run_cmd: apt_run "apt-get install -y <pkgs>"
+apt_run() {
+    local cmd="$*"
+    apt_wait_for_lock
+    if run_cmd "$cmd"; then
+        return 0
+    fi
+    echo "⚠️  apt operation failed — waiting for apt/dpkg lock and retrying once: $cmd" | tee -a "$LOG_FILE"
+    apt_wait_for_lock
+    run_cmd "$cmd"
+}
+# ------------------------------------------------------------------------------
 
 # Resolve AWS credentials into this shell's environment for tools that use the
 # AWS SDK default provider chain (the Greengrass Java provisioner, and every
@@ -184,14 +254,14 @@ check_mandatory_deps() {
     echo "▶ Checking mandatory dependencies..."
     
     # Update package manager first
-    if ! run_cmd "apt-get update"; then
+    if ! apt_run "apt-get update"; then
         add_warning "Failed to update package manager"
     fi
     
     # Java
     if ! check_command java; then
         echo "Installing Java..."
-        if ! run_cmd "apt-get install -y default-jdk"; then
+        if ! apt_run "apt-get install -y default-jdk"; then
             add_error "Failed to install Java"
             return 1
         else
@@ -204,7 +274,7 @@ check_mandatory_deps() {
     # curl
     if ! check_command curl; then
         echo "Installing curl..."
-        if ! run_cmd "apt-get install -y curl"; then
+        if ! apt_run "apt-get install -y curl"; then
             add_error "Failed to install curl"
             return 1
         else
@@ -217,7 +287,7 @@ check_mandatory_deps() {
     # unzip
     if ! check_command unzip; then
         echo "Installing unzip..."
-        if ! run_cmd "apt-get install -y unzip"; then
+        if ! apt_run "apt-get install -y unzip"; then
             add_error "Failed to install unzip"
             return 1
         else
@@ -256,7 +326,7 @@ fi
 # Check mandatory dependencies
 check_mandatory_deps
 
-# Function to install from source for Ubuntu 18.04
+# Function to install Python 3.11 from source (Ubuntu 20.04, and the PPA fallback)
 install_from_source() {
   # Check for python3.11 specifically
   if command -v python3.11 >/dev/null 2>&1; then
@@ -275,12 +345,12 @@ install_from_source() {
 
   # Install build dependencies
   echo "Installing build dependencies..."
-  if ! run_cmd "apt update"; then
+  if ! apt_run "apt update"; then
     add_error "Failed to update package manager"
     return 1
   fi
   
-  if ! run_cmd "apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget"; then
+  if ! apt_run "apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev wget"; then
     add_error "Failed to install build dependencies"
     return 1
   fi
@@ -352,15 +422,15 @@ install_from_source() {
 
 # Function to install from deadsnakes PPA
 install_from_ppa() {
-  echo "Ubuntu version is not 18.04. Installing Python 3.11 from the deadsnakes PPA."
+  echo "Installing Python 3.11 from the deadsnakes PPA."
 
   # Add the deadsnakes PPA
-  if ! run_cmd "apt update"; then
+  if ! apt_run "apt update"; then
     add_error "Failed to update package manager"
     return 1
   fi
   
-  if ! run_cmd "apt install -y software-properties-common"; then
+  if ! apt_run "apt install -y software-properties-common"; then
     add_error "Failed to install software-properties-common"
     return 1
   fi
@@ -371,17 +441,17 @@ install_from_ppa() {
   fi
 
   # Install Python 3.11
-  if ! run_cmd "apt update"; then
+  if ! apt_run "apt update"; then
     add_error "Failed to update package manager after adding PPA"
     return 1
   fi
   
-  if ! run_cmd "apt install -y python3.11"; then
+  if ! apt_run "apt install -y python3.11"; then
     add_error "Failed to install Python 3.11 from PPA"
     return 1
   fi
   
-  run_cmd "apt install python3.11-venv -y" || add_warning "Failed to install python3.11-venv"
+  apt_run "apt install python3.11-venv -y" || add_warning "Failed to install python3.11-venv"
 
   echo "✓ Python 3.11 installed successfully from the deadsnakes PPA."
 }
@@ -506,11 +576,11 @@ echo ""
 
 echo "▶ Installing additional system packages..."
 
-if ! run_cmd "apt-get update"; then
+if ! apt_run "apt-get update"; then
     add_warning "Failed to update package manager"
 fi
 
-if ! run_cmd "apt-get install ca-certificates gnupg lsb-release zip -y"; then
+if ! apt_run "apt-get install ca-certificates gnupg lsb-release zip -y"; then
     add_warning "Failed to install additional system packages"
 fi
 
@@ -534,15 +604,15 @@ fi
 echo ""
 
 echo "▶ Installing Python 3.11..."
-# The deadsnakes PPA has NO prebuilt python3.11 for Ubuntu 18.04 (bionic, JP4)
-# or 20.04 (focal, JP5) on arm64 (Jetson) — it only ships arm64 packages for
-# 22.04 (jammy, JP6). So build from source on 18.04/20.04 and use the PPA only
+# The deadsnakes PPA has NO prebuilt python3.11 for Ubuntu 20.04 (focal: JP5
+# and arm64 CPU hosts) on arm64 — it only ships arm64 packages for 22.04+
+# (jammy, JP6). So build from source on 20.04 and use the PPA only
 # on 22.04+ (with a source-build fallback if the PPA install fails, e.g. on an
-# unexpected arch/release). In every case the SYSTEM python3 is left unchanged —
+# unexpected arch/release). In every case, do NOT change the system python3 —
 # apt and other OS tools depend on it and its C extensions (apt_pkg, etc.);
-# python3.11 is installed alongside it.
+# python3.11 is installed alongside it, leaving the SYSTEM python3 unchanged.
 case "$UBUNTU_VERSION" in
-  18.04|20.04)
+  20.04)
     echo "Detected Ubuntu $UBUNTU_VERSION - building Python 3.11 from source (deadsnakes has no prebuilt 3.11 for this release/arch)..."
     if ! install_from_source; then
       add_error "Python 3.11 installation from source failed"
@@ -568,7 +638,7 @@ if [ -x /usr/local/bin/python3.11 ] && [ ! -e /usr/bin/python3.11 ]; then
 fi
 echo "✓ Python 3.11 available as python3.11 (system python3 left unchanged)"
 
-if ! run_cmd "apt-get install python3-pip -y"; then
+if ! apt_run "apt-get install python3-pip -y"; then
     add_error "Failed to install pip"
 else
     echo "✓ pip installed"
@@ -585,7 +655,7 @@ fi
 if [ -n "$PYTHON311" ]; then
   echo "Using Python at: $PYTHON311"
   run_cmd "$PYTHON311 -m pip install --upgrade pip" || add_warning "Failed to upgrade pip"
-  run_cmd "$PYTHON311 -m pip install --force-reinstall requests==2.32.4" || add_warning "Failed to install requests"
+  run_cmd "$PYTHON311 -m pip install --force-reinstall requests==2.34.2" || add_warning "Failed to install requests"
   run_cmd "$PYTHON311 -m pip install protobuf" || add_warning "Failed to install protobuf"
 else
   add_warning "python3.11 not found. Using system python3 instead."
@@ -622,11 +692,28 @@ fi
 echo ""
 
 echo "▶ Installing GStreamer..."
-if ! run_cmd "apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-alsa gstreamer1.0-gl gstreamer1.0-gtk3 gstreamer1.0-qt5 gstreamer1.0-pulseaudio"; then
-    add_error "Failed to install GStreamer"
+# Split into a required core set (ERROR on failure) and optional desktop
+# extras (WARNING on failure). Rationale: requirements.md has no criterion
+# covering transient apt-lock resilience; on a fresh JP6 Orin Nano a first-boot
+# apt lock made this single 12-package install fail and marked an
+# otherwise-healthy setup as failed. The gtk3/qt5/pulseaudio extras are
+# desktop-only and must not fail the whole setup.
+GST_CORE_PACKAGES="libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav gstreamer1.0-tools gstreamer1.0-x gstreamer1.0-alsa gstreamer1.0-gl"
+GST_EXTRA_PACKAGES="gstreamer1.0-gtk3 gstreamer1.0-qt5 gstreamer1.0-pulseaudio"
+
+if ! apt_run "apt-get install -y ${GST_CORE_PACKAGES}"; then
+    add_error "Failed to install GStreamer core packages"
 else
-    echo "✓ GStreamer installed"
+    echo "✓ GStreamer core packages installed"
 fi
+
+for gst_pkg in ${GST_EXTRA_PACKAGES}; do
+    if apt_run "apt-get install -y ${gst_pkg}"; then
+        echo "✓ ${gst_pkg} installed"
+    else
+        add_warning "Failed to install optional GStreamer package ${gst_pkg} (desktop extras; not required for station operation)"
+    fi
+done
 echo ""
 
 echo "▶ Setting up Edge Manager Agent..."
@@ -645,7 +732,7 @@ echo ""
 echo "▶ Installing Docker..."
 
 # Remove snap Docker if present — the snap bundles iptables 1.8.10 (nf_tables)
-# which is incompatible with older kernels (4.9.x on JetPack 4.6.x / Ubuntu 18.04).
+# which is incompatible with older kernels.
 # It also conflicts with the apt docker.io package we need.
 if snap list docker >/dev/null 2>&1; then
     echo "Removing snap Docker (incompatible with this kernel)..."
@@ -686,76 +773,22 @@ if check_command docker && docker ps >/dev/null 2>&1; then
         fi
     fi
 else
-    if [ "$UBUNTU_VERSION" = "18.04" ]; then
-        # Ubuntu 18.04 / JetPack 4.6.x — NVIDIA ships its own Docker 19.03 with
-        # nvidia-container-runtime pre-configured. docker-ce from Docker's repo
-        # conflicts with NVIDIA's packages and breaks the daemon.
-        # We must fully purge any docker-ce remnants before installing docker.io.
-        echo "Ubuntu 18.04 / JetPack detected — using NVIDIA-provided Docker..."
-        
-        # Purge any conflicting docker-ce packages and config left from prior installs
-        if dpkg -l docker-ce >/dev/null 2>&1 || dpkg -l docker-ce-cli >/dev/null 2>&1; then
-            echo "Removing conflicting docker-ce packages..."
-            run_cmd "systemctl stop docker.socket" || true
-            run_cmd "systemctl stop docker" || true
-            run_cmd "systemctl stop containerd" || true
-            run_cmd "apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" || true
-            run_cmd "apt-get autoremove -y" || true
-            # Clean up leftover config and state that prevent docker.io from starting
-            run_cmd "rm -rf /var/lib/docker" || true
-            run_cmd "rm -rf /var/lib/containerd" || true
-            run_cmd "rm -f /etc/apt/sources.list.d/docker.list" || true
-            run_cmd "rm -f /etc/apt/keyrings/docker.gpg" || true
-            echo "✓ Conflicting docker-ce packages removed"
-        fi
-        
-        # Install NVIDIA's Docker packages
-        if ! run_cmd "apt-get update"; then
-            add_warning "Failed to update package manager"
-        fi
-        if ! run_cmd "apt-get install -y docker.io containerd"; then
-            add_error "Failed to install docker.io"
-        else
-            echo "✓ docker.io installed"
-        fi
-        
-        # Install nvidia-container-runtime if not present (needed for GPU containers)
-        if ! dpkg -l nvidia-container-runtime >/dev/null 2>&1; then
-            run_cmd "apt-get install -y nvidia-container-runtime" || add_warning "nvidia-container-runtime not available — GPU containers may not work"
-        fi
-        
-        # Install Compose V2 plugin manually (required for --profile flag)
-        echo "Installing Docker Compose V2 plugin..."
-        COMPOSE_ARCH=$(uname -m)
-        case "$COMPOSE_ARCH" in
-            aarch64) COMPOSE_ARCH="aarch64" ;;
-            x86_64)  COMPOSE_ARCH="x86_64" ;;
-        esac
-        mkdir -p /usr/local/lib/docker/cli-plugins
-        if run_cmd "curl -fsSL https://github.com/docker/compose/releases/download/v2.24.7/docker-compose-linux-${COMPOSE_ARCH} -o /usr/local/lib/docker/cli-plugins/docker-compose"; then
-            run_cmd "chmod +x /usr/local/lib/docker/cli-plugins/docker-compose"
-            echo "✓ Docker Compose V2 plugin installed"
-        else
-            add_error "Failed to download Docker Compose V2 plugin"
-        fi
+    if ! run_cmd "mkdir -m 0755 -p /etc/apt/keyrings"; then
+        add_warning "Failed to create keyrings directory"
+    fi
+    
+    if ! run_cmd "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"; then
+        add_error "Failed to download Docker GPG key"
+    elif ! run_cmd "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable' | tee /etc/apt/sources.list.d/docker.list > /dev/null"; then
+        add_error "Failed to add Docker repository"
+    elif ! apt_run "apt-get update"; then
+        add_error "Failed to update package manager after adding Docker repo"
+    elif ! apt_run "apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y"; then
+        add_error "Failed to install Docker packages"
+    elif ! run_cmd "docker run hello-world"; then
+        add_warning "Docker installed but hello-world test failed"
     else
-        if ! run_cmd "mkdir -m 0755 -p /etc/apt/keyrings"; then
-            add_warning "Failed to create keyrings directory"
-        fi
-        
-        if ! run_cmd "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"; then
-            add_error "Failed to download Docker GPG key"
-        elif ! run_cmd "echo 'deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable' | tee /etc/apt/sources.list.d/docker.list > /dev/null"; then
-            add_error "Failed to add Docker repository"
-        elif ! run_cmd "apt-get update"; then
-            add_error "Failed to update package manager after adding Docker repo"
-        elif ! run_cmd "apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y"; then
-            add_error "Failed to install Docker packages"
-        elif ! run_cmd "docker run hello-world"; then
-            add_warning "Docker installed but hello-world test failed"
-        else
-            echo "✓ Docker installed successfully"
-        fi
+        echo "✓ Docker installed successfully"
     fi
 fi
 
@@ -821,7 +854,7 @@ else
     DOCKER_MAJOR=$(echo "$DOCKER_VER" | cut -d. -f1)
     if echo "$DOCKER_MAJOR" | grep -qE '^[0-9]+$' && [ "$DOCKER_MAJOR" -ge 28 ]; then
         echo "▶ iptables 'raw' table unavailable and Docker $DOCKER_VER >= 28 — pinning Docker to 27.5.1 (JetPack 6 fix)..."
-        if run_cmd "apt-get install -y --allow-downgrades docker-ce=5:27.5.1* docker-ce-cli=5:27.5.1*"; then
+        if apt_run "apt-get install -y --allow-downgrades docker-ce=5:27.5.1* docker-ce-cli=5:27.5.1*"; then
             echo "   ✓ Docker downgraded to 27.5.1"
             run_cmd "apt-mark hold docker-ce docker-ce-cli" || \
                 add_warning "Could not 'apt-mark hold' Docker; a future apt upgrade may bump it back to 28+ and break bridge networking."
@@ -835,20 +868,23 @@ else
 fi
 echo ""
 
-# Register the NVIDIA Container Runtime with the Docker daemon (Jetson/aarch64).
+# Register the NVIDIA Container Runtime with the Docker daemon (Jetson only).
 #
 # On Jetson/L4T the DDA LocalServer container gets GPU access via
 # `runtime: nvidia` in docker-compose (the supported mechanism). That requires
-# the `nvidia` runtime to be registered in /etc/docker/daemon.json. NVIDIA's
-# JetPack 4.6 Docker pre-registers it, but a stock docker-ce install on
-# JetPack 5 (Ubuntu 20.04) installs nvidia-container-runtime WITHOUT wiring it
-# into the daemon, so containers fail to start with:
+# the `nvidia` runtime to be registered in /etc/docker/daemon.json. A stock
+# docker-ce install on JetPack 5 (Ubuntu 20.04) installs
+# nvidia-container-runtime WITHOUT wiring it into the daemon, so containers
+# fail to start with:
 #   "unknown or invalid runtime name: nvidia"
 # Registering it here (idempotent) fixes that. Without it, compose falls back to
 # the unsupported --gpus/CDI hook and fails with:
 #   "invoking the NVIDIA Container Runtime Hook directly ... is not supported."
+# Generic (non-Jetson) arm64 CPU hosts such as AWS Graviton have no L4T and no
+# NVIDIA runtime; they run the CPU image under the generic compose profile.
 ARCH_RAW=$(uname -m)
-if [ "$ARCH_RAW" = "aarch64" ]; then
+if [ "$ARCH_RAW" = "aarch64" ] && { [ -f /etc/nv_tegra_release ] || \
+        dpkg-query -W -f '${Version}' nvidia-l4t-core >/dev/null 2>&1; }; then
     echo "▶ Configuring NVIDIA Container Runtime for Docker (Jetson)..."
     if docker info 2>/dev/null | grep -qi "Runtimes:.*nvidia"; then
         echo "✓ nvidia runtime already registered with Docker"
@@ -932,6 +968,74 @@ echo "▶ Provisioning Greengrass Core Device..."
 # policy updates) can authenticate.
 resolve_aws_credentials || true
 
+# IoT Thing Group the Greengrass core device joins. Overridable via the
+# DDA_THING_GROUP environment variable (used by the portal quick-setup flow);
+# defaults to the historical fixed group so the script stays fully functional
+# standalone. The Greengrass provisioner creates the group when it does not exist.
+thing_group_name="${DDA_THING_GROUP:-DDA_transition_EC2_Group}"
+
+# --- Nucleus platform variant override (device-arch-compatibility) -----------
+# LocalServer ships as independently-versioned aarch64 variants
+# (arm64_cpu / arm64_jp5 / arm64_jp6 / arm64_jp7) that ALL report architecture "aarch64" to
+# Greengrass. A Workflow_Component packaged for more than one arm variant
+# disambiguates its per-arch manifests with a custom Nucleus platform attribute
+# `variant` (== the workflow_core arch token). Unless the device declares that
+# attribute, such a component fails to deploy ("The version of component ...
+# does not claim platform compatibility"). Seed platformOverride.variant at
+# provision time so the device matches its own variant manifest.
+#
+# The arch token is detected with the shared detect_arch.sh helper (the same
+# detection the quick-setup flow reports), so both provisioning paths agree; an
+# explicit DDA_PLATFORM_VARIANT env var overrides detection (testing / unusual
+# images). Only the aarch64 variants need the disambiguator — x86
+# flavors match on the standard architecture/runtime attributes — so the
+# override is written only for arm64_* tokens. --init-config MERGES with the
+# provisioning-generated config (per the Greengrass installer docs), so this
+# adds the single key without disturbing the provisioned connectivity config.
+gg_init_config_arg=""
+platform_variant="${DDA_PLATFORM_VARIANT:-}"
+if [ -z "$platform_variant" ]; then
+    setup_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    for _detect_arch_candidate in \
+        "${setup_script_dir}/detect_arch.sh" \
+        "${setup_script_dir}/quick_setup/detect_arch.sh"; do
+        if [ -f "$_detect_arch_candidate" ]; then
+            # shellcheck source=/dev/null
+            . "$_detect_arch_candidate"
+            break
+        fi
+    done
+    if command -v detect_target_architecture >/dev/null 2>&1; then
+        platform_variant="$(detect_target_architecture 2>/dev/null || true)"
+    fi
+fi
+case "$platform_variant" in
+    arm64_*)
+        gg_init_config_file="./GreengrassInstaller/dda-init-config.yaml"
+        if { printf '%s\n' \
+                "---" \
+                "services:" \
+                "  aws.greengrass.Nucleus:" \
+                "    configuration:" \
+                "      platformOverride:" \
+                "        variant: \"${platform_variant}\"" \
+                > "$gg_init_config_file"; } 2>/dev/null; then
+            gg_init_config_arg="--init-config ${gg_init_config_file}"
+            echo "✓ Nucleus platform variant override: ${platform_variant}"
+        else
+            add_warning "Could not write Greengrass init-config for platform variant '${platform_variant}'; multi-arch Workflow_Components may not deploy to this device"
+        fi
+        ;;
+    "")
+        add_warning "Device platform variant could not be determined; multi-arch Workflow_Components may need a manual Nucleus platformOverride.variant on this device"
+        ;;
+    *)
+        # x86_64 / x86_64_nvidia: the standard architecture/runtime platform
+        # attributes suffice; no `variant` disambiguator is required.
+        :
+        ;;
+esac
+
 JAVA_CRED_PROPS=""
 if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
     JAVA_CRED_PROPS="-Daws.accessKeyId=$AWS_ACCESS_KEY_ID -Daws.secretAccessKey=$AWS_SECRET_ACCESS_KEY"
@@ -943,10 +1047,131 @@ else
 fi
 
 if ! AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
-    run_cmd "java -Droot=/aws_dda/greengrass/v2 -Dlog.store=FILE $JAVA_CRED_PROPS -jar ./GreengrassInstaller/lib/Greengrass.jar --aws-region ${aws_region} --thing-name ${thing_name} --thing-group-name DDA_transition_EC2_Group --thing-policy-name GreengrassV2IoTThingPolicy --tes-role-name GreengrassV2TokenExchangeRole --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias --component-default-user ggc_user:ggc_group --setup-system-service true --provision true"; then
+    run_cmd "java -Droot=/aws_dda/greengrass/v2 -Dlog.store=FILE $JAVA_CRED_PROPS -jar ./GreengrassInstaller/lib/Greengrass.jar --aws-region ${aws_region} --thing-name ${thing_name} --thing-group-name ${thing_group_name} --thing-policy-name GreengrassV2IoTThingPolicy --tes-role-name GreengrassV2TokenExchangeRole --tes-role-alias-name GreengrassCoreTokenExchangeRoleAlias --component-default-user ggc_user:ggc_group ${gg_init_config_arg} --setup-system-service true --provision true"; then
     add_error "Greengrass provisioning failed"
 else
     echo "✓ Greengrass Core provisioned successfully"
+fi
+echo ""
+
+echo "▶ Ensuring IoT thing policy allows shadow data-plane sync..."
+# The Greengrass installer creates GreengrassV2IoTThingPolicy with MQTT-only
+# grants (iot:Connect/Publish/Subscribe/Receive + greengrass:*).
+# aws.greengrass.ShadowManager syncs named shadows (dda-camera-registry,
+# dda-user-accounts, dda-camera-bindings) to the cloud over the IoT data
+# plane via HTTPS (port 8443), authenticated with the device X.509
+# certificate — so it is authorized by the certificate's IoT policy, never by
+# the token exchange IAM role. Thing policy variables
+# (${iot:Connection.Thing.ThingName}) resolve only on MQTT connections; a
+# shadow statement scoped with them denies every HTTPS sync request with
+# ForbiddenException (403) while local shadows keep working, so cloud/portal
+# shadow copies silently go stale. This step appends the HTTPS-compatible
+# ShadowManagerHttpsDataPlaneSync statement (no policy variables) to the
+# CURRENT default policy document; existing statements — including any
+# variable-scoped shadow statement, which continues to serve MQTT
+# connections — are preserved verbatim and in order. Idempotent: skips when
+# the default version already carries an HTTPS-compatible grant; prunes the
+# oldest non-default version first when the 5-version limit is reached.
+gg_thing_policy="GreengrassV2IoTThingPolicy"
+# Decision logic (idempotency predicate + statement append) lives in the
+# property-tested sibling helper; bash only orchestrates the AWS CLI calls.
+shadow_helper="$(dirname "$0")/iot_policy_shadow_statement.py"
+# Distinguish "check inconclusive" (CLI missing, auth failure, access denied)
+# from "policy absent" (API positively returns ResourceNotFoundException).
+# Previously CLI/auth errors were swallowed (2>/dev/null || echo "") and
+# reported as a missing policy, producing false alarms on devices where the
+# policy existed with correct permissions. Rationale: requirements.md has no
+# criterion covering these warnings; the false alarms pointed operators at the
+# wrong fix.
+gg_policy_check="ok"       # ok | inconclusive | absent
+gg_policy_check_detail=""
+policy_doc=""
+default_version=""
+if ! command -v aws >/dev/null 2>&1; then
+    gg_policy_check="inconclusive"
+    gg_policy_check_detail="AWS CLI unavailable"
+elif ! aws sts get-caller-identity >/dev/null 2>&1; then
+    gg_policy_check="inconclusive"
+    gg_policy_check_detail="credentials not resolvable (aws sts get-caller-identity failed)"
+else
+    gg_policy_err_file=$(mktemp)
+    if ! default_version=$(aws iot get-policy --policy-name "$gg_thing_policy" --query defaultVersionId --output text 2>"$gg_policy_err_file"); then
+        gg_policy_err=$(tr '\n' ' ' < "$gg_policy_err_file")
+        if echo "$gg_policy_err" | grep -qE "ResourceNotFoundException|NoSuchEntity"; then
+            gg_policy_check="absent"
+            # Discovery fallback: the conventional name above is authoritative
+            # for stations provisioned by this script (the installer invocation
+            # passes --thing-policy-name GreengrassV2IoTThingPolicy), but a
+            # pre-provisioned device may carry a differently named policy on
+            # its certificate — discover it via the thing's principal before
+            # giving up.
+            gg_principal=$(aws iot list-thing-principals --thing-name "$thing_name" --query 'principals[0]' --output text 2>/dev/null || echo "")
+            gg_discovered_policy=""
+            if [ -n "$gg_principal" ] && [ "$gg_principal" != "None" ]; then
+                gg_discovered_policy=$(aws iot list-attached-policies --target "$gg_principal" --query 'policies[0].policyName' --output text 2>/dev/null || echo "")
+            fi
+            if [ -n "$gg_discovered_policy" ] && [ "$gg_discovered_policy" != "None" ]; then
+                gg_thing_policy="$gg_discovered_policy"
+                if default_version=$(aws iot get-policy --policy-name "$gg_thing_policy" --query defaultVersionId --output text 2>/dev/null); then
+                    gg_policy_check="ok"
+                fi
+            fi
+        else
+            gg_policy_check="inconclusive"
+            gg_policy_check_detail="CLI error: ${gg_policy_err:-unknown error}"
+        fi
+    fi
+    rm -f "$gg_policy_err_file"
+    # Read the document of the version actually in force (explicit
+    # default-version read, not the get-policy shortcut) so the augmented
+    # document is built from what is really the default.
+    if [ "$gg_policy_check" = "ok" ]; then
+        gg_policy_err_file=$(mktemp)
+        if ! policy_doc=$(aws iot get-policy-version --policy-name "$gg_thing_policy" --policy-version-id "$default_version" --query policyDocument --output text 2>"$gg_policy_err_file"); then
+            gg_policy_err=$(tr '\n' ' ' < "$gg_policy_err_file")
+            gg_policy_check="inconclusive"
+            gg_policy_check_detail="CLI error reading default version ${default_version}: ${gg_policy_err:-unknown error}"
+            policy_doc=""
+        fi
+        rm -f "$gg_policy_err_file"
+    fi
+fi
+if [ "$gg_policy_check" = "inconclusive" ]; then
+    add_warning "Could not verify $gg_thing_policy — the check itself failed (${gg_policy_check_detail}); verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/*, no policy variables)"
+elif [ "$gg_policy_check" = "absent" ]; then
+    add_warning "Could not read $gg_thing_policy - verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/*, no policy variables)"
+elif [ ! -f "$shadow_helper" ]; then
+    add_warning "iot_policy_shadow_statement.py helper not found next to setup_station.sh — cannot verify/repair the IoT policy shadow statement; ensure $gg_thing_policy allows iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/* (no policy variables) manually"
+elif printf '%s' "$policy_doc" | python3 "$shadow_helper" check; then
+    echo "✓ $gg_thing_policy already grants HTTPS-compatible shadow data-plane actions"
+else
+    shadow_check_status=$?
+    if [ "$shadow_check_status" -eq 2 ]; then
+        # Exit code 2 = unparseable/malformed document: inconclusive — never
+        # build a new policy version from a document we could not understand.
+        add_warning "Could not parse the $gg_thing_policy default version document — cannot verify/repair the IoT policy shadow statement; verify shadow permissions manually (iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/*, no policy variables)"
+    else
+        shadow_policy_file=$(mktemp)
+        if printf '%s' "$policy_doc" | python3 "$shadow_helper" augment > "$shadow_policy_file"; then
+            version_count=$(aws iot list-policy-versions --policy-name "$gg_thing_policy" --query 'length(policyVersions)' --output text 2>/dev/null || echo "0")
+            if [ "$version_count" -ge 5 ]; then
+                oldest_version=$(aws iot list-policy-versions --policy-name "$gg_thing_policy" \
+                    --query 'policyVersions[?isDefaultVersion==`false`] | sort_by(@, &createDate)[0].versionId' --output text 2>/dev/null || echo "")
+                if [ -n "$oldest_version" ] && [ "$oldest_version" != "None" ]; then
+                    run_cmd "aws iot delete-policy-version --policy-name $gg_thing_policy --policy-version-id $oldest_version" \
+                        || add_warning "Could not prune old $gg_thing_policy version"
+                fi
+            fi
+            if run_cmd "aws iot create-policy-version --policy-name $gg_thing_policy --policy-document file://$shadow_policy_file --set-as-default"; then
+                echo "✓ Added ShadowManagerHttpsDataPlaneSync statement to $gg_thing_policy (existing statements preserved)"
+            else
+                add_warning "Could not update $gg_thing_policy - ShadowManager HTTPS shadow cloud sync will fail with 403. Add iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/* (no policy variables) manually."
+            fi
+        else
+            add_warning "Could not build the augmented $gg_thing_policy document — repair the policy manually (add iot:GetThingShadow/UpdateThingShadow/DeleteThingShadow on arn:aws:iot:*:*:thing/*, no policy variables)."
+        fi
+        rm -f "$shadow_policy_file"
+    fi
 fi
 echo ""
 
@@ -1183,14 +1408,27 @@ else
     # 1. Attach DDA Portal Component Access Policy (managed policy)
     echo "1. Attaching DDA Portal Component Access Policy..."
     DDA_POLICY_ARN="arn:aws:iam::${aws_account_id}:policy/DDAPortalComponentAccessPolicy"
-    if aws iam get-policy --policy-arn "$DDA_POLICY_ARN" 2>/dev/null; then
+    # Distinguish "check inconclusive" (auth failure, access denied, network)
+    # from "policy absent" (API positively returns NoSuchEntity). Previously
+    # CLI/auth errors were swallowed (2>/dev/null) and reported as a missing
+    # policy, producing false "Deploy UseCaseAccountStack first" alarms on
+    # accounts where the policy existed.
+    dda_policy_err_file=$(mktemp)
+    if aws iam get-policy --policy-arn "$DDA_POLICY_ARN" >> "$LOG_FILE" 2>"$dda_policy_err_file"; then
+        rm -f "$dda_policy_err_file"
         if run_cmd "aws iam attach-role-policy --role-name GreengrassV2TokenExchangeRole --policy-arn $DDA_POLICY_ARN"; then
             echo "   ✓ DDAPortalComponentAccessPolicy attached"
         else
             add_warning "Could not attach DDAPortalComponentAccessPolicy. Attach manually if needed."
         fi
     else
-        add_warning "DDAPortalComponentAccessPolicy not found. Deploy UseCaseAccountStack first."
+        dda_policy_err=$(tr '\n' ' ' < "$dda_policy_err_file")
+        rm -f "$dda_policy_err_file"
+        if echo "$dda_policy_err" | grep -qE "NoSuchEntity|ResourceNotFoundException"; then
+            add_warning "DDAPortalComponentAccessPolicy not found. Deploy UseCaseAccountStack first."
+        else
+            add_warning "Could not verify DDAPortalComponentAccessPolicy — the check itself failed (CLI error: ${dda_policy_err:-unknown error}); verify the policy and attach it to GreengrassV2TokenExchangeRole manually if needed"
+        fi
     fi
     echo ""
     
@@ -1285,6 +1523,39 @@ else
     fi
     echo ""
     
+    # IAM-layer grant on the token exchange role for SigV4 data-plane callers
+    # (includes iot:ListNamedShadowsForThing, which the IoT-policy-layer
+    # ShadowManagerHttpsDataPlaneSync statement does not carry). NOTE:
+    # ShadowManager cloud sync does NOT use this role — it authenticates with
+    # the device certificate over HTTPS and is authorized by the certificate's
+    # IoT policy (see the "Ensuring IoT thing policy allows shadow data-plane
+    # sync" step above). Kept as belt-and-braces.
+    echo "3.6 Adding ShadowManager shadow sync policy..."
+    if run_cmd "aws iam put-role-policy \
+      --role-name GreengrassV2TokenExchangeRole \
+      --policy-name ShadowManagerSyncPolicy \
+      --policy-document '{
+        \"Version\": \"2012-10-17\",
+        \"Statement\": [
+          {
+            \"Sid\": \"ShadowManagerCloudSync\",
+            \"Effect\": \"Allow\",
+            \"Action\": [
+              \"iot:GetThingShadow\",
+              \"iot:UpdateThingShadow\",
+              \"iot:DeleteThingShadow\",
+              \"iot:ListNamedShadowsForThing\"
+            ],
+            \"Resource\": \"arn:aws:iot:*:${aws_account_id}:thing/*\"
+          }
+        ]
+      }'"; then
+        echo "   ✓ ShadowManager shadow sync policy attached"
+    else
+        add_warning "Could not attach ShadowManager IAM shadow policy (belt-and-braces for SigV4 callers). ShadowManager HTTPS sync itself is authorized by the IoT thing policy step."
+    fi
+    echo ""
+    
     # 4. Verify all policies are attached
     echo "4. Verifying role policies..."
     ATTACHED_POLICIES=$(aws iam list-attached-role-policies --role-name GreengrassV2TokenExchangeRole --query 'AttachedPolicies[].PolicyName' --output text 2>/dev/null)
@@ -1306,5 +1577,34 @@ else
     echo ""
     
     echo "✓ GreengrassV2TokenExchangeRole updated successfully"
+fi
+echo ""
+echo "=========================================="
+echo "▶ Configuring CSI camera exposure (opt-in)"
+echo "=========================================="
+# CSI/nvargus is OPT-IN (spec: csi-nvargus-optional). nvargus/CSI ISP activity
+# can poison nvargus-daemon on JP7/Thor (driver 595.78) into a state where ALL
+# new CUDA context creation fails device-wide (kernel: "Can't map dma
+# attachment!" + NVRM osCreateOsDescriptorFromFileHandle Error (89)). Most
+# fleet devices have NO CSI camera, so the daemon is disabled unless the
+# operator provisions with ENABLE_CSI_CAMERA=1. The opt-in marker gates the
+# nvidia-csi-capture.service install at every component deployment.
+CSI_OPTIN_MARKER="/aws_dda/system/csi_camera_optin"
+if systemctl list-unit-files nvargus-daemon.service >/dev/null 2>&1; then
+    mkdir -p /aws_dda/system
+    if [ "${ENABLE_CSI_CAMERA:-0}" = "1" ]; then
+        echo "ENABLE_CSI_CAMERA=1 — enabling nvargus-daemon and recording CSI opt-in"
+        run_cmd "systemctl enable --now nvargus-daemon" || add_warning "Failed to enable nvargus-daemon"
+        printf 'enabled_by=setup_station.sh\nenabled_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$CSI_OPTIN_MARKER" \
+            || add_warning "Failed to write CSI opt-in marker $CSI_OPTIN_MARKER"
+        echo "✓ CSI camera opt-in recorded at $CSI_OPTIN_MARKER"
+    else
+        echo "No CSI opt-in (default) — disabling nvargus-daemon and clearing any opt-in marker"
+        run_cmd "systemctl disable --now nvargus-daemon" || add_warning "Failed to disable nvargus-daemon"
+        rm -f "$CSI_OPTIN_MARKER"
+        echo "✓ nvargus-daemon disabled (re-run with ENABLE_CSI_CAMERA=1 to opt in)"
+    fi
+else
+    echo "✓ nvargus-daemon not present on this device — no CSI configuration needed"
 fi
 echo ""

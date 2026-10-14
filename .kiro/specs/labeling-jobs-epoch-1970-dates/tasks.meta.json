@@ -1,0 +1,22 @@
+{
+  "pbtResults": {
+    "2. Write preservation property tests (BEFORE implementing fix)": {
+      "status": "passed",
+      "lastRunTimestamp": 1788845385893
+    },
+    "1. Write bug condition exploration test": {
+      "status": "passed",
+      "failingExample": "Bug condition exploration tests FAILED as expected on unfixed code (7/7 tests, PBT validation PASSED — the tests correctly detect the bug). Counterexamples: (1) jobs-table Created column, created_at=1789000000 (Sept 2026) rendered as \"1/21/1970, 4:56:40 PM\" instead of \"9/10/2026, 12:26:40 AM\"; property shrunk to minimal created_at=1577836800 (2020-01-01) rendered \"1/19/1970, 6:17:16 AM\" instead of \"1/1/2020, 12:00:00 AM\". (2) DDA detail Created/Completed/Stopped, shrunk counterexample [created_at=1577836800, +7200s, +7200s]: Created rendered \"1/19/1970, 6:17:16 AM\". (3) Ground Truth detail completed job, shrunk counterexample [created_at=1577836800, duration=7200s]: Duration rendered \"0 hours\" instead of \"2 hours\"; concrete 2-hour job (1789000000 → 1789007200) also \"0 hours\". (4) Ground Truth ongoing job, shrunk counterexample [hoursAgo=1, jitter=0]: Duration rendered 496,405 hours instead of ~1 hour (expected ≤ 2), and Created rendered \"1/21/1970, ...\".",
+      "lastRunTimestamp": 1788845865357
+    },
+    "3.2 Verify bug condition exploration test now passes": {
+      "status": "passed",
+      "lastRunTimestamp": 1788846111266
+    },
+    "3.3 Verify preservation tests still pass": {
+      "status": "passed",
+      "lastRunTimestamp": 1788846143752
+    }
+  },
+  "executionHistory": {}
+}

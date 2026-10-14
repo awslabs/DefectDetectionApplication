@@ -26,8 +26,7 @@ from uvicorn.protocols.utils import get_path_with_query_string
 
 import logging
 
-from utils import utils
-from utils.auth import validate_token
+from utils.auth import authorize_request
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +39,35 @@ def log_info(process_time_ns, req_body, status_code):
     structlog.contextvars.bind_contextvars(request_id=request_id)
 
     url = get_path_with_query_string(req_body.scope)
-    client_host = req_body.client.host
-    client_port = req_body.client.port
+    # ``Request.client`` is None whenever the ASGI scope carries no peer address.
+    # Uvicorn's ProxyHeadersMiddleware rewrites scope["client"], and a transport
+    # that exposes no peername leaves it unset, so this is reachable in normal
+    # operation -- it is not a "cannot happen" case.
+    #
+    # Dereferencing it unguarded took the entire backend down on a Jetson Thor
+    # (DLAP-701) after a reboot: a workflow component POSTing
+    # /workflows/registrations arrived with client=None, log_info raised
+    # AttributeError AFTER the route had already returned 200, the except branch
+    # in AccessLogRoute called log_info a second time so it raised again, and
+    # each escaping exception then spent ~45 s of GIL inside structlog's rich
+    # traceback renderer pretty-printing the whole ASGI scope. Requests arrived
+    # faster than they drained, so /health and the model components' StartModel
+    # calls all timed out and the blue-plate model never reached READY.
+    #
+    # Access logging must never be able to fail the request it is logging.
+    client = req_body.client
+    client_host = client.host if client is not None else None
+    client_port = client.port if client is not None else None
     http_method = req_body.method
     http_version = req_body.scope["http_version"]
 
+    # "-" for an absent peer, following the common access-log convention, while
+    # the structured network.client fields stay None rather than a fake value.
+    display_host = client_host if client_host is not None else "-"
+    display_port = client_port if client_port is not None else "-"
+
     access_logger.info(
-        f"""{client_host}:{client_port} - "{http_method} {url} HTTP/{http_version}" {status_code}""",
+        f"""{display_host}:{display_port} - "{http_method} {url} HTTP/{http_version}" {status_code}""",
         http={
             "url": url,
             "status_code": status_code,
@@ -88,6 +109,10 @@ class AccessLogRoute(APIRoute):
 
 
 def get_api_router():
-    if utils.is_authorization_enabled_on_station():
-        return APIRouter(route_class=AccessLogRoute, dependencies=[Depends(validate_token)])
-    return APIRouter(route_class=AccessLogRoute)
+    # authorize_request is attached unconditionally: it evaluates the
+    # (Local_Login_Configuration x Existing_Token_Auth) decision matrix per
+    # request instead of freezing the decision at import time, so runtime
+    # configuration changes take effect without a restart (Requirement 11.2).
+    # The (disabled, not-configured) row allows every request, preserving
+    # today's open-access behavior exactly (Requirements 9.1, 9.3).
+    return APIRouter(route_class=AccessLogRoute, dependencies=[Depends(authorize_request)])

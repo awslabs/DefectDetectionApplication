@@ -155,3 +155,12 @@ export function isICamImageSource(imageSourceType: string): boolean {
 export function isNvidiaCSIImageSource(imageSourceType: string): boolean {
   return imageSourceType === ImageSourceType.NvidiaCSI;
 }
+
+/**
+ * An RTSP or RTMP network stream camera (rtsp-rtmp-stream-cameras). It has
+ * no connect action or camera controls: its session opens when a workflow,
+ * preview or capture uses it.
+ */
+export function isStreamImageSource(imageSourceType: string | undefined): boolean {
+  return imageSourceType === ImageSourceType.RTSP || imageSourceType === ImageSourceType.RTMP;
+}

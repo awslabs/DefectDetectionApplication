@@ -43,10 +43,18 @@ DOCKER_PROFILE_TEST = os.path.join(
 def test_docker_profile_selection_suite_passes():
     """The existing docker-profile-selection suite passes unchanged (the real
     decision block plus the L4T / Orin regression guards)."""
+    # When this suite runs WITH the backend conftest (e.g. a plain
+    # ``pytest test/backend-test/security/preservation/``), the conftest sets
+    # PYTHONHOME=sys.executable for Triton's python-backend interpreter lookup.
+    # A spawned CPython would fail its own bootstrap ("No module named
+    # 'encodings'") with it set — strip it, same as workflow_engine's
+    # python_bridge does before spawning handler subprocesses.
+    env = dict(os.environ)
+    env.pop("PYTHONHOME", None)
     result = subprocess.run(
         [sys.executable, "-m", "pytest", DOCKER_PROFILE_TEST,
          "-p", "no:cacheprovider", "--noconftest", "-q"],
-        cwd=REPO_ROOT, capture_output=True, text=True,
+        cwd=REPO_ROOT, capture_output=True, text=True, env=env,
     )
     combined = result.stdout + result.stderr
     assert result.returncode == 0, (

@@ -1,0 +1,744 @@
+# Copyright 2025 Amazon Web Services, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""The pure ``build_inventory`` merge (Requirements 1.1, 2.5, 11.3).
+
+Merges the device's configured Image_Sources (read through the existing
+``ImageSourceAccessor`` — this module never touches SQLite itself) with the
+latest Camera_Discovery result into the Camera_Source inventory the
+Edge_Sync_Agent reports to the Portal:
+
+- An Image_Source whose resolved device path equals a discovered camera's
+  path yields ONE entry: configured id ``cfg-{imageSourceId}``, the
+  configured parameters, the discovered capability metadata, origin
+  ``edge-configured`` and ``discovered: True`` (Requirement 2.5).
+- Discovered hardware not referenced by any Image_Source yields an entry
+  with origin ``edge-discovered`` under its discovery stable id.
+- Every discovered camera contributes to exactly one entry — a device path
+  never appears both merged into a configured entry and as a separate
+  discovered entry.
+
+Aravis branch (feature aravis-camera-input, Requirements 2.1, 2.3, 2.4,
+7.2), structurally parallel to the device-path merge:
+
+- A configured Image_Source of type ``Camera`` whose ``cameraId`` equals a
+  tracked Aravis camera's ``camera_id`` merges into ONE entry under
+  ``cfg-{imageSourceId}``: configured params, ``capabilities.aravis``
+  identity metadata, ``discovered: True``, and the tracked absent state
+  (Requirement 2.4).
+- Unmerged Aravis cameras yield ``AravisDiscovered`` / ``edge-discovered``
+  entries under their ``arv-`` stable ids (Requirements 2.1, 2.3).
+- Families are distinguished by the tracked entry's camera object type
+  (:class:`camera_discovery.aravis.DiscoveredAravisCamera` vs
+  :class:`camera_discovery.DiscoveredCamera`); inputs containing no Aravis
+  cameras produce output identical to the pre-feature merge
+  (Requirement 7.2).
+
+Static_Image_Camera de-duplication (third hardware finding, jetson-thor1 /
+LocalServer.arm64JP7 1.0.24 — feature
+static-image-camera-binding-and-pin-discoverability, Requirements 2.7,
+2.8, 2.11): the virtual Static_Image_Camera was registered TWICE in the
+reported Camera_Registry. ``getCameras()`` appends
+``Camera(**STATIC_IMAGE_CAMERA_IDENTITY)`` to the Aravis bus enumeration
+while a Pinned_Image exists (base spec static-image-camera-source), so
+``enumerate_aravis()`` maps it like a physical GenICam camera and derives
+:data:`STATIC_IMAGE_ARAVIS_STABLE_ID` (``arv-6c84191b7fe6`` for the
+shipped identity) for it, while this merge appends its own dedicated
+entry under ``STATIC_IMAGE_CAMERA_ID`` — two rows, two absence
+lifecycles, and two Aravis-picker options for one camera. The merge
+therefore SKIPS the aravis-enumerated static camera when emitting the
+discovered-only entries, in every pin state (after an unpin the tracker
+still holds it as an absent leftover), so the dedicated entry — the only
+one carrying the pin metadata and the explicit-absence lifecycle — is the
+single reported registration. The exclusion is scoped to that emission
+loop only: the tracked index feeding the configured merge is untouched,
+so a user's Image_Source whose ``cameraId`` is ``static-image-camera``
+keeps merging with ``capabilities.aravis`` and the tracked absent state
+exactly as before (Requirement 3.18). Device-local enumeration is
+deliberately left alone — ``getCameras()``, ``rescan_cameras()``, the
+``getCamera()`` short-circuit, and the local aravis frame feeds all
+depend on the static camera enumerating like a GenICam camera
+(Requirement 3.13); the cloud REPORT is the only place that
+de-duplicates. Retiring the already-published ``arv-`` key from devices
+that reported it is the agent's job (:mod:`camera_sync.agent`), since
+shadow updates MERGE nested maps and omission alone cannot remove a key.
+
+Static_Video_Camera (feature static-camera-video-loop, Requirements 4.6,
+4.7, 6.2): the second virtual camera follows the same pattern with its
+own keyword parameters (``static_video_pinned``,
+``static_video_metadata``, ``static_video_absent_since``), its own
+dedicated entry (type ``StaticVideo``, identity and sidecar metadata under
+``capabilities.staticVideo``), its own absence lifecycle, and the same
+exclusion of its aravis-enumerated duplicate. The two cameras are
+independent: each one's entry depends only on its own arguments, and the
+image parameters and branches are unchanged.
+
+``build_inventory`` is pure: it accepts plain data (Image_Source model or
+ORM objects — anything attribute- or dict-shaped — and a
+``DiscoveryResult`` or ``InventorySnapshot``) and returns a deterministic,
+sorted list of :class:`CameraSourceState`.
+"""
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from camera_discovery.aravis import DiscoveredAravisCamera, aravis_stable_id
+from model.stream_source import RTSP_ONLY_SETTINGS, SETTING_DEFAULTS, STREAM_SOURCE_TYPE_VALUES
+from stream_ingest.health import COARSE_IDLE, coarse_health
+from utils.static_image_camera import (
+    STATIC_IMAGE_CAMERA_ID,
+    STATIC_IMAGE_CAMERA_IDENTITY,
+)
+from utils.static_video_camera import (
+    STATIC_VIDEO_CAMERA_ID,
+    STATIC_VIDEO_CAMERA_IDENTITY,
+)
+
+ORIGIN_EDGE_CONFIGURED = "edge-configured"
+ORIGIN_EDGE_DISCOVERED = "edge-discovered"
+
+#: Reported ``type`` for discovered-only hardware (design: ImageSourceType
+#: values + "V4L2Discovered").
+TYPE_V4L2_DISCOVERED = "V4L2Discovered"
+
+#: Reported ``type`` for discovered-only Aravis (GenICam) bus cameras
+#: (aravis-camera-input Requirement 2.1).
+TYPE_ARAVIS_DISCOVERED = "AravisDiscovered"
+
+#: Reported ``type`` for the virtual Static_Image_Camera (feature
+#: cloud-static-camera-provisioning, Requirement 6.1).
+TYPE_STATIC_IMAGE = "StaticImage"
+
+#: Reported ``name`` for the Static_Image_Camera entry — the fixed
+#: enumeration model name (Requirement 6.1).
+STATIC_IMAGE_CAMERA_NAME = STATIC_IMAGE_CAMERA_IDENTITY["model"]
+
+#: Reported ``type`` for the virtual Static_Video_Camera (feature
+#: static-camera-video-loop, Requirement 4.6).
+TYPE_STATIC_VIDEO = "StaticVideo"
+
+#: Reported ``name`` for the Static_Video_Camera entry — its fixed
+#: enumeration model name.
+STATIC_VIDEO_CAMERA_NAME = STATIC_VIDEO_CAMERA_IDENTITY["model"]
+
+#: The discovery stable id the aravis-enumerated Static_Image_Camera
+#: derives (third hardware finding — feature
+#: static-image-camera-binding-and-pin-discoverability, Requirement 2.11).
+#: DERIVED from the shipped enumeration identity through the real
+#: ``aravis_stable_id`` — never hardcoded — so a future identity change
+#: flows through to both the exclusion below and the agent's one-shot
+#: retirement of the already-published key. Equals ``arv-6c84191b7fe6``
+#: for the shipped identity, the id observed in the live
+#: ``dda-camera-registry`` shadow for ``jetson-thor1``.
+STATIC_IMAGE_ARAVIS_STABLE_ID = aravis_stable_id(
+    STATIC_IMAGE_CAMERA_IDENTITY["vendor"],
+    STATIC_IMAGE_CAMERA_IDENTITY["model"],
+    STATIC_IMAGE_CAMERA_IDENTITY["serial"],
+    STATIC_IMAGE_CAMERA_IDENTITY["physical_id"],
+)
+
+#: The configured Image_Source ``type`` whose ``cameraId`` references an
+#: Aravis camera (merge key for Requirement 2.4).
+_ARAVIS_BACKED_SOURCE_TYPE = "Camera"
+
+#: The stream settings a stream camera reports, per type, in Requirement
+#: 4.1 order (rtsp-rtmp-stream-cameras); transport and latency are RTSP only.
+STREAM_REPORTED_SETTINGS = {
+    source_type: tuple(name for name in SETTING_DEFAULTS
+                       if source_type == "RTSP" or name not in RTSP_ONLY_SETTINGS)
+    for source_type in STREAM_SOURCE_TYPE_VALUES
+}
+
+#: The device-managed keys a stream camera echoes to the Portal.
+STREAM_CREDENTIAL_REF = "credentialRef"
+STREAM_CREDENTIALS_CONFIGURED = "credentialsConfigured"
+STREAM_CREDENTIALS_UPDATED_AT = "credentialsUpdatedAt"
+
+
+def stream_capabilities(health: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """The reported ``capabilities`` of a stream camera: the coarse
+    Stream_Health state (``streaming``, ``reconnecting``, ``failed`` or
+    ``idle``) and the codec, resolution and decoder in use
+    (Requirement 4.5). Idempotent, so an already-projected section passes
+    through unchanged; an idle camera has nothing in use."""
+    health = health or {}
+    state = coarse_health(health)
+    in_use = state != COARSE_IDLE
+    return {
+        "stream": {
+            "state": state,
+            "codec": health.get("codec") if in_use else None,
+            "width": health.get("width") if in_use else None,
+            "height": health.get("height") if in_use else None,
+            "decoder": health.get("decoder") if in_use else None,
+        }
+    }
+
+
+@dataclass(frozen=True)
+class CameraSourceState:
+    """One Camera_Source in the device inventory (Requirement 1.1 shape,
+    minus the version counter which is assigned by
+    :mod:`camera_sync.version_state`)."""
+
+    camera_source_id: str
+    name: str
+    type: str
+    origin: str  # "edge-configured" | "edge-discovered"
+    params: Dict[str, Any] = field(default_factory=dict)
+    capabilities: Dict[str, Any] = field(default_factory=dict)
+    discovered: bool = False
+    absent: bool = False
+    absent_since: Optional[int] = None  # epoch ms
+
+
+def configured_camera_source_id(image_source_id: str) -> str:
+    """Stable id for a configured Image_Source: ``cfg-{imageSourceId}``."""
+    return "cfg-" + str(image_source_id)
+
+
+def build_inventory(
+    image_sources,
+    discovery_result,
+    static_image_pinned: bool = False,
+    static_image_metadata: Optional[Mapping[str, Any]] = None,
+    static_image_absent_since: Optional[int] = None,
+    static_video_pinned: bool = False,
+    static_video_metadata: Optional[Mapping[str, Any]] = None,
+    static_video_absent_since: Optional[int] = None,
+    stream_health: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    stream_credentials_configured: Optional[Mapping[str, bool]] = None,
+) -> List[CameraSourceState]:
+    """Pure merge of configured Image_Sources with discovered hardware.
+
+    ``image_sources`` is an iterable of Image_Source records (model
+    objects, ORM rows, or dicts). ``discovery_result`` is a
+    ``camera_discovery.DiscoveryResult`` or ``InventorySnapshot`` (the
+    latter carries absence tracking, Requirement 2.4).
+
+    ``static_image_pinned`` (feature cloud-static-camera-provisioning,
+    Requirements 6.1, 6.2, 6.5, 7.6): when true — the store holds a
+    Pinned_Image, whether device- or cloud-initiated — the merge appends
+    exactly one virtual ``static-image-camera`` entry with the fixed
+    identity, origin ``edge-discovered`` (so the Portal's existing
+    discovery-managed mutation rejection, absence handling, picker, and
+    binding flows apply with zero special-casing). All other entries are
+    identical to the pre-feature merge. ``static_image_metadata`` (the
+    pin store's status metadata) is folded into the entry's
+    ``staticImage`` capabilities.
+
+    The aravis-enumerated static camera — a discovered Aravis camera whose
+    ``camera_id`` equals ``STATIC_IMAGE_CAMERA_ID``, which
+    ``enumerate_aravis()`` derives from the synthetic bus entry
+    ``getCameras()`` appends while pinned — is EXCLUDED from the reported
+    discovery entries in every pin state, so this dedicated entry is the
+    single registration for the one virtual camera (third hardware
+    finding, Requirements 2.7, 2.8). A configured Image_Source
+    referencing that ``cameraId`` still merges with it exactly as before
+    (Requirement 3.18).
+
+    ``static_image_absent_since`` (second hardware finding, jetson-thor1
+    / LocalServer.arm64JP7 1.0.23 — Requirement 6.2): AWS IoT shadow
+    updates MERGE nested maps, so a camera key simply omitted from a full
+    report persists in the shadow document and the Portal keeps seeing
+    the stale entry as present. An unpinned, previously reported
+    Static_Image_Camera must therefore be reported explicitly ABSENT —
+    the same absence pattern discovered physical cameras use — not just
+    dropped from the report. When ``static_image_pinned`` is false and
+    the caller passes an ``static_image_absent_since`` timestamp (epoch
+    ms — the caller's signal that the camera was previously reported and
+    when its absence was first established), the merge appends exactly
+    one ``static-image-camera`` entry with the fixed identity,
+    ``absent=True``, and that timestamp. When false and ``None`` (never
+    reported), no entry is appended. Ignored while pinned.
+
+    ``static_video_pinned`` / ``static_video_metadata`` /
+    ``static_video_absent_since`` (feature static-camera-video-loop,
+    Requirements 4.6, 4.7) do the same for the virtual
+    ``static-video-camera``: one ``StaticVideo`` entry while a video is
+    pinned (the video sidecar folded into ``capabilities.staticVideo``),
+    one explicitly absent entry after an unpin of a reported camera, and
+    never the aravis-enumerated duplicate. They are independent of the
+    image parameters.
+
+    Stream cameras (rtsp-rtmp-stream-cameras Requirement 4.5): each ``RTSP``
+    or ``RTMP`` Image_Source becomes one ``edge-configured`` entry, never
+    merged with discovered hardware, whose ``params`` carry the Stream_URL
+    (``url``), its non-secret settings, ``credentialsConfigured`` and the
+    device-managed ``credentialRef`` / ``credentialsUpdatedAt``, and whose
+    ``capabilities.stream`` carry the coarse state, codec, resolution and
+    decoder (:func:`stream_capabilities`). ``stream_health`` maps an
+    Image_Source id to its Stream_Health (or an already-projected
+    section), and ``stream_credentials_configured`` to whether the
+    Credential_Store holds its credentials. Neither ever holds a
+    credential. Inputs without stream sources produce exactly the output
+    they did before.
+    """
+    tracked = _normalize_discovery(discovery_result)
+
+    # Discovered V4L2 cameras indexed by device path, and Aravis cameras
+    # indexed by camera id; a present camera wins over an absent one
+    # claiming the same key (post-renumbering leftovers).
+    by_path: Dict[str, Tuple[str, Any, bool, Optional[int]]] = {}
+    by_camera_id: Dict[str, Tuple[str, Any, bool, Optional[int]]] = {}
+    for stable_id in sorted(tracked):
+        camera, absent, absent_since = tracked[stable_id]
+        if isinstance(camera, DiscoveredAravisCamera):
+            index, key = by_camera_id, camera.camera_id
+        else:
+            index, key = by_path, camera.device_path
+        existing = index.get(key)
+        if existing is not None and not existing[2]:
+            continue  # keep the present camera already claiming this key
+        if existing is None or (existing[2] and not absent):
+            index[key] = (stable_id, camera, absent, absent_since)
+
+    merged_stable_ids = set()
+    entries: List[CameraSourceState] = []
+
+    for source in sorted(image_sources, key=_image_source_sort_key):
+        image_source_id = _get(source, "imageSourceId")
+        if _source_type(source) in STREAM_SOURCE_TYPE_VALUES:
+            key = str(image_source_id)
+            entries.append(_stream_entry(
+                source,
+                (stream_health or {}).get(key),
+                bool((stream_credentials_configured or {}).get(key)),
+            ))
+            continue
+        device_path = _resolve_device_path(source)
+
+        match = None
+        if device_path is not None and device_path in by_path:
+            candidate = by_path[device_path]
+            if candidate[0] not in merged_stable_ids:
+                match = candidate
+
+        # Aravis merge by camera id (aravis-camera-input Requirement 2.4):
+        # a configured Camera-type Image_Source whose cameraId equals a
+        # tracked Aravis camera's id merges into this configured entry.
+        aravis_match = None
+        if _source_type(source) == _ARAVIS_BACKED_SOURCE_TYPE:
+            camera_id = _get(source, "cameraId")
+            if camera_id and str(camera_id) in by_camera_id:
+                candidate = by_camera_id[str(camera_id)]
+                if candidate[0] not in merged_stable_ids:
+                    aravis_match = candidate
+
+        params = _configured_params(source, device_path)
+        if match is None and aravis_match is None:
+            entries.append(
+                CameraSourceState(
+                    camera_source_id=configured_camera_source_id(image_source_id),
+                    name=_get(source, "name") or "",
+                    type=_source_type(source),
+                    origin=ORIGIN_EDGE_CONFIGURED,
+                    params=params,
+                )
+            )
+            continue
+
+        capabilities: Dict[str, Any] = {}
+        absent = False
+        absent_since: Optional[int] = None
+        if match is not None:
+            stable_id, camera, absent, absent_since = match
+            merged_stable_ids.add(stable_id)
+            capabilities = _capabilities(camera)
+        if aravis_match is not None:
+            aravis_stable_id, aravis_camera, aravis_absent, aravis_absent_since = (
+                aravis_match
+            )
+            merged_stable_ids.add(aravis_stable_id)
+            capabilities["aravis"] = _aravis_identity(aravis_camera)
+            if match is None:
+                absent = aravis_absent
+                absent_since = aravis_absent_since
+        entries.append(
+            CameraSourceState(
+                camera_source_id=configured_camera_source_id(image_source_id),
+                name=_get(source, "name") or "",
+                type=_source_type(source),
+                origin=ORIGIN_EDGE_CONFIGURED,
+                params=params,
+                capabilities=capabilities,
+                discovered=True,
+                absent=absent,
+                absent_since=absent_since,
+            )
+        )
+
+    for stable_id in sorted(tracked):
+        if stable_id in merged_stable_ids:
+            continue
+        camera, absent, absent_since = tracked[stable_id]
+        # De-duplicate the Static_Image_Camera (third hardware finding —
+        # Requirements 2.7, 2.8): the aravis-enumerated static camera
+        # never reports as its own discovery entry, because the dedicated
+        # entry appended below is the single registration and is the only
+        # one carrying the pin metadata and the explicit-absence
+        # lifecycle. Matched on ``camera_id`` — the semantic key both
+        # rows share and the id a workflow node binds to — rather than on
+        # the derived STATIC_IMAGE_ARAVIS_STABLE_ID, so an identity
+        # change cannot silently un-match. Applied in EVERY pin state:
+        # after an unpin the tracker still holds this camera as an absent
+        # leftover, and it is the dedicated entry's own absence lifecycle
+        # the Portal consumes. Scoped to this emission loop only, so the
+        # configured merge above (a user's Image_Source whose
+        # ``cameraId`` is ``static-image-camera``) is untouched (3.18).
+        if _is_static_image_aravis_camera(camera):
+            continue
+        # The Static_Video_Camera's aravis-enumerated duplicate is skipped
+        # for the same reason, in every pin state (static-camera-video-loop,
+        # Requirement 4.6): its dedicated entry below is the single
+        # registration.
+        if _is_static_video_aravis_camera(camera):
+            continue
+        # A camera whose merge key merged under a different stable id
+        # (absent leftover displaced by a present camera) still reports
+        # separately — its stable id is what bindings reference.
+        if isinstance(camera, DiscoveredAravisCamera):
+            entries.append(
+                CameraSourceState(
+                    camera_source_id=stable_id,
+                    name=f"{camera.vendor} {camera.model}",
+                    type=TYPE_ARAVIS_DISCOVERED,
+                    origin=ORIGIN_EDGE_DISCOVERED,
+                    params={
+                        "cameraId": camera.camera_id,
+                        "serial": camera.serial,
+                        "protocol": camera.protocol,
+                        "address": camera.address,
+                    },
+                    capabilities={"aravis": _aravis_identity(camera)},
+                    discovered=True,
+                    absent=absent,
+                    absent_since=absent_since,
+                )
+            )
+            continue
+        entries.append(
+            CameraSourceState(
+                camera_source_id=stable_id,
+                name=camera.card_name,
+                type=TYPE_V4L2_DISCOVERED,
+                origin=ORIGIN_EDGE_DISCOVERED,
+                params={"devicePath": camera.device_path},
+                capabilities=_capabilities(camera),
+                discovered=True,
+                absent=absent,
+                absent_since=absent_since,
+            )
+        )
+
+    # Static_Image_Camera (cloud-static-camera-provisioning, Requirements
+    # 6.1, 6.2, 7.6): present exactly while a Pinned_Image exists;
+    # explicitly ABSENT (never merely omitted — shadow merge semantics
+    # keep omitted keys alive, Req 6.2) once unpinned after having been
+    # reported.
+    if static_image_pinned:
+        entries.append(_static_image_entry(static_image_metadata))
+    elif static_image_absent_since is not None:
+        entries.append(_static_image_absent_entry(static_image_absent_since))
+
+    # Static_Video_Camera (static-camera-video-loop, Requirements 4.6,
+    # 4.7): the same present/absent lifecycle, driven only by its own
+    # arguments.
+    if static_video_pinned:
+        entries.append(_static_video_entry(static_video_metadata))
+    elif static_video_absent_since is not None:
+        entries.append(_static_video_absent_entry(static_video_absent_since))
+
+    return entries
+
+
+# --- helpers -----------------------------------------------------------------
+
+
+def _is_static_image_aravis_camera(camera) -> bool:
+    """True for the aravis-enumerated Static_Image_Camera — the synthetic
+    bus entry ``getCameras()`` appends while a Pinned_Image exists (third
+    hardware finding, Requirements 2.7, 2.11).
+
+    Matched on the semantic key (``camera_id`` equal to the fixed
+    ``STATIC_IMAGE_CAMERA_ID``), not on the derived
+    :data:`STATIC_IMAGE_ARAVIS_STABLE_ID`, so a change to the shipped
+    enumeration identity cannot silently stop matching. Only Aravis-family
+    cameras carry a ``camera_id`` at all, so a V4L2 camera never matches.
+    """
+    return (
+        isinstance(camera, DiscoveredAravisCamera)
+        and camera.camera_id == STATIC_IMAGE_CAMERA_ID
+    )
+
+
+def _static_image_identity() -> Dict[str, Any]:
+    """The fixed Static_Image_Camera enumeration identity (Req 6.1)."""
+    return {
+        "id": STATIC_IMAGE_CAMERA_ID,
+        "model": STATIC_IMAGE_CAMERA_IDENTITY["model"],
+        "address": STATIC_IMAGE_CAMERA_IDENTITY["address"],
+        "physicalId": STATIC_IMAGE_CAMERA_IDENTITY["physical_id"],
+        "protocol": STATIC_IMAGE_CAMERA_IDENTITY["protocol"],
+        "serial": STATIC_IMAGE_CAMERA_IDENTITY["serial"],
+        "vendor": STATIC_IMAGE_CAMERA_IDENTITY["vendor"],
+    }
+
+
+def _static_image_entry(
+    pin_metadata: Optional[Mapping[str, Any]],
+) -> CameraSourceState:
+    """The virtual Static_Image_Camera inventory entry (Requirement 6.1).
+
+    Fixed id ``static-image-camera``, origin ``edge-discovered`` (so the
+    discovery-managed mutation rejection covers it, Requirement 6.5), and
+    ``staticImage`` capabilities carrying the fixed enumeration identity
+    plus the pin store's metadata (width/height/format/fileName/…)."""
+    static_image = _static_image_identity()
+    if pin_metadata:
+        static_image.update(dict(pin_metadata))
+    return CameraSourceState(
+        camera_source_id=STATIC_IMAGE_CAMERA_ID,
+        name=STATIC_IMAGE_CAMERA_NAME,
+        type=TYPE_STATIC_IMAGE,
+        origin=ORIGIN_EDGE_DISCOVERED,
+        params={},
+        capabilities={"staticImage": static_image},
+        discovered=True,
+    )
+
+
+def _static_image_absent_entry(absent_since: int) -> CameraSourceState:
+    """The ABSENT Static_Image_Camera entry for an unpinned, previously
+    reported camera (Requirement 6.2 — second hardware finding).
+
+    Same fixed identity/type/origin as the present entry, no pin
+    metadata (nothing is pinned), ``absent=True`` with the stable
+    ``absent_since`` timestamp — exactly the absence pattern discovered
+    physical cameras report, which the Portal reducer already consumes
+    (incoming ``absent``/``absentSince`` -> registry entry marked absent
+    with ``absent_since``); a later re-pin reports the present entry
+    again and restores it (Requirement 6.1)."""
+    return CameraSourceState(
+        camera_source_id=STATIC_IMAGE_CAMERA_ID,
+        name=STATIC_IMAGE_CAMERA_NAME,
+        type=TYPE_STATIC_IMAGE,
+        origin=ORIGIN_EDGE_DISCOVERED,
+        params={},
+        capabilities={"staticImage": _static_image_identity()},
+        discovered=True,
+        absent=True,
+        absent_since=int(absent_since),
+    )
+
+
+def _is_static_video_aravis_camera(camera) -> bool:
+    """True for the aravis-enumerated Static_Video_Camera — the synthetic
+    bus entry ``getCameras()`` appends while a Pinned_Video exists
+    (static-camera-video-loop, Requirement 4.6). Matched on ``camera_id``
+    like :func:`_is_static_image_aravis_camera`."""
+    return (
+        isinstance(camera, DiscoveredAravisCamera)
+        and camera.camera_id == STATIC_VIDEO_CAMERA_ID
+    )
+
+
+def _static_video_identity() -> Dict[str, Any]:
+    """The fixed Static_Video_Camera enumeration identity."""
+    return {
+        "id": STATIC_VIDEO_CAMERA_ID,
+        "model": STATIC_VIDEO_CAMERA_IDENTITY["model"],
+        "address": STATIC_VIDEO_CAMERA_IDENTITY["address"],
+        "physicalId": STATIC_VIDEO_CAMERA_IDENTITY["physical_id"],
+        "protocol": STATIC_VIDEO_CAMERA_IDENTITY["protocol"],
+        "serial": STATIC_VIDEO_CAMERA_IDENTITY["serial"],
+        "vendor": STATIC_VIDEO_CAMERA_IDENTITY["vendor"],
+    }
+
+
+def _static_video_entry(
+    video_metadata: Optional[Mapping[str, Any]],
+) -> CameraSourceState:
+    """The virtual Static_Video_Camera inventory entry (Requirement 4.6).
+
+    Fixed id ``static-video-camera``, origin ``edge-discovered`` (so the
+    Portal's discovery-managed mutation rejection covers it), and
+    ``staticVideo`` capabilities carrying the fixed identity plus the
+    video sidecar (format, codec, width, height, fps, frameCount, …)."""
+    static_video = _static_video_identity()
+    if video_metadata:
+        static_video.update(dict(video_metadata))
+    return CameraSourceState(
+        camera_source_id=STATIC_VIDEO_CAMERA_ID,
+        name=STATIC_VIDEO_CAMERA_NAME,
+        type=TYPE_STATIC_VIDEO,
+        origin=ORIGIN_EDGE_DISCOVERED,
+        params={},
+        capabilities={"staticVideo": static_video},
+        discovered=True,
+    )
+
+
+def _static_video_absent_entry(absent_since: int) -> CameraSourceState:
+    """The ABSENT Static_Video_Camera entry for an unpinned, previously
+    reported camera (Requirement 4.7): the identity without sidecar
+    fields, ``absent=True`` and the stable ``absent_since``."""
+    return CameraSourceState(
+        camera_source_id=STATIC_VIDEO_CAMERA_ID,
+        name=STATIC_VIDEO_CAMERA_NAME,
+        type=TYPE_STATIC_VIDEO,
+        origin=ORIGIN_EDGE_DISCOVERED,
+        params={},
+        capabilities={"staticVideo": _static_video_identity()},
+        discovered=True,
+        absent=True,
+        absent_since=int(absent_since),
+    )
+
+
+def _normalize_discovery(discovery_result) -> Dict[str, Tuple[Any, bool, Optional[int]]]:
+    """Normalize a ``DiscoveryResult`` or ``InventorySnapshot`` into
+    ``{stable_id: (camera, absent, absent_since)}``."""
+    tracked: Dict[str, Tuple[Any, bool, Optional[int]]] = {}
+    if discovery_result is None:
+        return tracked
+
+    cameras = getattr(discovery_result, "cameras", None)
+    if isinstance(cameras, Mapping):  # InventorySnapshot
+        for stable_id, entry in cameras.items():
+            tracked[stable_id] = (entry.camera, entry.absent, entry.absent_since)
+    elif cameras is not None:  # DiscoveryResult
+        for camera in cameras:
+            tracked[camera.stable_id] = (camera, False, None)
+    return tracked
+
+
+def _get(obj, key, default=None):
+    """Dict- or attribute-style access, tolerant of both record shapes."""
+    if isinstance(obj, Mapping):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _image_source_sort_key(source) -> str:
+    return str(_get(source, "imageSourceId") or "")
+
+
+def _source_type(source) -> str:
+    """The Image_Source's ``type`` as the design's ImageSourceType VALUE
+    (e.g. "Camera", "Folder"). Real ORM rows carry an ``ImageSourceType``
+    enum member (whose ``str()`` is the member repr, not its value);
+    dict-shaped records already carry the plain string."""
+    raw = _get(source, "type")
+    if raw is None:
+        return ""
+    return str(getattr(raw, "value", raw) or "")
+
+
+def _resolve_device_path(source) -> Optional[str]:
+    """The Image_Source's resolved device path: the ``device`` value on its
+    attached image-source configuration, when present."""
+    configuration = _get(source, "imageSourceConfiguration")
+    if not configuration:
+        return None
+    device = _get(configuration, "device")
+    if device:
+        return str(device)
+    return None
+
+
+def _configured_params(source, device_path: Optional[str]) -> Dict[str, Any]:
+    """The configured, portal-relevant parameters, omitting empty values."""
+    configuration = _get(source, "imageSourceConfiguration") or {}
+    params: Dict[str, Any] = {}
+    if device_path is not None:
+        params["devicePath"] = device_path
+    for source_key, param_key in (
+        ("cameraId", "cameraId"),
+        ("location", "location"),
+        ("description", "description"),
+    ):
+        value = _get(source, source_key)
+        if value:
+            params[param_key] = value
+    for config_key, param_key in (
+        ("gain", "gain"),
+        ("exposure", "exposure"),
+        ("deviceName", "deviceName"),
+    ):
+        value = _get(configuration, config_key)
+        if value is not None:
+            params[param_key] = value
+    return params
+
+
+def stream_params(source, credentials_configured: bool) -> Dict[str, Any]:
+    """The reported ``params`` of a stream Image_Source: the Stream_URL, its
+    stored settings, ``credentialsConfigured``, and the device-managed
+    Credential_Reference and update time. Never a credential: those live
+    only in the Credential_Store, and the stored settings hold none."""
+    source_type = _source_type(source)
+    configuration = _get(source, "imageSourceConfiguration") or {}
+    settings = dict(_get(configuration, "streamSettings") or {})
+    params: Dict[str, Any] = {"url": _get(source, "location")}
+    for name in STREAM_REPORTED_SETTINGS.get(source_type, ()):
+        if settings.get(name) is not None:
+            params[name] = settings[name]
+    params[STREAM_CREDENTIALS_CONFIGURED] = bool(credentials_configured)
+    reference = settings.get(STREAM_CREDENTIAL_REF)
+    if isinstance(reference, Mapping) and reference:
+        params[STREAM_CREDENTIAL_REF] = {
+            key: reference[key] for key in ("secretArn", "versionId") if key in reference}
+    updated_at = settings.get(STREAM_CREDENTIALS_UPDATED_AT)
+    if isinstance(updated_at, int) and not isinstance(updated_at, bool):
+        params[STREAM_CREDENTIALS_UPDATED_AT] = updated_at
+    return params
+
+
+def _stream_entry(source, health, credentials_configured: bool) -> CameraSourceState:
+    return CameraSourceState(
+        camera_source_id=configured_camera_source_id(_get(source, "imageSourceId")),
+        name=_get(source, "name") or "",
+        type=_source_type(source),
+        origin=ORIGIN_EDGE_CONFIGURED,
+        params=stream_params(source, credentials_configured),
+        capabilities=stream_capabilities(health),
+    )
+
+
+def _aravis_identity(camera) -> Dict[str, Any]:
+    """The discovered Aravis identity metadata reported under
+    ``capabilities.aravis`` (aravis-camera-input Requirement 2.3)."""
+    return {
+        "model": camera.model,
+        "address": camera.address,
+        "physicalId": camera.physical_id,
+        "protocol": camera.protocol,
+        "serial": camera.serial,
+        "vendor": camera.vendor,
+    }
+
+
+def _capabilities(camera) -> Dict[str, Any]:
+    """Discovered capability metadata in the reported-document shape."""
+    return {
+        "formats": [
+            {
+                "pixelFormat": fmt.get("pixel_format"),
+                "resolutions": [list(r) for r in fmt.get("resolutions", [])],
+            }
+            for fmt in camera.formats
+        ],
+        "driver": camera.driver,
+        "busInfo": camera.bus_info,
+        "kind": camera.kind,
+    }

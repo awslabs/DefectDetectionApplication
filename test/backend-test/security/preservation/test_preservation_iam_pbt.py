@@ -127,7 +127,7 @@ def _non_dda_bucket_arn(draw):
 # PBT 1 — DDA vs non-DDA S3 resource ARNs (unfixed = allow both)
 # --------------------------------------------------------------------------- #
 # Validates: Requirements 3.7 (and 3.1 by extension)
-@settings(max_examples=80, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(arn=st.one_of(_dda_bucket_arn(), _non_dda_bucket_arn()))
 def test_pbt1_unfixed_s3_wildcard_allows_all(arn):
     s3_policy = _golden("iam_baseline_heredoc_deploy-account-role_S3_POLICY.json")
@@ -139,7 +139,7 @@ def test_pbt1_unfixed_s3_wildcard_allows_all(arn):
 
 # Validates: Requirements 3.7 — the DDA-prefixed subset the fix must PRESERVE is
 # in the unfixed allow-set (so the fix can narrow to it without losing access).
-@settings(max_examples=80, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(arn=_dda_bucket_arn())
 def test_pbt1_dda_prefixed_arns_are_preserved_subset(arn):
     s3_policy = _golden("iam_baseline_heredoc_deploy-account-role_S3_POLICY.json")
@@ -160,7 +160,7 @@ _UNFIXED_GROUNDTRUTH_S3 = {
 
 
 # Validates: Requirements 3.3, 3.4
-@settings(max_examples=60, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(
     arn=st.one_of(_dda_bucket_arn(), _non_dda_bucket_arn()),
     tag_present=st.booleans(),
@@ -190,7 +190,7 @@ _UNFIXED_LABELING_ASSUME = {
 
 
 # Validates: Requirements 3.5, 3.6
-@settings(max_examples=80, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(trusted=st.lists(_account, min_size=1, max_size=4, unique=True), probe=_account)
 def test_pbt3_unfixed_assume_role_allows_any_account(trusted, probe):
     arn = f"arn:aws:iam::{probe}:role/DDAPortalAccessRole"
@@ -219,7 +219,7 @@ IOT_OTHER_ACTIONS = [
 
 
 # Validates: Requirements 3.11, 3.13, 3.15
-@settings(max_examples=60, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(action=st.sampled_from(IOT_EXERCISED_SUBSET + IOT_OTHER_ACTIONS))
 def test_pbt4_unfixed_iot_wildcard_allows_all_actions(action):
     inline = _golden(

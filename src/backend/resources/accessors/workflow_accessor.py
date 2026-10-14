@@ -34,7 +34,8 @@ import time
 import awsiot.greengrasscoreipc.model as model
 
 from dao.sqlite_db import workflow_dao, image_source_dao, input_configuration_dao, output_configuration_dao
-from model.image_source import ImageSourceType
+from model.image_source import ImageSourceType, is_stream_source_type
+from model.stream_source import CLASSIC_PIPELINE_REJECTION
 from .image_source_accessor import ImageSourceAccessor
 from .input_configuration_accessor import InputConfigurationAccessor
 from .output_configuration_accessor import OutputConfigurationAccessor
@@ -308,6 +309,11 @@ class WorkflowAccessor:
 
             if not retrieved_image_source:
                 raise ValidationError(f"Image source {image_src['imageSourceId']} does not exist")
+            if is_stream_source_type(retrieved_image_source.type):
+                # rtsp-rtmp-stream-cameras Requirement 4.8: a classic
+                # workflow, and with it a digital-input capture, cannot use
+                # a stream camera.
+                raise ValidationError(CLASSIC_PIPELINE_REJECTION)
 
             image_source = utils.convert_sqlalchemy_object_to_dict(retrieved_image_source)
 

@@ -1,6 +1,6 @@
 {
   "component": {
-    "aws.edgeml.dda.LocalServer.arm64JP5": {
+    "aws.edgeml.dda.LocalServer.arm64JP7": {
       "author": "Amazon",
       "version": "NEXT_PATCH",
       "build": {
@@ -8,14 +8,13 @@
         "custom_build_command": [
           "bash",
           "build-custom.sh",
-          "aws.edgeml.dda.LocalServer.arm64JP5",
-          "NEXT_PATCH",
-          "aarch64"
+          "aws.edgeml.dda.LocalServer.arm64JP7",
+          "NEXT_PATCH"
         ]
       },
       "publish": {
         "bucket": "dda-component",
-        "region": "us-east-2"
+        "region": "us-east-1"
       }
     }
   },

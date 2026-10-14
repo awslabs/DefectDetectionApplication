@@ -16,12 +16,17 @@ import {
   Container,
   StatusIndicator,
   ColumnLayout,
+  Toggle,
 } from '@cloudscape-design/components';
-import { apiService } from '../services/api';
+import { ApiError, apiService, UsecaseBucketUpdateResponse } from '../services/api';
 import { UseCase } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import TeamManagement from '../components/TeamManagement';
+import BucketNotAllowedNotice, {
+  USECASE_ADMIN_REQUIRED_MESSAGE,
+} from '../components/BucketNotAllowedNotice';
 import { validateBucketName } from '../utils/s3Validation';
+import { bucketErrorCode } from '../utils/bucketErrors';
 import { useTableSort } from '../hooks/useTableSort';
 
 interface FormDataType {
@@ -35,6 +40,70 @@ interface FormDataType {
   data_account_external_id: string;
   data_s3_bucket: string;
   data_s3_prefix: string;
+  // VLM/LLM Anomaly Tuning Sample_Export (spec: quality-prompt-tuning,
+  // Requirements 2.1, 2.9)
+  tuning_sample_export: boolean;
+  tuning_sample_retention_days: string;
+}
+
+// Sample_Export retention bounds, mirroring the backend
+// (functions/tuning_settings.py, Requirement 2.9).
+export const TUNING_RETENTION_DEFAULT_DAYS = 30;
+export const TUNING_RETENTION_MIN_DAYS = 7;
+export const TUNING_RETENTION_MAX_DAYS = 365;
+
+export function validateTuningRetentionDays(value: string): string | undefined {
+  const text = (value ?? '').trim();
+  if (!text) return undefined; // empty ⇒ the backend default applies
+  if (!/^\d+$/.test(text)) {
+    return 'Retention must be a whole number of days';
+  }
+  const days = Number(text);
+  if (days < TUNING_RETENTION_MIN_DAYS || days > TUNING_RETENTION_MAX_DAYS) {
+    return `Retention must be between ${TUNING_RETENTION_MIN_DAYS} and ${TUNING_RETENTION_MAX_DAYS} days`;
+  }
+  return undefined;
+}
+
+// Use-case bucket configuration (spec: portal-usecase-bucket-config, design
+// §5.1 / §10.2): the configured buckets of a record, always allowed.
+export function configuredBuckets(useCase: Pick<UseCase, 's3_bucket' | 'data_s3_bucket'>): string[] {
+  const names: string[] = [];
+  if (useCase.s3_bucket) names.push(useCase.s3_bucket);
+  if (useCase.data_s3_bucket && useCase.data_s3_bucket !== useCase.s3_bucket) {
+    names.push(useCase.data_s3_bucket);
+  }
+  return names;
+}
+
+/**
+ * The additional buckets after a PUT: the server's allowed set minus the
+ * configured buckets (the allowed set already excludes the portal's own
+ * buckets).
+ */
+export function additionalFromAllowed(
+  response: Pick<UsecaseBucketUpdateResponse, 'allowed_s3_buckets'>,
+  useCase: Pick<UseCase, 's3_bucket' | 'data_s3_bucket'>
+): string[] {
+  const configured = new Set(configuredBuckets(useCase));
+  return (response.allowed_s3_buckets || []).filter((name) => !configured.has(name));
+}
+
+/** Pending marker of the "Allow" action; '+' never occurs in a bucket name. */
+const ADD_PENDING = '+add';
+
+/** Message for a failed allow/remove that the notice does not render. */
+export function bucketUpdateErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 403) return USECASE_ADMIN_REQUIRED_MESSAGE;
+    const code = err.details?.error_code;
+    if (code === 'usecase_not_found') return 'This use case no longer exists';
+    if (code === 'concurrent_update') {
+      return 'The use case was changed by someone else at the same time; retry';
+    }
+    return err.message;
+  }
+  return err instanceof Error && err.message ? err.message : 'Failed to update the allowed buckets';
 }
 
 export default function UseCases() {
@@ -58,7 +127,18 @@ export default function UseCases() {
     data_account_external_id: '',
     data_s3_bucket: '',
     data_s3_prefix: '',
+    tuning_sample_export: false,
+    tuning_sample_retention_days: '',
   });
+
+  // Allowed buckets section of the Edit modal (design §10.2): the additional
+  // buckets of the opened record, the name being allowed, and its errors.
+  const [additionalBuckets, setAdditionalBuckets] = useState<string[]>([]);
+  const [newAllowedBucket, setNewAllowedBucket] = useState('');
+  // The bucket name being removed, or ADD_PENDING (not a valid bucket name).
+  const [bucketActionPending, setBucketActionPending] = useState<string | null>(null);
+  const [bucketActionError, setBucketActionError] = useState('');
+  const [bucketNoticeError, setBucketNoticeError] = useState<unknown>(null);
 
   const resetForm = () => {
     setFormData({
@@ -72,7 +152,14 @@ export default function UseCases() {
       data_account_external_id: '',
       data_s3_bucket: '',
       data_s3_prefix: '',
+      tuning_sample_export: false,
+      tuning_sample_retention_days: '',
     });
+    setAdditionalBuckets([]);
+    setNewAllowedBucket('');
+    setBucketActionPending(null);
+    setBucketActionError('');
+    setBucketNoticeError(null);
   };
 
   const { data, isLoading } = useQuery({
@@ -190,8 +277,68 @@ export default function UseCases() {
       data_account_external_id: useCase.data_account_external_id || '',
       data_s3_bucket: useCase.data_s3_bucket || '',
       data_s3_prefix: useCase.data_s3_prefix || '',
+      tuning_sample_export: useCase.tuning_sample_export === true,
+      tuning_sample_retention_days:
+        useCase.tuning_sample_retention_days !== undefined &&
+        useCase.tuning_sample_retention_days !== null
+          ? String(useCase.tuning_sample_retention_days)
+          : '',
     });
+    setAdditionalBuckets(useCase.additional_s3_buckets || []);
+    setNewAllowedBucket('');
+    setBucketActionError('');
+    setBucketNoticeError(null);
     setShowEditModal(true);
+  };
+
+  // Allow / remove one additional bucket through PUT /usecases/{id}
+  // (design §5.3): the server probes eligibility; its answer carries the
+  // allowed set the section is refreshed from.
+  const applyBucketUpdate = (response: UsecaseBucketUpdateResponse) => {
+    if (!selectedUseCase) return;
+    setAdditionalBuckets(additionalFromAllowed(response, selectedUseCase));
+    queryClient.invalidateQueries({ queryKey: ['usecases', user?.user_id] });
+  };
+
+  const handleAllowBucket = async () => {
+    if (!selectedUseCase) return;
+    const name = newAllowedBucket.trim();
+    if (!name || validateBucketName(name)) return;
+    setBucketActionPending(ADD_PENDING);
+    setBucketActionError('');
+    setBucketNoticeError(null);
+    try {
+      const response = await apiService.allowBucketForUsecase(selectedUseCase.usecase_id, name);
+      applyBucketUpdate(response);
+      setNewAllowedBucket('');
+    } catch (err) {
+      if (bucketErrorCode(err)) {
+        setBucketNoticeError(err);
+      } else {
+        setBucketActionError(bucketUpdateErrorMessage(err));
+      }
+    } finally {
+      setBucketActionPending(null);
+    }
+  };
+
+  const handleRemoveBucket = async (name: string) => {
+    if (!selectedUseCase) return;
+    setBucketActionPending(name);
+    setBucketActionError('');
+    setBucketNoticeError(null);
+    try {
+      const response = await apiService.removeAllowedBucket(selectedUseCase.usecase_id, name);
+      applyBucketUpdate(response);
+    } catch (err) {
+      if (bucketErrorCode(err)) {
+        setBucketNoticeError(err);
+      } else {
+        setBucketActionError(bucketUpdateErrorMessage(err));
+      }
+    } finally {
+      setBucketActionPending(null);
+    }
   };
 
   const handleUpdate = () => {
@@ -200,7 +347,22 @@ export default function UseCases() {
       setError('Name and S3 Bucket are required');
       return;
     }
-    updateMutation.mutate({ id: selectedUseCase.usecase_id, data: formData });
+    const retentionError = validateTuningRetentionDays(
+      formData.tuning_sample_retention_days
+    );
+    if (retentionError) {
+      setError(retentionError);
+      return;
+    }
+    // Tuning sample export travels as the typed setting pair the backend
+    // validates (quality-prompt-tuning 2.1, 2.9); an empty retention field
+    // leaves the stored value (or the 30-day default) alone.
+    const { tuning_sample_retention_days: retentionDays, ...rest } = formData;
+    const data: Partial<UseCase> = { ...rest };
+    if (retentionDays.trim()) {
+      data.tuning_sample_retention_days = Number(retentionDays.trim());
+    }
+    updateMutation.mutate({ id: selectedUseCase.usecase_id, data });
   };
 
   const handleDeleteClick = (useCase: UseCase) => {
@@ -486,6 +648,135 @@ export default function UseCases() {
               value={formData.s3_bucket}
               onChange={({ detail }) => setFormData({ ...formData, s3_bucket: detail.value })}
               placeholder="my-usecase-bucket"
+            />
+          </FormField>
+
+          {/* Allowed buckets (spec: portal-usecase-bucket-config, design
+              §10.2). Every S3 access the portal performs for the use case is
+              bound to the configured buckets plus this list; changes here are
+              written immediately through PUT /usecases/{id}, independent of
+              "Save Changes". */}
+          <Header
+            variant="h3"
+            description="Browsing, uploads, model import, manifests and transforms can only use these buckets. Configured buckets are always allowed; additional buckets must be tagged dda-portal:managed=true and not belong to another use case. Labeling jobs always use the configured data bucket."
+          >
+            Allowed buckets
+          </Header>
+
+          {bucketActionError && (
+            <Alert type="error" dismissible onDismiss={() => setBucketActionError('')}>
+              {bucketActionError}
+            </Alert>
+          )}
+          {bucketNoticeError !== null && (
+            <BucketNotAllowedNotice
+              err={bucketNoticeError}
+              usecaseId={selectedUseCase?.usecase_id}
+              onAllowed={() => setBucketNoticeError(null)}
+            />
+          )}
+
+          <Box>
+            <Box variant="awsui-key-label">Configured buckets</Box>
+            <SpaceBetween size="xxs">
+              {selectedUseCase &&
+                configuredBuckets(selectedUseCase).map((name) => (
+                  <Box key={name}>
+                    <code>{name}</code>
+                  </Box>
+                ))}
+            </SpaceBetween>
+          </Box>
+
+          <Box>
+            <Box variant="awsui-key-label">Additional buckets</Box>
+            {additionalBuckets.length === 0 ? (
+              <Box color="text-body-secondary">No additional buckets</Box>
+            ) : (
+              <SpaceBetween size="xxs">
+                {additionalBuckets.map((name) => (
+                  <SpaceBetween key={name} direction="horizontal" size="xs" alignItems="center">
+                    <code>{name}</code>
+                    <Button
+                      variant="inline-link"
+                      onClick={() => handleRemoveBucket(name)}
+                      loading={bucketActionPending === name}
+                      disabled={bucketActionPending !== null}
+                      ariaLabel={`Remove ${name}`}
+                    >
+                      Remove
+                    </Button>
+                  </SpaceBetween>
+                ))}
+              </SpaceBetween>
+            )}
+          </Box>
+
+          <FormField
+            label="Allow another bucket"
+            description="Bucket name only (no s3:// prefix). The server checks the dda-portal:managed tag before adding it."
+            errorText={validateBucketName(newAllowedBucket)}
+            stretch
+          >
+            <SpaceBetween direction="horizontal" size="xs">
+              <Input
+                value={newAllowedBucket}
+                onChange={({ detail }) => setNewAllowedBucket(detail.value)}
+                placeholder="another-bucket"
+              />
+              <Button
+                onClick={handleAllowBucket}
+                loading={bucketActionPending === ADD_PENDING}
+                disabled={
+                  bucketActionPending !== null ||
+                  !newAllowedBucket.trim() ||
+                  !!validateBucketName(newAllowedBucket)
+                }
+              >
+                Allow
+              </Button>
+            </SpaceBetween>
+          </FormField>
+
+          {/* VLM/LLM Anomaly Tuning Sample_Export (spec:
+              quality-prompt-tuning, Requirements 2.1, 2.9). Devices export
+              nothing until this is enabled AND the devices are redeployed. */}
+          <Header variant="h3">Workflow Tuning</Header>
+
+          <FormField
+            label="Tuning sample export"
+            description="Let devices upload the exact images and verdicts of every anomaly-mode Bedrock/VLM inspection to workflow-tuning/samples/ in this use case's inference results bucket, for prompt tuning. Takes effect the next time the devices are deployed to."
+            stretch
+          >
+            <Toggle
+              checked={formData.tuning_sample_export}
+              onChange={({ detail }) =>
+                setFormData({ ...formData, tuning_sample_export: detail.checked })
+              }
+            >
+              {formData.tuning_sample_export
+                ? 'Enabled — devices export tuning samples'
+                : 'Disabled — devices export nothing'}
+            </Toggle>
+          </FormField>
+
+          <FormField
+            label="Tuning sample retention (days)"
+            description={`How long exported tuning samples are kept before S3 expires them (${TUNING_RETENTION_MIN_DAYS}-${TUNING_RETENTION_MAX_DAYS}; default ${TUNING_RETENTION_DEFAULT_DAYS}).`}
+            errorText={validateTuningRetentionDays(formData.tuning_sample_retention_days)}
+            stretch
+          >
+            <Input
+              type="number"
+              inputMode="numeric"
+              value={formData.tuning_sample_retention_days}
+              onChange={({ detail }) =>
+                setFormData({
+                  ...formData,
+                  tuning_sample_retention_days: detail.value,
+                })
+              }
+              placeholder={String(TUNING_RETENTION_DEFAULT_DAYS)}
             />
           </FormField>
 

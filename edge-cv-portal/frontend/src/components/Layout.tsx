@@ -5,6 +5,7 @@ import {
   TopNavigation,
   SideNavigation,
   SideNavigationProps,
+  ButtonDropdownProps,
   Modal,
   SpaceBetween,
   FormField,
@@ -14,22 +15,89 @@ import {
   Alert,
 } from '@cloudscape-design/components';
 import { useAuth } from '../contexts/AuthContext';
+import { UserRole } from '../types';
 import { getConfig, getBuildInfo } from '../config';
+import { canAccessBuilds } from '../utils/buildsAccess';
+import { canAccessSyntheticData } from '../utils/syntheticAccess';
+import { canAccessWorkflowTuning } from '../utils/workflowTuningAccess';
+import { clearAttemptedLocation } from '../services/sessionRedirect';
 
-export default function Layout() {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const { user, logout, changePassword } = useAuth();
-  const config = getConfig();
-  const branding = config.branding;
-  const build = getBuildInfo();
-  const [showChangePassword, setShowChangePassword] = useState(false);
-  const [oldPassword, setOldPassword] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [changePwLoading, setChangePwLoading] = useState(false);
-  const [changePwError, setChangePwError] = useState('');
-  const [changePwSuccess, setChangePwSuccess] = useState(false);
+/**
+ * Builds the items for the top-navigation settings dropdown based on the
+ * user's role (portal-user-manager Requirements 1.1, 1.2).
+ *
+ * Exported as a pure function so the role gating is directly testable:
+ * the `user-manager` item is present only for PortalAdmin users — it is
+ * omitted entirely (not merely disabled) for every other role.
+ */
+export function buildSettingsDropdownItems(
+  role: UserRole | undefined
+): ButtonDropdownProps.ItemOrGroup[] {
+  // A user whose resolved role is DataLabeler keeps only sign-out and
+  // account settings (the change-password action) in the dropdown
+  // (dda-data-labeling Requirement 2.2). Multi-role users resolve to a
+  // different role and keep the full dropdown (Requirement 2.8).
+  if (role === 'DataLabeler') {
+    return [
+      { id: 'change-password', text: 'Change Password' },
+      { id: 'logout', text: 'Sign out' },
+    ];
+  }
+  const isPortalAdmin = role === 'PortalAdmin';
+  return [
+    {
+      id: 'profile',
+      text: 'Profile',
+      disabled: true,
+    },
+    {
+      id: 'settings',
+      text: 'Settings',
+      // The settings page is PortalAdmin-only (same rule as the
+      // sidebar link); other roles see the item disabled.
+      disabled: !isPortalAdmin,
+    },
+    // The User Manager tool is PortalAdmin-only and, unlike the settings
+    // item, is omitted entirely for other roles (Requirement 1.2).
+    ...(isPortalAdmin
+      ? [{ id: 'user-manager', text: 'User Manager' }]
+      : []),
+    {
+      id: 'change-password',
+      text: 'Change Password',
+    },
+    {
+      id: 'logout',
+      text: 'Sign out',
+    },
+  ];
+}
+
+/**
+ * Builds the side-navigation item list for a user's role
+ * (build-fleet-rbac-visibility Requirements 2.5, 2.6, 3.6).
+ *
+ * Exported as a pure function so the role gating is directly property-testable
+ * (mirroring the `buildSettingsDropdownItems` pattern above). The list is the
+ * historical navigation exactly, with one gating change: the
+ * `{ text: 'Builds', href: '/builds' }` entry is included only when
+ * `canAccessBuilds(role)`, so roles without builds access no longer see a link
+ * to a page that can only render a 403 banner. The PortalAdmin-only group
+ * (including "Build Fleet" → `/admin/fleet`) and the UseCaseAdmin audit-logs
+ * handling are unchanged.
+ */
+export function buildNavigationItems(
+  role: UserRole | undefined
+): SideNavigationProps.Item[] {
+  // A user whose resolved role is DataLabeler sees only the labeler
+  // workspace destination (dda-data-labeling Requirement 2.2). Users who
+  // hold DataLabeler alongside another role resolve to that other role and
+  // keep its navigation unchanged (Requirement 2.8).
+  if (role === 'DataLabeler') {
+    return [
+      { type: 'link' as const, text: 'My Labeling Tasks', href: '/labeler' },
+    ];
+  }
 
   // Base navigation items for all users
   const baseNavigationItems: SideNavigationProps.Item[] = [
@@ -38,10 +106,61 @@ export default function Layout() {
     { type: 'divider' as const },
     { type: 'link' as const, text: 'Data Management', href: '/data' },
     { type: 'link' as const, text: 'Labeling', href: '/labeling' },
+    // The synthetic data generation workspace is limited to the roles
+    // holding Data_Scientist_Access (DataScientist, UseCaseAdmin,
+    // PortalAdmin) — synthetic-defect-data-generation Req 9.3, following
+    // the Builds nav gating pattern below.
+    ...(canAccessSyntheticData(role)
+      ? [{ type: 'link' as const, text: 'Synthetic Data', href: '/synthetic' }]
+      : []),
     { type: 'link' as const, text: 'Training', href: '/training' },
     { type: 'link' as const, text: 'Models', href: '/models' },
     { type: 'divider' as const },
+    { type: 'link' as const, text: 'Workflows', href: '/workflows/builder' },
+    // Workflow Tuning: a group of workflow-analysis tools, of which
+    // VLM/LLM Anomaly Tuning is the first (quality-prompt-tuning Req 1.1).
+    // Sits between "Workflows" and "Node Designer" and is limited to the
+    // roles that may edit workflows, following the Builds nav gating
+    // pattern below.
+    ...(canAccessWorkflowTuning(role)
+      ? [
+          {
+            type: 'expandable-link-group' as const,
+            text: 'Workflow Tuning',
+            href: '/workflow-tuning',
+            items: [
+              {
+                type: 'link' as const,
+                text: 'VLM/LLM Anomaly Tuning',
+                href: '/workflow-tuning/anomaly',
+              },
+            ],
+          },
+        ]
+      : []),
+    // Node Designer: the plugin library plus the Use_Case Git connections
+    // that plugin source is pushed to / pulled from
+    // (custom-node-source-lifecycle Requirement 2.9: every role with
+    // node-designer read may view connections; mutations are gated on
+    // the page itself).
+    {
+      type: 'expandable-link-group' as const,
+      text: 'Node Designer',
+      href: '/node-designer',
+      items: [
+        {
+          type: 'link' as const,
+          text: 'Git connections',
+          href: '/node-designer/git-connections',
+        },
+      ],
+    },
     { type: 'link' as const, text: 'Components', href: '/components' },
+    // The builds surface is limited to the roles holding `builds:*`
+    // (DataScientist, UseCaseAdmin, PortalAdmin) — Req 2.5, 2.6.
+    ...(canAccessBuilds(role)
+      ? [{ type: 'link' as const, text: 'Builds', href: '/builds' }]
+      : []),
     { type: 'link' as const, text: 'Deployments', href: '/deployments' },
     { type: 'link' as const, text: 'Devices', href: '/devices' },
   ];
@@ -49,27 +168,59 @@ export default function Layout() {
   // Admin-only items (PortalAdmin only)
   const portalAdminItems: SideNavigationProps.Item[] = [
     { type: 'divider' as const },
+    { type: 'link' as const, text: 'Plugin Review', href: '/node-designer/review' },
+    // Build server fleet management is PortalAdmin-only, like the
+    // UserManager entry (portal-build-fleet-and-workflow-gates Req 6.1, 6.7).
+    { type: 'link' as const, text: 'Build Fleet', href: '/admin/fleet' },
     { type: 'link' as const, text: 'Settings', href: '/settings' },
   ];
 
   // Audit logs - available to PortalAdmin and UseCaseAdmin
-  const auditLogsItem: SideNavigationProps.Item = { 
-    type: 'link' as const, 
-    text: 'Audit Logs', 
-    href: '/audit' 
+  const auditLogsItem: SideNavigationProps.Item = {
+    type: 'link' as const,
+    text: 'Audit Logs',
+    href: '/audit'
   };
 
   // Combine navigation items based on user role
-  const isPortalAdmin = user?.role === 'PortalAdmin';
-  const isUseCaseAdmin = user?.role === 'UseCaseAdmin';
-  
-  let navigationItems = [...baseNavigationItems];
-  
+  const isPortalAdmin = role === 'PortalAdmin';
+  const isUseCaseAdmin = role === 'UseCaseAdmin';
+
   if (isPortalAdmin) {
-    navigationItems = [...navigationItems, ...portalAdminItems, auditLogsItem];
-  } else if (isUseCaseAdmin) {
-    navigationItems = [...navigationItems, { type: 'divider' as const }, auditLogsItem];
+    return [...baseNavigationItems, ...portalAdminItems, auditLogsItem];
   }
+  if (isUseCaseAdmin) {
+    return [...baseNavigationItems, { type: 'divider' as const }, auditLogsItem];
+  }
+  return [...baseNavigationItems];
+}
+
+export default function Layout() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { user, logout, changePassword } = useAuth();
+  const config = getConfig();
+  const branding = config.branding;
+  const build = getBuildInfo();
+
+  // The workflow builder needs the full horizontal space, so the side
+  // navigation is collapsed by default on that route. The route only
+  // provides the default: once the user toggles the navigation the
+  // explicit choice wins for the rest of the session, whatever page
+  // they navigate to.
+  const isBuilderRoute = location.pathname.startsWith('/workflows/builder');
+  const [navigationOverride, setNavigationOverride] = useState<boolean | null>(null);
+  const navigationOpen = navigationOverride ?? !isBuilderRoute;
+
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changePwLoading, setChangePwLoading] = useState(false);
+  const [changePwError, setChangePwError] = useState('');
+  const [changePwSuccess, setChangePwSuccess] = useState(false);
+
+  const navigationItems = buildNavigationItems(user?.role);
 
   return (
     <>
@@ -88,30 +239,24 @@ export default function Layout() {
             text: user?.email || user?.username || 'User',
             description: user?.role || '',
             iconName: 'user-profile',
-            items: [
-              {
-                id: 'profile',
-                text: 'Profile',
-                disabled: true,
-              },
-              {
-                id: 'settings',
-                text: 'Settings',
-                disabled: true,
-              },
-              {
-                id: 'change-password',
-                text: 'Change Password',
-              },
-              {
-                id: 'logout',
-                text: 'Sign out',
-              },
-            ],
+            items: buildSettingsDropdownItems(user?.role),
             onItemClick: async ({ detail }) => {
               if (detail.id === 'logout') {
                 await logout();
+                // Deliberate sign-out is a clean start: forget any remembered
+                // Attempted_Location before going to /login, so signing back
+                // in lands on the default landing page
+                // (portal-session-expiry-return-to-page Requirements 4.1,
+                // 4.2). This runs *after* `logout()` on purpose — clearing
+                // it first would let the re-render that `logout()` triggers
+                // (isAuthenticated flips false while still on the protected
+                // route) have `ProtectedRoute` record the location again.
+                clearAttemptedLocation();
                 navigate('/login');
+              } else if (detail.id === 'settings') {
+                navigate('/settings');
+              } else if (detail.id === 'user-manager') {
+                navigate('/admin/user-manager');
               } else if (detail.id === 'change-password') {
                 setShowChangePassword(true);
                 setChangePwError('');
@@ -125,6 +270,16 @@ export default function Layout() {
         ]}
       />
       <AppLayout
+        // The workflow builder canvas needs the full content width: drop
+        // the AppLayout content gutters and its default max content width
+        // (the dead space between the side navigation and the node
+        // palette) on the builder route only; the builder page applies
+        // its own minimal internal padding. Every other page keeps the
+        // default Cloudscape content paddings and width.
+        disableContentPaddings={isBuilderRoute}
+        maxContentWidth={isBuilderRoute ? Number.MAX_VALUE : undefined}
+        navigationOpen={navigationOpen}
+        onNavigationChange={({ detail }) => setNavigationOverride(detail.open)}
         navigation={
           <SideNavigation
             activeHref={location.pathname}

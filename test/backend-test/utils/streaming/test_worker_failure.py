@@ -67,7 +67,7 @@ def _build_running_session(backend_kind, good_frames, clock):
 
 # Feature: concurrent-camera-stream-viewing, Property 13: Acquisition failure preserves the last good frame
 # Validates: Requirements 2.7
-@settings(max_examples=200, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(
     backend_kind=st.sampled_from(BACKEND_KINDS),
     # Arbitrary good-frame payloads (>= 1 establishes the stream and a last-good

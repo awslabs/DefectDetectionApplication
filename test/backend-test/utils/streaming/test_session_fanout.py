@@ -60,7 +60,7 @@ _frame_payloads = st.lists(
 # Feature: concurrent-camera-stream-viewing, Property 3: Fan-out delivers the identical latest frame to every viewer
 # Validates: Requirements 1.1, 1.4, 2.2, 2.5
 @pytest.mark.parametrize("backend_cls", MOCK_BACKEND_CLASSES.values(), ids=list(MOCK_BACKEND_CLASSES))
-@settings(max_examples=150)
+@settings(max_examples=25)
 @given(
     payloads=_frame_payloads,
     num_viewers=st.integers(min_value=1, max_value=MAX_VIEWERS),

@@ -36,6 +36,8 @@ export function modelTypeLabel(
       return "LFV (Neo/DLR)";
     case FeatureConfigurationType.TritonModel:
       return "Triton";
+    case FeatureConfigurationType.VllmModel:
+      return "vLLM";
     default:
       return type ? String(type) : "-";
   }

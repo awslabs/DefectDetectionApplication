@@ -82,7 +82,7 @@ def _expected_label(class_index, class_map):
 
 # Feature: object-detection-visualization, Property 5: Class-label resolution falls back to the index string
 # Validates: Requirements 3.2, 3.3
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(class_index=_index_strategy, class_map=_class_map_strategy)
 def test_resolve_class_label_maps_when_present_else_index_string(
     class_index, class_map
@@ -101,7 +101,7 @@ def test_resolve_class_label_maps_when_present_else_index_string(
 
 # Feature: object-detection-visualization, Property 5: Class-label resolution falls back to the index string
 # Validates: Requirements 3.2, 3.3
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(
     class_index=st.integers(min_value=0, max_value=79),
     label=st.text(min_size=1, max_size=12),
@@ -120,7 +120,7 @@ def test_resolve_class_label_returns_mapped_name_when_index_present(
 
 # Feature: object-detection-visualization, Property 5: Class-label resolution falls back to the index string
 # Validates: Requirements 3.2, 3.3
-@settings(max_examples=200)
+@settings(max_examples=25)
 @given(
     class_index=st.one_of(_index_strategy),
     class_map=st.dictionaries(

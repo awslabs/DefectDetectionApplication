@@ -1,0 +1,178 @@
+/*
+ * Kiosk_Display stylesheet for the IMTS Triple Inspection HMI (task 3.1).
+ *
+ * Loaded only by the `triple.html` entry (imported from `triple/main.ts`), so
+ * the existing single-inspection HMI bundle is untouched. Every layout rule is
+ * scoped under `.triple-kiosk` for the same reason.
+ *
+ * Layout contract (design.md "Kiosk Layout"):
+ *   - three horizontal bands: header 72px, main 1fr, history strip 140px (6.1)
+ *   - main band: three equal columns with a fixed gap, so slot widths are
+ *     equal within 2px at any viewport width (6.2), fluid from 1280 to
+ *     1920px with no horizontal scrolling (6.5)
+ *   - image panels: aspect-ratio 1/2 (within the required 1:1.8-1:2.2 band for
+ *     the 1.5"x3" plates) with object-fit: contain, so both images of a slot
+ *     share one panel height, aspect preserved, uncropped (5.3, 6.2, 6.8).
+ *     At 1920 wide each panel is ~291px, above the 280px minimum (6.8).
+ *   - verdict text: clamp()-sized so the rendered text height stays >= 32px
+ *     at 1920x1080 in every verdict state (6.4)
+ */
+
+:root { color-scheme: dark; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: #0f1216; color: #e8eaed;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;                                      /* 6.1, 6.5 */
+}
+#app { height: 100vh; }
+button { font: inherit; cursor: pointer; }
+.hidden { display: none !important; }
+
+/* ---- Login screen (Requirement 1) ---- */
+.login-screen { height: 100%; display: flex; align-items: center; justify-content: center; }
+.login-box {
+  width: 420px; padding: 40px; background: #171b21; border-radius: 12px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.login-box h1 { font-size: 28px; font-weight: 600; }
+.login-box label { display: flex; flex-direction: column; gap: 6px; font-size: 15px; }
+.login-box input {
+  padding: 12px; font-size: 17px; border-radius: 8px;
+  border: 1px solid #3a4048; background: #0f1216; color: inherit;
+}
+.login-box button {
+  padding: 14px; font-size: 18px; font-weight: 600; border: none;
+  border-radius: 8px; background: #2f6fed; color: #fff;
+}
+.login-error { color: #ff8b8b; font-size: 15px; min-height: 20px; }
+
+/* ---- Three-band grid shell (Requirement 6.1) ---- */
+.triple-kiosk {
+  height: 100%; display: grid;
+  grid-template-rows: 72px 1fr 140px;
+  max-width: 100vw; overflow: hidden;                    /* 6.5, 6.7 */
+}
+
+/* ---- Header: workflow identity, run timing, run verdict, indicators ---- */
+.triple-kiosk .header {
+  display: flex; align-items: center; gap: 24px; padding: 0 16px;
+  background: #171b21; border-bottom: 1px solid #262c34; min-width: 0;
+}
+.triple-kiosk .workflow-name {
+  font-size: 26px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.triple-kiosk .run-timing { font-size: 16px; color: #aab2bd; white-space: nowrap; }
+/* Run-level indications that accompany the run rather than replace it:
+   failed-run summary (5.9), verdict-data-unavailable (4.8),
+   inspection-data-unavailable (4.9), historical-fetch error (7.7). */
+.triple-kiosk .run-note {
+  font-size: 16px; font-weight: 600; color: #ffd166;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.triple-kiosk .run-verdict { margin-left: auto; }
+.triple-kiosk .in-progress-badge {
+  font-size: 15px; font-weight: 600; color: #ffd166; white-space: nowrap;
+  padding: 6px 12px; border: 1px solid #ffd166; border-radius: 8px;
+}
+.triple-kiosk .connection-badge { font-size: 15px; font-weight: 600; text-align: right; white-space: nowrap; }
+.triple-kiosk .connection-badge.connected { color: #57d98a; }
+.triple-kiosk .connection-badge.disconnected { color: #ff8b8b; }
+.triple-kiosk .connection-last-update,
+.triple-kiosk .stale-badge { display: block; font-size: 13px; font-weight: 400; color: #ffd166; }
+
+/* ---- Main band: three Inspection_Slots (Requirements 5.1, 6.2) ---- */
+.triple-kiosk .main {
+  display: grid; grid-template-columns: repeat(3, 1fr);   /* equal widths (6.2) */
+  gap: 16px;                                             /* fixed inter-slot gap */
+  padding: 16px; min-height: 0; min-width: 0;
+}
+.triple-kiosk .main-message {
+  grid-column: 1 / -1; display: flex; flex-direction: column; gap: 12px;
+  align-items: center; justify-content: center; text-align: center;
+}
+.triple-kiosk .main-message .message-title { font-size: 34px; font-weight: 600; }
+.triple-kiosk .main-message .message-body { font-size: 20px; color: #aab2bd; }
+
+.triple-kiosk .slot {
+  background: #171b21; border-radius: 12px; padding: 12px;
+  display: flex; flex-direction: column; gap: 10px;
+  min-width: 0; min-height: 0; overflow: hidden;
+}
+.triple-kiosk .slot-heading {
+  display: flex; align-items: baseline; gap: 12px; min-width: 0;
+}
+.triple-kiosk .slot-label {
+  font-size: 20px; font-weight: 600; letter-spacing: 0.06em; color: #aab2bd;
+}
+
+/* ---- Verdict text: >= 32px rendered height at 1920x1080 (Requirement 6.4) ---- */
+.triple-kiosk .verdict {
+  display: flex; align-items: baseline; gap: 12px;
+  font-size: clamp(34px, 2.2vw, 48px); font-weight: 700; line-height: 1.1;
+}
+.triple-kiosk .verdict .verdict-confidence {
+  font-size: clamp(22px, 1.3vw, 28px); font-weight: 600; color: #e8eaed;
+}
+.triple-kiosk .verdict-pass { color: #57d98a; }
+.triple-kiosk .verdict-fail { color: #ff6b6b; }
+.triple-kiosk .verdict-error { color: #ffd166; }
+.triple-kiosk .verdict-none { color: #aab2bd; }
+.triple-kiosk .slot-note { font-size: 15px; color: #ffd166; }
+
+/* ---- Image panels: annotated | original, side by side (5.2, 5.3, 6.8) ---- */
+.triple-kiosk .slot-panels {
+  display: grid; grid-template-columns: repeat(2, 1fr);
+  gap: 12px; min-width: 0; min-height: 0;
+}
+.triple-kiosk .image-panel {
+  display: flex; flex-direction: column; gap: 6px; min-width: 0; min-height: 0;
+}
+.triple-kiosk .image-frame {
+  width: 100%; aspect-ratio: 1 / 2;                      /* 1:2 plate form factor (6.2) */
+  max-height: 100%;
+  background: #0f1216; border-radius: 10px; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.triple-kiosk .image-frame img {
+  width: 100%; height: 100%;
+  object-fit: contain;                                   /* uncropped, aspect kept (5.3, 6.8) */
+}
+.triple-kiosk .image-placeholder {
+  font-size: 16px; color: #aab2bd; text-align: center; padding: 12px;
+}
+.triple-kiosk .image-label {
+  font-size: 18px; font-weight: 600; letter-spacing: 0.08em;
+  text-align: center; color: #aab2bd;
+}
+.triple-kiosk .more-inspections-badge {
+  grid-column: 1 / -1; justify-self: end; align-self: end;
+  font-size: 15px; background: #262c34; border-radius: 8px; padding: 6px 12px; color: #c7cdd4;
+}
+
+/* ---- History strip (Requirements 7.1, 7.3, 7.6) ---- */
+.triple-kiosk .history-strip {
+  display: flex; align-items: stretch; gap: 12px; padding: 12px 16px;
+  background: #171b21; border-top: 1px solid #262c34; overflow: hidden;
+}
+.triple-kiosk .history-tiles { display: flex; gap: 12px; flex: 1 1 auto; overflow: hidden; }
+.triple-kiosk .history-empty { align-self: center; font-size: 18px; color: #aab2bd; }
+.triple-kiosk .history-tile {
+  min-width: 140px; border: 1px solid #3a4048; border-radius: 10px;
+  background: #0f1216; color: inherit; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 6px; padding: 8px 12px;
+}
+.triple-kiosk .history-tile.selected { border-color: #2f6fed; background: #1a2333; }
+.triple-kiosk .history-tile .tile-verdict { font-size: 18px; font-weight: 700; }
+.triple-kiosk .history-tile .tile-time { font-size: 15px; color: #aab2bd; }
+.triple-kiosk .history-side {
+  display: flex; flex-direction: column; justify-content: center; gap: 6px; min-width: 200px;
+}
+.triple-kiosk .history-banner { font-size: 16px; font-weight: 700; color: #ffd166; text-align: center; }
+.triple-kiosk .newer-run-notice { font-size: 14px; color: #ffd166; text-align: center; }
+.triple-kiosk .return-to-live {
+  padding: 10px 16px; font-size: 16px; font-weight: 600; border: none;
+  border-radius: 8px; background: #2f6fed; color: #fff;
+}

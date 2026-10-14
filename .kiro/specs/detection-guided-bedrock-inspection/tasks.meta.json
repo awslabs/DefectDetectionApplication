@@ -1,0 +1,187 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1.1 Implement `src/backend/workflow_engine/detections.py`": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976174786
+      }
+    ],
+    "1.2 Write unit tests over the real thor1 jsonl fixture": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976199059
+      }
+    ],
+    "1.3 Write property tests for ID stability and order/ID independence": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976219270
+      }
+    ],
+    "2.1 Implement `src/backend/workflow_engine/payload_fetch.py`": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976235884
+      }
+    ],
+    "2.2 Write unit tests": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976253269
+      }
+    ],
+    "3.1 Extend `MODEL_INFERENCE` and `BEDROCK_INFERENCE` descriptors": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976270604
+      }
+    ],
+    "3.2 Write catalog content unit tests": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976287341
+      }
+    ],
+    "3.3 Sync the vendored workflow_core mirror": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976303307
+      }
+    ],
+    "4.1 Implement the three checks in `workflow_core/validator/checks.py`": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976317950
+      }
+    ],
+    "4.2 Write validator unit tests": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976332275
+      }
+    ],
+    "5. Checkpoint: portal layer suites pass": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976347820
+      }
+    ],
+    "6. USER ACTION: confirm capture-record presence on-device (design Risk 1 gate)": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976366104
+      }
+    ],
+    "7.1 Thread `run_context` into `BedrockInferenceProcessor`": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976384711
+      }
+    ],
+    "7.2 Implement `crop_detection_index` handling in `_run_one`": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976401671
+      }
+    ],
+    "7.3 Implement `reference_payload_path` handling in `_run_one`": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976417941
+      }
+    ],
+    "7.4 Add nested verdict keys to anomaly-mode results": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976433044
+      }
+    ],
+    "7.5 Write unit + property tests": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976448924
+      }
+    ],
+    "8. Implement the branch planner (edge)": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976464237
+      }
+    ],
+    "9. Refactor `OutputBindingProcessor` with `process_subset` (edge)": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976479625
+      }
+    ],
+    "10.1 Thread pool + lock-guarded merge in `BedrockInferenceProcessor.process`": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976494787
+      }
+    ],
+    "10.2 Thread-safety hardening": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976509231
+      }
+    ],
+    "10.3 Write concurrency property + example tests": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976524471
+      }
+    ],
+    "11. Integrate at the executor (edge)": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976540231
+      }
+    ],
+    "12. Bridge pump detections injection (edge)": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976556225
+      }
+    ],
+    "13. Checkpoint: edge workflow_engine suite passes": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976573423
+      }
+    ],
+    "14. USER ACTION: JP7 component build + thor1 end-to-end verification": [
+      {
+        "executionId": "8af50a6e-855b-47dc-a5d7-2e3d254f3a1b",
+        "chatSessionId": "sess_3c73e510-c26d-4920-98c5-6efeb88c1d66",
+        "timestamp": 1787976589421
+      }
+    ]
+  }
+}

@@ -82,6 +82,14 @@
 			"deviceName": "v4l2src"
 		}
 	},
+	"AWS-DDA" : {
+		"default" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=RGB ! videoconvert"
+		},
+		"Static Image Camera" : {
+			"processingPipeline" : "capsfilter caps=video/x-raw,format=RGB ! videoconvert"
+		}
+	},
     "default" : {
 		"default" : {
 			"processingPipeline": "capsfilter caps=video/x-bayer,format=bggr ! bayer2rgb ! capsfilter caps=video/x-raw,format=RGBA ! videoconvert"

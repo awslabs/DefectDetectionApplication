@@ -128,6 +128,27 @@ class TestTritonFeatureConfigsUtils(LocalServerBaseTestCase):
 
         logger.info(f"Result is {result}")
 
+    def test_get_features_triton_unavailable_reason_surfaces_as_failure_reason(self):
+        # A model whose load failed (edgemlsdk wrapper marks it UNAVAILABLE with
+        # Triton's error as `reason`) reports that reason as failureReason;
+        # models without a reason, or in other states, are unchanged.
+        mock_triton_server = MagicMock()
+        mock_triton_server.list_triton_models.return_value = [
+            {"model_component": "model1", "status": "READY", "reason": "ignored for READY"},
+            {"model_component": "model2", "status": "UNAVAILABLE",
+             "reason": "failed to load 'model2', failed to poll from model repository"},
+            {"model_component": "model3", "status": "UNAVAILABLE"},
+        ]
+        result = feature_utils.get_features_triton(mock_triton_server)
+        assert len(result) == 3
+        assert "failureReason" not in result[0].defaultConfiguration
+        assert result[1].status == "UNAVAILABLE"
+        assert result[1].defaultConfiguration["failureReason"] == \
+            "failed to load 'model2', failed to poll from model repository"
+        assert "failureReason" not in result[2].defaultConfiguration
+        # The lru_cached default-config dict must not have been mutated.
+        assert "failureReason" not in feature_utils.get_default_configs_lfv("model2")
+
     def test_get_features_triton_no_server(self):
         with self.assertRaises(HTTPException) as e:
             feature_utils.get_features_triton(None)

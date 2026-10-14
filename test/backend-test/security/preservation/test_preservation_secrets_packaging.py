@@ -43,6 +43,38 @@ import types
 from _preservation_support import load_module_from_path
 
 PACKAGING_REL = "edge-cv-portal/backend/functions/packaging.py"
+# Sibling module in the same functions bundle. packaging.py does
+# ``from model_naming import safe_model_name`` (vllm-model-name-mismatch 2.2);
+# the isolated loader has no edge-cv-portal/backend/functions on sys.path, so
+# the REAL module is loaded from the same directory and injected alongside the
+# stubs. This keeps the actual production transform under test.
+MODEL_NAMING_REL = "edge-cv-portal/backend/functions/model_naming.py"
+# Shared-layer pure module (no boto3, no I/O). packaging.py does
+# ``from detection_training import (...)`` (portal-detection-training) for the
+# trained-YOLO record predicate + device-manifest builder; loaded REAL, like
+# model_naming, so the production import resolves under the isolated loader.
+DETECTION_TRAINING_REL = (
+    "edge-cv-portal/backend/layers/shared/python/detection_training.py"
+)
+# Sibling shared-layer module (stdlib only). detection_training.py does
+# ``from checkpoint_probe import (...)`` (rfdetr-training-and-transfer-learning
+# task 7.1) — a flat layer import that the isolated loader cannot resolve on
+# its own, so the REAL module is loaded first and injected when
+# detection_training is loaded.
+CHECKPOINT_PROBE_REL = (
+    "edge-cv-portal/backend/layers/shared/python/checkpoint_probe.py"
+)
+# Shared-layer modules (stdlib only) added by detector-checkpoint-import:
+# packaging.py does ``import detector_conversion as dconv`` (Conversion_Record
+# routing + artifact validator) and ``from onnx_fleet_ir import ...`` (the
+# trainer IR-version header fix), and onnx_fleet_ir itself imports
+# detector_conversion's wire-format helpers. Loaded REAL, like
+# detection_training, so the production imports resolve under the isolated
+# loader.
+DETECTOR_CONVERSION_REL = (
+    "edge-cv-portal/backend/layers/shared/python/detector_conversion.py"
+)
+ONNX_FLEET_IR_REL = "edge-cv-portal/backend/layers/shared/python/onnx_fleet_ir.py"
 
 
 def _shared_utils_stub():
@@ -76,12 +108,38 @@ def _make_stubs(lambda_client):
     yaml = types.ModuleType("yaml")
     yaml.safe_load = lambda *a, **k: {}
 
+    detector_conversion = load_module_from_path(
+        "detector_conversion_preservation", DETECTOR_CONVERSION_REL
+    )
+
     return {
         "boto3": boto3,
         "botocore": botocore,
         "botocore.exceptions": exc,
         "shared_utils": _shared_utils_stub(),
         "yaml": yaml,
+        # REAL sibling module (not a stub) — resolves packaging.py's
+        # ``from model_naming import safe_model_name``.
+        "model_naming": load_module_from_path(
+            "model_naming_preservation", MODEL_NAMING_REL
+        ),
+        # REAL shared-layer module — resolves packaging.py's
+        # ``from detection_training import (...)``. Its own sibling import
+        # (``from checkpoint_probe import ...``) is resolved the same way.
+        "detection_training": load_module_from_path(
+            "detection_training_preservation", DETECTION_TRAINING_REL,
+            injected_modules={
+                "checkpoint_probe": load_module_from_path(
+                    "checkpoint_probe_preservation", CHECKPOINT_PROBE_REL
+                ),
+            },
+        ),
+        # REAL shared-layer modules (detector-checkpoint-import).
+        "detector_conversion": detector_conversion,
+        "onnx_fleet_ir": load_module_from_path(
+            "onnx_fleet_ir_preservation", ONNX_FLEET_IR_REL,
+            injected_modules={"detector_conversion": detector_conversion},
+        ),
     }
 
 

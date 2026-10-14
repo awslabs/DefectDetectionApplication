@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workflow-core"
+version = "0.1.0"
+description = "Shared workflow core: node catalog, serializer, validator, and compiler for the Workflow Manager"
+requires-python = ">=3.11"
+dependencies = [
+    "jsonschema>=3.2,<5",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+]
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+packages = ["workflow_core"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

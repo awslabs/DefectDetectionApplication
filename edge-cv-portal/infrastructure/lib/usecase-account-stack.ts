@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as iot from 'aws-cdk-lib/aws-iot';
 import { Construct } from 'constructs';
 
 /**
@@ -11,7 +12,7 @@ import { Construct } from 'constructs';
  * - MINOR: New features (new permissions, new resources)
  * - PATCH: Bug fixes
  */
-const STACK_VERSION = '1.4.0';
+const STACK_VERSION = '1.7.0';
 
 export interface UseCaseAccountStackProps extends cdk.StackProps {
   /**
@@ -245,52 +246,54 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
-    // Ground Truth CloudWatch Logs
+    // SageMaker job metrics and logs. PutMetricData has no resource-level
+    // permissions. SageMaker writes training, compilation, labeling and
+    // processing job logs under /aws/sagemaker/, the pattern the
+    // DDAPortalAccessRole CloudWatchLogs statement also uses.
     this.groundTruthRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: [
-          'cloudwatch:PutMetricData',
-          'logs:CreateLogGroup',
-          'logs:CreateLogStream',
-          'logs:PutLogEvents',
-          'logs:DescribeLogStreams',
-        ],
+        actions: ['cloudwatch:PutMetricData'],
         resources: ['*'],
       })
     );
+    this.groundTruthRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents', 'logs:DescribeLogStreams'],
+        resources: [`arn:aws:logs:*:${this.account}:log-group:/aws/sagemaker/*`],
+      })
+    );
 
-    // SageMaker permissions for training, compilation, and labeling
+    // SageMaker job and model actions, scoped by resource type. Job and model
+    // names come from the use case and model, not from a fixed prefix (a dda-*
+    // prefix broke compilation status reads; see compute-stack.ts:395-404).
     this.groundTruthRole.addToPolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          // Training job permissions
-          'sagemaker:CreateTrainingJob',
-          'sagemaker:DescribeTrainingJob',
-          'sagemaker:StopTrainingJob',
-          'sagemaker:ListTrainingJobs',
-          // Compilation job permissions
-          'sagemaker:CreateCompilationJob',
-          'sagemaker:DescribeCompilationJob',
-          'sagemaker:StopCompilationJob',
-          'sagemaker:ListCompilationJobs',
-          // Labeling job permissions
+          'sagemaker:CreateTrainingJob', 'sagemaker:DescribeTrainingJob', 'sagemaker:StopTrainingJob',
+          'sagemaker:CreateCompilationJob', 'sagemaker:DescribeCompilationJob', 'sagemaker:StopCompilationJob',
           'sagemaker:DescribeLabelingJob',
-          'sagemaker:ListLabelingJobs',
-          // Model permissions
-          'sagemaker:CreateModel',
-          'sagemaker:DescribeModel',
-          'sagemaker:DeleteModel',
-          'sagemaker:ListModels',
+          'sagemaker:CreateModel', 'sagemaker:DescribeModel', 'sagemaker:DeleteModel',
         ],
-        // nosec: iam-resource-wildcard — this is the Ground Truth execution
-        // role's SageMaker job/model grant, NOT one of the I1–I17 scanner
-        // findings (the scoped SageMaker finding is I8 on the
-        // DDASageMakerExecutionRole in deploy-account-role.sh). These
-        // create/describe/stop/list actions span dynamically-named training,
-        // compilation, labeling jobs and models and are left on '*' here to
-        // preserve existing Ground Truth behavior byte-for-byte.
+        resources: [
+          `arn:aws:sagemaker:*:${this.account}:training-job/*`,
+          `arn:aws:sagemaker:*:${this.account}:compilation-job/*`,
+          `arn:aws:sagemaker:*:${this.account}:labeling-job/*`,
+          `arn:aws:sagemaker:*:${this.account}:model/*`,
+        ],
+      })
+    );
+    this.groundTruthRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'sagemaker:ListTrainingJobs', 'sagemaker:ListCompilationJobs',
+          'sagemaker:ListLabelingJobs', 'sagemaker:ListModels',
+        ],
+        // nosec: iam-resource-wildcard. The List* actions have no resource-level
+        // permissions; every job and model action is scoped by type above.
         resources: ['*'],
       })
     );
@@ -705,6 +708,61 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
+    // IoT shadow size quota (static-camera-video-loop task 10): the Portal's
+    // deployment path reads this account's "Maximum size of a JSON state
+    // document" quota and carries it into ShadowManager's
+    // shadowDocumentSizeLimitBytes. Read-only, scoped to that one quota.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'IoTShadowSizeQuotaRead',
+        effect: iam.Effect.ALLOW,
+        actions: ['servicequotas:GetServiceQuota'],
+        resources: [`arn:aws:servicequotas:*:${this.account}:iotcore/L-A295A064`],
+      })
+    );
+
+    // Device removal (DELETE /devices/{id}, the portal's devices.py): delete
+    // a DDA-managed Greengrass core device. Conditioned on the
+    // dda-portal:managed tag the portal's device list filters on, so core
+    // devices outside DDA cannot be deleted through this role.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'GreengrassCoreDeviceRemoval',
+        effect: iam.Effect.ALLOW,
+        actions: ['greengrass:DeleteCoreDevice'],
+        resources: [`arn:aws:greengrass:*:${this.account}:coreDevices:*`],
+        conditions: {
+          StringEquals: { 'aws:ResourceTag/dda-portal:managed': 'true' },
+        },
+      })
+    );
+
+    // Device removal with delete_thing=true: take the device's AWS IoT
+    // identity apart. Its certificates are deactivated, detached, and
+    // deleted unless another thing shares them; its shadows are deleted
+    // (DeleteThingShadow is granted above); then the thing is deleted.
+    // DetachThingPrincipal and ListPrincipalThings authorize against the
+    // certificate ARN.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'IoTThingRemoval',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'iot:ListThingPrincipals',
+          'iot:ListPrincipalThings',
+          'iot:DetachThingPrincipal',
+          'iot:UpdateCertificate',
+          'iot:DeleteCertificate',
+          'iot:ListNamedShadowsForThing',
+          'iot:DeleteThing',
+        ],
+        resources: [
+          `arn:aws:iot:*:${this.account}:thing/*`,
+          `arn:aws:iot:*:${this.account}:cert/*`,
+        ],
+      })
+    );
+
     // IoT Jobs - Greengrass CreateDeployment requires these as dependent actions.
     // iot:CreateJob needs both job/* and thing/* resources since the job targets a thing.
     this.role.addToPolicy(
@@ -774,7 +832,126 @@ export class UseCaseAccountStack extends cdk.Stack {
       })
     );
 
+    // Portal-managed stream camera credentials (rtsp-rtmp-stream-cameras,
+    // Requirements 5.3, 5.8, 5.9, 6.6). The Camera_Registry keeps one secret
+    // per device and camera source under a dedicated prefix in this account,
+    // and withdraws, restores, or schedules deletion of it. Write-only:
+    // GetSecretValue is deliberately NOT granted, so the Portal can never
+    // read a credential back. Devices read their own secrets through the
+    // DDAStreamCameraCredentialRead policy the Portal writes on their
+    // token-exchange role (statement below).
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'StreamCameraCredentialWrite',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'secretsmanager:CreateSecret',
+          'secretsmanager:PutSecretValue',
+          'secretsmanager:UpdateSecretVersionStage',
+          'secretsmanager:DescribeSecret',
+          'secretsmanager:DeleteSecret',
+          'secretsmanager:RestoreSecret',
+          'secretsmanager:TagResource',
+        ],
+        resources: [
+          `arn:aws:secretsmanager:*:${this.account}:secret:dda-portal/stream-camera-credentials/*`,
+        ],
+      })
+    );
+
+    // The inline policies the Portal owns on the devices' token-exchange
+    // role: DDAStreamCameraCredentialRead (each thing reads only its own
+    // stream camera secrets, through ${credentials-iot:ThingName},
+    // Requirement 6.7) and DDAWorkflowTuningSampleAccess
+    // (quality-prompt-tuning). Both are written get-then-put, idempotently.
+    // Inline policies on that one role only: no attach, create, or PassRole.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'DeviceRoleInlinePolicyGrants',
+        effect: iam.Effect.ALLOW,
+        actions: ['iam:GetRolePolicy', 'iam:PutRolePolicy'],
+        resources: [`arn:aws:iam::${this.account}:role/GreengrassV2TokenExchangeRole`],
+      })
+    );
+
     this.roleArn = this.role.roleArn;
+
+    // Camera registry shadow-report forwarding (camera-registry-sync)
+    // The Edge_Sync_Agent reports each device's Camera_Source inventory into
+    // the dda-camera-registry named shadow. This IoT topic rule forwards
+    // every shadow /update/documents event to the Portal account's
+    // dda-portal-camera-shadow-reports SQS queue (the portal side carries the
+    // matching cross-account queue policy), where the Portal_Sync_Service
+    // Lambda ingests it into the Camera_Registry.
+    const cameraShadowReportQueueName = 'dda-portal-camera-shadow-reports';
+    const cameraShadowReportQueueArn = `arn:aws:sqs:${region}:${portalAccountId}:${cameraShadowReportQueueName}`;
+    const cameraShadowReportQueueUrl = `https://sqs.${region}.amazonaws.com/${portalAccountId}/${cameraShadowReportQueueName}`;
+
+    // Only create the fixed-name camera-shadow rule/role when this use-case
+    // account is NOT the portal account. In the single-account topology the
+    // ComputeStack provisions the equivalent rule
+    // (dda_camera_registry_shadow_documents_portal), and creating these
+    // fixed-name copies there would collide. Deploy-time condition (not a
+    // synth-time if): keeps the synthesized IAM statements identical for the
+    // security preservation baselines and stays correct even when the synth
+    // environment does not resolve the account.
+    const cameraShadowCrossAccountCondition = new cdk.CfnCondition(
+      this, 'CameraShadowCrossAccountCondition', {
+        expression: cdk.Fn.conditionNot(
+          cdk.Fn.conditionEquals(portalAccountId, cdk.Aws.ACCOUNT_ID)
+        ),
+      }
+    );
+
+    const cameraShadowRuleRole = new iam.Role(this, 'CameraShadowRuleRole', {
+      roleName: 'DDACameraShadowRuleRole',
+      description: 'Role for the dda-camera-registry shadow IoT topic rule to deliver shadow documents events to the DDA Portal shadow-report queue',
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com'),
+    });
+
+    cameraShadowRuleRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'SendCameraShadowReports',
+        effect: iam.Effect.ALLOW,
+        actions: ['sqs:SendMessage'],
+        resources: [cameraShadowReportQueueArn],
+      })
+    );
+
+    const cameraRegistryShadowRule = new iot.CfnTopicRule(this, 'CameraRegistryShadowRule', {
+      ruleName: 'dda_camera_registry_shadow_documents',
+      topicRulePayload: {
+        // topic(3) is the thing name in $aws/things/{thing}/shadow/...
+        sql: "SELECT *, topic(3) AS thing_name FROM '$aws/things/+/shadow/name/dda-camera-registry/update/documents'",
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        description: 'Forward dda-camera-registry shadow documents events to the DDA Portal camera shadow-report queue',
+        actions: [
+          {
+            sqs: {
+              queueUrl: cameraShadowReportQueueUrl,
+              roleArn: cameraShadowRuleRole.roleArn,
+              useBase64: false,
+            },
+          },
+        ],
+      },
+    });
+
+    // Attach the cross-account condition to exactly the three fixed-name
+    // resources; the CameraShadowReportQueueArn output below stays
+    // unconditional (its value is a plain derived string, not a resource
+    // reference).
+    (cameraShadowRuleRole.node.defaultChild as iam.CfnRole)
+      .cfnOptions.condition = cameraShadowCrossAccountCondition;
+    (cameraShadowRuleRole.node.findChild('DefaultPolicy').node.defaultChild as iam.CfnPolicy)
+      .cfnOptions.condition = cameraShadowCrossAccountCondition;
+    cameraRegistryShadowRule.cfnOptions.condition = cameraShadowCrossAccountCondition;
+
+    new cdk.CfnOutput(this, 'CameraShadowReportQueueArn', {
+      value: cameraShadowReportQueueArn,
+      description: 'Portal SQS queue receiving dda-camera-registry shadow documents events',
+    });
 
     // Cross-Account EventBridge Forwarding
     // Forward SageMaker events to Portal Account for real-time status updates

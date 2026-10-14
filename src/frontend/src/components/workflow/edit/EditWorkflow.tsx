@@ -28,6 +28,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import schema, { SchemaType } from "./schema";
 import {
   FeatureConfigurationType,
+  isAssignableModel,
   Rule,
   SignalType,
   WorkflowTrigger,
@@ -41,7 +42,7 @@ import { editWorkflow, getWorkflow } from "api/WorkflowAPI";
 import { useContext, useEffect } from "react";
 import { AppLayoutContext } from "components/layout/AppLayoutContext";
 import { formLayoutStyle } from "styles/common";
-import { getWorkflowModelOptionLabel, getWorkflowModelOptionLabelWithoutVersion, setHashValuesInUrl, sortWorkflowModelOptions } from "components/utils";
+import { getWorkflowModelOptionLabelWithoutVersion, setHashValuesInUrl, sortWorkflowModelOptions } from "components/utils";
 import { DynamicRouterHashKey } from "components/layout/constants";
 import { listFeatureConfigurations } from "api/FeatureConfigurationAPI";
 
@@ -63,10 +64,13 @@ export default function EditWorkflow(): JSX.Element {
     queryFn: listFeatureConfigurations,
   });
 
-  const modelOptions = featureConfigurations?.sort(sortWorkflowModelOptions)?.map((config) => ({
-    label: getWorkflowModelOptionLabelWithoutVersion(config),
-    value: config.modelName,
-  })) || [];
+  const modelOptions = featureConfigurations
+    ?.filter(isAssignableModel)
+    ?.sort(sortWorkflowModelOptions)
+    ?.map((config) => ({
+      label: getWorkflowModelOptionLabelWithoutVersion(config),
+      value: config.modelName,
+    })) || [];
 
   const workflowName = getQuery.data?.name || "";
 
@@ -208,7 +212,7 @@ export default function EditWorkflow(): JSX.Element {
               <Button
                 formAction="none"
                 variant="link"
-                onClick={(): void => navigate(-1)}
+                onClick={(): void => void navigate(-1)}
               >
                 Cancel
               </Button>

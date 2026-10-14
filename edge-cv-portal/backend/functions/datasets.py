@@ -78,6 +78,9 @@ def get_data_bucket_and_credentials(usecase):
             'data-access'
         )
         bucket = usecase.get('data_s3_bucket') or usecase.get('s3_bucket')
+        # Derive base prefix; DynamoDB items may contain null/empty values,
+        # so coerce to '' — never return None in the prefix slot
+        prefix = usecase.get('data_s3_prefix') or usecase.get('s3_prefix') or ''
     else:
         # Use UseCase Account (this one requires external_id)
         credentials = assume_usecase_role(
@@ -86,8 +89,9 @@ def get_data_bucket_and_credentials(usecase):
             'data-access'
         )
         bucket = usecase['s3_bucket']
+        prefix = usecase.get('s3_prefix') or ''
     
-    return bucket, None, credentials
+    return bucket, prefix, credentials
 
 
 def list_datasets(event):
@@ -116,6 +120,9 @@ def list_datasets(event):
         
         # Get bucket and credentials (uses Data Account if configured)
         bucket, base_prefix, credentials = get_data_bucket_and_credentials(usecase)
+        
+        # Defensive None-safety: never let None reach the f-string composition
+        base_prefix = base_prefix or ''
         
         # Create S3 client with assumed credentials
         s3 = boto3.client(
@@ -309,6 +316,33 @@ def count_images(event):
         return handle_error(e, 'Failed to count images')
 
 
+def parse_extension_filter(raw):
+    """
+    Parse the optional comma-separated `extensions` query parameter into a
+    set of normalized, lowercase, dotted key suffixes (e.g. {'.jpg', '.png'}).
+    
+    Entries may be supplied with or without a leading dot and in any case;
+    blank entries are ignored. Returns None when the parameter is absent or
+    contributes no usable entry, in which case callers apply their default
+    image-extension set unchanged.
+    """
+    if raw is None:
+        return None
+    
+    suffixes = set()
+    for part in str(raw).split(','):
+        token = part.strip().lower()
+        if not token:
+            continue
+        if not token.startswith('.'):
+            token = '.' + token
+        if token == '.':
+            continue
+        suffixes.add(token)
+    
+    return suffixes or None
+
+
 def get_image_preview(event):
     """
     Generate presigned URLs for image preview.
@@ -316,16 +350,26 @@ def get_image_preview(event):
     Query Parameters:
         - usecase_id: Required. The use case ID
         - prefix: Required. The S3 prefix to preview
-        - limit: Optional. Number of images to preview (default: 8, max: 20)
+        - limit: Optional. Number of images per page (default: 8, max: 50)
+        - offset: Optional. 0-based index of the first image (default: 0)
+        - extensions: Optional. Comma-separated extensions to restrict the
+          listing to (e.g. "jpg,jpeg,png"). Matched case-insensitively
+          against the object key suffix. When absent, the default
+          image-extension set applies unchanged.
     
     Returns:
-        List of presigned URLs for image preview
+        List of presigned URLs for the requested page, plus paging metadata
+        (total_found is the TRUE total image count under the prefix — or
+        under the requested extension filter when one is supplied — with
+        offset, limit and has_more for pagination)
     """
     try:
         params = event.get('queryStringParameters', {}) or {}
         usecase_id = params.get('usecase_id')
         prefix = params.get('prefix')
-        limit = min(int(params.get('limit', '8')), 20)  # Max 20 images
+        offset = max(int(params.get('offset', '0')), 0)
+        limit = min(max(int(params.get('limit', '8')), 1), 50)  # Per-page cap: 50
+        extension_filter = parse_extension_filter(params.get('extensions'))
         
         if not usecase_id or not prefix:
             return create_response(400, {
@@ -346,7 +390,12 @@ def get_image_preview(event):
             aws_session_token=credentials['SessionToken']
         )
         
-        # Find image files
+        # Collect ALL image-extension keys under the prefix (the paginator
+        # walks every list_objects_v2 page; S3 returns keys in stable
+        # lexicographic order), then slice the requested page. When an
+        # `extensions` filter is supplied it replaces the default set and is
+        # matched case-insensitively against the key suffix; total_found,
+        # has_more and paging therefore span exactly the filtered set.
         image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
         image_keys = []
         
@@ -356,25 +405,27 @@ def get_image_preview(event):
         for page in pages:
             for obj in page.get('Contents', []):
                 key = obj['Key']
-                ext = os.path.splitext(key)[1].lower()
                 
-                if ext in image_extensions:
+                if extension_filter is None:
+                    matches = os.path.splitext(key)[1].lower() in image_extensions
+                else:
+                    lowered_key = key.lower()
+                    matches = any(lowered_key.endswith(suffix)
+                                  for suffix in extension_filter)
+                
+                if matches:
                     image_keys.append({
                         'key': key,
                         'size': obj['Size'],
                         'last_modified': obj['LastModified'].isoformat()
                     })
-                    
-                    # Stop when we have enough images
-                    if len(image_keys) >= limit:
-                        break
-            
-            if len(image_keys) >= limit:
-                break
         
-        # Generate presigned URLs (valid for 30 minutes)
+        # Slice the requested page
+        page_keys = image_keys[offset:offset + limit]
+        
+        # Generate presigned URLs for the page only (valid for 30 minutes)
         preview_images = []
-        for image in image_keys:
+        for image in page_keys:
             try:
                 presigned_url = s3.generate_presigned_url(
                     'get_object',
@@ -397,6 +448,9 @@ def get_image_preview(event):
             'prefix': prefix,
             'bucket': bucket,
             'total_found': len(image_keys),
+            'offset': offset,
+            'limit': limit,
+            'has_more': offset + limit < len(image_keys),
             'images': preview_images,
             'expires_in_seconds': 1800
         })

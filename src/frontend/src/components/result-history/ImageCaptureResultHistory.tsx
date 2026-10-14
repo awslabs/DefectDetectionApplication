@@ -43,7 +43,7 @@ export default function ImageCaptureResultHistory(): JSX.Element {
           <WorkflowSelector
             setWorkflowId={setWorkflowId}
             workflowId={workflowId}
-            onWorkflowChange={(wid): void => navigate(`/capture-results/${wid}`)}
+            onWorkflowChange={(wid): void => void navigate(`/capture-results/${wid}`)}
           />
         </Container>
         {

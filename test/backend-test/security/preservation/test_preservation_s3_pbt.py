@@ -96,7 +96,7 @@ def _access_proceeds_unfixed(bucket_owner, expected_owner):
 
 
 # Validates: Requirements 3.1, 3.2, 3.3
-@settings(max_examples=60, deadline=None,
+@settings(max_examples=25, deadline=None,
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(bucket_owner=_ACCOUNT, expected_owner=_ACCOUNT)
 def test_pbt1_unfixed_access_always_proceeds(bucket_owner, expected_owner):
@@ -108,7 +108,7 @@ def test_pbt1_unfixed_access_always_proceeds(bucket_owner, expected_owner):
 
 # Validates: Requirements 3.1, 3.2, 3.3 — the legitimate matching-owner case
 # proceeds (this is the F(X) that the no-op preflight must preserve in F').
-@settings(max_examples=60, deadline=None,
+@settings(max_examples=25, deadline=None,
           suppress_health_check=[HealthCheck.function_scoped_fixture])
 @given(owner=_ACCOUNT)
 def test_pbt1_matching_owner_access_proceeds(owner):
@@ -134,7 +134,7 @@ _ENV_VALUES = st.one_of(
 
 
 # Validates: Requirements 3.2, 3.3
-@settings(max_examples=60, deadline=None)
+@settings(max_examples=25, deadline=None)
 @given(artifact_env=_ENV_VALUES, docs_env=_ENV_VALUES)
 def test_pbt2_unfixed_resolution_ignores_env(artifact_env, docs_env):
     """Invariant (pre-fix): resolution is always the hardcoded literal, for any

@@ -1,0 +1,53 @@
+{
+  "pbtResults": {
+    "1.2 Write property test for pin round-trip fidelity": {
+      "status": "passed",
+      "lastRunTimestamp": 1788721710070
+    },
+    "1.3 Write property test for invalid pin input preserving prior state": {
+      "status": "passed",
+      "lastRunTimestamp": 1788721711612
+    },
+    "1.4 Write property test for pin-from-capture parity": {
+      "status": "passed",
+      "lastRunTimestamp": 1788721716761
+    },
+    "1.5 Write property test for replace atomicity and freshness": {
+      "status": "passed",
+      "lastRunTimestamp": 1788721718073
+    },
+    "1.6 Write property test for the unpin lifecycle": {
+      "status": "passed",
+      "lastRunTimestamp": 1788721724068
+    },
+    "1.7 Write property test for no-usable-image grab failure": {
+      "status": "passed",
+      "lastRunTimestamp": 1788721725297
+    },
+    "1.8 Write property test for restart persistence round trip": {
+      "status": "passed",
+      "lastRunTimestamp": 1788721730375
+    },
+    "1.9 Write property test for corruption containment at restore": {
+      "status": "passed",
+      "lastRunTimestamp": 1788721731506
+    },
+    "4.2 Write property test for enumeration inclusion iff pinned": {
+      "status": "passed",
+      "lastRunTimestamp": 1788723209254
+    },
+    "4.3 Write property test for fixed identifier invariance": {
+      "status": "passed",
+      "lastRunTimestamp": 1788723210888
+    },
+    "4.4 Write property test for enumeration resilience": {
+      "status": "passed",
+      "lastRunTimestamp": 1788723212024
+    },
+    "5.2 Write property test for grab determinism and config invariance": {
+      "status": "passed",
+      "lastRunTimestamp": 1788723213433
+    }
+  },
+  "executionHistory": {}
+}

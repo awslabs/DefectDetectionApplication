@@ -1,0 +1,1180 @@
+"""
+Shadow sync integration tests (camera-registry-sync task 15.1).
+
+The single integration example over the AWS-owned transports: everything
+else in the feature is fake-tested, so these two tests wire the REAL
+Edge_Sync_Agent (src/backend/camera_sync) to the REAL Portal_Sync_Service
+ingest handler and Camera_Registry API (functions/camera_sync.py,
+functions/camera_registry.py) across an emulated ``dda-camera-registry``
+named shadow.
+
+moto does not emulate IoT named shadows or IoT rules, so the shadow is a
+:class:`NamedShadowEmulator` — one in-memory shadow document implementing
+both sides' accessor contracts (the edge ``IoTShadowAccessor``'s
+``get/update_thing_shadow_state_request`` and the portal iot-data client's
+``get_thing_shadow``/``update_thing_shadow``) with AWS shadow semantics:
+recursive state merge, ``null`` deletes a key, a delta computed as desired
+minus reported, and one ``/update/documents`` event per accepted update.
+
+Direction 1 (edge -> portal, Reqs 3.3, 12.4): the real agent, driven with
+a fake clock, publishes the device inventory to the shadow — first while
+disconnected (writes fail, the report is retained), then after reconnect
+(the first successful write is the complete current state, Req 3.3). The
+resulting documents event is wrapped exactly like the IoT topic rule
+(``SELECT *, topic(3) AS thing_name``) and delivered as an SQS record to
+the real ingest handler against the moto DynamoDB registry.
+
+Direction 2 (portal -> edge, Reqs 5.5, 12.4): the real mutation route
+writes ``desired.changes`` (with the emulator standing in for the
+assumed-role iot-data client) and marks the registry entry pending; the
+delta is delivered to the real agent's ``on_delta``, applied through the
+image-source accessor, acknowledged in the resulting report, and that
+report travels back through the rule/SQS ingest path until the registry
+entry is synced. The disconnected-then-reconnect case delivers the pending
+change through the reconnect-time ``apply_desired_changes`` pass over the
+shadow's current desired document, exactly as ``server_setup`` does.
+
+The device's IoT identity (Req 12.4) is represented structurally: the
+shadow is scoped to one thing name (the emulator rejects access under any
+other identity — on real AWS the device's IoT policy does the same), and
+the ingest attribution comes from ``topic(3)`` of the thing-scoped shadow
+topic, never from anything the payload claims.
+
+The real-LocalServer apply path (SQLite, accessor schema validation) is
+already covered by test/backend-test/camera_sync/
+test_property_portal_change_round_trip.py; here a dict-backed accessor
+keeps the focus on the transport wiring.
+
+The id-list parity tests at the end (rtsp-rtmp-stream-cameras task 29.5)
+pin the Portal's ``camera_sync.CFG_OR_DISCOVERY_MANAGED_IDS`` to the real
+edge agent's id lists and delete rule.
+
+Requirements: 3.3, 5.5, 12.4 (rtsp-rtmp-stream-cameras: 5.11, 5.12, 18.3)
+"""
+import contextlib
+import copy
+import io
+import json
+import os
+import pathlib
+import sys
+import uuid
+from types import SimpleNamespace
+
+import pytest
+
+from conftest import REGION, TEST_ENV
+
+CAMERA_REGISTRY_TABLE_NAME = "test-camera-registry-shadow-sync"
+SETTINGS_TABLE_NAME = "test-settings-shadow-sync"
+DLQ_NAME = "test-camera-shadow-sync-dlq"
+COMPONENT_BUCKET_NAME = "test-dda-component-shadow-sync"
+
+SHADOW_NAME = "dda-camera-registry"
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+_SRC_BACKEND = _REPO_ROOT / "src" / "backend"
+
+
+# --- real edge modules (loaded by path) ----------------------------------------
+
+
+def _load_edge_modules():
+    """Load the REAL edge packages from src/backend.
+
+    The edge package and the portal Lambda module are both named
+    ``camera_sync``, so the edge package (whose submodules import each
+    other absolutely) is imported under its own name first and then
+    detached from sys.modules — the already-executed module objects keep
+    their internal references, and the portal module can own the name for
+    the rest of the suite (conftest re-import pattern).
+    """
+    saved = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "camera_sync" or name.startswith("camera_sync.")
+    }
+    sys.path.insert(0, str(_SRC_BACKEND))
+    try:
+        import camera_discovery
+        import camera_sync as edge_camera_sync
+    finally:
+        for name in list(sys.modules):
+            if name == "camera_sync" or name.startswith("camera_sync."):
+                del sys.modules[name]
+        sys.modules.update(saved)
+        sys.path.remove(str(_SRC_BACKEND))
+    return camera_discovery, edge_camera_sync
+
+
+_camera_discovery, _edge_camera_sync = _load_edge_modules()
+
+DiscoveredCamera = _camera_discovery.DiscoveredCamera
+DiscoveryResult = _camera_discovery.DiscoveryResult
+EdgeSyncAgent = _edge_camera_sync.EdgeSyncAgent
+CameraSyncStateStore = _edge_camera_sync.CameraSyncStateStore
+build_inventory = _edge_camera_sync.build_inventory
+
+
+# --- the emulated named shadow --------------------------------------------------
+
+
+class NamedShadowEmulator:
+    """One in-memory ``dda-camera-registry`` named shadow serving both
+    sides' accessor contracts.
+
+    Edge side (``IoTShadowAccessor`` contract):
+      - ``get_thing_shadow_state_request(thing_name, shadow_name)``
+      - ``update_thing_shadow_state_request(thing_name, shadow_name, state)``
+      Both honor :attr:`edge_online` — a disconnected device's shadow I/O
+      fails (Reqs 3.3, 5.5).
+
+    Portal side (assumed-role iot-data client contract):
+      - ``update_thing_shadow(thingName, shadowName, payload)``
+      - ``get_thing_shadow(thingName, shadowName)``
+      Cloud-side access works regardless of device connectivity — the
+      shadow itself is the retention buffer for pending desired changes.
+
+    Shadow document semantics follow AWS: state sections merge
+    recursively, an explicit ``null`` deletes a key, the delta is desired
+    minus reported, and every accepted update emits an
+    ``/update/documents`` event (recorded with which sections the update
+    touched, so tests can select the reported-state events the ingest
+    direction consumes).
+
+    Req 12.4: the emulator is scoped to a single thing name — access
+    under any other identity raises, standing in for the device's IoT
+    policy restricting shadow access to the thing's own identity.
+    """
+
+    def __init__(self, thing_name):
+        self.thing_name = thing_name
+        self.desired = {}
+        self.reported = {}
+        self.version = 0
+        self.edge_online = True
+        self.documents_events = []  # [(touched_sections, documents_payload)]
+
+    # --- shared shadow-document core -----------------------------------
+
+    def _check_identity(self, thing_name, shadow_name):
+        assert thing_name == self.thing_name, (
+            "shadow access under a foreign IoT identity: {!r} != {!r} "
+            "(Req 12.4)".format(thing_name, self.thing_name)
+        )
+        assert shadow_name == SHADOW_NAME
+
+    @staticmethod
+    def _merge(target, patch):
+        """AWS shadow merge: dicts merge recursively, null deletes."""
+        for key, value in patch.items():
+            if value is None:
+                target.pop(key, None)
+            elif isinstance(value, dict):
+                node = target.get(key)
+                if not isinstance(node, dict):
+                    node = {}
+                    target[key] = node
+                NamedShadowEmulator._merge(node, value)
+            else:
+                target[key] = value
+
+    def _accept_update(self, state):
+        touched = set()
+        for section in ("desired", "reported"):
+            if section in state and state[section] is not None:
+                self._merge(getattr(self, section), state[section])
+                touched.add(section)
+        self.version += 1
+        self.documents_events.append((
+            frozenset(touched),
+            {
+                "current": {
+                    "state": {
+                        "desired": copy.deepcopy(self.desired),
+                        "reported": copy.deepcopy(self.reported),
+                    },
+                    "version": self.version,
+                },
+            },
+        ))
+
+    @staticmethod
+    def _diff(desired, reported):
+        out = {}
+        for key, value in desired.items():
+            current = reported.get(key) if isinstance(reported, dict) else None
+            if isinstance(value, dict):
+                sub = NamedShadowEmulator._diff(
+                    value, current if isinstance(current, dict) else {}
+                )
+                if sub:
+                    out[key] = sub
+            elif value != current:
+                out[key] = value
+        return out
+
+    def delta(self):
+        """The shadow delta message (desired minus reported), or ``None``
+        when nothing is pending — what the shadow service would publish on
+        ``.../update/delta`` to the connected device."""
+        state = self._diff(self.desired, self.reported)
+        if not state:
+            return None
+        return {"state": copy.deepcopy(state), "version": self.version}
+
+    def drain_reported_events(self):
+        """Documents events from updates that touched reported state,
+        drained — the events the edge->portal ingest direction forwards
+        (desired-only updates carry no new reported state to ingest)."""
+        events = [
+            payload for touched, payload in self.documents_events
+            if "reported" in touched
+        ]
+        self.documents_events = []
+        return events
+
+    # --- edge side: IoTShadowAccessor contract ---------------------------
+
+    def get_thing_shadow_state_request(self, thing_name, shadow_name):
+        self._check_identity(thing_name, shadow_name)
+        if not self.edge_online:
+            raise ConnectionError("device has no AWS IoT connectivity")
+        if not self.desired and not self.reported:
+            return None
+        return {
+            "desired": copy.deepcopy(self.desired),
+            "reported": copy.deepcopy(self.reported),
+        }
+
+    def update_thing_shadow_state_request(self, thing_name, shadow_name, state):
+        self._check_identity(thing_name, shadow_name)
+        if not self.edge_online:
+            raise ConnectionError("device has no AWS IoT connectivity")
+        self._accept_update(state)
+
+    # --- portal side: iot-data client contract ---------------------------
+
+    def update_thing_shadow(self, thingName, shadowName, payload):
+        self._check_identity(thingName, shadowName)
+        self._accept_update(json.loads(payload).get("state") or {})
+        return {}
+
+    def get_thing_shadow(self, thingName, shadowName):
+        self._check_identity(thingName, shadowName)
+        document = {
+            "state": {
+                "desired": copy.deepcopy(self.desired),
+                "reported": copy.deepcopy(self.reported),
+            },
+            "version": self.version,
+        }
+        return {"payload": io.BytesIO(json.dumps(document).encode())}
+
+
+def iot_rule_record(thing_name, documents_event):
+    """One SQS record exactly as the IoT topic rule produces it.
+
+    The rule is ``SELECT *, topic(3) AS thing_name FROM
+    '$aws/things/+/shadow/name/dda-camera-registry/update/documents'``:
+    the body is the documents payload plus the thing name parsed from the
+    topic. Req 12.4: the topic is thing-scoped and only the device's own
+    IoT identity may publish to its shadow, so ``topic(3)`` attributes the
+    report to the authenticated device — never to anything the payload
+    itself claims.
+    """
+    body = dict(documents_event)
+    body["thing_name"] = thing_name  # topic(3)
+    return {"messageId": str(uuid.uuid4()), "body": json.dumps(body)}
+
+
+# --- edge-side fakes (same patterns as the sibling camera_sync suites) ----------
+
+
+class FakeClock:
+    def __init__(self, start=1_730_000_000.0):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class FakeDiscovery:
+    def __init__(self, snapshot):
+        self.latest_snapshot = snapshot
+
+
+class FakeImageSourceAccessor:
+    """Dict-backed stand-in for the LocalServer ``ImageSourceAccessor``.
+
+    The real-accessor apply path (SQLite, schema validation, verbatim
+    error messages) is exercised by the Property 7 suite in
+    test/backend-test/camera_sync/; this integration example is about the
+    transports, so a minimal accessor implementing the agent's contract
+    (list/create/update/delete) suffices.
+    """
+
+    def __init__(self):
+        self.sources = {}
+        self._next_id = 1
+
+    def list_image_sources(self, request, session):
+        return [copy.deepcopy(source) for source in self.sources.values()]
+
+    def create_image_source(self, data, session):
+        image_source_id = str(self._next_id)
+        self._next_id += 1
+        self.sources[image_source_id] = {
+            "imageSourceId": image_source_id,
+            "name": data.get("name"),
+            "type": data.get("type"),
+            "cameraId": data.get("cameraId"),
+            "location": data.get("location"),
+            "imageSourceConfiguration": {},
+        }
+        return {"imageSourceId": image_source_id}
+
+    def update_image_source(self, image_source_id, data, session):
+        source = self.sources[image_source_id]
+        for key, value in data.items():
+            if key == "imageSourceConfiguration":
+                source["imageSourceConfiguration"].update(value)
+            else:
+                source[key] = value
+
+    def delete_image_source(self, image_source_id, session):
+        del self.sources[image_source_id]
+
+
+def _flush(agent, clock, max_iterations=20):
+    """Pump the agent past debounce/backoff waits until it goes idle."""
+    for _ in range(max_iterations):
+        delay = agent.pump()
+        if delay is None:
+            return
+        clock.advance(delay + 0.001)
+    raise AssertionError("agent never went idle")
+
+
+def _pump_offline(agent, clock, attempts=3):
+    """Let a disconnected agent burn a few failed write attempts; the
+    pending report stays retained (dirty) for the reconnect catch-up."""
+    for _ in range(attempts):
+        delay = agent.pump()
+        assert delay is not None, "agent went idle while offline"
+        clock.advance(delay + 0.001)
+
+
+# --- portal-side fixtures and helpers -------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def sync_env(aws_stack):
+    """Registry + settings tables, the shadow-report DLQ, and freshly
+    bound portal camera_sync / camera_registry modules (conftest pattern)."""
+    import boto3
+
+    client = boto3.client("dynamodb", region_name=REGION)
+    client.create_table(
+        TableName=CAMERA_REGISTRY_TABLE_NAME,
+        KeySchema=[
+            {"AttributeName": "device_id", "KeyType": "HASH"},
+            {"AttributeName": "sk", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "device_id", "AttributeType": "S"},
+            {"AttributeName": "sk", "AttributeType": "S"},
+            {"AttributeName": "usecase_id", "AttributeType": "S"},
+        ],
+        GlobalSecondaryIndexes=[{
+            "IndexName": "usecase-index",
+            "KeySchema": [{"AttributeName": "usecase_id", "KeyType": "HASH"}],
+            "Projection": {"ProjectionType": "ALL"},
+        }],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    client.create_table(
+        TableName=SETTINGS_TABLE_NAME,
+        KeySchema=[{"AttributeName": "setting_key", "KeyType": "HASH"}],
+        AttributeDefinitions=[
+            {"AttributeName": "setting_key", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    sqs = boto3.client("sqs", region_name=REGION)
+    dlq_url = sqs.create_queue(QueueName=DLQ_NAME)["QueueUrl"]
+    s3 = boto3.client("s3", region_name=REGION)
+    s3.create_bucket(Bucket=COMPONENT_BUCKET_NAME)
+
+    os.environ["CAMERA_REGISTRY_TABLE"] = CAMERA_REGISTRY_TABLE_NAME
+    os.environ["SETTINGS_TABLE"] = SETTINGS_TABLE_NAME
+    os.environ["CAMERA_SHADOW_REPORT_DLQ_URL"] = dlq_url
+    os.environ["COMPONENT_BUCKET"] = COMPONENT_BUCKET_NAME
+
+    for module_name in ("camera_sync", "camera_registry", "pin_requests"):
+        sys.modules.pop(module_name, None)
+    import camera_sync
+    import camera_registry
+
+    resource = boto3.resource("dynamodb", region_name=REGION)
+    yield SimpleNamespace(
+        camera_sync=camera_sync,
+        camera_registry=camera_registry,
+        registry=resource.Table(CAMERA_REGISTRY_TABLE_NAME),
+        devices=resource.Table(TEST_ENV["DEVICES_TABLE"]),
+        s3=s3,
+        bucket=COMPONENT_BUCKET_NAME,
+    )
+
+
+def ingest(sync_env, thing_name, emulator):
+    """Deliver the emulator's new reported-state documents events through
+    the IoT-rule wrapper and the real SQS ingest handler."""
+    events = emulator.drain_reported_events()
+    assert events, "no reported-state shadow events to ingest"
+    records = [iot_rule_record(thing_name, event) for event in events]
+    result = sync_env.camera_sync.handler({"Records": records}, None)
+    assert result == {"batchItemFailures": []}
+    return events
+
+
+def device_items(sync_env, thing_name):
+    from boto3.dynamodb.conditions import Key
+
+    response = sync_env.registry.query(
+        KeyConditionExpression=Key("device_id").eq(thing_name))
+    return {item["sk"]: item for item in response["Items"]}
+
+
+def make_event(method, device_id, user, sub_path="", query=None, body=None):
+    path_parameters = {"id": device_id}
+    if sub_path and sub_path != "/refresh":
+        path_parameters["csid"] = sub_path.lstrip("/")
+    return {
+        "httpMethod": method,
+        "path": f"/devices/{device_id}/cameras{sub_path}",
+        "pathParameters": path_parameters,
+        "queryStringParameters": query,
+        "body": json.dumps(body) if body is not None else None,
+        "requestContext": {
+            "authorizer": {
+                "claims": {
+                    "sub": user["user_id"],
+                    "email": user["email"],
+                    "cognito:username": user["username"],
+                    "custom:role": user["role"],
+                }
+            }
+        },
+    }
+
+
+def invoke_registry_api(sync_env, method, device_id, user, sub_path="",
+                        body=None):
+    response = sync_env.camera_registry.handler(
+        make_event(method, device_id, user, sub_path, body=body), None)
+    return response["statusCode"], json.loads(response["body"])
+
+
+def make_edge_device(sync_env, env, tmp_path, snapshot=None):
+    """A registered device with a real EdgeSyncAgent over the emulated
+    shadow: fake clock, dict-backed accessor, real build_inventory."""
+    usecase_id = env.create_usecase()
+    thing_name = f"thing-{uuid.uuid4()}"
+    sync_env.devices.put_item(Item={
+        "device_id": thing_name, "usecase_id": usecase_id,
+    })
+
+    emulator = NamedShadowEmulator(thing_name)
+    accessor = FakeImageSourceAccessor()
+    discovery = FakeDiscovery(snapshot if snapshot is not None
+                              else DiscoveryResult())
+    clock = FakeClock()
+    agent = EdgeSyncAgent(
+        iot_shadow_accessor=emulator,
+        image_source_accessor=accessor,
+        camera_discovery=discovery,
+        db_session_factory=lambda: contextlib.nullcontext(),
+        state_store=CameraSyncStateStore(
+            str(tmp_path / f"camera_sync_state_{thing_name}.json")),
+        thing_name=thing_name,
+        clock=clock,
+        wall_clock=clock,
+    )
+    return SimpleNamespace(
+        usecase_id=usecase_id, thing_name=thing_name, emulator=emulator,
+        accessor=accessor, discovery=discovery, agent=agent, clock=clock,
+    )
+
+
+def add_configured_camera(device, name="Line camera", device_path="/dev/video0",
+                          gain=4, exposure=900):
+    """One configured Image_Source on the device; returns its cfg- csid."""
+    source_id = device.accessor.create_image_source(
+        {"name": name, "type": "Camera", "cameraId": f"cam-{source_suffix()}"},
+        None)["imageSourceId"]
+    device.accessor.update_image_source(
+        source_id,
+        {"imageSourceConfiguration": {
+            "device": device_path, "gain": gain, "exposure": exposure}},
+        None)
+    return source_id, f"cfg-{source_id}"
+
+
+_suffix_counter = iter(range(10_000))
+
+
+def source_suffix():
+    return next(_suffix_counter)
+
+
+def establish_synced_registry(sync_env, env, tmp_path):
+    """Direction-2 preamble: seed the registry through the real
+    edge->portal path (agent report -> rule -> SQS -> ingest handler)."""
+    device = make_edge_device(sync_env, env, tmp_path)
+    source_id, csid = add_configured_camera(device)
+    device.agent.report_inventory()
+    _flush(device.agent, device.clock)
+    ingest(sync_env, device.thing_name, device.emulator)
+
+    items = device_items(sync_env, device.thing_name)
+    entry = items[f"CAMERA#{csid}"]
+    assert entry["sync_status"] == "synced"
+    return device, source_id, csid
+
+
+@pytest.fixture
+def portal_shadow_client(sync_env, monkeypatch):
+    """Route the mutation routes' assumed-role iot-data client to a
+    per-test emulator (bound by the test via ``bind``)."""
+    holder = {}
+    monkeypatch.setattr(
+        sync_env.camera_registry, "iot_data_client",
+        lambda usecase_id: holder["emulator"])
+    return SimpleNamespace(bind=lambda emulator: holder.update(
+        emulator=emulator))
+
+
+@pytest.fixture
+def ingest_shadow_client(sync_env, monkeypatch):
+    """Route the SQS ingest handler's assumed-role iot-data client (the
+    applied-remove convergence's stale-key cleanup seam, camera_sync.py)
+    to a per-test emulator."""
+    holder = {}
+    monkeypatch.setattr(
+        sync_env.camera_sync, "iot_data_client",
+        lambda usecase_id: holder["emulator"])
+    return SimpleNamespace(bind=lambda emulator: holder.update(
+        emulator=emulator))
+
+
+# --- shadow merge-semantics guards ----------------------------------------------
+#
+# Second hardware finding (jetson-thor1 / LocalServer.arm64JP7 1.0.23,
+# Req 6.2): AWS IoT shadow updates MERGE nested maps — a camera key
+# omitted from a full report PERSISTS in the shadow document; only an
+# explicit null deletes it. The original removal round-trip test faked a
+# device that reported the static entry explicitly absent, so the merge
+# semantics were never exercised on the removal path and the
+# omission-based removal design passed silently. These guards pin the
+# emulator's merge behavior so the harness can never silently diverge
+# from AWS again; the removal round-trip tests below rely on them.
+
+
+class TestShadowMergeSemantics:
+    def test_keys_omitted_from_an_update_persist(self):
+        """A full report omitting a previously reported camera key leaves
+        the key in the shadow document — omission is NOT deletion."""
+        emulator = NamedShadowEmulator("thing-merge")
+        emulator.update_thing_shadow_state_request(
+            "thing-merge", SHADOW_NAME,
+            {"reported": {"cameras": {"a": {"version": 1},
+                                      "b": {"version": 1}}}})
+        emulator.update_thing_shadow_state_request(
+            "thing-merge", SHADOW_NAME,
+            {"reported": {"cameras": {"a": {"version": 2}}}})
+
+        assert emulator.reported["cameras"]["a"] == {"version": 2}
+        assert emulator.reported["cameras"]["b"] == {"version": 1}, (
+            "omitted nested keys must persist (AWS shadow merge)")
+
+    def test_explicit_null_deletes_a_nested_key(self):
+        emulator = NamedShadowEmulator("thing-merge")
+        emulator.update_thing_shadow_state_request(
+            "thing-merge", SHADOW_NAME,
+            {"reported": {"cameras": {"a": {"version": 1},
+                                      "b": {"version": 1}}}})
+        emulator.update_thing_shadow(  # the portal-side cleanup contract
+            "thing-merge", SHADOW_NAME,
+            json.dumps({"state": {"reported": {"cameras": {"b": None}}}}))
+
+        assert "b" not in emulator.reported["cameras"]
+        assert emulator.reported["cameras"]["a"] == {"version": 1}
+
+
+# --- direction 1: edge -> portal over the rule/SQS path -------------------------
+
+
+class TestEdgeToPortal:
+    def test_edge_report_reaches_registry_through_rule_and_sqs(
+            self, sync_env, env, tmp_path):
+        """A disconnected device's inventory report is retained, published
+        as the complete current state on reconnect (Req 3.3), forwarded by
+        the thing-scoped IoT rule to SQS under the device's IoT identity
+        (Req 12.4), and ingested into the registry scoped to the device's
+        use case."""
+        snapshot = DiscoveryResult(cameras=[
+            DiscoveredCamera(
+                stable_id="disc-int000000001", device_path="/dev/video0",
+                card_name="Line sensor", bus_info="usb-0000:00:14.0-1",
+                driver="uvcvideo", kind="v4l2",
+                formats=[{"pixel_format": "YUYV",
+                          "resolutions": [[1920, 1080], [1280, 720]]}]),
+            DiscoveredCamera(
+                stable_id="disc-int000000002", device_path="/dev/video1",
+                card_name="USB spare cam", bus_info="usb-0000:00:14.0-2",
+                driver="uvcvideo", kind="v4l2",
+                formats=[{"pixel_format": "MJPG",
+                          "resolutions": [[640, 480]]}]),
+        ])
+        device = make_edge_device(sync_env, env, tmp_path, snapshot=snapshot)
+        source_id, cfg_csid = add_configured_camera(
+            device, device_path="/dev/video0")
+
+        # Disconnected: the write fails and the report is retained (3.3).
+        device.emulator.edge_online = False
+        device.agent.report_inventory()
+        _pump_offline(device.agent, device.clock)
+        assert device.emulator.reported == {}
+
+        # Reconnect: the first successful write is the complete current
+        # state — one report, not a replay of queued deltas (3.3).
+        device.emulator.edge_online = True
+        _flush(device.agent, device.clock)
+        events = ingest(sync_env, device.thing_name, device.emulator)
+        assert len(events) == 1
+
+        # The registry mirrors the device inventory (build_inventory oracle).
+        expected = build_inventory(
+            device.accessor.list_image_sources(None, None), snapshot)
+        items = device_items(sync_env, device.thing_name)
+        camera_items = {
+            sk[len("CAMERA#"):]: item for sk, item in items.items()
+            if sk.startswith("CAMERA#")
+        }
+        assert set(camera_items) == {
+            entry.camera_source_id for entry in expected}
+
+        # Configured source merged with its discovered hardware.
+        cfg = camera_items[cfg_csid]
+        assert cfg["origin"] == "edge-configured"
+        assert cfg["name"] == "Line camera"
+        assert cfg["type"] == "Camera"
+        assert cfg["sync_status"] == "synced"
+        assert cfg["params"]["devicePath"] == "/dev/video0"
+        assert cfg["params"]["gain"] == 4
+        assert cfg["params"]["exposure"] == 900
+        assert cfg["capabilities"]["driver"] == "uvcvideo"
+        assert cfg["capabilities"]["formats"][0]["pixelFormat"] == "YUYV"
+
+        # Discovered-only hardware reports under its discovery stable id.
+        disc = camera_items["disc-int000000002"]
+        assert disc["origin"] == "edge-discovered"
+        assert disc["params"]["devicePath"] == "/dev/video1"
+
+        # Ingest attribution and scoping come from the device's IoT
+        # identity: the thing name from the shadow topic keyed the
+        # registry partition and resolved the use case (Req 12.4).
+        reported_at = events[0]["current"]["state"]["reported"]["reportedAt"]
+        meta = items["META"]
+        assert meta["usecase_id"] == device.usecase_id
+        assert meta["last_report_at"] == reported_at
+        assert meta["never_synced"] is False
+        assert all(item["usecase_id"] == device.usecase_id
+                   for item in camera_items.values())
+
+
+# --- direction 2: portal -> edge over the shadow delta --------------------------
+
+
+class TestPortalToEdge:
+    def test_portal_change_delta_applied_acked_and_synced(
+            self, sync_env, env, tmp_path, portal_shadow_client):
+        """A portal desired change is delivered as a shadow delta, applied
+        by the real agent, acknowledged in its report, and marked synced
+        by the real ingest handler (Reqs 5.1-5.3 wiring over the emulated
+        Sync_Channel)."""
+        device, source_id, csid = establish_synced_registry(
+            sync_env, env, tmp_path)
+        portal_shadow_client.bind(device.emulator)
+        operator = env.make_user(role="Operator")
+
+        status, body = invoke_registry_api(
+            sync_env, "PUT", device.thing_name, operator, sub_path=f"/{csid}",
+            body={"name": "Portal name", "type": "Camera",
+                  "params": {"devicePath": "/dev/video2", "gain": 8,
+                             "exposure": 1200}})
+        assert status == 200
+        change_id = body["portal_change_id"]
+
+        # Registry entry pending; the desired change sits in the shadow.
+        entry = device_items(sync_env, device.thing_name)[f"CAMERA#{csid}"]
+        assert entry["sync_status"] == "pending"
+        assert entry["portal_change_id"] == change_id
+
+        # The shadow service publishes the delta (desired minus reported)
+        # to the connected device; the agent applies and reports.
+        delta = device.emulator.delta()
+        assert set(delta["state"]["changes"]) == {csid}
+        device.agent.on_delta(delta)
+        _flush(device.agent, device.clock)
+
+        # Applied on the device through the accessor.
+        source = device.accessor.sources[source_id]
+        assert source["name"] == "Portal name"
+        assert source["imageSourceConfiguration"]["device"] == "/dev/video2"
+        assert source["imageSourceConfiguration"]["gain"] == 8
+
+        # The processed desired entry was cleared (null write), so the
+        # delta does not re-fire.
+        assert device.emulator.desired.get("changes", {}) == {}
+        assert device.emulator.delta() is None
+
+        # The resulting report carries the ack and travels the same
+        # rule/SQS path back into the registry.
+        events = ingest(sync_env, device.thing_name, device.emulator)
+        reported = events[-1]["current"]["state"]["reported"]
+        assert reported["cameras"][csid]["ack"] == change_id
+
+        entry = device_items(sync_env, device.thing_name)[f"CAMERA#{csid}"]
+        assert entry["sync_status"] == "synced"
+        assert entry["name"] == "Portal name"
+        assert entry["params"]["devicePath"] == "/dev/video2"
+        assert entry["params"]["gain"] == 8
+        assert "pending_content" not in entry
+        assert "portal_change_id" not in entry
+        # No conflict was classified anywhere along the round trip.
+        assert not any(sk.startswith("CONFLICT#") for sk in
+                       device_items(sync_env, device.thing_name))
+
+    def test_pending_change_is_delivered_after_reconnect(
+            self, sync_env, env, tmp_path, portal_shadow_client):
+        """A change issued while the device is disconnected stays pending
+        (Req 5.5) — the shadow retains the desired document — and is
+        applied on reconnect through the same apply_desired_changes pass
+        over the current desired document that server_setup runs, then
+        acknowledged and marked synced."""
+        device, source_id, csid = establish_synced_registry(
+            sync_env, env, tmp_path)
+        portal_shadow_client.bind(device.emulator)
+        operator = env.make_user(role="Operator")
+
+        # Device disconnected: cloud-side shadow writes still succeed —
+        # the shadow itself buffers the pending change (Req 5.5).
+        device.emulator.edge_online = False
+        status, body = invoke_registry_api(
+            sync_env, "PUT", device.thing_name, operator, sub_path=f"/{csid}",
+            body={"name": "Reconnect name", "type": "Camera",
+                  "params": {"devicePath": "/dev/video3", "gain": 2,
+                             "exposure": 700}})
+        assert status == 200
+        change_id = body["portal_change_id"]
+
+        # Retained as pending while the device is offline: the registry
+        # entry stays pending, the device state untouched, the desired
+        # change parked in the shadow.
+        entry = device_items(sync_env, device.thing_name)[f"CAMERA#{csid}"]
+        assert entry["sync_status"] == "pending"
+        assert device.accessor.sources[source_id]["name"] == "Line camera"
+        assert csid in device.emulator.desired["changes"]
+
+        # Reconnect: server_setup's reconnect pass reads the shadow's
+        # current desired document and applies the parked changes (5.5).
+        device.emulator.edge_online = True
+        state = device.emulator.get_thing_shadow_state_request(
+            device.thing_name, SHADOW_NAME)
+        changes = (state.get("desired") or {}).get("changes")
+        assert changes
+        device.agent.apply_desired_changes(changes)
+        _flush(device.agent, device.clock)
+
+        assert device.accessor.sources[source_id]["name"] == "Reconnect name"
+        assert device.emulator.desired.get("changes", {}) == {}
+
+        events = ingest(sync_env, device.thing_name, device.emulator)
+        reported = events[-1]["current"]["state"]["reported"]
+        assert reported["cameras"][csid]["ack"] == change_id
+
+        entry = device_items(sync_env, device.thing_name)[f"CAMERA#{csid}"]
+        assert entry["sync_status"] == "synced"
+        assert entry["name"] == "Reconnect name"
+        assert entry["params"]["devicePath"] == "/dev/video3"
+        assert not any(sk.startswith("CONFLICT#") for sk in
+                       device_items(sync_env, device.thing_name))
+
+
+# --- static-image pin round trip (cloud-static-camera-provisioning 3.3) ---------
+#
+# Same harness, extended end-to-end: the real Portal_Pin_API pin submit
+# populates the desired.staticImagePin slot on the emulated shadow, a fake
+# device confirmation document (the StaticImagePinWorker's reported echo,
+# ships in task 6) transitions the PIN_REQUEST# item to applied with the
+# device-reported metadata through the real rule/SQS ingest path, and a
+# reported.cameras inventory including ``static-image-camera`` upserts the
+# registry entry through the untouched camera reduction.
+#
+# Removal round trips (reworked after the second hardware finding —
+# Req 6.2): the deployed-build test models what LocalServer.arm64JP7
+# 1.0.23 actually does — the post-unpin full report OMITS the static
+# entry, which under shadow merge semantics leaves the stale key present
+# in the document — and asserts convergence through the portal-side
+# mitigation (registry absent-marking + explicit shadow-key null in the
+# ingest). The fixed-build test models the corrected device contract —
+# the entry reported explicitly ABSENT with absentSince, the physical-
+# camera absence pattern.
+#
+# Requirements: 1.2, 4.2, 6.1, 6.2, 7.5
+
+
+@pytest.fixture
+def pin_transport(sync_env, monkeypatch):
+    """Route the pin routes' Image_Transport seam to the moto S3 client."""
+    monkeypatch.setattr(sync_env.camera_registry, "pin_s3_client",
+                        lambda: sync_env.s3)
+
+
+def _tiny_png_bytes(size=(4, 4), color=(0, 128, 255)):
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def stage_pin_upload(sync_env, payload):
+    """PUT a payload to a fresh staging key (the presigned-PUT stand-in)."""
+    staging_key = f"static-image-pins/staging/{uuid.uuid4().hex}"
+    sync_env.s3.put_object(Bucket=sync_env.bucket, Key=staging_key,
+                           Body=payload)
+    return staging_key
+
+
+def static_camera_report(absent=False, absent_since=None, version=1):
+    """The device's ``static-image-camera`` inventory entry (the task 7.2
+    build_inventory shape), present or absence-tracked."""
+    report = {
+        "name": "Static Image Camera",
+        "type": "StaticImage",
+        "origin": "edge-discovered",
+        "params": {},
+        "capabilities": {"staticImage": {"width": 4, "height": 4,
+                                         "format": "PNG"}},
+        "discovered": True,
+        "absent": absent,
+        "version": version,
+    }
+    if absent and absent_since is not None:
+        report["absentSince"] = absent_since
+    return report
+
+
+def confirm_on_device(device, desired, status="applied", metadata=None,
+                      completed_at=1_730_000_200_000, cameras=None):
+    """The fake device confirmation: verbatim echo of the processed desired
+    fields plus the outcome, merged with an inventory report in one shadow
+    update (top-level merge, one documents event)."""
+    echo = dict(desired)
+    echo["status"] = status
+    if metadata is not None:
+        echo["metadata"] = metadata
+    echo["completedAtEpochMs"] = completed_at
+    reported = {"staticImagePin": echo}
+    if cameras is not None:
+        reported["cameras"] = cameras
+        reported["reportedAt"] = completed_at
+    device.emulator.update_thing_shadow_state_request(
+        device.thing_name, SHADOW_NAME, {"reported": reported})
+
+
+class TestStaticImagePinRoundTrip:
+    def test_pin_round_trip_applies_and_upserts_registry_entry(
+            self, sync_env, env, tmp_path, portal_shadow_client,
+            pin_transport):
+        """Portal pin submit -> desired slot populated (Req 1.2) -> fake
+        device confirmation -> item applied with metadata (Req 4.2) ->
+        reported.cameras including static-image-camera upserts the
+        registry entry through the untouched camera path (Req 6.1)."""
+        import hashlib
+
+        device = make_edge_device(sync_env, env, tmp_path)
+        portal_shadow_client.bind(device.emulator)
+        operator = env.make_user(role="Operator")
+
+        payload = _tiny_png_bytes()
+        staging_key = stage_pin_upload(sync_env, payload)
+        status, body = invoke_registry_api(
+            sync_env, "POST", device.thing_name, operator,
+            sub_path="/static-image/pin",
+            body={"stagingKey": staging_key, "fileName": "round-trip.png"})
+        assert status == 201
+        assert body["status"] == "pending"
+        pin_request_id = body["pinRequestId"]
+
+        # The desired slot carries the reference document — never bytes.
+        desired = device.emulator.desired["staticImagePin"]
+        assert desired["requestId"] == pin_request_id
+        assert desired["op"] == "pin"
+        assert desired["sha256"] == hashlib.sha256(payload).hexdigest()
+        assert desired["fileName"] == "round-trip.png"
+        # The canonical object is retrievable through the Image_Transport.
+        stored = sync_env.s3.get_object(Bucket=desired["bucket"],
+                                        Key=desired["key"])
+        assert stored["Body"].read() == payload
+        items = device_items(sync_env, device.thing_name)
+        assert items[f"PIN_REQUEST#{pin_request_id}"]["status"] == "pending"
+
+        # Fake device confirmation + inventory report, through the real
+        # rule/SQS ingest path.
+        metadata = {"width": 4, "height": 4, "format": "PNG",
+                    "fileName": "round-trip.png"}
+        confirm_on_device(device, desired, metadata=metadata,
+                          cameras={"static-image-camera":
+                                   static_camera_report()})
+        ingest(sync_env, device.thing_name, device.emulator)
+
+        items = device_items(sync_env, device.thing_name)
+        pin_item = items[f"PIN_REQUEST#{pin_request_id}"]
+        assert pin_item["status"] == "applied"
+        assert pin_item["device_metadata"]["width"] == 4
+        assert pin_item["device_metadata"]["fileName"] == "round-trip.png"
+        assert int(pin_item["completed_at"]) == 1_730_000_200_000
+
+        # Registry entry upserted through the same inventory sync used
+        # for physical cameras (Req 6.1).
+        entry = items["CAMERA#static-image-camera"]
+        assert entry["origin"] == "edge-discovered"
+        assert entry["type"] == "StaticImage"
+        assert entry["name"] == "Static Image Camera"
+        assert entry["absent"] is False
+        assert entry["usecase_id"] == device.usecase_id
+
+        # Status route: applied + device metadata + device-reported
+        # presence (Reqs 1.7, 4.6 surfaces).
+        status, view = invoke_registry_api(
+            sync_env, "GET", device.thing_name, operator,
+            sub_path="/static-image")
+        assert status == 200
+        assert view["latest"]["pinRequestId"] == pin_request_id
+        assert view["latest"]["status"] == "applied"
+        assert view["deviceMetadata"] == metadata
+        assert view["deviceReported"]["present"] is True
+
+    def _pinned_preamble(self, sync_env, env, tmp_path,
+                         portal_shadow_client, ingest_shadow_client,
+                         operator):
+        """Pin round trip establishing an applied pinned state; returns
+        the device with its registry entry present."""
+        device = make_edge_device(sync_env, env, tmp_path)
+        portal_shadow_client.bind(device.emulator)
+        ingest_shadow_client.bind(device.emulator)
+
+        staging_key = stage_pin_upload(sync_env, _tiny_png_bytes())
+        status, body = invoke_registry_api(
+            sync_env, "POST", device.thing_name, operator,
+            sub_path="/static-image/pin",
+            body={"stagingKey": staging_key, "fileName": "before.png"})
+        assert status == 201
+        pin_desired = dict(device.emulator.desired["staticImagePin"])
+        confirm_on_device(
+            device, pin_desired,
+            metadata={"width": 4, "height": 4, "format": "PNG",
+                      "fileName": "before.png"},
+            cameras={"static-image-camera": static_camera_report()})
+        ingest(sync_env, device.thing_name, device.emulator)
+        return device
+
+    def _submit_removal(self, sync_env, device, operator):
+        """Portal removal request (Req 7.2 surface); returns the removal
+        Pin_Request id and the remove desired document."""
+        status, body = invoke_registry_api(
+            sync_env, "DELETE", device.thing_name, operator,
+            sub_path="/static-image/pin")
+        assert status == 200
+        assert body["status"] == "pending"
+        removal_id = body["pinRequestId"]
+
+        # The desired slot was replaced wholesale: the remove document
+        # carries no transport reference fields (nulls delete on merge).
+        desired = device.emulator.desired["staticImagePin"]
+        assert desired["requestId"] == removal_id
+        assert desired["op"] == "remove"
+        assert "bucket" not in desired and "key" not in desired
+        return removal_id, desired
+
+    def test_removal_round_trip_converges_for_deployed_builds(
+            self, sync_env, env, tmp_path, portal_shadow_client,
+            ingest_shadow_client, pin_transport):
+        """Deployed-build (LocalServer.arm64JP7 1.0.23) removal round
+        trip — the second hardware finding's exact shape: the post-unpin
+        FULL report OMITS the static entry, shadow merge keeps the stale
+        key present in the document, and convergence comes from the
+        ingest's applied-remove mitigation: registry entry marked absent
+        with the confirmation timestamp, stale shadow key cleared with an
+        explicit null, and subsequent events keep the entry absent — it
+        is never deleted and never resurrected as present (Reqs 6.2,
+        7.5)."""
+        operator = env.make_user(role="Operator")
+        device = self._pinned_preamble(
+            sync_env, env, tmp_path, portal_shadow_client,
+            ingest_shadow_client, operator)
+        removal_id, desired = self._submit_removal(sync_env, device,
+                                                   operator)
+
+        # Fake 1.0.23 device: unpin applied and confirmed, but the full
+        # report OMITS the static entry (an empty cameras update models
+        # the omission) — the shadow document STILL carries the stale
+        # present entry (merge semantics, the guard tests above).
+        completed_at = 1_730_000_300_000
+        confirm_on_device(device, desired, completed_at=completed_at,
+                          cameras={})
+        assert "static-image-camera" in device.emulator.reported["cameras"]
+
+        ingest(sync_env, device.thing_name, device.emulator)
+
+        items = device_items(sync_env, device.thing_name)
+        assert items[f"PIN_REQUEST#{removal_id}"]["status"] == "applied"
+
+        # (a) Registry entry marked absent with the confirmation
+        # timestamp — not deleted (Req 6.2) — despite the same event's
+        # cameras map still carrying the stale present entry.
+        entry = items["CAMERA#static-image-camera"]
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == completed_at
+
+        # (b) The stale shadow key was cleared with an explicit null, so
+        # future documents events stop resurrecting the entry.
+        assert "static-image-camera" not in \
+            device.emulator.reported["cameras"]
+
+        # The null write emitted its own documents event; ingesting it
+        # (the static entry now genuinely missing from the report) keeps
+        # the entry absent through the absence-tracked deletion path.
+        ingest(sync_env, device.thing_name, device.emulator)
+        entry = device_items(
+            sync_env, device.thing_name)["CAMERA#static-image-camera"]
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == completed_at
+
+        # A later full device report still omitting the entry never
+        # brings it back (and never deletes it).
+        device.emulator.update_thing_shadow_state_request(
+            device.thing_name, SHADOW_NAME,
+            {"reported": {"cameras": {}, "reportedAt": completed_at + 60_000}})
+        ingest(sync_env, device.thing_name, device.emulator)
+        entry = device_items(
+            sync_env, device.thing_name)["CAMERA#static-image-camera"]
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == completed_at
+
+        # Status route: removal applied, device reports no Pinned_Image.
+        status, view = invoke_registry_api(
+            sync_env, "GET", device.thing_name, operator,
+            sub_path="/static-image")
+        assert status == 200
+        assert view["latest"]["pinRequestId"] == removal_id
+        assert view["latest"]["op"] == "remove"
+        assert view["latest"]["status"] == "applied"
+        assert view["deviceReported"]["present"] is False
+        assert int(view["deviceReported"]["absentSince"]) == completed_at
+
+    def test_removal_round_trip_with_absence_reporting_build(
+            self, sync_env, env, tmp_path, portal_shadow_client,
+            ingest_shadow_client, pin_transport):
+        """Fixed-build removal round trip (the corrected device contract,
+        rides the next component build): the post-unpin report carries
+        the entry explicitly ABSENT with absentSince — the physical-
+        camera absence pattern — and the registry converges to absent
+        with the device's timestamp (Reqs 6.2, 7.5)."""
+        operator = env.make_user(role="Operator")
+        device = self._pinned_preamble(
+            sync_env, env, tmp_path, portal_shadow_client,
+            ingest_shadow_client, operator)
+        removal_id, desired = self._submit_removal(sync_env, device,
+                                                   operator)
+
+        absent_since = 1_730_000_300_000
+        confirm_on_device(
+            device, desired, completed_at=absent_since,
+            cameras={"static-image-camera": static_camera_report(
+                absent=True, absent_since=absent_since, version=2)})
+        ingest(sync_env, device.thing_name, device.emulator)
+
+        items = device_items(sync_env, device.thing_name)
+        assert items[f"PIN_REQUEST#{removal_id}"]["status"] == "applied"
+
+        # Marked absent with the device-reported timestamp — not deleted
+        # (6.2); the device keeps the key alive in the shadow, so no
+        # merge staleness arises in the first place.
+        entry = items["CAMERA#static-image-camera"]
+        assert entry["absent"] is True
+        assert int(entry["absent_since"]) == absent_since
+
+        # Status route: removal applied, device reports no Pinned_Image.
+        status, view = invoke_registry_api(
+            sync_env, "GET", device.thing_name, operator,
+            sub_path="/static-image")
+        assert status == 200
+        assert view["latest"]["pinRequestId"] == removal_id
+        assert view["latest"]["op"] == "remove"
+        assert view["latest"]["status"] == "applied"
+        assert view["deviceReported"]["present"] is False
+        assert int(view["deviceReported"]["absentSince"]) == absent_since
+
+
+# --- the id list the Portal shares with the device (task 29.5) ---------------
+#
+# rtsp-rtmp-stream-cameras Requirements 5.11, 5.12 and 18.3: the registry's
+# exception for pending deletes covers exactly the ids the device's rule 4
+# acknowledges, so the Portal's CFG_OR_DISCOVERY_MANAGED_IDS must be the
+# device's list, matched the same way. These tests pin the two together
+# against the REAL edge package loaded above.
+
+PARITY_IDS = ("cfg-1", "disc-video0", "arv-Fake-1", "static-image-camera",
+              "static-video-camera", "portal-be48f52dd98d", "cam-1", "cfg",
+              "CFG-1", "static-image-camera-2")
+
+
+class TestIdListParity:
+    def test_the_portal_list_is_the_devices_list(self, sync_env):
+        agent = _edge_camera_sync.agent
+        rules = sync_env.camera_sync.CFG_OR_DISCOVERY_MANAGED_IDS
+        prefixes = {rule for rule in rules if rule.endswith("-")}
+        exact_ids = {rule for rule in rules if not rule.endswith("-")}
+        assert prefixes == {agent._CONFIGURED_PREFIX,
+                            *agent.ABSENCE_TRACKED_PREFIXES}
+        assert exact_ids == set(agent.ABSENCE_TRACKED_IDS)
+
+    def test_a_delete_fails_on_the_device_exactly_for_listed_ids(
+            self, sync_env, env, tmp_path):
+        """Ten deletes delivered to a real EdgeSyncAgent whose accessor
+        holds no Image_Source: the device reports a failure exactly for
+        the ids is_cfg_or_discovery_managed lists (a cfg- delete fails
+        because the camera does not exist, the discovery-managed ids are
+        refused), and acknowledges every other delete."""
+        device = make_edge_device(sync_env, env, tmp_path)
+        changes = {csid: {"op": "delete",
+                          "portalChangeId": f"pc-parity-{index}"}
+                   for index, csid in enumerate(PARITY_IDS)}
+        device.agent.apply_desired_changes(changes)
+        _flush(device.agent, device.clock)
+
+        failures = device.emulator.reported.get("failures") or {}
+        for csid in PARITY_IDS:
+            listed = sync_env.camera_sync.is_cfg_or_discovery_managed(csid)
+            assert (csid in failures) is listed, (csid, failures.get(csid))
+            if listed:
+                assert failures[csid]["portalChangeId"] == \
+                    changes[csid]["portalChangeId"]
+        assert device.accessor.sources == {}

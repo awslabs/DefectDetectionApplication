@@ -105,7 +105,7 @@ This plan fixes the missing `inference_runtimes.py` on the subsequent-setup path
     - Confirm all tests still pass after the fix (no regressions)
     - _Requirements: 3.1, 3.2, 3.3, 3.4_
 
-- [-] 4. Add drift-proofing and downstream staging tests
+- [x] 4. Add drift-proofing and downstream staging tests
   - **Property 1: Fix Checking (PBT)** - Generate varied source resource file sets (add arbitrary new resource files alongside `inference_runtimes.py`) and varied pre-existing destination states → assert the fixed re-sync delivers every source file to `/aws_dda/resources_for_copy`, proving the drift class of bug cannot recur
   - Verify downstream staging: with `inference_runtimes.py` now present in `/aws_dda/resources_for_copy`, run the `model_convertor.py` staging path and assert `inference_runtimes.py` is copied next to `lfv_model_template.py` into the model version directory (Requirement 2.2)
   - Run all tests

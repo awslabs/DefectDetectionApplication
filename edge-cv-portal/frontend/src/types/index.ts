@@ -11,12 +11,20 @@ export interface User {
   use_cases?: UseCase[];
 }
 
-export type UserRole = 'PortalAdmin' | 'UseCaseAdmin' | 'DataScientist' | 'Operator' | 'Viewer';
+export type UserRole = 'PortalAdmin' | 'UseCaseAdmin' | 'DataScientist' | 'Operator' | 'Viewer' | 'DataLabeler';
 
 export interface S3Bucket {
   name: string;
   creation_date?: string | null;
   region?: string;
+  // Use-case bucket configuration (spec: portal-usecase-bucket-config,
+  // design §5.5 / §10.1). Advisory marking from GET /s3-buckets: `eligible`
+  // is true when the bucket carries the dda-portal:managed=true tag the
+  // server requires before a use case can configure or allow it;
+  // `portal_created` when the portal created it. Tag discovery is regional,
+  // so the server decides again when the use case is created.
+  eligible?: boolean;
+  portal_created?: boolean;
 }
 
 export interface UseCase {
@@ -41,6 +49,19 @@ export interface UseCase {
   data_account_external_id?: string;
   data_s3_bucket?: string;
   data_s3_prefix?: string;
+  // Use-case bucket configuration (spec: portal-usecase-bucket-config,
+  // design §5.1 / §10.1). `additional_s3_buckets` is the stored list a
+  // UseCaseAdmin allows next to the configured buckets; `allowed_s3_buckets`
+  // is the computed union GET /usecases/{id} returns (configured + additional,
+  // the portal's own buckets excluded). Every S3 access the portal performs
+  // for the use case is bound to this set.
+  additional_s3_buckets?: string[];
+  allowed_s3_buckets?: string[];
+  // VLM/LLM Anomaly Tuning Sample_Export settings (spec:
+  // quality-prompt-tuning, Requirements 2.1, 2.9). Absent ⇒ export
+  // disabled / the 30-day default retention.
+  tuning_sample_export?: boolean;
+  tuning_sample_retention_days?: number;
   // Shared components provisioning
   shared_components_provisioned?: boolean;
   shared_components?: {
@@ -57,6 +78,32 @@ export interface UseCase {
   };
 }
 
+/**
+ * Per-model entry of the `dda-model-status` reported shadow document
+ * (spec: model-gpu-fallback-visibility, design Decision 4). The document
+ * comes from a device and may be partial — every field is optional.
+ */
+export interface ModelProviderStatus {
+  status?: string | null;
+  runtime?: string | null;
+  gpuRequested?: boolean | null;
+  gpuActive?: boolean | null;
+}
+
+/**
+ * Reported `dda-model-status` shadow document, attached by the portal
+ * backend to the single-device GET as the additive `model_status` field.
+ * Null/absent means "no information" (Decision 6) — the portal renders
+ * exactly as before this field existed.
+ */
+export interface DeviceModelStatus {
+  models?: Record<string, ModelProviderStatus | null> | null;
+  gpuDegraded?: boolean | null;
+  gpuChainModels?: number | null;
+  gpuActiveModels?: number | null;
+  updatedAt?: string | null;
+}
+
 export interface Device {
   device_id: string;
   usecase_id: string;
@@ -69,6 +116,14 @@ export interface Device {
   greengrass_version?: string;
   platform?: string;
   architecture?: string;
+  /** UseCaseAdmin-designated Test_Device flag (Devices table). */
+  test_device?: boolean;
+  /** Portal-recorded DDA Target_Architecture (Devices table), checked by
+   *  the deployment architecture gates. Null/absent fails closed. */
+  target_architecture?: string | null;
+  /** Reported `dda-model-status` shadow document (additive; null/absent =
+   *  no information — spec: model-gpu-fallback-visibility). */
+  model_status?: DeviceModelStatus | null;
   attributes?: Record<string, string>;
   tags?: Record<string, string>;
   installed_components?: InstalledComponent[];
@@ -139,10 +194,23 @@ export interface CompilationJob {
   target: string;
   compilation_job_name: string;
   compilation_job_arn: string;
-  status: 'InProgress' | 'Completed' | 'Failed' | 'Stopped' | 'INPROGRESS' | 'COMPLETED' | 'FAILED' | 'STOPPED';
+  // 'ERROR' is a transient poll fault: the job's true status is unknown and it
+  // will be re-polled. It is not a terminal state.
+  // Uppercase values come verbatim from SageMaker Neo (STARTING/STOPPING
+  // included) and the event writer's normalization; mixed-case values come
+  // from the training-job API ('Stopping' included) and start time.
+  status: 'InProgress' | 'Completed' | 'Failed' | 'Stopping' | 'Stopped' | 'STARTING' | 'INPROGRESS' | 'COMPLETED' | 'FAILED' | 'STOPPING' | 'STOPPED' | 'ERROR';
   compiled_model_s3?: string;
   failure_reason?: string;
   error?: string;
+  // False when the start call itself failed and no live job exists to poll.
+  job_started?: boolean;
+  // Last status-lookup (describe) failure recorded by the poller; distinct
+  // from `error` / `failure_reason`, which carry the originating reason.
+  poll_error?: string;
+  // Name of the step that failed when the job never started
+  // (e.g. 'start_onnx_export_job').
+  failed_step?: string;
   created_at?: number;
   completed_at?: number;
 }
@@ -202,6 +270,45 @@ export interface TrainingJob {
   packaged_components?: PackagedComponent[];
   greengrass_components?: GreengrassComponent[];
   published_components?: PublishedComponent[];
+  /** 'classification' | 'segmentation' | '*-robust' | 'object_detection' | 'vllm' ... */
+  model_type?: string;
+  /** Absent for SageMaker-trained records (defaults to 'trained'); 'imported' | 'vllm' otherwise. */
+  source?: 'trained' | 'imported' | 'vllm' | string;
+  /** 'onnx' for portal-trained Object Detection jobs (no Neo compilation). */
+  runtime?: string;
+  /** Detection_Record_Fields written by training.py for object_detection jobs. */
+  detection?: {
+    detection_arch?: string;
+    network_input_width?: number;
+    network_input_height?: number;
+    class_names?: string[];
+    num_classes?: number;
+    score_threshold?: number;
+    iou_threshold?: number;
+    preserve_aspect?: boolean;
+    [key: string]: unknown;
+  };
+  /**
+   * Imported records (Smart Import / Model Import): the validator's metadata
+   * (`framework` 'PYTORCH' | 'ONNX', `pt_file` / `model_file`, input shape)
+   * plus `fine_tunable` (rfdetr-training-and-transfer-learning Req 7): the
+   * kept training checkpoint when the import was an ultralytics `.pt` or an
+   * RF-DETR `.pth`, `null` for ONNX / TorchScript / state_dict imports.
+   */
+  metadata?: {
+    framework?: string;
+    pt_file?: string;
+    model_file?: string;
+    model_type?: string;
+    fine_tunable?: {
+      arch: 'yolo' | 'rf_detr' | string;
+      kind?: string;
+      checkpoint_s3?: string;
+      class_names?: string[] | null;
+      num_classes?: number | null;
+    } | null;
+    [key: string]: unknown;
+  };
 }
 
 export interface LabelingJob {

@@ -1,0 +1,353 @@
+/**
+ * The nodes × target-devices Camera_Binding matrix of the
+ * CreateDeployment page (camera-registry-sync task 12.1 — Requirements
+ * 8.1, 8.4, 8.5, 8.7, 8.8, 8.9, 9.2, 9.3).
+ *
+ * Rendered only when the selected workflow version has
+ * Camera_Input_Nodes (`binding_required`, 8.9). Each cell offers the
+ * target device's registered Camera_Sources as a dropdown (8.1), with
+ * the node's binding hint pre-selected but visibly marked as suggested
+ * until the user confirms or changes it (8.5), and a manual-override
+ * entry accepting an explicit device path (8.4). Never-synced targets
+ * show a warning and permit manual override only (8.8). Warnings carry
+ * confirmation checkboxes feeding `confirmed_warnings` (9.3), and
+ * submission rejections are surfaced next to the matrix identifying the
+ * node and device (8.7, 9.2).
+ *
+ * A Stream_Camera_Source_Node row offers only the Camera_Sources of its
+ * protocol, and its manual override collects a Stream_URL, checked as it
+ * is typed (rtsp-rtmp-stream-cameras Requirements 9.3, 9.4).
+ */
+import {
+  Alert,
+  Badge,
+  Box,
+  Button,
+  Checkbox,
+  FormField,
+  Header,
+  Input,
+  Select,
+  SpaceBetween,
+  Table,
+} from '@cloudscape-design/components';
+import type { SelectProps, TableProps } from '@cloudscape-design/components';
+import {
+  BindingCell,
+  BindingContextNode,
+  CameraBindingContext,
+  CameraBindingIssue,
+  CameraBindingWarning,
+  cameraOptionDescription,
+  cameraOptionLabel,
+  cameraOptionTags,
+  describeBindingIssue,
+  getBindingCell,
+  BindingSelections,
+  isStreamBindingNode,
+  streamOverrideProblem,
+} from './cameraBindings';
+import {
+  isAravisCompatibleCamera,
+  isStreamCompatibleCamera,
+  isV4l2CompatibleCamera,
+  STREAM_CAMERA_SOURCE_TYPES,
+} from '../workflows/cameraReference';
+import { SCHEMES_BY_NODE_TYPE } from '../workflows/streamUrl';
+
+export interface CameraBindingMatrixProps {
+  context: CameraBindingContext;
+  selections: BindingSelections;
+  onCellChange: (device: string, nodeId: string, cell: BindingCell) => void;
+  /** Warnings requiring confirmation (expected + server-reported). */
+  warnings: CameraBindingWarning[];
+  confirmedWarningIds: ReadonlySet<string>;
+  onToggleWarning: (warningId: string, confirmed: boolean) => void;
+  /** Validation errors from a rejected submission (409). */
+  errors: CameraBindingIssue[];
+}
+
+/** An example Stream_URL for a stream node's override placeholder. */
+function streamUrlExample(nodeType: string): string {
+  const scheme = SCHEMES_BY_NODE_TYPE[nodeType]?.[0] ?? 'rtsp';
+  return scheme.startsWith('rtmp')
+    ? `${scheme}://media.local/live/line1`
+    : `${scheme}://192.168.1.64:554/Streaming/Channels/101`;
+}
+
+/**
+ * The manual-override input of one cell. Camera nodes take a device path
+ * (8.4). A Stream_Camera_Source_Node takes a Stream_URL for its `url`
+ * parameter, checked as it is typed with the rules deployments.py applies
+ * (rtsp-rtmp-stream-cameras Requirement 9.4), so a URL with credentials or
+ * the other protocol's scheme is flagged before submission.
+ */
+function OverrideInput({
+  device,
+  node,
+  value,
+  onChange,
+}: {
+  device: string;
+  node: BindingContextNode;
+  value: string;
+  onChange: (cell: BindingCell) => void;
+}) {
+  if (!isStreamBindingNode(node.node_type)) {
+    return (
+      <Input
+        value={value}
+        onChange={({ detail }) => onChange({ mode: 'override', device: detail.value })}
+        placeholder="Device path, e.g. /dev/video0"
+        ariaLabel={`Manual override device path for node ${node.node_id} on device ${device}`}
+      />
+    );
+  }
+  const problem = streamOverrideProblem(node.node_type, value);
+  return (
+    <FormField errorText={problem ?? undefined} stretch>
+      <Input
+        value={value}
+        onChange={({ detail }) => onChange({ mode: 'override', device: detail.value })}
+        placeholder={`Stream URL, e.g. ${streamUrlExample(node.node_type)}`}
+        ariaLabel={`Manual override Stream URL for node ${node.node_id} on device ${device}`}
+        invalid={problem !== null}
+      />
+    </FormField>
+  );
+}
+
+function BindingCellControl({
+  context,
+  device,
+  node,
+  cell,
+  onChange,
+}: {
+  context: CameraBindingContext;
+  device: string;
+  node: BindingContextNode;
+  cell: BindingCell;
+  onChange: (cell: BindingCell) => void;
+}) {
+  const target = context.targets[device];
+  const neverSynced = target?.state === 'never-synced';
+  const allCameras = target?.cameras ?? [];
+  // An aravis_camera_source row offers only Aravis-compatible sources and
+  // an icam_source row only V4L2-compatible sources — the same predicates
+  // the Workflow_Builder picker uses — so users are not offered bindings
+  // the validator would reject (aravis-camera-input Requirement 5.1,
+  // csi-icam-input-nodes Requirement 5.2). A stream node row offers only
+  // the Camera_Sources of its own protocol (rtsp-rtmp-stream-cameras
+  // Requirement 9.3). Hint pre-selection is unaffected: the cell state is
+  // seeded upstream by initialBindingSelections.
+  const cameras =
+    node.node_type === 'aravis_camera_source'
+      ? allCameras.filter(isAravisCompatibleCamera)
+      : node.node_type === 'icam_source'
+        ? allCameras.filter(isV4l2CompatibleCamera)
+        : isStreamBindingNode(node.node_type)
+          ? allCameras.filter((camera) => isStreamCompatibleCamera(node.node_type, camera))
+          : allCameras;
+  // The Camera_Source type a stream row binds to ('RTSP' / 'RTMP'), named
+  // in the empty-list text; null for every other node type.
+  const streamProtocol = isStreamBindingNode(node.node_type)
+    ? STREAM_CAMERA_SOURCE_TYPES[node.node_type] ?? null
+    : null;
+
+  // Never-synced targets are restricted to manual override (8.8).
+  if (neverSynced) {
+    return (
+      <SpaceBetween size="xxs">
+        <Box color="text-status-warning" fontSize="body-s">
+          Never synced — manual override only
+        </Box>
+        <OverrideInput
+          device={device}
+          node={node}
+          value={cell.mode === 'override' ? cell.device : ''}
+          onChange={onChange}
+        />
+      </SpaceBetween>
+    );
+  }
+
+  if (cell.mode === 'override') {
+    return (
+      <SpaceBetween size="xxs">
+        <OverrideInput device={device} node={node} value={cell.device} onChange={onChange} />
+        <Button
+          variant="inline-link"
+          onClick={() => onChange({ mode: 'unbound' })}
+        >
+          Use registered camera
+        </Button>
+      </SpaceBetween>
+    );
+  }
+
+  const options: SelectProps.Option[] = cameras.map((camera) => ({
+    value: camera.camera_source_id,
+    label: cameraOptionLabel(camera),
+    description: cameraOptionDescription(camera),
+    tags: cameraOptionTags(camera),
+  }));
+  const selectedOption =
+    cell.mode === 'camera'
+      ? options.find((o) => o.value === cell.cameraSourceId) ?? {
+          value: cell.cameraSourceId,
+          label: cell.cameraSourceId,
+        }
+      : null;
+
+  return (
+    <SpaceBetween size="xxs">
+      {cell.mode === 'camera' && cell.suggested && (
+        <Badge color="blue">Suggested from workflow hint</Badge>
+      )}
+      <Select
+        selectedOption={selectedOption}
+        onChange={({ detail }) => {
+          const value = detail.selectedOption?.value;
+          if (value) {
+            // A user-made (or user-confirmed) choice is no longer a
+            // suggestion (8.5).
+            onChange({ mode: 'camera', cameraSourceId: value, suggested: false });
+          }
+        }}
+        options={options}
+        placeholder={
+          cameras.length > 0
+            ? 'Select camera'
+            : streamProtocol !== null
+              ? `No ${streamProtocol} cameras registered`
+              : 'No cameras registered'
+        }
+        disabled={cameras.length === 0}
+        empty={
+          streamProtocol !== null
+            ? `No ${streamProtocol} cameras registered for this device`
+            : 'No cameras registered for this device'
+        }
+        ariaLabel={`Camera binding for node ${node.node_id} on device ${device}`}
+        // The matrix renders inside a Table whose horizontally scrollable
+        // wrapper establishes a clipping context, so an inline-rendered
+        // dropdown is cut off at the cell/table edge — the camera list was
+        // effectively unreadable in the last row (and unusable on the
+        // Revise Deployment screen). Portalling the dropdown to the body
+        // escapes that clipping; this matches every other Select in the
+        // portal (Labeling, Models, Training, Components, UseCases).
+        expandToViewport
+      />
+      <Button
+        variant="inline-link"
+        onClick={() => onChange({ mode: 'override', device: '' })}
+      >
+        Manual override
+      </Button>
+    </SpaceBetween>
+  );
+}
+
+export function CameraBindingMatrix({
+  context,
+  selections,
+  onCellChange,
+  warnings,
+  confirmedWarningIds,
+  onToggleWarning,
+  errors,
+}: CameraBindingMatrixProps) {
+  const devices = Object.keys(context.targets);
+  const neverSyncedDevices = devices.filter(
+    (d) => context.targets[d].state === 'never-synced'
+  );
+
+  const columnDefinitions: TableProps.ColumnDefinition<BindingContextNode>[] = [
+    {
+      id: 'node',
+      header: 'Camera input node',
+      cell: (node) => (
+        <SpaceBetween size="xxs">
+          <Box fontWeight="bold">{node.node_id}</Box>
+          <Box color="text-body-secondary" fontSize="body-s">
+            {node.node_type}
+          </Box>
+        </SpaceBetween>
+      ),
+    },
+    ...devices.map((device) => ({
+      id: `device-${device}`,
+      header: device,
+      cell: (node: BindingContextNode) => (
+        <BindingCellControl
+          context={context}
+          device={device}
+          node={node}
+          cell={getBindingCell(selections, device, node.node_id)}
+          onChange={(cell) => onCellChange(device, node.node_id, cell)}
+        />
+      ),
+    })),
+  ];
+
+  return (
+    <SpaceBetween size="m">
+      {errors.length > 0 && (
+        <Alert type="error" header="Camera binding validation failed">
+          <ul style={{ margin: 0, paddingLeft: '20px' }}>
+            {errors.map((issue, index) => (
+              <li key={`${issue.code}-${issue.device}-${issue.nodeId ?? ''}-${index}`}>
+                {describeBindingIssue(issue)}
+              </li>
+            ))}
+          </ul>
+        </Alert>
+      )}
+
+      {neverSyncedDevices.length > 0 && (
+        <Alert type="warning" header="Devices that have never synced their camera registry">
+          The following target device(s) have never completed a camera registry
+          synchronization, so no registered cameras are available for them.
+          Camera bindings for these devices are restricted to manual override:{' '}
+          <strong>{neverSyncedDevices.join(', ')}</strong>
+        </Alert>
+      )}
+
+      <Table
+        resizableColumns
+        header={
+          <Header
+            variant="h3"
+            description="Bind each camera input node of the workflow to a camera registered on each target device, or supply a manual override."
+          >
+            Camera bindings — {context.workflow_id} v{context.workflow_version}
+          </Header>
+        }
+        items={context.camera_input_nodes}
+        columnDefinitions={columnDefinitions}
+        empty={<Box textAlign="center">No camera input nodes</Box>}
+      />
+
+      {warnings.length > 0 && (
+        <Alert type="warning" header="Camera binding warnings require confirmation">
+          <SpaceBetween size="xs">
+            <Box>
+              Review and confirm each warning below to allow the deployment to
+              be created.
+            </Box>
+            {warnings.map((warning) => (
+              <Checkbox
+                key={warning.id}
+                checked={confirmedWarningIds.has(warning.id)}
+                onChange={({ detail }) => onToggleWarning(warning.id, detail.checked)}
+              >
+                {warning.message}
+              </Checkbox>
+            ))}
+          </SpaceBetween>
+        </Alert>
+      )}
+    </SpaceBetween>
+  );
+}

@@ -22,6 +22,7 @@ import { Component, UseCase } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import { useUsecase } from '../contexts/UsecaseContext';
 import ConfirmationModal from '../components/ConfirmationModal';
+import { isWorkflowComponent, workflowComponentName } from './workflows/workflowComponentName';
 
 // Portal-managed component prefix - these should not be deleted by non-admin users
 const PORTAL_MANAGED_COMPONENT_PREFIX = 'aws.edgeml.dda.LocalServer';
@@ -36,6 +37,8 @@ export default function Components() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedItems, setSelectedItems] = useState<Component[]>([]);
+  // {workflowId: name} for resolving friendly names of dda.workflow.* components.
+  const [workflowNames, setWorkflowNames] = useState<Record<string, string>>({});
   
   // Use case management
   const [useCases, setUseCases] = useState<UseCase[]>([]);
@@ -139,6 +142,20 @@ export default function Components() {
       });
       
       setComponents(response.components);
+
+      // Resolve friendly names for any packaged workflow components
+      // (dda.workflow.{id}) so the list shows the workflow name, not the
+      // UUID. Best-effort: a failure just leaves the raw name.
+      if (response.components.some((c) => isWorkflowComponent(c.component_name))) {
+        try {
+          const wfResp = await apiService.listWorkflows(selectedUseCase.value as string);
+          setWorkflowNames(
+            Object.fromEntries((wfResp.workflows || []).map((w) => [w.workflow_id, w.name]))
+          );
+        } catch (wfErr) {
+          console.error('Failed to resolve workflow names for components:', wfErr);
+        }
+      }
     } catch (err) {
       console.error('Failed to load components:', err);
       setError(err instanceof Error ? err.message : 'Failed to load components');
@@ -309,13 +326,28 @@ export default function Components() {
               {
                 id: 'name',
                 header: 'Component Name',
-                cell: (item: Component) => (
-                  <Link
-                    onFollow={() => navigate(`/components/${encodeURIComponent(item.arn)}?usecase_id=${selectedUseCase?.value || ''}`)}
-                  >
-                    {item.component_name}
-                  </Link>
-                ),
+                cell: (item: Component) => {
+                  // Packaged workflow components are named dda.workflow.{uuid};
+                  // show the friendly workflow name with the technical name as
+                  // secondary text so users can recognize what they're deploying.
+                  const friendlyName = workflowComponentName(item.component_name, workflowNames);
+                  return (
+                    <Link
+                      onFollow={() => navigate(`/components/${encodeURIComponent(item.arn)}?usecase_id=${selectedUseCase?.value || ''}`)}
+                    >
+                      {friendlyName ? (
+                        <SpaceBetween size="xxxs">
+                          <span>{friendlyName}</span>
+                          <Box variant="small" color="text-body-secondary">
+                            {item.component_name}
+                          </Box>
+                        </SpaceBetween>
+                      ) : (
+                        item.component_name
+                      )}
+                    </Link>
+                  );
+                },
                 sortingField: 'component_name',
                 isRowHeader: true,
               },

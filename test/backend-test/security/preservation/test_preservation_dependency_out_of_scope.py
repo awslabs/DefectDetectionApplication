@@ -20,13 +20,16 @@ Record sha256 baselines for the out-of-scope references that MUST stay
 byte-for-byte unchanged:
 
 * ``edge-cv-portal/backend/layers/shared/python/requests/auth.py`` -- the
-  vendored HTTP Digest-auth code (B324 md5/sha1 at 148/156/205). F3 is a
+  vendored HTTP Digest-auth code (B324 md5/sha1 at 179/187/237). F3 is a
   DOCUMENTED suppression in the audit gate, NOT a code edit, so this file is
   unchanged (Req 3.5).
 * the portal ``layers/jwt/requirements.txt`` and ``functions/requirements.txt``
-  (``requests==2.31.0``) -- out of scope, NOT bumped (Req 3.6).
-* the vendored ``urllib3`` package -- ``urllib3 2.6.3`` has zero md5/sha1 usage;
-  nothing to change (Req 3.6).
+  -- out of scope for this spec's audit gate (Req 3.6). Re-baselined by the
+  Dependabot remediation, which pins them to the patched
+  ``PyJWT==2.15.0`` / ``cryptography==50.0.1`` / ``requests==2.34.2`` set.
+* the vendored ``urllib3`` package -- zero md5/sha1 usage; nothing to change
+  (Req 3.6). Re-baselined when the shared layer was re-vendored to
+  ``urllib3 2.8.0`` / ``requests 2.34.2``.
 
 The golden metadata also records the Req 3.4 effective-runtime-``requests`` note:
 the edge Dockerfiles run ``pip install --upgrade requests`` AFTER installing
@@ -82,14 +85,19 @@ def test_out_of_scope_sha256_golden():
     assert current == recorded
 
 
+# Portal pin set recorded by the Dependabot remediation re-baseline.
+_PORTAL_PINS = ("PyJWT==2.15.0", "cryptography==50.0.1", "requests==2.34.2")
+
+
 # Validates: Requirements 3.6
-def test_portal_pins_are_requests_2_31_0_and_out_of_scope():
-    """The portal pins record ``requests==2.31.0`` (out of scope, NOT the two
-    in-scope pin files), so the audit never parses/bumps them."""
+def test_portal_pins_are_the_patched_set_and_out_of_scope():
+    """The portal pins record the patched ``PyJWT`` / ``cryptography`` /
+    ``requests`` set (out of scope, NOT the two in-scope pin files), so the
+    audit never parses/bumps them."""
     for rel_path in (PORTAL_JWT_REQS_REL, PORTAL_FUNCTIONS_REQS_REL):
-        lines = read_lines(rel_path)
-        assert any(ln.strip() == "requests==2.31.0" for ln in lines), (
-            f"{rel_path} should pin requests==2.31.0 (out of scope), got: {lines!r}"
+        lines = [ln.strip() for ln in read_lines(rel_path)]
+        assert lines == list(_PORTAL_PINS), (
+            f"{rel_path} should pin exactly {_PORTAL_PINS!r}, got: {lines!r}"
         )
 
 

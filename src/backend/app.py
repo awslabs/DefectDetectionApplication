@@ -28,6 +28,7 @@
 
 # System Modules
 import asyncio
+import importlib.util
 import logging
 import os
 import time
@@ -38,6 +39,7 @@ from alembic.config import Config
 # Fast api
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from asgi_correlation_id import CorrelationIdMiddleware
 from panorama import trace as emltriton_trace
@@ -109,8 +111,26 @@ from endpoints import (
     auth_info,
     download_file,
     inference_result,
-    streams
+    streams,
+    local_auth,
+    health,
+    static_image_camera,
+    static_video_camera
 )
+
+# Workflow Manager engine (additive subsystem, Requirement 13)
+from workflow_engine import api as workflow_engine_api
+from workflow_engine import runtime as workflow_engine_runtime
+
+# vLLM capability probe (vllm-triton-inference, Requirements 4.1, 4.2, 4.3,
+# 8.3): the companion Triton_vLLM_Runtime and the Text_Generation_API router
+# exist only on images whose build installed the vllm wheel (Dockerfile.jp6's
+# VLLM_ENABLE layer). Images without vLLM (arm64 CPU, jp5-default, x86 variants)
+# skip the import, the router registration, and the manager startup below —
+# exactly the pre-feature startup sequence.
+VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
+if VLLM_AVAILABLE:
+    from endpoints import text_generation
 
 import dao.sqlite_db.models as models
 from dao.sqlite_db.sqlite_db_operations import SessionLocal, engine
@@ -140,8 +160,20 @@ app.add_exception_handler(ImageNotFoundException, image_not_found_exception_hand
 app.add_exception_handler(GrpcException, grpc_exception_handler)
 app.add_exception_handler(AravisCameraException, aravis_camera_exception_handler)
 
+# Registered before the legacy routers so the workflow engine's fixed
+# /workflows/registrations and /workflows/executions paths take precedence
+# over the legacy /workflows/{workflowId} parameter route; behavior of the
+# existing endpoints for real workflow ids is unchanged (Requirement 13.6).
+app.include_router(workflow_engine_api.router)
+
 app.include_router(image_source.router)
 app.include_router(camera.router)
+# Pin_API for the Static_Image_Camera (static-image-camera-source): pin /
+# status / unpin routes backing the virtual camera's Pinned_Image.
+app.include_router(static_image_camera.router)
+# Video_Pin_API for the separate Static_Video_Camera (static-camera-video-
+# loop): pin / status / unpin routes backing its looping Pinned_Video.
+app.include_router(static_video_camera.router)
 app.include_router(system.router)
 app.include_router(feature_config.router)
 app.include_router(workflow.router)
@@ -149,6 +181,34 @@ app.include_router(auth_info.router)
 app.include_router(download_file.unauthenticated_router)
 app.include_router(inference_result.router)
 app.include_router(streams.router)
+# Local_Login endpoints (portal-user-manager): intentionally carry no auth
+# dependency — /local-auth/login and /local-auth/status must be reachable
+# without credentials (exempt from authorize_request, task 9.4).
+app.include_router(local_auth.router)
+# Health endpoint (edge-deploy-reliability, Defect B): unauthenticated like
+# local_auth's router (exempt from authorize_request) — the docker healthcheck
+# (healthcheck.py) probes GET /health without credentials, and the Greengrass
+# Startup `compose up -d --wait` gates RUNNING on the resulting health.
+app.include_router(health.router)
+# Text_Generation_API: registered beside the existing routers only when the
+# capability probe found the vllm wheel; vLLM-free images keep the
+# pre-feature router set (Requirements 4.1, 8.3).
+if VLLM_AVAILABLE:
+    app.include_router(text_generation.router)
+
+# Quality Station HMI static bundle (quality-station-hmi, Requirement 6.7):
+# serve the pre-built HMI single-page app same-origin with the API it
+# consumes, so the kiosk browser needs nothing beyond static assets. The
+# mount carries no auth dependency — static assets hold no secrets, and
+# every data route the HMI calls still requires the Session_Token. Guarded
+# by directory existence so devices without the HMI bundle behave
+# byte-identically to today (no mount, no route changes).
+HMI_DIST_DIR = os.environ.get(
+    "HMI_DIST_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "hmi", "dist"),
+)
+if os.path.isdir(HMI_DIST_DIR):
+    app.mount("/hmi", StaticFiles(directory=HMI_DIST_DIR, html=True), name="hmi")
 
 
 def cleanup_workflow_digital_inputs():
@@ -159,12 +219,29 @@ def cleanup_workflow_digital_inputs():
                 terminate_digital_input_task(workflow)
 
 
+# Bound on the SIGTERM shutdown cleanup (edge-deploy-reliability, Defect A):
+# strictly below the compose stop_grace_period (120s) so the backend is never
+# SIGKILLed mid-cleanup by Docker's stop timeout.
+SHUTDOWN_CLEANUP_BUDGET_SECONDS = 20
+
+
 @app.on_event("shutdown")
 async def shutdown_event():
-    cleanup_workflow_digital_inputs()
+    def _cleanup():
+        cleanup_workflow_digital_inputs()
 
-    # On exit disconnect all cameras
-    disconnect_all_cameras()
+        # On exit disconnect all cameras
+        disconnect_all_cameras()
+
+    try:
+        await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(None, _cleanup),
+            timeout=SHUTDOWN_CLEANUP_BUDGET_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Shutdown cleanup exceeded %ss budget; proceeding with shutdown "
+            "(remaining cleanup is abandoned — the container is being torn "
+            "down)", SHUTDOWN_CLEANUP_BUDGET_SECONDS)
 
 def alembic_schema_migration():
     '''
@@ -238,6 +315,45 @@ def setup_triton():
         logger.error("[TRITON SETUP during startup FAILED]")
         logger.error(traceback.format_exc())
 
+def start_vllm_runtime():
+    """
+    Start the companion Triton_vLLM_Runtime on vLLM-capable images: the
+    VllmRuntimeManager plus its loopback model-control/generate server, then
+    install the manager into the Text_Generation_API router and the
+    feature-config status merge (Requirements 4.1, 4.2). Failures are
+    contained: the vision stack and every existing router start exactly as
+    before (Requirement 4.3).
+    """
+    if not VLLM_AVAILABLE:
+        return None
+    try:
+        from vllm_runtime.manager import VllmRuntimeManager
+        from vllm_runtime.server import VllmRuntimeServer
+        from utils import feature_configs_utils
+
+        manager = VllmRuntimeManager()
+        vllm_server = VllmRuntimeServer(manager)
+        vllm_server.start()
+        text_generation.set_runtime(manager)
+        feature_configs_utils.set_vllm_manager(manager)
+        # Re-drive staged-but-unloaded models after a backend restart
+        # (vllm-model-reload-after-backend-restart, design File 4 /
+        # Decision 7). The import lives INSIDE this try block, after the
+        # VLLM_AVAILABLE early return, so vLLM-free images never import
+        # or construct the reconciler; a reconciler construction/start
+        # failure is caught by the existing containment below.
+        from vllm_runtime.reconciler import VllmReconciler
+        VllmReconciler(manager).start()
+        logger.info(
+            "vLLM reconciler started (staged-model reload after restart).")
+        logger.info("vLLM runtime manager started.")
+        return vllm_server
+    except Exception:
+        logger.error("[VLLM RUNTIME STARTUP FAILED]")
+        logger.error(traceback.format_exc())
+        return None
+
+
 def setup_workflow_digital_inputs():
     logger.info("Setting up digital input workflows")
     with SessionLocal() as session:
@@ -279,9 +395,25 @@ async def main():
         # it is intentional for an on-device edge appliance serving the LAN UI.
         config = uvicorn.Config(app, host="0.0.0.0", port=5000, loop="asyncio", log_config="dda_logging/uvicorn_disable_logging.json")  # nosec B104
     server = uvicorn.Server(config)
-    loop.create_task(server.serve())
+    # AWAIT the server instead of detaching it as a task (edge-deploy-
+    # reliability, deterministic shutdown): uvicorn installs its own
+    # SIGTERM/SIGINT handlers and serve() RETURNS after the graceful
+    # shutdown sequence (connection drain + lifespan shutdown, i.e. our
+    # bounded shutdown_event) completes. When serve() was detached and the
+    # process parked in loop.run_forever(), nothing ever stopped the loop
+    # after shutdown finished, so on `docker stop` the process idled in
+    # epoll until the stop_grace_period SIGKILL (exit 137 at exactly 120s).
+    # Awaiting serve() makes main() — and run_until_complete below — return
+    # as soon as the graceful shutdown is done.
+    await server.serve()
 
 if __name__ == "__main__":  # pragma: no cover
+    # FIRST, before the backend forks any child: a forked child must not
+    # share the main server's signal wakeup fd, or a signal the child
+    # handles (vLLM's engine core on SIGTERM) runs the backend's own
+    # shutdown handler (spec vllm-jp7-engine-lifecycle, Defect A).
+    from utils import fork_signal_hygiene
+    fork_signal_hygiene.install()
     triton_instance = TritonEdgeClient.get_instance()
     setup_triton()
     # Start schema migration using alembic tool
@@ -297,13 +429,58 @@ if __name__ == "__main__":  # pragma: no cover
     logger.info("Local server init.")
     on_startup()
 
-    # The event loop should start running continously after both FastAPI server and capture task manager
+    # Start the Workflow Manager watcher (own daemon thread). Failures are
+    # contained inside start_workflow_engine: LocalServer and every
+    # Pipeline_Configuration continue exactly as before (Requirement 13.6).
+    workflow_engine_runtime.start_workflow_engine()
+
+    # Start the companion vLLM runtime (no-op on images without the vllm
+    # wheel — arm64 CPU, jp5-default, x86 — which run exactly the pre-feature
+    # startup sequence, Requirement 8.3). Install the result into the /health
+    # endpoint (edge-deploy-reliability, Defect B): only a genuinely started
+    # runtime server (non-None) arms the 8901 reachability gate — a contained
+    # startup failure (None, Requirement 4.3) never flips the backend
+    # unhealthy, while a started-then-dead runtime does.
+    vllm_server = start_vllm_runtime()
+    health.set_vllm_server(vllm_server)
+
+    # Run the server to completion. main() awaits uvicorn's serve(), which
+    # returns once the SIGTERM-triggered graceful shutdown (including the
+    # bounded shutdown_event cleanup) has finished — no run_forever(): the
+    # loop must stop when the server is done so the process can exit inside
+    # the compose stop_grace_period instead of being SIGKILLed (exit 137).
     loop = asyncio.get_event_loop()
+    exit_code = 0
     try:
         loop.run_until_complete(main())
-        loop.run_forever()
+    except Exception:
+        logger.error("[LOCAL SERVER CRASHED]")
+        logger.error(traceback.format_exc())
+        exit_code = 1
     finally:
-        # Close loop if any exception to prevent the resource leak.
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
+        # Stop the companion vLLM runtime server (bounded internally); the
+        # loaded engine's worker threads/processes die with the process.
+        if vllm_server is not None:
+            try:
+                vllm_server.stop()
+            except Exception:
+                logger.error(traceback.format_exc())
+        # Close loop to prevent the resource leak.
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+        except Exception:
+            logger.error(traceback.format_exc())
+        logger.info("Local server shutdown complete; exiting.")
+        # Deterministic exit (edge-deploy-reliability): every cleanup the app
+        # owns has already run (bounded shutdown_event, uvicorn connection
+        # drain, vLLM runtime stop, asyncgens, loop close). A plain return
+        # would now hang in interpreter teardown: the loaded vLLM engine,
+        # Triton client and torch/NCCL leave NON-DAEMON threads (140+
+        # observed on JP6) and child processes that block threading/
+        # multiprocessing atexit joins far past the 120s stop grace window —
+        # the incident's exit-137-at-exactly-120s shape. os._exit skips that
+        # teardown and ends the process immediately with the correct code.
+        logging.shutdown()
+        os._exit(exit_code)  # pylint: disable=protected-access
 

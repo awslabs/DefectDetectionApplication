@@ -44,6 +44,8 @@ import { CameraDisconnectedContent } from "components/common/ImagePlaceholder/Pr
 import ConfirmDisconnectModal, { FilteredWorkflowTableItem } from "../list/ConfirmDisconnectModal";
 import { filterWorkflows } from "api/WorkflowAPI";
 import { Workflow } from "components/workflow/types";
+import StreamCameraPanel from "../stream/StreamCameraPanel";
+import { isStreamType } from "../stream/streamForm";
 
 export enum ImageSourceTabTypes {
   DETAILS = "ImageSourceDetails",
@@ -104,7 +106,10 @@ export default function ImageSourceDetails(): JSX.Element {
   // If image source is not folder, then it treat as camera.
   // For smart camera, we will add more camera type in the future
   const isFolderSrc = imgSrcType === ImageSourceType.Folder;
-  const isCameraSrc = !isFolderSrc;
+  // RTSP/RTMP cameras have their own section: camera controls (gain,
+  // exposure) and the image settings do not apply to a network stream.
+  const isStreamSrc = isStreamType(imgSrcType);
+  const isCameraSrc = !isFolderSrc && !isStreamSrc;
   const isArvisCameraSrc = isArvisCameraImageSource(imgSrcType)
   const { status: cameraStatus } = cameraStatusObj || {};
 
@@ -178,7 +183,7 @@ export default function ImageSourceDetails(): JSX.Element {
                 variant="h2"
                 actions={
                   <Button
-                    onClick={(): void => navigate(editImageSourceUrl)}
+                    onClick={(): void => void navigate(editImageSourceUrl)}
                   >
                     Edit
                   </Button>
@@ -218,6 +223,9 @@ export default function ImageSourceDetails(): JSX.Element {
             )}
           </Container>
 
+          {isStreamSrc && imageSource && (
+            <StreamCameraPanel imageSource={imageSource} />
+          )}
           {isCameraSrc && (
             <>
               {/* Only show connection status for Arvis camera as we don't have connection status for ICam right now*/}
@@ -257,7 +265,7 @@ export default function ImageSourceDetails(): JSX.Element {
                 header={
                   <Header
                     variant="h2"
-                    actions={<Button onClick={(): void => navigate(editImageSourceSettingsUrl)}>Edit</Button>}
+                    actions={<Button onClick={(): void => void navigate(editImageSourceSettingsUrl)}>Edit</Button>}
                   >
                     Image settings
                   </Header>
@@ -280,7 +288,7 @@ export default function ImageSourceDetails(): JSX.Element {
                   <Header
                     variant="h2"
                     actions={
-                      <Button onClick={(): void => navigate(`/image-sources/${imageSourceId}/edit-region-of-interest`)}>
+                      <Button onClick={(): void => void navigate(`/image-sources/${imageSourceId}/edit-region-of-interest`)}>
                         Edit
                       </Button>
                     }

@@ -43,7 +43,7 @@ export default function DetailsHeader({
           </Button>
           <Button
             variant="primary"
-            onClick={(): void => navigate(editWorkflowUrl || "")}
+            onClick={(): void => void navigate(editWorkflowUrl || "")}
           >
             Edit workflow
           </Button>

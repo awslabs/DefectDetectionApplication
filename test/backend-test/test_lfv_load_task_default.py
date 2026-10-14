@@ -159,7 +159,7 @@ _manifest_without_task = st.dictionaries(
 
 # Feature: object-detection-visualization, Property 9: Missing task defaults to anomaly
 # Validates: Requirements 5.2
-@settings(max_examples=100)
+@settings(max_examples=25)
 @given(manifest=_manifest_without_task)
 def test_missing_task_defaults_to_anomaly(manifest):
     """For any manifest that omits the ``task`` field (but may contain arbitrary

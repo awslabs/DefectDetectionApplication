@@ -35,6 +35,76 @@ interface DeploymentItem {
 
 const PAGE_SIZE = 10;
 
+/**
+ * The subset of a deployment the Created_Date sort needs. `creation_timestamp`
+ * is intentionally widened to allow null/undefined so the comparator can place
+ * missing dates deterministically (Req 6.3), independent of the stricter
+ * DeploymentItem shape.
+ */
+type SortableByCreated = {
+  deployment_id: string;
+  creation_timestamp?: string | null;
+};
+
+/**
+ * Parse a deployment's Created_Date to a comparable epoch value, or null when
+ * it is absent/unparseable. Kept separate so the sort placement of missing
+ * dates is explicit (Req 6.3).
+ */
+function parseCreatedTimestamp(item: SortableByCreated): number | null {
+  const raw = item.creation_timestamp;
+  if (raw == null) return null;
+  const parsed = Date.parse(String(raw));
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+/**
+ * Ascending comparator for the "Created" column.
+ *
+ * - Orders by parsed `creation_timestamp` ascending.
+ * - Deterministic secondary tie-break on `deployment_id` so equal timestamps
+ *   keep a stable order across loads (Req 6.2).
+ * - Places unparseable/absent timestamps FIRST in ascending order, so that
+ *   under the hook's descending `reverse()` they end up LAST — never dropped
+ *   (Req 6.3).
+ *
+ * The Deployments list defaults to descending on this column (newest-first,
+ * Req 6.1); `useTableSort` reverses this ascending order for that default.
+ */
+export const createdSortingComparator = (
+  a: SortableByCreated,
+  b: SortableByCreated
+): number => {
+  const at = parseCreatedTimestamp(a);
+  const bt = parseCreatedTimestamp(b);
+
+  // Missing dates sort first ascending -> last after the descending reverse.
+  if (at === null && bt === null) {
+    return a.deployment_id.localeCompare(b.deployment_id);
+  }
+  if (at === null) return -1;
+  if (bt === null) return 1;
+
+  if (at !== bt) return at - bt;
+  // Equal timestamps: deterministic tie-break.
+  return a.deployment_id.localeCompare(b.deployment_id);
+};
+
+/**
+ * Default sort applied by the Deployments list: newest-first by Created_Date
+ * (Req 6.1). References the same `creation_timestamp` field AND the custom
+ * comparator so that (a) `useTableSort` actually uses the comparator for the
+ * default sort, and (b) Cloudscape highlights the "Created" column header as
+ * the active sort. A user header click overrides this default (Req 6.4).
+ */
+export const deploymentsSortingDefaults = {
+  sortingColumn: {
+    sortingField: 'creation_timestamp',
+    sortingComparator: createdSortingComparator,
+  },
+  sortingDescending: true,
+};
+
 export default function Deployments() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -149,7 +219,10 @@ export default function Deployments() {
   });
 
   // Paginate
-  const { items: sortedDeployments, sortingProps } = useTableSort(filteredDeployments);
+  const { items: sortedDeployments, sortingProps } = useTableSort(
+    filteredDeployments,
+    deploymentsSortingDefaults
+  );
   const paginatedDeployments = sortedDeployments.slice(
     (currentPage - 1) * PAGE_SIZE,
     currentPage * PAGE_SIZE
@@ -357,6 +430,7 @@ export default function Deployments() {
             header: 'Created',
             cell: (item) => formatTimestamp(item.creation_timestamp),
             sortingField: 'creation_timestamp',
+            sortingComparator: createdSortingComparator,
           },
           {
             id: 'actions',

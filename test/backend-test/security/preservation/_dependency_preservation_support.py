@@ -89,9 +89,12 @@ VENDORED_URLLIB3_DIR_REL = os.path.join(
     "edge-cv-portal", "backend", "layers", "shared", "python", "urllib3"
 )
 
-# The CVE-vulnerable and CVE-fixed version tokens (the ONLY allowed delta).
-BASELINE_REQUESTS_VERSION = "2.32.3"  # F(X): unfixed pin (CVE-2024-47081)
-FIXED_REQUESTS_VERSION = "2.32.4"  # F'(X): fixed pin
+# The recorded baseline and current fixed ``requests`` tokens (the ONLY
+# allowed delta at the pin line). Re-baselined by dependabot-remediation: the
+# golden now records the Dependabot-patched pin set (requests 2.34.2 / urllib3
+# 2.8.0, >= the 2.33.0 floor), so both tokens are the same release.
+BASELINE_REQUESTS_VERSION = "2.34.2"  # recorded golden pin
+FIXED_REQUESTS_VERSION = "2.34.2"  # current fixed pin
 
 
 # --------------------------------------------------------------------------- #

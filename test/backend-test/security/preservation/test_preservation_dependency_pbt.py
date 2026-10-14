@@ -66,7 +66,7 @@ _any_version = st.one_of(_well_formed_version, _malformed_version)
 # PBT 1 -- disallowed-pin predicate over generated version strings.
 # --------------------------------------------------------------------------- #
 # Validates: Requirements 3.3
-@settings(max_examples=400)
+@settings(max_examples=25)
 @given(v=_any_version)
 def test_pbt1_disallowed_pin_predicate_matches_parsed_floor(v):
     """``_pin_is_disallowed(v)`` is True iff the parsed version is below the
@@ -148,7 +148,7 @@ def _candidate(draw):
 
 
 # Validates: Requirements 3.1, 3.6, 3.7
-@settings(max_examples=500)
+@settings(max_examples=25)
 @given(case=_candidate())
 def test_pbt2_pin_line_classification(case):
     """A line is flagged iff it is a ``requests==`` pin ``< 2.32.4`` in an

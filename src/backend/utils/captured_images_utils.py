@@ -30,7 +30,7 @@ import glob
 from fastapi import HTTPException
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_500_INTERNAL_SERVER_ERROR
 
-from model.image_source import ImageSource, ImageSourceType
+from model.image_source import ImageSource, ImageSourceType, is_stream_source_type
 from exceptions.api.captured_images_exception import CapturedImageException, ImageNotFoundException
 from utils.camera_manager import get_camera_frame
 from utils.constants import CAPTURE
@@ -123,6 +123,15 @@ def run_image_capture_pipeline(image_source, workflow_output_path, gst_pipeline_
         r = gst_pipeline_executor.execute_image_source_pipeline(
             ImageSource(**image_source), is_preview=False, file_prefix=file_prefix,
             workflow_output_path=workflow_output_path
+        )
+        return r.get("captureLocation")
+    elif is_stream_source_type(image_source.get("type")):
+        # rtsp-rtmp-stream-cameras Requirement 4.4: the stream's Latest_Frame
+        # through the StreamBroadcaster, like a camera frame.
+        from utils.stream_frames import get_stream_frame
+        r = gst_pipeline_executor.execute_image_source_pipeline(
+            ImageSource(**image_source), is_preview=False, file_prefix=file_prefix,
+            workflow_output_path=workflow_output_path, frame_data=get_stream_frame(image_source)
         )
         return r.get("captureLocation")
     

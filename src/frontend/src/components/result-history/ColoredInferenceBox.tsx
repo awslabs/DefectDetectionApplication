@@ -88,7 +88,10 @@ function InferenceBox({ prediction, humanFeedbackRequired }: InferenceBoxProps):
 }
 
 function ClassificationTypeTag({ classification }: { classification: PredictionType }): JSX.Element {
+  // Render the classification's own value rather than hardcoding "Anomaly" for
+  // every non-Normal prediction, mirroring LiveResultCard. PredictionType.Detection
+  // is a real stored value, so a hardcoded label would mislabel a detection row.
   return classification === PredictionType.Normal
     ? <StatusIndicator>Normal</StatusIndicator>
-    : <StatusIndicator type="error">Anomaly</StatusIndicator>
+    : <StatusIndicator type="error">{classification}</StatusIndicator>
 }

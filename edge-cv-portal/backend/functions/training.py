@@ -6,6 +6,8 @@ Based on DDA_SageMaker_Model_Training_and_Compilation.ipynb
 import json
 import os
 import logging
+import tempfile
+from decimal import Decimal
 from typing import Dict, Any, Optional
 from datetime import datetime
 import boto3
@@ -19,12 +21,44 @@ from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, create_s3_path_builder,
     is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase,
-    get_s3_client_for_bucket
+    get_s3_client_for_bucket, parse_s3_uri, assert_bucket_allowed,
+    allowed_s3_buckets, BucketConfigError, InvalidS3Uri,
+    bucket_config_error_response
 )
 from manifest_transformer import (
     detect_ground_truth_attributes,
     transform_manifest_entry,
     transform_manifest_lines
+)
+# Object Detection (YOLO / RF-DETR) training: shared vocabulary + pure helpers
+# (.kiro/specs/portal-detection-training/,
+# .kiro/specs/rfdetr-training-and-transfer-learning/). Same layer as
+# manifest_transformer.
+from detection_training import (
+    MODEL_TYPE_OBJECT_DETECTION,
+    DETECTION_DEFAULT_INSTANCE_TYPE,
+    DETECTION_DEFAULT_MAX_RUNTIME_SECONDS,
+    DETECTION_METRIC_DEFINITIONS,
+    DETECTION_VOLUME_SIZE_GB,
+    ENTRY_POINT_FOR_ARCH,
+    RFDETR_TOP_K,
+    build_sourcedir_tarball,
+    decode_final_metrics,
+    detection_job_environment,
+    is_trained_detection_record,
+    normalize_detection_arch,
+    parse_detection_hyperparameters,
+    resolve_base_model,
+    resolve_detection_training_image,
+    validate_detection_manifest_entry,
+)
+# Imported-detector conversions (detector-checkpoint-import Requirement 7):
+# the shared Conversion_Status reducer both status writers route through.
+from detector_conversion import (
+    apply_transition_to_record,
+    is_detector_conversion_record,
+    plan_conversion_transition,
+    reconcile_conversion,
 )
 
 # Configure logging
@@ -51,6 +85,64 @@ MARKETPLACE_ALGORITHM_ARN = os.environ.get(
 
 logger.info(f"Using marketplace algorithm ARN: {MARKETPLACE_ALGORITHM_ARN}")
 
+# The keys of a refused bucket-configuration decision (shared_utils
+# BucketConfigError.to_body) that ride along inside a validation result so
+# the handler can answer with the Requirement 5 body.
+_BUCKET_CONFIG_BODY_KEYS = ('error', 'error_code', 'bucket', 'usecase_id',
+                            'purpose', 'reason', 'remedy')
+
+
+def _bucket_config_validation_result(exc: BucketConfigError, **extra) -> Dict:
+    """A validation-result dict for a refused bucket-configuration decision
+    (use-case bucket configuration, design §3): `valid` is False and the
+    body fields of the refusal are carried alongside `errors` / `message`
+    so `create_training_job` can emit them unchanged."""
+    result = {'valid': False, 'errors': [exc.message], 'message': exc.message}
+    result.update(extra)
+    result.update(exc.to_body())
+    return result
+
+
+def _bucket_config_body(validation_result: Dict) -> Dict:
+    """The refusal body carried by `_bucket_config_validation_result`."""
+    return {key: validation_result[key] for key in _BUCKET_CONFIG_BODY_KEYS
+            if key in validation_result}
+
+
+def _reference_exists(ref_field: str, ref_uri: Any, usecase: Dict, allowed,
+                      clients: Dict, warnings: list, session_name: str):
+    """Existence spot-check of one manifest-internal reference (use-case
+    bucket configuration, design §4).
+
+    Returns True when the object exists (or S3 answered anything other than
+    a 404), False when S3 answered 404 / NoSuchKey, and None when the
+    reference was not checked: it is not a valid S3 URI, or its bucket is
+    not one of the use case's configured buckets. A skipped reference adds
+    a warning naming the field (and the bucket, never the key) and costs
+    no client, no STS call and no audit row — the request itself is not
+    refused; the SageMaker execution role decides at training time.
+    """
+    try:
+        ref_bucket, ref_key = parse_s3_uri(ref_uri)
+    except InvalidS3Uri:
+        warnings.append(f"{ref_field}: reference is not a valid S3 URI; not checked")
+        return None
+    if ref_bucket not in allowed:
+        warnings.append(f"{ref_field}: reference in bucket {ref_bucket} is not "
+                        f"configured for this use case; existence not checked")
+        logger.info("Manifest reference %s in bucket %s is not configured for "
+                    "use case %s; existence not checked",
+                    ref_field, ref_bucket, usecase.get('usecase_id'))
+        return None
+    try:
+        if ref_bucket not in clients:
+            clients[ref_bucket] = get_s3_client_for_bucket(usecase, ref_bucket, session_name)
+        clients[ref_bucket].head_object(Bucket=ref_bucket, Key=ref_key)
+    except ClientError as e:
+        if e.response['Error']['Code'] in ('404', 'NoSuchKey'):
+            return False
+    return True
+
 
 def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: str) -> Dict:
     """
@@ -66,27 +158,13 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
     - anomaly-mask-ref-metadata: Mask metadata
     
     Returns:
-        dict with 'valid' (bool), 'message' (str), 'errors' (list)
+        dict with 'valid' (bool), 'message' (str), 'errors' (list),
+        'warnings' (list)
     """
+    warnings: list = []
     try:
-        # Parse S3 URI
-        if not manifest_uri.startswith('s3://'):
-            return {
-                'valid': False,
-                'errors': ['Manifest URI must be an S3 URI (s3://bucket/key)'],
-                'message': 'Invalid manifest URI format'
-            }
-        
-        parts = manifest_uri.replace('s3://', '').split('/', 1)
-        if len(parts) != 2:
-            return {
-                'valid': False,
-                'errors': ['Invalid S3 URI format'],
-                'message': 'Could not parse manifest URI'
-            }
-        
-        bucket = parts[0]
-        key = parts[1]
+        # Parse S3 URI (InvalidS3Uri -> the refusal result below)
+        bucket, key = parse_s3_uri(manifest_uri)
         
         # In single-account setup, use Lambda's own credentials
         # In multi-account setup, assume the usecase role
@@ -225,29 +303,27 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
                 'message': 'Invalid metadata type'
             }
         
-        # Spot-check that referenced S3 files exist (first entry only)
+        # Spot-check that referenced S3 files exist (first entry only). A
+        # reference outside the use case's configured buckets is skipped
+        # with a warning, never dereferenced (design §4).
+        allowed = allowed_s3_buckets(usecase)
+        clients = {bucket: s3_client}
         missing_refs = []
         for ref_field in ['source-ref', 'anomaly-mask-ref']:
             ref_uri = first_entry.get(ref_field)
-            if not ref_uri or not isinstance(ref_uri, str) or not ref_uri.startswith('s3://'):
+            if not ref_uri:
                 continue
-            ref_parts = ref_uri.replace('s3://', '').split('/', 1)
-            if len(ref_parts) != 2:
-                continue
-            ref_bucket, ref_key = ref_parts
-            try:
-                ref_s3 = get_s3_client_for_bucket(usecase, ref_bucket, f"validate-{ref_field}")
-                ref_s3.head_object(Bucket=ref_bucket, Key=ref_key)
-            except ClientError as e:
-                code = e.response['Error']['Code']
-                if code in ('404', 'NoSuchKey'):
-                    missing_refs.append(f"{ref_field}: {ref_uri}")
+            exists = _reference_exists(ref_field, ref_uri, usecase, allowed, clients,
+                                       warnings, f"validate-{ref_field}")
+            if exists is False:
+                missing_refs.append(f"{ref_field}: {ref_uri}")
         
         if missing_refs:
             return {
                 'valid': False,
                 'errors': [f"Referenced file not found: {ref}" for ref in missing_refs],
-                'message': 'Manifest references files that do not exist in S3. Check that images/masks have been uploaded.'
+                'message': 'Manifest references files that do not exist in S3. Check that images/masks have been uploaded.',
+                'warnings': warnings
             }
         
         # All validations passed
@@ -255,9 +331,14 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
             'valid': True,
             'message': f'Manifest is valid for {model_type} training',
             'errors': [],
+            'warnings': warnings,
             'sample_entry': first_entry
         }
         
+    except BucketConfigError as e:
+        logger.warning(f"Manifest bucket refused for use case "
+                       f"{usecase.get('usecase_id')}: {e.error_code}")
+        return _bucket_config_validation_result(e, warnings=warnings)
     except Exception as e:
         logger.error(f"Error validating manifest: {str(e)}")
         return {
@@ -265,6 +346,395 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
             'errors': [f'Validation error: {str(e)}'],
             'message': 'Failed to validate manifest'
         }
+
+
+# ── Object Detection (YOLO) training ───────────────────────────────────────
+# Detection jobs do not use the AWS Marketplace algorithm. They run the repo's
+# datasets/detection_training/train.py on a SageMaker PyTorch GPU DLC in
+# script mode (the same mechanism compilation._start_onnx_export_job uses),
+# and the finished model.onnx is packaged directly — no Neo. Everything below
+# is reached only for model_type == 'object_detection'; the LFV code path in
+# create_training_job is untouched.
+
+def validate_detection_manifest(manifest_uri: str, usecase: Dict) -> Dict:
+    """Validate the first line of a manifest as an Object Detection entry.
+
+    Mirrors validate_marketplace_manifest's S3 access pattern but delegates
+    the shape check to detection_training.validate_detection_manifest_entry,
+    which accepts the DDA literal `bounding-box` attribute and a Ground Truth
+    job-named attribute. Never suggests the Manifest Transformer (it has no
+    ObjectDetection handling).
+
+    Returns {'valid', 'errors', 'message', 'class_names', 'detected_attributes',
+    'warnings'}.
+    """
+    warnings: list = []
+    try:
+        # InvalidS3Uri -> the refusal result below
+        bucket, key = parse_s3_uri(manifest_uri)
+
+        s3_client = get_s3_client_for_bucket(usecase, bucket, 'validate-detection-manifest')
+        try:
+            response = s3_client.get_object(Bucket=bucket, Key=key)
+            content = response['Body'].read(10240).decode('utf-8')
+        except ClientError as e:
+            if e.response['Error']['Code'] in ('NoSuchKey', '404'):
+                return {'valid': False, 'message': 'Manifest file does not exist',
+                        'errors': [f'Manifest file not found: {manifest_uri}'],
+                        'class_names': [], 'detected_attributes': []}
+            raise
+
+        first_line = next((ln for ln in content.splitlines() if ln.strip()), None)
+        if first_line is None:
+            return {'valid': False, 'message': 'Manifest is empty',
+                    'errors': [f'Manifest has no entries: {manifest_uri}'],
+                    'class_names': [], 'detected_attributes': []}
+        try:
+            first_entry = json.loads(first_line)
+        except json.JSONDecodeError as e:
+            return {'valid': False, 'message': 'Manifest is not valid JSON Lines',
+                    'errors': [f'First manifest line is not valid JSON: {e}'],
+                    'class_names': [], 'detected_attributes': []}
+
+        result = validate_detection_manifest_entry(first_entry)
+        logger.info(f"Detection manifest attributes: {result['detected_attributes']}")
+        if not result['valid']:
+            return {'valid': False, 'message': 'Manifest is not an Object Detection manifest',
+                    'errors': result['errors'], 'class_names': [],
+                    'detected_attributes': result['detected_attributes']}
+
+        # Spot-check the first image exists (same courtesy as the LFV
+        # validator); a reference outside the use case's configured buckets
+        # is skipped with a warning, never dereferenced (design §4).
+        ref = first_entry.get('source-ref', '')
+        if ref:
+            exists = _reference_exists('source-ref', ref, usecase, allowed_s3_buckets(usecase),
+                                       {bucket: s3_client}, warnings, 'validate-source-ref')
+            if exists is False:
+                return {'valid': False,
+                        'message': 'Manifest references images that do not exist in S3',
+                        'errors': [f'Referenced file not found: source-ref: {ref}'],
+                        'class_names': [], 'detected_attributes': result['detected_attributes'],
+                        'warnings': warnings}
+
+        return {'valid': True, 'message': 'Manifest is valid for object_detection training',
+                'errors': [], 'class_names': result['class_names'],
+                'attribute': result['attribute'],
+                'detected_attributes': result['detected_attributes'],
+                'warnings': warnings}
+    except BucketConfigError as e:
+        logger.warning(f"Detection manifest bucket refused for use case "
+                       f"{usecase.get('usecase_id')}: {e.error_code}")
+        return _bucket_config_validation_result(
+            e, class_names=[], detected_attributes=[], warnings=warnings)
+    except Exception as e:
+        logger.error(f"Error validating detection manifest: {str(e)}")
+        return {'valid': False, 'message': 'Failed to validate manifest',
+                'errors': [f'Validation error: {str(e)}'],
+                'class_names': [], 'detected_attributes': []}
+
+
+def _detection_code_dir() -> str:
+    """Where the bundled entry-point files live. The CDK TrainingHandler asset
+    copies them into functions/detection_training/; tests point the env var
+    at a staged temp dir."""
+    return (os.environ.get('DETECTION_TRAINING_CODE_DIR')
+            or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'detection_training'))
+
+
+def _to_dynamo_number(value):
+    """DynamoDB rejects Python floats; store them as Decimal via str()."""
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return value
+
+
+def _create_detection_training_job(
+    user: Dict,
+    body: Dict,
+    usecase: Dict,
+    usecase_id: str,
+    model_name: str,
+    model_version: str,
+    dataset_manifest_s3: str,
+    auto_compile: bool,
+    compilation_targets: list,
+    generation_session_id: Optional[str],
+) -> Dict:
+    """Launch the arch's entry point (datasets/detection_training/train.py for
+    YOLO, train_rfdetr.py for RF-DETR) as a SageMaker script-mode job and
+    persist the Detection_Record_Fields. Called from create_training_job
+    after the shared validation/access checks; raises ClientError into the
+    caller's shared error mapping.
+
+    Every 400 below (arch, hyperparameters, base model, manifest) returns
+    BEFORE the sourcedir upload and the SageMaker call, so a rejected request
+    leaves nothing behind in the use-case bucket (Req 6.4).
+    """
+    user_id = user['user_id']
+
+    # 1. Arch (default yolo so existing callers are unchanged; Req 3.2) and
+    #    its hyperparameter schema (validated at the boundary; 400 names the
+    #    field).
+    try:
+        detection_arch = normalize_detection_arch(body.get('detection_arch'))
+        params = parse_detection_hyperparameters(
+            body.get('hyperparameters') or {}, detection_arch)
+    except ValueError as e:
+        return create_response(400, {'error': str(e)})
+    entry_point = ENTRY_POINT_FOR_ARCH[detection_arch]
+    # Square network input the ONNX is exported at (YOLO: imgsz; RF-DETR:
+    # resolution) — what packaging reads back as network_input_width.
+    network_input = params['resolution'] if detection_arch == 'rf_detr' else params['imgsz']
+    # The arch's published checkpoint name; the base model the run starts
+    # from when the request names none.
+    published_ref = params['rfdetr_size'] if detection_arch == 'rf_detr' else params['base_weights']
+
+    instance_type = body.get('instance_type') or DETECTION_DEFAULT_INSTANCE_TYPE
+    max_runtime = int(body.get('max_runtime_seconds') or DETECTION_DEFAULT_MAX_RUNTIME_SECONDS)
+
+    # 1b. Base model (Req 6.3 / 6.4): `base_model = {kind, ref}` -> descriptor.
+    #     One DynamoDB get_item at most; every rejection (bad kind, unknown /
+    #     other-use-case ref, not Completed, arch mismatch, no checkpoint) is
+    #     a 400 here, before any S3 write or SageMaker call.
+    base_model_request = body.get('base_model')
+    if base_model_request is None:
+        base_model_request = {}
+    if not isinstance(base_model_request, dict):
+        return create_response(400, {
+            'error': "base_model must be an object of the form {kind, ref}"})
+    base_kind = base_model_request.get('kind') or 'published'
+    base_ref = base_model_request.get('ref')
+    if str(base_kind).strip().lower() == 'published' and \
+            (base_ref is None or not str(base_ref).strip()):
+        base_ref = published_ref
+    table = dynamodb.Table(TRAINING_JOBS_TABLE)
+    try:
+        base_model = resolve_base_model(
+            base_kind, base_ref, detection_arch, usecase_id, table)
+    except ValueError as e:
+        return create_response(400, {'error': str(e)})
+
+    # 2. Manifest must be a bounding-box manifest.
+    logger.info("Validating manifest as an Object Detection manifest")
+    validation = validate_detection_manifest(dataset_manifest_s3, usecase)
+    if not validation['valid']:
+        logger.error(f"Detection manifest validation failed: {validation['errors']}")
+        if validation.get('error_code'):
+            # A refused bucket answers the use-case bucket configuration body.
+            return create_response(400, _bucket_config_body(validation))
+        return create_response(400, {
+            'error': 'Object Detection requires a bounding-box manifest',
+            'details': validation['errors'],
+            'detected_attributes': validation.get('detected_attributes', []),
+            'message': validation.get('message'),
+        })
+    class_names = body.get('class_names') or validation['class_names']
+    if not isinstance(class_names, list) or not class_names or \
+            not all(isinstance(c, str) and c.strip() for c in class_names):
+        return create_response(400, {
+            'error': 'class_names must be a non-empty list of strings'})
+    class_names = [c.strip() for c in class_names]
+
+    usecase_region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
+    sagemaker_usecase = get_usecase_client(
+        'sagemaker', usecase,
+        session_name=f"training-{user_id}-{int(datetime.utcnow().timestamp())}",
+        region=usecase_region)
+    s3_usecase = get_usecase_client(
+        's3', usecase,
+        session_name=f"training-s3-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+        region=usecase_region)
+
+    # 3. Job naming — identical rules to the LFV path.
+    training_id = str(uuid.uuid4())
+    safe_model_name = model_name.replace('.', '-').replace('_', '-')
+    timestamp_str = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+    training_job_name = f"{safe_model_name}-{timestamp_str}"
+    if len(training_job_name) > 63:
+        max_model_name_length = 63 - len(timestamp_str) - 1
+        training_job_name = f"{safe_model_name[:max_model_name_length]}-{timestamp_str}"
+        logger.warning(f"Model name truncated to fit SageMaker limits: {training_job_name}")
+
+    # 4. Stage sourcedir.tar.gz next to the job in the use-case bucket (the
+    #    SageMaker execution role in that account can read it; the portal
+    #    artifacts bucket may be in another account).
+    bucket = usecase['s3_bucket']
+    code_key = f"models/detection-training/{training_job_name}/sourcedir.tar.gz"
+    code_dir = _detection_code_dir()
+    with tempfile.TemporaryDirectory() as td:
+        source_tar = os.path.join(td, 'sourcedir.tar.gz')
+        bundled = build_sourcedir_tarball(code_dir, source_tar, entry_point)
+        logger.info(f"Bundled detection entry point {entry_point} from {code_dir}: {bundled}")
+        s3_usecase.upload_file(source_tar, bucket, code_key)
+    code_s3 = f"s3://{bucket}/{code_key}"
+
+    # 5. Image + job environment. BASE_WEIGHTS_S3 (+ BASE_WEIGHTS_MEMBER when
+    #    the URI is a tarball) appear only when the base model resolved to
+    #    real weights; the published-checkpoint env is unchanged (Req 6.5).
+    training_image = resolve_detection_training_image(
+        usecase_region, os.environ.get('DETECTION_TRAINING_IMAGE'))
+    job_env = detection_job_environment(
+        dataset_manifest_s3, params, detection_arch,
+        base_weights_s3=base_model['weights_s3'],
+        base_weights_member=base_model['member'])
+    training_hyperparameters = {
+        'sagemaker_program': entry_point,
+        'sagemaker_submit_directory': code_s3,
+        **job_env,
+    }
+
+    path_builder = create_s3_path_builder(bucket=bucket)
+    training_output_path = path_builder.get_training_output_uri(training_job_name)
+    sagemaker_role_arn = f"arn:aws:iam::{usecase['account_id']}:role/DDASageMakerExecutionRole"
+
+    logger.info(f"Creating detection training job {training_job_name} "
+                f"(arch={detection_arch}, image={training_image}, sourcedir={code_s3}, "
+                f"network_input={network_input}, base_model={base_model['kind']}:{base_model['ref']})")
+    training_response = sagemaker_usecase.create_training_job(
+        TrainingJobName=training_job_name,
+        HyperParameters=training_hyperparameters,
+        # The entry points read bare env names (MANIFEST_S3, IMGSZ, ...), not SM_HP_*.
+        Environment=job_env,
+        AlgorithmSpecification={
+            'TrainingImage': training_image,
+            'TrainingInputMode': 'File',
+            'MetricDefinitions': DETECTION_METRIC_DEFINITIONS,
+        },
+        RoleArn=sagemaker_role_arn,
+        # No InputDataConfig at all: the entry point pulls the whole manifest
+        # + images itself so it can build data.yaml, and a per-record
+        # streaming channel is the wrong shape. The key is optional on
+        # CreateTrainingJob but boto3 rejects an EMPTY list ("valid min
+        # length: 1"), so it must be omitted rather than passed as [].
+        OutputDataConfig={'S3OutputPath': training_output_path},
+        ResourceConfig={
+            'InstanceType': instance_type,
+            'InstanceCount': 1,
+            'VolumeSizeInGB': DETECTION_VOLUME_SIZE_GB,
+        },
+        StoppingCondition={'MaxRuntimeInSeconds': max_runtime},
+        # The container pip-installs requirements.txt (ultralytics / rfdetr)
+        # and downloads pretrained weights at start-up.
+        EnableNetworkIsolation=False,
+        Tags=[
+            {'Key': 'UseCase', 'Value': usecase_id},
+            {'Key': 'ModelName', 'Value': model_name},
+            {'Key': 'ModelVersion', 'Value': model_version},
+            {'Key': 'CreatedBy', 'Value': user_id},
+        ],
+    )
+    training_job_arn = training_response['TrainingJobArn']
+
+    # 6. Record — LFV base fields + Detection_Record_Fields (per arch).
+    if detection_arch == 'rf_detr':
+        detection_record = {
+            'detection_arch': detection_arch,
+            'network_input_width': params['resolution'],
+            'network_input_height': params['resolution'],
+            'class_names': class_names,
+            'num_classes': len(class_names),
+            'score_threshold': _to_dynamo_number(params['score_threshold']),
+            # DETR-family decoding is set-based (no NMS): the device keeps the
+            # top_k detections above score_threshold. No iou_threshold.
+            'top_k': RFDETR_TOP_K,
+            # train_rfdetr.py trains on an aspect-destroying square resize
+            # with ImageNet normalisation; letterboxing on the device would
+            # be the YOLO geometry mismatch in the other direction (Req 1.9).
+            'preserve_aspect': False,
+            'rfdetr_size': params['rfdetr_size'],
+            'resolution': params['resolution'],
+            'epochs': params['epochs'],
+            'batch': params['batch'],
+            'grad_accum': params['grad_accum'],
+            'lr': _to_dynamo_number(params['lr']),
+            'patience': params['patience'],
+            'onnx_opset': params['onnx_opset'],
+            'sourcedir_s3': code_s3,
+        }
+    else:
+        detection_record = {
+            'detection_arch': detection_arch,
+            'network_input_width': params['imgsz'],
+            'network_input_height': params['imgsz'],
+            'class_names': class_names,
+            'num_classes': len(class_names),
+            'score_threshold': _to_dynamo_number(params['score_threshold']),
+            'iou_threshold': _to_dynamo_number(params['iou_threshold']),
+            # train.py fine-tunes letterboxed (rect=False); the device MUST
+            # letterbox too or confidence silently drops (gap doc §7).
+            'preserve_aspect': True,
+            'imgsz': params['imgsz'],
+            'epochs': params['epochs'],
+            'batch': params['batch'],
+            'base_weights': params['base_weights'],
+            'patience': params['patience'],
+            'onnx_opset': params['onnx_opset'],
+            'sourcedir_s3': code_s3,
+        }
+    # Base_Model_Descriptor (Req 6.6): Training Detail shows "Fine-tuned from
+    # <name> v<version>" and a chain of retrains stays traceable. When the
+    # base's class_names differ from the manifest's, both are kept as-is —
+    # the entry point re-initialises the class head (Req 7.4), the frontend
+    # warns; nothing to reject here.
+    detection_record['base_model'] = dict(base_model)
+
+    timestamp = int(datetime.utcnow().timestamp() * 1000)
+    training_item = {
+        'training_id': training_id,
+        'usecase_id': usecase_id,
+        'model_name': model_name,
+        'model_version': model_version,
+        'model_type': MODEL_TYPE_OBJECT_DETECTION,
+        'dataset_manifest_s3': dataset_manifest_s3,
+        'algorithm_uri': training_image,
+        'hyperparameters': training_hyperparameters,
+        'instance_type': instance_type,
+        'training_job_name': training_job_name,
+        'training_job_arn': training_job_arn,
+        'status': 'InProgress',
+        'progress': 10,
+        'created_by': user['email'],
+        'created_at': timestamp,
+        'updated_at': timestamp,
+        'auto_compile': auto_compile,
+        'compilation_targets': compilation_targets,
+        # Downstream predicates (compilation / packaging / CompilationTab)
+        # key off model_type + runtime; no `source` so models.py keeps
+        # defaulting it to 'trained'.
+        'runtime': 'onnx',
+        'detection': detection_record,
+    }
+    if generation_session_id:
+        training_item['generation_session_id'] = generation_session_id
+    table.put_item(Item=training_item)
+
+    log_audit_event(
+        user_id=user_id,
+        action='create_training_job',
+        resource_type='training_job',
+        resource_id=training_id,
+        result='success',
+        details={
+            'model_name': model_name,
+            'model_version': model_version,
+            'model_type': MODEL_TYPE_OBJECT_DETECTION,
+            'training_job_name': training_job_name,
+            'training_image': training_image,
+            'detection_arch': detection_arch,
+            'imgsz': network_input,
+            'class_names': class_names,
+            'base_model': {'kind': base_model['kind'], 'ref': base_model['ref']},
+        },
+    )
+    logger.info(f"Detection training job created successfully: {training_id}")
+    return create_response(201, {
+        'training_id': training_id,
+        'training_job_name': training_job_name,
+        'training_job_arn': training_job_arn,
+        'status': 'InProgress',
+        'message': 'Training job created successfully',
+    })
 
 
 def create_training_job(event: Dict, context: Any) -> Dict:
@@ -283,7 +753,10 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         "max_runtime_seconds": 7200,
         "hyperparameters": {},  // optional
         "auto_compile": true,  // optional, default false
-        "compilation_targets": ["x86_64", "aarch64", "jetson"]  // optional, required if auto_compile is true
+        "compilation_targets": ["x86_64", "aarch64", "jetson"],  // optional, required if auto_compile is true
+        // object_detection only:
+        "detection_arch": "yolo" | "rf_detr",  // optional, default "yolo"
+        "base_model": {"kind": "published" | "training_job" | "imported", "ref": "..."}  // optional
     }
     """
     try:
@@ -320,9 +793,13 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         hyperparameters = body.get('hyperparameters', {})
         auto_compile = body.get('auto_compile', False)
         compilation_targets = body.get('compilation_targets', [])
+        # Optional: originating synthetic Generation_Session
+        # (synthetic-defect-data-generation, Req 8.3). Additive only.
+        generation_session_id = body.get('generation_session_id')
         
         # Validate model type
-        valid_model_types = ['classification', 'segmentation', 'classification-robust', 'segmentation-robust']
+        valid_model_types = ['classification', 'segmentation', 'classification-robust', 'segmentation-robust',
+                             MODEL_TYPE_OBJECT_DETECTION]
         if model_type not in valid_model_types:
             return create_response(400, {
                 'error': f"Invalid model_type. Must be one of: {', '.join(valid_model_types)}"
@@ -334,8 +811,33 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         
         # Get use case details
         usecase = get_usecase(usecase_id)
+
+        # Bind the manifest bucket to the use case's configured buckets
+        # before any STS or S3 call, whatever the model_source (use-case
+        # bucket configuration, design §3). BucketConfigError -> 400 below.
+        manifest_bucket, _manifest_key = parse_s3_uri(dataset_manifest_s3)
+        assert_bucket_allowed(usecase, manifest_bucket, 'training-manifest',
+                              actor=user, event=event)
+
+        # Object Detection (YOLO): script-mode training job, not the
+        # marketplace algorithm. Branches here so everything below stays the
+        # untouched LFV path (portal-detection-training Req 1.2).
+        if model_type == MODEL_TYPE_OBJECT_DETECTION:
+            return _create_detection_training_job(
+                user=user,
+                body=body,
+                usecase=usecase,
+                usecase_id=usecase_id,
+                model_name=model_name,
+                model_version=model_version,
+                dataset_manifest_s3=dataset_manifest_s3,
+                auto_compile=auto_compile,
+                compilation_targets=compilation_targets,
+                generation_session_id=generation_session_id,
+            )
         
         # Validate manifest format for marketplace model
+        validation_warnings = []
         if model_source == 'marketplace':
             logger.info("Validating manifest format for marketplace model")
             validation_result = validate_marketplace_manifest(
@@ -349,6 +851,10 @@ def create_training_job(event: Dict, context: Any) -> Dict:
                 logger.error(f"Detected attributes: {validation_result.get('detected_attributes', [])}")
                 logger.error(f"Required attributes: {validation_result.get('required_attributes', [])}")
                 
+                if validation_result.get('error_code'):
+                    # A refused bucket answers the use-case bucket
+                    # configuration body (design §1.2).
+                    return create_response(400, _bucket_config_body(validation_result))
                 return create_response(400, {
                     'error': 'Manifest validation failed',
                     'details': validation_result['errors'],
@@ -357,6 +863,7 @@ def create_training_job(event: Dict, context: Any) -> Dict:
                     'suggestion': 'Ensure your manifest is in DDA format with anomaly-label, anomaly-label-metadata, and source-ref fields. Use the Manifest Transformer tool to convert Ground Truth manifests.'
                 })
             logger.info(f"Manifest validation passed: {validation_result['message']}")
+            validation_warnings = validation_result.get('warnings', [])
         
         # Log data account configuration for debugging
         data_account_id = usecase.get('data_account_id')
@@ -508,6 +1015,10 @@ def create_training_job(event: Dict, context: Any) -> Dict:
             'auto_compile': auto_compile,
             'compilation_targets': compilation_targets
         }
+        if generation_session_id:
+            # Record the originating Generation_Session
+            # (synthetic-defect-data-generation, Req 8.3).
+            training_item['generation_session_id'] = generation_session_id
         
         table.put_item(Item=training_item)
         
@@ -533,9 +1044,12 @@ def create_training_job(event: Dict, context: Any) -> Dict:
             'training_job_name': training_job_name,
             'training_job_arn': training_job_arn,
             'status': 'InProgress',
-            'message': 'Training job created successfully'
+            'message': 'Training job created successfully',
+            'warnings': validation_warnings
         })
         
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         return create_response(400, {'error': str(e)})
@@ -611,6 +1125,27 @@ def list_training_jobs(event: Dict, context: Any) -> Dict:
     except Exception as e:
         logger.error(f"Error listing training jobs: {str(e)}")
         return create_response(500, {'error': 'Internal server error'})
+
+
+def sync_conversion_record(table: Any, job: Dict, sm_response: Dict, now_ms: int) -> Dict:
+    """Sync-on-read for a Conversion_Record (detector-checkpoint-import
+    Requirements 7.3-7.6): reconcile against SageMaker through the shared
+    reducer and return the record as it now reads."""
+    status = sm_response.get('TrainingJobStatus')
+    reason = sm_response.get('FailureReason')
+    artifact = (sm_response.get('ModelArtifacts') or {}).get('S3ModelArtifacts')
+    transition = reconcile_conversion(
+        table, job, status, reason, artifact, now_ms,
+        lambda_client=boto3.client('lambda'),
+        packaging_function=os.environ.get('PACKAGING_FUNCTION_NAME'))
+    if transition is not None:
+        return apply_transition_to_record(job, transition)
+    if plan_conversion_transition(job, status, reason, artifact, now_ms) is not None:
+        # Our read was stale and another writer moved the record first:
+        # return what it wrote, not the pre-race view.
+        fresh = table.get_item(Key={'training_id': job['training_id']}).get('Item')
+        return fresh or job
+    return job
 
 
 def get_training_job(event: Dict, context: Any) -> Dict:
@@ -689,6 +1224,35 @@ def get_training_job(event: Dict, context: Any) -> Dict:
                 
                 status = sm_response['TrainingJobStatus']
                 timestamp = int(datetime.utcnow().timestamp() * 1000)
+
+                # A Conversion_Record never takes the generic status copy
+                # below (detector-checkpoint-import Requirement 7.3): the
+                # shared reducer moves it with a conditional write, and only
+                # the winner of the InProgress -> Finalizing claim invokes the
+                # packaging finalize.
+                if is_detector_conversion_record(job):
+                    return create_response(200, sync_conversion_record(table, job, sm_response,
+                                                                       timestamp))
+
+                # Object Detection jobs declare MetricDefinitions, so their
+                # test mAP / precision / recall arrive in FinalMetricDataList.
+                # Hydrate `metrics` once, independent of the status-changed
+                # block below: training_events.py may already have recorded
+                # Completed, in which case that block never runs. LFV records
+                # are never touched here (portal-detection-training Req 4.2/4.3).
+                if (is_trained_detection_record(job) and status == 'Completed'
+                        and not job.get('metrics')):
+                    metrics = decode_final_metrics(sm_response.get('FinalMetricDataList'))
+                    if metrics:
+                        dynamo_metrics = {k: Decimal(str(v)) for k, v in metrics.items()}
+                        # `metrics` is a DynamoDB reserved word.
+                        table.update_item(
+                            Key={'training_id': training_id},
+                            UpdateExpression='SET #metrics = :m',
+                            ExpressionAttributeNames={'#metrics': 'metrics'},
+                            ExpressionAttributeValues={':m': dynamo_metrics},
+                        )
+                        job['metrics'] = dynamo_metrics
                 
                 # Update DynamoDB if status changed
                 if status != job.get('status'):
@@ -1146,19 +1710,28 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         if not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
         
-        # Parse S3 URI
-        if not source_manifest_uri.startswith('s3://'):
-            return create_response(400, {'error': 'source_manifest_uri must be an S3 URI (s3://bucket/key)'})
-        
-        source_parts = source_manifest_uri.replace('s3://', '').split('/', 1)
-        if len(source_parts) != 2:
-            return create_response(400, {'error': 'Invalid S3 URI format'})
-        
-        source_bucket = source_parts[0]
-        source_key = source_parts[1]
+        # Parse the source URI (InvalidS3Uri -> 400 below)
+        source_bucket, source_key = parse_s3_uri(source_manifest_uri)
         
         # Get use case details
         usecase = get_usecase(usecase_id)
+        
+        # Determine output location (defaults to the source bucket with a
+        # -dda suffix) and bind source then output to the use case's
+        # configured buckets before any STS or S3 call (use-case bucket
+        # configuration, design §3).
+        if not output_manifest_uri:
+            base_key = source_key.rsplit('.', 1)[0]
+            output_key = f"{base_key}-dda.manifest"
+            output_bucket = source_bucket
+            output_manifest_uri = f"s3://{output_bucket}/{output_key}"
+        else:
+            output_bucket, output_key = parse_s3_uri(output_manifest_uri)
+        assert_bucket_allowed(usecase, source_bucket, 'transform-source',
+                              actor=user, event=event)
+        if output_bucket != source_bucket:
+            assert_bucket_allowed(usecase, output_bucket, 'transform-output',
+                                  actor=user, event=event)
         
         # Get region from use case (defaults to us-east-1 if not set)
         usecase_region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
@@ -1183,8 +1756,15 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         if not manifest_lines:
             return create_response(400, {'error': 'Source manifest is empty'})
         
-        # Validate that referenced S3 files exist (spot-check first few entries)
+        # Validate that referenced S3 files exist (spot-check first few
+        # entries). A reference outside the use case's configured buckets
+        # is skipped with a warning, never dereferenced (design §4); access
+        # denied is skipped too — the file may exist but we can't check from
+        # this role.
         logger.info("Validating referenced S3 files exist...")
+        allowed = allowed_s3_buckets(usecase)
+        ref_clients = {source_bucket: s3_usecase}
+        warnings = []
         missing_files = []
         check_count = min(5, len(manifest_lines))  # Check up to 5 entries
         for i in range(check_count):
@@ -1195,20 +1775,12 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
             
             for ref_field in ['source-ref', 'anomaly-mask-ref']:
                 ref_uri = entry.get(ref_field)
-                if not ref_uri or not ref_uri.startswith('s3://'):
+                if not ref_uri:
                     continue
-                ref_parts = ref_uri.replace('s3://', '').split('/', 1)
-                if len(ref_parts) != 2:
-                    continue
-                ref_bucket, ref_key = ref_parts
-                try:
-                    ref_s3 = get_s3_client_for_bucket(usecase, ref_bucket, f"validate-ref-{i}")
-                    ref_s3.head_object(Bucket=ref_bucket, Key=ref_key)
-                except ClientError as e:
-                    code = e.response['Error']['Code']
-                    if code in ('404', 'NoSuchKey'):
-                        missing_files.append(f"Line {i+1} {ref_field}: {ref_uri}")
-                    # Skip access denied — the file may exist but we can't check from this role
+                exists = _reference_exists(f"Line {i+1} {ref_field}", ref_uri, usecase, allowed,
+                                           ref_clients, warnings, f"validate-ref-{i}")
+                if exists is False:
+                    missing_files.append(f"Line {i+1} {ref_field}: {ref_uri}")
         
         if missing_files:
             return create_response(400, {
@@ -1240,24 +1812,12 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         # Generate output manifest content
         transformed_content = '\n'.join(result['transformed_lines'])
         
-        # Determine output location
-        if not output_manifest_uri:
-            # Default: same location with -dda suffix
-            base_key = source_key.rsplit('.', 1)[0]
-            output_key = f"{base_key}-dda.manifest"
-            output_bucket = source_bucket
-            output_manifest_uri = f"s3://{output_bucket}/{output_key}"
-        else:
-            # Parse provided output URI
-            output_parts = output_manifest_uri.replace('s3://', '').split('/', 1)
-            if len(output_parts) != 2:
-                return create_response(400, {'error': 'Invalid output_manifest_uri format'})
-            output_bucket = output_parts[0]
-            output_key = output_parts[1]
-        
-        # Upload transformed manifest (same bucket as source)
+        # Upload transformed manifest through the client for the (already
+        # bound) output bucket; the source client is reused when they match.
         logger.info(f"Uploading transformed manifest to {output_manifest_uri}")
-        s3_usecase.put_object(
+        s3_out = (s3_usecase if output_bucket == source_bucket
+                  else get_s3_client_for_bucket(usecase, output_bucket, 'transform-output'))
+        s3_out.put_object(
             Bucket=output_bucket,
             Key=output_key,
             Body=transformed_content,
@@ -1294,6 +1854,7 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
                 'mask_ref_metadata': 'anomaly-mask-ref-metadata' if task_type in ['segmentation', 'segmentation-robust'] else None
             },
             'sample_entry': sample_entry,
+            'warnings': warnings,
             'next_steps': [
                 f'1. Use the transformed manifest URI in your training job: {output_manifest_uri}',
                 '2. Create a new training job with this manifest',
@@ -1301,6 +1862,8 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
             ]
         })
         
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ClientError as e:
         logger.error(f"AWS error transforming manifest: {str(e)}")
         return create_response(500, {'error': f"Failed to transform manifest: {str(e)}"})

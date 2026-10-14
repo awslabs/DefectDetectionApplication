@@ -30,8 +30,9 @@ tar -rf $snapshotfile /aws_dda/greengrass/v2/work/aws.edgeml.dda.GstRunner/
 # GG config
 tar -rf $snapshotfile /aws_dda/greengrass/v2/config
 
-# Local Server database files
-tar -rf $snapshotfile /aws_dda/greengrass/v2/work/aws.edgeml.dda.LocalServer/
+# Local Server database files. The stream camera Credential_Store under the
+# work path never leaves the device (rtsp-rtmp-stream-cameras Req 6.1, 6.2).
+tar -rf $snapshotfile --exclude=stream_credentials /aws_dda/greengrass/v2/work/aws.edgeml.dda.LocalServer/
 
 # Memory
 cp /proc/meminfo snapshot-meminfo

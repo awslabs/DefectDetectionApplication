@@ -47,10 +47,20 @@ GPIO_FALLING = 'GPIO.FALLING'
 DIGITAL_IO_SIGNAL_TYPES = [GPIO_RISING, GPIO_FALLING]
 ANOMALY = 'Anomaly'
 NORMAL = 'Normal'
+# Object-detection captures are typed distinctly by the marshal
+# (dda_triton/resources_for_copy/marshal_for_capture_template.py: it sets
+# "Inference result" = "Detection" and never labels a detection Anomaly/Normal),
+# so the STORED prediction vocabulary has to carry it.
+DETECTION = 'Detection'
 CAPTURE = 'Capture'
 INFERENCE = 'Inference'
 OUTPUT_RULE = ['All', NORMAL, ANOMALY]
 PREDICTION = [NORMAL, ANOMALY]
+# The prediction values a persisted inference result row may carry. Deliberately
+# a SEPARATE vocabulary from PREDICTION: a human's classification, the digital
+# output rules and the results-list prediction filter all stay a Normal/Anomaly
+# binary, while a model's task type may also be Detection.
+STORED_PREDICTION = PREDICTION + [DETECTION]
 CAPTURE_TYPE = [CAPTURE, INFERENCE]
 DB_TEXT_NOTE_MAX_LENGTH = 50
 

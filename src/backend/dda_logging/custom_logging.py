@@ -34,6 +34,17 @@ import sys
 import structlog
 from structlog.types import EventDict, Processor
 
+from dda_logging.log_rotation import MIB, SizeCappedTimedRotatingFileHandler
+from dda_logging.redaction import install_redaction
+from dda_logging.run_context import install_continuous_run_filter
+
+#: Total bytes the rotated application.log and service.log files may hold
+#: (rtsp-rtmp-stream-cameras finding 18, Requirement 12.10). Normal use
+#: writes about 4 MB of application.log a day, so the 14-day count limit
+#: still decides; the caps only bite during a flood.
+APPLICATION_LOG_MAX_ROTATED_BYTES = 512 * MIB
+SERVICE_LOG_MAX_ROTATED_BYTES = 128 * MIB
+
 
 # https://github.com/hynek/structlog/issues/35#issuecomment-591321744
 def rename_event_key(_, __, event_dict: EventDict) -> EventDict:
@@ -92,7 +103,16 @@ def setup_logging(json_logs: bool = False, log_level: str = "INFO"):
     if json_logs:
         log_renderer = structlog.processors.JSONRenderer()
     else:
-        log_renderer = structlog.dev.ConsoleRenderer(colors=False)
+        # Force the plain (stdlib-style) traceback formatter. When `rich` is
+        # importable, ConsoleRenderer defaults to structlog.dev.rich_traceback,
+        # which renders every frame's locals into boxed tables. That rendering
+        # runs synchronously on the uvicorn event-loop thread inside the
+        # exception handlers and has been measured at ~45 s of GIL time per
+        # exception on Jetson: a burst of failing requests makes the whole
+        # backend unresponsive (see unhandled_exception_handler).
+        log_renderer = structlog.dev.ConsoleRenderer(
+            colors=False, exception_formatter=structlog.dev.plain_traceback
+        )
 
     formatter = structlog.stdlib.ProcessorFormatter(
         # These run ONLY on `logging` entries that do NOT originate within
@@ -115,15 +135,28 @@ def setup_logging(json_logs: bool = False, log_level: str = "INFO"):
     if not os.path.exists(log_path):
         os.makedirs(log_path)
 
-    # Rotate every hour, delete entries older than 14 days
-    service_logs_handler = logging.handlers.TimedRotatingFileHandler(
-        log_path + "/service.log", when='h', interval=1, backupCount=24*14, encoding='utf-8')
+    # Rotate every hour, delete entries older than 14 days, and keep the
+    # rotated files under a total size cap (see dda_logging.log_rotation)
+    service_logs_handler = SizeCappedTimedRotatingFileHandler(
+        log_path + "/service.log", max_rotated_bytes=SERVICE_LOG_MAX_ROTATED_BYTES,
+        when='h', interval=1, backupCount=24*14, encoding='utf-8')
     service_logs_handler.setFormatter(formatter)
 
-    # Rotate every hour, delete entries older than 14 days
-    application_logs_handler = logging.handlers.TimedRotatingFileHandler(
-        log_path + "/application.log", when='h', interval=1, backupCount=24*14, encoding='utf-8')
+    # Rotate every hour, delete entries older than 14 days, and keep the
+    # rotated files under a total size cap (see dda_logging.log_rotation)
+    application_logs_handler = SizeCappedTimedRotatingFileHandler(
+        log_path + "/application.log", max_rotated_bytes=APPLICATION_LOG_MAX_ROTATED_BYTES,
+        when='h', interval=1, backupCount=24*14, encoding='utf-8')
     application_logs_handler.setFormatter(formatter)
+
+    # Stream camera credentials never reach a log (rtsp-rtmp-stream-cameras
+    # Requirements 6.1, 6.3): every handler below redacts URL user
+    # information, secret query values and Credential_Store values.
+    install_redaction([handler, service_logs_handler, application_logs_handler])
+    # Continuous stream workflows keep their per-run INFO lines out of the
+    # component log (rtsp-rtmp-stream-cameras Requirement 12.6); each run's
+    # own run.log still records them. Inert outside a continuous run.
+    install_continuous_run_filter([handler, application_logs_handler])
 
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)

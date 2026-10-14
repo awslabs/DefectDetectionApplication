@@ -2,6 +2,55 @@ version: "3.0"
 services:
   backend_tegra_gpu_enabled:
     network_mode: "host"
+    # Auto-recover from crashes. The backend links to the Greengrass Nucleus
+    # over the AWS CRT event-stream RPC IPC, which can hit a native fatal abort
+    # ("Continuation ref count has gone negative" in aws-c-event-stream) that
+    # SIGABRTs the whole process. Without a restart policy that abort leaves the
+    # flask-app permanently down until the component is manually restarted.
+    # `always` re-launches the container after such a crash (a strict superset
+    # of the previous `unless-stopped` for crash exits) and additionally
+    # re-launches a previously-stopped backend when the Docker daemon restarts
+    # (device reboot / dockerd restart) — one of the ways an Exited backend
+    # could otherwise persist after a deployment-restart race. It still does
+    # not fight the component's own `docker compose down` on a normal stop
+    # (which removes the container). Honest caveat: NO restart policy
+    # re-launches a docker-stopped container while the daemon runs — that
+    # recovery path is owned by the recipe Startup `compose up -d --wait`
+    # retry loop (a retried `compose up` starts existing stopped containers),
+    # which is why the two changes ship together.
+    restart: always
+    # Time Docker waits between SIGTERM and SIGKILL on stop. The backend's
+    # SIGTERM cleanup is bounded at 20s in app.py (SHUTDOWN_CLEANUP_BUDGET_
+    # SECONDS); 120s gives a 5-6x margin for slow devices under load so the
+    # backend is never SIGKILLed mid-cleanup (the incident's exit 137 at the
+    # 10s default). `docker compose stop`/`down` inherits this value as the
+    # default timeout, so the recipe Shutdown scripts need no change.
+    stop_grace_period: 120s
+    # Bound the container log (rtsp-rtmp-stream-cameras finding 18). Docker's
+    # json-file default never rotates, and the backend writes every log
+    # record to stdout as well as to application.log: continuous stream
+    # workflows once grew it by about 1 GB a day. These caps keep at most
+    # 3 x 50 MB per container; `docker logs` reads across the rotated files.
+    # The driver is named because max-size/max-file are json-file options.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    # Health gate (edge-deploy-reliability, Defect B): /healthcheck.py probes
+    # the unauthenticated GET /health endpoint on 127.0.0.1:5000, falling back
+    # to https://127.0.0.1:5443 (TLS when station authorization is enabled).
+    # Python because the image is not guaranteed to carry curl/wget; loopback
+    # works under network_mode: host. The recipe Startup's `compose up -d
+    # --wait` blocks on this healthcheck, so Greengrass reports LocalServer
+    # RUNNING only when the backend is actually healthy. start_period covers
+    # DB migration + triton setup + vLLM runtime start on a cold JP6 boot.
+    healthcheck:
+      test: ["CMD", "python3", "/healthcheck.py"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 300s
     build:
       context: ./backend
       dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
@@ -46,21 +95,49 @@ services:
       - JETSON_TENSORRT=$JETSON_TENSORRT
       # Request GPU capabilities so the L4T NVIDIA Container Runtime performs its
       # CSV injection (host-files-for-container.d/*.csv, incl. tensorrt.csv ->
-      # libnvinfer.so.8.2.1). Without these, `runtime: nvidia` injects nothing
+      # libnvinfer.so.8.x). Without these, `runtime: nvidia` injects nothing
       # from the CSVs, so libnvinfer.so* (which lives in /usr/lib/aarch64-linux-gnu,
       # NOT the tegra/ dir we bind-mount) is absent in the container and the
       # python+DLR base_model fails: "libnvinfer.so.8: cannot open shared object
       # file". CUDA still works via the explicit mounts below, which masks the gap.
-      # Requires /etc/nvidia-container-runtime/config.toml mode = "csv" on JP4/L4T r32.
+      # Requires /etc/nvidia-container-runtime/config.toml mode = "csv" on the
+      # L4T runtimes that inject through CSV files.
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
       - CUDA_HOME=/usr/local/cuda/
-      - LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CUDA_HOME/lib64/:/usr/lib/aarch64-linux-gnu/tegra:/usr/local/cuda/targets/aarch64-linux/lib/
+      # /usr/local/cuda-12.6/... leads the path on JP6 ONLY (the dir does not
+      # exist in JP5/JP7 images, where the loader silently skips it): the JP6
+      # image's /usr/local/cuda is a real mount-point dir (not a symlink), so
+      # the host CUDA mount above no longer shadows the image's cuda-12.6
+      # toolkit, and torch/vllm (built against CUDA 12.6) must resolve the
+      # 12.6 runtime libs rather than an older host toolkit (JetPack 6.0's
+      # 12.2 libcudart lacks cudaGetDriverEntryPointByVersion -> model-load
+      # failures). Driver libs (libcuda.so.1, libnvrm*) are NOT in the toolkit
+      # lib dir — they come from the tegra dir / NVIDIA runtime injection — so
+      # the host driver still wins for driver resolution.
+      # /opt/dda/trt8-runtime/lib is appended LAST (lowest precedence) for the
+      # JetPack 6 Neo/DLR TensorRT 8 stack (Dockerfile.jp6 stages TRT 8.5 there
+      # because JP6 ships TRT 10). TensorRT dlopens libnvinfer_builder_resource.
+      # so.8.5.2 by BARE filename, which searches only LD_LIBRARY_PATH + default
+      # paths — not the ldconfig-registered custom dir — so the staged dir must
+      # be on LD_LIBRARY_PATH for the DLR model to load. Its .so.8/.so.11 sonames
+      # do not collide with the base image's TRT 10 / cuDNN 9 / cuBLAS 12, and
+      # being last it cannot shadow the cuda-12.6 libs torch/vLLM resolve first.
+      # On JP5/JP7 the dir does not exist (JP5's TRT 8 is native under /usr/lib),
+      # so the loader silently skips it — harmless.
+      - LD_LIBRARY_PATH=/usr/local/cuda-12.6/targets/aarch64-linux/lib/:$LD_LIBRARY_PATH:$CUDA_HOME/lib64/:/usr/lib/aarch64-linux-gnu/tegra:/usr/local/cuda/targets/aarch64-linux/lib/:/opt/dda/trt8-runtime/lib
       - GRPC_POLL_STRATEGY=poll
       - GRPC_ENABLE_FORK_SUPPORT=1
       - PYTHONPATH=/opt/tritonserver/backends/python:/
       - ARGUS_HEADLESS=1
       - NVARGUS_ENABLE_HEADLESS=1
+      # Persist the HF hub cache across container recreations (/aws_dda is
+      # already bind-mounted rw). Without this, vLLM/huggingface_hub caches
+      # weights at /root/.cache/huggingface on the ephemeral container layer,
+      # forcing a full re-download on every recreation (and a BROKEN component
+      # if huggingface.co is unreachable in that window). HF_HOME (not the
+      # deprecated TRANSFORMERS_CACHE) covers the hub cache, token, and modules.
+      - HF_HOME=/aws_dda/hf_cache
     # On Jetson/L4T, GPU access is provided by the NVIDIA Container Runtime, not
     # by the Compose `deploy.resources.reservations.devices` (--gpus / CDI)
     # mechanism. The latter invokes the NVIDIA Container Runtime Hook directly,
@@ -73,6 +150,24 @@ services:
     profiles: [tegra]
   backend_generic:
     network_mode: "host"
+    # Auto-recover from crashes and daemon restarts; see the restart-policy
+    # rationale on backend_tegra_gpu_enabled above.
+    restart: always
+    # See the stop_grace_period rationale on backend_tegra_gpu_enabled above.
+    stop_grace_period: 120s
+    # See the logging rationale on backend_tegra_gpu_enabled above.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    # See the healthcheck rationale on backend_tegra_gpu_enabled above.
+    healthcheck:
+      test: ["CMD", "python3", "/healthcheck.py"]
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 300s
     build:
       context: ./backend
       dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
@@ -115,10 +210,105 @@ services:
       - GRPC_POLL_STRATEGY=poll
       - GRPC_ENABLE_FORK_SUPPORT=1
       - PYTHONPATH=/opt/tritonserver/backends/python:/
+      # Persist the HF hub cache across container recreations (/aws_dda is
+      # already bind-mounted rw); see backend_tegra_gpu_enabled above.
+      - HF_HOME=/aws_dda/hf_cache
     profiles: [generic]
+  backend_generic_nvidia:
+    # x86_64 hosts with the NVIDIA GPU runtime (AMD64_NVIDIA target,
+    # aws.edgeml.dda.LocalServer.amd64Nvidia). Runtime-only service: the
+    # flask-app image is built by build-custom.sh through the generic
+    # profile's build definition with BACKEND_DOCKERFILE=Dockerfile.x86_64_nvidia
+    # (CUDA x86 base + GPU onnxruntime); the recipe runs `up --no-build`
+    # against the loaded image with `--profile generic_nvidia`.
+    network_mode: "host"
+    # Auto-recover from crashes (see backend_tegra_gpu_enabled above).
+    restart: unless-stopped
+    # See the logging rationale on backend_tegra_gpu_enabled above.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    image: flask-app
+    privileged: true
+    expose:
+      - "5000"
+      - "5443"
+      - "8000"
+      - "8001"
+      - "8002"
+    volumes:
+      - /aws_dda:/aws_dda
+      - /tmp:/tmp
+      - /dev/shm:/dev/shm
+    environment:
+      - DDA_SYSTEM_USER_ID=$DDA_SYSTEM_USER_ID
+      - DDA_SYSTEM_GROUP_ID=$DDA_SYSTEM_GROUP_ID
+      - DDA_ADMIN_USER_ID=$DDA_ADMIN_USER_ID
+      - DDA_ADMIN_GROUP_ID=$DDA_ADMIN_GROUP_ID
+      - AWS_REGION
+      - SVCUID
+      - AWS_GG_NUCLEUS_DOMAIN_SOCKET_FILEPATH_FOR_COMPONENT
+      - AWS_CONTAINER_AUTHORIZATION_TOKEN
+      - AWS_CONTAINER_CREDENTIALS_FULL_URI
+      - AWS_IOT_THING_NAME
+      - COMPONENT_WORK_PATH
+      - KERNEL_ROOT_PATH
+      - INFERENCE_COMPONENT_DECOMPRESED_PATH
+      - LOCAL_SERVER_COMPONENT_DECOMPRESSED_PATH
+      - JETSON_CUDA=$JETSON_CUDA
+      - JETSON_TENSORRT=$JETSON_TENSORRT
+      # Request GPU capabilities from the NVIDIA Container Toolkit. On x86
+      # (unlike Jetson/L4T) the standard Compose device-reservation mechanism
+      # below is the supported path; these env vars additionally direct the
+      # toolkit to inject all driver libraries (libcuda.so.1 etc.).
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - CUDA_HOME=/usr/local/cuda/
+      # The Dockerfile.x86_64_nvidia image ships its own CUDA toolkit under
+      # /usr/local/cuda (nvidia/cuda base) — no host CUDA mounts are needed;
+      # only the driver libs are injected by the NVIDIA runtime.
+      - LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/cuda/lib64
+      - GRPC_POLL_STRATEGY=poll
+      - GRPC_ENABLE_FORK_SUPPORT=1
+      - PYTHONPATH=/opt/tritonserver/backends/python:/
+      # Persist the HF hub cache across container recreations (/aws_dda is
+      # already bind-mounted rw); see backend_tegra_gpu_enabled above.
+      - HF_HOME=/aws_dda/hf_cache
+    # x86_64 GPU access: docker compose's device-reservation mechanism drives
+    # the NVIDIA Container Toolkit (`--gpus all` equivalent). This is the
+    # supported mechanism on x86 hosts — the Jetson-only `runtime: nvidia`
+    # CSV-injection path (see backend_tegra_gpu_enabled) does not apply here.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles: [generic_nvidia]
   frontend:
     build: ./frontend
     image: react-webapp
+    # Auto-recover from crashes (see backend_tegra_gpu_enabled above).
+    restart: unless-stopped
+    # See the logging rationale on backend_tegra_gpu_enabled above.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    # Basic liveness probe of the nginx-served app on the container port
+    # (edge-deploy-reliability, Defect B). The react-webapp image is
+    # nginx:stable-alpine — busybox wget is available, curl is not, so the
+    # probe uses wget (exit non-zero unless nginx answers).
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     ports:
       - "3000:80"
       - "3443:443"

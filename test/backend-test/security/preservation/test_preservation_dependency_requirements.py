@@ -16,11 +16,12 @@ spec.
 
 Spec: security-dependency-cve-fixes -- Property 2: Preservation.
 
-Capture every line of ``src/backend/requirements.txt`` on the UNFIXED tree,
-explicitly recording line 8 ``urllib3==2.2.3`` (NOT flagged, NOT bumped) and line
-9 ``requests==2.32.3`` (the F2 site). Task 7 re-runs this against the FIXED tree
-and asserts every line except line 9 is byte-for-byte identical, and line 9
-differs ONLY in its ``2.32.3`` -> ``2.32.4`` version token.
+Capture every line of ``src/backend/requirements.txt``, explicitly recording
+line 8 ``urllib3==2.8.0`` and line 9 ``requests==2.34.2`` (the F2 site), and
+assert every line except line 9 is byte-for-byte identical to the golden, with
+line 9 differing at most in its ``requests`` version token. Re-baselined by
+dependabot-remediation (Pillow/urllib3/requests/pydantic/marshmallow/grpcio
+bumps and python-opcua -> asyncua); the golden is the post-remediation file.
 
 Golden: ``baselines/dependency_baseline_requirements.txt``.
 
@@ -49,24 +50,24 @@ _F2_PIN_SUBSTRING = "requests=="
 def test_requirements_full_file_golden():
     """Every line of ``requirements.txt`` is byte-for-byte identical to the
     baseline except the F2 pin line (line 9), which may differ ONLY in its
-    version token (``2.32.3`` unfixed -> ``2.32.4`` fixed)."""
+    version token."""
     assert_pin_file_matches_baseline(_GOLDEN, BACKEND_REQS_REL, _F2_PIN_SUBSTRING)
 
 
 # Validates: Requirements 3.3
 def test_requirements_records_urllib3_and_requests_lines():
-    """The baseline records line 8 ``urllib3==2.2.3`` (unchanged, NOT bumped) and
-    line 9 ``requests==2.32.3`` (the F2 token that flips to 2.32.4)."""
+    """The baseline records line 8 ``urllib3==2.8.0`` and line 9
+    ``requests==2.34.2`` (both >= their Dependabot-patched floors)."""
     golden_lines, _current_lines, pin_idx = assert_pin_file_matches_baseline(
         _GOLDEN, BACKEND_REQS_REL, _F2_PIN_SUBSTRING
     )
-    # Line 9 (the requests pin) records 2.32.3.
+    # Line 9 (the requests pin) records the baseline version.
     assert golden_lines[pin_idx] == f"requests=={BASELINE_REQUESTS_VERSION}", (
-        f"baseline F2 pin line should be 'requests==2.32.3', got: "
+        f"baseline F2 pin line should be 'requests=={BASELINE_REQUESTS_VERSION}', got: "
         f"{golden_lines[pin_idx]!r}"
     )
-    # Line immediately above (line 8) is the un-flagged, un-bumped urllib3 pin.
-    assert golden_lines[pin_idx - 1] == "urllib3==2.2.3", (
-        f"expected line 8 'urllib3==2.2.3' immediately above the requests pin, "
+    # Line immediately above (line 8) is the patched urllib3 pin.
+    assert golden_lines[pin_idx - 1] == "urllib3==2.8.0", (
+        f"expected line 8 'urllib3==2.8.0' immediately above the requests pin, "
         f"got: {golden_lines[pin_idx - 1]!r}"
     )

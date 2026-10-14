@@ -75,8 +75,18 @@ class _FullNet(nn.Module):
 def _load_model_converter():
     su = types.ModuleType("shared_utils")
     for name in ["create_response", "get_user_from_event", "log_audit_event",
-                 "check_user_access", "validate_required_fields"]:
+                 "check_user_access", "validate_required_fields",
+                 # portal-usecase-bucket-config: the trusted-source rule now
+                 # parses with the shared layer's parse_s3_uri and compares
+                 # against the use case's configured buckets. Stubbed like the
+                 # names above: none of the #8 sites under test reach them.
+                 "parse_s3_uri", "allowed_s3_buckets", "portal_owned_buckets",
+                 "bucket_config_error_response"]:
         setattr(su, name, lambda *a, **k: None)
+    for name in ["InvalidS3Uri", "BucketConfigError", "BucketNotAllowed"]:
+        setattr(su, name, type(name, (ValueError,), {}))
+    su.REMEDY_NOT_ALLOWED = "remedy"
+    su.REMEDY_PORTAL_BUCKET = "remedy"
 
     boto3 = types.ModuleType("boto3")
     boto3.resource = lambda *a, **k: types.SimpleNamespace(
@@ -91,12 +101,42 @@ def _load_model_converter():
     exc.ClientError = ClientError
     botocore.exceptions = exc
 
+    # Shared-layer checkpoint classifier imported by convert_model since
+    # rfdetr-training-and-transfer-learning task 7.2 (Smart Import keeps a
+    # fine-tunable .pt/.pth as a sidecar). Stubbed like shared_utils: it is
+    # not on sys.path here and none of the #8 sites under test reach it.
+    cp = types.ModuleType("checkpoint_probe")
+    cp.classify_checkpoint = lambda *a, **k: {"kind": "unknown", "fine_tunable": False}
+    cp.FINE_TUNABLE_KINDS = ("ultralytics_checkpoint", "rfdetr_checkpoint")
+
+    # detector-checkpoint-import added three imports: the stdlib-only
+    # shared-layer detector_conversion (loaded REAL), the shared-layer s3_cors
+    # (loaded REAL over the boto3 / botocore stubs) and botocore.config.Config
+    # for the SigV4 upload presign (stubbed). None of the #8 sites under test
+    # reach them.
+    cfg = types.ModuleType("botocore.config")
+    cfg.Config = lambda **kwargs: types.SimpleNamespace(**kwargs)
+    botocore.config = cfg
+    aws_stubs = {"boto3": boto3, "botocore": botocore, "botocore.exceptions": exc,
+                 "botocore.config": cfg}
+    dconv = load_module_from_path(
+        "detector_conversion_preservation",
+        "edge-cv-portal/backend/layers/shared/python/detector_conversion.py",
+    )
+    s3_cors = load_module_from_path(
+        "s3_cors_preservation",
+        "edge-cv-portal/backend/layers/shared/python/s3_cors.py",
+        injected_modules=aws_stubs,
+    )
+
     return load_module_from_path(
         "model_converter_preservation",
         "edge-cv-portal/backend/functions/model_converter.py",
         injected_modules={
-            "shared_utils": su, "boto3": boto3,
-            "botocore": botocore, "botocore.exceptions": exc,
+            "shared_utils": su, **aws_stubs,
+            "checkpoint_probe": cp,
+            "detector_conversion": dconv,
+            "s3_cors": s3_cors,
         },
     )
 
