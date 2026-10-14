@@ -1,0 +1,52 @@
+# CodeQL code scanning (advanced setup).
+#
+# Mirrors the languages, build mode, query suite and weekly schedule that GitHub's
+# default setup used for this repository. Two differences:
+#   * .github/codeql/codeql-config.yml excludes vendored third-party packages, so
+#     their findings stop surfacing on every upgrade;
+#   * pushes and pull requests to integration/all-specs are scanned as well as main,
+#     so findings appear when work lands on the integration branch.
+name: CodeQL
+
+on:
+  push:
+    branches: [main, integration/all-specs]
+  pull_request:
+    branches: [main, integration/all-specs]
+  schedule:
+    - cron: "41 12 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [c-cpp, javascript-typescript, python]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: "/language:${{ matrix.language }}"
