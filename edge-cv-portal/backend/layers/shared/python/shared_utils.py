@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List, Set
 from datetime import datetime
 from decimal import Decimal
 import boto3
+import botocore
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from enum import Enum
@@ -17,6 +18,13 @@ from functools import wraps
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+# The SDK is vendored into this layer (layers/shared/requirements.txt) so the
+# S3 bucket ABAC / tagging operations the use-case bucket configuration needs
+# do not depend on the Lambda-managed runtime's bundled copy. Logged once per
+# cold start so the deployed version is readable from any function's log
+# stream.
+logger.info("shared layer botocore %s", botocore.__version__)
 
 # DynamoDB client
 dynamodb = boto3.resource('dynamodb')
