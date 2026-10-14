@@ -1,0 +1,1 @@
+filesrc location=/data/images/canary.jpg ! jpegdec ! fakesink

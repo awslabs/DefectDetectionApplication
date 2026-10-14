@@ -1062,6 +1062,12 @@
             "factory": "jpegdec"
           },
           {
+            "args_template": {
+              "caps": "video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
             "args_template": {},
             "factory": "videoconvert"
           },
@@ -1106,6 +1112,12 @@
             "factory": "jpegdec"
           },
           {
+            "args_template": {
+              "caps": "video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
             "args_template": {},
             "factory": "videoconvert"
           },
@@ -1148,6 +1160,12 @@
               "idct-method": 2
             },
             "factory": "jpegdec"
+          },
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
           },
           {
             "args_template": {},
@@ -2697,6 +2715,12 @@
             "factory": "jpegdec"
           },
           {
+            "args_template": {
+              "caps": "video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
             "args_template": {},
             "factory": "videoconvert"
           },
@@ -2741,6 +2765,12 @@
             "factory": "jpegdec"
           },
           {
+            "args_template": {
+              "caps": "video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
+          },
+          {
             "args_template": {},
             "factory": "videoconvert"
           },
@@ -2783,6 +2813,12 @@
               "idct-method": 2
             },
             "factory": "jpegdec"
+          },
+          {
+            "args_template": {
+              "caps": "video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB"
+            },
+            "factory": "capsfilter"
           },
           {
             "args_template": {},

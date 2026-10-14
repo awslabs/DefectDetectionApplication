@@ -74,6 +74,11 @@ MIRRORED_PACKAGE_FILENAMES = ("anomaly_invocation.py",)
 #     rules (the generalized V7 plus V11, V12, V13 and W3) and the codes they
 #     are re-exported under. The device re-validates a compiled document, so a
 #     drifted copy would accept on one side what the other side rejects.
+#   * ``compiler/compiler.py`` — the workflow compiler. The device never
+#     imports it, but the lab harness and the backend compile tests compile
+#     packages with the vendored copy, so a drifted copy would build packages
+#     the Portal never would: it must stay an exact mirror
+#     (jpeg-folder-source-decode-ubuntu2204).
 #
 # Re-sync these with a per-file ``cp``, not with ``re_vendor.sh``: a wholesale
 # re-vendor would also copy the portal-only ``catalog/platforms.py``, which the
@@ -84,6 +89,7 @@ MIRRORED_SHARED_MODULE_RELPATHS = (
     "analytics/scene.py",
     "validator/checks.py",
     "validator/__init__.py",
+    "compiler/compiler.py",
 )
 
 

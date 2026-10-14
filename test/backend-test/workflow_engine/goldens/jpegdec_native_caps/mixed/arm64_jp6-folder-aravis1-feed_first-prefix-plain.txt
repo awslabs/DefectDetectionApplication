@@ -1,0 +1,1 @@
+appsrc name=appsrc caps=video/x-raw,format=GRAY8 ! videoconvert ! fakesink filesrc blocksize=-1 location=/data/images/canary.jpg.dda_decoded.png ! pngdec ! videoconvert ! fakesink

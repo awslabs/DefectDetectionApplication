@@ -1,0 +1,1 @@
+filesrc blocksize=-1 location=/data/images/canary.jpg.dda_decoded.png ! pngdec ! videoconvert ! fakesink

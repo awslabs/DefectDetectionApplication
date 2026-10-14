@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import os
 import unittest
 import logging
@@ -25,6 +26,30 @@ from model.feature_configuration import FeatureConfiguration
 from model.output_configuration import OutputConfiguration
 from utils.constants import GPIO_RISING
 from edge_ml1_p_camera_management.aravis_functions import get_input_file_from_pipeline
+
+#: Legacy goldens of jpeg-folder-source-decode-ubuntu2204 (task 2): captured
+#: once from the unfixed tree, then frozen. Resolved from this file, never
+#: from the working directory.
+_JPEGDEC_GOLDEN_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "goldens", "jpegdec_native_caps")
+
+
+def _capture_or_assert_text(name, current_text):
+    """Capture ``current_text`` as the golden ``name`` when it is absent (the
+    first run, on the unfixed tree), else assert byte equality with it. The
+    ``_cmake_preservation_support.capture_or_assert_text`` pattern."""
+    path = os.path.join(_JPEGDEC_GOLDEN_DIR, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(current_text)
+        return current_text
+    with open(path, encoding="utf-8") as fh:
+        recorded = fh.read()
+    assert current_text == recorded, (
+        f"frozen golden '{name}' changed: the legacy pipeline string differs "
+        f"from the unfixed-tree capture")
+    return recorded
 
 
 class TestPipelineBuilder(unittest.TestCase):
@@ -194,9 +219,10 @@ class TestPipelineBuilder(unittest.TestCase):
         self.assertTrue("emoutputevent" in result, "Expected emoutputevent gstreamer plugin to be present in pipeline")
         self.assertTrue(GPIO_RISING in result, "Expected GPIO.RISING config to be present in pipeline")
 
+    @patch("workflow_engine.environment.device_arch", return_value="x86_64")
     @patch("utils.captured_images_utils.get_oldest_image_file_path", return_value="test/backend-test/captured_images_for_test/test-1.jpg")
-    def test_pipeline_definition_with_folder_input(self, mock_get_oldest_image):
-        expected_result = "filesrc blocksize=-1 location=\"test/backend-test/captured_images_for_test/test-1.jpg\" ! emexifextract ! jpegparse ! jpegdec idct-method=2 ! videoconvert ! videoflip method=automatic ! capsfilter caps=video/x-raw,format=RGB ! eminfer name=eminferX mode=2 tensor-source=1 config=test/backend-test/resources/em-agent-fakeWorkflowId.json model-component=fakemodel-1 confidence-watermark=1 ! jpegenc idct-method=2 quality=100 ! emdatacapture config=test/backend-test/resources/em-agent-fakeWorkflowId.json aws-cred-source=0 target=eminferX file-extension=jpg capture-folder=/tmp/workflow/output/path capture-id=my-capture-id ! fakesink"
+    def test_pipeline_definition_with_folder_input(self, mock_get_oldest_image, mock_device_arch):
+        expected_result = "filesrc blocksize=-1 location=\"test/backend-test/captured_images_for_test/test-1.jpg\" ! emexifextract ! jpegparse ! jpegdec idct-method=2 ! capsfilter caps=\"video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB\" ! videoconvert ! videoflip method=automatic ! capsfilter caps=video/x-raw,format=RGB ! eminfer name=eminferX mode=2 tensor-source=1 config=test/backend-test/resources/em-agent-fakeWorkflowId.json model-component=fakemodel-1 confidence-watermark=1 ! jpegenc idct-method=2 quality=100 ! emdatacapture config=test/backend-test/resources/em-agent-fakeWorkflowId.json aws-cred-source=0 target=eminferX file-extension=jpg capture-folder=/tmp/workflow/output/path capture-id=my-capture-id ! fakesink"
         image_capture_path = "fake_image_capture_path"
         image_source = ImageSource("imageSourceId", "fakeName", ImageSourceType.FOLDER, int(time.time()),
                                    int(time.time()), image_capture_path, location="test/backend-test/captured_images_for_test/")
@@ -208,6 +234,61 @@ class TestPipelineBuilder(unittest.TestCase):
         
         result, _ = self.pipeline_builder.add_image_source(image_source).add_inference(workflow_config, "my-capture-id").build()
         self.assertEqual(expected_result, result)
+
+    # jpeg-folder-source-decode-ubuntu2204: the legacy folder-input chain pins
+    # jpegdec to its native formats on the Ubuntu 22.04 targets (design C4).
+    # Each case first checks that it tests the tree's builder, not a
+    # LocalServer image's baked /gstreamer/pipeline_builder.py.
+
+    def _assert_tests_the_tree_builder(self):
+        assert inspect.getsourcefile(type(self.pipeline_builder)) == os.path.join(
+            os.getcwd(), "src", "backend", "gstreamer", "pipeline_builder.py"), \
+            "the legacy cases must test the tree's builder"
+
+    def _folder_input_pipeline(self):
+        image_source = ImageSource("imageSourceId", "fakeName", ImageSourceType.FOLDER, int(time.time()),
+                                   int(time.time()), "fake_image_capture_path",
+                                   location="test/backend-test/captured_images_for_test/")
+        feature_configs = [FeatureConfiguration("LFVModel", "fakemodel-1")]
+        workflow_config = Workflow("fakeWorkflowId", "fakeWorkflowName", "/tmp/workflow/output/path",
+                                   int(time.time()), int(time.time()), feature_configs, description="",
+                                   imageSourceId="imageSourceId", inputConfigurations=[], outputConfigurations=[])
+        with patch("utils.captured_images_utils.get_oldest_image_file_path",
+                   return_value="test/backend-test/captured_images_for_test/test-1.jpg"):
+            result, _ = self.pipeline_builder.add_image_source(image_source).add_inference(
+                workflow_config, "my-capture-id").build()
+        return result
+
+    def _assert_folder_input_pins_jpegdec(self, arch):
+        from workflow_engine.vendor.workflow_core.catalog import nodes as vendored_nodes
+        caps = getattr(vendored_nodes, "JPEGDEC_NATIVE_CAPS", None)
+        self.assertIsNotNone(caps, "the vendored JPEGDEC_NATIVE_CAPS is missing")
+        with patch("workflow_engine.environment.device_arch", return_value=arch):
+            result = self._folder_input_pipeline()
+        self.assertIn(f'jpegdec idct-method=2 ! capsfilter caps="{caps}" ! videoconvert', result)
+
+    def test_folder_input_pins_jpegdec_on_x86_64(self):
+        self._assert_tests_the_tree_builder()
+        self._assert_folder_input_pins_jpegdec("x86_64")
+
+    def test_folder_input_pins_jpegdec_on_arm64_cpu(self):
+        self._assert_tests_the_tree_builder()
+        self._assert_folder_input_pins_jpegdec("arm64_cpu")
+
+    def test_folder_input_on_arm64_jp5_matches_the_frozen_golden(self):
+        self._assert_tests_the_tree_builder()
+        with patch("workflow_engine.environment.device_arch", return_value="arm64_jp5"):
+            result = self._folder_input_pipeline()
+        _capture_or_assert_text("folder_input_arm64_jp5.txt", result + "\n")
+
+    def test_folder_input_jp6_png_branch_matches_the_frozen_golden(self):
+        self._assert_tests_the_tree_builder()
+        with patch("workflow_engine.environment.device_arch", return_value="arm64_jp6"), \
+                patch.object(self.pipeline_builder, "_is_jp6", return_value=True), \
+                patch.object(self.pipeline_builder, "_stage_decoded_png",
+                             side_effect=lambda path: path + ".dda_decoded.png"):
+            result = self._folder_input_pipeline()
+        _capture_or_assert_text("folder_input_jp6_png.txt", result + "\n")
 
     def test_input_filename_extracted_from_pipeline_definition(self):
         pipeline_string = "filesrc blocksize=-1 location=\"test/backend-test/captured_images_for_test/test-1.jpg\" ! emexifextract ! jpegdec idct-method=2 ! videoconvert ! videoflip method=automatic ! capsfilter caps=video/x-raw,format=RGB ! eminfer name=eminferX mode=2 tensor-source=1 config=test/backend-test/resources/em-agent-fakeWorkflowId.json model-component=fakemodel-1 confidence-watermark=1 ! jpegenc idct-method=2 quality=100 ! emdatacapture config=test/backend-test/resources/em-agent-fakeWorkflowId.json aws-cred-source=0 target=eminferX file-extension=jpg ! fakesink"
