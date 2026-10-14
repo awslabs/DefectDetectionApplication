@@ -34,6 +34,23 @@ import pytest
 
 import shared_utils as su
 
+
+def _bind_live_shared_utils():
+    """Rebind `su` to the shared layer module the handler modules will import.
+
+    An earlier aws_stack-based file in the same process pops `shared_utils`
+    from sys.modules and re-imports it, so the module object bound at
+    collection time may no longer be the one `from shared_utils import ...`
+    resolves to; patching that stale object would leave the handlers on the
+    real seams. Called first by every module-scoped fixture here.
+    """
+    global su
+    su = importlib.import_module("shared_utils")
+    assert hasattr(su, "assert_bucket_allowed"), (
+        "a fake shared_utils is installed in sys.modules; this suite needs "
+        "the real layer module")
+    return su
+
 USECASE_ID = "uc-pld"
 BUCKET = "uc-pld-bucket"
 USER_ID = "user-pld"
@@ -75,7 +92,7 @@ class FakeTable:
 
 @pytest.fixture(scope="module")
 def pld():
-    assert hasattr(su, "assert_bucket_allowed"), "this suite needs the real shared layer"
+    _bind_live_shared_utils()
     sys.modules.pop("pre_labeled_datasets", None)
     return importlib.import_module("pre_labeled_datasets")
 

@@ -45,6 +45,23 @@ from hypothesis import strategies as st
 
 import shared_utils as su
 
+
+def _bind_live_shared_utils():
+    """Rebind `su` to the shared layer module the handler modules will import.
+
+    An earlier aws_stack-based file in the same process pops `shared_utils`
+    from sys.modules and re-imports it, so the module object bound at
+    collection time may no longer be the one `from shared_utils import ...`
+    resolves to; patching that stale object would leave the handlers on the
+    real seams. Called first by every module-scoped fixture here.
+    """
+    global su
+    su = importlib.import_module("shared_utils")
+    assert hasattr(su, "assert_bucket_allowed"), (
+        "a fake shared_utils is installed in sys.modules; this suite needs "
+        "the real layer module")
+    return su
+
 ARTIFACTS = "test-portal-artifacts"   # conftest's PORTAL_ARTIFACTS_BUCKET
 COMPONENT = "dda-component-us-east-1-portal"
 PORTAL_OWNED = frozenset({ARTIFACTS, COMPONENT})
@@ -155,6 +172,7 @@ def rec():
     """Module-scoped recorders on the shared layer's STS / S3 seams (so the
     property bodies, which hypothesis forbids from using function-scoped
     fixtures, stay pure); each example clears them first."""
+    _bind_live_shared_utils()
     mp = pytest.MonkeyPatch()
     mp.setenv("PORTAL_ARTIFACTS_BUCKET", ARTIFACTS)
     mp.setenv("COMPONENT_BUCKET", COMPONENT)
@@ -359,7 +377,7 @@ def handlers(rec):
     """Fresh handler modules with RBAC admitting, the use case lookup
     reading the example's record, and recorders on their own credential
     paths."""
-    assert hasattr(su, "assert_bucket_allowed"), "this suite needs the real shared layer"
+    _bind_live_shared_utils()
     mp = pytest.MonkeyPatch()
     modules = {}
     for name in ("training", "model_import", "model_converter", "pre_labeled_datasets",

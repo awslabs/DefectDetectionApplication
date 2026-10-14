@@ -2525,6 +2525,36 @@ def _eligibility_result(reason: str, tags: Dict[str, str]) -> EligibilityResult:
         claimed_by=tags.get(PORTAL_USECASE_ID_TAG) or None)
 
 
+def read_bucket_tags(s3_client: Any, bucket: str, *, retry: bool = False) -> Tuple[Dict[str, str], str]:
+    """One `get_bucket_tagging` read classified as `eligible` (a qualifying
+    portal tag is present), `tag_missing` (tags, none qualifying) or
+    `no_tags` (NoSuchTagSet); returns `(tags, reason)`.
+
+    With `retry=True` the two non-qualifying outcomes are re-read up to
+    ELIGIBILITY_RETRY_ATTEMPTS times, ELIGIBILITY_RETRY_DELAY_SECONDS apart
+    (bucket tagging reads are not read-after-write consistent); with the
+    default the first read concludes and nothing sleeps. Any other
+    ClientError propagates unchanged so the caller classifies it. The one
+    implementation behind the eligibility probe and `create_s3_bucket`'s
+    read-after-write of the tags it sent (design §1.6, §5.5 step 5).
+    """
+    attempts = ELIGIBILITY_RETRY_ATTEMPTS if retry else 1
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            tags = _tags_from_tagging_response(s3_client.get_bucket_tagging(Bucket=bucket))
+            reason = 'eligible' if _tags_qualify(tags) else 'tag_missing'
+        except ClientError as error:
+            code, _ = _client_error_code_and_status(error)
+            if code != 'NoSuchTagSet':
+                raise
+            tags, reason = {}, 'no_tags'
+        if reason == 'eligible' or attempt >= attempts:
+            return tags, reason
+        time.sleep(ELIGIBILITY_RETRY_DELAY_SECONDS)
+
+
 def probe_bucket_eligibility(usecase_like: Dict, bucket: str, *, retry: bool = False) -> EligibilityResult:
     """Read a bucket's tags with the credentials the portal would later use
     for it and classify the outcome (design §1.6 table). Never raises.
@@ -2551,20 +2581,15 @@ def probe_bucket_eligibility(usecase_like: Dict, bucket: str, *, retry: bool = F
         role_arn, external_id = _select_s3_role_for_bucket(usecase_like, bucket)
         credentials = assume_usecase_role(role_arn, external_id, ELIGIBILITY_SESSION_NAME)
         s3_client = create_boto3_client('s3', credentials)
-        attempts = ELIGIBILITY_RETRY_ATTEMPTS if retry else 1
-        attempt = 0
         redirected = False
         while True:
-            attempt += 1
             try:
-                tags = _tags_from_tagging_response(s3_client.get_bucket_tagging(Bucket=bucket))
-                reason = 'eligible' if _tags_qualify(tags) else 'tag_missing'
+                tags, reason = read_bucket_tags(s3_client, bucket, retry=retry)
+                break
             except ClientError as error:
                 code, status = _client_error_code_and_status(error)
-                if code == 'NoSuchTagSet':
-                    tags = {}
-                    reason = 'no_tags'
-                elif code in ('PermanentRedirect', '301') or status == '301':
+                tags = {}
+                if code in ('PermanentRedirect', '301') or status == '301':
                     headers = ((error.response or {}).get('ResponseMetadata') or {}).get('HTTPHeaders') or {}
                     region = headers.get('x-amz-bucket-region')
                     if redirected or not region:
@@ -2573,20 +2598,14 @@ def probe_bucket_eligibility(usecase_like: Dict, bucket: str, *, retry: bool = F
                     logger.info("Bucket %s tagging read redirected to region %s", bucket, region)
                     redirected = True
                     s3_client = create_boto3_client('s3', credentials, region=region)
-                    attempt -= 1
                     continue
-                elif redirected or code in ('AccessDenied', '403') or status == '403':
+                if redirected or code in ('AccessDenied', '403') or status == '403':
                     reason = 'tagging_unreadable'
-                    break
                 elif code in ('NoSuchBucket', '404') or status == '404':
                     reason = 'bucket_not_found'
-                    break
                 else:
                     reason = 'credentials_unavailable'
-                    break
-            if reason == 'eligible' or attempt >= attempts:
                 break
-            time.sleep(ELIGIBILITY_RETRY_DELAY_SECONDS)
     except Exception as error:  # noqa: BLE001 - the probe never raises; it fails closed
         logger.info("Bucket %s eligibility probe could not read tags: %s", bucket, error)
         tags = {}
@@ -2704,3 +2723,23 @@ def check_bucket_attachable(*, target_usecase_id: Optional[str], usecase_like: D
         1 if claimed_elsewhere and result.claimed_by not in others else 0)
     result.stale_claim = claimed_elsewhere and stale_claim
     return result
+
+
+def audit_bucket_allowed(user: Dict, usecase_id: str, bucket: str, attribute: str,
+                         source: str, result: EligibilityResult,
+                         event: Optional[Dict]) -> None:
+    """The one `s3_bucket_allowed` audit row every record writer emits AFTER
+    its write succeeded (design §1.6): `attribute` names the record field the
+    bucket entered (`s3_bucket` | `data_s3_bucket` | `additional_s3_buckets`),
+    `source` the writer (`api` | `create` | `configure` | `auto_add`), and the
+    validator's `shared_with_usecases` / `stale_claim` ride along only when
+    the PortalAdmin override admitted a shared or claimed bucket.
+    `log_audit_event` swallows its own failures.
+    """
+    details: Dict[str, Any] = {'bucket': bucket, 'attribute': attribute, 'source': source}
+    if result.shared_with_usecases > 0:
+        details['shared_with_usecases'] = result.shared_with_usecases
+    if result.stale_claim:
+        details['stale_claim'] = True
+    log_audit_event(user['user_id'], 's3_bucket_allowed', 'usecase', usecase_id,
+                    'success', details, event=event)

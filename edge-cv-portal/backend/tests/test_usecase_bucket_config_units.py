@@ -1195,15 +1195,11 @@ def _python_files(*roots):
 
 def test_only_enumerated_writers_touch_bucket_attributes():
     """Every function in functions/*.py and the shared layer that writes
-    DynamoDB and names a bucket attribute in a write-shaping position.
-
-    Asserted against the PRE-CHANGE writer set: the use case API feature
-    (tasks 4.1–4.3, 5.1) adds `usecases._add_additional_bucket` and
-    `usecases._remove_additional_bucket` and switches this assertion to
-    {usecases.create_usecase, usecases.update_usecase,
-    usecases._add_additional_bucket, usecases._remove_additional_bucket,
-    data_management.configure_data_account}, plus the helper call-site pin
-    {usecases.update_usecase, usecases.create_s3_bucket} (design §2.4).
+    DynamoDB and names a bucket attribute in a write-shaping position is one
+    of the five enumerated writers (design §2.4, §12): the three record
+    handlers that call `check_bucket_attachable` before their write and the
+    two additional-list helpers, which are called only from `update_usecase`
+    and `create_s3_bucket`. A new writer anywhere else fails this test.
     """
     writers = set()
     for path in _python_files(_FUNCTIONS_DIR, _SHARED_LAYER):
@@ -1211,12 +1207,14 @@ def test_only_enumerated_writers_touch_bucket_attributes():
     assert writers == {
         "usecases.create_usecase",
         "usecases.update_usecase",
+        "usecases._add_additional_bucket",
+        "usecases._remove_additional_bucket",
         "data_management.configure_data_account",
     }
     callers = set()
     for path in _python_files(_FUNCTIONS_DIR, _SHARED_LAYER):
         callers |= helper_call_sites(path, {"_add_additional_bucket", "_remove_additional_bucket"})
-    assert callers == set()                          # the list helpers do not exist yet
+    assert callers == {"usecases.update_usecase", "usecases.create_s3_bucket"}
 
 
 def test_writer_guard_rule_detects_each_shape():

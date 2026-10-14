@@ -1548,22 +1548,25 @@ class WorkerBatchEnv:
         # The example set is per job on this path, so the two example
         # conditions need no per-record read scripting: the affected
         # job's own object is missing or undecodable for its setting.
+        # References are `s3://` URIs inside the use case's configured
+        # bucket (the worker resolves nothing else).
         few_shot = None
         example_ref = None
         if record.few_shot:
-            example_ref = f"{self.example_prefix}good-{index}.png"
+            example_key = f"{self.example_prefix}good-{index}.png"
+            example_ref = f"s3://{DATASET_BUCKET}/{example_key}"
             if record.condition == "undecodable_attached_example":
                 # Header-only bytes declaring a longer edge above every
                 # option: the downscaler must decode them, and cannot.
                 self.real_s3.put_object(
-                    Bucket=ARTIFACTS_BUCKET, Key=example_ref,
+                    Bucket=DATASET_BUCKET, Key=example_key,
                     Body=_png_bytes(*UNDECODABLE_DECLARED, tag=100 + index))
             elif record.condition != "unreadable_example":
                 # A real decodable 64x48 PNG: it fits every option, so
                 # it passes through under any setting — but the
                 # downscaler's header read must succeed to know that.
                 self.real_s3.put_object(
-                    Bucket=ARTIFACTS_BUCKET, Key=example_ref,
+                    Bucket=DATASET_BUCKET, Key=example_key,
                     Body=_real_png_bytes(tag=100 + index))
             few_shot = {"enabled": True, "examples": [
                 {"ref": example_ref, "designation": "good", "position": 0}]}

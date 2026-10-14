@@ -19,6 +19,7 @@ from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, get_usecase,
     get_s3_client_for_bucket, assert_bucket_allowed, allowed_s3_buckets,
+    check_bucket_attachable, audit_bucket_allowed,
     BucketConfigError, bucket_config_error_response
 )
 
@@ -705,6 +706,12 @@ def get_batch_upload_urls(event: Dict) -> Dict:
 
 
 
+def _is_clear(value) -> bool:
+    """A Clear of the data bucket (design §5.3 step 4): None, '' or
+    whitespace-only; absent, None and '' compare equal for change detection."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
 def configure_data_account(event: Dict) -> Dict:
     """
     Configure data account settings for a usecase.
@@ -732,9 +739,6 @@ def configure_data_account(event: Dict) -> Dict:
         table = dynamodb.Table(USECASES_TABLE)
         timestamp = int(datetime.utcnow().timestamp() * 1000)
         
-        update_expr = "SET updated_at = :updated"
-        expr_values = {':updated': timestamp}
-        
         # Optional data account fields
         data_fields = [
             'data_account_id',
@@ -743,21 +747,62 @@ def configure_data_account(event: Dict) -> Dict:
             'data_s3_bucket'
         ]
         
+        # Use-case bucket configuration (design §5.6): the route follows the
+        # same rules as PUT /usecases/{id} — the record must exist, and a
+        # changed data bucket (a Clear — None / '' / whitespace — is stored as
+        # today and never probed) must be Eligible and Unclaimed before the
+        # write; the probe uses the role fields as they will be after it.
+        record = table.get_item(Key={'usecase_id': usecase_id}).get('Item')
+        if record is None:
+            return create_response(404, {'error': 'Use case not found',
+                                         'error_code': 'usecase_not_found'})
+        effective = dict(record)
+        effective.update({field: body[field] for field in data_fields if field in body})
+        new_bucket = body.get('data_s3_bucket')
+        bucket_changed = (
+            'data_s3_bucket' in body and not _is_clear(new_bucket)
+            and new_bucket != (None if _is_clear(record.get('data_s3_bucket'))
+                               else record.get('data_s3_bucket')))
+        attach_result = None
+        if bucket_changed:
+            try:
+                attach_result = check_bucket_attachable(
+                    target_usecase_id=usecase_id, usecase_like=effective, bucket=new_bucket,
+                    user=user, event=event, purpose='configure-data-s3-bucket', retry=False)
+            except BucketConfigError as e:
+                return bucket_config_error_response(e)
+        
+        update_expr = "SET updated_at = :updated"
+        expr_values = {':updated': timestamp}
+        
         for field in data_fields:
             if field in body:
                 update_expr += f", {field} = :{field}"
                 expr_values[f":{field}"] = body[field]
         
-        table.update_item(
-            Key={'usecase_id': usecase_id},
-            UpdateExpression=update_expr,
-            ExpressionAttributeValues=expr_values
-        )
+        try:
+            table.update_item(
+                Key={'usecase_id': usecase_id},
+                UpdateExpression=update_expr,
+                ExpressionAttributeValues=expr_values,
+                ConditionExpression='attribute_exists(usecase_id)'
+            )
+        except ClientError as e:
+            if e.response['Error']['Code'] != 'ConditionalCheckFailedException':
+                raise
+            return create_response(404, {'error': 'Use case not found',
+                                         'error_code': 'usecase_not_found'})
         
+        details = {'updated_fields': list(body.keys())}
+        if bucket_changed:
+            details['bucket'] = new_bucket
         log_audit_event(
             user_id, 'configure_data_account', 'data_management', usecase_id,
-            'success', {'updated_fields': list(body.keys())}
+            'success', details
         )
+        if bucket_changed:
+            audit_bucket_allowed(user, usecase_id, new_bucket, 'data_s3_bucket',
+                                 'configure', attach_result, event)
         
         return create_response(200, {
             'message': 'Data account configuration updated',

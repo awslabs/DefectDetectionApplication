@@ -56,6 +56,23 @@ from botocore.exceptions import ClientError
 
 import shared_utils as su
 
+
+def _bind_live_shared_utils():
+    """Rebind `su` to the shared layer module the handler modules will import.
+
+    An earlier aws_stack-based file in the same process pops `shared_utils`
+    from sys.modules and re-imports it, so the module object bound at
+    collection time may no longer be the one `from shared_utils import ...`
+    resolves to; patching that stale object would leave the handlers on the
+    real seams. Called first by every module-scoped fixture here.
+    """
+    global su
+    su = importlib.import_module("shared_utils")
+    assert hasattr(su, "assert_bucket_allowed"), (
+        "a fake shared_utils is installed in sys.modules; this suite needs "
+        "the real layer module")
+    return su
+
 ARTIFACTS = "test-portal-artifacts"   # conftest's PORTAL_ARTIFACTS_BUCKET
 COMPONENT = "dda-component-us-east-1-portal"
 FOREIGN = "someone-elses-bucket"
@@ -232,9 +249,7 @@ MANIFEST_LINE = json.dumps({
 @pytest.fixture(scope="module")
 def m():
     """Fresh handler modules bound to the real shared layer."""
-    assert hasattr(su, "assert_bucket_allowed"), (
-        "a fake shared_utils is installed in sys.modules; this suite needs "
-        "the real layer module")
+    _bind_live_shared_utils()
     modules = {}
     for name in HANDLER_MODULES:
         sys.modules.pop(name, None)
