@@ -155,6 +155,12 @@ from shared_utils import (
     log_audit_event,
     rbac_manager,
     Permission,
+    # Use-case bucket configuration: few-shot example references are
+    # `s3://` URIs inside the use case's configured buckets.
+    parse_s3_uri,
+    allowed_s3_buckets,
+    InvalidS3Uri,
+    REMEDY_NOT_ALLOWED,
 )
 from rbac_middleware import rbac_check
 # `podium_ranking` is the one shared Podium_Ranking implementation
@@ -232,8 +238,10 @@ LABELING_TASKS_TABLE = os.environ.get(
     'LABELING_TASKS_TABLE', 'dda-portal-labeling-tasks')
 USER_ROLES_TABLE = os.environ.get('USER_ROLES_TABLE')
 USER_POOL_ID = os.environ.get('USER_POOL_ID')
-# Pre-labels and example images live in the portal's own artifacts
-# bucket (written by dda_autolabel_worker / the job creation wizard).
+# Pre-labels, segmentation annotations and preview results live in the
+# portal's own artifacts bucket (written by dda_autolabel_worker and the
+# routes below). Example image references are `s3://` URIs inside the use
+# case's configured buckets and are never resolved against this bucket.
 PORTAL_ARTIFACTS_BUCKET = os.environ.get('PORTAL_ARTIFACTS_BUCKET')
 # Portal settings table: holds the persisted Model_Token_Limits item
 # (`llm_model_token_limits`) the per-invocation _llm_model_token_limits()
@@ -1420,9 +1428,18 @@ def _validate_label_set(raw_label_set: Any) -> tuple:
     return [name.strip() for name in raw_label_set], errors
 
 
-def _validate_example_refs(example_images: Any) -> tuple:
+def _validate_example_refs(example_images: Any,
+                           usecase: Optional[Dict]) -> tuple:
     """Validate the good/bad example image references (Req 4.4): at most
-    10 of each, every reference a JPEG or PNG.
+    10 of each, every reference a JPEG or PNG, and every reference an
+    `s3://` URI inside the use case's configured buckets (use-case bucket
+    configuration, design §3): a bare key or a malformed URI is refused
+    with `error_code` `invalid_s3_uri`, a bucket outside the set — the
+    portal's own buckets included — with `bucket_not_allowed`.
+
+    `usecase` is the loaded use case record (None when it could not be
+    loaded, in which case no bucket is in the set and the use case error
+    is reported by the caller).
 
     Returns ({'good': [...], 'bad': [...]}, [validation errors]).
     """
@@ -1436,6 +1453,7 @@ def _validate_example_refs(example_images: Any) -> tuple:
             "{'good': [...], 'bad': [...]}"))
         return {'good': [], 'bad': []}, errors
 
+    allowed = allowed_s3_buckets(usecase) if usecase else frozenset()
     validated = {}
     for kind in ('good', 'bad'):
         refs = example_images.get(kind) or []
@@ -1460,6 +1478,23 @@ def _validate_example_refs(example_images: Any) -> tuple:
                     f"{kind} example image '{ref}' is not a JPEG or PNG "
                     f'image',
                     example_ref=ref if isinstance(ref, str) else str(ref)))
+                continue
+            try:
+                ref_bucket, _ref_key = parse_s3_uri(ref)
+            except InvalidS3Uri:
+                errors.append(_validation_error(
+                    'example_images',
+                    f"{kind} example image '{ref}' must be an s3:// URI "
+                    f"inside one of the use case's configured buckets",
+                    example_ref=ref, error_code='invalid_s3_uri'))
+                continue
+            if ref_bucket not in allowed:
+                errors.append(_validation_error(
+                    'example_images',
+                    f"{kind} example image bucket '{ref_bucket}' is not "
+                    f'configured for this use case',
+                    example_ref=ref, bucket=ref_bucket,
+                    error_code='bucket_not_allowed'))
         validated[kind] = [ref for ref in refs if isinstance(ref, str)]
     return validated, errors
 
@@ -1615,6 +1650,24 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
         if not usecase_id:
             errors.append(_validation_error(
                 'usecase_id', 'usecase_id is required'))
+        elif not rbac_manager.has_permission(
+                user['user_id'], usecase_id,
+                Permission.CREATE_LABELING_JOBS, user):
+            # Role gate (use-case bucket configuration, design §7): the
+            # `has_permission(..., user_info)` form every sibling DDA
+            # labeling route gets from @rbac_check, so the labeling wizard
+            # agrees with itself across the enforcement flag states. 403
+            # with an audit row before any S3, STS or DynamoDB write;
+            # RegistryUnavailable reaches the handler's except -> 500.
+            raw_name = body.get('job_name')
+            log_audit_event(
+                user['user_id'], 'unauthorized_access', 'labeling_job',
+                (raw_name.strip() if isinstance(raw_name, str)
+                 and raw_name.strip() else 'unknown'),
+                'denied',
+                {'usecase_id': usecase_id,
+                 'required_permission': 'create_labeling_jobs'})
+            return create_response(403, {'error': 'Insufficient permissions'})
 
         # --- job name: 1-63 chars, unique per Use_Case (Req 4.1) ---
         raw_name = body.get('job_name')
@@ -1748,10 +1801,9 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                 f'characters',
                 instructions_length=len(instructions)))
 
-        # --- example images (Req 4.4) ---
-        example_images, example_errors = _validate_example_refs(
-            body.get('example_images'))
-        errors.extend(example_errors)
+        # --- example images (Req 4.4) --- validated below, once the use
+        #     case is loaded: every reference must be an s3:// URI inside
+        #     the use case's configured buckets (design §3).
 
         # --- auto-label model/modality matrix (Req 8.1, 8.8) ---
         auto_label = body.get('auto_label') or {}
@@ -1874,15 +1926,11 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                     task_type=modality))
 
         # --- Few_Shot_Option (llm-autolabel-prompt-tuning Req 6.2-6.4,
-        #     10.1, 10.4, 10.6) ---
-        # Scoped to the `llm:` family: sam / bedrock: jobs get no
-        # few_shot key at all, so their records and request construction
-        # are untouched (Req 10.1).
-        few_shot_document = None
-        if model_family == 'llm':
-            few_shot_document, few_shot_errors = _resolve_few_shot_document(
-                auto_label, body, example_images)
-            errors.extend(few_shot_errors)
+        #     10.1, 10.4, 10.6) --- resolved below, after the example
+        #     references it derives from have been validated against the
+        #     loaded use case. Scoped to the `llm:` family: sam / bedrock:
+        #     jobs get no few_shot key at all, so their records and request
+        #     construction are untouched (Req 10.1).
 
         # --- Downscale_Setting + Token_Budget_Selection (llm-model-
         #     token-and-image-sizing Req 3.6, 5.7, 10.4, 10.6) ---
@@ -1934,6 +1982,21 @@ def create_dda_job(body: Dict, user: Dict, event: Optional[Dict] = None):
                     errors.append(_validation_error(
                         'usecase_id',
                         'Use case has no data bucket configured'))
+
+        # --- example images (Req 4.4; use-case bucket configuration §3):
+        #     every reference an s3:// URI inside the use case's configured
+        #     buckets, judged against the loaded record ---
+        example_images, example_errors = _validate_example_refs(
+            body.get('example_images'), usecase)
+        errors.extend(example_errors)
+
+        # --- Few_Shot_Option (llm-autolabel-prompt-tuning Req 6.2-6.4,
+        #     10.1, 10.4, 10.6), derived from the validated references ---
+        few_shot_document = None
+        if model_family == 'llm':
+            few_shot_document, few_shot_errors = _resolve_few_shot_document(
+                auto_label, body, example_images)
+            errors.extend(few_shot_errors)
 
         # Req 4.9/4.10: reject before touching S3 or persisting anything.
         if errors:
@@ -2196,12 +2259,15 @@ def _is_task_presentable(task: Dict) -> bool:
     return (task.get('prelabel_status') or 'None') != PENDING_PRELABEL_STATUS
 
 
-def _presign_task_image(job: Dict, task: Dict) -> tuple:
+def _presign_task_image(job: Dict, task: Dict,
+                        usecase: Optional[Dict] = None) -> tuple:
     """(url, expires_at): a read-only presigned GET URL scoped to
     exactly the task's image object, valid 15 minutes (Req 12.6),
     through the use case's cross-account access with the single-account
-    direct fallback (get_s3_client_for_bucket, Req 12.1-12.3)."""
-    usecase = get_usecase(job['usecase_id'])
+    direct fallback (get_s3_client_for_bucket, Req 12.1-12.3). `usecase`
+    is the job's use case when the caller has already loaded it."""
+    if usecase is None:
+        usecase = get_usecase(job['usecase_id'])
     bucket, key = _parse_s3_uri(task['image_s3_uri'])
     dataset_s3 = get_s3_client_for_bucket(
         usecase, bucket, 'dda-labeling-labeler')
@@ -2231,24 +2297,38 @@ def _load_prelabel(task: Dict) -> Optional[Any]:
         return None
 
 
-def _example_image_urls(job: Dict) -> Dict[str, List[str]]:
+def _example_image_urls(job: Dict, usecase: Dict) -> Dict[str, List[str]]:
     """Presigned GET URLs for the job's stored good/bad example images
     (Req 7.2). Kinds with no stored references are omitted, so a job
-    without examples presents without them. References are portal
-    artifacts bucket keys (the wizard's presigned-PUT uploads) or full
-    s3:// URIs."""
+    without examples presents without them. References are `s3://` URIs
+    inside the use case's configured buckets; anything else is skipped
+    (use-case bucket configuration, design §3): a reference that is not
+    an `s3://` URI, one the parser rejects, or one whose bucket is outside
+    the set is omitted with a WARNING that never names the key."""
     example_images = job.get('example_images') or {}
+    allowed = allowed_s3_buckets(usecase)
     urls: Dict[str, List[str]] = {}
     for kind in ('good', 'bad'):
         kind_urls: List[str] = []
         for ref in example_images.get(kind) or []:
             if not isinstance(ref, str) or not ref:
                 continue
-            if ref.startswith('s3://'):
-                bucket, key = _parse_s3_uri(ref)
-            else:
-                bucket, key = PORTAL_ARTIFACTS_BUCKET, ref
-            if not bucket:
+            if not ref.startswith('s3://'):
+                logger.warning(f"Skipping example image for job "
+                               f"{job.get('job_id')} ({kind}): reference is "
+                               f"not an s3:// URI")
+                continue
+            try:
+                bucket, key = parse_s3_uri(ref)
+            except InvalidS3Uri:
+                logger.warning(f"Skipping example image for job "
+                               f"{job.get('job_id')} ({kind}): reference is "
+                               f"not a valid s3:// URI")
+                continue
+            if bucket not in allowed:
+                logger.warning(f"Skipping example image in bucket {bucket}: "
+                               f"not configured for use case "
+                               f"{usecase.get('usecase_id')}")
                 continue
             try:
                 kind_urls.append(s3_client.generate_presigned_url(
@@ -2384,7 +2464,10 @@ def get_next_labeler_task(event, context):
             })
 
         task = presentable[0]
-        image_url, image_url_expires_at = _presign_task_image(job, task)
+        # The job's use case, loaded once for the image presign and the
+        # example-reference check below.
+        usecase = get_usecase(job['usecase_id'])
+        image_url, image_url_expires_at = _presign_task_image(job, task, usecase)
         payload: Dict[str, Any] = {
             'complete': False,
             'task_id': task['task_id'],
@@ -2399,11 +2482,13 @@ def get_next_labeler_task(event, context):
         }
 
         # Req 7.2: instructions and example images ride along when
-        # stored; absent items are omitted from the payload.
+        # stored; absent items are omitted from the payload. The example
+        # references are judged against the job's use case, see
+        # _example_image_urls.
         instructions = job.get('instructions')
         if instructions:
             payload['instructions'] = instructions
-        example_urls = _example_image_urls(job)
+        example_urls = _example_image_urls(job, usecase)
         if example_urls:
             payload['example_images'] = example_urls
 
@@ -3810,6 +3895,42 @@ def _count_failed_prelabel_tasks(job_id: str) -> int:
     return count
 
 
+NOT_AN_S3_URI_REF = '<not an s3:// URI>'
+
+
+def _rerun_refused_few_shot_refs(job: Dict) -> List[str]:
+    """The stored few-shot example references of `job` that are not
+    `s3://` URIs inside the use case's configured buckets (use-case bucket
+    configuration, design §3), each reported as its bucket name — or
+    NOT_AN_S3_URI_REF for a bare key or a malformed URI — never as a key.
+    Empty when the job stores no few-shot examples or all are in the set;
+    the use case is loaded only when there is something to judge."""
+    few_shot = (job.get('auto_label') or {}).get('few_shot')
+    if not isinstance(few_shot, dict):
+        return []
+    stored = few_shot.get('examples')
+    if not isinstance(stored, list) or not stored:
+        return []
+    refs = [example.get('ref') for example in stored
+            if isinstance(example, dict)]
+    if not refs:
+        return []
+    allowed = allowed_s3_buckets(get_usecase(job['usecase_id']))
+    refused: List[str] = []
+    for ref in refs:
+        if not isinstance(ref, str) or not ref.startswith('s3://'):
+            refused.append(NOT_AN_S3_URI_REF)
+            continue
+        try:
+            bucket, _key = parse_s3_uri(ref)
+        except InvalidS3Uri:
+            refused.append(NOT_AN_S3_URI_REF)
+            continue
+        if bucket not in allowed:
+            refused.append(bucket)
+    return refused
+
+
 @rbac_check([Permission.MANAGE_LABELING_JOBS], allow_global=True)
 def rerun_prelabels(event, context):
     """POST /labeling/{id}/rerun-prelabels
@@ -3904,6 +4025,24 @@ def rerun_prelabels(event, context):
                 'error': 'The job has no failed pre-label tasks to '
                          're-run',
                 'job_id': job_id,
+            })
+
+        # Use-case bucket configuration (design §3): every stored few-shot
+        # example reference must be an s3:// URI inside the use case's
+        # configured buckets, or the worker could never read it. Refused
+        # before anything is persisted or enqueued; the listed refs name
+        # buckets (or the non-URI spelling), never a key.
+        refused_refs = _rerun_refused_few_shot_refs(job)
+        if refused_refs:
+            return create_response(400, {
+                'error': 'Few-shot example references of this job are '
+                         "outside the use case's configured buckets",
+                'error_code': 'bucket_not_allowed',
+                'usecase_id': job.get('usecase_id'),
+                'purpose': 'labeling-few-shot',
+                'job_id': job_id,
+                'refs': refused_refs,
+                'remedy': REMEDY_NOT_ALLOWED,
             })
 
         # --- request body (Req 5.5-5.8) ---

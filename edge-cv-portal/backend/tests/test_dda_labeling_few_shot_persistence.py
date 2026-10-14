@@ -80,11 +80,13 @@ def env(aws_stack, dda):
 # ------------------------------------------------------------- helpers
 
 def example_refs(good_count, bad_count):
-    """Distinct, order-revealing example references per designation."""
+    """Distinct, order-revealing example references per designation —
+    s3:// URIs inside the use case's dataset bucket, the reference shape
+    job creation accepts (portal-usecase-bucket-config)."""
     return {
-        "good": [f"ex/good-{i}-{uuid.uuid4().hex[:6]}.jpg"
+        "good": [f"s3://{DATASET_BUCKET}/ex/good-{i}-{uuid.uuid4().hex[:6]}.jpg"
                  for i in range(good_count)],
-        "bad": [f"ex/bad-{i}-{uuid.uuid4().hex[:6]}.png"
+        "bad": [f"s3://{DATASET_BUCKET}/ex/bad-{i}-{uuid.uuid4().hex[:6]}.png"
                 for i in range(bad_count)],
     }
 

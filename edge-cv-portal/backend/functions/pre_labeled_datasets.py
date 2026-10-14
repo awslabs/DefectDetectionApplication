@@ -2,21 +2,28 @@ import json
 import boto3
 import uuid
 from datetime import datetime
-from typing import Dict, Any, List
-from urllib.parse import urlparse
+from typing import Dict, Any, List, Optional
 from decimal import Decimal
 import os
 import sys
 
+from botocore.exceptions import ClientError
+
 # Import shared utilities
 sys.path.append('/opt/python')
-from shared_utils import get_usecase, assume_usecase_role, create_response as shared_create_response, handle_error
+from shared_utils import (
+    get_usecase, assume_usecase_role, create_response as shared_create_response, handle_error,
+    get_user_from_event, check_user_access, log_audit_event, _display_identity,
+    get_s3_client_for_bucket, parse_s3_uri, assert_bucket_allowed, allowed_s3_buckets,
+    BucketConfigError, InvalidS3Uri,
+)
 from s3_browse_utils import browse_s3_bucket as browse_s3_bucket_util, filter_manifest_files
 from manifest_transformer import detect_ground_truth_attributes
 
-# Initialize AWS clients
+# Initialize AWS clients. There is no module-level S3 client: every S3 read
+# goes through get_s3_client_for_bucket for the use case's configured bucket
+# (use-case bucket configuration, design §3).
 dynamodb = boto3.resource('dynamodb')
-s3 = boto3.client('s3')
 
 
 # Helper class to convert Decimal to int/float for JSON serialization
@@ -52,20 +59,24 @@ def lambda_handler(event, context):
                 'body': ''
             }
         
+        # The authenticated caller, resolved once and handed to every route
+        # (every route is authorized against the use case it acts on).
+        user = get_user_from_event(event)
+        
         if method == 'GET' and path == '/datasets/pre-labeled':
-            return list_datasets(event)
+            return list_datasets(event, user)
         elif method == 'POST' and path == '/datasets/pre-labeled':
-            return create_dataset(event)
+            return create_dataset(event, user)
         elif method == 'POST' and path == '/datasets/validate-manifest':
-            return validate_manifest(event)
+            return validate_manifest(event, user)
         elif method == 'GET' and '/datasets/pre-labeled/browse' in path:
-            return browse_s3_bucket(event)
+            return browse_s3_bucket(event, user)
         elif method == 'GET' and '/datasets/pre-labeled/' in path:
             dataset_id = path.split('/')[-1]
-            return get_dataset(dataset_id)
+            return get_dataset(dataset_id, user)
         elif method == 'DELETE' and '/datasets/pre-labeled/' in path:
             dataset_id = path.split('/')[-1]
-            return delete_dataset(dataset_id)
+            return delete_dataset(dataset_id, user)
         else:
             return create_response(405, {'error': 'Method not allowed'})
             
@@ -91,7 +102,23 @@ def create_response(status_code: int, body: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def list_datasets(event):
+def _insufficient_permissions(user: Dict, usecase_id: Optional[str], resource_type: str,
+                              resource_id: Optional[str],
+                              required_role: Optional[str] = None) -> Dict[str, Any]:
+    """The 403 every route answers when `check_user_access` fails, after one
+    `unauthorized_access` audit row (design §7); nothing has been read from
+    S3 or written to DynamoDB at this point."""
+    details = {'usecase_id': usecase_id or ''}
+    if required_role:
+        details['required_role'] = required_role
+    log_audit_event(
+        user_id=user['user_id'], action='unauthorized_access',
+        resource_type=resource_type, resource_id=resource_id or 'unknown',
+        result='denied', details=details)
+    return create_response(403, {'error': 'Insufficient permissions'})
+
+
+def list_datasets(event, user: Dict):
     """List pre-labeled datasets for a use case"""
     try:
         query_params = event.get('queryStringParameters') or {}
@@ -99,6 +126,10 @@ def list_datasets(event):
         
         if not usecase_id:
             return create_response(400, {'error': 'usecase_id is required'})
+        
+        # Membership of the use case named in the query
+        if not check_user_access(user['user_id'], usecase_id):
+            return _insufficient_permissions(user, usecase_id, 'pre_labeled_dataset', usecase_id)
         
         table = dynamodb.Table(PRE_LABELED_DATASETS_TABLE)
         response = table.query(
@@ -119,7 +150,7 @@ def list_datasets(event):
         return create_response(500, {'error': 'Failed to list datasets', 'details': str(e)})
 
 
-def create_dataset(event):
+def create_dataset(event, user: Dict):
     """Create a new pre-labeled dataset"""
     try:
         body = json.loads(event.get('body', '{}'))
@@ -130,13 +161,27 @@ def create_dataset(event):
             if not body.get(field):
                 return create_response(400, {'error': f'{field} is required'})
         
+        usecase_id = body['usecase_id']
+        
+        # DataScientist on the use case, before any S3 or DynamoDB write
+        if not check_user_access(user['user_id'], usecase_id, 'DataScientist'):
+            return _insufficient_permissions(user, usecase_id, 'pre_labeled_dataset',
+                                             usecase_id, 'DataScientist')
+        
+        # Bind the manifest bucket to the use case's configured buckets
+        # before persisting (use-case bucket configuration, design §3)
+        bucket, _key = parse_s3_uri(body['manifest_s3_uri'])
+        usecase = get_usecase(usecase_id)
+        assert_bucket_allowed(usecase, bucket, 'prelabeled-register',
+                              actor=user, event=event)
+        
         # Generate dataset ID
         dataset_id = str(uuid.uuid4())
         
         # Create dataset record
         dataset = {
             'dataset_id': dataset_id,
-            'usecase_id': body['usecase_id'],
+            'usecase_id': usecase_id,
             'name': body['name'],
             'description': body.get('description', ''),
             'manifest_s3_uri': body['manifest_s3_uri'],
@@ -144,7 +189,10 @@ def create_dataset(event):
             'label_attribute': body.get('label_attribute', ''),
             'image_count': body.get('image_count', 0),
             'label_stats': body.get('label_stats', {}),
-            'created_by': body.get('created_by', 'unknown'),
+            # The authenticated caller (email -> username -> sub), never a
+            # body-supplied value.
+            'created_by': _display_identity(user.get('email'), user.get('username'),
+                                            user['user_id']),
             'created_at': int(datetime.utcnow().timestamp()),
             'updated_at': int(datetime.utcnow().timestamp())
         }
@@ -158,6 +206,8 @@ def create_dataset(event):
             'message': 'Dataset created successfully'
         })
         
+    except BucketConfigError as e:
+        return create_response(400, e.to_body())
     except Exception as e:
         print(f"Error creating dataset: {str(e)}")
         import traceback
@@ -165,7 +215,7 @@ def create_dataset(event):
         return create_response(500, {'error': 'Failed to create dataset', 'details': str(e)})
 
 
-def validate_manifest(event):
+def validate_manifest(event, user: Dict):
     """Validate a manifest file format"""
     try:
         body = json.loads(event.get('body', '{}'))
@@ -178,23 +228,32 @@ def validate_manifest(event):
         if not usecase_id:
             return create_response(400, {'error': 'usecase_id is required'})
         
-        # Parse S3 URI
-        parsed = urlparse(manifest_s3_uri)
-        bucket = parsed.netloc
-        key = parsed.path.lstrip('/')
+        # DataScientist on the use case, before any S3 call
+        if not check_user_access(user['user_id'], usecase_id, 'DataScientist'):
+            return _insufficient_permissions(user, usecase_id, 'pre_labeled_dataset',
+                                             usecase_id, 'DataScientist')
+        
+        # Parse S3 URI (InvalidS3Uri -> 400 below)
+        bucket, key = parse_s3_uri(manifest_s3_uri)
         
         # Get usecase to determine which account/role to use for S3 access
         usecase = get_usecase(usecase_id)
         
+        # Bind the manifest bucket to the use case's configured buckets
+        # before any STS or S3 call (use-case bucket configuration, design §3)
+        assert_bucket_allowed(usecase, bucket, 'prelabeled-validate',
+                              actor=user, event=event)
+        
         # Get S3 client with correct credentials for the manifest bucket
-        from shared_utils import get_s3_client_for_bucket
-        s3_client = get_s3_client_for_bucket(usecase, bucket, 'validate-manifest')
+        s3_client = get_s3_client_for_bucket(usecase, bucket, 'prelabeled-validate')
         
         # Validate manifest file
-        validation_result = validate_manifest_file(bucket, key, s3_client)
+        validation_result = validate_manifest_file(bucket, key, s3_client, usecase=usecase)
         
         return create_response(200, validation_result)
         
+    except BucketConfigError as e:
+        return create_response(400, e.to_body())
     except Exception as e:
         print(f"Error validating manifest: {str(e)}")
         import traceback
@@ -202,11 +261,18 @@ def validate_manifest(event):
         return create_response(500, {'error': 'Failed to validate manifest', 'details': str(e)})
 
 
-def validate_manifest_file(bucket: str, key: str, s3_client=None) -> Dict[str, Any]:
-    """Validate manifest file format and content"""
+def validate_manifest_file(bucket: str, key: str, s3_client, *, usecase: Dict) -> Dict[str, Any]:
+    """Validate manifest file format and content.
+
+    `s3_client` is the use case's client for `bucket` (required: there is no
+    module-level fallback client); `usecase` decides which other buckets a
+    manifest-internal reference (the segmentation mask probe) may be checked
+    in — a reference outside the use case's configured buckets is skipped
+    with a warning, never dereferenced (design §4).
+    """
+    if s3_client is None:
+        raise ValueError('validate_manifest_file requires the S3 client for the manifest bucket')
     try:
-        if s3_client is None:
-            s3_client = s3
         # Download and parse manifest
         response = s3_client.get_object(Bucket=bucket, Key=key)
         content = response['Body'].read().decode('utf-8')
@@ -332,18 +398,39 @@ def validate_manifest_file(bucket: str, key: str, s3_client=None) -> Dict[str, A
                 
                 if sample_mask_uri:
                     try:
-                        # Parse mask S3 URI
-                        mask_parsed = urlparse(sample_mask_uri)
-                        mask_bucket = mask_parsed.netloc
-                        mask_key = mask_parsed.path.lstrip('/')
-                        
-                        # Try to access the mask file
-                        s3.head_object(Bucket=mask_bucket, Key=mask_key)
-                        print(f"Verified segmentation mask file accessible: {sample_mask_uri}")
-                    except s3.exceptions.NoSuchKey:
-                        errors.append(f"Segmentation mask file not found: {sample_mask_uri}")
-                    except Exception as e:
-                        warnings.append(f"Could not verify segmentation mask file: {sample_mask_uri} ({str(e)})")
+                        mask_bucket, mask_key = parse_s3_uri(sample_mask_uri)
+                    except InvalidS3Uri:
+                        mask_bucket = mask_key = None
+                        warnings.append("Segmentation mask reference is not a valid S3 URI; not checked")
+                    if mask_bucket is not None:
+                        try:
+                            # The use case's client for the mask bucket: the
+                            # manifest's own client when they match, the
+                            # helper's for another configured bucket; a bucket
+                            # outside the configured set is not probed.
+                            if mask_bucket == bucket:
+                                mask_s3 = s3_client
+                            elif mask_bucket in allowed_s3_buckets(usecase):
+                                mask_s3 = get_s3_client_for_bucket(
+                                    usecase, mask_bucket, 'prelabeled-mask-ref')
+                            else:
+                                mask_s3 = None
+                                warnings.append(
+                                    f"Segmentation mask reference in bucket {mask_bucket} is not "
+                                    f"configured for this use case; existence not checked")
+                                print(f"Mask reference bucket {mask_bucket} is not configured for "
+                                      f"use case {usecase.get('usecase_id')}; existence not checked")
+                            if mask_s3 is not None:
+                                # Try to access the mask file
+                                mask_s3.head_object(Bucket=mask_bucket, Key=mask_key)
+                                print(f"Verified segmentation mask file accessible: {sample_mask_uri}")
+                        except ClientError as e:
+                            if e.response.get('Error', {}).get('Code') in ('NoSuchKey', '404'):
+                                errors.append(f"Segmentation mask file not found: {sample_mask_uri}")
+                            else:
+                                warnings.append(f"Could not verify segmentation mask file: {sample_mask_uri} ({str(e)})")
+                        except Exception as e:
+                            warnings.append(f"Could not verify segmentation mask file: {sample_mask_uri} ({str(e)})")
         
         return {
             'valid': len(errors) == 0,
@@ -352,10 +439,19 @@ def validate_manifest_file(bucket: str, key: str, s3_client=None) -> Dict[str, A
             'stats': stats
         }
         
-    except s3.exceptions.NoSuchKey:
+    except ClientError as e:
+        if e.response.get('Error', {}).get('Code') in ('NoSuchKey', '404'):
+            return {
+                'valid': False,
+                'errors': [f"Manifest file not found: s3://{bucket}/{key}"],
+                'warnings': [],
+                'stats': {
+                    'sample_entries': []
+                }
+            }
         return {
             'valid': False,
-            'errors': [f"Manifest file not found: s3://{bucket}/{key}"],
+            'errors': [f"Failed to read manifest file: {str(e)}"],
             'warnings': [],
             'stats': {
                 'sample_entries': []
@@ -426,7 +522,7 @@ def analyze_manifest_entries(entries: List[Dict]) -> Dict[str, Any]:
     }
 
 
-def get_dataset(dataset_id: str):
+def get_dataset(dataset_id: str, user: Dict):
     """Get dataset details"""
     try:
         table = dynamodb.Table(PRE_LABELED_DATASETS_TABLE)
@@ -435,6 +531,13 @@ def get_dataset(dataset_id: str):
         if 'Item' not in response:
             return create_response(404, {'error': 'Dataset not found'})
         
+        # Membership of the use case the record belongs to (404 first, so an
+        # unknown id is not distinguishable from a forbidden one by order)
+        record_usecase_id = response['Item'].get('usecase_id')
+        if not check_user_access(user['user_id'], record_usecase_id):
+            return _insufficient_permissions(user, record_usecase_id, 'pre_labeled_dataset',
+                                             dataset_id)
+        
         return create_response(200, {'dataset': response['Item']})
         
     except Exception as e:
@@ -442,10 +545,21 @@ def get_dataset(dataset_id: str):
         return create_response(500, {'error': 'Failed to get dataset', 'details': str(e)})
 
 
-def delete_dataset(dataset_id: str):
+def delete_dataset(dataset_id: str, user: Dict):
     """Delete a dataset"""
     try:
         table = dynamodb.Table(PRE_LABELED_DATASETS_TABLE)
+        response = table.get_item(Key={'dataset_id': dataset_id})
+        
+        if 'Item' not in response:
+            return create_response(404, {'error': 'Dataset not found'})
+        
+        # DataScientist on the record's use case, before the delete
+        record_usecase_id = response['Item'].get('usecase_id')
+        if not check_user_access(user['user_id'], record_usecase_id, 'DataScientist'):
+            return _insufficient_permissions(user, record_usecase_id, 'pre_labeled_dataset',
+                                             dataset_id, 'DataScientist')
+        
         table.delete_item(Key={'dataset_id': dataset_id})
         
         return create_response(200, {'message': 'Dataset deleted successfully'})
@@ -456,7 +570,7 @@ def delete_dataset(dataset_id: str):
 
 
 
-def browse_s3_bucket(event):
+def browse_s3_bucket(event, user: Dict):
     """
     Browse S3 bucket contents for a use case.
     
@@ -478,6 +592,10 @@ def browse_s3_bucket(event):
         
         if not usecase_id:
             return create_response(400, {'error': 'usecase_id is required'})
+        
+        # Membership of the use case named in the query, before any S3 call
+        if not check_user_access(user['user_id'], usecase_id):
+            return _insufficient_permissions(user, usecase_id, 'pre_labeled_dataset', usecase_id)
         
         # Use shared browse utility with manifest file filter
         result = browse_s3_bucket_util(

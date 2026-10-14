@@ -75,8 +75,18 @@ class _FullNet(nn.Module):
 def _load_model_converter():
     su = types.ModuleType("shared_utils")
     for name in ["create_response", "get_user_from_event", "log_audit_event",
-                 "check_user_access", "validate_required_fields"]:
+                 "check_user_access", "validate_required_fields",
+                 # portal-usecase-bucket-config: the trusted-source rule now
+                 # parses with the shared layer's parse_s3_uri and compares
+                 # against the use case's configured buckets. Stubbed like the
+                 # names above: none of the #8 sites under test reach them.
+                 "parse_s3_uri", "allowed_s3_buckets", "portal_owned_buckets",
+                 "bucket_config_error_response"]:
         setattr(su, name, lambda *a, **k: None)
+    for name in ["InvalidS3Uri", "BucketConfigError", "BucketNotAllowed"]:
+        setattr(su, name, type(name, (ValueError,), {}))
+    su.REMEDY_NOT_ALLOWED = "remedy"
+    su.REMEDY_PORTAL_BUCKET = "remedy"
 
     boto3 = types.ModuleType("boto3")
     boto3.resource = lambda *a, **k: types.SimpleNamespace(

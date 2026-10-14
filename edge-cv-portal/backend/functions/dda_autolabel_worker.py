@@ -427,15 +427,18 @@ def _llm_model_image_limits() -> Dict[str, Any]:
 
 def _few_shot_ref_location(ref: str) -> Tuple[Optional[str], Optional[str]]:
     """(bucket, key) for one stored example reference. References are
-    portal artifacts bucket keys (the wizard's presigned-PUT uploads) or
-    full s3:// URIs — the two spellings the job record carries."""
+    `s3://` URIs inside the use case's configured buckets; anything else
+    resolves to `(None, None)`, which the caller reports as a reference
+    that could not be resolved to an S3 object (use-case bucket
+    configuration, design §3). The bucket itself is bound to the use
+    case's configured set by `_dataset_s3_client` when it is read."""
     if not isinstance(ref, str) or not ref:
         return None, None
     if ref.startswith('s3://'):
         remainder = ref[len('s3://'):]
         bucket, _, key = remainder.partition('/')
         return (bucket or None), (key or None)
-    return (PORTAL_ARTIFACTS_BUCKET or None), ref
+    return None, None
 
 
 def _resolve_few_shot_images(job: Dict,

@@ -317,10 +317,12 @@ class TestSuccessfulCreation:
         status InProgress, image_count over nested prefixes, and every
         submitted field persisted."""
         env.put_images(["a.jpg", "b.PNG", "nested/deep/c.jpeg"])
+        # Example references are s3:// URIs inside the use case's
+        # configured buckets (portal-usecase-bucket-config).
         status, body = env.create(
             instructions="Label carefully",
-            example_images={"good": ["ex/good1.jpg"],
-                            "bad": ["ex/bad1.png"]},
+            example_images={"good": [f"s3://{DATASET_BUCKET}/ex/good1.jpg"],
+                            "bad": [f"s3://{DATASET_BUCKET}/ex/bad1.png"]},
         )
         assert status == 201
         assert body["status"] == "InProgress"
@@ -337,8 +339,9 @@ class TestSuccessfulCreation:
         assert job["dataset_bucket"] == DATASET_BUCKET
         assert job["team_id"] == env.team_id
         assert job["instructions"] == "Label carefully"
-        assert job["example_images"] == {"good": ["ex/good1.jpg"],
-                                         "bad": ["ex/bad1.png"]}
+        assert job["example_images"] == {
+            "good": [f"s3://{DATASET_BUCKET}/ex/good1.jpg"],
+            "bad": [f"s3://{DATASET_BUCKET}/ex/bad1.png"]}
         assert job["submitted_count"] == 0
         assert job["blocked"] is False
         assert job["skip_verification"] is False
@@ -506,7 +509,8 @@ class TestParameterValidation:
         """Req 4.4: at most 10 good and 10 bad example images."""
         env.put_images(["a.jpg"])
         status, body = env.create(example_images={
-            "good": [f"g{i}.jpg" for i in range(11)], "bad": []})
+            "good": [f"s3://{DATASET_BUCKET}/ex/g{i}.jpg" for i in range(11)],
+            "bad": []})
         assert status == 400
         assert "At most 10 good example images" in messages(body)
         env.assert_nothing_persisted()
@@ -515,11 +519,14 @@ class TestParameterValidation:
         """Req 4.4: each non-JPEG/PNG example reference identified."""
         env.put_images(["a.jpg"])
         status, body = env.create(example_images={
-            "good": ["ok.png", "bad.gif"], "bad": ["worse.bmp"]})
+            "good": [f"s3://{DATASET_BUCKET}/ex/ok.png",
+                     f"s3://{DATASET_BUCKET}/ex/bad.gif"],
+            "bad": [f"s3://{DATASET_BUCKET}/ex/worse.bmp"]})
         assert status == 400
         offenders = {err.get("example_ref")
                      for err in body["validation_errors"]}
-        assert offenders == {"bad.gif", "worse.bmp"}
+        assert offenders == {f"s3://{DATASET_BUCKET}/ex/bad.gif",
+                             f"s3://{DATASET_BUCKET}/ex/worse.bmp"}
         env.assert_nothing_persisted()
 
     def test_all_invalid_parameters_enumerated_together(self, env):

@@ -586,8 +586,12 @@ def test_get_s3_client_for_bucket_signature_unchanged_and_binds_first():
 
 
 def test_helper_call_sites_are_unchanged():
-    """The helper keeps its signature, so the fourteen existing call sites need
-    no edit: none passes a new keyword and none names the artifacts bucket."""
+    """The helper keeps its signature: the fourteen pre-existing call sites
+    needed no edit, and the sinks bound in design §3 (model_import's
+    consolidated artifact validator, data_management's four handlers, the
+    pre-labeled mask probe, training's reference check and transform output)
+    call it the same way — none passes a new keyword and none names the
+    artifacts bucket."""
     call_sites = []
     for root in (_FUNCTIONS_DIR, _SHARED_LAYER):
         for name in sorted(os.listdir(root)):
@@ -602,10 +606,11 @@ def test_helper_call_sites_are_unchanged():
                     callee_name = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", None)
                     if callee_name == "get_s3_client_for_bucket":
                         call_sites.append((name, node))
-    assert len(call_sites) == 14
+    assert len(call_sites) == 19
     assert {name for name, _ in call_sites} == {
         "dda_autolabel_worker.py", "dda_labeling.py", "dda_labeling_worker.py",
-        "pre_labeled_datasets.py", "training.py", "s3_browse_utils.py"}
+        "pre_labeled_datasets.py", "training.py", "s3_browse_utils.py",
+        "data_management.py", "model_import.py"}
     for _, call in call_sites:
         assert 2 <= len(call.args) + len(call.keywords) <= 3
         assert all(kw.arg in (None, "session_name") for kw in call.keywords)

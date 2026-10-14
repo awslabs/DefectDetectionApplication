@@ -14,7 +14,6 @@ import uuid
 import tarfile
 import tempfile
 import shutil
-from urllib.parse import urlparse
 import yaml
 
 # Import shared utilities
@@ -22,7 +21,10 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields
+    check_user_access, validate_required_fields,
+    parse_s3_uri, allowed_s3_buckets, portal_owned_buckets, InvalidS3Uri,
+    BucketConfigError, BucketNotAllowed, bucket_config_error_response,
+    REMEDY_NOT_ALLOWED, REMEDY_PORTAL_BUCKET
 )
 # Envelope-only checkpoint classifier (stdlib, never raises, no torch import).
 # Smart Import keeps a fine-tunable .pt/.pth as a sidecar so it can later be a
@@ -67,49 +69,60 @@ UPLOAD_S3_CLIENT_CONFIG = Config(signature_version='s3v4')
 # serializer). The primary neutralization is weights_only=True (see
 # inspect_pytorch_model). As defense-in-depth AND to gate
 # the legitimate full-checkpoint weights_only=False fallback, the source S3
-# bucket/account is validated against a CONFIG-DRIVEN allowlist populated from
-# environment variables (comma-separated):
+# bucket is validated against the use case's configured buckets
+# (shared_utils.allowed_s3_buckets — the use-case bucket configuration) plus a
+# CONFIG-DRIVEN allowlist populated from one environment variable
+# (comma-separated):
 #   * TRUSTED_MODEL_BUCKETS  — exact bucket names that are trusted.
-#   * TRUSTED_MODEL_ACCOUNTS — account IDs; a bucket whose name embeds one of
-#     these account IDs (a common naming convention) is treated as trusted.
-# The use case's own application-owned s3_bucket is always trusted.
+# Membership is an exact bucket-name comparison. The former
+# TRUSTED_MODEL_ACCOUNTS substring rule is gone; the variable, if still set,
+# is ignored with one WARNING at import time.
 def _config_trusted_model_buckets() -> set:
     raw = os.environ.get('TRUSTED_MODEL_BUCKETS', '')
     return {b.strip() for b in raw.split(',') if b.strip()}
 
 
-def _config_trusted_model_accounts() -> set:
-    raw = os.environ.get('TRUSTED_MODEL_ACCOUNTS', '')
-    return {a.strip() for a in raw.split(',') if a.strip()}
+if os.environ.get('TRUSTED_MODEL_ACCOUNTS'):
+    logger.warning("TRUSTED_MODEL_ACCOUNTS is set but no longer consulted: trusted "
+                   "model sources are exact bucket names — the use case's configured "
+                   "buckets and TRUSTED_MODEL_BUCKETS")
 
 
 def is_trusted_model_source(model_s3_uri: str, usecase: Optional[Dict] = None) -> bool:
-    """Return True iff the model_s3_uri points at a bucket/account on the
-    config-driven trusted allowlist.
+    """Return True iff the model_s3_uri names a bucket that is an exact member
+    of the use case's configured buckets (`allowed_s3_buckets`) or of the
+    config-driven TRUSTED_MODEL_BUCKETS allowlist.
 
     Only allowlisted sources are downloaded/inspected, and only allowlisted
     sources may use the weights_only=False full-checkpoint fallback. Anything
-    else is rejected (the caller returns a 400)."""
+    else — a URI the shared parser rejects included — is refused (the caller
+    returns a 400)."""
     try:
-        parsed = urlparse(model_s3_uri)
-    except Exception:
+        bucket, _key = parse_s3_uri(model_s3_uri, require_key=True)
+    except InvalidS3Uri:
         return False
-    bucket = parsed.netloc
-    if not bucket:
-        return False
+    allowed = allowed_s3_buckets(usecase) if usecase else frozenset()
+    return bucket in (allowed | _config_trusted_model_buckets())
 
-    trusted_buckets = _config_trusted_model_buckets()
-    # The use case's own application-owned bucket is always trusted.
-    if usecase and usecase.get('s3_bucket'):
-        trusted_buckets.add(usecase['s3_bucket'])
-    if bucket in trusted_buckets:
-        return True
 
-    # Account-based allowlisting: a bucket that embeds a trusted account id.
-    for account in _config_trusted_model_accounts():
-        if account and account in bucket:
-            return True
-    return False
+def _refused_model_source(source_bucket: str, usecase: Dict, purpose: str,
+                          user: Dict, event: Optional[Dict]) -> Dict:
+    """The 400 body for a model_s3_uri whose bucket is not a trusted source
+    (use-case bucket configuration, design §1.2: error_code
+    bucket_not_allowed), with the refusal audited like every other sink."""
+    usecase_id = usecase.get('usecase_id')
+    logger.warning("Model source bucket refused: usecase=%s bucket=%s purpose=%s",
+                   usecase_id, source_bucket, purpose)
+    log_audit_event(
+        user_id=user['user_id'], action='s3_bucket_refused', resource_type='usecase',
+        resource_id=usecase_id or 'unknown', result='denied',
+        details={'bucket': source_bucket, 'purpose': purpose}, event=event)
+    portal_owned = source_bucket in portal_owned_buckets()
+    return bucket_config_error_response(BucketNotAllowed(
+        'model_s3_uri source bucket is not configured for this use case or on '
+        'the trusted-source allowlist',
+        bucket=source_bucket, usecase_id=usecase_id, purpose=purpose,
+        remedy=REMEDY_PORTAL_BUCKET if portal_owned else REMEDY_NOT_ALLOWED))
 
 # Supported model types
 MODEL_TYPES = {
@@ -1162,6 +1175,20 @@ def convert_model(event: Dict, context: Any) -> Dict:
         # Get use case details
         usecase = get_usecase_details(usecase_id)
         
+        # Parse S3 URI (InvalidS3Uri -> 400 below)
+        source_bucket, source_key = parse_s3_uri(model_s3_uri)
+
+        # Restrict the model source to trusted buckets (#8): the use case's
+        # configured buckets plus TRUSTED_MODEL_BUCKETS, exact names. A
+        # non-allowlisted source is rejected BEFORE any STS call or download,
+        # narrowing the attack surface; only an allowlisted source may later
+        # use the weights_only=False full-checkpoint fallback in
+        # inspect_pytorch_model.
+        trusted_source = is_trusted_model_source(model_s3_uri, usecase)
+        if not trusted_source:
+            return _refused_model_source(source_bucket, usecase, 'model-convert',
+                                         user, event)
+        
         # Assume cross-account role
         credentials = assume_usecase_role(
             usecase['cross_account_role_arn'],
@@ -1171,21 +1198,6 @@ def convert_model(event: Dict, context: Any) -> Dict:
 
         # Create S3 client (assumed role for multi-account, Lambda role for single-account)
         s3_client = make_usecase_s3_client(credentials)
-        
-        # Parse S3 URI
-        parsed = urlparse(model_s3_uri)
-        source_bucket = parsed.netloc
-        source_key = parsed.path.lstrip('/')
-
-        # Restrict the model source to trusted buckets/accounts (#8). A
-        # non-allowlisted source is rejected BEFORE download, narrowing the
-        # attack surface; only an allowlisted source may later use the
-        # weights_only=False full-checkpoint fallback in inspect_pytorch_model.
-        trusted_source = is_trusted_model_source(model_s3_uri, usecase)
-        if not trusted_source:
-            return create_response(400, {
-                'error': 'model_s3_uri source bucket is not on the trusted-source allowlist'
-            })
 
         # detector-checkpoint-import (Requirement 4): a .pt/.pth asked for as
         # ONNX is converted by a network-isolated SageMaker job, instead of
@@ -1351,6 +1363,8 @@ def convert_model(event: Dict, context: Any) -> Dict:
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
         
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         return create_response(400, {'error': str(e)})
@@ -1390,12 +1404,22 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
         usecase_id = body['usecase_id']
         model_s3_uri = body['model_s3_uri'].strip()
         
-        # Check user access
-        if not check_user_access(user_id, usecase_id):
+        # Check user access (DataScientist role required, matching convert_model)
+        if not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Get use case details
         usecase = get_usecase_details(usecase_id)
+        
+        # Parse S3 URI (InvalidS3Uri -> 400 below)
+        bucket, key = parse_s3_uri(model_s3_uri)
+
+        # Restrict the model source to trusted buckets (#8): the use case's
+        # configured buckets plus TRUSTED_MODEL_BUCKETS, exact names; reject a
+        # non-allowlisted source before any STS call or download.
+        trusted_source = is_trusted_model_source(model_s3_uri, usecase)
+        if not trusted_source:
+            return _refused_model_source(bucket, usecase, 'model-inspect', user, event)
         
         # Assume cross-account role
         credentials = assume_usecase_role(
@@ -1406,19 +1430,6 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
 
         # Create S3 client (assumed role for multi-account, Lambda role for single-account)
         s3_client = make_usecase_s3_client(credentials)
-        
-        # Parse S3 URI
-        parsed = urlparse(model_s3_uri)
-        bucket = parsed.netloc
-        key = parsed.path.lstrip('/')
-
-        # Restrict the model source to trusted buckets/accounts (#8): reject a
-        # non-allowlisted source before download.
-        trusted_source = is_trusted_model_source(model_s3_uri, usecase)
-        if not trusted_source:
-            return create_response(400, {
-                'error': 'model_s3_uri source bucket is not on the trusted-source allowlist'
-            })
 
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_inspect_")
@@ -1467,6 +1478,8 @@ def inspect_model_endpoint(event: Dict, context: Any) -> Dict:
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
         
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except Exception as e:
         logger.error(f"Error inspecting model: {str(e)}")
         return create_response(500, {'error': f"Failed to inspect model: {str(e)}"})

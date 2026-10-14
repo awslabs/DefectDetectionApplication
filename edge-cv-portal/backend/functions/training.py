@@ -21,7 +21,9 @@ from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, create_s3_path_builder,
     is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase,
-    get_s3_client_for_bucket
+    get_s3_client_for_bucket, parse_s3_uri, assert_bucket_allowed,
+    allowed_s3_buckets, BucketConfigError, InvalidS3Uri,
+    bucket_config_error_response
 )
 from manifest_transformer import (
     detect_ground_truth_attributes,
@@ -83,6 +85,64 @@ MARKETPLACE_ALGORITHM_ARN = os.environ.get(
 
 logger.info(f"Using marketplace algorithm ARN: {MARKETPLACE_ALGORITHM_ARN}")
 
+# The keys of a refused bucket-configuration decision (shared_utils
+# BucketConfigError.to_body) that ride along inside a validation result so
+# the handler can answer with the Requirement 5 body.
+_BUCKET_CONFIG_BODY_KEYS = ('error', 'error_code', 'bucket', 'usecase_id',
+                            'purpose', 'reason', 'remedy')
+
+
+def _bucket_config_validation_result(exc: BucketConfigError, **extra) -> Dict:
+    """A validation-result dict for a refused bucket-configuration decision
+    (use-case bucket configuration, design §3): `valid` is False and the
+    body fields of the refusal are carried alongside `errors` / `message`
+    so `create_training_job` can emit them unchanged."""
+    result = {'valid': False, 'errors': [exc.message], 'message': exc.message}
+    result.update(extra)
+    result.update(exc.to_body())
+    return result
+
+
+def _bucket_config_body(validation_result: Dict) -> Dict:
+    """The refusal body carried by `_bucket_config_validation_result`."""
+    return {key: validation_result[key] for key in _BUCKET_CONFIG_BODY_KEYS
+            if key in validation_result}
+
+
+def _reference_exists(ref_field: str, ref_uri: Any, usecase: Dict, allowed,
+                      clients: Dict, warnings: list, session_name: str):
+    """Existence spot-check of one manifest-internal reference (use-case
+    bucket configuration, design §4).
+
+    Returns True when the object exists (or S3 answered anything other than
+    a 404), False when S3 answered 404 / NoSuchKey, and None when the
+    reference was not checked: it is not a valid S3 URI, or its bucket is
+    not one of the use case's configured buckets. A skipped reference adds
+    a warning naming the field (and the bucket, never the key) and costs
+    no client, no STS call and no audit row — the request itself is not
+    refused; the SageMaker execution role decides at training time.
+    """
+    try:
+        ref_bucket, ref_key = parse_s3_uri(ref_uri)
+    except InvalidS3Uri:
+        warnings.append(f"{ref_field}: reference is not a valid S3 URI; not checked")
+        return None
+    if ref_bucket not in allowed:
+        warnings.append(f"{ref_field}: reference in bucket {ref_bucket} is not "
+                        f"configured for this use case; existence not checked")
+        logger.info("Manifest reference %s in bucket %s is not configured for "
+                    "use case %s; existence not checked",
+                    ref_field, ref_bucket, usecase.get('usecase_id'))
+        return None
+    try:
+        if ref_bucket not in clients:
+            clients[ref_bucket] = get_s3_client_for_bucket(usecase, ref_bucket, session_name)
+        clients[ref_bucket].head_object(Bucket=ref_bucket, Key=ref_key)
+    except ClientError as e:
+        if e.response['Error']['Code'] in ('404', 'NoSuchKey'):
+            return False
+    return True
+
 
 def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: str) -> Dict:
     """
@@ -98,27 +158,13 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
     - anomaly-mask-ref-metadata: Mask metadata
     
     Returns:
-        dict with 'valid' (bool), 'message' (str), 'errors' (list)
+        dict with 'valid' (bool), 'message' (str), 'errors' (list),
+        'warnings' (list)
     """
+    warnings: list = []
     try:
-        # Parse S3 URI
-        if not manifest_uri.startswith('s3://'):
-            return {
-                'valid': False,
-                'errors': ['Manifest URI must be an S3 URI (s3://bucket/key)'],
-                'message': 'Invalid manifest URI format'
-            }
-        
-        parts = manifest_uri.replace('s3://', '').split('/', 1)
-        if len(parts) != 2:
-            return {
-                'valid': False,
-                'errors': ['Invalid S3 URI format'],
-                'message': 'Could not parse manifest URI'
-            }
-        
-        bucket = parts[0]
-        key = parts[1]
+        # Parse S3 URI (InvalidS3Uri -> the refusal result below)
+        bucket, key = parse_s3_uri(manifest_uri)
         
         # In single-account setup, use Lambda's own credentials
         # In multi-account setup, assume the usecase role
@@ -257,29 +303,27 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
                 'message': 'Invalid metadata type'
             }
         
-        # Spot-check that referenced S3 files exist (first entry only)
+        # Spot-check that referenced S3 files exist (first entry only). A
+        # reference outside the use case's configured buckets is skipped
+        # with a warning, never dereferenced (design §4).
+        allowed = allowed_s3_buckets(usecase)
+        clients = {bucket: s3_client}
         missing_refs = []
         for ref_field in ['source-ref', 'anomaly-mask-ref']:
             ref_uri = first_entry.get(ref_field)
-            if not ref_uri or not isinstance(ref_uri, str) or not ref_uri.startswith('s3://'):
+            if not ref_uri:
                 continue
-            ref_parts = ref_uri.replace('s3://', '').split('/', 1)
-            if len(ref_parts) != 2:
-                continue
-            ref_bucket, ref_key = ref_parts
-            try:
-                ref_s3 = get_s3_client_for_bucket(usecase, ref_bucket, f"validate-{ref_field}")
-                ref_s3.head_object(Bucket=ref_bucket, Key=ref_key)
-            except ClientError as e:
-                code = e.response['Error']['Code']
-                if code in ('404', 'NoSuchKey'):
-                    missing_refs.append(f"{ref_field}: {ref_uri}")
+            exists = _reference_exists(ref_field, ref_uri, usecase, allowed, clients,
+                                       warnings, f"validate-{ref_field}")
+            if exists is False:
+                missing_refs.append(f"{ref_field}: {ref_uri}")
         
         if missing_refs:
             return {
                 'valid': False,
                 'errors': [f"Referenced file not found: {ref}" for ref in missing_refs],
-                'message': 'Manifest references files that do not exist in S3. Check that images/masks have been uploaded.'
+                'message': 'Manifest references files that do not exist in S3. Check that images/masks have been uploaded.',
+                'warnings': warnings
             }
         
         # All validations passed
@@ -287,9 +331,14 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
             'valid': True,
             'message': f'Manifest is valid for {model_type} training',
             'errors': [],
+            'warnings': warnings,
             'sample_entry': first_entry
         }
         
+    except BucketConfigError as e:
+        logger.warning(f"Manifest bucket refused for use case "
+                       f"{usecase.get('usecase_id')}: {e.error_code}")
+        return _bucket_config_validation_result(e, warnings=warnings)
     except Exception as e:
         logger.error(f"Error validating manifest: {str(e)}")
         return {
@@ -316,19 +365,13 @@ def validate_detection_manifest(manifest_uri: str, usecase: Dict) -> Dict:
     job-named attribute. Never suggests the Manifest Transformer (it has no
     ObjectDetection handling).
 
-    Returns {'valid', 'errors', 'message', 'class_names', 'detected_attributes'}.
+    Returns {'valid', 'errors', 'message', 'class_names', 'detected_attributes',
+    'warnings'}.
     """
+    warnings: list = []
     try:
-        if not manifest_uri.startswith('s3://'):
-            return {'valid': False, 'message': 'Invalid manifest URI format',
-                    'errors': ['Manifest URI must be an S3 URI (s3://bucket/key)'],
-                    'class_names': [], 'detected_attributes': []}
-        parts = manifest_uri.replace('s3://', '').split('/', 1)
-        if len(parts) != 2 or not parts[1]:
-            return {'valid': False, 'message': 'Could not parse manifest URI',
-                    'errors': ['Invalid S3 URI format'],
-                    'class_names': [], 'detected_attributes': []}
-        bucket, key = parts
+        # InvalidS3Uri -> the refusal result below
+        bucket, key = parse_s3_uri(manifest_uri)
 
         s3_client = get_s3_client_for_bucket(usecase, bucket, 'validate-detection-manifest')
         try:
@@ -360,24 +403,30 @@ def validate_detection_manifest(manifest_uri: str, usecase: Dict) -> Dict:
                     'errors': result['errors'], 'class_names': [],
                     'detected_attributes': result['detected_attributes']}
 
-        # Spot-check the first image exists (same courtesy as the LFV validator).
+        # Spot-check the first image exists (same courtesy as the LFV
+        # validator); a reference outside the use case's configured buckets
+        # is skipped with a warning, never dereferenced (design §4).
         ref = first_entry.get('source-ref', '')
-        ref_parts = ref.replace('s3://', '').split('/', 1)
-        if len(ref_parts) == 2:
-            try:
-                ref_s3 = get_s3_client_for_bucket(usecase, ref_parts[0], 'validate-source-ref')
-                ref_s3.head_object(Bucket=ref_parts[0], Key=ref_parts[1])
-            except ClientError as e:
-                if e.response['Error']['Code'] in ('404', 'NoSuchKey'):
-                    return {'valid': False,
-                            'message': 'Manifest references images that do not exist in S3',
-                            'errors': [f'Referenced file not found: source-ref: {ref}'],
-                            'class_names': [], 'detected_attributes': result['detected_attributes']}
+        if ref:
+            exists = _reference_exists('source-ref', ref, usecase, allowed_s3_buckets(usecase),
+                                       {bucket: s3_client}, warnings, 'validate-source-ref')
+            if exists is False:
+                return {'valid': False,
+                        'message': 'Manifest references images that do not exist in S3',
+                        'errors': [f'Referenced file not found: source-ref: {ref}'],
+                        'class_names': [], 'detected_attributes': result['detected_attributes'],
+                        'warnings': warnings}
 
         return {'valid': True, 'message': 'Manifest is valid for object_detection training',
                 'errors': [], 'class_names': result['class_names'],
                 'attribute': result['attribute'],
-                'detected_attributes': result['detected_attributes']}
+                'detected_attributes': result['detected_attributes'],
+                'warnings': warnings}
+    except BucketConfigError as e:
+        logger.warning(f"Detection manifest bucket refused for use case "
+                       f"{usecase.get('usecase_id')}: {e.error_code}")
+        return _bucket_config_validation_result(
+            e, class_names=[], detected_attributes=[], warnings=warnings)
     except Exception as e:
         logger.error(f"Error validating detection manifest: {str(e)}")
         return {'valid': False, 'message': 'Failed to validate manifest',
@@ -471,6 +520,9 @@ def _create_detection_training_job(
     validation = validate_detection_manifest(dataset_manifest_s3, usecase)
     if not validation['valid']:
         logger.error(f"Detection manifest validation failed: {validation['errors']}")
+        if validation.get('error_code'):
+            # A refused bucket answers the use-case bucket configuration body.
+            return create_response(400, _bucket_config_body(validation))
         return create_response(400, {
             'error': 'Object Detection requires a bounding-box manifest',
             'details': validation['errors'],
@@ -760,6 +812,13 @@ def create_training_job(event: Dict, context: Any) -> Dict:
         # Get use case details
         usecase = get_usecase(usecase_id)
 
+        # Bind the manifest bucket to the use case's configured buckets
+        # before any STS or S3 call, whatever the model_source (use-case
+        # bucket configuration, design §3). BucketConfigError -> 400 below.
+        manifest_bucket, _manifest_key = parse_s3_uri(dataset_manifest_s3)
+        assert_bucket_allowed(usecase, manifest_bucket, 'training-manifest',
+                              actor=user, event=event)
+
         # Object Detection (YOLO): script-mode training job, not the
         # marketplace algorithm. Branches here so everything below stays the
         # untouched LFV path (portal-detection-training Req 1.2).
@@ -778,6 +837,7 @@ def create_training_job(event: Dict, context: Any) -> Dict:
             )
         
         # Validate manifest format for marketplace model
+        validation_warnings = []
         if model_source == 'marketplace':
             logger.info("Validating manifest format for marketplace model")
             validation_result = validate_marketplace_manifest(
@@ -791,6 +851,10 @@ def create_training_job(event: Dict, context: Any) -> Dict:
                 logger.error(f"Detected attributes: {validation_result.get('detected_attributes', [])}")
                 logger.error(f"Required attributes: {validation_result.get('required_attributes', [])}")
                 
+                if validation_result.get('error_code'):
+                    # A refused bucket answers the use-case bucket
+                    # configuration body (design §1.2).
+                    return create_response(400, _bucket_config_body(validation_result))
                 return create_response(400, {
                     'error': 'Manifest validation failed',
                     'details': validation_result['errors'],
@@ -799,6 +863,7 @@ def create_training_job(event: Dict, context: Any) -> Dict:
                     'suggestion': 'Ensure your manifest is in DDA format with anomaly-label, anomaly-label-metadata, and source-ref fields. Use the Manifest Transformer tool to convert Ground Truth manifests.'
                 })
             logger.info(f"Manifest validation passed: {validation_result['message']}")
+            validation_warnings = validation_result.get('warnings', [])
         
         # Log data account configuration for debugging
         data_account_id = usecase.get('data_account_id')
@@ -979,9 +1044,12 @@ def create_training_job(event: Dict, context: Any) -> Dict:
             'training_job_name': training_job_name,
             'training_job_arn': training_job_arn,
             'status': 'InProgress',
-            'message': 'Training job created successfully'
+            'message': 'Training job created successfully',
+            'warnings': validation_warnings
         })
         
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         return create_response(400, {'error': str(e)})
@@ -1642,19 +1710,28 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         if not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
         
-        # Parse S3 URI
-        if not source_manifest_uri.startswith('s3://'):
-            return create_response(400, {'error': 'source_manifest_uri must be an S3 URI (s3://bucket/key)'})
-        
-        source_parts = source_manifest_uri.replace('s3://', '').split('/', 1)
-        if len(source_parts) != 2:
-            return create_response(400, {'error': 'Invalid S3 URI format'})
-        
-        source_bucket = source_parts[0]
-        source_key = source_parts[1]
+        # Parse the source URI (InvalidS3Uri -> 400 below)
+        source_bucket, source_key = parse_s3_uri(source_manifest_uri)
         
         # Get use case details
         usecase = get_usecase(usecase_id)
+        
+        # Determine output location (defaults to the source bucket with a
+        # -dda suffix) and bind source then output to the use case's
+        # configured buckets before any STS or S3 call (use-case bucket
+        # configuration, design §3).
+        if not output_manifest_uri:
+            base_key = source_key.rsplit('.', 1)[0]
+            output_key = f"{base_key}-dda.manifest"
+            output_bucket = source_bucket
+            output_manifest_uri = f"s3://{output_bucket}/{output_key}"
+        else:
+            output_bucket, output_key = parse_s3_uri(output_manifest_uri)
+        assert_bucket_allowed(usecase, source_bucket, 'transform-source',
+                              actor=user, event=event)
+        if output_bucket != source_bucket:
+            assert_bucket_allowed(usecase, output_bucket, 'transform-output',
+                                  actor=user, event=event)
         
         # Get region from use case (defaults to us-east-1 if not set)
         usecase_region = usecase.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
@@ -1679,8 +1756,15 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         if not manifest_lines:
             return create_response(400, {'error': 'Source manifest is empty'})
         
-        # Validate that referenced S3 files exist (spot-check first few entries)
+        # Validate that referenced S3 files exist (spot-check first few
+        # entries). A reference outside the use case's configured buckets
+        # is skipped with a warning, never dereferenced (design §4); access
+        # denied is skipped too — the file may exist but we can't check from
+        # this role.
         logger.info("Validating referenced S3 files exist...")
+        allowed = allowed_s3_buckets(usecase)
+        ref_clients = {source_bucket: s3_usecase}
+        warnings = []
         missing_files = []
         check_count = min(5, len(manifest_lines))  # Check up to 5 entries
         for i in range(check_count):
@@ -1691,20 +1775,12 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
             
             for ref_field in ['source-ref', 'anomaly-mask-ref']:
                 ref_uri = entry.get(ref_field)
-                if not ref_uri or not ref_uri.startswith('s3://'):
+                if not ref_uri:
                     continue
-                ref_parts = ref_uri.replace('s3://', '').split('/', 1)
-                if len(ref_parts) != 2:
-                    continue
-                ref_bucket, ref_key = ref_parts
-                try:
-                    ref_s3 = get_s3_client_for_bucket(usecase, ref_bucket, f"validate-ref-{i}")
-                    ref_s3.head_object(Bucket=ref_bucket, Key=ref_key)
-                except ClientError as e:
-                    code = e.response['Error']['Code']
-                    if code in ('404', 'NoSuchKey'):
-                        missing_files.append(f"Line {i+1} {ref_field}: {ref_uri}")
-                    # Skip access denied — the file may exist but we can't check from this role
+                exists = _reference_exists(f"Line {i+1} {ref_field}", ref_uri, usecase, allowed,
+                                           ref_clients, warnings, f"validate-ref-{i}")
+                if exists is False:
+                    missing_files.append(f"Line {i+1} {ref_field}: {ref_uri}")
         
         if missing_files:
             return create_response(400, {
@@ -1736,24 +1812,12 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
         # Generate output manifest content
         transformed_content = '\n'.join(result['transformed_lines'])
         
-        # Determine output location
-        if not output_manifest_uri:
-            # Default: same location with -dda suffix
-            base_key = source_key.rsplit('.', 1)[0]
-            output_key = f"{base_key}-dda.manifest"
-            output_bucket = source_bucket
-            output_manifest_uri = f"s3://{output_bucket}/{output_key}"
-        else:
-            # Parse provided output URI
-            output_parts = output_manifest_uri.replace('s3://', '').split('/', 1)
-            if len(output_parts) != 2:
-                return create_response(400, {'error': 'Invalid output_manifest_uri format'})
-            output_bucket = output_parts[0]
-            output_key = output_parts[1]
-        
-        # Upload transformed manifest (same bucket as source)
+        # Upload transformed manifest through the client for the (already
+        # bound) output bucket; the source client is reused when they match.
         logger.info(f"Uploading transformed manifest to {output_manifest_uri}")
-        s3_usecase.put_object(
+        s3_out = (s3_usecase if output_bucket == source_bucket
+                  else get_s3_client_for_bucket(usecase, output_bucket, 'transform-output'))
+        s3_out.put_object(
             Bucket=output_bucket,
             Key=output_key,
             Body=transformed_content,
@@ -1790,6 +1854,7 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
                 'mask_ref_metadata': 'anomaly-mask-ref-metadata' if task_type in ['segmentation', 'segmentation-robust'] else None
             },
             'sample_entry': sample_entry,
+            'warnings': warnings,
             'next_steps': [
                 f'1. Use the transformed manifest URI in your training job: {output_manifest_uri}',
                 '2. Create a new training job with this manifest',
@@ -1797,6 +1862,8 @@ def transform_manifest(event: Dict, context: Any) -> Dict:
             ]
         })
         
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ClientError as e:
         logger.error(f"AWS error transforming manifest: {str(e)}")
         return create_response(500, {'error': f"Failed to transform manifest: {str(e)}"})

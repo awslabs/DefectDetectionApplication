@@ -17,7 +17,9 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields, get_usecase
+    check_user_access, validate_required_fields, get_usecase,
+    get_s3_client_for_bucket, assert_bucket_allowed, allowed_s3_buckets,
+    BucketConfigError, bucket_config_error_response
 )
 
 # Configure logging
@@ -226,6 +228,11 @@ def list_buckets(event: Dict) -> Dict:
             tagging_client = boto3.client('resourcegroupstaggingapi')
             s3 = boto3.client('s3')
         
+        # The use case's configured buckets (s3_bucket, data_s3_bucket and the
+        # additional list): each listed bucket says whether it is already
+        # allowed for this use case and whether the portal created it.
+        allowed_names = allowed_s3_buckets(usecase)
+        
         # Find buckets with dda-portal:managed tag
         buckets = []
         paginator = tagging_client.get_paginator('get_resources')
@@ -244,27 +251,23 @@ def list_buckets(event: Dict) -> Dict:
                 arn = resource['ResourceARN']
                 bucket_name = arn.split(':::')[-1]
                 
+                # Get bucket tags for additional info
+                tags = {tag['Key']: tag['Value'] for tag in resource.get('Tags', [])}
+                entry = {
+                    'name': bucket_name,
+                    'tags': tags,
+                    'allowed': bucket_name in allowed_names,
+                    'portal_created': tags.get('dda-portal:created-by') == 'portal',
+                }
                 try:
                     # Get bucket location
                     location = s3.get_bucket_location(Bucket=bucket_name)
-                    region = location.get('LocationConstraint') or 'us-east-1'
-                    
-                    # Get bucket tags for additional info
-                    tags = {tag['Key']: tag['Value'] for tag in resource.get('Tags', [])}
-                    
-                    buckets.append({
-                        'name': bucket_name,
-                        'region': region,
-                        'tags': tags
-                    })
+                    entry['region'] = location.get('LocationConstraint') or 'us-east-1'
                 except ClientError as e:
                     logger.warning(f"Could not get details for bucket {bucket_name}: {str(e)}")
                     # Still include the bucket but with limited info
-                    buckets.append({
-                        'name': bucket_name,
-                        'region': 'unknown',
-                        'tags': {tag['Key']: tag['Value'] for tag in resource.get('Tags', [])}
-                    })
+                    entry['region'] = 'unknown'
+                buckets.append(entry)
         
         # Also include the configured data bucket if it exists
         current_bucket = get_data_bucket(usecase)
@@ -279,7 +282,9 @@ def list_buckets(event: Dict) -> Dict:
                         'name': current_bucket,
                         'region': region,
                         'tags': {},
-                        'is_configured': True
+                        'is_configured': True,
+                        'allowed': current_bucket in allowed_names,
+                        'portal_created': False
                     })
                 except ClientError:
                     pass
@@ -294,7 +299,14 @@ def list_buckets(event: Dict) -> Dict:
             'current_data_bucket': current_bucket,
             'target_account': target_account,
             'has_data_account_role': bool(data_role_arn),
-            'message': f"Showing {len(buckets)} bucket(s). To add more buckets, tag them with dda-portal:managed=true in AWS Console."
+            'message': (
+                f"Showing {len(buckets)} bucket(s). To make another bucket visible, tag it "
+                f"dda-portal:managed=true with the S3 Control TagResource API "
+                f"(aws s3control tag-resource --account-id ACCOUNT_ID "
+                f"--resource-arn arn:aws:s3:::BUCKET --tags Key=dda-portal:managed,Value=true); "
+                f"a visible bucket that is not yet allowed for this use case can be allowed "
+                f"with the Allow action (Additional S3 buckets)."
+            )
         })
         
     except ClientError as e:
@@ -318,7 +330,11 @@ def create_bucket(event: Dict) -> Dict:
         'error': 'Bucket creation via portal is not supported. Please create the bucket in AWS Console before onboarding the UseCase, then tag it with dda-portal:managed=true.',
         'instructions': [
             '1. Create bucket in AWS Console: aws s3 mb s3://your-bucket-name',
-            '2. Tag the bucket: aws s3api put-bucket-tagging --bucket your-bucket-name --tagging \'TagSet=[{Key=dda-portal:managed,Value=true}]\'',
+            '2. Tag the bucket with the S3 Control TagResource API: aws s3control tag-resource '
+            '--account-id ACCOUNT_ID --resource-arn arn:aws:s3:::BUCKET '
+            '--tags Key=dda-portal:managed,Value=true (for a bucket without ABAC, the '
+            'alternative is aws s3api put-bucket-tagging --bucket BUCKET '
+            '--tagging \'TagSet=[{Key=dda-portal:managed,Value=true}]\')',
             '3. The bucket will appear in the portal after tagging'
         ]
     })
@@ -359,13 +375,18 @@ def list_folders(event: Dict) -> Dict:
         if not bucket:
             return create_response(400, {'error': 'bucket is required'})
         
+        # Bind the bucket to the use case's configured buckets before any
+        # credential step; the client then follows the bucket (use-case
+        # bucket configuration, design §3). BucketConfigError -> 400 below.
+        assert_bucket_allowed(usecase, bucket, 'data-list-folders', actor=user, event=event)
+        
         # Ensure prefix ends with / if not empty
         if prefix and not prefix.endswith('/'):
             prefix += '/'
         
-        # Get credentials and create S3 client
-        credentials = get_data_account_credentials(usecase)
-        s3 = create_s3_client(credentials)
+        # S3 client for the bucket (Data Account role for data_s3_bucket on a
+        # separate-Data-Account use case, the use case's role otherwise)
+        s3 = get_s3_client_for_bucket(usecase, bucket, 'data-list-folders')
         
         # List objects with delimiter to get folders
         response = s3.list_objects_v2(
@@ -413,6 +434,8 @@ def list_folders(event: Dict) -> Dict:
             'is_truncated': response.get('IsTruncated', False)
         })
         
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ClientError as e:
         logger.error(f"AWS error listing folders: {str(e)}")
         return create_response(500, {'error': f"Failed to list folders: {str(e)}"})
@@ -458,13 +481,15 @@ def create_folder(event: Dict) -> Dict:
         if not bucket or not folder_path:
             return create_response(400, {'error': 'bucket and folder_path are required'})
         
+        # Bind the bucket before any credential step (design §3)
+        assert_bucket_allowed(usecase, bucket, 'data-create-folder', actor=user, event=event)
+        
         # Ensure folder path ends with /
         if not folder_path.endswith('/'):
             folder_path += '/'
         
-        # Get credentials and create S3 client
-        credentials = get_data_account_credentials(usecase)
-        s3 = create_s3_client(credentials)
+        # S3 client for the bucket (the credential path follows the bucket)
+        s3 = get_s3_client_for_bucket(usecase, bucket, 'data-create-folder')
         
         # Create folder (empty object with trailing /)
         s3.put_object(Bucket=bucket, Key=folder_path, Body='')
@@ -480,6 +505,8 @@ def create_folder(event: Dict) -> Dict:
             'created': True
         })
         
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ClientError as e:
         logger.error(f"AWS error creating folder: {str(e)}")
         return create_response(500, {'error': f"Failed to create folder: {str(e)}"})
@@ -527,9 +554,11 @@ def get_upload_url(event: Dict) -> Dict:
         if not bucket or not key:
             return create_response(400, {'error': 'bucket and key are required'})
         
-        # Get credentials and create S3 client
-        credentials = get_data_account_credentials(usecase)
-        s3 = create_s3_client(credentials)
+        # Bind the bucket before any credential step (design §3)
+        assert_bucket_allowed(usecase, bucket, 'data-upload-url', actor=user, event=event)
+        
+        # S3 client for the bucket (the credential path follows the bucket)
+        s3 = get_s3_client_for_bucket(usecase, bucket, 'data-upload-url')
         
         # Ensure bucket has CORS configured for browser uploads
         ensure_bucket_cors(s3, bucket)
@@ -552,6 +581,8 @@ def get_upload_url(event: Dict) -> Dict:
             'expires_in': expires_in
         })
         
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ClientError as e:
         logger.error(f"AWS error generating upload URL: {str(e)}")
         return create_response(500, {'error': f"Failed to generate upload URL: {str(e)}"})
@@ -603,13 +634,15 @@ def get_batch_upload_urls(event: Dict) -> Dict:
         if len(files) > 100:
             return create_response(400, {'error': 'Maximum 100 files per batch'})
         
+        # Bind the bucket before any credential step (design §3)
+        assert_bucket_allowed(usecase, bucket, 'data-batch-upload-urls', actor=user, event=event)
+        
         # Ensure prefix ends with / if not empty
         if prefix and not prefix.endswith('/'):
             prefix += '/'
         
-        # Get credentials and create S3 client
-        credentials = get_data_account_credentials(usecase)
-        s3 = create_s3_client(credentials)
+        # S3 client for the bucket (the credential path follows the bucket)
+        s3 = get_s3_client_for_bucket(usecase, bucket, 'data-batch-upload-urls')
         
         # Ensure bucket has CORS configured for browser uploads
         ensure_bucket_cors(s3, bucket)
@@ -661,6 +694,8 @@ def get_batch_upload_urls(event: Dict) -> Dict:
             'expires_in': expires_in
         })
         
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ClientError as e:
         logger.error(f"AWS error generating batch upload URLs: {str(e)}")
         return create_response(500, {'error': f"Failed to generate upload URLs: {str(e)}"})
