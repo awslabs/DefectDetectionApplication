@@ -109,6 +109,62 @@ cdk deploy --all --require-approval never
 - `UserPoolClientId` - Cognito Client ID
 - `DistributionDomainName` - CloudFront URL
 
+### Bucket compliance before deploying
+
+The portal's Lambda roles reach use-case S3 buckets only when a bucket carries
+`dda-portal:managed=true` **and** has ABAC enabled (the data-plane grants are
+conditioned on that tag; tag discovery — `GetBucketTagging`, `GetBucketAbac` —
+stays unconditioned so the portal can read tags before ABAC is on). The deploy
+log prints the scoping in force as `Data-plane scoping: <value>`. Buckets the
+portal itself owns (artifacts, component, inference results) are granted by
+name and need nothing.
+
+Before deploying this version over an existing portal, bring every registered
+bucket into compliance — a bucket that is not tagged and ABAC-enabled loses
+portal access at the deploy:
+
+```bash
+cd edge-cv-portal
+# Read-only: tags, ABAC status and region of every bucket the use cases register
+python3 scripts/portal-bucket-abac-audit.py \
+  --usecases-table dda-portal-usecases \
+  --training-jobs-table dda-portal-training-jobs
+# Exit 0: every portal-account bucket compliant and no legacy-artifact bucket.
+# Exit 1: findings (listed); exit 2: usage error or a local boto3 without the ABAC operations.
+
+# Tag and enable ABAC on exactly the non-compliant buckets it printed
+python3 scripts/portal-bucket-abac-audit.py \
+  --usecases-table dda-portal-usecases \
+  --training-jobs-table dda-portal-training-jobs \
+  --apply --buckets <bucket> [<bucket> ...]
+```
+
+`--apply` refuses any name the read-only pass did not list as a portal-account
+bucket of a use case. Buckets reached through a cross-account role are listed
+as `not probed`; their account's administrator tags them and enables ABAC
+(see [Tag S3 Buckets](#tag-s3-buckets)). Review existing tag-conditioned
+policies (IAM and bucket policies) in the account before enabling ABAC — they
+start matching on the enabled buckets.
+
+**Legacy model artifacts.** The audit's `legacy-artifact-bucket <name>` lines
+list buckets that stored model artifacts of single-account use cases point at
+(typically a model imported from a bucket that was never registered); the summary
+line `legacy-artifact buckets: N` must read `0` before the deploy. For each such
+bucket choose one remedy:
+
+1. tag it, enable ABAC on it and allow it for the owning use case (**Allow**, or
+   `PUT /usecases/{id}` with `additional_s3_buckets_add`) — it then joins the
+   audited set and devices can read it too;
+2. re-import the model from the use case's own bucket; or
+3. accept the loss: compile, package and publish of those models fail with
+   `AccessDenied` after the deploy.
+
+**`tag-objects-only` deployments.** If the deploy log reads
+`Data-plane scoping: tag-objects-only`, object access follows the tag but bucket
+listing is bounded by a list resolved at deploy time, so a bucket registered
+after the deploy reports the remedy "redeploy the portal to browse this bucket";
+run `./deploy-infrastructure.sh` again to include it.
+
 ### Configure Frontend
 
 ```bash
@@ -242,9 +298,18 @@ aws s3control tag-resource \
   --tags Key=dda-portal:managed,Value=true
 ```
 
+For a bucket in the **portal account**, no further step is needed: registering
+the tagged bucket with a use case (creating the use case with it, allowing it,
+or configuring it as the data bucket) makes the portal enable ABAC on it,
+because the portal's Lambda roles reach a use-case bucket only when it carries
+the tag and ABAC is on. Enabling ABAC changes how every tag-conditioned policy
+in the portal account evaluates for that bucket — review existing tag
+conditions first.
+
 For a bucket in a **UseCase or Data Account** (reached through a cross-account
-role) also enable bucket ABAC, because the role's tag condition is evaluated
-only once ABAC is on:
+role) also enable bucket ABAC yourself, because the account stack's role
+conditions its S3 access on the `dda-portal:managed` tag and S3 evaluates that
+condition only once ABAC is on:
 
 ```bash
 aws s3api put-bucket-abac --bucket YOUR_BUCKET_NAME --abac-status Status=Enabled
@@ -502,6 +567,66 @@ aws dynamodb put-item \
 
 ## Creating a UseCase
 
+Only a PortalAdmin creates use cases (see
+[UseCase Creation (PortalAdmin Only)](#usecase-creation-portaladmin-only)).
+Every API route and the authorization it carries is listed in
+[infrastructure/ROUTE_AUTH.md](infrastructure/ROUTE_AUTH.md), generated from
+the synthesized stacks and checked by the infrastructure tests.
+
+### Before creating a multi-account use case
+
+Two steps come before the portal accepts a use case in another account:
+
+1. **Trust the account.** Add the account id to the portal's trusted use-case
+   account list and redeploy the portal: `-c trustedUseCaseAccountIds=<id>,<id>`
+   on the deploy, the `TRUSTED_USECASE_ACCOUNT_IDS` environment variable, or
+   the SSM parameter `/dda-portal/trusted-usecase-account-ids` (in that order
+   of precedence; then `./deploy-infrastructure.sh`). An account outside the
+   list is refused with `400 ACCOUNT_NOT_TRUSTED` before the portal makes any
+   STS call.
+2. **Deploy the account stack.** Run `./deploy-account-role.sh` (option 1) in
+   the use-case account. `cross_account_role_arn` must be that stack's
+   `DDAPortalAccessRole` (`arn:aws:iam::<account>:role/DDAPortalAccessRole`;
+   any other role name is refused with `400 INVALID_ROLE_ARN`), and
+   `external_id` must be the external id the stack printed.
+
+**Proof of control.** Before the use case is written and before any grant on
+the portal's component bucket or event bus, the portal assumes
+`DDAPortalAccessRole` with the supplied external id. If that fails, the create
+is refused with `400 ACCOUNT_CONTROL_NOT_VERIFIED` (deploy the account stack in
+that account and supply its external id); nothing is written. When STS itself
+is unavailable the answer is `503 STS_UNAVAILABLE` (retry). The wizard's
+**Verify Role** step runs the same checks and shows the same remedies.
+
+| Error code | Meaning | Remedy |
+|---|---|---|
+| `INSUFFICIENT_PERMISSIONS` (403) | The caller is not a PortalAdmin | Ask a PortalAdmin |
+| `INVALID_ACCOUNT_ID` / `INVALID_ROLE_ARN` (400) | An account id is not twelve digits, or a role ARN is not the account stack's role in that account | Correct the value |
+| `ACCOUNT_NOT_TRUSTED` (400) | The account is not in the trusted list | Add it to `trustedUseCaseAccountIds` and redeploy |
+| `ACCOUNT_CONTROL_NOT_VERIFIED` (400) | The role could not be assumed with the external id | Deploy `DDAPortalUseCaseAccountStack` in the account and supply its external id |
+| `STS_UNAVAILABLE` (503) | STS did not answer | Retry |
+
+**Shared components.** Creating a use case provisions the portal's shared
+components into its account. Re-running that from **Use Cases** → **Actions** →
+**Re-provision Shared Components** (`POST /shared-components/provision`) is a
+PortalAdmin action; the item is hidden for other roles and the route answers
+`403 INSUFFICIENT_PERMISSIONS` to them.
+
+**Moving a use case to another account.** Moves are API-only:
+`PUT /usecases/{id}` with `account_id`, `cross_account_role_arn`, `external_id`
+and `sagemaker_execution_role_arn` (a role in the **new** account), after the
+new account has been trusted and its account stack deployed as above. The
+portal runs the same checks and proof of control on the new values before it
+writes anything; a `sagemaker_execution_role_arn` still in the old account is
+refused with `400 INVALID_ROLE_ARN`. After the write it removes the old
+account's grants (when no other use case uses that account) and writes the new
+account's grants, reported as `grants_removed` and `grants_added`; re-provision
+the shared components afterwards. Moving a multi-account use case back to the
+portal account is refused (`400 INVALID_ACCOUNT_ID`). The **Edit** modal does
+not move use cases — it carries neither `external_id` nor
+`sagemaker_execution_role_arn` — and saving it with unchanged account fields
+runs none of these checks.
+
 ### Via Portal UI
 
 1. Navigate to **Use Cases** → **Create Use Case**
@@ -515,11 +640,21 @@ aws dynamodb put-item \
 selected in the wizard's bucket picker must already carry
 `dda-portal:managed=true`. Tag it first with `aws s3control tag-resource
 --account-id PORTAL_ACCOUNT_ID --resource-arn arn:aws:s3:::BUCKET --tags
-Key=dda-portal:managed,Value=true`; today no ABAC step is needed for a bucket in
-the portal account, because the portal's execution role reads bucket tags
-without a tag condition (the follow-on IAM scoping adds that step). Or have a
-PortalAdmin create the bucket with the picker's **Create new bucket** control,
-which tags it, enables ABAC on it and allows it for the use case automatically.
+Key=dda-portal:managed,Value=true`. No separate ABAC step is needed: registering
+a tagged portal-account bucket makes the portal enable ABAC on it (the portal's
+roles reach a use-case bucket only when it is tagged and ABAC is on). Enabling
+ABAC changes how every tag-conditioned policy in the portal account evaluates
+for that bucket, so review existing tag conditions first. Or create the bucket
+with the picker's **Create new bucket** control, which tags it, enables ABAC on
+it and allows it for the use case automatically.
+
+**Registration report.** Every response that attaches a bucket (use-case
+create, the Edit modal's save, **Allow** on a bucket, bucket creation, the
+data-account configure) carries `registration` — per bucket `tagged`,
+`abac_enabled`, `iam_reachable` and `remedy`. The attach has succeeded either
+way; a non-null `remedy` names the one step left (tag the bucket, enable ABAC on
+it, ask the bucket's account administrator to enable ABAC, or redeploy the
+portal) and the UI shows it beside the bucket.
 The picker marks each bucket **Tagged for the portal** / **Not tagged for the
 portal** / **Portal-created**; the marking is advisory (tag discovery is
 regional) and the server decides when the use case is created — an untagged
@@ -621,6 +756,60 @@ written the portal checks that the bucket:
    tagged but ABAC off / no `s3:GetBucketTagging` grant for the role),
    `bucket_not_found` or `credentials_unavailable` (the use case's role could
    not be assumed).
+
+Once a tagged portal-account bucket passes these checks, the portal enables ABAC
+on it (audited as `bucket_abac_enabled`) and probes that its role can reach it;
+the response's `registration[bucket]` reports `tagged`, `abac_enabled`,
+`iam_reachable` and, when something is still missing, a `remedy` the UI shows
+beside the bucket. Enabling ABAC changes how every tag-conditioned policy in the
+portal account evaluates for that bucket — review existing tag conditions
+before allowing a bucket that other policies condition on.
+
+**Device reads of allowed buckets.** Devices may read an allowed bucket from
+workflow and trigger payloads only when the bucket is in the use case's own
+account; the portal writes the device grant for it (the
+`DDAUseCaseDeviceAccess` policy on the account's
+`GreengrassV2TokenExchangeRole`) immediately when the bucket is allowed, and
+again on the next deployment. The device role is one per account, so a bucket
+allowed for one use case becomes readable by the devices of every use case in
+that account — allow a sensitive bucket knowing that reach. Allowed buckets in
+another account and the training-data bucket (`data_s3_bucket`) are not readable
+from devices — keep payload references to them out of workflows, or publish the
+objects from the use case's bucket.
+
+The device grant covers every out-of-pattern bucket (one not matching `dda-*` or
+`*-dda-*`, which the account stack's device policy already covers) of a use
+case's `s3_bucket` and allowed buckets, one statement per use case. Its size
+budget holds about 19 use cases with one 63-character out-of-pattern bucket each
+(more with shorter names); beyond it the response reports
+`policy_size_limit` with the remedy (name the bucket within the pattern, remove
+allowed buckets the use case no longer needs, or consolidate). The outcome is
+reported as `device_grants.device_access` on deployment create and on a `PUT`
+that changed the device-readable buckets, and as `grants_removed.device_access`
+on `DELETE`. Removing the last use case statement of an account cannot leave an
+empty policy; the response names the one manual command
+(`aws iam delete-role-policy --role-name GreengrassV2TokenExchangeRole
+--policy-name DDAUseCaseDeviceAccess`).
+
+**Inference-results bucket override.** A use case whose inference uploader
+writes to a results bucket of its own (`inference_uploader_s3_bucket`) instead
+of `dda-inference-results-<account>`: an override in the portal account must be
+tagged `dda-portal:managed=true` and ABAC-enabled like any registered bucket, or
+the captures and workflow-tuning views cannot read it. The bucket audit
+(`scripts/portal-bucket-abac-audit.py`, below) lists use cases with an override.
+
+**Models imported before the IAM scoping change.** A model imported from a
+bucket outside the use case's allowed buckets before this change keeps that
+bucket in its stored artifact URI; on a single-account use case compile,
+package and publish of that model read it on the portal's role, which after the
+change reaches only tagged, ABAC-enabled buckets. The bucket audit lists such
+buckets as `legacy-artifact-bucket`; each needs one of the three remedies in
+[Bucket compliance before deploying](#bucket-compliance-before-deploying)
+before the deploy. The ModelConverter function's `TRUSTED_MODEL_BUCKETS` /
+`TRUSTED_MODEL_ACCOUNTS` variables are empty in every deployment (no stack sets
+them; a console edit is reverted at the next deploy), and any bucket ever placed
+there must be tagged `dda-portal:managed=true` and ABAC-enabled like a registered
+bucket, or the converter's downloads from it are denied.
 
 Additional S3 buckets are reached with the use case's own role (the portal's
 execution role for a single-account use case), so they must live in the use
@@ -1046,7 +1235,7 @@ shows a user's assignments, not their reach.
 | Action | PortalAdmin | UseCaseAdmin | DataScientist | Operator | Viewer |
 |--------|:-----------:|:------------:|:-------------:|:--------:|:------:|
 | **UseCase Management** |
-| Create UseCase | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Create UseCase | ✅ | ❌ | ❌ | ❌ | ❌ |
 | View All UseCases | ✅ | ❌ | ❌ | ❌ | ❌ |
 | View Assigned UseCases | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Update UseCase | ✅ | ✅ | ❌ | ❌ | ❌ |
@@ -1055,6 +1244,7 @@ shows a user's assignments, not their reach.
 | Create S3 bucket in the onboarding wizard (no use case yet) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Delete UseCase (see the delete note under [Use case buckets](#use-case-buckets-and-additional-s3-buckets)) | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Manage Team Members | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Re-provision Shared Components | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Labeling** |
 | Create Labeling Job | ✅ | ✅ | ✅ | ❌ | ❌ |
 | View Labeling Jobs | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -1081,38 +1271,39 @@ shows a user's assignments, not their reach.
 | View Logs | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Update Config | ✅ | ✅ | ❌ | ✅ | ❌ |
 
-### Self-Service UseCase Creation
+### UseCase Creation (PortalAdmin Only)
 
-Any authenticated user can create a new usecase. When a user creates a usecase:
-1. The usecase is created in DynamoDB
-2. The creator is automatically assigned as **UseCaseAdmin** for that usecase
-3. The creator can then add other team members via "Manage Team"
+Creating a use case is a PortalAdmin action: `POST /usecases` (and the
+onboarding wizard's **Verify Role** step, `POST /usecases/verify-role`)
+requires the `create_usecases` permission, which only the PortalAdmin role
+holds. Any other caller receives `403 INSUFFICIENT_PERMISSIONS` and the attempt
+is audited as `unauthorized_access`; the **Onboard New Use Case** action is
+hidden for them (cosmetic — the server decides). A use case is created for an
+account the portal already trusts and controls through the account stack
+(see [Creating a UseCase](#creating-a-usecase)).
 
-**Administrator pre-step for a creator who is not a PortalAdmin.** The wizard
-completes only with an S3 bucket that **already** carries
-`dda-portal:managed=true`, is configured on no other use case and carries no
-`dda-portal:usecase-id` tag for another use case. A user who is not a
-PortalAdmin cannot create a bucket in the wizard — **Create new bucket** is a
-PortalAdmin action (`POST /s3-buckets` without a use case answers `403`), and
-after the configured buckets of existing use cases have been tagged a fresh
-single-account deployment holds no such free tagged bucket. So before a
-non-administrator onboards a use case, one of:
+When a PortalAdmin creates a use case:
+1. The use case is created in DynamoDB
+2. The creator is assigned as **UseCaseAdmin** for that use case
+3. The PortalAdmin (or that UseCaseAdmin) adds the other team members via
+   "Manage Team"
 
-- a PortalAdmin creates the bucket in the wizard (**Create new bucket** tags it,
-  enables ABAC on it and allows it for the new use case) or hands over a
-  tagged, unconfigured, unclaimed bucket, or
-- an AWS administrator tags a bucket for the user:
-  `aws s3control tag-resource --account-id PORTAL_ACCOUNT_ID --resource-arn
-  arn:aws:s3:::BUCKET --tags Key=dda-portal:managed,Value=true`.
+A UseCaseAdmin who needs a new use case asks a PortalAdmin. The PortalAdmin
+picks or creates its bucket in the wizard (**Create new bucket** tags the
+bucket, enables ABAC on it and allows it for the new use case), or an AWS
+administrator tags an existing bucket first
+(`aws s3control tag-resource --account-id PORTAL_ACCOUNT_ID --resource-arn
+arn:aws:s3:::BUCKET --tags Key=dda-portal:managed,Value=true`). Registering a
+tagged portal-account bucket makes the portal enable ABAC on it, which changes
+how every tag-conditioned policy in the portal account evaluates for that
+bucket — review existing tag conditions first.
 
-Selecting any other bucket answers `400 bucket_not_eligible` (`no_tags` or
-`bucket_configured_on_other_usecase`). A self-created use case's buckets follow
-the same rules as every other use case's (see
-[Use case buckets and Additional S3 buckets](#use-case-buckets-and-additional-s3-buckets));
-as its UseCaseAdmin the creator can allow further tagged buckets and create
-buckets for it through the API. The follow-on authorization work makes use-case
-creation PortalAdmin-only, after which this pre-step is simply the PortalAdmin's
-own flow.
+Selecting a bucket that is untagged or configured on another use case answers
+`400 bucket_not_eligible` (`no_tags` or `bucket_configured_on_other_usecase`).
+After creation the use case's buckets follow the rules in
+[Use case buckets and Additional S3 buckets](#use-case-buckets-and-additional-s3-buckets);
+its UseCaseAdmin can allow further tagged buckets and create buckets for it
+through the API.
 
 ### Managing Team Members
 

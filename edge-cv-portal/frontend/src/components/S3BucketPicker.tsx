@@ -16,6 +16,10 @@
  * portal and ABAC-enabled by the server; creating one without a use case is a
  * PortalAdmin operation, so the "Create new bucket" control is rendered only
  * for PortalAdmins and a 403 is still rendered by code if that answer is stale.
+ *
+ * Registration_Report (spec: portal-authorization-and-iam-scoping, design
+ * I5): when the created bucket's report carries a `remedy` (the portal could
+ * not yet reach it), the remedy is shown beside the created bucket's name.
  */
 import { useEffect, useState } from 'react';
 import {
@@ -33,6 +37,7 @@ import {
 import { ApiError, apiService } from '../services/api';
 import { S3Bucket } from '../types';
 import { useUsecasePermissions } from '../hooks/useUsecasePermissions';
+import { BucketRemedy } from './RegistrationRemedy';
 
 interface S3BucketPickerProps {
   selectedBucket: string;
@@ -108,6 +113,8 @@ export default function S3BucketPicker({
   const [newBucketName, setNewBucketName] = useState('');
   const [createInProgress, setCreateInProgress] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  // The last created bucket whose Registration_Report names a remedy.
+  const [createdRemedy, setCreatedRemedy] = useState<{ bucket: string; remedy: string } | null>(null);
 
   const loadBuckets = async () => {
     try {
@@ -135,8 +142,13 @@ export default function S3BucketPicker({
     try {
       setCreateInProgress(true);
       setCreateError(null);
+      setCreatedRemedy(null);
       const result = await apiService.createS3Bucket({ name, region });
       const created = result.bucket?.name || name;
+      const remedy = result.bucket?.remedy;
+      if (typeof remedy === 'string' && remedy.trim() !== '') {
+        setCreatedRemedy({ bucket: created, remedy });
+      }
       // Refresh the list, select the new bucket, and collapse the create form.
       await loadBuckets();
       onSelect(created);
@@ -244,6 +256,20 @@ export default function S3BucketPicker({
           </Box>
         }
       />
+
+      {createdRemedy && (
+        <Alert
+          type="warning"
+          dismissible
+          onDismiss={() => setCreatedRemedy(null)}
+          header={`Bucket ${createdRemedy.bucket} was created; it needs one more step`}
+        >
+          <SpaceBetween direction="horizontal" size="xs" alignItems="center">
+            <code>{createdRemedy.bucket}</code>
+            <BucketRemedy remedy={createdRemedy.remedy} />
+          </SpaceBetween>
+        </Alert>
+      )}
 
       {creating && isPortalAdmin && (
         <Box padding={{ top: 'xs' }}>

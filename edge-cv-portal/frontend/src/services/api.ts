@@ -114,7 +114,25 @@ export interface UsecaseBucketUpdateResponse {
   not_present: string[];
   /** The computed allowed set after the write (configured + additional). */
   allowed_s3_buckets: string[];
+  /** Registration_Report of every bucket attached by this request. */
+  registration?: RegistrationReport;
 }
+
+// Registration_Report (spec: portal-authorization-and-iam-scoping, design
+// I5 "The Attach_Step"): what the portal found when it attached a bucket.
+/** One attached bucket's report. */
+export interface BucketRegistration {
+  /** The bucket carries dda-portal:managed=true. */
+  tagged: boolean;
+  /** ABAC is on for the bucket ('unknown' when it could not be read). */
+  abac_enabled: boolean | 'unknown';
+  /** The portal's role reached the bucket after the attach. */
+  iam_reachable: boolean;
+  /** What to do so the portal can use the bucket; null when nothing is needed. */
+  remedy: string | null;
+}
+/** Bucket name → report, for every bucket a request attached ({} when none). */
+export type RegistrationReport = Record<string, BucketRegistration>;
 
 /** The bucket entry POST /s3-buckets answers with (201). */
 export interface CreatedS3Bucket extends S3Bucket {
@@ -122,6 +140,11 @@ export interface CreatedS3Bucket extends S3Bucket {
   /** Tag keys written on the bucket (dda-portal:*). */
   tags: string[];
   abac: 'enabled' | 'failed';
+  /** Registration_Report fields of the created bucket (design I5). */
+  tagged?: boolean;
+  abac_enabled?: boolean | 'unknown';
+  iam_reachable?: boolean;
+  remedy?: string | null;
   /** True when the bucket was also added to the given use case. */
   added_to_usecase: boolean;
   /** Present when `usecase_id` was given and the add did not happen. */
@@ -1921,8 +1944,12 @@ class ApiService {
     return this.request<{ usecase: UseCase }>(`/usecases/${id}`);
   }
 
-  async createUseCase(data: Partial<UseCase>): Promise<{ usecase: UseCase; message: string }> {
-    return this.request<{ usecase: UseCase; message: string }>('/usecases', {
+  async createUseCase(data: Partial<UseCase>): Promise<{
+    usecase: UseCase;
+    message: string;
+    registration?: RegistrationReport;
+  }> {
+    return this.request<{ usecase: UseCase; message: string; registration?: RegistrationReport }>('/usecases', {
       method: 'POST',
       body: JSON.stringify(data),
     });
@@ -1940,8 +1967,11 @@ class ApiService {
     });
   }
 
-  async updateUseCase(id: string, data: Partial<UseCase>): Promise<{ message: string }> {
-    return this.request<{ message: string }>(`/usecases/${id}`, {
+  async updateUseCase(
+    id: string,
+    data: Partial<UseCase>
+  ): Promise<{ message: string; registration?: RegistrationReport }> {
+    return this.request<{ message: string; registration?: RegistrationReport }>(`/usecases/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
@@ -3841,6 +3871,11 @@ class ApiService {
       // `portal_created` the ones the portal created.
       allowed?: boolean;
       portal_created?: boolean;
+      // Present on an entry the portal's role could not read
+      // (GetBucketLocation denied): ABAC off, with what to do about it
+      // (portal-authorization-and-iam-scoping, design I5).
+      abac_enabled?: boolean;
+      remedy?: string;
     }>;
     current_data_bucket: string | null;
     target_account?: string;
@@ -3954,6 +3989,8 @@ class ApiService {
   }): Promise<{
     message: string;
     usecase_id: string;
+    /** Registration_Report of a changed data_s3_bucket ({} otherwise). */
+    registration?: RegistrationReport;
   }> {
     return this.request(`/usecases/${usecaseId}/data/configure`, {
       method: 'POST',

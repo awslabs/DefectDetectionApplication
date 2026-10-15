@@ -34,6 +34,8 @@ import BucketNotAllowedNotice, {
   ALLOW_ACTION_LABEL,
   USECASE_ADMIN_REQUIRED_MESSAGE,
 } from '../components/BucketNotAllowedNotice';
+import { BucketRemedy, registrationRemedies } from '../components/RegistrationRemedy';
+import type { UsecaseBucketUpdateResponse } from '../services/api';
 
 interface Bucket {
   name: string;
@@ -45,6 +47,11 @@ interface Bucket {
   // design §5.6 / §10.2): in the use case's allowed set / created by the portal.
   allowed?: boolean;
   portal_created?: boolean;
+  // What to do so the portal can use the bucket (spec: portal-authorization-
+  // and-iam-scoping, design I5): from the list (a bucket the portal's role
+  // cannot read) or from the Registration_Report of an "Allow" answer.
+  abac_enabled?: boolean;
+  remedy?: string;
 }
 
 /** Tooltip of the "Allowed" badge (design §10.2). */
@@ -81,6 +88,7 @@ function BucketStatusBadges({ bucket }: { bucket: Bucket }) {
       )}
       {bucket.allowed === false && <Badge color="grey">Not allowed</Badge>}
       {bucket.portal_created && <Badge color="blue">Portal-created</Badge>}
+      {bucket.remedy && <BucketRemedy remedy={bucket.remedy} />}
     </SpaceBetween>
   );
 }
@@ -158,6 +166,8 @@ export default function DataManagement() {
   const [folderError, setFolderError] = useState<unknown>(null);
   const [allowError, setAllowError] = useState<unknown>(null);
   const [allowingBucket, setAllowingBucket] = useState<string | null>(null);
+  // Remedies from the Registration_Report of the last "Allow" answers.
+  const [allowRemedies, setAllowRemedies] = useState<Record<string, string>>({});
   const { canUpdateUsecase } = useUsecasePermissions();
   const hasDataRole = targetAccountInfo?.hasDataRole ?? false;
 
@@ -226,6 +236,7 @@ export default function DataManagement() {
   useEffect(() => {
     setFolderError(null);
     setAllowError(null);
+    setAllowRemedies({});
     if (usecaseId) {
       loadBuckets();
       loadUseCaseDetail();
@@ -315,6 +326,17 @@ export default function DataManagement() {
     }
   };
 
+  // Keep the remedies an "Allow" answer reported, shown beside each bucket.
+  const recordAllowRemedies = (response: UsecaseBucketUpdateResponse | undefined) => {
+    const remedies = registrationRemedies(response?.registration);
+    if (remedies.length === 0) return;
+    setAllowRemedies((prev) => {
+      const next = { ...prev };
+      for (const { bucket, remedy } of remedies) next[bucket] = remedy;
+      return next;
+    });
+  };
+
   // After a bucket was allowed: the use case record and the bucket marking.
   const refreshAfterAllow = async () => {
     try {
@@ -330,7 +352,8 @@ export default function DataManagement() {
     setAllowError(null);
     setError(null);
     try {
-      await apiService.allowBucketForUsecase(usecaseId, bucketName);
+      const response = await apiService.allowBucketForUsecase(usecaseId, bucketName);
+      recordAllowRemedies(response);
       await refreshAfterAllow();
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
@@ -352,8 +375,9 @@ export default function DataManagement() {
     return buckets.map((bucket) => ({
       ...bucket,
       allowed: bucket.allowed ?? (allowedSet ? allowedSet.includes(bucket.name) : undefined),
+      remedy: allowRemedies[bucket.name] ?? bucket.remedy,
     }));
-  }, [buckets, useCaseDetail]);
+  }, [buckets, useCaseDetail, allowRemedies]);
 
   /** The inline action (or the Data Account note) of a not-allowed row. */
   const renderAllowAction = (bucket: Bucket) => {
@@ -580,8 +604,9 @@ export default function DataManagement() {
               <BucketNotAllowedNotice
                 err={allowError}
                 usecaseId={usecaseId}
-                onAllowed={() => {
+                onAllowed={(response) => {
                   setAllowError(null);
+                  recordAllowRemedies(response);
                   refreshAfterAllow();
                 }}
               />
@@ -733,8 +758,9 @@ export default function DataManagement() {
             <BucketNotAllowedNotice
               err={folderError}
               usecaseId={usecaseId}
-              onAllowed={async () => {
+              onAllowed={async (response) => {
                 setFolderError(null);
+                recordAllowRemedies(response);
                 await refreshAfterAllow();
                 await loadFolderContents();
               }}
@@ -890,8 +916,9 @@ export default function DataManagement() {
             <BucketNotAllowedNotice
               err={allowError}
               usecaseId={usecaseId}
-              onAllowed={() => {
+              onAllowed={(response) => {
                 setAllowError(null);
+                recordAllowRemedies(response);
                 refreshAfterAllow();
               }}
             />

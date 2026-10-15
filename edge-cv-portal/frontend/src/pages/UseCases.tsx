@@ -18,7 +18,12 @@ import {
   ColumnLayout,
   Toggle,
 } from '@cloudscape-design/components';
-import { ApiError, apiService, UsecaseBucketUpdateResponse } from '../services/api';
+import {
+  ApiError,
+  apiService,
+  RegistrationReport,
+  UsecaseBucketUpdateResponse,
+} from '../services/api';
 import { UseCase } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import TeamManagement from '../components/TeamManagement';
@@ -28,6 +33,12 @@ import BucketNotAllowedNotice, {
 import { validateBucketName } from '../utils/s3Validation';
 import { bucketErrorCode } from '../utils/bucketErrors';
 import { useTableSort } from '../hooks/useTableSort';
+import { useUsecasePermissions } from '../hooks/useUsecasePermissions';
+import {
+  BucketRemedy,
+  RegistrationRemedies,
+  registrationRemedies,
+} from '../components/RegistrationRemedy';
 
 interface FormDataType {
   name: string;
@@ -89,6 +100,22 @@ export function additionalFromAllowed(
   return (response.allowed_s3_buckets || []).filter((name) => !configured.has(name));
 }
 
+/**
+ * The row actions a caller sees (spec: portal-authorization-and-iam-scoping,
+ * design I1 D1 / I3 D3): re-provisioning shared components is a PortalAdmin
+ * action, so it is offered only to a PortalAdmin. Cosmetic — the server
+ * decides; a stale answer at worst shows an action that answers 403.
+ */
+export function rowActionsFor(isPortalAdmin: boolean): Array<{ id: string; text: string }> {
+  return [
+    { id: 'browse', text: 'Browse Datasets' },
+    { id: 'team', text: 'Manage Team' },
+    ...(isPortalAdmin ? [{ id: 'provision', text: 'Re-provision Shared Components' }] : []),
+    { id: 'edit', text: 'Edit' },
+    { id: 'delete', text: 'Delete' },
+  ];
+}
+
 /** Pending marker of the "Allow" action; '+' never occurs in a bucket name. */
 const ADD_PENDING = '+add';
 
@@ -110,6 +137,9 @@ export default function UseCases() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  // Use-case creation and re-provisioning are PortalAdmin actions (design I1
+  // D1, I3 D3); the server-resolved answer gates their visibility.
+  const { isPortalAdmin } = useUsecasePermissions();
   const [showEditModal, setShowEditModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [selectedUseCase, setSelectedUseCase] = useState<UseCase | null>(null);
@@ -139,6 +169,10 @@ export default function UseCases() {
   const [bucketActionPending, setBucketActionPending] = useState<string | null>(null);
   const [bucketActionError, setBucketActionError] = useState('');
   const [bucketNoticeError, setBucketNoticeError] = useState<unknown>(null);
+  // Registration_Report remedies (design I5): per bucket allowed in the open
+  // Edit modal, and of the last saved edit (shown after the modal closes).
+  const [bucketRemedies, setBucketRemedies] = useState<Record<string, string>>({});
+  const [saveRegistration, setSaveRegistration] = useState<RegistrationReport | null>(null);
 
   const resetForm = () => {
     setFormData({
@@ -160,6 +194,7 @@ export default function UseCases() {
     setBucketActionPending(null);
     setBucketActionError('');
     setBucketNoticeError(null);
+    setBucketRemedies({});
   };
 
   const { data, isLoading } = useQuery({
@@ -174,10 +209,13 @@ export default function UseCases() {
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Partial<UseCase> }) =>
       apiService.updateUseCase(id, data),
-    onSuccess: () => {
+    onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['usecases', user?.user_id] });
       setShowEditModal(false);
       resetForm();
+      setSaveRegistration(
+        registrationRemedies(result?.registration).length > 0 ? result.registration ?? null : null
+      );
       setSuccessMessage('Use case updated successfully');
       setTimeout(() => setSuccessMessage(''), 5000);
     },
@@ -288,6 +326,7 @@ export default function UseCases() {
     setNewAllowedBucket('');
     setBucketActionError('');
     setBucketNoticeError(null);
+    setBucketRemedies({});
     setShowEditModal(true);
   };
 
@@ -297,6 +336,14 @@ export default function UseCases() {
   const applyBucketUpdate = (response: UsecaseBucketUpdateResponse) => {
     if (!selectedUseCase) return;
     setAdditionalBuckets(additionalFromAllowed(response, selectedUseCase));
+    const remedies = registrationRemedies(response.registration);
+    if (remedies.length > 0) {
+      setBucketRemedies((prev) => {
+        const next = { ...prev };
+        for (const { bucket, remedy } of remedies) next[bucket] = remedy;
+        return next;
+      });
+    }
     queryClient.invalidateQueries({ queryKey: ['usecases', user?.user_id] });
   };
 
@@ -396,6 +443,17 @@ export default function UseCases() {
         </Alert>
       )}
 
+      {saveRegistration && (
+        <Alert
+          type="warning"
+          dismissible
+          onDismiss={() => setSaveRegistration(null)}
+          header="The use case was saved; a bucket needs one more step"
+        >
+          <RegistrationRemedies report={saveRegistration} />
+        </Alert>
+      )}
+
       {/* Shared Components Status Panel - Portal Admin Only */}
       {user?.role === 'PortalAdmin' && (
         <Container
@@ -466,7 +524,7 @@ export default function UseCases() {
             variant="h1"
             description="Manage computer vision use cases across AWS accounts"
             actions={
-              user ? (
+              user && isPortalAdmin ? (
                 <Button 
                   variant="primary" 
                   onClick={() => window.location.href = '/usecases/onboard'}
@@ -525,13 +583,7 @@ export default function UseCases() {
             header: 'Actions',
             cell: (item: UseCase) => (
               <ButtonDropdown
-                items={[
-                  { id: 'browse', text: 'Browse Datasets' },
-                  { id: 'team', text: 'Manage Team' },
-                  { id: 'provision', text: 'Re-provision Shared Components' },
-                  { id: 'edit', text: 'Edit' },
-                  { id: 'delete', text: 'Delete' },
-                ]}
+                items={rowActionsFor(isPortalAdmin)}
                 onItemClick={({ detail }) => {
                   if (detail.id === 'browse') {
                     navigate(`/data?usecase_id=${item.usecase_id}`);
@@ -672,7 +724,10 @@ export default function UseCases() {
             <BucketNotAllowedNotice
               err={bucketNoticeError}
               usecaseId={selectedUseCase?.usecase_id}
-              onAllowed={() => setBucketNoticeError(null)}
+              onAllowed={(response) => {
+                setBucketNoticeError(null);
+                applyBucketUpdate(response);
+              }}
             />
           )}
 
@@ -681,9 +736,10 @@ export default function UseCases() {
             <SpaceBetween size="xxs">
               {selectedUseCase &&
                 configuredBuckets(selectedUseCase).map((name) => (
-                  <Box key={name}>
+                  <SpaceBetween key={name} direction="horizontal" size="xs" alignItems="center">
                     <code>{name}</code>
-                  </Box>
+                    {bucketRemedies[name] && <BucketRemedy remedy={bucketRemedies[name]} />}
+                  </SpaceBetween>
                 ))}
             </SpaceBetween>
           </Box>
@@ -697,6 +753,7 @@ export default function UseCases() {
                 {additionalBuckets.map((name) => (
                   <SpaceBetween key={name} direction="horizontal" size="xs" alignItems="center">
                     <code>{name}</code>
+                    {bucketRemedies[name] && <BucketRemedy remedy={bucketRemedies[name]} />}
                     <Button
                       variant="inline-link"
                       onClick={() => handleRemoveBucket(name)}
