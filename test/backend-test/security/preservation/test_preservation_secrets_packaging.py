@@ -75,12 +75,25 @@ DETECTOR_CONVERSION_REL = (
     "edge-cv-portal/backend/layers/shared/python/detector_conversion.py"
 )
 ONNX_FLEET_IR_REL = "edge-cv-portal/backend/layers/shared/python/onnx_fleet_ir.py"
+# Shared-layer module (stdlib only) added by portal-authorization-and-iam-
+# scoping: packaging.py imports the internal-invocation names from
+# shared_utils (which re-exports them) and detector_conversion.py imports them
+# from ``internal_invocation`` directly. Loaded REAL, so the captured publish
+# event carries the production marker.
+INTERNAL_INVOCATION_REL = (
+    "edge-cv-portal/backend/layers/shared/python/internal_invocation.py"
+)
 
 
-def _shared_utils_stub():
+def _internal_invocation():
+    return load_module_from_path("internal_invocation_preservation", INTERNAL_INVOCATION_REL)
+
+
+def _shared_utils_stub(internal_invocation):
     """Stub the shared_utils imports (packaging.py does ``from shared_utils import
-    (...)`` at module top). None of these are exercised by
-    ``_trigger_component_creation``."""
+    (...)`` at module top). None of the stubbed callables are exercised by
+    ``_trigger_component_creation``; the three internal-invocation names are
+    the REAL module's."""
     mod = types.ModuleType("shared_utils")
     for name in [
         "create_response", "get_user_from_event", "log_audit_event",
@@ -88,6 +101,9 @@ def _shared_utils_stub():
         "get_usecase_client", "assume_usecase_role", "get_usecase",
     ]:
         setattr(mod, name, lambda *a, **k: None)
+    mod.INTERNAL_MARKER_KEY = internal_invocation.INTERNAL_MARKER_KEY
+    mod.internal_marker = internal_invocation.internal_marker
+    mod.is_internal_invocation = internal_invocation.is_internal_invocation
     return mod
 
 
@@ -108,15 +124,17 @@ def _make_stubs(lambda_client):
     yaml = types.ModuleType("yaml")
     yaml.safe_load = lambda *a, **k: {}
 
+    internal_invocation = _internal_invocation()
     detector_conversion = load_module_from_path(
-        "detector_conversion_preservation", DETECTOR_CONVERSION_REL
+        "detector_conversion_preservation", DETECTOR_CONVERSION_REL,
+        injected_modules={"internal_invocation": internal_invocation},
     )
 
     return {
         "boto3": boto3,
         "botocore": botocore,
         "botocore.exceptions": exc,
-        "shared_utils": _shared_utils_stub(),
+        "shared_utils": _shared_utils_stub(internal_invocation),
         "yaml": yaml,
         # REAL sibling module (not a stub) — resolves packaging.py's
         # ``from model_naming import safe_model_name``.
@@ -214,6 +232,11 @@ def test_s3_synthetic_identity_construction_preserved_apart_from_email():
     # Email is a synthetic ``system@...`` address (system@edgecv.com before the
     # fix, system@example.com after) — the DOMAIN is the only thing S3 changes.
     assert claims["email"].startswith("system@")
+
+    # The publish chain is a marked direct invoke
+    # (portal-authorization-and-iam-scoping, Requirement 4.8).
+    marker = _internal_invocation()
+    assert event[marker.INTERNAL_MARKER_KEY] == marker.internal_marker("packaging", "publish_chain")
 
 
 # Validates: Requirements 3.3

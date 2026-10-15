@@ -28,7 +28,8 @@ from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, get_usecase_client,
     get_s3_client_for_bucket, parse_s3_uri, assert_bucket_allowed,
-    BucketConfigError, bucket_config_error_response
+    BucketConfigError, bucket_config_error_response,
+    INTERNAL_MARKER_KEY, internal_marker,
 )
 
 # Preflight Fit_Check (pure sizing module bundled in this functions dir)
@@ -1446,7 +1447,10 @@ def import_model(event: Dict, context: Any) -> Dict:
                                     'cognito:username': user.get('username', user_id)
                                 }
                             }
-                        }
+                        },
+                        # A direct invoke: the compilation handler skips its
+                        # role check and attributes the compile to the importer.
+                        INTERNAL_MARKER_KEY: internal_marker('model_import', 'auto_compile', user_id),
                     }
                     
                     lambda_client.invoke(

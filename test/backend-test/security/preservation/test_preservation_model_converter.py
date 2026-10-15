@@ -119,9 +119,15 @@ def _load_model_converter():
     botocore.config = cfg
     aws_stubs = {"boto3": boto3, "botocore": botocore, "botocore.exceptions": exc,
                  "botocore.config": cfg}
+    # detector_conversion imports the stdlib-only shared-layer
+    # internal_invocation module (portal-authorization-and-iam-scoping):
+    # loaded REAL and injected, like the module itself.
     dconv = load_module_from_path(
         "detector_conversion_preservation",
         "edge-cv-portal/backend/layers/shared/python/detector_conversion.py",
+        injected_modules={"internal_invocation": load_module_from_path(
+            "internal_invocation_preservation",
+            "edge-cv-portal/backend/layers/shared/python/internal_invocation.py")},
     )
     s3_cors = load_module_from_path(
         "s3_cors_preservation",

@@ -13,6 +13,9 @@ from botocore.exceptions import ClientError
 # Imported-detector conversions (detector-checkpoint-import Requirement 7):
 # the shared Conversion_Status reducer (shared layer, stdlib only).
 from detector_conversion import is_detector_conversion_record, reconcile_conversion
+# The marker of a direct portal-to-portal invoke (shared layer, stdlib only;
+# portal-authorization-and-iam-scoping design I2).
+from internal_invocation import INTERNAL_MARKER_KEY, internal_marker
 
 # Configure logging
 logger = logging.getLogger()
@@ -184,7 +187,9 @@ def handle_training_state_change(event: Dict, context: Any) -> Dict:
                                         'cognito:username': 'system'
                                     }
                                 }
-                            }
+                            },
+                            # A direct invoke: the compilation handler skips its role check for it.
+                            INTERNAL_MARKER_KEY: internal_marker('training_events', 'auto_compile'),
                         }
                         
                         # Invoke compilation Lambda asynchronously

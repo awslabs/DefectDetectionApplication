@@ -20,7 +20,8 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields,
-    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
+    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase,
+    INTERNAL_MARKER_KEY, is_internal_invocation,
 )
 
 # Preflight Fit_Check (vllm-sizing-and-packaging-errors Requirements 3.4,
@@ -702,9 +703,12 @@ def publish_component(event: Dict, context: Any) -> Dict:
     }
     """
     try:
-        # Extract user info
+        # Extract user info. The acting user (audit attribution) follows the
+        # event source: the marker's user for an Internal_Invocation, the
+        # gateway caller otherwise.
         user = get_user_from_event(event)
-        user_id = user['user_id']
+        internal = is_internal_invocation(event)
+        user_id = event[INTERNAL_MARKER_KEY]['user_id'] if internal else user['user_id']
         
         # Get path parameters
         training_id = event.get('pathParameters', {}).get('id')
@@ -741,9 +745,9 @@ def publish_component(event: Dict, context: Any) -> Dict:
         training_job = get_training_job_details(training_id)
         usecase_id = training_job['usecase_id']
         
-        # Check user access (DataScientist role required)
-        # Allow 'system' user for auto-triggered publishing
-        if user_id != 'system' and not check_user_access(user_id, usecase_id, 'DataScientist'):
+        # DataScientist role required, except for a direct invoke by a portal
+        # Lambda (Internal_Invocation: the packaging publish chain)
+        if not internal and not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Check packaged components exist

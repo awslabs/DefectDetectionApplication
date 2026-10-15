@@ -35,6 +35,10 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+# The direct-invoke marker (stdlib-only sibling module; never shared_utils,
+# so this module keeps loading without the rest of the layer).
+from internal_invocation import INTERNAL_MARKER_KEY, internal_marker
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -730,7 +734,8 @@ def apply_conversion_transition(table: Any, training_id: str, transition: Transi
 
 def build_finalize_event(training_id: str) -> Dict[str, Any]:
     """The API-Gateway-shaped Packaging invoke that finalizes a conversion
-    (the `_trigger_component_creation` system-caller pattern)."""
+    (the `_trigger_component_creation` system-caller pattern), marked as a
+    direct invoke so Packaging skips its role check for it."""
     return {
         'httpMethod': 'POST',
         'path': f'/api/v1/training/{training_id}/package',
@@ -738,6 +743,7 @@ def build_finalize_event(training_id: str) -> Dict[str, Any]:
         'body': json.dumps({'finalize_conversion': True, 'auto_triggered': True}),
         'requestContext': {'authorizer': {'claims': {
             'sub': 'system', 'email': 'system@example.com', 'cognito:username': 'system'}}},
+        INTERNAL_MARKER_KEY: internal_marker('detector_conversion', 'finalize'),
     }
 
 

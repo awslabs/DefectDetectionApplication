@@ -10,6 +10,10 @@ from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError
 
+# The marker of a direct portal-to-portal invoke (shared layer, stdlib only;
+# portal-authorization-and-iam-scoping design I2).
+from internal_invocation import INTERNAL_MARKER_KEY, internal_marker
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -161,7 +165,9 @@ def handle_compilation_state_change(event: Dict, context: Any) -> Dict:
                                         'cognito:username': 'system'
                                     }
                                 }
-                            }
+                            },
+                            # A direct invoke: the packaging handler skips its role check for it.
+                            INTERNAL_MARKER_KEY: internal_marker('compilation_events', 'auto_package'),
                         }
                         
                         # Invoke packaging Lambda asynchronously

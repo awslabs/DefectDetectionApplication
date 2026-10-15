@@ -22,7 +22,8 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, create_s3_path_builder,
-    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
+    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase,
+    INTERNAL_MARKER_KEY, is_internal_invocation,
 )
 # Shared compilation-status vocabulary and aggregation (same layer).
 # derive_compilation_status is re-exported here so existing importers keep
@@ -432,8 +433,11 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
         training_job = get_training_job_details(training_id)
         usecase_id = training_job['usecase_id']
         
-        # Check user access (DataScientist role required) - skip for auto-triggered compilations
-        if not auto_triggered and not check_user_access(user_id, usecase_id, 'DataScientist'):
+        # DataScientist role required, except for a direct invoke by a portal
+        # Lambda (Internal_Invocation, derived from the event source and never
+        # from the body's auto_triggered).
+        internal = is_internal_invocation(event)
+        if not internal and not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Check training job status
@@ -684,21 +688,26 @@ def start_compilation_job(event: Dict, context: Any) -> Dict:
             }
         )
         
-        # Log audit event
+        # Log audit event. The actor follows the source: the marker's user for
+        # an Internal_Invocation, the gateway caller otherwise; auto_triggered
+        # stays the body echo.
+        audit_details = {
+            'targets': targets,
+            'compilation_jobs': [
+                j.get('compilation_job_name') or f"{j.get('target')}:not-started"
+                for j in compilation_jobs
+            ],
+            'auto_triggered': auto_triggered
+        }
+        if internal:
+            audit_details['internal_source'] = event[INTERNAL_MARKER_KEY]['source']
         log_audit_event(
-            user_id=user_id if not auto_triggered else 'system',
+            user_id=event[INTERNAL_MARKER_KEY]['user_id'] if internal else user_id,
             action='start_compilation',
             resource_type='training_job',
             resource_id=training_id,
             result='success',
-            details={
-                'targets': targets,
-                'compilation_jobs': [
-                    j.get('compilation_job_name') or f"{j.get('target')}:not-started"
-                    for j in compilation_jobs
-                ],
-                'auto_triggered': auto_triggered
-            }
+            details=audit_details
         )
         
         logger.info(f"Started {len(compilation_jobs)} compilation jobs for training {training_id}")

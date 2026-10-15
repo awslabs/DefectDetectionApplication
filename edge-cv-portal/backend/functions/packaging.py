@@ -31,7 +31,8 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields,
-    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase
+    is_cross_account_setup, get_usecase_client, assume_usecase_role, get_usecase,
+    INTERNAL_MARKER_KEY, internal_marker, is_internal_invocation,
 )
 
 # Shared model-name sanitization transform (same functions bundle):
@@ -956,7 +957,9 @@ def _trigger_component_creation(training_id: str, training_job: Dict) -> None:
                 'authorizer': {'claims': {
                     'sub': 'system', 'email': 'system@example.com', 'cognito:username': 'system'
                 }}
-            }
+            },
+            # A direct invoke: the publish handler skips its role check for it.
+            INTERNAL_MARKER_KEY: internal_marker('packaging', 'publish_chain'),
         }
         lambda_client.invoke(
             FunctionName=greengrass_function_name,
@@ -1130,9 +1133,12 @@ def package_components(event: Dict, context: Any) -> Dict:
     }
     """
     try:
-        # Extract user info
+        # Extract user info. The acting user (audit attribution) follows the
+        # event source: the marker's user for an Internal_Invocation, the
+        # gateway caller otherwise.
         user = get_user_from_event(event)
-        user_id = user['user_id']
+        internal = is_internal_invocation(event)
+        user_id = event[INTERNAL_MARKER_KEY]['user_id'] if internal else user['user_id']
         
         # Get path parameters
         training_id = event.get('pathParameters', {}).get('id')
@@ -1147,9 +1153,10 @@ def package_components(event: Dict, context: Any) -> Dict:
         training_job = get_training_job_details(training_id)
         usecase_id = training_job['usecase_id']
         
-        # Check user access (DataScientist role required)
-        # Allow 'system' user for auto-triggered packaging
-        if user_id != 'system' and not check_user_access(user_id, usecase_id, 'DataScientist'):
+        # DataScientist role required, except for a direct invoke by a portal
+        # Lambda (Internal_Invocation: the compilation-events chain and the
+        # conversion finalize)
+        if not internal and not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
 
         # ── vLLM bypass ────────────────────────────────────────────────────

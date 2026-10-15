@@ -38,6 +38,7 @@ import pytest
 
 import detector_conversion as dc
 from conftest import REGION
+from internal_invocation import INTERNAL_MARKER_KEY, internal_marker
 from fixtures.checkpoints.builders import _pb_ld, _pb_str, _pb_vi, _value_info
 from fixtures.detector_probes import PPE_PROBE, PPE_SHA256
 
@@ -183,12 +184,17 @@ def seed_trained_twin(env, artifact_s3):
 
 def package(env, training_id, body=None, system=True):
     sub = "system" if system else env.user_id
-    response = env.packaging.package_components({
+    event = {
         "httpMethod": "POST", "path": f"/api/v1/training/{training_id}/package",
         "pathParameters": {"id": training_id}, "body": json.dumps(body or {}),
         "requestContext": {"authorizer": {"claims": {
             "sub": sub, "email": f"{sub}@example.com", "cognito:username": sub}}},
-    }, None)
+    }
+    if system:
+        # The finalize invoke is a marked direct invoke (portal-authorization-
+        # and-iam-scoping I2), as detector_conversion.build_finalize_event sends it.
+        event[INTERNAL_MARKER_KEY] = internal_marker("test", "finalize")
+    response = env.packaging.package_components(event, None)
     return response["statusCode"], json.loads(response["body"])
 
 
