@@ -5,10 +5,12 @@ import json
 import os
 import logging
 import uuid
-from typing import Dict, Any, Optional, List, Set
+import time
+from typing import Dict, Any, Optional, List, Set, FrozenSet, Tuple
 from datetime import datetime
 from decimal import Decimal
 import boto3
+import botocore
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from enum import Enum
@@ -17,6 +19,13 @@ from functools import wraps
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+# The SDK is vendored into this layer (layers/shared/requirements.txt) so the
+# S3 bucket ABAC / tagging operations the use-case bucket configuration needs
+# do not depend on the Lambda-managed runtime's bundled copy. Logged once per
+# cold start so the deployed version is readable from any function's log
+# stream.
+logger.info("shared layer botocore %s", botocore.__version__)
 
 # DynamoDB client
 dynamodb = boto3.resource('dynamodb')
@@ -2092,20 +2101,293 @@ def validate_usecase_access(user_id: str, usecase_id: str, required_permissions:
         }
 
 
-def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str = 'portal-s3-access'):
+# ---------------------------------------------------------------------------
+# Use-case bucket configuration (portal-usecase-bucket-config, design §1)
+#
+# The S3 buckets a use case may use are an exact-name property of its record:
+# `s3_bucket`, `data_s3_bucket` and the `additional_s3_buckets` list, minus
+# the portal's own buckets (`portal_owned_buckets`). `allowed_s3_buckets`
+# computes that set, `assert_bucket_allowed` enforces it and is the FIRST
+# statement of `get_s3_client_for_bucket`, so no bucket-selected code path
+# reaches STS or S3 for a bucket outside the set. Attaching a bucket to a use
+# case goes through `check_bucket_attachable` (further below, after the
+# PortalAdmin gate it depends on).
+# ---------------------------------------------------------------------------
+
+# Membership and URI parsing: permissive and exact-match safe. Buckets created
+# before March 2018 in us-east-1 may carry uppercase letters, underscores and
+# up to 255 characters, and a use case whose configured bucket has such a name
+# must keep working. The class still excludes '@', ':', '/', whitespace and
+# control characters, so a URI can never smuggle a second host or a port into
+# the compared string (design §1.1).
+MEMBERSHIP_NAME_RE = re.compile(r'^[A-Za-z0-9._-]{3,255}$')
+# Strict S3 naming rules, applied only where the portal is about to CREATE a
+# bucket (POST /s3-buckets).
+BUCKET_NAME_RE = re.compile(
+    r'^(?!\d+\.\d+\.\d+\.\d+$)(?!.*\.\.)[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')
+MAX_S3_URI_LENGTH = 2048
+S3_URI_PREFIX = 's3://'
+
+# Bucket tags the portal reads and writes (design §1.6, §5.5).
+PORTAL_MANAGED_TAG = 'dda-portal:managed'
+PORTAL_CREATED_BY_TAG = 'dda-portal:created-by'
+PORTAL_USECASE_ID_TAG = 'dda-portal:usecase-id'
+PORTAL_CREATED_BY_VALUE = 'portal'
+
+# Remedy texts are constants so tests and the frontend never depend on prose
+# (design §1.2). Every tagging command is the S3 Control form — in AWS CLI 2.x
+# the bucket tag write for the ABAC model is `aws s3control tag-resource`.
+REMEDY_NOT_ALLOWED = (
+    "A UseCaseAdmin can allow this bucket for the use case under Additional "
+    "S3 buckets, or place the object in the use case's configured bucket.")
+REMEDY_PORTAL_BUCKET = (
+    "The portal's own buckets (artifacts, components) cannot be a target for "
+    "this operation and cannot be allowed for a use case.")
+REMEDY_TAG = (
+    "An AWS administrator must tag the bucket dda-portal:managed=true with the "
+    "S3 Control TagResource API (console, or `aws s3control tag-resource "
+    "--account-id <bucket owner account> --resource-arn arn:aws:s3:::<bucket> "
+    "--tags Key=dda-portal:managed,Value=true`), then retry.")
+REMEDY_TAGGING_UNREADABLE = (
+    "The portal's role could not read this bucket's tags. Tag the bucket "
+    "dda-portal:managed=true with the S3 Control TagResource API (`aws "
+    "s3control tag-resource --account-id <bucket owner account> --resource-arn "
+    "arn:aws:s3:::<bucket> --tags Key=dda-portal:managed,Value=true`) if it is "
+    "not tagged (through the use case's role an untagged bucket also answers "
+    "AccessDenied); if it is tagged, enable ABAC on it (`aws s3api "
+    "put-bucket-abac --bucket <bucket> --abac-status Status=Enabled`) or grant "
+    "s3:GetBucketTagging to the portal's role in the bucket policy; on a "
+    "single-account portal deployed with a data-bucket allowlist, add the "
+    "bucket to that list and redeploy; then retry.")
+REMEDY_NOT_FOUND = (
+    "The bucket does not exist or is not visible to the portal's role for "
+    "this use case.")
+REMEDY_CREDENTIALS = (
+    "The portal could not assume the role configured for this bucket; check "
+    "the use case's role ARN, external id and the role's trust policy.")
+REMEDY_ACCOUNT = (
+    "Buckets created in the portal account can only be allowed for "
+    "single-account use cases.")
+REMEDY_OTHER_USECASE = (
+    "This bucket is configured on, or tagged for, another use case. A "
+    "PortalAdmin can allow it for this use case too.")
+REMEDY_STALE_CLAIM = (
+    "This bucket is tagged for a use case that no longer exists. A PortalAdmin "
+    "can allow it for this use case, or an AWS administrator removes the "
+    "dda-portal:usecase-id tag (`aws s3control untag-resource --account-id "
+    "<bucket owner account> --resource-arn arn:aws:s3:::<bucket> --tag-keys "
+    "dda-portal:usecase-id`).")
+REMEDY_TOO_MANY = (
+    "A use case can have at most 100 additional buckets; remove one first.")
+
+# Remedy per eligibility `reason` (design §1.6 table). The
+# `bucket_configured_on_other_usecase` reason is absent on purpose: its remedy
+# (REMEDY_OTHER_USECASE or REMEDY_STALE_CLAIM) is decided by
+# `check_bucket_attachable` from the claim it found.
+REMEDY_FOR_REASON = {
+    'tag_missing': REMEDY_TAG,
+    'no_tags': REMEDY_TAG,
+    'tagging_unreadable': REMEDY_TAGGING_UNREADABLE,
+    'bucket_not_found': REMEDY_NOT_FOUND,
+    'credentials_unavailable': REMEDY_CREDENTIALS,
+    'portal_bucket': REMEDY_PORTAL_BUCKET,
+    'account_mismatch': REMEDY_ACCOUNT,
+    'too_many_buckets': REMEDY_TOO_MANY,
+}
+
+
+class BucketConfigError(ValueError):
+    """A bucket-configuration decision the caller receives as a 400.
+
+    Subclasses `ValueError` so handlers whose `except ValueError` already maps
+    to 400 keep working if a call site forgets the explicit catch; the
+    explicit catch (`bucket_config_error_response`) produces the Requirement 5
+    body shape.
     """
-    Get an S3 client with the correct credentials for accessing a bucket.
-    
-    Determines whether the bucket is in the Data Account, UseCase Account,
-    or Portal Account and assumes the appropriate role.
-    
-    Args:
-        usecase: UseCase dict from DynamoDB
-        bucket_name: S3 bucket name to access
-        session_name: STS session name for role assumption
-    
-    Returns:
-        boto3 S3 client with appropriate credentials
+    error_code = 'bucket_config_error'
+
+    def __init__(self, message: str, *, bucket: Any = None,
+                 usecase_id: Optional[str] = None, purpose: Optional[str] = None,
+                 reason: Optional[str] = None, remedy: Optional[str] = None):
+        super().__init__(message)
+        self.message = message
+        # A non-string bucket (a body value that was null, a number, a list)
+        # is reported by error_code alone, never echoed into the body.
+        self.bucket = bucket if isinstance(bucket, str) else None
+        self.usecase_id = usecase_id
+        self.purpose = purpose
+        self.reason = reason
+        self.remedy = remedy
+
+    def to_body(self) -> Dict[str, Any]:
+        body = {
+            'error': self.message,
+            'error_code': self.error_code,
+            'bucket': self.bucket,
+            'usecase_id': self.usecase_id,
+            'purpose': self.purpose,
+            'reason': self.reason,
+            'remedy': self.remedy,
+        }
+        return {key: value for key, value in body.items() if value is not None}
+
+
+class InvalidS3Uri(BucketConfigError):
+    error_code = 'invalid_s3_uri'
+
+
+class InvalidBucketName(BucketConfigError):
+    error_code = 'invalid_bucket_name'
+
+
+class BucketNotAllowed(BucketConfigError):
+    error_code = 'bucket_not_allowed'
+
+
+class BucketNotEligible(BucketConfigError):
+    error_code = 'bucket_not_eligible'
+
+
+def bucket_config_error_response(exc: BucketConfigError, status: int = 400) -> Dict:
+    """The API Gateway response for a refused bucket-configuration decision."""
+    return create_response(status, exc.to_body())
+
+
+def is_membership_name(name: Any) -> bool:
+    """True when `name` is a `str` the membership grammar accepts.
+
+    `fullmatch`, so the whole string is the name: a trailing newline (which
+    `$` alone would tolerate) is a control character and fails.
+    """
+    return isinstance(name, str) and MEMBERSHIP_NAME_RE.fullmatch(name) is not None
+
+
+def is_valid_bucket_name(name: Any) -> bool:
+    """True when `name` is a `str` S3 would accept for a NEW bucket."""
+    return isinstance(name, str) and BUCKET_NAME_RE.fullmatch(name) is not None
+
+
+def parse_s3_uri(uri: Any, *, require_key: bool = True) -> Tuple[str, str]:
+    """Split an `s3://bucket/key` URI into `(bucket, key)` exactly.
+
+    Requires a `str` of at most MAX_S3_URI_LENGTH characters with the literal
+    lowercase `s3://` prefix; the remainder is split at the FIRST '/', the
+    bucket must match MEMBERSHIP_NAME_RE and the key must be non-empty when
+    `require_key`. No urlparse (whose netloc for `s3://bucket@other/key` is
+    `bucket@other`), no lowercasing, stripping or percent-decoding: the key is
+    returned as given. Any failure raises InvalidS3Uri (design §1.1).
+    """
+    if not isinstance(uri, str):
+        raise InvalidS3Uri("S3 URI must be a string")
+    if len(uri) > MAX_S3_URI_LENGTH:
+        raise InvalidS3Uri(f"S3 URI exceeds {MAX_S3_URI_LENGTH} characters")
+    if not uri.startswith(S3_URI_PREFIX):
+        raise InvalidS3Uri("S3 URI must start with s3://")
+    remainder = uri[len(S3_URI_PREFIX):]
+    bucket, separator, key = remainder.partition('/')
+    if not is_membership_name(bucket):
+        raise InvalidS3Uri("S3 URI does not name a valid bucket",
+                           bucket=bucket if bucket else None)
+    if require_key and not key:
+        raise InvalidS3Uri("S3 URI must name an object key", bucket=bucket)
+    return bucket, key
+
+
+def portal_owned_buckets() -> FrozenSet[str]:
+    """Buckets the portal owns for all use cases; never a member of any
+    allowed set, never attachable (design §1.3).
+
+    The artifacts bucket (PORTAL_ARTIFACTS_BUCKET) and the Greengrass
+    component bucket (COMPONENT_BUCKET, or the `{prefix}-{region}-{account}`
+    derivation of shared_components.py when PORTAL_ACCOUNT_ID is set).
+    Empty names are omitted.
+    """
+    artifacts = os.environ.get('PORTAL_ARTIFACTS_BUCKET', '')
+    component = os.environ.get('COMPONENT_BUCKET') or (
+        f"{os.environ.get('COMPONENT_BUCKET_PREFIX', 'dda-component')}-"
+        f"{os.environ.get('AWS_REGION', 'us-east-1')}-{os.environ.get('PORTAL_ACCOUNT_ID', '')}"
+        if os.environ.get('PORTAL_ACCOUNT_ID') else '')
+    return frozenset(name for name in (artifacts, component) if name)
+
+
+def allowed_s3_buckets(usecase: Dict) -> FrozenSet[str]:
+    """The exact bucket names a use case may use (design §1.3).
+
+    Entries failing the membership grammar and the portal's own buckets are
+    dropped with a WARNING rather than raising: a corrupt record must never
+    widen access and must not take the use case's valid buckets offline.
+    """
+    candidates = [usecase.get('s3_bucket'), usecase.get('data_s3_bucket'),
+                  *(usecase.get('additional_s3_buckets') or [])]
+    owned = portal_owned_buckets()
+    allowed = set()
+    for name in candidates:
+        if not name or (isinstance(name, str) and not name.strip()):
+            continue
+        if not is_membership_name(name):
+            logger.warning("Ignoring configured bucket with invalid name on use case %s",
+                           usecase.get('usecase_id'))
+            continue
+        if name in owned:
+            logger.warning("Ignoring portal-owned bucket configured on use case %s",
+                           usecase.get('usecase_id'))
+            continue
+        allowed.add(name)
+    return frozenset(allowed)
+
+
+def _audit_bucket_refused(usecase: Dict, bucket: str, purpose: str, reason: Optional[str],
+                          actor: Optional[Dict], event: Optional[Dict]) -> None:
+    """The one `s3_bucket_refused` audit row every refusal writes (design
+    §1.4, §1.6). `log_audit_event` swallows its own failures, so audit loss
+    never changes the decision."""
+    usecase_id = usecase.get('usecase_id') or 'unknown'
+    details = {'bucket': bucket, 'purpose': purpose}
+    if reason is not None:
+        details['reason'] = reason
+    user_id = (actor or {}).get('user_id') or 'system'
+    log_audit_event(
+        user_id=user_id, action='s3_bucket_refused', resource_type='usecase',
+        resource_id=usecase_id, result='denied', details=details,
+        identity=attribution_from(event, actor, usecase_id) if event else None)
+
+
+def assert_bucket_allowed(usecase: Dict, bucket: Any, purpose: str, *,
+                          actor: Optional[Dict] = None, event: Optional[Dict] = None) -> None:
+    """Refuse any bucket outside `allowed_s3_buckets(usecase)` (design §1.4).
+
+    (1) `bucket` must be a `str` matching MEMBERSHIP_NAME_RE, else
+    InvalidBucketName (no audit row: nothing was decided). (2) Membership;
+    a refusal logs a WARNING (never a key), writes one `s3_bucket_refused`
+    audit row and raises BucketNotAllowed — with REMEDY_PORTAL_BUCKET when the
+    bucket is one of the portal's own, REMEDY_NOT_ALLOWED otherwise. There is
+    no opt-in parameter of any kind.
+    """
+    if not is_membership_name(bucket):
+        raise InvalidBucketName("Invalid S3 bucket name", bucket=bucket,
+                                usecase_id=usecase.get('usecase_id'), purpose=purpose)
+    if bucket in allowed_s3_buckets(usecase):
+        return
+    usecase_id = usecase.get('usecase_id')
+    logger.warning("S3 bucket refused: usecase=%s bucket=%s purpose=%s",
+                   usecase_id, bucket, purpose)
+    _audit_bucket_refused(usecase, bucket, purpose, None, actor, event)
+    portal_owned = bucket in portal_owned_buckets()
+    raise BucketNotAllowed(
+        "S3 bucket is not allowed for this use case",
+        bucket=bucket, usecase_id=usecase_id, purpose=purpose,
+        remedy=REMEDY_PORTAL_BUCKET if portal_owned else REMEDY_NOT_ALLOWED)
+
+
+def _select_s3_role_for_bucket(usecase: Dict, bucket_name: str) -> Tuple[Optional[str], Optional[str]]:
+    """The `(role_arn, external_id)` the portal assumes for a bucket.
+
+    Data Account role iff the use case has a separate Data Account and the
+    bucket is its `data_s3_bucket`; the use case's cross-account role
+    (the execution role, for a root ARN) otherwise — so every
+    `additional_s3_buckets` entry is reached with the cross-account role.
+    Private: returns ARNs, not a client, so the eligibility probe can reuse
+    the credential path without a way to obtain an unchecked client.
     """
     data_s3_bucket = usecase.get('data_s3_bucket')
     data_account_id = usecase.get('data_account_id')
@@ -2123,7 +2405,29 @@ def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str 
     else:
         role_arn = usecase.get('cross_account_role_arn')
         external_id = usecase.get('external_id')
+    return role_arn, external_id
+
+
+def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str = 'portal-s3-access'):
+    """
+    Get an S3 client with the correct credentials for accessing a bucket.
     
+    Binds the bucket to the use case's configured buckets FIRST
+    (`assert_bucket_allowed`, raising BucketConfigError before any STS or S3
+    call), then determines whether the bucket is in the Data Account,
+    UseCase Account, or Portal Account and assumes the appropriate role.
+    
+    Args:
+        usecase: UseCase dict from DynamoDB
+        bucket_name: S3 bucket name to access
+        session_name: STS session name for role assumption (recorded as the
+            `purpose` of a refusal)
+    
+    Returns:
+        boto3 S3 client with appropriate credentials
+    """
+    assert_bucket_allowed(usecase, bucket_name, purpose=session_name)
+    role_arn, external_id = _select_s3_role_for_bucket(usecase, bucket_name)
     credentials = assume_usecase_role(role_arn, external_id, session_name)
     return create_boto3_client('s3', credentials)
 
@@ -2164,3 +2468,278 @@ def caller_is_portal_admin(user: Optional[Dict]) -> bool:
     """
     user_id = (user or {}).get('user_id') or 'unknown'
     return rbac_manager.is_portal_admin(user_id, user_info=user)
+
+
+# ---------------------------------------------------------------------------
+# Use-case bucket configuration: eligibility probe and attach validator
+# (portal-usecase-bucket-config, design §1.6). Placed after the PortalAdmin
+# gate because the validator's sharing override is `caller_is_portal_admin`.
+# ---------------------------------------------------------------------------
+
+ELIGIBILITY_RETRY_ATTEMPTS = 3
+ELIGIBILITY_RETRY_DELAY_SECONDS = 1
+ELIGIBILITY_SESSION_NAME = 'portal-bucket-eligibility'
+
+
+@dataclass
+class EligibilityResult:
+    """What `probe_bucket_eligibility` read, plus what `check_bucket_attachable`
+    decided on top of it.
+
+    `shared_with_usecases` and `stale_claim` are filled by the validator only
+    when the PortalAdmin override admitted a bucket that its configuration
+    Scan or its tag-claim step would otherwise have refused, so every record
+    writer emits one and the same `s3_bucket_allowed` audit row without
+    recomputing anything.
+    """
+    eligible: bool
+    reason: str
+    tags: Dict[str, str]
+    portal_created: bool
+    claimed_by: Optional[str]
+    shared_with_usecases: int = 0
+    stale_claim: bool = False
+
+
+def _tags_from_tagging_response(response: Dict) -> Dict[str, str]:
+    return {tag['Key']: tag.get('Value') for tag in response.get('TagSet', [])
+            if isinstance(tag, dict) and 'Key' in tag}
+
+
+def _tags_qualify(tags: Dict[str, str]) -> bool:
+    return (tags.get(PORTAL_MANAGED_TAG) == 'true'
+            or tags.get(PORTAL_CREATED_BY_TAG) == PORTAL_CREATED_BY_VALUE)
+
+
+def _client_error_code_and_status(error: ClientError) -> Tuple[str, str]:
+    response = getattr(error, 'response', None) or {}
+    code = str((response.get('Error') or {}).get('Code') or '')
+    status = str((response.get('ResponseMetadata') or {}).get('HTTPStatusCode') or '')
+    return code, status
+
+
+def _eligibility_result(reason: str, tags: Dict[str, str]) -> EligibilityResult:
+    return EligibilityResult(
+        eligible=(reason == 'eligible'), reason=reason, tags=dict(tags),
+        portal_created=(tags.get(PORTAL_CREATED_BY_TAG) == PORTAL_CREATED_BY_VALUE),
+        claimed_by=tags.get(PORTAL_USECASE_ID_TAG) or None)
+
+
+def read_bucket_tags(s3_client: Any, bucket: str, *, retry: bool = False) -> Tuple[Dict[str, str], str]:
+    """One `get_bucket_tagging` read classified as `eligible` (a qualifying
+    portal tag is present), `tag_missing` (tags, none qualifying) or
+    `no_tags` (NoSuchTagSet); returns `(tags, reason)`.
+
+    With `retry=True` the two non-qualifying outcomes are re-read up to
+    ELIGIBILITY_RETRY_ATTEMPTS times, ELIGIBILITY_RETRY_DELAY_SECONDS apart
+    (bucket tagging reads are not read-after-write consistent); with the
+    default the first read concludes and nothing sleeps. Any other
+    ClientError propagates unchanged so the caller classifies it. The one
+    implementation behind the eligibility probe and `create_s3_bucket`'s
+    read-after-write of the tags it sent (design §1.6, §5.5 step 5).
+    """
+    attempts = ELIGIBILITY_RETRY_ATTEMPTS if retry else 1
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            tags = _tags_from_tagging_response(s3_client.get_bucket_tagging(Bucket=bucket))
+            reason = 'eligible' if _tags_qualify(tags) else 'tag_missing'
+        except ClientError as error:
+            code, _ = _client_error_code_and_status(error)
+            if code != 'NoSuchTagSet':
+                raise
+            tags, reason = {}, 'no_tags'
+        if reason == 'eligible' or attempt >= attempts:
+            return tags, reason
+        time.sleep(ELIGIBILITY_RETRY_DELAY_SECONDS)
+
+
+def probe_bucket_eligibility(usecase_like: Dict, bucket: str, *, retry: bool = False) -> EligibilityResult:
+    """Read a bucket's tags with the credentials the portal would later use
+    for it and classify the outcome (design §1.6 table). Never raises.
+
+    `usecase_like` is the use case record or, at creation, the item about to
+    be written with its role fields resolved. Outcomes, all fail-closed:
+    `eligible` (dda-portal:managed=true or dda-portal:created-by=portal),
+    `tag_missing`, `no_tags`, `tagging_unreadable` (AccessDenied / 403, or a
+    PermanentRedirect the one region retry could not resolve),
+    `bucket_not_found` (NoSuchBucket / 404) and `credentials_unavailable`
+    (the STS call or anything else failed).
+
+    `retry=True` re-reads `no_tags` / `tag_missing` up to
+    ELIGIBILITY_RETRY_ATTEMPTS times, ELIGIBILITY_RETRY_DELAY_SECONDS apart
+    (tag read-after-write); with the default the first read concludes and the
+    probe never sleeps. A `PermanentRedirect` / 301 is followed ONCE with a
+    client bound to the `x-amz-bucket-region` response header (same
+    credentials, no second STS call); no header, a second redirect or any
+    other read failure on that client concludes `tagging_unreadable`.
+    """
+    tags: Dict[str, str] = {}
+    reason = 'credentials_unavailable'
+    try:
+        role_arn, external_id = _select_s3_role_for_bucket(usecase_like, bucket)
+        credentials = assume_usecase_role(role_arn, external_id, ELIGIBILITY_SESSION_NAME)
+        s3_client = create_boto3_client('s3', credentials)
+        redirected = False
+        while True:
+            try:
+                tags, reason = read_bucket_tags(s3_client, bucket, retry=retry)
+                break
+            except ClientError as error:
+                code, status = _client_error_code_and_status(error)
+                tags = {}
+                if code in ('PermanentRedirect', '301') or status == '301':
+                    headers = ((error.response or {}).get('ResponseMetadata') or {}).get('HTTPHeaders') or {}
+                    region = headers.get('x-amz-bucket-region')
+                    if redirected or not region:
+                        reason = 'tagging_unreadable'
+                        break
+                    logger.info("Bucket %s tagging read redirected to region %s", bucket, region)
+                    redirected = True
+                    s3_client = create_boto3_client('s3', credentials, region=region)
+                    continue
+                if redirected or code in ('AccessDenied', '403') or status == '403':
+                    reason = 'tagging_unreadable'
+                elif code in ('NoSuchBucket', '404') or status == '404':
+                    reason = 'bucket_not_found'
+                else:
+                    reason = 'credentials_unavailable'
+                break
+    except Exception as error:  # noqa: BLE001 - the probe never raises; it fails closed
+        logger.info("Bucket %s eligibility probe could not read tags: %s", bucket, error)
+        tags = {}
+        reason = 'credentials_unavailable'
+    logger.info("Bucket %s eligibility: %s", bucket, reason)
+    return _eligibility_result(reason, tags)
+
+
+def _usecases_configuring_bucket(bucket: str) -> Set[str]:
+    """usecase_ids whose record names `bucket` as `s3_bucket`, `data_s3_bucket`
+    or an `additional_s3_buckets` entry (paginated Scan). A Scan error is an
+    outage, not a decision: it propagates."""
+    table = dynamodb.Table(USECASES_TABLE)
+    scan_kwargs = {
+        'ProjectionExpression': 'usecase_id',
+        'FilterExpression': 's3_bucket = :b OR data_s3_bucket = :b OR contains(additional_s3_buckets, :b)',
+        'ExpressionAttributeValues': {':b': bucket},
+    }
+    found: Set[str] = set()
+    while True:
+        response = table.scan(**scan_kwargs)
+        for item in response.get('Items', []):
+            if item.get('usecase_id'):
+                found.add(item['usecase_id'])
+        last_key = response.get('LastEvaluatedKey')
+        if not last_key:
+            return found
+        scan_kwargs['ExclusiveStartKey'] = last_key
+
+
+def _usecase_exists(usecase_id: str) -> bool:
+    """One projected get_item; a DynamoDB error propagates (same rule as the Scan)."""
+    table = dynamodb.Table(USECASES_TABLE)
+    response = table.get_item(Key={'usecase_id': usecase_id}, ProjectionExpression='usecase_id')
+    return 'Item' in response
+
+
+def check_bucket_attachable(*, target_usecase_id: Optional[str], usecase_like: Dict, bucket: Any,
+                            user: Dict, event: Optional[Dict], purpose: str,
+                            evidence: Optional[EligibilityResult] = None,
+                            retry: bool = False) -> EligibilityResult:
+    """The single attach validator every use case record writer calls before
+    it writes a bucket into `s3_bucket`, `data_s3_bucket` or
+    `additional_s3_buckets` (design §1.6). Order:
+
+    0. portal-owned bucket → BucketNotEligible(`portal_bucket`), before any
+       Scan or probe, whatever its tags say — PortalAdmin included;
+    1. `bucket` must be a `str` matching MEMBERSHIP_NAME_RE, else
+       InvalidBucketName (a non-string body value is a 400, never a 500);
+    2. Unclaimed (configuration): a bucket configured on another use case is
+       attachable only by a PortalAdmin (`bucket_configured_on_other_usecase`,
+       REMEDY_OTHER_USECASE);
+    3. eligibility: `evidence` when the caller read the tags itself in the
+       same request, else `probe_bucket_eligibility(..., retry=retry)`;
+    4. Unclaimed (tag claim): a `dda-portal:usecase-id` naming another use
+       case is a claim whether or not that use case still exists; one
+       get_item picks REMEDY_OTHER_USECASE (exists) or REMEDY_STALE_CLAIM
+       (deleted); a PortalAdmin proceeds;
+    5. the returned result carries `shared_with_usecases` and `stale_claim`
+       for the writer's `s3_bucket_allowed` audit row.
+
+    Every refusal writes `s3_bucket_refused` (details bucket, purpose, reason)
+    before raising. `caller_is_portal_admin` may raise RegistryUnavailable and
+    a Scan / get_item error propagates: an outage is a 500, never a decision.
+    """
+    usecase_id = target_usecase_id or usecase_like.get('usecase_id') or 'unknown'
+    audit_usecase = {'usecase_id': usecase_id}
+
+    def _refuse(reason: str, remedy: str) -> None:
+        logger.warning("S3 bucket not attachable: usecase=%s bucket=%s purpose=%s reason=%s",
+                       usecase_id, bucket, purpose, reason)
+        _audit_bucket_refused(audit_usecase, bucket, purpose, reason, user, event)
+        raise BucketNotEligible(
+            "S3 bucket is not eligible for this use case", bucket=bucket,
+            usecase_id=usecase_id, purpose=purpose, reason=reason, remedy=remedy)
+
+    # 0. The portal's own buckets are not attachable by anyone.
+    if isinstance(bucket, str) and bucket in portal_owned_buckets():
+        _refuse('portal_bucket', REMEDY_PORTAL_BUCKET)
+
+    # 1. Grammar.
+    if not is_membership_name(bucket):
+        logger.info("S3 bucket name rejected: usecase=%s purpose=%s", usecase_id, purpose)
+        raise InvalidBucketName("Invalid S3 bucket name", bucket=bucket,
+                                usecase_id=usecase_id, purpose=purpose)
+
+    # 2. Unclaimed (configuration).
+    others = _usecases_configuring_bucket(bucket)
+    others.discard(target_usecase_id)
+    is_portal_admin: Optional[bool] = None
+    if others:
+        is_portal_admin = caller_is_portal_admin(user)
+        if not is_portal_admin:
+            _refuse('bucket_configured_on_other_usecase', REMEDY_OTHER_USECASE)
+
+    # 3. Eligibility.
+    result = evidence if evidence is not None else probe_bucket_eligibility(
+        usecase_like, bucket, retry=retry)
+    if not result.eligible:
+        _refuse(result.reason, REMEDY_FOR_REASON.get(result.reason))
+
+    # 4. Unclaimed (tag claim).
+    claimed_elsewhere = bool(result.claimed_by) and result.claimed_by != target_usecase_id
+    stale_claim = False
+    if claimed_elsewhere:
+        stale_claim = not _usecase_exists(result.claimed_by)
+        if is_portal_admin is None:
+            is_portal_admin = caller_is_portal_admin(user)
+        if not is_portal_admin:
+            _refuse('bucket_configured_on_other_usecase',
+                    REMEDY_STALE_CLAIM if stale_claim else REMEDY_OTHER_USECASE)
+
+    # 5. What the PortalAdmin override admitted, for the writer's audit row.
+    result.shared_with_usecases = len(others) + (
+        1 if claimed_elsewhere and result.claimed_by not in others else 0)
+    result.stale_claim = claimed_elsewhere and stale_claim
+    return result
+
+
+def audit_bucket_allowed(user: Dict, usecase_id: str, bucket: str, attribute: str,
+                         source: str, result: EligibilityResult,
+                         event: Optional[Dict]) -> None:
+    """The one `s3_bucket_allowed` audit row every record writer emits AFTER
+    its write succeeded (design §1.6): `attribute` names the record field the
+    bucket entered (`s3_bucket` | `data_s3_bucket` | `additional_s3_buckets`),
+    `source` the writer (`api` | `create` | `configure` | `auto_add`), and the
+    validator's `shared_with_usecases` / `stale_claim` ride along only when
+    the PortalAdmin override admitted a shared or claimed bucket.
+    `log_audit_event` swallows its own failures.
+    """
+    details: Dict[str, Any] = {'bucket': bucket, 'attribute': attribute, 'source': source}
+    if result.shared_with_usecases > 0:
+        details['shared_with_usecases'] = result.shared_with_usecases
+    if result.stale_claim:
+        details['stale_claim'] = True
+    log_audit_event(user['user_id'], 's3_bucket_allowed', 'usecase', usecase_id,
+                    'success', details, event=event)

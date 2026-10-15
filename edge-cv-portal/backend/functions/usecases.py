@@ -13,7 +13,18 @@ from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, is_super_user, validate_required_fields,
     rbac_manager, Role, Permission, require_permission, require_super_user,
-    validate_usecase_access
+    validate_usecase_access,
+    # Use-case bucket configuration (design §5): the allowed-set helpers, the
+    # attach validator and the error / audit shapes every record writer shares.
+    allowed_s3_buckets, portal_owned_buckets, check_bucket_attachable,
+    audit_bucket_allowed, read_bucket_tags, is_membership_name,
+    is_valid_bucket_name, caller_is_portal_admin, is_cross_account_setup,
+    BucketConfigError, BucketNotEligible, InvalidBucketName,
+    bucket_config_error_response, EligibilityResult,
+    PORTAL_MANAGED_TAG, PORTAL_CREATED_BY_TAG, PORTAL_USECASE_ID_TAG,
+    PORTAL_CREATED_BY_VALUE, REMEDY_FOR_REASON, REMEDY_ACCOUNT,
+    REMEDY_OTHER_USECASE, REMEDY_PORTAL_BUCKET, REMEDY_TOO_MANY,
+    _usecases_configuring_bucket,
 )
 # Use_Case settings for VLM/LLM Anomaly Tuning Sample_Export (spec:
 # quality-prompt-tuning, Requirements 2.1, 2.9). Pure module, shared with
@@ -27,6 +38,138 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.resource('dynamodb')
 sts = boto3.client('sts')
 USECASES_TABLE = os.environ.get('USECASES_TABLE')
+
+# Use-case bucket configuration (design §5.1, §5.3): the additional-bucket
+# list is capped at 100 entries per use case and at 10 names per request
+# (the probe latency bound of §1.6 — every add is probed).
+MAX_ADDITIONAL_BUCKETS = 100
+MAX_BUCKET_NAMES_PER_REQUEST = 10
+# Remedy for a portal-created bucket whose auto-add did not happen (§5.5
+# step 6) and for a name the account already owns (§5.5 step 3).
+REMEDY_ADD_LATER = ("The bucket exists and is tagged; a UseCaseAdmin can allow it "
+                    "from the use case's Additional S3 buckets.")
+REMEDY_BUCKET_ALREADY_EXISTS = ("Select the existing bucket instead; if it is not tagged "
+                                "for the portal an AWS administrator must tag it.")
+REMEDY_TAGGING_FAILED = ("The bucket was created but could not be tagged; an AWS "
+                         "administrator must tag it before it can be allowed.")
+
+
+class InvalidField(ValueError):
+    """A request field of the wrong shape (not a list, more names than the
+    per-request cap): answered 400 `invalid_field`."""
+
+    def __init__(self, field: str, message: str):
+        super().__init__(message)
+        self.field = field
+        self.message = message
+
+    def to_body(self) -> dict:
+        return {'error': self.message, 'error_code': 'invalid_field', 'field': self.field}
+
+
+def _is_clear(value) -> bool:
+    """A Clear of an optional bucket field (design §5.3 step 4): None, '' or
+    whitespace-only. Absent, None and '' compare equal when deciding whether
+    a value changed."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _bucket_value(value):
+    """The comparable form of a configured bucket value: None for a Clear,
+    the value itself otherwise (no stripping, no lowercasing — §1.1)."""
+    return None if _is_clear(value) else value
+
+
+def _bucket_name_list(value, field: str, *, usecase_id: str = None, purpose: str) -> list:
+    """Validate an optional list of bucket names from the request body
+    (design §5.3 step 2, §5.4): absent/None -> []; must be a list of at most
+    MAX_BUCKET_NAMES_PER_REQUEST strings matching MEMBERSHIP_NAME_RE, else
+    InvalidField / InvalidBucketName naming the first offender. Duplicates
+    are dropped, order kept."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise InvalidField(field, f"{field} must be a list of bucket names")
+    if len(value) > MAX_BUCKET_NAMES_PER_REQUEST:
+        raise InvalidField(
+            field, f"{field} accepts at most {MAX_BUCKET_NAMES_PER_REQUEST} bucket names per request")
+    for name in value:
+        if not is_membership_name(name):
+            raise InvalidBucketName("Invalid S3 bucket name", bucket=name,
+                                    usecase_id=usecase_id, purpose=purpose)
+    return list(dict.fromkeys(value))
+
+
+def _rejection(bucket, error: BucketConfigError) -> dict:
+    """One `rejected` entry per failing name (design §5.3 step 7)."""
+    return {'bucket': bucket if isinstance(bucket, str) else None,
+            'error_code': error.error_code, 'reason': error.reason}
+
+
+def _refused_response(first_error: BucketConfigError, rejected: list) -> dict:
+    body = first_error.to_body()
+    body['rejected'] = rejected
+    return create_response(400, body)
+
+
+def _usecase_not_found(**extra) -> dict:
+    return create_response(404, {'error': 'Use case not found',
+                                 'error_code': 'usecase_not_found', **extra})
+
+
+def _add_additional_bucket(table, usecase_id: str, name: str) -> str:
+    """Append `name` to the use case's additional_s3_buckets list (design
+    §5.1). 'added' | 'already_present' | 'usecase_not_found'.
+
+    The `attribute_exists(usecase_id)` conjunct keeps the update from
+    materialising a phantom record when the use case was deleted between the
+    permission check and the write; `ReturnValuesOnConditionCheckFailure`
+    tells "item gone" (no Item in the failure) from "name already present"
+    (the old item) without a second read.
+    """
+    now_ms = int(datetime.utcnow().timestamp() * 1000)
+    try:
+        table.update_item(
+            Key={'usecase_id': usecase_id},
+            UpdateExpression='SET #a = list_append(if_not_exists(#a, :empty), :one), updated_at = :t',
+            ConditionExpression='attribute_exists(usecase_id) AND (attribute_not_exists(#a) OR NOT contains(#a, :b))',
+            ExpressionAttributeNames={'#a': 'additional_s3_buckets'},
+            ExpressionAttributeValues={':empty': [], ':one': [name], ':b': name, ':t': now_ms},
+            ReturnValuesOnConditionCheckFailure='ALL_OLD')
+        return 'added'
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'ConditionalCheckFailedException':
+            raise
+        return 'usecase_not_found' if not e.response.get('Item') else 'already_present'
+
+
+def _remove_additional_bucket(table, usecase_id: str, name: str) -> str:
+    """Remove `name` from the use case's additional_s3_buckets list (design
+    §5.1). 'removed' | 'not_present' | 'usecase_not_found' |
+    'concurrent_update' (the list changed under us twice)."""
+    for _attempt in range(2):
+        record = table.get_item(Key={'usecase_id': usecase_id}).get('Item')
+        if record is None:
+            return 'usecase_not_found'
+        current = list(record.get('additional_s3_buckets') or [])
+        if name not in current:
+            return 'not_present'
+        now_ms = int(datetime.utcnow().timestamp() * 1000)
+        try:
+            table.update_item(
+                Key={'usecase_id': usecase_id},
+                UpdateExpression='SET #a = :filtered, updated_at = :t',
+                ConditionExpression='attribute_exists(usecase_id) AND #a = :expected',
+                ExpressionAttributeNames={'#a': 'additional_s3_buckets'},
+                ExpressionAttributeValues={':filtered': [b for b in current if b != name],
+                                           ':expected': current, ':t': now_ms})
+            return 'removed'
+        except ClientError as e:
+            if e.response['Error']['Code'] != 'ConditionalCheckFailedException':
+                raise
+            logger.warning("additional_s3_buckets of use case %s changed during a remove; re-reading",
+                           usecase_id)
+    return 'concurrent_update'
 
 
 def provision_shared_components_via_api(
@@ -533,21 +676,27 @@ def tag_bucket_for_portal(
     usecase_id: str
 ) -> dict:
     """
-    Tag a bucket with dda-portal:managed=true so it appears in the portal.
+    Confirm that a Data Account bucket carries the portal tag
+    (dda-portal:managed=true) so it appears in the portal.
     
-    This is called during usecase onboarding to automatically tag the configured bucket.
+    Called during usecase onboarding for the configured data bucket. Read-only:
+    the portal writes no tags on buckets it did not create (design §5.4) — the
+    attach validator has already required the tag before the use case was
+    written, so on the success path the bucket is always `already_configured`;
+    a bucket without the tag is reported `failed` with the tagging remedy for
+    an AWS administrator.
     
     Args:
         role_arn: Role ARN to assume for bucket access
         external_id: External ID for assuming the role
-        bucket_name: S3 bucket name to tag
-        usecase_id: UseCase ID to associate with the bucket
+        bucket_name: S3 bucket name to check
+        usecase_id: UseCase ID the bucket is configured on (logged only)
     
     Returns:
-        dict with status and details
+        dict with status and details (keys unchanged from the former writer)
     """
     try:
-        logger.info(f"Tagging bucket {bucket_name} for portal access")
+        logger.info(f"Checking the portal tag on bucket {bucket_name} for use case {usecase_id}")
         
         # Assume role
         credentials = assume_role(role_arn, external_id, 'tag-bucket')
@@ -560,41 +709,24 @@ def tag_bucket_for_portal(
             aws_session_token=credentials['SessionToken']
         )
         
-        # Get existing tags
-        existing_tags = []
+        # Read the tags; the managed tag must already be there.
         try:
             response = s3.get_bucket_tagging(Bucket=bucket_name)
-            existing_tags = response.get('TagSet', [])
-            
-            # Check if already tagged
-            for tag in existing_tags:
-                if tag.get('Key') == 'dda-portal:managed' and tag.get('Value') == 'true':
-                    logger.info(f"Bucket {bucket_name} already tagged for portal")
+            for tag in response.get('TagSet', []):
+                if tag.get('Key') == PORTAL_MANAGED_TAG and tag.get('Value') == 'true':
+                    logger.info(f"Bucket {bucket_name} is tagged for the portal")
                     return {
                         'status': 'already_configured',
                         'bucket': bucket_name
                     }
         except ClientError as e:
-            if e.response['Error']['Code'] == 'NoSuchTagSet':
-                existing_tags = []
-            else:
+            if e.response['Error']['Code'] != 'NoSuchTagSet':
                 raise
         
-        # Add portal tag
-        new_tags = [t for t in existing_tags if t.get('Key') not in ['dda-portal:managed', 'dda-portal:usecase-id']]
-        new_tags.append({'Key': 'dda-portal:managed', 'Value': 'true'})
-        new_tags.append({'Key': 'dda-portal:usecase-id', 'Value': usecase_id})
-        
-        # Put tags
-        s3.put_bucket_tagging(
-            Bucket=bucket_name,
-            Tagging={'TagSet': new_tags}
-        )
-        
-        logger.info(f"Successfully tagged bucket {bucket_name} for portal")
-        
+        logger.warning(f"Bucket {bucket_name} does not carry {PORTAL_MANAGED_TAG}=true")
         return {
-            'status': 'success',
+            'status': 'failed',
+            'error': f"Bucket is not tagged {PORTAL_MANAGED_TAG}=true. {REMEDY_FOR_REASON['tag_missing']}",
             'bucket': bucket_name
         }
         
@@ -834,17 +966,39 @@ def configure_eventbridge_permission(usecase_account_id: str) -> dict:
         }
 
 
+def _portal_tagged_buckets() -> dict:
+    """{bucket name: tags} for every bucket in this account and region tagged
+    dda-portal:managed=true — one paginated Resource Groups Tagging API query
+    (design §5.5, `list_s3_buckets`). GetResources is regional while
+    ListBuckets is global, so the marking is advisory."""
+    tagging = boto3.client('resourcegroupstaggingapi')
+    tagged = {}
+    paginator = tagging.get_paginator('get_resources')
+    for page in paginator.paginate(TagFilters=[{'Key': PORTAL_MANAGED_TAG, 'Values': ['true']}],
+                                   ResourceTypeFilters=['s3:bucket']):
+        for resource in page.get('ResourceTagMappingList', []):
+            # ARN format: arn:aws:s3:::bucket-name
+            bucket_name = resource.get('ResourceARN', '').split(':::')[-1]
+            if bucket_name:
+                tagged[bucket_name] = {tag['Key']: tag.get('Value') for tag in resource.get('Tags', [])}
+    return tagged
+
+
 def list_s3_buckets(user):
     """List S3 buckets in the current (portal) AWS account.
 
     Used by the 'Onboard New Use Case' flow so the user can browse and pick a
     bucket instead of typing its name. Runs in the portal account with the
     Lambda execution role (no cross-account assume-role) and returns each
-    bucket's name, creation date, and region.
+    bucket's name, creation date, and region, plus the advisory marks
+    `eligible` (tagged dda-portal:managed=true in this region, from one
+    Resource Groups Tagging API query) and `portal_created` (design §5.5).
+    The attach probe at use-case creation is the authority, not these marks.
     """
     try:
         s3 = boto3.client('s3')
         response = s3.list_buckets()
+        tagged = _portal_tagged_buckets()
 
         buckets = []
         for b in response.get('Buckets', []):
@@ -863,6 +1017,8 @@ def list_s3_buckets(user):
                 'name': name,
                 'creation_date': created.isoformat() if hasattr(created, 'isoformat') else None,
                 'region': region,
+                'eligible': name in tagged,
+                'portal_created': tagged.get(name, {}).get(PORTAL_CREATED_BY_TAG) == PORTAL_CREATED_BY_VALUE,
             })
 
         buckets.sort(key=lambda x: (x['name'] or '').lower())
@@ -881,35 +1037,143 @@ def list_s3_buckets(user):
         return create_response(500, {'error': 'Internal server error'})
 
 
-def create_s3_bucket(event, user):
-    """Create a new S3 bucket in the current (portal) account with default settings.
+def _portal_bucket_tags(usecase_id):
+    """The tags a portal-created bucket carries (design §5.5 step 3)."""
+    tags = [{'Key': PORTAL_MANAGED_TAG, 'Value': 'true'},
+            {'Key': PORTAL_CREATED_BY_TAG, 'Value': PORTAL_CREATED_BY_VALUE}]
+    if usecase_id:
+        tags.append({'Key': PORTAL_USECASE_ID_TAG, 'Value': usecase_id})
+    return tags
 
-    Used by the 'Onboard New Use Case' flow as an alternative to selecting an
-    existing bucket. Keeps it simple: default permissions/ownership, created in
-    the requested region (defaults to the Lambda's region). us-east-1 must not
-    send a LocationConstraint.
+
+def _portal_tags_confirmed(read_tags: dict, tags: list) -> bool:
+    """True when every tag the portal sent came back from GetBucketTagging."""
+    return all(read_tags.get(tag['Key']) == tag['Value'] for tag in tags)
+
+
+def _read_created_bucket_tags(s3, name: str) -> dict:
+    """Read-after-write of the tags sent with CreateBucket (design §5.5 step
+    5): the shared bounded retry on NoSuchTagSet / a tag set lacking the
+    keys; any other read error counts as "keys missing" so the fallback
+    runs."""
+    try:
+        read_tags, _reason = read_bucket_tags(s3, name, retry=True)
+        return read_tags
+    except ClientError as e:
+        logger.warning(f"Could not read back the tags of bucket {name}: {str(e)}")
+        return {}
+
+
+def _audit_bucket_refused_before_create(user, usecase_id, name, reason, event):
+    log_audit_event(
+        user['user_id'], 's3_bucket_refused', 'usecase', usecase_id or 'none', 'denied',
+        {'bucket': name, 'purpose': 'create-s3-bucket', 'reason': reason}, event=event)
+
+
+def create_s3_bucket(event, user):
+    """Create a portal-managed S3 bucket in the current (portal) account
+    (design §5.5, Requirement 9).
+
+    body: {name: str, region?: str, usecase_id?: str}
+
+    Who: with `usecase_id`, a holder of UPDATE_USECASES on that single-account
+    use case (the bucket is then auto-added to its additional buckets);
+    without, a PortalAdmin (the onboarding wizard, which has no use case yet).
+    Before any AWS call the name must be free of the portal's own buckets and
+    not configured on another use case. The dda-portal:* tags travel in the
+    CreateBucket request (CreateBucketConfiguration.Tags, built for us-east-1
+    too), ABAC is enabled, the tags are read back with the bounded retry and,
+    only if S3 did not return them, written once more with the S3 Control
+    TagResource API; a bucket whose tags cannot be confirmed is never
+    attached (500 `bucket_tagging_failed`).
     """
     try:
         body = json.loads(event.get('body', '{}'))
-        name = (body.get('name') or '').strip()
+        name = body.get('name')
+        name = name.strip() if isinstance(name, str) else name
         region = (body.get('region') or os.environ.get('AWS_REGION', 'us-east-1')).strip()
+        usecase_id = body.get('usecase_id') or None
 
         if not name:
             return create_response(400, {'error': 'Bucket name is required'})
+        if usecase_id is not None and not isinstance(usecase_id, str):
+            return create_response(400, InvalidField('usecase_id', 'usecase_id must be a string').to_body())
+        # 1. Strict S3 naming: this is a new bucket.
+        if not is_valid_bucket_name(name):
+            return bucket_config_error_response(InvalidBucketName(
+                "Invalid S3 bucket name", bucket=name, usecase_id=usecase_id,
+                purpose='create-s3-bucket'))
 
-        s3 = boto3.client('s3')
-        create_args = {'Bucket': name}
-        # us-east-1 is the API default and rejects an explicit LocationConstraint.
+        # 2. Authorization.
+        table = dynamodb.Table(USECASES_TABLE)
+        record = None
+        if usecase_id:
+            record = table.get_item(Key={'usecase_id': usecase_id}).get('Item')
+            if record is None:
+                return _usecase_not_found()
+            if not rbac_manager.has_permission(user['user_id'], usecase_id, Permission.UPDATE_USECASES, user):
+                log_audit_event(
+                    user['user_id'], 'create_s3_bucket', 'usecase', usecase_id,
+                    'failure', {'reason': 'insufficient_permissions', 'bucket': name})
+                return create_response(403, {'error': 'Insufficient permissions to update use case'})
+            if is_cross_account_setup(record):
+                return bucket_config_error_response(BucketNotEligible(
+                    "Buckets created in the portal account cannot be allowed for a multi-account use case",
+                    bucket=name, usecase_id=usecase_id, purpose='create-s3-bucket',
+                    reason='account_mismatch', remedy=REMEDY_ACCOUNT))
+            if len(record.get('additional_s3_buckets') or []) >= MAX_ADDITIONAL_BUCKETS:
+                return bucket_config_error_response(BucketNotEligible(
+                    "The use case already has the maximum number of additional buckets",
+                    bucket=name, usecase_id=usecase_id, purpose='create-s3-bucket',
+                    reason='too_many_buckets', remedy=REMEDY_TOO_MANY))
+        elif not caller_is_portal_admin(user):
+            log_audit_event(
+                user['user_id'], 'create_s3_bucket', 'usecase', name,
+                'failure', {'reason': 'insufficient_permissions'})
+            return create_response(403, {'error': 'Only a PortalAdmin can create a bucket without a use case'})
+
+        # 2b. Pre-create Unclaimed check, before any AWS call: the portal does
+        # not re-create its own buckets, and a name another use case already
+        # configures is created only by a PortalAdmin (who may share it).
+        if name in portal_owned_buckets():
+            _audit_bucket_refused_before_create(user, usecase_id, name, 'portal_bucket', event)
+            return bucket_config_error_response(BucketNotEligible(
+                "S3 bucket is not eligible for this use case", bucket=name, usecase_id=usecase_id,
+                purpose='create-s3-bucket', reason='portal_bucket', remedy=REMEDY_PORTAL_BUCKET))
+        others = _usecases_configuring_bucket(name)
+        others.discard(usecase_id)
+        if others and not caller_is_portal_admin(user):
+            _audit_bucket_refused_before_create(user, usecase_id, name,
+                                                'bucket_configured_on_other_usecase', event)
+            return bucket_config_error_response(BucketNotEligible(
+                "S3 bucket is not eligible for this use case", bucket=name, usecase_id=usecase_id,
+                purpose='create-s3-bucket', reason='bucket_configured_on_other_usecase',
+                remedy=REMEDY_OTHER_USECASE))
+
+        # 3. Create with the tags in the request. The configuration dict is
+        # built for us-east-1 too; only the LocationConstraint is omitted
+        # there (us-east-1 rejects an explicit one).
+        tags = _portal_bucket_tags(usecase_id)
+        tag_keys = [tag['Key'] for tag in tags]
+        s3 = boto3.client('s3', region_name=region)
+        create_args = {'Bucket': name, 'CreateBucketConfiguration': {'Tags': tags}}
         if region != 'us-east-1':
-            create_args['CreateBucketConfiguration'] = {'LocationConstraint': region}
+            create_args['CreateBucketConfiguration']['LocationConstraint'] = region
 
         try:
             s3.create_bucket(**create_args)
         except ClientError as e:
             code = e.response.get('Error', {}).get('Code', '')
             if code == 'BucketAlreadyOwnedByYou':
-                # Already owned by this account - treat as success (idempotent).
+                # Not idempotent any more: an existing bucket goes through
+                # "select existing" so an untagged one is never attached.
                 logger.info(f"Bucket {name} already owned by this account")
+                return create_response(409, {
+                    'error': f"Bucket '{name}' already exists in this account",
+                    'error_code': 'bucket_already_exists',
+                    'bucket': name,
+                    'remedy': REMEDY_BUCKET_ALREADY_EXISTS,
+                })
             elif code == 'BucketAlreadyExists':
                 return create_response(409, {
                     'error': f"Bucket name '{name}' is already taken (S3 bucket names are globally unique). Try another name."
@@ -918,12 +1182,73 @@ def create_s3_bucket(event, user):
                 logger.error(f"Failed to create bucket {name}: {str(e)}")
                 return create_response(400, {'error': f"Failed to create bucket: {str(e)}"})
 
-        log_audit_event(
-            user.get('user_id', 'unknown'), 'create_s3_bucket', 'usecase', name,
-            'success', {'region': region}
-        )
+        # 4. Enable ABAC (non-fatal) so bucket-tag conditions apply to it.
+        try:
+            s3.put_bucket_abac(Bucket=name, AbacStatus={'Status': 'Enabled'})
+            abac = 'enabled'
+        except ClientError as e:
+            logger.warning(f"Could not enable ABAC on bucket {name}: {str(e)}")
+            abac = 'failed'
 
-        return create_response(201, {'bucket': {'name': name, 'region': region}})
+        # 5. Read the tags back; fall back once to the post-ABAC tag write.
+        read_tags = _read_created_bucket_tags(s3, name)
+        if not _portal_tags_confirmed(read_tags, tags):
+            try:
+                boto3.client('s3control', region_name=region).tag_resource(
+                    AccountId=os.environ['PORTAL_ACCOUNT_ID'],
+                    ResourceArn=f'arn:aws:s3:::{name}', Tags=tags)
+                read_tags = _read_created_bucket_tags(s3, name)
+            except (ClientError, KeyError) as e:
+                logger.error(f"Fallback tag write on bucket {name} failed: {str(e)}")
+                read_tags = {}
+        if not _portal_tags_confirmed(read_tags, tags):
+            logger.error(f"Bucket {name} was created but its portal tags could not be confirmed")
+            log_audit_event(
+                user['user_id'], 'create_s3_bucket', 'usecase', name, 'failure',
+                {'region': region, 'reason': 'bucket_tagging_failed', 'abac': abac,
+                 'usecase_id': usecase_id}, event=event)
+            return create_response(500, {
+                'error': 'The bucket was created but could not be tagged',
+                'error_code': 'bucket_tagging_failed',
+                'bucket': name,
+                'remedy': REMEDY_TAGGING_FAILED,
+            })
+        evidence = EligibilityResult(
+            eligible=True, reason='eligible', tags=read_tags, portal_created=True,
+            claimed_by=read_tags.get(PORTAL_USECASE_ID_TAG) or None)
+
+        # 6. Auto-add to the use case, with the read tags as the evidence.
+        added_to_usecase = False
+        add_error = None
+        if usecase_id:
+            try:
+                result = check_bucket_attachable(
+                    target_usecase_id=usecase_id, usecase_like=record, bucket=name,
+                    user=user, event=event, purpose='auto-add-bucket', evidence=evidence)
+                outcome = _add_additional_bucket(table, usecase_id, name)
+                if outcome == 'usecase_not_found':
+                    add_error = {'error_code': 'usecase_not_found', 'remedy': REMEDY_ADD_LATER}
+                else:
+                    added_to_usecase = True
+                    audit_bucket_allowed(user, usecase_id, name, 'additional_s3_buckets',
+                                         'auto_add', result, event)
+            except BucketNotEligible as e:
+                add_error = {'error_code': 'bucket_not_eligible', 'reason': e.reason, 'remedy': e.remedy}
+            except ClientError as e:
+                logger.error(f"Could not add bucket {name} to use case {usecase_id}: {str(e)}")
+                add_error = {'error_code': 'usecase_update_failed', 'remedy': REMEDY_ADD_LATER}
+
+        # 7. Audit and answer.
+        log_audit_event(
+            user['user_id'], 'create_s3_bucket', 'usecase', name, 'success',
+            {'region': region, 'tags': tag_keys, 'abac': abac, 'usecase_id': usecase_id,
+             'added_to_usecase': added_to_usecase}, event=event)
+
+        bucket = {'name': name, 'region': region, 'portal_created': True, 'tags': tag_keys,
+                  'abac': abac, 'added_to_usecase': added_to_usecase}
+        if add_error is not None:
+            bucket['add_error'] = add_error
+        return create_response(201, {'bucket': bucket})
     except ClientError as e:
         logger.error(f"AWS error creating S3 bucket: {str(e)}")
         return create_response(500, {'error': f"Failed to create S3 bucket: {str(e)}"})
@@ -1215,7 +1540,51 @@ def create_usecase(event, user):
             if field in body:
                 item[field] = body[field]
 
+        # Use-case bucket configuration (design §5.4): every bucket the new
+        # record names must be Eligible and Unclaimed before anything is
+        # written. The two configured buckets opt into the tag
+        # read-after-write retry (the wizard may have created and tagged
+        # them seconds earlier); the optional additional list (<= 10 names)
+        # names pre-existing buckets and is probed without retry.
+        try:
+            additional = _bucket_name_list(
+                body.get('additional_s3_buckets'), 'additional_s3_buckets',
+                usecase_id=usecase_id, purpose='allow-additional-bucket')
+        except InvalidField as e:
+            return create_response(400, e.to_body())
+        except BucketConfigError as e:
+            return bucket_config_error_response(e)
+        if additional:
+            item['additional_s3_buckets'] = additional
+        attach_checks = [('s3_bucket', item['s3_bucket'], 'configure-s3-bucket', True)]
+        if not _is_clear(item.get('data_s3_bucket')):
+            attach_checks.append(('data_s3_bucket', item['data_s3_bucket'],
+                                  'configure-data-s3-bucket', True))
+        attach_checks.extend(('additional_s3_buckets', name, 'allow-additional-bucket', False)
+                             for name in additional)
+        attached = []          # (attribute, bucket, EligibilityResult) for the audit rows
+        rejected = []
+        first_error = None
+        for attribute, bucket, purpose, retry in attach_checks:
+            try:
+                attached.append((attribute, bucket, check_bucket_attachable(
+                    target_usecase_id=usecase_id, usecase_like=item, bucket=bucket,
+                    user=user, event=event, purpose=purpose, retry=retry)))
+            except BucketConfigError as e:
+                rejected.append(_rejection(bucket, e))
+                first_error = first_error or e
+        if rejected:
+            log_audit_event(
+                user['user_id'], 'create_usecase', 'usecase', usecase_id, 'failure',
+                {'reason': 'bucket_not_eligible', 'bucket': first_error.bucket,
+                 'eligibility_reason': first_error.reason}, event=event)
+            return _refused_response(first_error, rejected)
+
         table.put_item(Item=item)
+
+        # The attach audit row, once per bucket the record names (design §1.6).
+        for attribute, bucket, result in attached:
+            audit_bucket_allowed(user, usecase_id, bucket, attribute, 'create', result, event)
         
         # Auto-assign creator as UseCaseAdmin
         try:
@@ -1514,7 +1883,13 @@ def get_usecase(usecase_id, user):
             user['user_id'], 'get_usecase', 'usecase', usecase_id, 'success'
         )
         
-        return create_response(200, {'usecase': response['Item']})
+        # Use-case bucket configuration (design §5.2): the computed allowed
+        # set (the portal's own buckets are never in it, even when the raw
+        # record names one) and the additional list, absent ≡ [].
+        item = dict(response['Item'])
+        item['allowed_s3_buckets'] = sorted(allowed_s3_buckets(item))
+        item['additional_s3_buckets'] = item.get('additional_s3_buckets') or []
+        return create_response(200, {'usecase': item})
         
     except Exception as e:
         logger.error(f"Error getting use case: {str(e)}")
@@ -1555,10 +1930,30 @@ def update_usecase(usecase_id, event, user):
             )
             return create_response(400, {'error': settings_error})
 
-        # Build update expression with expression attribute names for reserved keywords
-        update_expr = "SET updated_at = :updated_at"
-        expr_values = {':updated_at': int(datetime.utcnow().timestamp() * 1000)}
-        expr_names = {}
+        # Use-case bucket configuration (design §5.3). The additional list is
+        # changed only through add / remove deltas; every bucket entering the
+        # record (a changed configured bucket, each add) must be Eligible and
+        # Unclaimed, and nothing is written while any of them is refused.
+        if 'additional_s3_buckets' in body:
+            return create_response(400, {
+                'error': 'additional_s3_buckets is changed through additional_s3_buckets_add '
+                         'and additional_s3_buckets_remove',
+                'error_code': 'unsupported_field', 'field': 'additional_s3_buckets'})
+        try:
+            adds = _bucket_name_list(body.pop('additional_s3_buckets_add', None),
+                                     'additional_s3_buckets_add', usecase_id=usecase_id,
+                                     purpose='allow-additional-bucket')
+            removes = _bucket_name_list(body.pop('additional_s3_buckets_remove', None),
+                                        'additional_s3_buckets_remove', usecase_id=usecase_id,
+                                        purpose='remove-additional-bucket')
+        except InvalidField as e:
+            return create_response(400, e.to_body())
+        except BucketConfigError as e:
+            return bucket_config_error_response(e)
+
+        record = table.get_item(Key={'usecase_id': usecase_id}).get('Item')
+        if record is None:
+            return _usecase_not_found()
         
         updatable_fields = [
             'name', 'description', 's3_bucket', 'region', 'owner', 'default_device_group',
@@ -1571,6 +1966,63 @@ def update_usecase(usecase_id, event, user):
             tuning_settings.SAMPLE_EXPORT_FIELD,
             tuning_settings.SAMPLE_RETENTION_FIELD
         ]
+        # The record as it will be after the SET (role fields included), so
+        # the probe uses the credentials the portal will later use.
+        effective = dict(record)
+        effective.update({field: body[field] for field in updatable_fields if field in body})
+
+        # Clear semantics: data_s3_bucket None / '' / whitespace is a Clear
+        # (stored as today, never probed); s3_bucket is required.
+        if 's3_bucket' in body and _is_clear(body['s3_bucket']):
+            return bucket_config_error_response(InvalidBucketName(
+                "s3_bucket is required and cannot be cleared", usecase_id=usecase_id,
+                purpose='configure-s3-bucket'))
+        configured_changes = []        # (attribute, bucket, purpose) for buckets that change
+        for attribute, purpose in (('s3_bucket', 'configure-s3-bucket'),
+                                   ('data_s3_bucket', 'configure-data-s3-bucket')):
+            if attribute in body and not _is_clear(body[attribute]) and \
+                    _bucket_value(body[attribute]) != _bucket_value(record.get(attribute)):
+                configured_changes.append((attribute, body[attribute], purpose))
+
+        # Cap on the additional list, before any probe.
+        current = list(record.get('additional_s3_buckets') or [])
+        if len(set(current) | set(adds)) - len(set(removes) & set(current)) > MAX_ADDITIONAL_BUCKETS:
+            return bucket_config_error_response(BucketNotEligible(
+                "The use case would exceed the maximum number of additional buckets",
+                usecase_id=usecase_id, purpose='allow-additional-bucket',
+                reason='too_many_buckets', remedy=REMEDY_TOO_MANY))
+
+        # Every bucket entering the record is validated; every refusal is
+        # reported, nothing is written while any remains.
+        configured_results = {}        # attribute -> (bucket, EligibilityResult)
+        add_results = {}               # bucket -> EligibilityResult
+        rejected = []
+        first_error = None
+        for attribute, bucket, purpose in configured_changes:
+            try:
+                configured_results[attribute] = (bucket, check_bucket_attachable(
+                    target_usecase_id=usecase_id, usecase_like=effective, bucket=bucket,
+                    user=user, event=event, purpose=purpose, retry=False))
+            except BucketConfigError as e:
+                rejected.append(_rejection(bucket, e))
+                first_error = first_error or e
+        for name in adds:
+            if name in current:
+                continue
+            try:
+                add_results[name] = check_bucket_attachable(
+                    target_usecase_id=usecase_id, usecase_like=effective, bucket=name,
+                    user=user, event=event, purpose='allow-additional-bucket', retry=False)
+            except BucketConfigError as e:
+                rejected.append(_rejection(name, e))
+                first_error = first_error or e
+        if rejected:
+            return _refused_response(first_error, rejected)
+
+        # Build update expression with expression attribute names for reserved keywords
+        update_expr = "SET updated_at = :updated_at"
+        expr_values = {':updated_at': int(datetime.utcnow().timestamp() * 1000)}
+        expr_names = {}
         for field in updatable_fields:
             if field in body:
                 alias = f"#{field}"
@@ -1581,19 +2033,76 @@ def update_usecase(usecase_id, event, user):
         update_params = {
             'Key': {'usecase_id': usecase_id},
             'UpdateExpression': update_expr,
-            'ExpressionAttributeValues': expr_values
+            'ExpressionAttributeValues': expr_values,
+            # Never materialise a record: a PUT on a deleted use case is a 404.
+            'ConditionExpression': 'attribute_exists(usecase_id)',
         }
         if expr_names:
             update_params['ExpressionAttributeNames'] = expr_names
         
-        table.update_item(**update_params)
+        try:
+            table.update_item(**update_params)
+        except ClientError as e:
+            if e.response['Error']['Code'] != 'ConditionalCheckFailedException':
+                raise
+            logger.warning(f"Use case {usecase_id} disappeared before the update was written")
+            return _usecase_not_found()
+        for attribute, (bucket, result) in configured_results.items():
+            audit_bucket_allowed(user, usecase_id, bucket, attribute, 'api', result, event)
+
+        # Adds, then removes (design §5.1); each change is independently
+        # valid, so a write failure mid-sequence reports what was applied.
+        added, already_present, removed, not_present = [], [], [], []
+        applied = {'added': added, 'removed': removed}
+        try:
+            for name in adds:
+                if name in current:
+                    already_present.append(name)
+                    continue
+                outcome = _add_additional_bucket(table, usecase_id, name)
+                if outcome == 'added':
+                    added.append(name)
+                    audit_bucket_allowed(user, usecase_id, name, 'additional_s3_buckets',
+                                         'api', add_results[name], event)
+                elif outcome == 'already_present':
+                    already_present.append(name)
+                else:
+                    return _usecase_not_found(applied=applied)
+            for name in removes:
+                outcome = _remove_additional_bucket(table, usecase_id, name)
+                if outcome == 'removed':
+                    removed.append(name)
+                    log_audit_event(
+                        user['user_id'], 's3_bucket_removed', 'usecase', usecase_id, 'success',
+                        {'bucket': name, 'attribute': 'additional_s3_buckets', 'source': 'api'},
+                        event=event)
+                elif outcome == 'not_present':
+                    not_present.append(name)
+                elif outcome == 'usecase_not_found':
+                    return _usecase_not_found(applied=applied)
+                else:
+                    return create_response(409, {
+                        'error': 'The additional buckets changed concurrently; retry the request',
+                        'error_code': 'concurrent_update', 'bucket': name, 'applied': applied})
+        except ClientError as e:
+            logger.error(f"Error writing the additional buckets of use case {usecase_id}: {str(e)}")
+            log_audit_event(
+                user['user_id'], 'update_usecase', 'usecase', usecase_id, 'failure',
+                {'reason': 'write_failed', 'applied': applied})
+            return create_response(500, {'error': 'Failed to update use case', 'applied': applied})
         
         log_audit_event(
             user['user_id'], 'update_usecase', 'usecase', usecase_id,
             'success', {'updated_fields': list(body.keys())}
         )
         
-        return create_response(200, {'message': 'Use case updated successfully'})
+        reloaded = table.get_item(Key={'usecase_id': usecase_id}).get('Item') or {}
+        return create_response(200, {
+            'message': 'Use case updated successfully',
+            'added': added, 'already_present': already_present,
+            'removed': removed, 'not_present': not_present,
+            'allowed_s3_buckets': sorted(allowed_s3_buckets(reloaded)),
+        })
         
     except Exception as e:
         logger.error(f"Error updating use case: {str(e)}")

@@ -17,6 +17,14 @@ export interface S3Bucket {
   name: string;
   creation_date?: string | null;
   region?: string;
+  // Use-case bucket configuration (spec: portal-usecase-bucket-config,
+  // design §5.5 / §10.1). Advisory marking from GET /s3-buckets: `eligible`
+  // is true when the bucket carries the dda-portal:managed=true tag the
+  // server requires before a use case can configure or allow it;
+  // `portal_created` when the portal created it. Tag discovery is regional,
+  // so the server decides again when the use case is created.
+  eligible?: boolean;
+  portal_created?: boolean;
 }
 
 export interface UseCase {
@@ -41,6 +49,14 @@ export interface UseCase {
   data_account_external_id?: string;
   data_s3_bucket?: string;
   data_s3_prefix?: string;
+  // Use-case bucket configuration (spec: portal-usecase-bucket-config,
+  // design §5.1 / §10.1). `additional_s3_buckets` is the stored list a
+  // UseCaseAdmin allows next to the configured buckets; `allowed_s3_buckets`
+  // is the computed union GET /usecases/{id} returns (configured + additional,
+  // the portal's own buckets excluded). Every S3 access the portal performs
+  // for the use case is bound to this set.
+  additional_s3_buckets?: string[];
+  allowed_s3_buckets?: string[];
   // VLM/LLM Anomaly Tuning Sample_Export settings (spec:
   // quality-prompt-tuning, Requirements 2.1, 2.9). Absent ⇒ export
   // disabled / the 30-day default retention.

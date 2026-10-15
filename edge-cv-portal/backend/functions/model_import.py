@@ -18,7 +18,7 @@ import uuid
 import tarfile
 import tempfile
 import shutil
-from urllib.parse import urlparse
+import time
 import yaml
 
 # Import shared utilities
@@ -26,7 +26,9 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    check_user_access, validate_required_fields, get_usecase_client
+    check_user_access, validate_required_fields, get_usecase_client,
+    get_s3_client_for_bucket, parse_s3_uri, assert_bucket_allowed,
+    BucketConfigError, bucket_config_error_response
 )
 
 # Preflight Fit_Check (pure sizing module bundled in this functions dir)
@@ -42,7 +44,6 @@ logger.setLevel(logging.INFO)
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
-sts = boto3.client('sts')
 
 # Environment variables
 TRAINING_JOBS_TABLE = os.environ.get('TRAINING_JOBS_TABLE')
@@ -362,8 +363,14 @@ def evaluate_fit_check(record: Dict) -> Dict:
         s3_head = None
         model_source = record.get('model_source') or {}
         if isinstance(model_source, dict) and model_source.get('s3_model_artifact'):
-            # S3-sourced records need a Use_Case-account client for HEAD
+            # S3-sourced records need a Use_Case-account client for HEAD.
+            # The artifact's bucket is bound to the use case's configured
+            # buckets first; a refusal (BucketNotAllowed) is one more
+            # estimation failure -> 'unverified' below.
             usecase = get_usecase_details(record['usecase_id'])
+            artifact_bucket, _artifact_key = parse_s3_uri(
+                model_source['s3_model_artifact'])
+            assert_bucket_allowed(usecase, artifact_bucket, 'vllm-fit-check')
             s3_head = get_usecase_client('s3', usecase).head_object
 
         estimate = estimate_weights(record, s3_head=s3_head)
@@ -457,11 +464,14 @@ def register_vllm_model(event: Dict, context: Any) -> Dict:
         usecase = get_usecase_details(usecase_id)
 
         # For S3-sourced registrations, verify the artifact is readable from
-        # the Use_Case account BEFORE any write (1.7)
+        # the Use_Case account BEFORE any write (1.7). The bucket is bound
+        # to the use case's configured buckets before the client is built
+        # (use-case bucket configuration, design §3); require_key is
+        # intended — the field must already end in .tar.gz.
         if s3_artifact:
-            parsed = urlparse(s3_artifact)
-            bucket = parsed.netloc
-            key = parsed.path.lstrip('/')
+            bucket, key = parse_s3_uri(s3_artifact, require_key=True)
+            assert_bucket_allowed(usecase, bucket, 'vllm-register',
+                                  actor=user, event=event)
             try:
                 s3_client = get_usecase_client('s3', usecase)
                 s3_client.head_object(Bucket=bucket, Key=key)
@@ -543,6 +553,8 @@ def register_vllm_model(event: Dict, context: Any) -> Dict:
             'fit_check': fit_check
         })
 
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         return create_response(400, {'error': str(e)})
@@ -791,30 +803,6 @@ def update_vllm_engine_configuration(event: Dict, context: Any) -> Dict:
         return create_response(500, {'error': 'Internal server error'})
 
 
-def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
-    """Assume cross-account role for UseCase Account access.
-
-    Single-account setups store the account *root* ARN
-    (arn:aws:iam::ACCOUNT_ID:root), which is not an assumable role — assuming it
-    fails with AccessDenied. In that case use the Lambda's own execution role
-    (same-account access) via the default credential chain.
-    """
-    if role_arn and role_arn.endswith(':root'):
-        logger.info("Single-account setup (root ARN) — using Lambda execution role credentials")
-        return {'is_default_credentials': True}
-    try:
-        response = sts.assume_role(
-            RoleArn=role_arn,
-            RoleSessionName=session_name,
-            ExternalId=external_id,
-            DurationSeconds=3600
-        )
-        return response['Credentials']
-    except ClientError as e:
-        logger.error(f"Error assuming role {role_arn}: {str(e)}")
-        raise
-
-
 def get_usecase_details(usecase_id: str) -> Dict:
     """Get use case details from DynamoDB"""
     try:
@@ -1015,32 +1003,27 @@ def validate_dimensions_match(
         )
 
 
-def validate_model_artifact(model_s3_uri: str, credentials: Dict) -> Dict:
+def validate_model_artifact(model_s3_uri: str, usecase: Dict, *, purpose: str) -> Dict:
     """
     Download and validate model artifact structure
     Returns: validation result with extracted metadata
+
+    The S3 client comes from `get_s3_client_for_bucket`, which binds the
+    artifact's bucket to the use case's configured buckets before any STS
+    call and selects the role the portal uses for that bucket (the Data
+    Account role for `data_s3_bucket` on a separate-Data-Account use case).
+    A refused bucket raises BucketConfigError here, before any download,
+    even for a caller that skipped the handler's own pre-check.
     """
     temp_dir = None
     validation_errors = []
     validation_warnings = []
     
     try:
-        # Parse S3 URI
-        parsed = urlparse(model_s3_uri)
-        bucket = parsed.netloc
-        key = parsed.path.lstrip('/')
-        
-        # Create S3 client (assumed role for multi-account; Lambda execution
-        # role for single-account setups where the root ARN can't be assumed).
-        if credentials.get('is_default_credentials'):
-            s3_client = boto3.client('s3')
-        else:
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=credentials['AccessKeyId'],
-                aws_secret_access_key=credentials['SecretAccessKey'],
-                aws_session_token=credentials['SessionToken']
-            )
+        # Parse S3 URI and obtain the bucket-bound client
+        bucket, key = parse_s3_uri(model_s3_uri)
+        s3_client = get_s3_client_for_bucket(
+            usecase, bucket, f"{purpose}-{int(time.time())}"[:64])
         
         # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="model_validation_")
@@ -1134,6 +1117,10 @@ def validate_model_artifact(model_s3_uri: str, credentials: Dict) -> Dict:
         
     except ModelValidationError:
         raise
+    except BucketConfigError:
+        # A refused or malformed bucket is the caller's 400 body, not a
+        # validation failure of the artifact.
+        raise
     except Exception as e:
         logger.error(f"Unexpected error during validation: {str(e)}")
         raise ModelValidationError(f"Validation failed: {str(e)}")
@@ -1171,8 +1158,9 @@ def validate_model(event: Dict, context: Any) -> Dict:
         usecase_id = body['usecase_id']
         model_s3_uri = body['model_s3_uri'].strip()
         
-        # Check user access
-        if not check_user_access(user_id, usecase_id):
+        # Check user access (DataScientist role required, the same gate as
+        # import_model: validation performs the same privileged download)
+        if not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Validate S3 URI format
@@ -1189,15 +1177,15 @@ def validate_model(event: Dict, context: Any) -> Dict:
         # Get use case details
         usecase = get_usecase_details(usecase_id)
         
-        # Assume cross-account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            f"validate-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
-        )
+        # Bind the artifact's bucket to the use case's configured buckets
+        # before any credential step (use-case bucket configuration, §3)
+        bucket, _key = parse_s3_uri(model_s3_uri)
+        assert_bucket_allowed(usecase, bucket, 'model-validate',
+                              actor=user, event=event)
         
-        # Validate model artifact
-        validation_result = validate_model_artifact(model_s3_uri, credentials)
+        # Validate model artifact (the client is bucket-bound inside)
+        validation_result = validate_model_artifact(
+            model_s3_uri, usecase, purpose='model-validate')
         
         return create_response(200, validation_result)
         
@@ -1208,6 +1196,8 @@ def validate_model(event: Dict, context: Any) -> Dict:
             'error': e.message,
             'details': e.details
         })
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         return create_response(400, {'error': str(e)})
@@ -1347,16 +1337,17 @@ def import_model(event: Dict, context: Any) -> Dict:
         if ft_error:
             return create_response(400, {'error': ft_error})
         
-        # Assume cross-account role
-        credentials = assume_usecase_role(
-            usecase['cross_account_role_arn'],
-            usecase['external_id'],
-            f"import-{user_id[:20]}-{int(datetime.utcnow().timestamp())}"[:64]
-        )
+        # Bind the artifact's bucket to the use case's configured buckets
+        # before any credential step (use-case bucket configuration, §3);
+        # the persisted artifact_s3 is therefore always inside that set.
+        bucket, _key = parse_s3_uri(model_s3_uri)
+        assert_bucket_allowed(usecase, bucket, 'model-import',
+                              actor=user, event=event)
         
-        # Validate model artifact
+        # Validate model artifact (the client is bucket-bound inside)
         logger.info(f"Validating model artifact: {model_s3_uri}")
-        validation_result = validate_model_artifact(model_s3_uri, credentials)
+        validation_result = validate_model_artifact(
+            model_s3_uri, usecase, purpose='model-import')
         
         if not validation_result.get('valid'):
             return create_response(400, {
@@ -1489,6 +1480,8 @@ def import_model(event: Dict, context: Any) -> Dict:
             'error': f'Model validation failed: {e.message}',
             'details': e.details
         })
+    except BucketConfigError as e:
+        return bucket_config_error_response(e)
     except ValueError as e:
         logger.error(f"Validation error: {str(e)}")
         return create_response(400, {'error': str(e)})

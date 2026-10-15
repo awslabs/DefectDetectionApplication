@@ -217,11 +217,14 @@ def test_record_stores_type_source_and_complete_configuration(vllm_env, case):
 
     # Fresh use case + DataScientist user per example (single-account use
     # case, so the S3 readability probe uses the moto-intercepted client).
+    # The artifact bucket is the use case's configured bucket: registration
+    # binds the artifact URI to the use case's configured buckets first.
     usecase_id = f"uc-{uuid.uuid4()}"
     stack.tables.usecases.put_item(Item={
         "usecase_id": usecase_id,
         "name": "vLLM Engine Defaults UC",
         "account_id": "123456789012",
+        "s3_bucket": ARTIFACTS_BUCKET,
     })
     user_id = f"user-{uuid.uuid4()}"
     user = {"user_id": user_id, "email": f"{user_id}@example.com",

@@ -47,6 +47,22 @@ button { font: inherit; cursor: pointer; }
   border-radius: 8px; background: #2f6fed; color: #fff;
 }
 .login-error { color: #ff8b8b; font-size: 15px; min-height: 20px; }
+/* The LocalServer host:port the credentials are posted to. */
+.login-target { font-size: 15px; color: #aab2bd; overflow-wrap: anywhere; }
+.login-target-address { color: #e8eaed; }
+
+/* ---- Ignored-?api= notice: fixed, so it never moves the layout below ---- */
+.api-notice {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 10;
+  display: flex; align-items: center; gap: 16px;
+  max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 8px;
+  background: #2b2411; border: 1px solid #ffd166; color: #ffd166;
+  font-size: 15px; overflow-wrap: anywhere;
+}
+.api-notice-dismiss {
+  flex: none; padding: 6px 12px; font-size: 14px; font-weight: 600;
+  border: 1px solid #ffd166; border-radius: 6px; background: transparent; color: #ffd166;
+}
 
 /* ---- Three-band grid shell (Requirement 6.1) ---- */
 .triple-kiosk {

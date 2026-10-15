@@ -67,6 +67,16 @@ fi
 if [ -n "$ENFORCED" ]; then
   CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c portalRegistryEnforced=$ENFORCED"
 fi
+# Production posture (ADMIN_GUIDE "The enforcement flag"): a deploy that leaves
+# enforcement off must never be silent. The resolved value is passed through
+# as requested (1/true/yes/on/enabled all read as on, like the Lambda layer),
+# so normalise before testing; empty means "no portal handler deployed yet,
+# CDK default (off) applies", which is also not on.
+ENFORCED_ON=false
+_portal_registry_value_is_on "$ENFORCED" && ENFORCED_ON=true
+if [ "$ENFORCED_ON" != "true" ]; then
+  echo "⚠️  Portal_Identity enforcement is OFF for this deploy. Production deployments must run PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh after backfill_portal_registry.py has been run." >&2
+fi
 
 # The project-local CLI (devDependency aws-cdk, installed by `npm ci` above):
 # aws-cdk-lib emits a cloud-assembly schema that an older global `cdk` on

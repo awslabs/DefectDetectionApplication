@@ -23,10 +23,17 @@ import {
   Link,
   StatusIndicator,
   Grid,
+  Popover,
 } from '@cloudscape-design/components';
 import { useNavigate } from 'react-router-dom';
-import { apiService } from '../services/api';
+import { ApiError, apiService } from '../services/api';
 import { UseCase } from '../types';
+import { useUsecasePermissions } from '../hooks/useUsecasePermissions';
+import { bucketErrorCode } from '../utils/bucketErrors';
+import BucketNotAllowedNotice, {
+  ALLOW_ACTION_LABEL,
+  USECASE_ADMIN_REQUIRED_MESSAGE,
+} from '../components/BucketNotAllowedNotice';
 
 interface Bucket {
   name: string;
@@ -34,6 +41,48 @@ interface Bucket {
   region: string;
   tags?: Record<string, string>;
   is_configured?: boolean;
+  // Use-case bucket configuration (spec: portal-usecase-bucket-config,
+  // design §5.6 / §10.2): in the use case's allowed set / created by the portal.
+  allowed?: boolean;
+  portal_created?: boolean;
+}
+
+/** Tooltip of the "Allowed" badge (design §10.2). */
+export const ALLOWED_BADGE_TOOLTIP =
+  "Usable for browsing, uploads, model import, manifests and transforms. Labeling jobs always use the use case's configured data bucket.";
+/** Shown on a not-allowed row when the buckets live in a separate Data Account. */
+export const DATA_ACCOUNT_CANNOT_ADD_MESSAGE =
+  'Buckets in a separate Data Account cannot be added here';
+
+/** The first bucket the page opens when the use case has no data bucket. */
+export function defaultBucketSelection(
+  buckets: Array<{ name: string; allowed?: boolean }>,
+  currentDataBucket: string | null | undefined
+): string | null {
+  if (currentDataBucket) return currentDataBucket;
+  const firstAllowed = buckets.find((b) => b.allowed === true);
+  return firstAllowed ? firstAllowed.name : null;
+}
+
+/** Allowed / Not allowed / Portal-created marking of one bucket row. */
+function BucketStatusBadges({ bucket }: { bucket: Bucket }) {
+  return (
+    <SpaceBetween direction="horizontal" size="xxs">
+      {bucket.allowed === true && (
+        <Popover
+          dismissButton={false}
+          position="top"
+          size="medium"
+          triggerType="custom"
+          content={ALLOWED_BADGE_TOOLTIP}
+        >
+          <Badge color="green">Allowed</Badge>
+        </Popover>
+      )}
+      {bucket.allowed === false && <Badge color="grey">Not allowed</Badge>}
+      {bucket.portal_created && <Badge color="blue">Portal-created</Badge>}
+    </SpaceBetween>
+  );
 }
 
 interface FolderItem {
@@ -102,6 +151,15 @@ export default function DataManagement() {
   const [folders, setFolders] = useState<FolderItem[]>([]);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [targetAccountInfo, setTargetAccountInfo] = useState<{account: string, hasDataRole: boolean} | null>(null);
+  // Use-case bucket configuration (design §10.2): the use case record (its
+  // allowed set), a `bucket_not_allowed` refusal of the folder listing, a
+  // refused inline "Allow" action, and the bucket being allowed.
+  const [useCaseDetail, setUseCaseDetail] = useState<UseCase | null>(null);
+  const [folderError, setFolderError] = useState<unknown>(null);
+  const [allowError, setAllowError] = useState<unknown>(null);
+  const [allowingBucket, setAllowingBucket] = useState<string | null>(null);
+  const { canUpdateUsecase } = useUsecasePermissions();
+  const hasDataRole = targetAccountInfo?.hasDataRole ?? false;
 
   // UI state
   const [filterText, setFilterText] = useState('');
@@ -166,43 +224,63 @@ export default function DataManagement() {
 
   // Load buckets when usecase changes
   useEffect(() => {
+    setFolderError(null);
+    setAllowError(null);
     if (usecaseId) {
       loadBuckets();
+      loadUseCaseDetail();
     } else {
       setBuckets([]);
       setFolders([]);
       setFiles([]);
       setSelectedBucket(null);
+      setUseCaseDetail(null);
       setLoading(false);
     }
   }, [usecaseId]);
 
   // Load folder contents when bucket or path changes
   useEffect(() => {
+    setFolderError(null);
     if (selectedBucket) {
       loadFolderContents();
     }
   }, [selectedBucket, currentPath]);
 
+  // The use case record carries the allowed set (configured + additional
+  // buckets); it is refreshed after a bucket is allowed.
+  const loadUseCaseDetail = async () => {
+    try {
+      const response = await apiService.getUseCase(usecaseId);
+      setUseCaseDetail(response.usecase);
+    } catch (err) {
+      console.error('Failed to load use case:', err);
+    }
+  };
+
+  // Fetch the bucket list and the account info without touching the
+  // selection; `loadBuckets` adds the initial selection on top.
+  const refreshBuckets = async () => {
+    const response = await apiService.listDataBuckets(usecaseId);
+    setBuckets(response.buckets);
+
+    if (response.target_account) {
+      setTargetAccountInfo({
+        account: response.target_account,
+        hasDataRole: response.has_data_account_role || false
+      });
+    }
+    return response;
+  };
+
   const loadBuckets = async () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await apiService.listDataBuckets(usecaseId);
-      setBuckets(response.buckets);
-      
-      if (response.target_account) {
-        setTargetAccountInfo({
-          account: response.target_account,
-          hasDataRole: response.has_data_account_role || false
-        });
-      }
-      
-      if (response.current_data_bucket) {
-        setSelectedBucket(response.current_data_bucket);
-      } else if (response.buckets.length > 0) {
-        setSelectedBucket(response.buckets[0].name);
-      }
+      const response = await refreshBuckets();
+      // Open the use case's data bucket, else the first allowed bucket, else
+      // nothing: the page never opens straight onto a refusal (design §10.2).
+      setSelectedBucket(defaultBucketSelection(response.buckets, response.current_data_bucket));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load buckets');
     } finally {
@@ -221,12 +299,82 @@ export default function DataManagement() {
       });
       setFolders(response.folders);
       setFiles(response.files);
+      setFolderError(null);
       setCurrentPage(1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load folder contents');
+      if (bucketErrorCode(err) === 'bucket_not_allowed') {
+        // Rendered in place of the folder table with the allow action.
+        setFolders([]);
+        setFiles([]);
+        setFolderError(err);
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to load folder contents');
+      }
     } finally {
       setLoading(false);
     }
+  };
+
+  // After a bucket was allowed: the use case record and the bucket marking.
+  const refreshAfterAllow = async () => {
+    try {
+      await Promise.all([loadUseCaseDetail(), refreshBuckets()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to refresh buckets');
+    }
+  };
+
+  // Inline "Allow for this use case" on a not-allowed bucket row (design §10.2).
+  const handleAllowBucket = async (bucketName: string) => {
+    setAllowingBucket(bucketName);
+    setAllowError(null);
+    setError(null);
+    try {
+      await apiService.allowBucketForUsecase(usecaseId, bucketName);
+      await refreshAfterAllow();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        setError(USECASE_ADMIN_REQUIRED_MESSAGE);
+      } else if (bucketErrorCode(err)) {
+        setAllowError(err);
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to allow the bucket');
+      }
+    } finally {
+      setAllowingBucket(null);
+    }
+  };
+
+  // Marking of each row: the list's `allowed` flag, else membership in the
+  // use case record's allowed set.
+  const markedBuckets = useMemo<Bucket[]>(() => {
+    const allowedSet = useCaseDetail?.allowed_s3_buckets;
+    return buckets.map((bucket) => ({
+      ...bucket,
+      allowed: bucket.allowed ?? (allowedSet ? allowedSet.includes(bucket.name) : undefined),
+    }));
+  }, [buckets, useCaseDetail]);
+
+  /** The inline action (or the Data Account note) of a not-allowed row. */
+  const renderAllowAction = (bucket: Bucket) => {
+    if (bucket.allowed !== false) return null;
+    if (hasDataRole) {
+      return (
+        <Box color="text-body-secondary" fontSize="body-s">
+          {DATA_ACCOUNT_CANNOT_ADD_MESSAGE}
+        </Box>
+      );
+    }
+    if (!canUpdateUsecase(usecaseId)) return null;
+    return (
+      <Button
+        onClick={() => handleAllowBucket(bucket.name)}
+        loading={allowingBucket === bucket.name}
+        disabled={allowingBucket !== null}
+      >
+        {ALLOW_ACTION_LABEL}
+      </Button>
+    );
   };
 
   const handleCreateFolder = async () => {
@@ -389,6 +537,9 @@ export default function DataManagement() {
                 setBuckets([]);
                 setFolders([]);
                 setFiles([]);
+                setUseCaseDetail(null);
+                setFolderError(null);
+                setAllowError(null);
               }}
               options={useCases.map((uc) => ({
                 label: uc.name,
@@ -425,8 +576,19 @@ export default function DataManagement() {
                 }
               </Alert>
             )}
+            {allowError !== null && (
+              <BucketNotAllowedNotice
+                err={allowError}
+                usecaseId={usecaseId}
+                onAllowed={() => {
+                  setAllowError(null);
+                  refreshAfterAllow();
+                }}
+              />
+            )}
             <Cards
-              items={buckets}
+              data-testid="data-bucket-cards"
+              items={markedBuckets}
               loading={loading}
               loadingText="Loading buckets..."
               cardDefinition={{
@@ -445,9 +607,18 @@ export default function DataManagement() {
                   },
                   {
                     id: 'status',
-                    content: item => item.is_configured 
-                      ? <StatusIndicator type="success">Configured</StatusIndicator>
-                      : <StatusIndicator type="info">Available</StatusIndicator>,
+                    content: item => (
+                      <SpaceBetween direction="horizontal" size="xs">
+                        {item.is_configured
+                          ? <StatusIndicator type="success">Configured</StatusIndicator>
+                          : <StatusIndicator type="info">Available</StatusIndicator>}
+                        <BucketStatusBadges bucket={item} />
+                      </SpaceBetween>
+                    ),
+                  },
+                  {
+                    id: 'allow',
+                    content: item => renderAllowAction(item),
                   },
                 ],
               }}
@@ -490,7 +661,12 @@ export default function DataManagement() {
                     }
                   }}
                 />
-                <Button variant="icon" iconName="settings" onClick={() => setShowBucketSelector(true)}>
+                <Button
+                  variant="icon"
+                  iconName="settings"
+                  ariaLabel="Change Bucket"
+                  onClick={() => setShowBucketSelector(true)}
+                >
                   Change Bucket
                 </Button>
               </SpaceBetween>
@@ -551,6 +727,20 @@ export default function DataManagement() {
             </SpaceBetween>
           </Container>
 
+          {/* A bucket outside the use case's allowed set: the refusal with the
+              allow action replaces the folder and file views (design §10.2). */}
+          {folderError !== null ? (
+            <BucketNotAllowedNotice
+              err={folderError}
+              usecaseId={usecaseId}
+              onAllowed={async () => {
+                setFolderError(null);
+                await refreshAfterAllow();
+                await loadFolderContents();
+              }}
+            />
+          ) : (
+          <>
           {/* Folders as cards */}
           {folders.length > 0 && (
             <Container header={<Header variant="h3" counter={`(${folders.length})`}>Folders</Header>}>
@@ -675,6 +865,8 @@ export default function DataManagement() {
               }
             />
           </Container>
+          </>
+          )}
         </SpaceBetween>
       )}
 
@@ -694,7 +886,18 @@ export default function DataManagement() {
               }
             </Alert>
           )}
+          {showBucketSelector && allowError !== null && (
+            <BucketNotAllowedNotice
+              err={allowError}
+              usecaseId={usecaseId}
+              onAllowed={() => {
+                setAllowError(null);
+                refreshAfterAllow();
+              }}
+            />
+          )}
           <Table
+            data-testid="data-bucket-selector-table"
             resizableColumns
             columnDefinitions={[
               {
@@ -722,8 +925,18 @@ export default function DataManagement() {
                   ? <StatusIndicator type="success">Configured</StatusIndicator>
                   : <StatusIndicator type="info">Available</StatusIndicator>,
               },
+              {
+                id: 'allowed',
+                header: 'Use case access',
+                cell: item => <BucketStatusBadges bucket={item} />,
+              },
+              {
+                id: 'allow',
+                header: '',
+                cell: item => renderAllowAction(item),
+              },
             ]}
-            items={buckets}
+            items={markedBuckets}
             empty={<Box textAlign="center">No buckets available</Box>}
           />
         </SpaceBetween>

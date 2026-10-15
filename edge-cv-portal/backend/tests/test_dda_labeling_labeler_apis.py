@@ -432,11 +432,16 @@ class TestNextTaskGating:
         """Req 7.2: stored instructions and good/bad example images are
         presented beside the task."""
         caller = env.labeler["user_id"]
+        # Example references are s3:// URIs inside the use case's
+        # configured buckets (portal-usecase-bucket-config); a bare key
+        # or a reference outside the set is skipped, never presigned.
         job_id = env.put_job(
             instructions="Mark every scratch",
-            example_images={"good": ["examples/good1.jpg",
-                                     "examples/good2.png"],
-                            "bad": ["examples/bad1.jpg"]})
+            example_images={"good": [f"s3://{DATASET_BUCKET}/examples/good1.jpg",
+                                     f"s3://{DATASET_BUCKET}/examples/good2.png",
+                                     "examples/bare-key.jpg",
+                                     "s3://someone-elses-bucket/examples/foreign.jpg"],
+                            "bad": [f"s3://{DATASET_BUCKET}/examples/bad1.jpg"]})
         env.put_task(job_id, "task-0000000", caller)
 
         status, body = env.next_task(job_id)
@@ -447,6 +452,8 @@ class TestNextTaskGating:
         assert len(examples["bad"]) == 1
         for url in examples["good"] + examples["bad"]:
             assert "examples/" in url
+            assert DATASET_BUCKET in url
+            assert "someone-elses-bucket" not in url
             assert 0 < presigned_expiry_seconds(url) <= 900
 
     def test_absent_instructions_and_examples_omitted(self, env):

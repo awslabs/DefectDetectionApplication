@@ -52,20 +52,21 @@ Generated across: all three modalities, Label_Sets, image dimensions,
 with varying good/bad counts, and Model_Image_Limit values (including ones
 that force omission, and `limit == 1` which attaches nothing).
 
-Known seam difference, recorded rather than hidden
---------------------------------------------------
-For a **bare** (non-`s3://`) example reference the two paths resolve
-different buckets: `dda_autolabel_worker._few_shot_ref_location` resolves a
-bare ref against `PORTAL_ARTIFACTS_BUCKET`, while
-`dda_labeling._resolve_sample_reference` resolves it against the Use_Case
-dataset bucket. The wizard stores full `s3://…` URIs
+Reference shape, pinned rather than assumed
+-------------------------------------------
+Example references are `s3://` URIs inside the use case's configured buckets
+(portal-usecase-bucket-config). The wizard stores exactly that spelling
 (`CreateLabelingJob.tsx` builds `s3://${bucket}/${key}` from the batch upload
-response), for which both paths resolve identically — so the identity property
-generates full `s3://bucket/key` references, the spelling the system actually
-produces. The divergence for the bare spelling is pinned by the single
+response), so the identity property generates full `s3://bucket/key`
+references in the dataset bucket, for which both paths resolve identically.
+The two spellings the system no longer serves are pinned by the single
 example-based test at the end of this file
-(`test_bare_example_reference_spelling_resolves_to_different_buckets`) so it
-is documented and will fail loudly if either side changes.
+(`test_unsupported_example_reference_spellings_fail_both_paths`): a **bare**
+(non-`s3://`) reference resolves to nothing in the Auto_Labeler
+(`_few_shot_ref_location` -> `(None, None)`) and is out of scope for the
+Preview_API, and an `s3://` reference inside the portal artifacts bucket is
+refused by the bucket-bound client factory on both paths — the bucket is never
+in a use case's configured set.
 
 Harness reuse (Hypothesis cannot consume function-scoped fixtures): the
 module-scoped `worker` / `dda` fixtures follow the
@@ -1126,23 +1127,24 @@ def test_property_preview_and_worker_stay_byte_identical_under_downscaling(
 
 
 # =========================================================================== #
-# The known seam difference, pinned by example
+# The unsupported reference spellings, pinned by example
 # =========================================================================== #
 
-def test_bare_example_reference_spelling_resolves_to_different_buckets(
+def test_unsupported_example_reference_spellings_fail_both_paths(
         aws_stack, worker, dda, prelabel):
-    """A **bare** example reference is resolved against different buckets by
-    the two paths — recorded here rather than hidden.
+    """Example references are `s3://` URIs inside the use case's configured
+    buckets (portal-usecase-bucket-config); the two spellings the system no
+    longer serves fail on both paths, so neither path can read what the other
+    could not.
 
-    `dda_autolabel_worker._few_shot_ref_location` resolves a non-`s3://` ref
-    against `PORTAL_ARTIFACTS_BUCKET`; `dda_labeling._resolve_sample_reference`
-    resolves it against the Use_Case dataset bucket. The two namespaces are
-    disjoint by design — the preview's request validation *requires* every
-    example ref to resolve inside the Use_Case data bucket, while a bare ref
-    on a job record is an artifacts-bucket key — and the wizard stores full
-    `s3://…` URIs for both paths, so no configuration the system produces
-    reaches this divergence. The `s3://` half of this test is the spelling
-    that is actually used, and it agrees.
+    A **bare** (non-`s3://`) reference resolves to `(None, None)` in
+    `dda_autolabel_worker._few_shot_ref_location` — the Auto_Labeler raises
+    the unresolvable-reference `GenerationFailure` for that example and reads
+    nothing — and the Preview_API's request validation already requires every
+    example to resolve inside the Use_Case data bucket. An `s3://` reference
+    inside the portal artifacts bucket is refused by the bucket-bound client
+    factory (`get_s3_client_for_bucket`) on both paths before any read: the
+    portal's own bucket is never a member of a use case's configured set.
 
     Requirements 6.6, 7.6 (documented boundary of the identity claim).
     """
@@ -1152,52 +1154,44 @@ def test_bare_example_reference_spelling_resolves_to_different_buckets(
         detection_prompt=AWKWARD_PROMPT, few_shot_enabled=True,
         good_count=1, bad_count=0, image_limit=None)
 
-    # --- bare spelling: the same key in two buckets, different bytes.
+    # --- bare spelling: the Auto_Labeler resolves it to nothing.
     patcher = _EnvPatcher()
     try:
         stub = RecordingConverseClient(reply=_valid_reply(case))
         env = IdentityEnv(aws_stack, worker, dda, prelabel, patcher, stub)
         env.seed_target(case.extension, case.width, case.height)
-        env.seed_examples(1, 0, bucket=ARTIFACTS_BUCKET, bare=True)
-        artifacts_bytes = dict(env.example_bytes)
+        env.seed_examples(1, 0, bucket=DATASET_BUCKET, bare=True)
         bare_ref = env.examples[0]["ref"]
-        # The same bare key in the dataset bucket, with different content.
-        dataset_example = jpeg_bytes(31, 29)
-        env.s3.put_object(Bucket=DATASET_BUCKET, Key=bare_ref,
-                          Body=dataset_example)
+        assert worker._few_shot_ref_location(bare_ref) == (None, None)
 
-        env.worker_prelabel(case)
-        env.preview_prelabel(case)
-
-        worker_call, preview_call = stub.calls
-        assert preview_call != worker_call
-        # The worker read the artifacts-bucket object...
-        assert (image_blocks(worker_call)[0]["image"]["source"]["bytes"]
-                == artifacts_bytes[bare_ref])
-        # ...the preview read the dataset-bucket object of the same key.
-        assert (image_blocks(preview_call)[0]["image"]["source"]["bytes"]
-                == dataset_example)
-        # Nothing else differs: same model id, same inference config, same
-        # prompt, same target image.
-        assert worker_call["modelId"] == preview_call["modelId"]
-        assert worker_call["inferenceConfig"] == preview_call["inferenceConfig"]
-        assert text_blocks(worker_call) == text_blocks(preview_call)
-        assert (image_blocks(worker_call)[-1] == image_blocks(preview_call)[-1])
+        with pytest.raises(worker.GenerationFailure) as excinfo:
+            env.worker_prelabel(case)
+        assert str(excinfo.value) == (
+            f"few-shot example image {bare_ref} is not accessible: the "
+            f"reference could not be resolved to an S3 object")
+        assert stub.calls == []
     finally:
         patcher.undo()
 
-    # --- s3:// spelling of the very same object: the two paths agree.
+    # --- s3:// spelling inside the portal artifacts bucket: refused by the
+    #     bucket-bound client factory on both paths, nothing sent.
     patcher = _EnvPatcher()
     try:
         stub = RecordingConverseClient(reply=_valid_reply(case))
         env = IdentityEnv(aws_stack, worker, dda, prelabel, patcher, stub)
         env.seed_target(case.extension, case.width, case.height)
         env.seed_examples(1, 0, bucket=ARTIFACTS_BUCKET, bare=False)
+        artifacts_ref = env.examples[0]["ref"]
 
-        env.worker_prelabel(case)
-        env.preview_prelabel(case)
+        with pytest.raises(worker.GenerationFailure) as worker_failure:
+            env.worker_prelabel(case)
+        assert str(worker_failure.value).startswith(
+            f"could not obtain credentials for bucket {ARTIFACTS_BUCKET}: ")
 
-        worker_call, preview_call = stub.calls
-        assert preview_call == worker_call
+        with pytest.raises(dda.PreviewSampleFailure) as preview_failure:
+            env.preview_prelabel(case)
+        assert str(preview_failure.value).startswith(
+            f"few-shot example image {artifacts_ref} is not accessible: ")
+        assert stub.calls == []
     finally:
         patcher.undo()

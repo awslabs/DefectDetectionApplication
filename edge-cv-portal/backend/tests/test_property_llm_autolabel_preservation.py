@@ -233,8 +233,10 @@ def _assert_no_few_shot_content(request_repr):
 
 # ------------------------------------------------------------- generators
 
+# Example references are s3:// URIs inside the use case's dataset bucket,
+# the reference shape job creation accepts (portal-usecase-bucket-config).
 _example_ref = st.builds(
-    lambda ext: f"ex/{uuid.uuid4().hex[:8]}{ext}",
+    lambda ext: f"s3://{CREATE_BUCKET}/ex/{uuid.uuid4().hex[:8]}{ext}",
     st.sampled_from([".jpg", ".jpeg", ".png", ".PNG"]),
 )
 

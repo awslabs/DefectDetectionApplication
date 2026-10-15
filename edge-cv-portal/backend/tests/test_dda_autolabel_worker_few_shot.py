@@ -33,6 +33,17 @@ Covers, against the moto-backed stack from conftest.py and the
 
 Requirements: 6.5, 6.7, 7.3, 7.4, 10.3
 
+Spec: portal-usecase-bucket-config (use-case bucket configuration, task
+3.5). Example references are `s3://` URIs inside the use case's configured
+buckets — the dataset bucket (`s3_bucket`) and a second configured bucket
+on the use case's `additional_s3_buckets` list. The portal artifacts
+bucket is not a readable location for an example: a reference inside it
+is refused by `get_s3_client_for_bucket` and fails the dataset image, and
+a bare key (the former artifacts-bucket spelling) resolves to nothing —
+the task-level `GenerationFailure` marks the task Failed.
+
+Requirements: 2.7, 15.10
+
 Spec: llm-model-token-and-image-sizing, task 8.2 (job-record sizing
 reads). Extends the same harness — every pre-existing case above holds
 unchanged, since Few_Shot_Example selection is independent of the
@@ -81,6 +92,9 @@ from test_dda_autolabel_worker import (
 
 REGION = "us-east-1"
 ARTIFACTS_BUCKET = "test-portal-artifacts"
+# A second bucket configured on the use case (additional_s3_buckets), so
+# "one client per bucket" can be shown over two readable locations.
+EXAMPLES_BUCKET = "test-autolabel-examples"
 
 MODEL_ID = "us.amazon.nova-pro-v1:0"
 MODEL = f"llm:{MODEL_ID}"
@@ -134,6 +148,12 @@ class FewShotEnv(AutolabelEnv):
         self.get_object_calls = []
         self.client_requests = []
         self.example_bytes = {}
+        # The use case's configured buckets: the dataset bucket plus one
+        # additional bucket (both readable example locations).
+        stack.tables.usecases.update_item(
+            Key={"usecase_id": self.usecase_id},
+            UpdateExpression="SET additional_s3_buckets = :extra",
+            ExpressionAttributeValues={":extra": [EXAMPLES_BUCKET]})
 
         real_factory = worker.get_s3_client_for_bucket
         calls, requests = self.get_object_calls, self.client_requests
@@ -149,21 +169,27 @@ class FewShotEnv(AutolabelEnv):
 
     # ------------------------------------------------------------ examples
     def put_example(self, designation, position, ext="png",
-                    bucket=ARTIFACTS_BUCKET, width=20, height=10):
+                    bucket=DATASET_BUCKET, width=20, height=10):
         """Upload one example image and return its stored reference."""
         key = (f"labeling-examples/{uuid.uuid4().hex[:8]}/{designation}/"
                f"{position}.{ext}")
         body = (png_bytes(width, height) if ext.lower() == "png"
                 else jpeg_bytes(width, height))
         self.s3.put_object(Bucket=bucket, Key=key, Body=body)
-        # Portal artifacts refs are bare keys (the wizard's presigned-PUT
-        # uploads); other buckets are stored as full s3:// URIs.
-        ref = key if bucket == ARTIFACTS_BUCKET else f"s3://{bucket}/{key}"
+        # References are s3:// URIs inside the use case's configured
+        # buckets (the wizard stores s3://<data bucket>/labeling-examples/...).
+        ref = f"s3://{bucket}/{key}"
         self.example_bytes[ref] = body
         return {"ref": ref, "designation": designation, "position": position}
 
     def missing_example(self, designation=GOOD, position=0):
-        return {"ref": f"labeling-examples/{uuid.uuid4().hex[:8]}/nope.png",
+        return {"ref": (f"s3://{DATASET_BUCKET}/labeling-examples/"
+                        f"{uuid.uuid4().hex[:8]}/nope.png"),
+                "designation": designation, "position": position}
+
+    def bare_key_example(self, designation=GOOD, position=0):
+        """The former artifacts-bucket spelling: a bare key, no scheme."""
+        return {"ref": f"labeling-examples/{uuid.uuid4().hex[:8]}/bare.png",
                 "designation": designation, "position": position}
 
     # ------------------------------------------------------- job documents
@@ -192,8 +218,9 @@ class FewShotEnv(AutolabelEnv):
                                 json.dumps({model_identifier: limit}))
 
     # --------------------------------------------------------- assertions
-    def read_keys(self):
-        return [key for _bucket, key in self.get_object_calls]
+    def read_refs(self):
+        """The s3:// references read so far, in read order."""
+        return [f"s3://{bucket}/{key}" for bucket, key in self.get_object_calls]
 
     def make_llm_job(self, few_shot=_ABSENT, task_type="ObjectDetection"):
         """A persisted `llm:` job, optionally carrying a few_shot doc."""
@@ -217,10 +244,11 @@ def worker(aws_stack):
     dda_autolabel_worker.SAM_WORKER_FUNCTION_NAME = SAM_FUNCTION
     dda_autolabel_worker.PORTAL_ARTIFACTS_BUCKET = ARTIFACTS_BUCKET
     s3 = boto3.client("s3", region_name=REGION)
-    try:
-        s3.create_bucket(Bucket=DATASET_BUCKET)
-    except s3.exceptions.BucketAlreadyOwnedByYou:
-        pass
+    for bucket in (DATASET_BUCKET, EXAMPLES_BUCKET):
+        try:
+            s3.create_bucket(Bucket=bucket)
+        except s3.exceptions.BucketAlreadyOwnedByYou:
+            pass
     return dda_autolabel_worker
 
 
@@ -299,7 +327,7 @@ class TestDisabledByDefault:
         assert limit == DEFAULT_LIMIT
         assert [image["designation"] for image in images] == [GOOD]
         assert images[0]["bytes"] == env.example_bytes[example["ref"]]
-        assert env.read_keys() == [example["ref"]]
+        assert env.read_refs() == [example["ref"]]
 
     def test_disabled_document_still_resolves_the_configured_limit(self, env):
         """The bound is resolved even with the option off, so the
@@ -337,7 +365,7 @@ class TestAttachmentOrderAndBounds:
         # Formats derive from the ref's extension (case-insensitive).
         assert [image["format"] for image in images] == [
             "png", "png", "jpeg", "jpeg"]
-        assert env.read_keys() == [good_0["ref"], good_1["ref"],
+        assert env.read_refs() == [good_0["ref"], good_1["ref"],
                                    bad_0["ref"], bad_1["ref"]]
         assert [image["bytes"] for image in images] == [
             env.example_bytes[ref["ref"]]
@@ -356,9 +384,9 @@ class TestAttachmentOrderAndBounds:
         assert limit == 3
         assert len(images) == 2
         attached_refs = [good[0]["ref"], good[1]["ref"]]
-        assert env.read_keys() == attached_refs
+        assert env.read_refs() == attached_refs
         omitted_refs = {good[2]["ref"], bad[0]["ref"], bad[1]["ref"]}
-        assert omitted_refs.isdisjoint(set(env.read_keys()))
+        assert omitted_refs.isdisjoint(set(env.read_refs()))
 
     def test_limit_of_one_attaches_and_reads_nothing(self, env):
         """Req 7.4: the target image consumes the only slot."""
@@ -409,18 +437,18 @@ class TestAttachmentOrderAndBounds:
             few_shot={"enabled": True, "examples": stored})
 
         assert len(images) == 2
-        assert env.read_keys() == [good_0["ref"], good_1["ref"]]
+        assert env.read_refs() == [good_0["ref"], good_1["ref"]]
 
     def test_one_client_per_bucket(self, env):
-        """Attached refs share one S3 client per bucket."""
-        artifacts = [env.put_example(GOOD, index) for index in range(2)]
-        dataset = env.put_example(BAD, 0, bucket=DATASET_BUCKET)
+        """Attached refs share one S3 client per configured bucket."""
+        dataset = [env.put_example(GOOD, index) for index in range(2)]
+        additional = env.put_example(BAD, 0, bucket=EXAMPLES_BUCKET)
 
         images, _limit = env.resolve(
-            few_shot={"enabled": True, "examples": artifacts + [dataset]})
+            few_shot={"enabled": True, "examples": dataset + [additional]})
 
         assert len(images) == 3
-        assert env.client_requests == [ARTIFACTS_BUCKET, DATASET_BUCKET]
+        assert env.client_requests == [DATASET_BUCKET, EXAMPLES_BUCKET]
 
 
 # ---------------------------------------------------- unreadable examples
@@ -455,6 +483,35 @@ class TestUnreadableExampleReason:
             "few-shot example image s3:// is not accessible: the reference "
             "could not be resolved to an S3 object")
 
+    def test_bare_key_reference_resolves_to_nothing(self, env):
+        """Use-case bucket configuration: a bare key (the former
+        artifacts-bucket spelling) resolves to `(None, None)` and gets the
+        unresolvable-reference reason; no client and no read."""
+        bare = env.bare_key_example(GOOD, 0)
+        assert env.worker._few_shot_ref_location(bare["ref"]) == (None, None)
+
+        with pytest.raises(env.worker.GenerationFailure) as excinfo:
+            env.resolve(few_shot={"enabled": True, "examples": [bare]})
+
+        assert str(excinfo.value) == (
+            f"few-shot example image {bare['ref']} is not accessible: the "
+            f"reference could not be resolved to an S3 object")
+        assert env.client_requests == []
+        assert env.get_object_calls == []
+
+    def test_portal_artifacts_bucket_is_not_a_readable_location(self, env):
+        """Use-case bucket configuration: an s3:// reference inside the
+        portal artifacts bucket is refused by the bucket-bound client
+        factory before any read — the bucket is never in a use case's set."""
+        example = env.put_example(GOOD, 0, bucket=ARTIFACTS_BUCKET)
+
+        with pytest.raises(env.worker.GenerationFailure) as excinfo:
+            env.resolve(few_shot={"enabled": True, "examples": [example]})
+
+        assert str(excinfo.value).startswith(
+            f"could not obtain credentials for bucket {ARTIFACTS_BUCKET}: ")
+        assert env.get_object_calls == []
+
     def test_omitted_unreadable_ref_never_fails_the_image(self, env):
         """An unreadable reference beyond the bound is never read, so it
         cannot fail the image."""
@@ -467,7 +524,7 @@ class TestUnreadableExampleReason:
 
         assert limit == 2
         assert [image["designation"] for image in images] == [GOOD]
-        assert env.read_keys() == [good["ref"]]
+        assert env.read_refs() == [good["ref"]]
 
 
 # --------------------------------------------- end-to-end through the SQS
@@ -558,6 +615,48 @@ class TestBatchEndToEnd:
         assert PROMPT in absent_content[1]["text"]
         assert "example" not in absent_content[1]["text"].lower()
 
+    def test_bare_key_reference_fails_the_task(self, env):
+        """Use-case bucket configuration: a job whose stored example is a
+        bare key fails pre-label generation for its task (status Failed,
+        the unresolvable-reference reason, no model invocation), while a
+        sibling record in the same batch is unaffected."""
+        bare = env.bare_key_example(GOOD, 0)
+        bare_job = env.make_llm_job(
+            few_shot={"enabled": True, "examples": [bare]})
+        bare_uri = env.put_image(f"imgs/{uuid.uuid4()}.png",
+                                 width=WIDTH, height=HEIGHT)
+        bare_task = env.make_task(bare_job, bare_uri)
+
+        healthy = env.put_example(GOOD, 0)
+        healthy_job = env.make_llm_job(
+            few_shot={"enabled": True, "examples": [healthy]})
+        healthy_uri = env.put_image(f"imgs/{uuid.uuid4()}.png",
+                                    width=WIDTH, height=HEIGHT)
+        healthy_task = env.make_task(healthy_job, healthy_uri)
+
+        bedrock, _ = env.use_bedrock(replies=[guidance([BOX])])
+
+        result = env.run([
+            env.record(bare_job, bare_task, bare_uri,
+                       "ObjectDetection", LABELS, MODEL,
+                       detection_prompt=PROMPT),
+            env.record(healthy_job, healthy_task, healthy_uri,
+                       "ObjectDetection", LABELS, MODEL,
+                       detection_prompt=PROMPT),
+        ])
+
+        assert result == {"batchItemFailures": []}
+        failed = env.get_task(bare_job, bare_task)
+        assert failed["prelabel_status"] == "Failed"
+        assert failed["prelabel_error"] == (
+            f"few-shot example image {bare['ref']} is not accessible: the "
+            f"reference could not be resolved to an S3 object")
+        assert not env.prelabel_exists(bare_job, bare_task)
+        assert (env.get_task(healthy_job, healthy_task)["prelabel_status"]
+                == "Available")
+        # Only the healthy record reached the model.
+        assert len(bedrock.calls) == 1
+
 
 # --------------------------------------------- job-record sizing reads
 #                     (llm-model-token-and-image-sizing, task 8.2 —
@@ -593,14 +692,16 @@ def decoded_size(image_bytes):
 
 def put_real_example(env, designation, position, *, width, height):
     """One fully decodable PNG example upload — `put_example`'s stored
-    shape with real pixel data, for jobs whose Downscale_Setting makes
-    the downscaler decode the example bytes."""
+    shape (an s3:// URI in the use case's dataset bucket) with real pixel
+    data, for jobs whose Downscale_Setting makes the downscaler decode the
+    example bytes."""
     key = (f"labeling-examples/{uuid.uuid4().hex[:8]}/{designation}/"
            f"{position}.png")
     body = real_png(width, height)
-    env.s3.put_object(Bucket=ARTIFACTS_BUCKET, Key=key, Body=body)
-    env.example_bytes[key] = body
-    return {"ref": key, "designation": designation, "position": position}
+    env.s3.put_object(Bucket=DATASET_BUCKET, Key=key, Body=body)
+    ref = f"s3://{DATASET_BUCKET}/{key}"
+    env.example_bytes[ref] = body
+    return {"ref": ref, "designation": designation, "position": position}
 
 
 def make_sized_llm_job(env, downscale_max_edge=_ABSENT, token_budget=_ABSENT,

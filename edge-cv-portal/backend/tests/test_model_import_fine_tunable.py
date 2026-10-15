@@ -10,9 +10,12 @@ to THIS use case's bucket under the converter's prefix and 400s on any
 vocabulary violation. Absent → an explicit `null` so Model Detail and the
 base-model resolver never have to guess.
 
-Harness: the artifact validator, RBAC, STS, use-case lookup and audit log are
-swapped for stubs (none is under test); the DynamoDB table is a recorder so
-the persisted item can be inspected directly.
+Harness: the artifact validator, RBAC, use-case lookup and audit log are
+swapped for stubs (none is under test); the artifact validator stub takes the
+consolidated `(model_s3_uri, usecase, *, purpose)` shape, whose real
+implementation obtains its client through `get_s3_client_for_bucket`
+(portal-usecase-bucket-config), so no STS stub is needed. The DynamoDB table
+is a recorder so the persisted item can be inspected directly.
 
 # Validates: Requirements 7.1, 7.2, 7.5
 """
@@ -70,9 +73,8 @@ def harness(monkeypatch):
         "usecase_id": "uc-72", "s3_bucket": BUCKET,
         "cross_account_role_arn": "arn:aws:iam::123456789012:role/uc",
         "external_id": "ext"})
-    monkeypatch.setattr(mi, "assume_usecase_role", lambda *a, **k: {"AccessKeyId": "t"})
     monkeypatch.setattr(mi, "validate_model_artifact",
-                        lambda uri, creds: json.loads(json.dumps(VALIDATION_RESULT)))
+                        lambda uri, usecase, *, purpose: json.loads(json.dumps(VALIDATION_RESULT)))
     monkeypatch.setattr(mi, "log_audit_event", lambda **k: None)
     monkeypatch.setattr(mi, "dynamodb", dynamo)
     monkeypatch.setattr(mi, "TRAINING_JOBS_TABLE", "test-training-jobs")

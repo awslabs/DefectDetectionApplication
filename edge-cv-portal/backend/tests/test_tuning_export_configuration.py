@@ -286,6 +286,16 @@ class UseCaseEnv:
         return response["statusCode"], json.loads(response["body"])
 
     def create(self, body):
+        # Use-case bucket configuration: a use case is created only on a
+        # bucket that exists and carries dda-portal:managed=true (the attach
+        # validator reads the tags with the use case's own credentials), so
+        # the configured bucket is created and tagged in moto first.
+        bucket = body.get("s3_bucket")
+        if bucket:
+            self.env.s3.create_bucket(Bucket=bucket)
+            self.env.s3.put_bucket_tagging(
+                Bucket=bucket,
+                Tagging={"TagSet": [{"Key": "dda-portal:managed", "Value": "true"}]})
         event = self.env.event("POST", "/usecases", self.user, body=body)
         response = self.usecases.handler(event, None)
         return response["statusCode"], json.loads(response["body"])
@@ -372,7 +382,7 @@ class TestUseCaseSettingsPersistence:
         assert int(item["tuning_sample_retention_days"]) == 14
 
     def test_create_without_the_settings_stores_neither(self, uc_env):
-        status, payload = uc_env.create({"name": "Plain", "s3_bucket": "b"})
+        status, payload = uc_env.create({"name": "Plain", "s3_bucket": "plain-bucket"})
 
         assert status == 201, payload
         item = uc_env.item(payload["usecase"]["usecase_id"])
@@ -381,7 +391,7 @@ class TestUseCaseSettingsPersistence:
 
     def test_create_rejects_an_invalid_setting(self, uc_env):
         status, payload = uc_env.create({
-            "name": "Bad", "s3_bucket": "b",
+            "name": "Bad", "s3_bucket": "bad-setting-bucket",
             "tuning_sample_retention_days": 2,
         })
 

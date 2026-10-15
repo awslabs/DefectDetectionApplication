@@ -20,10 +20,21 @@ import {
   ColumnLayout,
   Spinner,
 } from '@cloudscape-design/components';
-import { apiService } from '../services/api';
+import { ApiError, apiService } from '../services/api';
 import { validateS3Uri } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
+import { bucketErrorCode } from '../utils/bucketErrors';
 import { COMPILATION_TARGET_OPTIONS } from '../utils/compilationTargets';
+import BucketNotAllowedNotice from '../components/BucketNotAllowedNotice';
+
+/**
+ * POST /models/validate and /models/import require the DataScientist role
+ * on the use case (spec: portal-usecase-bucket-config, design §7 / §10.2).
+ * The page is reachable by every role, so the server's 403 is rendered as
+ * this message rather than the generic one; the server stays the authority.
+ */
+export const DATA_SCIENTIST_REQUIRED_MESSAGE =
+  'Validating and importing models requires the DataScientist role on this use case';
 
 interface ValidationResult {
   valid: boolean;
@@ -64,6 +75,9 @@ export default function ImportModel() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // A refused model bucket (`bucket_not_allowed`, `invalid_s3_uri`, ...):
+  // rendered through the notice with the allow action (design §10.2).
+  const [bucketError, setBucketError] = useState<unknown>(null);
 
   // Load use cases
   useEffect(() => {
@@ -89,6 +103,7 @@ export default function ImportModel() {
     setValidating(true);
     setValidationResult(null);
     setError(null);
+    setBucketError(null);
 
     try {
       const result = await apiService.validateModel({
@@ -102,7 +117,18 @@ export default function ImportModel() {
       }
     } catch (err) {
       console.error('Validation error:', err);
-      const msg = getErrorMessage(err, 'Validation failed');
+      if (bucketErrorCode(err)) {
+        // The artifact's bucket is outside the use case's allowed set (or
+        // the URI is malformed): the notice names the bucket and offers the
+        // allow action to a UseCaseAdmin.
+        setBucketError(err);
+        scrollToTop();
+        return;
+      }
+      const msg =
+        err instanceof ApiError && err.status === 403
+          ? DATA_SCIENTIST_REQUIRED_MESSAGE
+          : getErrorMessage(err, 'Validation failed');
       setError(msg);
       setValidationResult({
         valid: false,
@@ -128,6 +154,7 @@ export default function ImportModel() {
 
     setSubmitting(true);
     setError(null);
+    setBucketError(null);
 
     try {
       const result = await apiService.importModel({
@@ -148,7 +175,13 @@ export default function ImportModel() {
       }, 2000);
     } catch (err) {
       console.error('Import error:', err);
-      setError(getErrorMessage(err, 'Failed to import model'));
+      if (bucketErrorCode(err)) {
+        setBucketError(err);
+      } else if (err instanceof ApiError && err.status === 403) {
+        setError(DATA_SCIENTIST_REQUIRED_MESSAGE);
+      } else {
+        setError(getErrorMessage(err, 'Failed to import model'));
+      }
       scrollToTop();
     } finally {
       setSubmitting(false);
@@ -175,6 +208,16 @@ export default function ImportModel() {
         <Alert type="error" dismissible onDismiss={() => setError(null)}>
           {error}
         </Alert>
+      )}
+      {bucketError !== null && (
+        <BucketNotAllowedNotice
+          err={bucketError}
+          usecaseId={selectedUseCase?.value}
+          onAllowed={() => {
+            setBucketError(null);
+            handleValidate();
+          }}
+        />
       )}
       {success && (
         <Alert type="success">
