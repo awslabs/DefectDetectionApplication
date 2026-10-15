@@ -127,6 +127,10 @@ from workflow_engine.gst_plugins import workflow_plugin_path
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
 from workflow_engine.node_status import NodeStatusCollector, format_duration_ms
 from workflow_engine.run_log import RunLogCapture
+from workflow_engine.vendor.workflow_core.catalog.nodes import (
+    JPEGDEC_NATIVE_CAPS,
+    JPEGDEC_NATIVE_CAPS_ARCHS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +316,12 @@ _CAPTURE_META_PLACEHOLDER = "{capture_meta}"
 #: downstream needs the frame. Found on hardware (rtsp-rtmp-stream-cameras
 #: task 25.3): every such run failed with GST_FLOW_NOT_LINKED.
 _SRC_PAD_TERMINAL_FACTORIES = ("emlcapture", "emltriton")
+
+
+def _factory(element):
+    """An element's ``factory``, or None for anything that is not a dict
+    (the run-time rewrites never trust a document's shape)."""
+    return element.get("factory") if isinstance(element, dict) else None
 
 
 class FrameSourceError(Exception):
@@ -1158,6 +1168,81 @@ class WorkflowExecutor:
                 )
 
     @staticmethod
+    def _constrain_jpegdec_output(document, arch) -> int:
+        """Insert capsfilter caps=JPEGDEC_NATIVE_CAPS between jpegdec and
+        videoconvert in every catalog JPEG sequence (jpegparse, jpegdec,
+        videoconvert) of a document compiled before the fix, on the arches
+        in JPEGDEC_NATIVE_CAPS_ARCHS. Returns the number inserted. Never
+        raises on JSON-shaped input; anything else is left untouched."""
+        if not isinstance(document, dict) or arch not in JPEGDEC_NATIVE_CAPS_ARCHS:
+            return 0
+        segments = document.get("segments")
+        if not isinstance(segments, list):
+            return 0
+        inserted = 0
+        for segment in segments:
+            elements = segment.get("elements") if isinstance(segment, dict) else None
+            if not isinstance(elements, list):
+                continue
+            index = 1
+            while index < len(elements) - 1:
+                before, current, after = elements[index - 1:index + 2]
+                if (_factory(before) == "jpegparse" and _factory(current) == "jpegdec"
+                        and _factory(after) == "videoconvert"):
+                    elements.insert(index + 1, {
+                        "factory": "capsfilter",
+                        "nodeId": current.get("nodeId"),
+                        "args": {"caps": JPEGDEC_NATIVE_CAPS},
+                    })
+                    inserted += 1
+                    index += 2
+                else:
+                    index += 1
+        if inserted:
+            logger.info("Pinned jpegdec to its native output formats in %d JPEG "
+                        "file chain(s) compiled before the fix (arch %s)",
+                        inserted, arch)
+        return inserted
+
+    @staticmethod
+    def _feed_segment_first(document, arch) -> bool:
+        """Move the segment headed by the fed appsrc to index 0.
+
+        GstPipelineManager.create_buffer and python_bridge._fed_frame_caps
+        read the launch string's FIRST caps= clause as the fed appsrc's
+        caps. On the arches in JPEGDEC_NATIVE_CAPS_ARCHS a JPEG file chain
+        renders a capsfilter caps= of its own, so a file source rendered
+        first would hand the appsrc that capsfilter's quoted caps, which
+        Gst.Caps.from_string rejects. A tee branch (a segment with "from")
+        never moves; the forward funnel reference the move can create
+        (... ! f0. ahead of funnel name=f0) parses on GStreamer 1.16 to
+        1.24. The other segments keep their order. Returns True when it
+        moved a segment. Never raises on JSON-shaped input."""
+        if not isinstance(document, dict) or arch not in JPEGDEC_NATIVE_CAPS_ARCHS:
+            return False
+        segments = document.get("segments")
+        if not isinstance(segments, list):
+            return False
+        for index, segment in enumerate(segments):
+            if not isinstance(segment, dict) or segment.get("from"):
+                continue
+            elements = segment.get("elements")
+            if not isinstance(elements, list) or not elements:
+                continue
+            head = elements[0]
+            args = head.get("args") if isinstance(head, dict) else None
+            if (_factory(head) == "appsrc" and isinstance(args, dict)
+                    and args.get("name") == "appsrc"):
+                if index == 0:
+                    return False
+                segments.insert(0, segments.pop(index))
+                logger.info("Moved the Frame_Feed segment of node %s ahead of "
+                            "%d segment(s) so its appsrc caps come first "
+                            "(arch %s)", head.get("nodeId"), index, arch)
+                return True
+        return False
+
+    @staticmethod
     def _ensure_writable_inference_branch(document: dict) -> int:
         """Give an ``emltriton`` branch its own buffer when the frame tee
         fans out, and return the number of branches fixed.
@@ -1911,6 +1996,14 @@ class WorkflowExecutor:
                     "the run continues without artifact routing",
                     execution_id,
                 )
+
+            # Packages compiled before the jpegdec native-caps fix: pin each
+            # catalog JPEG chain to jpegdec's native formats on the Ubuntu
+            # 22.04 targets, then keep the fed appsrc's caps= the launch
+            # string's first, which both Frame_Feed consumers read
+            # (jpeg-folder-source-decode-ubuntu2204, design C3 and C3b).
+            self._constrain_jpegdec_output(document, registration.arch)
+            self._feed_segment_first(document, registration.arch)
 
             # Terminate a bare capture branch with a sink; a trailing
             # emltriton/emlcapture src pad left unlinked fails the run with

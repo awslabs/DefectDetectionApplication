@@ -40,9 +40,9 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 from ..catalog import ARCH_SIM, ARCHITECTURES, CATEGORY_OUTPUT, NODE_CATALOG, bundled_plugins_for
 from ..catalog.metadata_config import parse_mappings, parse_static_json
 from ..catalog.models import GstMapping, NodeTypeDescriptor
-from ..catalog.nodes import SOURCE_KIND_TO_SOURCE_TYPE
+from ..catalog.nodes import JPEGDEC_NATIVE_CAPS_ARCHS, SOURCE_KIND_TO_SOURCE_TYPE
 from ..serializer.models import Connection, Node, WorkflowGraph
-from ..validator import SEVERITY_ERROR, validate
+from ..validator import FRAME_FEED_SOURCE_TYPES, SEVERITY_ERROR, validate
 from .models import (
     CODE_UNMAPPED_ARCHITECTURE,
     CODE_VALIDATION_ERROR,
@@ -420,6 +420,11 @@ def compile(
     segments = _build_segments(
         topo_order, stream_out, stream_in, chains, feeder_captures
     )
+    # Frame-feed segment first on the jpegdec-constrained arches (design
+    # D10, option c). Before the packager derives bindingPoints slots,
+    # which address segments by index.
+    if not simulation:
+        segments = _feed_segment_first(segments, nodes_by_id, target_arch)
 
     # Executor bindings, one entry per executor-level node (Requirement 6.6).
     predecessors = _node_predecessors(graph)
@@ -987,4 +992,38 @@ def _build_segments(
         # fan_in == 1 nodes are placed while extending their upstream,
         # which precedes them in topological order.
 
+    return segments
+
+
+def _feed_segment_first(
+    segments: List[dict],
+    nodes_by_id: Dict[str, Node],
+    target_arch: str,
+) -> List[dict]:
+    """The segments with the frame-feed source's appsrc-headed segment moved
+    to index 0 on the arches in JPEGDEC_NATIVE_CAPS_ARCHS.
+
+    GstPipelineManager.create_buffer and python_bridge._fed_frame_caps
+    read the launch string's FIRST caps= clause as the fed appsrc's caps,
+    and on these arches a JPEG file chain renders a capsfilter caps= of its
+    own. Emitting the feed segment first keeps the fed caps first on every
+    LocalServer, including those that predate the executor's own rule.
+    Segment, tee and funnel names are unchanged; a source segment has no
+    "from", so no tee branch moves ahead of its tee. The single-feed rule
+    (validator V7) allows one such segment. Other arches, and documents
+    whose feed segment is already first or absent, are returned unchanged
+    (the same list object). The scan stops at the first frame-feed segment,
+    as the executor's rule does."""
+    if target_arch not in JPEGDEC_NATIVE_CAPS_ARCHS:
+        return segments
+    for index, segment in enumerate(segments):
+        elements = segment["elements"]
+        head = elements[0] if elements else None
+        node = nodes_by_id.get(head["nodeId"]) if head else None
+        if (segment["from"] is None and node is not None
+                and head["factory"] == "appsrc"
+                and node.type in FRAME_FEED_SOURCE_TYPES):
+            if index == 0:
+                return segments
+            return [segment] + segments[:index] + segments[index + 1:]
     return segments

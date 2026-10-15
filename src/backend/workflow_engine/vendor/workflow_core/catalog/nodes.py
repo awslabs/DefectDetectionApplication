@@ -151,17 +151,46 @@ def _dataset_fed_sim_source():
 # Shared element chains
 # --------------------------------------------------------------------------
 
+#: Caps that pin jpegdec to the formats it emits natively (no libjpeg-turbo
+#: direct colour conversion): I420 for every YCbCr JPEG, GRAY8 for grayscale,
+#: RGB for RGB-colourspace JPEGs; Y42B/Y444 admit a future jpegdec that emits
+#: subsampling-native YUV. I420 MUST stay first: GStreamer 1.20 jpegdec
+#: decides its direct RGB output from the first downstream format it
+#: supports, and that path fails on 1.20.x ("Improper call to JPEG library
+#: in state 205").
+#: ';'-separated structures, no braces (args templates go through format_map).
+JPEGDEC_NATIVE_CAPS = (
+    "video/x-raw,format=I420;"
+    "video/x-raw,format=Y42B;"
+    "video/x-raw,format=Y444;"
+    "video/x-raw,format=GRAY8;"
+    "video/x-raw,format=RGB"
+)
+
+#: Architectures whose LocalServer image ships GStreamer 1.20.x (Ubuntu
+#: 22.04) and decodes file JPEGs with jpegdec. JP5 (1.16.3), JP6 (pngdec) and
+#: JP7 (1.24.2) never take the direct path and keep the unconstrained chain.
+#: The compiler's feed-first order uses the same set (design D10).
+JPEGDEC_NATIVE_CAPS_ARCHS = (ARCH_X86_64, ARCH_X86_64_NVIDIA, ARCH_ARM64_CPU)
+
+
 # Standard JPEG file decode chain used by the existing builder
 # (filesrc ! emexifextract ! jpegparse ! jpegdec ! videoconvert ! videoflip).
-def _jpeg_file_chain(location_template):
-    return [
+# On the JPEGDEC_NATIVE_CAPS_ARCHS a capsfilter caps=JPEGDEC_NATIVE_CAPS
+# follows jpegdec, so jpegdec never takes the GStreamer 1.20 direct RGB
+# output path; videoconvert does the RGB conversion.
+def _jpeg_file_chain(location_template, arch):
+    chain = [
         _element("filesrc", blocksize=-1, location=location_template),
         _element("emexifextract"),
         _element("jpegparse"),
         _element("jpegdec", **{"idct-method": 2}),
-        _element("videoconvert"),
-        _element("videoflip", method="automatic"),
     ]
+    if arch in JPEGDEC_NATIVE_CAPS_ARCHS:
+        chain.append(_element("capsfilter", caps=JPEGDEC_NATIVE_CAPS))
+    chain.append(_element("videoconvert"))
+    chain.append(_element("videoflip", method="automatic"))
+    return chain
 
 
 # JetPack 6 avoids GStreamer's libjpeg-based jpegdec (libdlr.so libjpeg
@@ -208,23 +237,23 @@ CSI_CAMERA_SOURCE = NodeTypeDescriptor(
     # decode path (see _jp6_png_staged_chain). Simulation: fed from the
     # Test_Dataset (Requirement 12.6).
     mappings=[
-        GstMapping(arch=ARCH_X86_64, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg"),
+        GstMapping(arch=ARCH_X86_64, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg", ARCH_X86_64),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
-        GstMapping(arch=ARCH_X86_64_NVIDIA, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg"),
+        GstMapping(arch=ARCH_X86_64_NVIDIA, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg", ARCH_X86_64_NVIDIA),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
-        GstMapping(arch=ARCH_ARM64_CPU, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg"),
+        GstMapping(arch=ARCH_ARM64_CPU, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg", ARCH_ARM64_CPU),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
-        GstMapping(arch=ARCH_ARM64_JP5, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg"),
+        GstMapping(arch=ARCH_ARM64_JP5, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg", ARCH_ARM64_JP5),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
         GstMapping(arch=ARCH_ARM64_JP6, element_chain=_jp6_png_staged_chain("/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"),
                    plugin_dependencies=["coreelements", "png", "videoconvertscale", "python:pillow"]),
         # JP7 reads the staged capture JPEG directly — see the folder_source
         # JP7 mapping for why the JP6 PNG staging path does not apply here.
-        GstMapping(arch=ARCH_ARM64_JP7, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg"),
+        GstMapping(arch=ARCH_ARM64_JP7, element_chain=_jpeg_file_chain("/aws_dda/nvidia-csi-capture/latest.jpg", ARCH_ARM64_JP7),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
         _dataset_fed_sim_source(),
@@ -333,17 +362,17 @@ FOLDER_SOURCE = NodeTypeDescriptor(
                             examples=["*.jpg", "line1_*.jpg"]),
     ],
     mappings=[
-        GstMapping(arch=ARCH_X86_64, element_chain=_jpeg_file_chain("{location}"),
+        GstMapping(arch=ARCH_X86_64, element_chain=_jpeg_file_chain("{location}", ARCH_X86_64),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
         # x86_64 with the NVIDIA GPU runtime mirrors the plain x86_64 chain.
-        GstMapping(arch=ARCH_X86_64_NVIDIA, element_chain=_jpeg_file_chain("{location}"),
+        GstMapping(arch=ARCH_X86_64_NVIDIA, element_chain=_jpeg_file_chain("{location}", ARCH_X86_64_NVIDIA),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
-        GstMapping(arch=ARCH_ARM64_CPU, element_chain=_jpeg_file_chain("{location}"),
+        GstMapping(arch=ARCH_ARM64_CPU, element_chain=_jpeg_file_chain("{location}", ARCH_ARM64_CPU),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
-        GstMapping(arch=ARCH_ARM64_JP5, element_chain=_jpeg_file_chain("{location}"),
+        GstMapping(arch=ARCH_ARM64_JP5, element_chain=_jpeg_file_chain("{location}", ARCH_ARM64_JP5),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
         # JP6 PNG staging path (see _jp6_png_staged_chain).
@@ -359,7 +388,7 @@ FOLDER_SOURCE = NodeTypeDescriptor(
         # around is libdlr.so's libjpeg, and DLR is unsupported on JP7 (its
         # r35-era libdlr.so needs L4T driver libs absent on Thor), so plain
         # jpegdec is not at risk there.
-        GstMapping(arch=ARCH_ARM64_JP7, element_chain=_jpeg_file_chain("{location}"),
+        GstMapping(arch=ARCH_ARM64_JP7, element_chain=_jpeg_file_chain("{location}", ARCH_ARM64_JP7),
                    plugin_dependencies=["coreelements", "emexifextract", "jpeg",
                                         "videoconvertscale", "videofilter"]),
         # Simulation: fed from the Test_Dataset like camera_source, never

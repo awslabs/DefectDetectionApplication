@@ -1,0 +1,1 @@
+appsrc name=appsrc caps=video/x-raw,format=RGB ! videoconvert ! fakesink filesrc blocksize=-1 location=/data/images/canary.jpg.dda_decoded.png ! pngdec ! videoconvert ! appsink name=py_in_py1 emit-signals=true sync=false max-buffers=1 caps=video/x-raw,format=RGB appsrc name=py_out_py1 is-live=true format=time block=true ! fakesink

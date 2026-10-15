@@ -1,0 +1,1 @@
+filesrc blocksize=-1 location=/data/images/canary.jpg ! emexifextract ! jpegparse ! jpegdec idct-method=2 ! videoconvert ! videoflip method=automatic ! fakesink

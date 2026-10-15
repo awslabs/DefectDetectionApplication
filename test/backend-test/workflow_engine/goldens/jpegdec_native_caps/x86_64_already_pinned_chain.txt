@@ -1,0 +1,1 @@
+filesrc blocksize=-1 location=/data/images/canary.jpg ! emexifextract ! jpegparse ! jpegdec idct-method=2 ! capsfilter caps="video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB" ! videoconvert ! videoflip method=automatic ! fakesink

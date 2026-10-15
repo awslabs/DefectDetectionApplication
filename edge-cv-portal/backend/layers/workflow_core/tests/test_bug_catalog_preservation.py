@@ -130,6 +130,14 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: list lets a trigger payload point the fetch at any remote source, so
 #: setting prefixes is recommended. Only that entry was regenerated per
 #: the same maintenance path; ONLY that description moved.
+#:
+#: The jpeg-folder-source-decode-ubuntu2204 spec inserted the native-caps
+#: ``capsfilter`` (``caps=JPEGDEC_NATIVE_CAPS``) right after ``jpegdec``
+#: in the ``x86_64``, ``x86_64_nvidia`` and ``arm64_cpu`` mappings of
+#: ``folder_source`` and ``csi_camera_source``. Only those two entries were
+#: regenerated per the same maintenance path (ONLY those six element
+#: chains moved); every other recording, ``mqtt_publish`` included, is
+#: untouched.
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",
