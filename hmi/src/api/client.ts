@@ -4,7 +4,8 @@
  *
  * Responsibilities:
  *  - Attach `Authorization: Bearer <token>` from the stored session to every
- *    request (Requirement 1.2).
+ *    request (Requirement 1.2) whose origin is the one that issued the token
+ *    (`auth/session.ts`). A request to any other origin is sent without it.
  *  - Apply a 10-second timeout per request via `AbortController`.
  *  - Classify failures as `network` / `timeout` / `http-5xx` / `http-401` /
  *    `http-other` so the connection state machine can route them
@@ -36,6 +37,7 @@ import {
   type SessionStorageLike,
   type StoredSession,
 } from "../auth/session";
+import { requestOrigin } from "./base";
 import { loginUrl } from "./routes";
 
 // --------------------------------------------------------------------------
@@ -180,7 +182,7 @@ async function requestWithToken<T>(
 // Login (Requirements 1.2, 1.6, 1.7)
 // --------------------------------------------------------------------------
 
-function parseLoginSession(raw: unknown): StoredSession | null {
+function parseLoginSession(raw: unknown): Omit<StoredSession, "origin"> | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
   if (
@@ -197,15 +199,16 @@ function parseLoginSession(raw: unknown): StoredSession | null {
 /**
  * Submits credentials to `POST /local-auth/login`.
  *
- * - Success: persists `{token, expiresAt}` and retains the credentials in
- *   memory only (Requirement 1.2).
+ * - Success: persists `{token, expiresAt}` bound to the login URL's origin,
+ *   and retains the credentials in memory only (Requirement 1.2).
  * - HTTP 403: local login is disabled on the device (Requirement 1.6).
  * - HTTP 401: credentials rejected; nothing is stored (Requirement 1.7).
  *
  * The login route never goes through the 401 re-login interception.
  */
 export async function login(credentials: Credentials): Promise<LoginResult> {
-  const outcome = await timedFetch(loginUrl(), {
+  const url = loginUrl();
+  const outcome = await timedFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -229,13 +232,16 @@ export async function login(credentials: Credentials): Promise<LoginResult> {
   if (!response.ok) {
     return { ok: false, reason: "http-other" };
   }
-  const session = parseLoginSession(await safeJson(response));
-  if (session === null) {
+  const grant = parseLoginSession(await safeJson(response));
+  if (grant === null) {
     // A 2xx login without a usable token is unusable; store nothing.
     return { ok: false, reason: "http-other" };
   }
+  // Bound to the LocalServer that issued it: the token only goes back there.
+  const session: StoredSession = { ...grant, origin: requestOrigin(url) };
   saveSession(session, config.storage); // Requirement 1.2
-  retainCredentials(credentials); // in-memory only (Requirement 1.4 groundwork)
+  // In memory only (Requirement 1.4 groundwork), for the same origin.
+  retainCredentials(credentials, session.origin);
   return { ok: true, session };
 }
 
@@ -247,7 +253,7 @@ export async function login(credentials: Credentials): Promise<LoginResult> {
  * Module-level in-flight latch: concurrent 401s share one re-login attempt
  * instead of firing parallel logins (design Decision 4).
  */
-let reloginInFlight: Promise<string | null> | null = null;
+let reloginInFlight: Promise<StoredSession | null> | null = null;
 
 /** Discards the stored token and surfaces the login screen (Requirement 1.8). */
 function handleAuthExpired(): void {
@@ -255,8 +261,9 @@ function handleAuthExpired(): void {
   config.onAuthExpired?.();
 }
 
-async function performRelogin(): Promise<string | null> {
-  const credentials = getRetainedCredentials();
+async function performRelogin(): Promise<StoredSession | null> {
+  // Only credentials the login route's own origin accepted are re-submitted.
+  const credentials = getRetainedCredentials(requestOrigin(loginUrl()));
   if (credentials === null) {
     // No credentials retained (e.g. after a page reload): Requirement 1.8.
     handleAuthExpired();
@@ -264,7 +271,7 @@ async function performRelogin(): Promise<string | null> {
   }
   const result = await login(credentials); // exactly once (Requirement 1.4)
   if (result.ok) {
-    return result.session.token;
+    return result.session;
   }
   if (
     result.reason === "credentials-rejected" ||
@@ -279,7 +286,7 @@ async function performRelogin(): Promise<string | null> {
 }
 
 /** Joins the in-flight re-login, or starts the single attempt. */
-function reloginOnce(): Promise<string | null> {
+function reloginOnce(): Promise<StoredSession | null> {
   if (reloginInFlight === null) {
     reloginInFlight = performRelogin().finally(() => {
       reloginInFlight = null;
@@ -295,29 +302,36 @@ function reloginOnce(): Promise<string | null> {
 /**
  * The wrapper for every authenticated non-image JSON request.
  *
- * Attaches the bearer Session_Token (Requirement 1.2), applies the 10-second
- * timeout, classifies failures, and on a 401 from any route except login
- * performs the single re-login + single retry of the original request
- * (Requirements 1.4, 1.8).
+ * Attaches the bearer Session_Token (Requirement 1.2) when the request goes to
+ * the origin that issued it, applies the 10-second timeout, classifies
+ * failures, and on a 401 from any route except login performs the single
+ * re-login + single retry of the original request (Requirements 1.4, 1.8).
  */
 export async function apiFetch<T = unknown>(
   url: string,
   init: RequestInit = {},
 ): Promise<ApiResult<T>> {
-  const session = loadSession(config.storage);
+  // Another origin's token is never sent: for this request's origin the
+  // stored session either matches or the request goes out signed out.
+  const origin = requestOrigin(url);
+  const session = loadSession(config.storage, origin);
   const first = await requestWithToken<T>(url, init, session?.token ?? null);
   if (first.ok || first.kind !== "http-401" || url === loginUrl()) {
     return first;
   }
 
   // 401 from a non-login route: single re-login, then single retry.
-  const freshToken = await reloginOnce();
-  if (freshToken === null) {
+  const fresh = await reloginOnce();
+  if (fresh === null) {
     // Re-login failed or no credentials: token already discarded and the
     // login screen surfaced (Requirement 1.8).
     return first;
   }
-  const retry = await requestWithToken<T>(url, init, freshToken);
+  if (fresh.origin !== origin) {
+    // The fresh token belongs to the login route's origin, not this URL's.
+    return first;
+  }
+  const retry = await requestWithToken<T>(url, init, fresh.token);
   if (!retry.ok && retry.kind === "http-401") {
     // Still unauthorized after a fresh token: no further attempts; discard
     // the token and surface the login screen (Requirements 1.4, 1.8).

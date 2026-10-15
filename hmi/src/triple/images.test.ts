@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { resetApiBase, setApiBase } from "../api/base";
+import { saveSession, type SessionStorageLike } from "../auth/session";
 import {
   IMAGE_TIMEOUT_MS,
   IMAGE_UNAVAILABLE_TEXT,
@@ -214,5 +216,49 @@ describe("createPanelImageLoader", () => {
     // No pending timeout can later blank an image that is already displayed.
     expect(vi.getTimerCount()).toBe(0);
     expect(panel.img.listenerCount("error")).toBe(0);
+  });
+});
+
+describe("default token: only the session the current API origin issued", () => {
+  const STATION_A = "http://192.168.8.224:5000";
+  const STATION_B = "http://192.168.8.225:5000";
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    const data = new Map<string, string>();
+    const storage: SessionStorageLike = {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => void data.set(key, value),
+      removeItem: (key) => void data.delete(key),
+    };
+    vi.stubGlobal("localStorage", storage);
+    saveSession({ token: "tok-A", expiresAt: 9e9, origin: STATION_A });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    resetApiBase();
+  });
+
+  it("puts no token= in an image URL for another origin", () => {
+    setApiBase(STATION_B);
+    const panel = testPanel();
+    createPanelImageLoader()(panel.handle, "exec-1", REF);
+
+    const src = panel.img.getAttribute("src")!;
+    expect(src.startsWith(`${STATION_B}/workflows/executions/exec-1/node-image?`)).toBe(true);
+    expect(new URL(src).searchParams.has("token")).toBe(false);
+    expect(src).not.toContain("tok-A");
+  });
+
+  it("carries the token to the origin that issued it", () => {
+    setApiBase(STATION_A);
+    const panel = testPanel();
+    createPanelImageLoader()(panel.handle, "exec-1", REF);
+
+    const src = panel.img.getAttribute("src")!;
+    expect(new URL(src).origin).toBe(STATION_A);
+    expect(new URL(src).searchParams.get("token")).toBe("tok-A");
   });
 });

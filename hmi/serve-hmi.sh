@@ -26,6 +26,13 @@
 # needs no `?api=` query string. Without it the page would ask its own static
 # server for `/local-auth/status`, get a 404, and sit on the login form.
 #
+# A per-URL `?api=<port|origin>` still overrides that, but only for this
+# page's host, private-network, loopback and link-local IP addresses, .local
+# and single-label names, and the hosts in API_ALLOW_HOSTS (stamped into the
+# `dda-api-allow-hosts` meta tag). The page ignores any other host and shows a
+# notice naming it, because the HMI sends its session token and the login
+# form's credentials to whatever API_Base it uses.
+#
 # Why a server at all, rather than opening index.html from disk: the bundle
 # loads its JavaScript as ES modules, and browsers refuse external module
 # fetches over file:// (opaque origin), so a file:// page renders blank.
@@ -41,6 +48,11 @@
 #   API_BASE=http://192.168.8.224:5000  # LocalServer on another machine
 #   API_BASE= ./serve-hmi.sh          # stamp nothing; same-origin as before
 #
+#   API_ALLOW_HOSTS=station-01.plant.example,.plant.example,100.64.0.0/10
+#                                     # more hosts ?api= may name: exact names
+#                                     # or IPs, .suffix domains, IPv4 CIDRs
+#                                     # (default: none beyond the built-in set)
+#
 # Then open, e.g.:
 #   http://<host>:8081/triple.html
 #   http://<host>:8081/index.html
@@ -52,6 +64,8 @@ BIND="${BIND:-0.0.0.0}"
 # `-` not `:-` so an explicitly empty API_BASE means "stamp nothing", while an
 # unset one gets the same-host default.
 API_BASE="${API_BASE-5000}"
+# Unset or empty: stamp nothing, so only the built-in ?api= hosts apply.
+API_ALLOW_HOSTS="${API_ALLOW_HOSTS:-}"
 
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
     echo "serve-hmi: '$PORT' is not a valid port (1-65535)." >&2
@@ -65,6 +79,24 @@ if [ -n "$API_BASE" ] \
    && ! [[ "$API_BASE" =~ ^(https?:)?//[^/]+ ]]; then
     echo "serve-hmi: API_BASE='$API_BASE' is not a port, //host:port, or http(s)://host:port." >&2
     exit 2
+fi
+
+# Same for API_ALLOW_HOSTS: every comma-separated entry must be one of the forms
+# api/hosts.ts accepts. The page would silently ignore anything else, and the
+# typo would only show up later as a rejected ?api= host.
+if [ -n "$API_ALLOW_HOSTS" ]; then
+    IFS=',' read -r -a ALLOW_ENTRIES <<< "$API_ALLOW_HOSTS"
+    for entry in "${ALLOW_ENTRIES[@]}"; do
+        read -r entry <<< "$entry"   # trim surrounding whitespace
+        [ -n "$entry" ] || continue
+        if ! [[ "$entry" =~ ^\.?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\.?$ ]] \
+           && ! [[ "$entry" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]] \
+           && ! [[ "$entry" =~ ^\[[0-9A-Fa-f:.]+\]$ ]]; then
+            echo "serve-hmi: API_ALLOW_HOSTS entry '$entry' is not a host name or IP address," >&2
+            echo "           a .suffix domain, an [IPv6] address, or an IPv4 CIDR (a.b.c.d/n)." >&2
+            exit 2
+        fi
+    done
 fi
 
 if [ ! -d "$DIST_DIR" ]; then
@@ -101,7 +133,7 @@ fi
 # different API_BASE values can't stack on each other.
 SERVE_ROOT="$DIST_DIR"
 PREFIX=""
-if [ "$NEEDS_PREFIX" = 1 ] || [ -n "$API_BASE" ]; then
+if [ "$NEEDS_PREFIX" = 1 ] || [ -n "$API_BASE" ] || [ -n "$API_ALLOW_HOSTS" ]; then
     SERVE_ROOT="$(mktemp -d)"
     trap 'rm -rf "$SERVE_ROOT"' EXIT
     if [ "$NEEDS_PREFIX" = 1 ]; then
@@ -115,38 +147,49 @@ if [ "$NEEDS_PREFIX" = 1 ] || [ -n "$API_BASE" ]; then
     fi
 fi
 
-# Stamp the API_Base into every served HTML page: rewrite the meta tag's
-# content when the tag exists, insert the tag when it does not. This is the
-# documented deploy-time knob (base.ts precedence step 2), and it is what makes
-# the plain kiosk URL work with no query string.
+# Stamp the API_Base, and the ?api= allow list when set, into every served HTML
+# page: rewrite each meta tag's content when the tag exists, insert the tag when
+# it does not. The API_Base is the documented deploy-time knob (base.ts
+# precedence step 2), and it is what makes the plain kiosk URL work with no
+# query string. Arguments after the root are (label, meta name, value) triples.
+STAMPS=()
 if [ -n "$API_BASE" ]; then
-    "$PY" - "$SERVE_ROOT" "$API_BASE" <<'PYSTAMP' || { echo "serve-hmi: failed to stamp API_BASE into the HTML." >&2; exit 2; }
+    STAMPS+=("API_Base" "dda-api-base" "$API_BASE")
+fi
+if [ -n "$API_ALLOW_HOSTS" ]; then
+    STAMPS+=("API_ALLOW_HOSTS" "dda-api-allow-hosts" "$API_ALLOW_HOSTS")
+fi
+if [ "${#STAMPS[@]}" -gt 0 ]; then
+    "$PY" - "$SERVE_ROOT" "${STAMPS[@]}" <<'PYSTAMP' || { echo "serve-hmi: failed to stamp API_BASE / API_ALLOW_HOSTS into the HTML." >&2; exit 2; }
 import html
 import pathlib
 import re
 import sys
 
-root, api_base = pathlib.Path(sys.argv[1]), sys.argv[2]
-tag = f'<meta name="dda-api-base" content="{html.escape(api_base, quote=True)}" />'
-existing = re.compile(r'<meta\s+name="dda-api-base"[^>]*>', re.IGNORECASE)
+root, args = pathlib.Path(sys.argv[1]), sys.argv[2:]
 head = re.compile(r'<head[^>]*>', re.IGNORECASE)
+pages = sorted(root.rglob("*.html"))
 
-stamped = []
-for page in sorted(root.rglob("*.html")):
-    text = page.read_text(encoding="utf-8")
-    if existing.search(text):
-        updated = existing.sub(tag, text, count=1)
-    elif head.search(text):
-        updated = head.sub(lambda m: m.group(0) + "\n    " + tag, text, count=1)
-    else:
-        print(f"serve-hmi: warning - no <head> in {page.name}; API_BASE not stamped.",
-              file=sys.stderr)
-        continue
-    if updated != text:
-        page.write_text(updated, encoding="utf-8")
-    stamped.append(page.name)
-
-print("serve-hmi: API_Base '%s' stamped into: %s" % (api_base, ", ".join(stamped) or "(nothing)"))
+for i in range(0, len(args), 3):
+    label, name, value = args[i:i + 3]
+    tag = f'<meta name="{name}" content="{html.escape(value, quote=True)}" />'
+    existing = re.compile(r'<meta\s+name="%s"[^>]*>' % re.escape(name), re.IGNORECASE)
+    stamped = []
+    for page in pages:
+        text = page.read_text(encoding="utf-8")
+        # Replacement via a function, so the value is never read as a regex template.
+        if existing.search(text):
+            updated = existing.sub(lambda _m: tag, text, count=1)
+        elif head.search(text):
+            updated = head.sub(lambda m: m.group(0) + "\n    " + tag, text, count=1)
+        else:
+            print(f"serve-hmi: warning - no <head> in {page.name}; {label} not stamped.",
+                  file=sys.stderr)
+            continue
+        if updated != text:
+            page.write_text(updated, encoding="utf-8")
+        stamped.append(page.name)
+    print("serve-hmi: %s '%s' stamped into: %s" % (label, value, ", ".join(stamped) or "(nothing)"))
 PYSTAMP
 fi
 
@@ -160,12 +203,19 @@ echo "  single view  : http://$HOSTNAME_GUESS:$PORT/${PREFIX}index.html"
 echo
 if [ -n "$API_BASE" ]; then
     echo "  API requests go to '$API_BASE' (stamped into the pages; no ?api= needed)."
-    echo "  Override per-URL any time with '?api=<port|origin>'."
 else
     echo "  API_BASE is empty, so the pages call their OWN origin (:$PORT), which serves"
     echo "  static files only. Append '?api=5000' to reach the LocalServer, or restart"
     echo "  with API_BASE=5000 to stamp it in."
 fi
+echo "  A per-URL '?api=<port|origin>' is used only for this host, private-network,"
+echo "  loopback and link-local IP addresses, and .local or single-label names."
+if [ -n "$API_ALLOW_HOSTS" ]; then
+    echo "  Also allowed (API_ALLOW_HOSTS): $API_ALLOW_HOSTS"
+else
+    echo "  Allow more hosts with API_ALLOW_HOSTS=<host,.suffix,a.b.c.d/n>."
+fi
+echo "  Any other ?api= host is ignored, and the page shows a notice naming it."
 echo
 
 # Deliberately NOT `exec`: the serve root can be a temp copy, and `exec` would

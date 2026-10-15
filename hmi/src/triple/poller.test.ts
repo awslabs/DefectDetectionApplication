@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { getApiOrigin } from "../api/base";
 import {
   DEFAULT_TIMEOUT_MS,
   configureApiClient,
@@ -113,10 +114,13 @@ interface Script {
   metadata: Reply;
 }
 
-/** In-memory session storage holding an unexpired Session_Token. */
+/** In-memory session storage holding an unexpired Session_Token for the API origin. */
 function makeStorage(): SessionStorageLike {
   const data = new Map<string, string>([
-    [SESSION_STORAGE_KEY, JSON.stringify({ token: "tok", expiresAt: 9e9 })],
+    [
+      SESSION_STORAGE_KEY,
+      JSON.stringify({ token: "tok", expiresAt: 9e9, origin: getApiOrigin() }),
+    ],
   ]);
   return {
     getItem: (key) => data.get(key) ?? null,

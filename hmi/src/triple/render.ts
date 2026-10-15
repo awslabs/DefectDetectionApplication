@@ -30,6 +30,9 @@
  *    each run's verdict state and start time, the selected-tile marker and
  *    historical-view indicator, the newer-run notice (7.4), the
  *    return-to-live control (7.5), and the zero-history message.
+ *  - **API target** (`api/base.ts`): the login form names the LocalServer
+ *    `host:port` the credentials are posted to, and a non-blocking,
+ *    dismissible notice names a `?api=` host that was ignored.
  *  - **Empty and error states**, all read from the view models: not deployed
  *    (2.4), no runs recorded (2.6), no completed runs yet (3.7),
  *    no-inspection-data slots (4.6), the more-inspections indicator (4.7),
@@ -46,6 +49,7 @@
  * option exists so tests can substitute their own.
  */
 
+import { getApiAddress, getApiBaseNotice } from "../api/base";
 import { formatDateTime, formatTime } from "../logic/format";
 import { createPanelImageLoader } from "./images";
 import type { HistoryEntry } from "./history";
@@ -110,7 +114,11 @@ export const TRIPLE_MESSAGES = {
   newerRunAvailable: "Newer run available",
   returnToLive: "RETURN TO LIVE",
   loginTitle: "IMTS Triple Inspection",
+  /** Precedes the LocalServer `host:port` the login form posts to. */
+  loginTarget: "Signing in to",
   loginSubmit: "Sign in",
+  /** Hides the ignored-`?api=` notice (`api/base.ts` `getApiBaseNotice`). */
+  dismissNotice: "Dismiss",
   loginDisabled: "Local login is disabled on this device.",
   loginRejected: "Username or password is incorrect.",
   loginUnreachable: "Could not reach the device. Check the connection and try again.",
@@ -352,8 +360,13 @@ export function createTripleRenderer(
   loginError.setAttribute("role", "alert");
   const loginButton = el("button", undefined, TRIPLE_MESSAGES.loginSubmit);
   loginButton.type = "submit";
+  // The LocalServer host:port the credentials are posted to (filled on render).
+  const loginTarget = el("div", "login-target hidden");
+  const loginTargetAddress = el("strong", "login-target-address");
+  loginTarget.append(`${TRIPLE_MESSAGES.loginTarget} `, loginTargetAddress);
   loginForm.append(
     el("h1", undefined, TRIPLE_MESSAGES.loginTitle),
+    loginTarget,
     userLabel,
     passLabel,
     loginError,
@@ -364,6 +377,19 @@ export function createTripleRenderer(
     callbacks.onLoginSubmit(userInput.value, passInput.value);
   });
   loginScreen.append(loginForm);
+
+  // ---- ignored-?api= notice: fixed overlay, dismissible, shown on any screen ----
+  const apiNotice = el("div", "api-notice hidden");
+  apiNotice.setAttribute("role", "status");
+  const apiNoticeText = el("span", "api-notice-text");
+  const apiNoticeDismiss = el("button", "api-notice-dismiss", TRIPLE_MESSAGES.dismissNotice);
+  apiNoticeDismiss.type = "button";
+  let apiNoticeDismissed = false;
+  apiNoticeDismiss.addEventListener("click", () => {
+    apiNoticeDismissed = true;
+    toggleHidden(apiNotice, true);
+  });
+  apiNotice.append(apiNoticeText, apiNoticeDismiss);
 
   // ---- kiosk shell: header ----
   const kiosk = el("div", "triple-kiosk");
@@ -425,7 +451,28 @@ export function createTripleRenderer(
   historyStrip.append(historyTiles, historyEmpty, historySide);
 
   kiosk.append(header, main, historyStrip);
-  root.replaceChildren(loginScreen, kiosk);
+  root.replaceChildren(loginScreen, kiosk, apiNotice);
+
+  // ---- API target -------------------------------------------------------
+
+  /**
+   * The ignored-`?api=` notice and the login form's target address. Text is
+   * only written when it changes, so the notice's live region is not
+   * re-announced on every 2-second poll.
+   */
+  function renderApiTarget(onLogin: boolean): void {
+    const notice = getApiBaseNotice();
+    if (apiNoticeText.textContent !== (notice ?? "")) {
+      apiNoticeText.textContent = notice ?? "";
+    }
+    toggleHidden(apiNotice, notice === null || apiNoticeDismissed);
+    if (!onLogin) return;
+    const address = getApiAddress();
+    if (loginTargetAddress.textContent !== address) {
+      loginTargetAddress.textContent = address;
+    }
+    toggleHidden(loginTarget, address === "");
+  }
 
   // ---- panels -----------------------------------------------------------
 
@@ -701,6 +748,7 @@ export function createTripleRenderer(
     const onLogin = state.auth.screen === "login";
     toggleHidden(loginScreen, !onLogin);
     toggleHidden(kiosk, onLogin);
+    renderApiTarget(onLogin);
     if (onLogin) {
       loginError.textContent =
         state.auth.loginError === "disabled"
