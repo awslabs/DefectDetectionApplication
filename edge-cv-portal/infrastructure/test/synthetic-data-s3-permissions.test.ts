@@ -24,6 +24,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import { PORTAL_MANAGED_TAG_CONDITION } from '../lib/context-helpers';
 import { StorageStack } from '../lib/storage-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
 
@@ -127,29 +128,43 @@ describe('Property 1: bug condition exploration — S3 data-plane grants (Requir
         )
       )
     ).toBe(true);
+    // AMENDED (portal-authorization-and-iam-scoping task 5.4, design I5
+    // D5-B): every object statement on all buckets carries the
+    // dda-portal:managed tag condition.
+    for (const statement of objectLevel) {
+      expect(statement.Condition).toEqual(PORTAL_MANAGED_TAG_CONDITION);
+    }
   });
 
-  test('handler role allows s3:ListBucket, s3:GetBucketLocation, s3:GetBucketTagging at the bucket level (default allowlist => arn:aws:s3:::*)', () => {
+  // AMENDED (portal-authorization-and-iam-scoping task 5.4, design I5 D5-B):
+  // the three-action bucket-level statement is split into the tag-conditioned
+  // s3:ListBucket / s3:GetBucketLocation statement and the unconditioned
+  // tag-discovery statement (s3:GetBucketTagging, s3:GetBucketABAC). SUPERSEDED
+  // expectation, recorded verbatim: one statement holding s3:ListBucket,
+  // s3:GetBucketLocation and s3:GetBucketTagging on arn:aws:s3:::*.
+  test('handler role allows s3:ListBucket, s3:GetBucketLocation under the tag condition and s3:GetBucketTagging, s3:GetBucketABAC unconditioned at the bucket level (default allowlist => arn:aws:s3:::*)', () => {
     const bucketLevel = handlerRoleStatements().filter((s) => {
       const actions = actionsOf(s);
       return (
         s.Effect === 'Allow' &&
         actions.includes('s3:ListBucket') &&
-        actions.includes('s3:GetBucketLocation') &&
-        actions.includes('s3:GetBucketTagging')
+        actions.includes('s3:GetBucketLocation')
       );
     });
-    expect(bucketLevel.length).toBeGreaterThanOrEqual(1);
+    expect(bucketLevel).toHaveLength(1);
     // Default/empty allowlist: bucket-level resources cover all buckets
     // (exactly arn:aws:s3:::* — not the object-level */* form).
-    expect(
-      bucketLevel.some((s) =>
-        resourcesOf(s).some((r: any) => {
-          const flat = JSON.stringify(r);
-          return flat.includes('arn:aws:s3:::*') && !flat.includes('*/*');
-        })
-      )
-    ).toBe(true);
+    expect(resourcesOf(bucketLevel[0])).toEqual(['arn:aws:s3:::*']);
+    expect(bucketLevel[0].Condition).toEqual(PORTAL_MANAGED_TAG_CONDITION);
+    expect(actionsOf(bucketLevel[0])).not.toContain('s3:GetBucketTagging');
+
+    const tagDiscovery = handlerRoleStatements().filter(
+      (s) => s.Effect === 'Allow' && actionsOf(s).includes('s3:GetBucketTagging'),
+    );
+    expect(tagDiscovery).toHaveLength(1);
+    expect([...actionsOf(tagDiscovery[0])].sort()).toEqual(['s3:GetBucketABAC', 's3:GetBucketTagging']);
+    expect(resourcesOf(tagDiscovery[0])).toEqual(['arn:aws:s3:::*']);
+    expect(tagDiscovery[0].Condition).toBeUndefined();
   });
 });
 
@@ -313,6 +328,10 @@ describe('Fix checking: dataBucketAllowlist scopes the data-plane grant (Require
       trustedUseCaseAccountIds: [TRUSTED_USECASE_ACCOUNT],
       // One bare name and one full ARN: both normalize to canonical ARNs.
       dataBucketAllowlist: ['bucket-a', 'arn:aws:s3:::bucket-b'],
+      // AMENDED (portal-authorization-and-iam-scoping task 5.4): the default
+      // Data_Plane_Scoping 'tag' ignores the allowlist; the allowlist scopes
+      // the grant under 'allowlist', which these cases now synthesize.
+      dataPlaneScoping: 'allowlist',
       userPool: new cognito.UserPool(deps, 'Pool'),
       restApiId: 'testrestapiid',
       restApiRootResourceId: 'testrootresourceid',
@@ -344,13 +363,15 @@ describe('Fix checking: dataBucketAllowlist scopes the data-plane grant (Require
   }
 
   test('bucket-level statement is scoped to exactly the allowlisted bucket ARNs, with no Condition', () => {
+    // AMENDED (task 5.4): s3:GetBucketTagging moved to the unconditioned
+    // tag-discovery statement, so the bucket-level statement is matched on
+    // s3:ListBucket and s3:GetBucketLocation.
     const bucketLevel = allowlistHandlerRoleStatements().filter((s) => {
       const actions = actionsOf(s);
       return (
         s.Effect === 'Allow' &&
         actions.includes('s3:ListBucket') &&
-        actions.includes('s3:GetBucketLocation') &&
-        actions.includes('s3:GetBucketTagging')
+        actions.includes('s3:GetBucketLocation')
       );
     });
     expect(bucketLevel).toHaveLength(1);

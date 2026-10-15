@@ -19,7 +19,12 @@ import { Construct } from 'constructs';
 import * as fs from 'fs';
 import * as path from 'path';
 import { NodeDesignerApiStack } from './node-designer-api-stack';
-import { portalRegistryEnforced } from './context-helpers';
+import {
+  DATA_PLANE_SCOPING,
+  DataPlaneScoping,
+  dataPlaneGrant,
+  portalRegistryEnforced,
+} from './context-helpers';
 
 /**
  * The plugin Target_Architectures (custom-node-designer requirements
@@ -68,6 +73,14 @@ export interface NodeDesignerStackProps extends cdk.StackProps {
   restApiRootResourceId: string;
   /** Stage the portal API serves on (ApiGatewayStack deployOptions). */
   apiStageName: string;
+  /**
+   * Bucket allowlist for the plugin-components handler's S3 data plane, read
+   * through `dataPlaneGrant` like the ComputeStack's: ignored under the
+   * default Data_Plane_Scoping 'tag', required under the other two.
+   */
+  dataBucketAllowlist?: string[];
+  /** The Data_Plane_Scoping to synthesize; defaults to DATA_PLANE_SCOPING (jest only). */
+  dataPlaneScoping?: DataPlaneScoping;
 }
 
 /**
@@ -933,14 +946,40 @@ export class NodeDesignerStack extends cdk.Stack {
     // Component artifacts stage to the Use_Case's data bucket
     // (plugins/staging/... then plugins/components/...) before Greengrass
     // registration. Data buckets are user-named and resolved at runtime, so
-    // the object-level grant mirrors the ComputeStack data-plane pattern
-    // (all buckets by default; the control plane is never granted). Same-
-    // account Use_Cases exercise this role directly — cross-account ones go
-    // through the assumed DDAPortalAccessRole above.
+    // the grant comes from the data-plane helper the ComputeStack factory
+    // uses (dataPlaneGrant; portal-authorization-and-iam-scoping, design I5):
+    // the tag-conditioned bucket-level and object-level statements, the
+    // unconditioned tag-discovery statement, and DeleteObject only under the
+    // plugins/ prefix; the control plane is never granted. Same-account
+    // Use_Cases exercise this role directly — cross-account ones go through
+    // the assumed DDAPortalAccessRole above.
+    const dataPlane = dataPlaneGrant(
+      props.dataBucketAllowlist,
+      props.dataPlaneScoping ?? DATA_PLANE_SCOPING,
+    );
+    const pluginsPrefixScope = dataPlane.objectPrefix('plugins');
     this.pluginComponentsHandler.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject', 's3:ListBucket'],
-      resources: ['arn:aws:s3:::*'],
+      actions: dataPlane.bucketLevel.actions,
+      resources: dataPlane.bucketLevel.resources,
+      conditions: dataPlane.bucketLevel.conditions,
+    }));
+    this.pluginComponentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: dataPlane.tagDiscovery.actions,
+      resources: dataPlane.tagDiscovery.resources,
+    }));
+    this.pluginComponentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: dataPlane.objectLevel.actions,
+      resources: dataPlane.objectLevel.resources,
+      conditions: dataPlane.objectLevel.conditions,
+    }));
+    this.pluginComponentsHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:DeleteObject'],
+      resources: pluginsPrefixScope.resources,
+      conditions: pluginsPrefixScope.conditions,
     }));
     // Same-account Use_Cases register the dda.plugin.* Greengrass component
     // version with this role directly (cross-account ones assume

@@ -36,6 +36,8 @@ from shared_utils import (
     component_bucket_name, COMPONENT_BUCKET_POLICY_MAX_BYTES,
     # The marker of the direct provisioning invoke (design I3).
     INTERNAL_MARKER_KEY, internal_marker,
+    # The key-namespace check of the one tag list the portal writes (design I5).
+    assert_portal_tags,
 )
 # Use_Case settings for VLM/LLM Anomaly Tuning Sample_Export (spec:
 # quality-prompt-tuning, Requirements 2.1, 2.9). Pure module, shared with
@@ -1222,12 +1224,16 @@ def list_s3_buckets(user):
 
 
 def _portal_bucket_tags(usecase_id):
-    """The tags a portal-created bucket carries (design §5.5 step 3)."""
+    """The tags a portal-created bucket carries (design §5.5 step 3), checked
+    against the dda-portal: key namespace before any S3 call, so both of its
+    writes (CreateBucketConfiguration.Tags and the fallback S3 Control
+    tag_resource) receive a validated list (portal-authorization-and-iam-
+    scoping, Requirement 7.7)."""
     tags = [{'Key': PORTAL_MANAGED_TAG, 'Value': 'true'},
             {'Key': PORTAL_CREATED_BY_TAG, 'Value': PORTAL_CREATED_BY_VALUE}]
     if usecase_id:
         tags.append({'Key': PORTAL_USECASE_ID_TAG, 'Value': usecase_id})
-    return tags
+    return assert_portal_tags(tags)
 
 
 def _portal_tags_confirmed(read_tags: dict, tags: list) -> bool:
@@ -1428,8 +1434,12 @@ def create_s3_bucket(event, user):
             {'region': region, 'tags': tag_keys, 'abac': abac, 'usecase_id': usecase_id,
              'added_to_usecase': added_to_usecase}, event=event)
 
+        # The registration fields (portal-authorization-and-iam-scoping, design
+        # I5 "Registration-time reporting"): a 201 means the tags were
+        # confirmed, and ABAC is enabled when the creation-time enable was.
         bucket = {'name': name, 'region': region, 'portal_created': True, 'tags': tag_keys,
-                  'abac': abac, 'added_to_usecase': added_to_usecase}
+                  'abac': abac, 'added_to_usecase': added_to_usecase,
+                  'tagged': True, 'abac_enabled': abac == 'enabled'}
         if add_error is not None:
             bucket['add_error'] = add_error
         return create_response(201, {'bucket': bucket})

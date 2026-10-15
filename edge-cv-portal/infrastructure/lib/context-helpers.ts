@@ -144,3 +144,136 @@ export function detectorExportImageDefault(
   }
   return fromSsm && fromSsm !== 'None' ? fromSsm : undefined;
 }
+
+// ---------------------------------------------------------------------------
+// S3 data-plane scoping of the portal Lambda roles
+// (portal-authorization-and-iam-scoping, design I5 "Design D5-B").
+//
+// One helper builds the S3 data-plane statements of the three stacks that
+// grant them (compute-stack.ts createLambdaRole, synthetic-data-stack.ts,
+// node-designer-stack.ts), so the three cannot diverge:
+//
+//   'tag'              the bucket-level statement (s3:ListBucket,
+//                      s3:GetBucketLocation on arn:aws:s3:::*) and the
+//                      object-level statements (the objects of every bucket,
+//                      or one key prefix of every bucket) carry
+//                      PORTAL_MANAGED_TAG_CONDITION; the bucket allowlist is
+//                      ignored.
+//   'tag-objects-only' the object-level statements carry the condition; the
+//                      bucket-level statement names the allowlist's buckets.
+//   'allowlist'        both name the allowlist, unconditioned (design
+//                      Appendix A; owner gate G1 only).
+//
+// In every scoping the tag-discovery statement (s3:GetBucketTagging,
+// s3:GetBucketABAC on arn:aws:s3:::*) stays unconditioned: the eligibility
+// read and the ABAC-status read run on a tagged bucket before its ABAC is
+// enabled, where a tag-conditioned statement could not match. Neither read
+// returns object data or a listing.
+// ---------------------------------------------------------------------------
+
+export type DataPlaneScoping = 'tag' | 'tag-objects-only' | 'allowlist';
+
+// Set from the live probe's decision rule (task 5.3). 'tag' is the design's
+// expected outcome; it was written before the probe ran, and the deploy gate
+// (task 9.2) requires the probe to have confirmed it, or the post-probe code
+// change to be applied, before any deploy. The compute stack carries the
+// value into every handler's DATA_PLANE_SCOPING, which the shared layer reads
+// through data_plane_scoping(); the deploy scripts log it after their build.
+export const DATA_PLANE_SCOPING: DataPlaneScoping = 'tag';
+
+// The Tag_Condition. S3 evaluates bucket-tag condition keys only on a bucket
+// whose ABAC is enabled, so a statement carrying it matches a bucket tagged
+// dda-portal:managed=true with ABAC on, and no other bucket.
+export const PORTAL_MANAGED_TAG_CONDITION = {
+  StringEquals: { 'aws:ResourceTag/dda-portal:managed': 'true' },
+};
+
+/** The resources and the optional condition of one data-plane statement. */
+export interface DataPlaneScope {
+  resources: string[];
+  conditions?: { [operator: string]: { [key: string]: string } };
+}
+
+/** A data-plane statement with its fixed action set. */
+export interface DataPlaneStatement extends DataPlaneScope {
+  actions: string[];
+}
+
+export interface DataPlaneGrant {
+  /** `s3:ListBucket` and `s3:GetBucketLocation`. */
+  bucketLevel: DataPlaneStatement;
+  /** `s3:GetObject` and `s3:PutObject`. */
+  objectLevel: DataPlaneStatement;
+  /** The object-level scope confined to one key prefix; the caller names the actions. */
+  objectPrefix(prefix: string): DataPlaneScope;
+  /** `s3:GetBucketTagging` and `s3:GetBucketABAC` on every bucket, unconditioned in every scoping. */
+  tagDiscovery: DataPlaneStatement;
+}
+
+const ANY_BUCKET_ARN = 'arn:aws:s3:::*';
+const BUCKET_LEVEL_ACTIONS = ['s3:ListBucket', 's3:GetBucketLocation'];
+const OBJECT_LEVEL_ACTIONS = ['s3:GetObject', 's3:PutObject'];
+const TAG_DISCOVERY_ACTIONS = ['s3:GetBucketTagging', 's3:GetBucketABAC'];
+
+// A fresh copy per statement, so no statement shares a condition object.
+function portalManagedTagCondition() {
+  return { StringEquals: { ...PORTAL_MANAGED_TAG_CONDITION.StringEquals } };
+}
+
+// The canonical bucket ARN of an allowlist entry: a bare bucket name, or a
+// bucket ARN with an optional trailing '/' or '/' plus '*'.
+function canonicalBucketArn(entry: string): string {
+  return entry.startsWith('arn:aws:s3:::') ? entry.replace(/\/\*?$/, '') : `arn:aws:s3:::${entry}`;
+}
+
+/**
+ * The S3 data-plane statements of a portal Lambda role under `scoping`
+ * (default {@link DATA_PLANE_SCOPING}). `allowlist` is the
+ * `-c dataBucketAllowlist` value (bucket names or ARNs); it is ignored under
+ * 'tag' and must be non-empty under the other two scopings, which throw
+ * rather than fall back to every bucket. Pure.
+ */
+export function dataPlaneGrant(
+  allowlist: string[] | undefined,
+  scoping: DataPlaneScoping = DATA_PLANE_SCOPING,
+): DataPlaneGrant {
+  const tagDiscovery: DataPlaneStatement = {
+    actions: [...TAG_DISCOVERY_ACTIONS],
+    resources: [ANY_BUCKET_ARN],
+  };
+  const conditioned = (resources: string[]): DataPlaneScope => ({
+    resources,
+    conditions: portalManagedTagCondition(),
+  });
+  const conditionedObjects = {
+    objectLevel: { actions: [...OBJECT_LEVEL_ACTIONS], ...conditioned([`${ANY_BUCKET_ARN}/*`]) },
+    objectPrefix: (prefix: string) => conditioned([`${ANY_BUCKET_ARN}/${prefix}/*`]),
+  };
+  if (scoping === 'tag') {
+    return {
+      bucketLevel: { actions: [...BUCKET_LEVEL_ACTIONS], ...conditioned([ANY_BUCKET_ARN]) },
+      ...conditionedObjects,
+      tagDiscovery,
+    };
+  }
+  const bucketArns = (allowlist ?? [])
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map(canonicalBucketArn);
+  if (bucketArns.length === 0) {
+    throw new Error(
+      `Data_Plane_Scoping '${scoping}' names its buckets and needs a non-empty bucket allowlist ` +
+        '(-c dataBucketAllowlist=<bucket>,<bucket>); it never falls back to every bucket.',
+    );
+  }
+  const bucketLevel = { actions: [...BUCKET_LEVEL_ACTIONS], resources: bucketArns };
+  if (scoping === 'tag-objects-only') {
+    return { bucketLevel, ...conditionedObjects, tagDiscovery };
+  }
+  return {
+    bucketLevel,
+    objectLevel: { actions: [...OBJECT_LEVEL_ACTIONS], resources: bucketArns.map((arn) => `${arn}/*`) },
+    objectPrefix: (prefix: string) => ({ resources: bucketArns.map((arn) => `${arn}/${prefix}/*`) }),
+    tagDiscovery,
+  };
+}

@@ -70,6 +70,9 @@ MANAGED = "dda-portal:managed"
 CREATED_BY = "dda-portal:created-by"
 CLAIM = "dda-portal:usecase-id"
 SOURCE_IP = "203.0.113.9"
+# The 201 `bucket` keys this suite pins exactly; the registration fields of
+# portal-authorization-and-iam-scoping ride beside them (Requirement 10.4(g)).
+SIBLING_BUCKET_KEYS = ("name", "region", "portal_created", "tags", "abac", "added_to_usecase")
 
 
 # --------------------------------------------------------------- helpers
@@ -1067,9 +1070,12 @@ def test_create_s3_bucket_without_usecase_requires_portal_admin(h):
     name = h.name()
     status, payload = h.create_bucket(portal_admin, {"name": name})
     assert status == 201, payload
-    assert payload["bucket"] == {"name": name, "region": "us-east-1", "portal_created": True,
-                                 "tags": [MANAGED, CREATED_BY], "abac": "enabled",
-                                 "added_to_usecase": False}
+    # The sibling's six keys, plus the registration fields of
+    # portal-authorization-and-iam-scoping (Requirement 7.11).
+    assert {key: payload["bucket"][key] for key in SIBLING_BUCKET_KEYS} == {
+        "name": name, "region": "us-east-1", "portal_created": True,
+        "tags": [MANAGED, CREATED_BY], "abac": "enabled", "added_to_usecase": False}
+    assert payload["bucket"]["tagged"] is True and payload["bucket"]["abac_enabled"] is True
     assert stubs.s3control.calls == []
     success = h.audit.of("create_s3_bucket", user_id=portal_admin["user_id"], result="success")
     assert [row["details"] for row in success] == [{
@@ -1259,9 +1265,12 @@ def test_create_s3_bucket_auto_add_success_row(h):
     name = h.name()
     status, payload = h.create_bucket(admin, {"name": name, "usecase_id": usecase_id})
     assert status == 201, payload
-    assert payload["bucket"] == {"name": name, "region": "us-east-1", "portal_created": True,
-                                 "tags": [MANAGED, CREATED_BY, CLAIM], "abac": "enabled",
-                                 "added_to_usecase": True}
+    # The sibling's six keys, plus the registration fields of
+    # portal-authorization-and-iam-scoping (Requirement 7.11).
+    assert {key: payload["bucket"][key] for key in SIBLING_BUCKET_KEYS} == {
+        "name": name, "region": "us-east-1", "portal_created": True,
+        "tags": [MANAGED, CREATED_BY, CLAIM], "abac": "enabled", "added_to_usecase": True}
+    assert payload["bucket"]["tagged"] is True and payload["bucket"]["abac_enabled"] is True
     assert h.record(usecase_id)["additional_s3_buckets"] == [name]
     rows = allowed_rows(h, user_id=admin["user_id"], resource_id=usecase_id)
     assert [row["details"] for row in rows] == [

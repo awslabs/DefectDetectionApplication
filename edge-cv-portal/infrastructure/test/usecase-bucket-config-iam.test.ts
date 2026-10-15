@@ -166,9 +166,14 @@ describe('UseCases role: use-case bucket configuration grants', () => {
   });
 });
 
-describe('Every other Lambda role: none of the three grants', () => {
-  test('only the UseCases role may create, tag or enable ABAC on an arbitrary bucket', () => {
+describe('Every other Lambda role: none of the three grants (DataManagement: s3:PutBucketABAC only)', () => {
+  test('only the UseCases role may create or tag an arbitrary bucket; only it and the DataManagement role may enable ABAC on one', () => {
     const useCasesRoleId = roleLogicalId('UseCasesRole');
+    // AMENDED (portal-authorization-and-iam-scoping task 5.4, design I5
+    // "Control-plane grants"): the DataManagement role also carries
+    // s3:PutBucketABAC, for the data bucket POST /usecases/{id}/data/configure
+    // attaches; s3:CreateBucket and s3:TagResource stay UseCases-only.
+    const dataManagementRoleId = roleLogicalId('DataManagementRole');
     const otherRoleIds = Object.keys(
       computeTemplate.findResources('AWS::IAM::Role')
     ).filter((logicalId) => logicalId !== useCasesRoleId);
@@ -186,7 +191,8 @@ describe('Every other Lambda role: none of the three grants', () => {
         if (actions.includes('s3:TagResource')) {
           offenders.push(`${roleId}: s3:TagResource`);
         }
-        if (actions.some((a) => a.toLowerCase() === 's3:putbucketabac')) {
+        if (actions.some((a) => a.toLowerCase() === 's3:putbucketabac') &&
+            roleId !== dataManagementRoleId) {
           offenders.push(`${roleId}: s3:PutBucketABAC`);
         }
       }
