@@ -6,7 +6,7 @@ import os
 import logging
 import uuid
 import time
-from typing import Dict, Any, Optional, List, Set, FrozenSet, Tuple
+from typing import Dict, Any, Optional, List, Set, FrozenSet, Tuple, Union
 from datetime import datetime
 from decimal import Decimal
 import boto3
@@ -15,6 +15,10 @@ from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from enum import Enum
 from functools import wraps
+# Re-exported so handlers import the internal-invocation helpers from
+# shared_utils like everything else (portal-authorization-and-iam-scoping,
+# design I2); the module itself is standard-library only.
+from internal_invocation import INTERNAL_MARKER_KEY, internal_marker, is_internal_invocation
 
 # Configure logging
 logger = logging.getLogger()
@@ -2300,13 +2304,15 @@ def portal_owned_buckets() -> FrozenSet[str]:
     The artifacts bucket (PORTAL_ARTIFACTS_BUCKET) and the Greengrass
     component bucket (COMPONENT_BUCKET, or the `{prefix}-{region}-{account}`
     derivation of shared_components.py when PORTAL_ACCOUNT_ID is set).
-    Empty names are omitted.
+    Empty names are omitted. The component name comes from
+    `component_bucket_name()`, called only when COMPONENT_BUCKET or
+    PORTAL_ACCOUNT_ID is set, so with neither set no component bucket is
+    contributed.
     """
     artifacts = os.environ.get('PORTAL_ARTIFACTS_BUCKET', '')
-    component = os.environ.get('COMPONENT_BUCKET') or (
-        f"{os.environ.get('COMPONENT_BUCKET_PREFIX', 'dda-component')}-"
-        f"{os.environ.get('AWS_REGION', 'us-east-1')}-{os.environ.get('PORTAL_ACCOUNT_ID', '')}"
-        if os.environ.get('PORTAL_ACCOUNT_ID') else '')
+    component = (component_bucket_name()
+                 if os.environ.get('COMPONENT_BUCKET') or os.environ.get('PORTAL_ACCOUNT_ID')
+                 else '')
     return frozenset(name for name in (artifacts, component) if name)
 
 
@@ -2743,3 +2749,379 @@ def audit_bucket_allowed(user: Dict, usecase_id: str, bucket: str, attribute: st
         details['stale_claim'] = True
     log_audit_event(user['user_id'], 's3_bucket_allowed', 'usecase', usecase_id,
                     'success', details, event=event)
+
+
+# ---------------------------------------------------------------------------
+# Portal authorization and IAM scoping (portal-authorization-and-iam-scoping,
+# design I1, I5).
+#
+# The account grammar and the trusted-account check the use-case writers run
+# before any STS call; the one Component_Bucket_Name derivation; the bucket
+# policy size bound; the tag-namespace check every portal tag list passes;
+# the Data_Plane_Scoping accessor; and the Attach_Step (`attach_bucket`) the
+# four bucket record writers call where they called `check_bucket_attachable`.
+# ---------------------------------------------------------------------------
+
+def data_plane_scoping() -> str:
+    """The Data_Plane_Scoping the CDK deployed ('tag', 'tag-objects-only' or
+    'allowlist'), read from the DATA_PLANE_SCOPING variable the compute stack
+    sets on every handler. The one accessor every Python reader of the
+    scoping uses; the default exists so unit tests and the host lane run
+    without the variable."""
+    return os.environ.get('DATA_PLANE_SCOPING', 'tag')
+
+
+# Account grammar (Requirement 3.1). re.ASCII so `\d` and `\w` are the ASCII
+# classes IAM uses; the validators call fullmatch, so a trailing newline
+# (which `$` alone tolerates) fails.
+ACCOUNT_ID_RE = re.compile(r'^\d{12}$', re.ASCII)
+ROLE_ARN_RE = re.compile(r'^arn:aws:iam::(\d{12}):role/[\w+=,.@/-]+$', re.ASCII)
+
+
+def validate_account_id(value: Any) -> bool:
+    """True when `value` is a `str` of exactly twelve ASCII digits."""
+    return isinstance(value, str) and ACCOUNT_ID_RE.fullmatch(value) is not None
+
+
+def validate_role_arn(value: Any, account_id: Any, role_name: Optional[str] = None) -> bool:
+    """True when `value` is an IAM role ARN in `account_id`.
+
+    With `role_name` the ARN must be exactly
+    `arn:aws:iam::<account_id>:role/<role_name>` (no path; the names the
+    account templates create, e.g. DDAPortalAccessRole). Without it the
+    generic ROLE_ARN_RE applies and its account segment must equal
+    `account_id`. Pure; never raises.
+    """
+    if not isinstance(value, str) or not validate_account_id(account_id):
+        return False
+    match = ROLE_ARN_RE.fullmatch(value)
+    if match is None or match.group(1) != account_id:
+        return False
+    if role_name is not None:
+        return value == f"arn:aws:iam::{account_id}:role/{role_name}"
+    return True
+
+
+TRUSTED_USECASE_ACCOUNT_IDS_ENV = 'TRUSTED_USECASE_ACCOUNT_IDS'
+
+
+class TrustedAccountsNotConfigured(Exception):
+    """TRUSTED_USECASE_ACCOUNT_IDS is unset or empty. Callers answer 500 with
+    the exception's message; it is a deployment fault, never a refusal of the
+    caller's account."""
+
+    def __init__(self, message: str = 'Trusted account list is not configured'):
+        super().__init__(message)
+
+
+def account_trusted(account_id: Any) -> bool:
+    """True when `account_id` is in the portal's Trusted_Account_List, the
+    comma-separated TRUSTED_USECASE_ACCOUNT_IDS the compute stack exports
+    (entries trimmed, empty entries ignored) — the same list that bounds the
+    portal's own sts:AssumeRole grant.
+
+    Raises:
+        TrustedAccountsNotConfigured: the variable is unset or holds no id.
+    """
+    raw = os.environ.get(TRUSTED_USECASE_ACCOUNT_IDS_ENV) or ''
+    trusted = {entry.strip() for entry in raw.split(',') if entry.strip()}
+    if not trusted:
+        raise TrustedAccountsNotConfigured()
+    return isinstance(account_id, str) and account_id in trusted
+
+
+def component_bucket_name() -> str:
+    """The Greengrass component bucket's name: COMPONENT_BUCKET when set, else
+    the `{prefix}-{region}-{account}` derivation of shared_components.py, every
+    read defaulted. Always a string; the one definition the UseCases and
+    SharedComponents handlers and `portal_owned_buckets()` share
+    (Requirement 3.5)."""
+    return os.environ.get('COMPONENT_BUCKET') or (
+        f"{os.environ.get('COMPONENT_BUCKET_PREFIX', 'dda-component')}-"
+        f"{os.environ.get('AWS_REGION', 'us-east-1')}-{os.environ.get('PORTAL_ACCOUNT_ID', '')}")
+
+
+# Upper bound for a serialized component bucket policy (Requirement 3.3):
+# deliberately under S3's 20,480-byte bucket policy limit, so a writer refuses
+# before S3 would reject the PutBucketPolicy.
+COMPONENT_BUCKET_POLICY_MAX_BYTES = 20_000
+
+PORTAL_TAG_NAMESPACE = 'dda-portal:'
+
+
+def assert_portal_tags(tags: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Return `tags` unchanged when every entry's `Key` is in the `dda-portal:`
+    namespace; raise ValueError otherwise, before any S3 call (Requirement
+    7.7). Pure."""
+    for tag in tags:
+        key = tag.get('Key') if isinstance(tag, dict) else None
+        if not isinstance(key, str) or not key.startswith(PORTAL_TAG_NAMESPACE):
+            raise ValueError(f"Tag key outside the {PORTAL_TAG_NAMESPACE} namespace: {key!r}")
+    return tags
+
+
+# ---------------------------------------------------------------------------
+# The Attach_Step (design I5 "The Attach_Step — one wrapper, four writers").
+#
+# `attach_bucket` runs the sibling's attach validator unchanged; once the
+# validator has passed, it enables ABAC on a tagged Portal_Account_Bucket and
+# probes whether the role the selector picks reaches the bucket, and it never
+# raises: every failure after the validator degrades to a report field.
+# Every client comes from the module-global `create_boto3_client`.
+# ---------------------------------------------------------------------------
+
+# Distinct from ELIGIBILITY_SESSION_NAME, so the Attach_Step's AssumeRole is
+# never counted as an eligibility probe.
+ATTACH_SESSION_NAME = 'portal-bucket-attach'
+# The one bounded wait: a just-enabled bucket whose first probe is denied is
+# probed once more after this many seconds (time.sleep on this module's
+# `time`), because the condition's evaluation after PutBucketAbac is not
+# documented as synchronous.
+ATTACH_PROBE_RETRY_DELAY_SECONDS = 1
+_ATTACH_REASON_MAX_CHARS = 200
+_UNKNOWN_BUCKET_ACCOUNT = '<bucket owner account>'
+
+# Registration_Report remedies (Requirement 7.11), formatted with the bucket
+# (and the account for the tag command). Prefixed REGISTRATION_ so they stay
+# apart from the REMEDY_* refusal remedies of the attach validator above.
+REGISTRATION_REMEDY_TAG = (
+    "Tag the bucket dda-portal:managed=true: `aws s3control tag-resource "
+    "--account-id {account} --resource-arn arn:aws:s3:::{bucket} "
+    "--tags Key=dda-portal:managed,Value=true`")
+REGISTRATION_REMEDY_ENABLE_ABAC = (
+    "Enable ABAC on the bucket: `aws s3api put-bucket-abac --bucket {bucket} "
+    "--abac-status Status=Enabled`")
+REGISTRATION_REMEDY_CROSS_ACCOUNT = (
+    "Ask the bucket's account administrator to enable ABAC on it (`aws s3api "
+    "put-bucket-abac --bucket {bucket} --abac-status Status=Enabled`); the "
+    "portal's cross-account role evaluates its tag condition only then.")
+REGISTRATION_REMEDY_REDEPLOY = (
+    "Object access works now; redeploy the portal to browse this bucket.")
+
+
+class RegionUnknown(Exception):
+    """HeadBucket answered without an `x-amz-bucket-region` header, so the
+    bucket's region for the two ABAC calls is unknown."""
+
+
+@dataclass
+class AttachOutcome:
+    """What `attach_bucket` decided and observed after the validator passed."""
+    eligibility: EligibilityResult       # the validator's result, unchanged
+    tagged: bool                         # carries dda-portal:managed=true (not `eligibility.eligible`)
+    abac_enabled: Union[bool, str]       # True | False | 'unknown' (not a Portal_Account_Bucket)
+    iam_reachable: bool
+    remedy: Optional[str]
+    abac_action: str                     # 'already_enabled' | 'enabled' | 'enable_failed' | 'tag_missing' | 'not_applicable'
+
+    def report(self) -> Dict[str, Any]:
+        """The Registration_Report entry for this bucket (Requirement 7.11)."""
+        return {'tagged': self.tagged, 'abac_enabled': self.abac_enabled,
+                'iam_reachable': self.iam_reachable, 'remedy': self.remedy}
+
+
+def _failure_reason(error: BaseException) -> str:
+    return f'{type(error).__name__}: {error}'[:_ATTACH_REASON_MAX_CHARS]
+
+
+def _arn_account(arn: Any) -> Optional[str]:
+    """The account segment of an ARN, or None."""
+    if not isinstance(arn, str):
+        return None
+    parts = arn.split(':')
+    return parts[4] if len(parts) > 5 and parts[4] else None
+
+
+def _is_portal_account_bucket(usecase_like: Dict, bucket: str) -> bool:
+    """True when the sibling's selector would reach `bucket` with the
+    execution role: its role ARN is the account root, the exact test
+    `assume_usecase_role` makes before returning the execution role's own
+    credentials. A `None` ARN is not a Portal_Account_Bucket."""
+    role_arn, _ = _select_s3_role_for_bucket(usecase_like, bucket)
+    return isinstance(role_arn, str) and role_arn.endswith(':root')
+
+
+def _execution_role_client(region: Optional[str] = None) -> Any:
+    """An S3 client on the calling handler's execution role, through the
+    sibling's default-credentials marker."""
+    return create_boto3_client('s3', {'is_default_credentials': True}, region=region)
+
+
+def _selector_client(usecase_like: Dict, bucket: str) -> Any:
+    """An S3 client on the role the sibling's selector picks for `bucket`."""
+    role_arn, external_id = _select_s3_role_for_bucket(usecase_like, bucket)
+    return create_boto3_client('s3', assume_usecase_role(role_arn, external_id, ATTACH_SESSION_NAME))
+
+
+def _s3_client_for_bucket_region(bucket: str, cache: Dict[Optional[str], Any]) -> Any:
+    """An execution-role S3 client bound to `bucket`'s region.
+
+    One HeadBucket on the default-region execution-role client; the region is
+    the `x-amz-bucket-region` header of the 200 response, or of the error
+    response's HTTPHeaders (301, 403). There is no GetBucketLocation fallback:
+    that action is conditioned under 'tag' and would be denied on the tagged
+    ABAC-off bucket this resolver exists for. `cache` maps a region (None for
+    the default) to its client, so one client is built per region per call.
+
+    Raises:
+        RegionUnknown: the header is absent.
+    """
+    probe_client = cache.get(None)
+    if probe_client is None:
+        probe_client = cache[None] = _execution_role_client()
+    try:
+        response = probe_client.head_bucket(Bucket=bucket)
+        headers = (response.get('ResponseMetadata') or {}).get('HTTPHeaders') or {}
+        answered = '200'
+    except ClientError as error:
+        headers = ((error.response or {}).get('ResponseMetadata') or {}).get('HTTPHeaders') or {}
+        answered = _client_error_code_and_status(error)[1] or 'an error'
+    region = headers.get('x-amz-bucket-region')
+    if not region:
+        raise RegionUnknown(f"HeadBucket answered {answered} without x-amz-bucket-region")
+    if region not in cache:
+        cache[region] = _execution_role_client(region)
+    return cache[region]
+
+
+def _abac_status(s3_client: Any, bucket: str) -> str:
+    """'Enabled' iff GetBucketAbac reports `AbacStatus.Status == 'Enabled'`,
+    else 'Disabled' (an empty AbacStatus included). A bucket that never had
+    PutBucketAbac answers 200 with `Status: Disabled` (read-only check in the
+    implementation run), so no error code is mapped: every error reaches the
+    caller's guard."""
+    response = s3_client.get_bucket_abac(Bucket=bucket)
+    status = (response.get('AbacStatus') or {}).get('Status')
+    return 'Enabled' if status == 'Enabled' else 'Disabled'
+
+
+def registration_remedy(tagged: bool, abac_enabled: Union[bool, str], iam_reachable: bool,
+                        account_kind: str, scoping: str, *, bucket: str,
+                        account_id: Optional[str] = None) -> Optional[str]:
+    """The Registration_Report remedy (Requirement 7.11): None iff
+    `iam_reachable`, else the earliest unmet step as a copy-ready command.
+
+    Not tagged (eligible or not) → tag it; tagged Portal_Account_Bucket
+    (`account_kind` 'portal') with ABAC not enabled → enable ABAC; any other
+    bucket (`'cross_account'`) → the bucket's account administrator enables
+    ABAC; a portal bucket under 'tag-objects-only' → object access works now,
+    redeploy to browse; every step met yet unreachable → enable ABAC. The
+    account in the tag command is `account_id`, else the portal account
+    (PORTAL_ACCOUNT_ID) for a portal bucket — the deployment's own
+    configuration — else a placeholder. Pure.
+    """
+    if iam_reachable:
+        return None
+    if not tagged:
+        account = account_id or (
+            os.environ.get('PORTAL_ACCOUNT_ID') if account_kind == 'portal' else None)
+        return REGISTRATION_REMEDY_TAG.format(account=account or _UNKNOWN_BUCKET_ACCOUNT,
+                                              bucket=bucket)
+    if account_kind == 'portal' and abac_enabled is not True:
+        return REGISTRATION_REMEDY_ENABLE_ABAC.format(bucket=bucket)
+    if account_kind != 'portal':
+        return REGISTRATION_REMEDY_CROSS_ACCOUNT.format(bucket=bucket)
+    if scoping == 'tag-objects-only':
+        return REGISTRATION_REMEDY_REDEPLOY
+    return REGISTRATION_REMEDY_ENABLE_ABAC.format(bucket=bucket)
+
+
+def _bucket_reachable(s3_client: Any, bucket: str) -> bool:
+    """HeadBucket plus a one-key ListObjectsV2; False on any exception."""
+    if s3_client is None:
+        return False
+    try:
+        s3_client.head_bucket(Bucket=bucket)
+        s3_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+        return True
+    except Exception as error:
+        logger.info("Bucket %s not reachable by the probe: %s", bucket, _failure_reason(error))
+        return False
+
+
+def _probe(bucket: str, *, s3_client: Any, tagged: bool, abac_enabled: Union[bool, str],
+           account_kind: str, scoping: str, just_enabled: bool,
+           account_id: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+    """`(iam_reachable, remedy)` for `bucket` on `s3_client`. Never raises.
+
+    When the caller has just enabled ABAC and the first probe fails, it waits
+    ATTACH_PROBE_RETRY_DELAY_SECONDS once (time.sleep on this module's `time`)
+    and probes again, so the whole probe stays under two seconds of waiting.
+    `s3_client=None` (the client could not be built) is unreachable without a
+    call. `account_id` is the bucket's account for the tag remedy.
+    """
+    reachable = _bucket_reachable(s3_client, bucket)
+    if not reachable and just_enabled and s3_client is not None:
+        time.sleep(ATTACH_PROBE_RETRY_DELAY_SECONDS)
+        reachable = _bucket_reachable(s3_client, bucket)
+    return reachable, registration_remedy(tagged, abac_enabled, reachable, account_kind, scoping,
+                                          bucket=bucket, account_id=account_id)
+
+
+def attach_bucket(*, target_usecase_id: Optional[str], usecase_like: Dict, bucket: Any,
+                  user: Dict, event: Optional[Dict], purpose: str,
+                  evidence: Optional[EligibilityResult] = None, retry: bool = False,
+                  source: str) -> AttachOutcome:
+    """The Attach_Step: `check_bucket_attachable` with every keyword forwarded
+    (a refusal propagates untouched and nothing else runs), then the ABAC
+    registration and the reachability probe (Requirements 7.6, 7.11).
+
+    A tagged (dda-portal:managed=true) Portal_Account_Bucket gets ABAC enabled
+    on the calling handler's execution role when it is not already, inside one
+    guard around region resolution, GetBucketAbac and PutBucketAbac; every
+    enable attempt writes one `bucket_abac_enabled` audit row. An untagged one
+    gets no ABAC call (`tag_missing`). Any other bucket is never enabled
+    (`abac_enabled: 'unknown'`, `not_applicable`) and is probed on the role
+    the selector picks. After the validator has passed nothing here raises.
+    """
+    result = check_bucket_attachable(
+        target_usecase_id=target_usecase_id, usecase_like=usecase_like, bucket=bucket,
+        user=user, event=event, purpose=purpose, evidence=evidence, retry=retry)
+    tagged = result.tags.get(PORTAL_MANAGED_TAG) == 'true'
+    scoping = data_plane_scoping()
+
+    if not _is_portal_account_bucket(usecase_like, bucket):
+        role_arn, _ = _select_s3_role_for_bucket(usecase_like, bucket)
+        try:
+            probe_client = _selector_client(usecase_like, bucket)
+        except Exception as error:
+            logger.warning("Attach probe for %s has no client for the selected role: %s",
+                           bucket, _failure_reason(error))
+            probe_client = None
+        reachable, remedy = _probe(bucket, s3_client=probe_client, tagged=tagged,
+                                   abac_enabled='unknown', account_kind='cross_account',
+                                   scoping=scoping, just_enabled=False,
+                                   account_id=_arn_account(role_arn))
+        return AttachOutcome(result, tagged, 'unknown', reachable, remedy, 'not_applicable')
+
+    action, abac_enabled, reason = 'tag_missing', False, None
+    if tagged:
+        try:
+            s3_client = _s3_client_for_bucket_region(bucket, {})
+            if _abac_status(s3_client, bucket) == 'Enabled':
+                action, abac_enabled = 'already_enabled', True
+            else:
+                s3_client.put_bucket_abac(Bucket=bucket, AbacStatus={'Status': 'Enabled'})
+                action, abac_enabled = 'enabled', True
+        except Exception as error:
+            action, abac_enabled, reason = 'enable_failed', False, _failure_reason(error)
+            logger.warning("ABAC enable failed for %s: %s", bucket, reason)
+        if action != 'already_enabled':
+            details: Dict[str, Any] = {'bucket': bucket, 'source': source}
+            if reason:
+                details['reason'] = reason
+            log_audit_event((user or {}).get('user_id') or UNKNOWN_ATTRIBUTION,
+                            'bucket_abac_enabled', 'usecase',
+                            target_usecase_id or usecase_like.get('usecase_id') or 'unknown',
+                            'success' if action == 'enabled' else 'failure', details, event=event)
+
+    try:
+        probe_client = _execution_role_client()
+    except Exception as error:
+        logger.warning("Attach probe for %s has no execution-role client: %s",
+                       bucket, _failure_reason(error))
+        probe_client = None
+    reachable, remedy = _probe(bucket, s3_client=probe_client, tagged=tagged,
+                               abac_enabled=abac_enabled, account_kind='portal', scoping=scoping,
+                               just_enabled=(action == 'enabled'))
+    return AttachOutcome(result, tagged, abac_enabled, reachable, remedy, action)
