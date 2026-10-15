@@ -112,7 +112,7 @@ graph TD
 
 ## Tasks
 
-- [ ] 1. Write and run bug-condition exploration tests on the UNFIXED tree
+- [x] 1. Write and run bug-condition exploration tests on the UNFIXED tree
   - **Property 1 (Item 1)**, **Property 3 (Item 2)**, **Property 4 (Item 3)**,
     **Property 9 (Item 3b, fix half)**, **Property 5 (Item 4)**,
     **Item 5 (`not isBugCondition_A`, sink level)**
@@ -239,7 +239,7 @@ graph TD
     each failure matches the documented counterexample.
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6_
 
-- [ ] 2. Write and run observation-first preservation tests on the UNFIXED tree
+- [x] 2. Write and run observation-first preservation tests on the UNFIXED tree
   - **Property 2 (Item 1)**, **Property 9 (Item 3b, preservation half +
     guard)**, **Property 6 (Item 4)**, **Property 8 (Item 5,
     observation-first)**, plus Items 2/3 legitimate-path preservation
@@ -299,13 +299,13 @@ graph TD
   - **EXPECTED OUTCOME**: PASS on the unfixed tree; frozen thereafter.
   - _Requirements: 2.6, 3.1, 3.2, 3.3, 3.4_
 
-- [ ] 3. Implement Changes 1-4, 3b and 6 (Items 1-4 and 3c)
-  - [ ] 3.1 Change 1 — fixed 500 body, kept `exc_info` log
+- [x] 3. Implement Changes 1-4, 3b and 6 (Items 1-4 and 3c)
+  - [x] 3.1 Change 1 — fixed 500 body, kept `exc_info` log
     - `src/backend/exceptions/handlers/exception_handlers.py`: return the fixed
       `message` + `request_id` at `:107`; keep `:102` and `:105`; drop the
       now-unused `exception_name` (`:103`). No other handler **body** changes.
     - _Requirements: 1.1, 2.1, 3.1_
-  - [ ] 3.2 Change 3b — mask the validation handler's query log
+  - [x] 3.2 Change 3b — mask the validation handler's query log
     - Same file (`:76`/`:80`): `query_text = str(query_params)`, then
       `logged_query = _body_for_log(query_text)`. Log
       `query_params if logged_query == query_text else logged_query`, so a
@@ -314,7 +314,7 @@ graph TD
     - The 400 response body is unchanged. Don't edit `download_file.py:56` or
       `access_log_router.py` (design DD8).
     - _Requirements: 1.6, 2.6, 3.1_
-  - [ ] 3.3 Change 2 — input-image containment under `INFERENCE_RESULTS_DIR`
+  - [x] 3.3 Change 2 — input-image containment under `INFERENCE_RESULTS_DIR`
     - `src/backend/endpoints/download_file.py`: import `INFERENCE_RESULTS_DIR`;
       resolve (both `realpath` calls inside the `try`) and guard the sink with
       the strictly-below prefix check `jsonl_file.startswith(base + os.sep)`
@@ -323,7 +323,7 @@ graph TD
       fixed string and log at WARNING with `exc_info`; keep the legitimate path
       byte-identical.
     - _Requirements: 1.2, 2.2, 3.2_
-  - [ ] 3.4 Change 3 — anchor the pattern + export containment under `DDA_SYSTEM_FOLDER`
+  - [x] 3.4 Change 3 — anchor the pattern + export containment under `DDA_SYSTEM_FOLDER`
     - `src/backend/utils/constants.py:109`: anchor `CAPTURED_IDS_PATH_PATTERN`
       with `^...$` and ASCII `[0-9]` digit classes, not `\d` (single consumer
       confirmed; `[0-9]` keeps the validator and a `re.fullmatch` oracle agreed
@@ -335,14 +335,14 @@ graph TD
       contained or missing; open the resolved path; drop the input echo from the
       404 detail.
     - _Requirements: 1.3, 2.3, 3.2_
-  - [ ] 3.5 Change 4 — `_failure_reason` helper (design DD4)
+  - [x] 3.5 Change 4 — `_failure_reason` helper (design DD4)
     - `src/backend/endpoints/text_generation.py:423-426`: the
       `GenerationError`-vs-fixed-string helper with the `exc_info` log; no
       call-site or shape change. Note (design DD4): a streaming READY→not-READY
       race now returns the fixed string in the SSE error event instead of the
       not-ready text — accepted, consistent with Item 4.
     - _Requirements: 1.4, 2.4, 3.3_
-  - [ ] 3.6 Change 6 — the result-history export link (Item 3c, owner decision D5 (b))
+  - [x] 3.6 Change 6 — the result-history export link (Item 3c, owner decision D5 (b))
     - Unconditional: the owner chose D5 (b) on 2026-10-15.
     - Frontend baseline first, with `src/frontend`'s own scripts on the
       unfixed tree: `npm ci --ignore-scripts`, then
@@ -375,7 +375,7 @@ graph TD
   - **STOP**: no push, build, deploy or device action in this task.
   - _Requirements: 2.1-2.4, 2.6, 2.7, 3.1-3.3, 3.5, 3.7_
 
-- [ ] 4. Implement Change 5 (Item 5) — redactor + Layer A, Layer B per D1
+- [x] 4. Implement Change 5 (Item 5) — redactor + Layer A, Layer B per D1
   - Scope follows task 9's D1 answer (default (b1) if unanswered at the task-9
     gate). Under (a):
     - skip 4.1-4.3 and record the choice;
@@ -385,7 +385,7 @@ graph TD
       This is the one sanctioned post-freeze edit; record it in
       verification-notes.
     - The task-2 Item 5 preservation case still applies.
-  - [ ] 4.1 Add `redact_signed_query`, `_redact_leaves` and `redacted_run_view`
+  - [x] 4.1 Add `redact_signed_query`, `_redact_leaves` and `redacted_run_view`
     beside `serialize_trigger_context` in `trigger_runtime.py` (standard-library
     only; mask `***`; total; fixed point; value class per design Property 7;
     `_redact_leaves` keeps a tuple a tuple; `redacted_run_view` never mutates
@@ -396,7 +396,7 @@ graph TD
     `redacted_run_view` non-mutation case. Dummy SigV4 values use no
     `AKIA`/`ASIA` prefix and `.invalid` hosts. _(b1 and b2)_
     - _Requirements: 2.5, 3.4; Acceptance Criterion 11_
-  - [ ] 4.2 Layer A (no behavior change): add `from workflow_engine.trigger_runtime
+  - [x] 4.2 Layer A (no behavior change): add `from workflow_engine.trigger_runtime
     import redacted_run_view` to `pipeline_executor.py`'s existing
     `from workflow_engine import …` grouping (near `:88`) and
     `from workflow_engine.trigger_runtime import redact_signed_query,
@@ -444,7 +444,7 @@ graph TD
   - **STOP**: no push, build, deploy or device action in this task.
   - _Requirements: 2.5, 3.4, 3.6_
 
-- [ ] 5. Local checkpoint — Properties 1-10, preservation suites, build-gate replay
+- [x] 5. Local checkpoint — Properties 1-10, preservation suites, build-gate replay
   - Re-run the task-1 tests, unchanged. They now PASS, except the Item 5 case
     under D1 (a), which stays `xfail(strict=True)`. Run the property variants
     here: Properties 1, 3, 4, 5 and 9 (authored in task 1), and the helper-level
@@ -544,7 +544,7 @@ graph TD
 
 ### OWNER-gated tasks — NOT executed in this run, leave UNCHECKED
 
-- [ ] 9. OWNER DECISION: Item 5 accept vs fix (owner memo D1) — gate before the build
+- [x] 9. OWNER DECISION: Item 5 accept vs fix (owner memo D1) — gate before the build
   - The owner selects one of:
     - (a) accept;
     - (b1) fix Layer A only: the serve/log sinks, with no behavior change;

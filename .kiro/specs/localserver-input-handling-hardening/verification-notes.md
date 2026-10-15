@@ -1,11 +1,12 @@
 # Verification Notes — localserver-input-handling-hardening
 
-**Status:** design authored (revision after design review iteration 3); the
-iteration-4 items and the owner's answers of 2026-10-15 (D1 (b1); D2
-accepted, D2.2 no fold; D3 batch; D4 dismiss the six now; D5 (b)) were applied
-to the spec at the start of implementation. Implementation in progress; the
-sections below are filled as each task runs. Nothing has been built, pushed,
-deployed or run on a device.
+**Status:** tasks 1-5 complete locally; the owner's answers of 2026-10-15 are
+applied (D1 (b1), D2 accepted / D2.2 no fold, D3 batch, D4 the six dismissed
+2026-10-15, D5 (b)); the task-9 gate is recorded with D1 (b1). The
+feature-branch commits are local and unpushed. Tasks 6 (push), 7 (build), 8
+(on-device), 10 (trunk merge) and 11 (post-rescan reconciliation) are
+owner-gated and not run here. Nothing has been built, pushed, deployed or run
+on a device.
 
 Design-time offline checks (local backend image, `--network none`, dummy
 values only; no test files added; scratch probes deleted):
@@ -48,119 +49,356 @@ credentials, personal names or analyzer/tool names. Lab devices are named only
 labels (repository basename + tag) and local image IDs only. Component artifacts
 are named by component name and version only.
 
-## Task 1: exploration on the unfixed tree — PENDING
+## Task 1: exploration on the unfixed tree — DONE
 
-Every task-1 case asserts the fixed behavior, so each must FAIL here. Per
-item, record the test file(s), the failing assertion and the exact unfixed
-value it observed (the counterexample):
-- Item 1: the 500 body `message` (expected `"Internal Server Error."`; the
-  handler was called inside `except`).
-- Item 2: for `workflowId=".."`, the path the `open` shim recorded and the
-  response instead of 404. For the malformed contained jsonl, the 500 detail
-  (device container).
-- Item 3: the mounted-route status for the `..`-segment value, instead of 400;
-  the target the direct call opened, instead of 404; the 404 detail that
-  echoed the value; and the symlink case (AC5). Also record the observation
-  that the unfixed constant passes `re.search` and fails `re.fullmatch` for the
-  `..`-segment value. It's an observation, not a frozen test.
-- Item 3b: the validation handler's log record that carried the dummy `token=`
-  value.
-- Item 4: the strings returned for `ValueError("boom")` and for a
-  non-`GenerationError` exception carrying a `.reason`, instead of the fixed
-  string.
-- Item 5: the dummy SigV4 values found in the persisted metadata JSON and the
-  formatted `tags:` line.
+Authored before any production edit and run on the unfixed tree (HEAD at the
+time, the committed spec on `296c230c`). Every task-1 case asserts the fixed
+behavior and FAILED, each matching its documented counterexample. The five test
+files are frozen in the state directory (`.agents/localserver-input-handling/frozen/`,
+with `SHA256SUMS`). Image IDs and versions: host CPython 3.9.5, pytest 8.4.2,
+hypothesis 6.141.1; device container `flask-app:latest` =
+`sha256:f2e221c3e2d1…` (Python 3.11.9, fastapi 0.109.2 / pydantic 2.6.4 /
+starlette 0.36.3), pytest 8.4.2 + hypothesis 6.141.1 installed into the
+throwaway container; 3.10 stdlib probe under `flask-app:arm64-1.1.0` =
+`sha256:6d5ce25b9e2d…` (3.10.12).
 
-Record the commands (host `--noconftest` or device-container image ID),
-pass/fail counts, and confirmation that every task-1 case FAILED. `¬C` cases
-are recorded under task 2.
+New properties carry `@settings(max_examples=50, deadline=None)`; inside
+`@given` tests no function-scoped fixture is used (a local collecting
+`logging.Handler` replaces `caplog`, and `tmp_path_factory` gives a per-example
+directory). Each task-1 property pins its counterexample with `@example(...)`.
 
-## Task 2: preservation on the unfixed tree — PENDING
+- **Item 1** (`stream_ingest/test_log_redaction.py::TestUncaughtExceptionBody`,
+  host). FAILED: for `KeyError("source-ref")` raised and handled inside
+  `except`, the 500 body `message` was
+  `"Internal Server Error. Error: 'KeyError: 'source-ref'.'"`, not the fixed
+  `"Internal Server Error."`. Property 1 falsified immediately
+  (`KeyError, "source-ref"`).
+- **Item 2** (`workflow_engine/test_input_image_containment.py`, device
+  container authoritative; host skips NUL). FAILED: `workflowId=".."` opened
+  the one-level-up jsonl (the `open` shim recorded the mapped
+  `/aws_dda/inference-results/../escape.jsonl`) and served it (200), instead of
+  404 with no open; the malformed contained jsonl answered 500 with detail
+  `"Server cannot find the input image path, Error Expecting property name …"`,
+  not the fixed detail; the `a\x00b` member (container, 3.11) answered 500 with
+  `"… Error embedded null byte."` and 1 open, not 404 with none; Property 3
+  falsified at `workflow_id="..", capture_id="cap-1", seed_mode="valid"`.
+- **Item 3** (`workflow_engine/test_export_path_containment.py`, device
+  container authoritative; host skips NUL + the zip). FAILED: the mounted route
+  accepted the `…/capture-id-path-…/../../../target.json` value (status != 400,
+  token check reached), not 400; the direct call opened the escaped
+  `<tmp>/target.json` (142 → clean 442) instead of 404 with no open; the
+  missing-value 404 detail echoed the value; the capture-name symlink resolved
+  outward and opened the target; the NUL member answered 404 but with the
+  **echoed** detail, not the fixed string; Property 4 (validator) falsified at
+  the `/../../../target.json` suffix, Property 4 (containment) at
+  `capture-id-path-…/../../..` → `<tmp>/target.json`. Observation (one-off
+  `python3 -c`, not a frozen test): for the `..`-segment value the unfixed
+  constant `re.search(P, v)` is truthy and `re.fullmatch(P, v)` is `None`.
+- **Item 3b** (`stream_ingest/test_log_redaction.py::TestRejectedQueryLog`,
+  host). FAILED: the validation handler's record carried the dummy credential
+  in the re-encoded `…token%3DLOCALSESSIONTOKENdummy1234` form; Property 9's
+  fix half falsified on the first generated credential.
+- **Item 4** (`text_generation/test_failure_reason.py`, host). FAILED:
+  `_failure_reason(ValueError("boom"))` returned `"boom"`;
+  `_failure_reason(_HasReason("attr-reason"))` returned `"attr-reason"`;
+  Property 5 falsified at `ValueError("boom")`.
+- **Item 5** (`workflow_engine/test_trigger_payload_redaction.py`, host).
+  FAILED: the persisted `{capture_id}.json` and the `tags:` line (formatted
+  through `RedactingFilter`) both carried `DUMMYKEYID1234567890`
+  (`X-Amz-Credential`) and `20250101T000000Z` (`X-Amz-Date`). The existing
+  shared redactor already masks `X-Amz-Security-Token` and `X-Amz-Signature`
+  (the `-` before the name makes them whole tokens), so only Credential and
+  Date leak — exactly the masking boundary the design records.
 
-Record the frozen baselines captured:
-- the two handler **response bodies**, and the uncaught handler's `exc_info`
-  record;
-- the legitimate-route artifacts and status for Items 2/3, including the
-  exact writer-shape acceptance;
-- the secret-free validation-log text, the unfixed-expression oracle, and the
-  download-router structural guard (Item 3b);
-- `_failure_reason(GenerationError(...))` and the 502/SSE shapes;
-- the no-SigV4 metadata-JSON and `tags:` bytes for Item 5.
+## Task 2: preservation on the unfixed tree — DONE
 
-Also record the commands, and that they PASSED on the unfixed tree.
+Authored in the same files and run on the unfixed tree; every `¬C` case PASSED
+and is frozen.
+- Item 1 (Property 2): `http_exception_handler` and the request-validation
+  handler produced byte-identical bodies to the unfixed-expression oracle over
+  the generated exception set; the uncaught handler's `"Uncaught Exception"`
+  record carried `exc_info` naming `KeyError` (AC2).
+- Item 2 (P-routes): the legitimate `(wf, cap-1)` pair served the seeded
+  image (`FileResponse.path`); a database row served the row's image; a
+  contained id with a missing image answered 404.
+- Item 3 (P-routes): the exact writer-shape value entered the handler (the
+  token check was reached); a seeded capture-id-path list yielded the zip with
+  members `manifest`, `a.jpg`, `b.jpg` (device container only; the host skips
+  it — `inference_results_utils` needs `awsiot`).
+- Item 3b (Property 9 preservation half + guard): a query naming no sensitive
+  key logged byte-identically to the oracle
+  `str({"errors": safe_errors, "body": _body_for_log(exc.body), "query_params": request.query_params})`;
+  one frozen literal (`captureIdPath=not-a-capture-path&limit=5`); the `ast`
+  guard confirms `unauthenticated_router = APIRouter()` has no `route_class`.
+- Item 4 (Property 6): `_failure_reason(GenerationError("qwen2-vl", "oom"))`
+  returned `"oom"`; the 502 body was `{"model_name": "qwen2-vl", "reason": "oom"}`
+  and the SSE event `data: {"error": {"reason": "oom"}}\n\n` exactly.
+- Item 5 (observation-first): the no-SigV4 context (`image_url` with
+  `?part=42&lane=3`) persisted and logged byte-identically, with no `***`
+  introduced; the frozen literal check asserts byte-identity after the fix.
 
-## Task 3: fixes (Changes 1-4, 3b, 6) — PENDING
+Commands (wrapped in `timeout`): host runs via
+`PYTHONPATH=src/backend:test/backend-test:test/backend-test/workflow_engine
+python3 -m pytest <file> --noconftest -p no:cacheprovider`; container runs by
+image ID with pytest/hypothesis installed first, `--noconftest`. Unfixed-tree
+counts: Item 1/3b host 4 failed (task 1) / 43 passed; Item 2 container 4 failed
+/ 3 passed; Item 3 container 7 failed / 2 passed; Item 4 host 3 failed / 3
+passed; Item 5 host 1 failed / 1 passed.
 
-Record the exact edits applied (file + function), that no hash-pinned file was
-touched by Changes 1-4, 3b or 6, and the diff scope. Confirm three things for
-Change 3b:
-- the 400 response body is unchanged;
-- a secret-free query keeps its `QueryParams(...)` log text;
-- neither `download_file.py:56` nor `access_log_router.py` was edited.
+## Task 3: fixes (Changes 1-4, 3b, 6) — DONE
 
-For Change 6 (task 3.6), record the frontend baseline (suite and build), the
-unfixed-tree run of the new jest tests and the shipped template's
-counterexample, and the post-change suite and build compared with the
-baseline.
+Edits, by file + function:
+- **Change 1** `exception_handlers.unhandled_exception_handler`: dropped the
+  `exception_name` line; the return is
+  `JSONResponse({"message": "Internal Server Error.", "request_id": get_request_id()}, status_code=500)`;
+  the `sys.exc_info()` capture and the `logger.error("Uncaught Exception", exc_info=…)`
+  line are kept.
+- **Change 3b** `exception_handlers.request_validation_exception_handler`: added
+  `query_text = str(query_params)` and `logged_query = _body_for_log(query_text)`;
+  the detail's `query_params` is `query_params if logged_query == query_text else logged_query`.
+  Confirmed: the 400 response body is unchanged (Property 2 and the existing
+  suites); a secret-free query keeps its `QueryParams(...)` text (Property 9
+  preservation half); neither `download_file.py:56` nor `access_log_router.py`
+  was edited.
+- **Change 2** `download_file.load_input_image_from_worflow_by_capture_id`:
+  added `INFERENCE_RESULTS_DIR` to the constants import; the jsonl fallback
+  resolves `base` and `jsonl_file` with `os.path.realpath` inside one
+  `try/except ValueError`, guards the sink with
+  `jsonl_file.startswith(base + os.sep)` (404 fixed detail otherwise), and the
+  inner read's `except` logs at WARNING with `exc_info` and 500s with the fixed
+  detail.
+- **Change 3** `constants.CAPTURED_IDS_PATH_PATTERN` anchored
+  `^/aws_dda/system/capture-id-path-[0-9]{4}-…-[0-9]{2}$`;
+  `download_file.get_inference_result_data_for_retraining` resolves
+  `base`/`resolved` with `realpath` inside `try/except ValueError` and opens
+  only when `resolved.startswith(base + os.sep)` and `os.path.exists(resolved)`;
+  the 404 detail no longer echoes the value.
+- **Change 4** `text_generation._failure_reason`: the DD4 helper
+  (`isinstance(error, GenerationError) and error.reason` → `error.reason`; else
+  `logger.error("Unexpected text generation failure", exc_info=error)` and the
+  fixed string). No call-site or shape change.
+- **Change 6** (task 3.6, Item 3c) is recorded under Task 6 (frontend); it is
+  not a backend change.
 
-## Task 9: Item 5 owner decision (D1) — PENDING
+No hash-pinned file was touched by Changes 1-4, 3b or 6: after commit (iv) the
+CSI surface suite showed only the pre-existing
+`vendor/workflow_core/catalog/nodes.py` failure (same as the 296c230c
+baseline), the two guard suites equalled the baseline, and
+`git diff 296c230c -- src/backend/endpoints/route/access_log_router.py` was
+empty. Only Change 5 (Layer A) touches the hash-pinned `pipeline_executor.py`
+(Task 4).
 
-Record the owner's selection (a / b1 / b2), the deciding input (whether any
-deployed workflow consumes a signed value from the trigger payload, by fetch,
-metadata binding or `{trigger.…}` placeholder), and the
-resulting Item 5 code scope. If unanswered at the gate, record that the default
-(b1) was taken. Also record the D3 answer (it sets task 7's build source) and
-the D2.2 / D5 answers.
+### Change 6 — frontend export link (task 3.6)
 
-## Task 4: Change 5 (Item 5) — PENDING
+Frontend baseline on the unfixed tree (`src/frontend`, Node 20.20.2, after
+`npm ci --ignore-scripts`): `CI=true npm test -- --watchAll=false` → 35 suites
+/ 308 tests passed; `npm run build` → compiled with the project's standing
+warnings (rc=0). The new `result-history/utils.test.ts`, run on the unfixed
+tree, failed 5/5: `buildExportUrl` did not exist
+(`TypeError: (0 , _utils.buildExportUrl) is not a function`) and the call site
+still held the mis-joined `token=${encodeURIComponent(token)}` template — the
+shipped counterexample (for the writer shape with auth on, the parsed query
+holds one `captureIdPath` ending `token=<credential>` and no `token`). After
+Change 6: the suite passed 5/5 (unit auth-on/off, the reserved-character path,
+Property 10 at 200 runs, and the call-site check); the full suite is unchanged
+except the pre-existing flaky `DeployedWorkflowDetails.exploration` property
+suite (see Task 5); `npm run build` compiled with the same warning set as the
+baseline (rc=0).
 
-Record the helpers added (`redact_signed_query`, `_redact_leaves` keeping
-tuples, `redacted_run_view` non-mutating), the new
-`from workflow_engine.trigger_runtime import …` in `pipeline_executor.py` and
-`api.py`, and the Layer A application points (the four sinks). If Layer B:
-record that `serialize_trigger_context` became
-`json.dumps(_redact_leaves(context or {}), default=lambda v:
-redact_signed_query(str(v)))`, that it masks every string leaf (not only
-`payload`) and never re-serializes the payload, and that
-`load_trigger_context(stored)["payload"] == redact_signed_query(original)` and a
-non-`payload` string-leaf SigV4 value reads `***`. Record that the "download
-paths stop working" change is in scope: every SigV4 value a run reads back is
-masked (presigned-URL fetches and signed values via metadata bindings or
-`{trigger.…}` placeholders). Also record the helper-test results (Property 7
-incl. AC11, Property 8, non-mutation) and the serve-time masking cases for a
-pre-upgrade run. Under (a), record that the task-1 Item 5 case is
-`xfail(strict=True)`. Note that `pipeline_executor.py` is hash-pinned and the
-CSI golden entry was rebaselined in the Layer A commit.
+## Task 9: Item 5 owner decision (D1) — DONE (owner answered 2026-10-15)
 
-## Task 5: local checkpoint — PENDING
+The owner answered on 2026-10-15 (`.agents/localserver-input-handling/owner-answers-2026-10-15.md`):
+- **D1 = (b1):** Item 5 Layer A only (helper + the four served/logged sinks),
+  no Layer B. The stored `trigger_context_json` column is unchanged, so what a
+  run reads back is unchanged. Task 4.3 is not implemented; the task-1 Item 5
+  sink case is a real pass (not `xfail`).
+- **D2 accepted; D2.2 no fold:** the request_id is not folded into the 500
+  body; any fold is a follow-up round.
+- **D3 = batch:** task 7 builds from `build/jpeg-and-input-handling`.
+- **D5 = (b):** the frontend export link is fixed in this round (Item 3c /
+  Change 6 / task 3.6), with a frontend device check added to task 8.
 
-Record per property (1-10): the test, pass/fail and requirement traceability, and
-the run location (host `--noconftest`, device container by image ID, or the
-SPA's `npm test` for Property 10).
-Confirm that the task-1 tests passed unchanged. Record the container image:
-the local backend image whose dependencies match this tree's pins (image ID,
-`python3.11 --version`), and the `pytest`/`hypothesis` versions installed into
-the container (the image ships neither). Record whether a local 3.10 (JP6)
-backend image with the same pins was available for the containment modules. If
-not, record "3.10 covered by the stdlib probe and the Orin check". Record the
-affected-suite results, the CSI preservation suite and the security guard
-result (note the pre-existing `nodes.py` CSI golden failure, unrelated to this
-spec), any rebaseline (file + sanctioned path + reason — expected only for
-`pipeline_executor.py` under b1/b2), and the **build-gate replay** result: that
-it ran as a derived copy against a writable tree copy by image ID, the per-gate
-verdicts, the comparison with the base-commit replay, and the recorded
-pre-existing off-device failures (first block needs `libtritonserver.so`; stream
-gate needs GStreamer/PyAV). Record any pre-existing unrelated failures. Confirm
-the no-build/no-device contract was honored.
+Deciding input for D1 (whether a deployed workflow consumes a signed value
+from the trigger payload) stays UNVERIFIED here; the owner chose (b1)
+regardless, so Layer B's behavior change is not adopted. The task-9 box is
+checked because the owner answered; tasks 7/8/10/11 remain owner-gated.
 
-## Task 6: commit and push — PENDING
+## Task 4: Change 5 (Item 5) — DONE (Layer A only, D1 = b1)
 
-Record (after approval): the commit split (Changes 1+3b / 2 / 3 / 4 / Layer A /
-Layer B / Change 6, then the docs commit), the named files staged, the hygiene
-check result over the diff and over the whole spec dir (no
-secrets/identifiers/suppressions), the wording-checklist result (pass/fail
-only), the trunk-moved merge if any, the branch pushed, and confirmation that
-nothing was merged into or pushed to the trunk and no build was dispatched.
+Helpers added beside `serialize_trigger_context` in `trigger_runtime.py`
+(stdlib only; `import re` added to the module import block):
+- `redact_signed_query(value)` — masks the value of each SigV4 parameter in
+  the literal `name=value` form with `***`; value class
+  `[^&;,)\]}#"'\s]+` (the shared redactor's terminators plus `#`); total (a
+  non-string or empty string returns unchanged); a fixed point;
+- `_redact_leaves(value)` — recurses into string leaves of dict/list/tuple,
+  keeps a tuple a tuple, returns other leaves unchanged;
+- `redacted_run_view(tag_values)` — a shallow copy whose `trigger` section is
+  `_redact_leaves`-masked; returns the input unchanged when it is not a mapping
+  or has no `trigger` key; never mutates its input.
+
+Imports (each module imports only what it uses):
+`pipeline_executor.py` adds `from workflow_engine.trigger_runtime import
+redacted_run_view` in the existing `from workflow_engine import …` grouping
+near `:88` (not jpeg's `:129` block); `api.py` adds
+`from workflow_engine.trigger_runtime import redact_signed_query, redacted_run_view`.
+
+Layer A sinks (no behavior change):
+- `_persist_run_metadata` dumps `redacted_run_view(tag_values or {})`, computed
+  before the file is opened;
+- the completed-run `tags:` log computes
+  `logged_tags = redacted_run_view(tag_values)` inside `try/except RecursionError`
+  (placeholder `"<tags withheld: too deeply nested to mask>"`), after the run
+  is committed COMPLETED, so the run status is never affected;
+- `get_workflow_execution_metadata` returns
+  `redacted_run_view(read_run_metadata(...))`;
+- `get_workflow_execution_log` wraps the text in `redact_signed_query(...)`.
+
+Layer B not implemented (D1 = b1): `serialize_trigger_context` is unchanged, so
+the stored column keeps its bytes and what a run reads back is unchanged
+(presigned-URL fetches and `{trigger.…}` / metadata-binding resolution are
+unaffected).
+
+Helper and serve-time test results (host, `test_trigger_payload_redaction.py`,
+8 passed): Property 7 (masking, byte-for-byte preservation, fixed point,
+non-string passthrough — covers AC11); Property 8 and the `redacted_run_view`
+non-mutation / tuple-preservation case; the sink-level task-1 case through the
+executor harness; the pre-upgrade serve-time masking of `/metadata` and `/log`
+(every SigV4 value reads `***`, `is_anomalous` and the non-signed payload
+fields preserved); and the RecursionError guard (the run stays COMPLETED and
+the `tags:` record carries the placeholder).
+
+`pipeline_executor.py` is hash-pinned by the CSI consumer golden; its entry was
+rebaselined in the Layer A commit (95c58736):
+`7b80c297aaa3a3fab07f36a70185476ac9b928a1a7a0d7c0bbb490e3e36b03dc` →
+`8edf43bfcd39aed25e3d9a29817923c3599e2b8f34427bf3a7259550a93d186a`. The stale
+`vendor/workflow_core/catalog/nodes.py` entry is left as-is (pre-existing; the
+jpeg merge recomputes every entry at task 7).
+
+## Task 5: local checkpoint — DONE
+
+The five test files are byte-identical to their `frozen/` copies (the four
+backend files whole, `test_trigger_payload_redaction.py` through its frozen
+head of 185 lines; the task-4 helpers/serve-time/guard cases are appended
+below the marker). The task-1 tests pass unchanged after the fixes; the task-2
+tests still pass.
+
+Per property:
+- **1** (Item 1 fix) PASS, host — Req 1.1, 2.1.
+- **2** (Item 1 preservation) PASS, host — Req 3.1.
+- **3** (Item 2 fix + containment) PASS, device container (host skips the NUL
+  member) — Req 1.2, 2.2, 3.2.
+- **4** (Item 3 anchor + containment) PASS, device container (host skips the
+  NUL member) — Req 1.3, 2.3, 3.2.
+- **5** (Item 4 fix) PASS, host — Req 1.4, 2.4.
+- **6** (Item 4 preservation) PASS, host — Req 3.3.
+- **7** (Item 5 helper, incl. AC11) PASS, host — Req 2.5.
+- **8** (Item 5 preservation) PASS, host — Req 3.4.
+- **9** (Item 3b fix + preservation + guard) PASS, host — Req 1.6, 2.6, 3.1.
+- **10** (Item 3c export link) PASS, SPA `npm test` — Req 1.7, 2.7, 3.7.
+
+Container image: the local backend image whose pins match this tree,
+`flask-app:latest` = `sha256:f2e221c3e2d1…`, `python3.11 --version` = Python
+3.11.9, fastapi 0.109.2 / pydantic 2.6.4 / starlette 0.36.3; the image ships
+neither pytest nor hypothesis, so the throwaway container installs
+pytest 8.4.2 + hypothesis 6.141.1 (pinned to the host versions). The two
+full-app files run against a writable `git archive HEAD` copy, because
+`LocalServerBaseTestCase.setUp` writes into the tree, with
+`LD_LIBRARY_PATH=/opt/tritonserver/lib:/usr/local/cuda/lib64` so
+`libtritonserver.so` resolves. HEAD container runs: the five new/modified files
+plus `test_trigger_metadata_persistence.py` → 78 passed (NUL members run);
+`test_inference_result_api.py` + `test_workflows_api.py` → 42 passed, matching
+the baseline with no failing id.
+
+No local image carries this tree's pinned stack on 3.10; 3.10 is covered by the
+stdlib probe (bare `realpath` and the two lifted route bodies under 3.10.12,
+`flask-app:arm64-1.1.0` = `sha256:6d5ce25b9e2d…`) and the Orin device check
+(task 8, Item 2's `a%00b`). NUL probe on HEAD: under 3.10.12 and 3.11.9 both
+routes answer 404 with their fixed details and 0 open calls; under the host
+3.9.5 the input-image route answers 500 with the fixed detail (realpath does
+not raise on a NUL there — the WARNING line is logged with the traceback — which
+is why the explicit NUL member skips below 3.10) and the export route answers
+404 with the fixed detail.
+
+Affected-suite comparison, HEAD vs the 296c230c baseline (host, `--noconftest`;
+`comm -13` on the sorted failing/erroring id sets): no new failing id in any of
+`stream_ingest/` (2 pre-existing collection errors), `text_generation/` (0),
+`workflow_engine/` (7 pre-existing), `output_bindings_fixes/` (7 pre-existing),
+the text-generation consumers (1 pre-existing: the `vllm_model_reload`
+hash-pin), the download-route source checks (1 pre-existing collection error),
+the CSI surface (only `nodes.py`), and the two guard suites (0). HEAD passing
+counts rose only by the new tests (e.g. `workflow_engine/` 1898 → 1919).
+
+CSI preservation: after the Layer A rebaseline the `pipeline_executor.py` entry
+passes; only the pre-existing `vendor/workflow_core/catalog/nodes.py` entry
+fails (unrelated to this spec; the jpeg merge recomputes it at task 7). Guard
+suites: 4 passed / 3 skipped, equal to the baseline. The one rebaseline is
+`backend_csi_consumers_sha256.json`'s `pipeline_executor.py` entry, in the
+Layer A commit, for the intended Layer A edit (hashes in Task 4).
+
+Build-gate replay (AC13): `build-custom.sh`'s in-image gate body, extracted
+verbatim (141 lines, `bash -n` clean) and run as a derived `set +e` + ERR-trap
+copy against a writable `git archive` tree copy by image ID, on both 296c230c
+and HEAD. HEAD's per-gate summary is identical to the base run (modulo line
+numbers and timings): the six security audit gates pass in both
+(injection/deserialization, secrets/credentials/JWT, IAM, S3, Docker,
+dependency), and the only two `GATE-CMD-FAILED` are the pre-existing off-device
+ones — the first block (auth / user-management unit tests needing
+`libtritonserver.so`) and the stream-component gate (needs GStreamer/PyAV the
+local image lacks). `git diff 296c230c --stat -- test/backend-test/security/baselines/`
+is empty. Logs in `impl/gate-base.*` and `impl/gate-head.*`.
+
+Property budget note: new properties use `@settings(max_examples=50,
+deadline=None)` as the step prompt requires; the `workflow_engine` and
+`text_generation` conftests register a 25-example "fast" profile, but the host
+and container runs use `--noconftest`, which drops those profiles, so the
+per-property 50 applies and there is no conflict in these runs.
+
+Frontend flaky note: with Change 6 applied, the SPA suite is unchanged against
+the pre-change baseline except `DeployedWorkflowDetails.exploration.test.tsx`,
+a fast-check property that uses no fixed seed and falsifies on
+whitespace-collapsing counterexamples (e.g. `" !"`). It is unrelated to this
+change (it imports none of `result-history/`): run against a copy of the
+committed tree (HEAD, no frontend edits) it failed once and passed twice over
+three runs, so it is pre-existing seed-dependent flakiness, not a regression.
+
+The no-build/no-device contract was honored: no component or image was built,
+nothing was deployed, pushed or run on a device. `npm run build` was a local
+compile check only; its `build/` output was removed.
+
+## Task 6: commit (local part) — DONE; push PENDING (owner-gated)
+
+The fix commits are made locally on `spec/localserver-input-handling`; the push
+is not done (it needs the owner's go at task 6). Commit split and hashes
+(oldest first), each carrying its own item's tests:
+- `e3aebb09` docs(spec): design review iteration 4 items + owner answers (d0)
+- `a1022f18` fix(backend): fixed 500 body; withhold credential-bearing query logs (i, Changes 1 + 3b)
+- `d953fabe` fix(backend): contain the input-image jsonl fallback path (ii, Change 2)
+- `73fec9f4` fix(backend): anchor captureIdPath and contain the export path (iii, Change 3)
+- `db451906` fix(backend): fixed reason for unexpected text-generation errors (iv, Change 4)
+- `95c58736` fix(workflow-engine): mask signed query values in run metadata and logs (v, Layer A + CSI rebaseline)
+- `f280cc02` fix(frontend): build the result-history export link with encoded parameters (vii, Change 6 / Item 3c)
+- (d1) docs(spec): this verification-notes + tasks.md record
+
+Each commit staged named files only (no `git add .`); the staged file list was
+checked to equal the commit's list before committing. The hygiene gate ran on
+every commit's staged added lines and its message, and the wording checklist's
+four checks (label swap → 0 originals; the identifier grep; the neutral-wording
+term grep; the identifier-class grep) passed for every commit (recorded
+pass/fail only). The whole committed spec directory also passes all four
+checks. Messages are framed as input validation / path containment / output
+encoding / error-response hardening, and each code-commit body states what was
+verified locally and that on-device verification is pending.
+
+Scope (`git diff 296c230c`): the four spec files; the seven source files
+(`exception_handlers.py`, `download_file.py`, `constants.py`,
+`text_generation.py`, `trigger_runtime.py`, `pipeline_executor.py`, `api.py`);
+the CSI golden; the five backend test files; and the three frontend files
+(`result-history/utils.ts`, `utils.test.ts`, `ResultCardContent.tsx`). Empty:
+`.kiro/specs/security-scan-remediation-high/requirements.md`,
+`src/backend/endpoints/route/access_log_router.py`, and any
+`src/frontend`/`hmi`/`edge-cv-portal`/`vendor` path outside `result-history`.
+Nothing was merged into or pushed to the trunk, and no build was dispatched.
 
 ## Owner-gated — PENDING (not executed in this run)
 
