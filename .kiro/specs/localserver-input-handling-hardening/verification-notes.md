@@ -1,9 +1,11 @@
 # Verification Notes — localserver-input-handling-hardening
 
-**Status:** design authored (revision after design review iteration 3);
-implementation not started. Every section below is PENDING, to be filled as each
-task runs. Nothing has been built, pushed, deployed or run on a device. The
-Item 5 owner decision (D1) is open; the default at the task-9 gate is (b1).
+**Status:** design authored (revision after design review iteration 3); the
+iteration-4 items and the owner's answers of 2026-10-15 (D1 (b1); D2
+accepted, D2.2 no fold; D3 batch; D4 dismiss the six now; D5 (b)) were applied
+to the spec at the start of implementation. Implementation in progress; the
+sections below are filled as each task runs. Nothing has been built, pushed,
+deployed or run on a device.
 
 Design-time offline checks (local backend image, `--network none`, dummy
 values only; no test files added; scratch probes deleted):
@@ -87,14 +89,19 @@ Record the frozen baselines captured:
 
 Also record the commands, and that they PASSED on the unfixed tree.
 
-## Task 3: fixes (Changes 1-4, 3b) — PENDING
+## Task 3: fixes (Changes 1-4, 3b, 6) — PENDING
 
 Record the exact edits applied (file + function), that no hash-pinned file was
-touched by Changes 1-4 or 3b, and the diff scope. Confirm three things for
+touched by Changes 1-4, 3b or 6, and the diff scope. Confirm three things for
 Change 3b:
 - the 400 response body is unchanged;
 - a secret-free query keeps its `QueryParams(...)` log text;
 - neither `download_file.py:56` nor `access_log_router.py` was edited.
+
+For Change 6 (task 3.6), record the frontend baseline (suite and build), the
+unfixed-tree run of the new jest tests and the shipped template's
+counterexample, and the post-change suite and build compared with the
+baseline.
 
 ## Task 9: Item 5 owner decision (D1) — PENDING
 
@@ -102,7 +109,8 @@ Record the owner's selection (a / b1 / b2), the deciding input (whether any
 deployed workflow consumes a signed value from the trigger payload, by fetch,
 metadata binding or `{trigger.…}` placeholder), and the
 resulting Item 5 code scope. If unanswered at the gate, record that the default
-(b1) was taken.
+(b1) was taken. Also record the D3 answer (it sets task 7's build source) and
+the D2.2 / D5 answers.
 
 ## Task 4: Change 5 (Item 5) — PENDING
 
@@ -126,8 +134,9 @@ CSI golden entry was rebaselined in the Layer A commit.
 
 ## Task 5: local checkpoint — PENDING
 
-Record per property (1-9): the test, pass/fail and requirement traceability, and
-the run location (host `--noconftest`, or device container by image ID).
+Record per property (1-10): the test, pass/fail and requirement traceability, and
+the run location (host `--noconftest`, device container by image ID, or the
+SPA's `npm test` for Property 10).
 Confirm that the task-1 tests passed unchanged. Record the container image:
 the local backend image whose dependencies match this tree's pins (image ID,
 `python3.11 --version`), and the `pytest`/`hypothesis` versions installed into
@@ -147,10 +156,11 @@ the no-build/no-device contract was honored.
 ## Task 6: commit and push — PENDING
 
 Record (after approval): the commit split (Changes 1+3b / 2 / 3 / 4 / Layer A /
-Layer B, then the docs commit), the named files staged, the hygiene check result
-over the diff and over the whole spec dir (no secrets/identifiers/suppressions),
-the trunk-moved merge if any, the branch pushed, and confirmation that nothing
-was merged into or pushed to the trunk and no build was dispatched.
+Layer B / Change 6, then the docs commit), the named files staged, the hygiene
+check result over the diff and over the whole spec dir (no
+secrets/identifiers/suppressions), the wording-checklist result (pass/fail
+only), the trunk-moved merge if any, the branch pushed, and confirmation that
+nothing was merged into or pushed to the trunk and no build was dispatched.
 
 ## Owner-gated — PENDING (not executed in this run)
 
@@ -159,7 +169,8 @@ Record: the jpeg-branch merge-up result, the combined ref
 `build/jpeg-and-input-handling`, the recomputed CSI golden hashes for **every**
 pinned entry from the merged tree (resolved by recompute, not by taking a
 branch's side), the re-run CSI + both specs' suites on it, the build-gate replay
-on the combined ref, the pre-build checks, and each architecture's build
+on the combined ref, the two pushes and their hygiene result, the pre-build
+checks, and each architecture's build
 (component name + version) — strictly one variant at a time. These are jpeg's
 task-7 builds too: record jpeg's offline built-image check on the
 amd64/amd64Nvidia/arm64/arm64JP7 builds and the build-source change (owner memo
@@ -168,13 +179,18 @@ D3) in jpeg's `verification-notes.md` "Task 6". Combined with the jpeg round.
 ### Task 8: on-device verification — PENDING
 Per architecture (MIC-730 / Orin / thor1 / the lab Dell for amd64 and
 amd64Nvidia / built-only for generic arm64): the build version, the per-item
-check results (Items 1, 2, 3, 3b, 5 everywhere; Item 4 on JP6/JP7; the jpeg
-folder-source non-regression check on MIC-730 and Orin), and the sustained-health
+check results (Items 1, 2, 3, 3b, 3c, 5 everywhere; Item 4 on JP6/JP7; the jpeg
+folder-source non-regression check on MIC-730 and Orin (its four sub-check
+results, also recorded in jpeg's notes; it doesn't replace jpeg task 8b); the
+Item 3c download on at least one auth-enabled station, recording the link's
+shape only), and the sustained-health
 observation (>= 30 min, >= 10 runs, >= 10 requests per route). Record each
 deterministic inducer used: Item 1 the non-JSON scratch file + exact 500 body +
 `request_id` in the traceback; Item 2 the `%2E%2E` request + the route's own
-404 body `"Server cannot find the input image path."`; Item 4 the truncated
-JPEG (not an OOM). For Item 5, record the pre-upgrade run's masked `/metadata`
+404 body `"Server cannot find the input image path."`, and the `a%00b`
+request's 404 with the same body (or, if the device rejected the NUL before
+the route, that outcome and the AC4 rewording); Item 4 the truncated JPEG with
+a READY multimodal model (not an OOM). For Item 5, record the pre-upgrade run's masked `/metadata`
 and `/log` as well as a new run's. For Item 3b, record two things: that the
 validation handler's withheld record was present, and that the dummy value was
 in none of `application.log`, `service.log` or the container console output. If
@@ -189,7 +205,7 @@ cannot be induced. No thing names / hostnames / LAN addresses / bucket names.
 Record which precondition path was taken: (both gates met) the combined-ref
 merge, which also performs jpeg's task 11 — merge into `remediation`, fast-forward
 `integration/all-specs`, then merge to `main`, and the jpeg task-11 PR note; or
-(jpeg's Dell/thor1 gate not met) that the owner waited, or merged
+(jpeg's lab Dell/thor1 gate not met) that the owner waited, or merged
 `spec/localserver-input-handling` alone and recorded that the trunk tree differs
 from the built tree by jpeg's files. Record the devices verified on which arch
 for both specs, and (if the trunk moved since task 7) that the interim trunk
@@ -204,9 +220,23 @@ Record the outcome for each of the five changed findings, by location:
 
 Record any residual dismissed with its reason (Item 4 contract reason;
 containment-guarded Item 2/3 lines, with "realpath + strictly-below prefix
-guard" as the fallback reason — the prefix form is expected to clear these), and
-the six dismissals applied (false positive ×3, won't fix ×2, used in tests ×1).
-Items 3b and 5 have no standalone finding; they're verified under tasks 5 and 8.
+guard" as the fallback reason — the prefix form is expected to clear these).
+Items 3b, 3c and 5 have no standalone finding; they're verified under tasks 5
+and 8. The six dismissals are not part of this task (see below).
+
+## Static-analysis dismissals (owner decision D4) — DONE 2026-10-15
+
+The owner chose to dismiss the six findings in bugfix "Items reviewed and left
+unchanged" without waiting for this spec's build or rescan (this spec changes
+none of their files). They were dismissed on the default branch at
+2026-10-15 13:37Z with the platform's fixed reasons, each checked first to be
+open at the expected location:
+- false positive ×3: `download_file.py:90`, `CapturedCards.tsx:158`,
+  `InteractableImage.tsx:114`;
+- won't fix ×2: `mqtt.cpp:28` and `:51`;
+- used in tests ×1: `test_docker_base_image_bug_condition_exploration.py:120`.
+
+The five findings this spec changes stay open until task 11.
 
 ## UNVERIFIED / open
 
@@ -225,3 +255,9 @@ Items 3b and 5 have no standalone finding; they're verified under tasks 5 and 8.
   `nodes.py` line; Layer A's `trigger_runtime` import is placed to avoid jpeg's
   `:129` import block). A read-only `git merge-tree` showed no conflict markers
   in the function bodies; the real merge is task 7.
+- Whether `%00` in a path segment reaches the input-image route on device
+  (Item 2's `a%00b` request). Task 8 records the outcome either way.
+- Whether a multimodal model is READY on the Orin and thor1 for Item 4's
+  check.
+- Which station runs with authorization or local login on for Item 3c's
+  auth-enabled download check (task 8).

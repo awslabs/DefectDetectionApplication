@@ -5,7 +5,9 @@
 A review of request handling in the LocalServer backend found four
 input-validation and output-encoding gaps in shipped device code, and one
 persistence/redaction gap in the workflow trigger path. This spec fixes them
-together, in one LocalServer build round. It is framed as input validation,
+together, in one LocalServer build round. Owner decision D5 (b) adds one
+frontend change to the same round: the result-history download link that
+feeds Item 3's route (Item 3c). It is framed as input validation,
 path containment, output encoding and error-response hardening. Every behavior
 change is called out below. The one change that alters what a run reads back
 (Item 5, full form) is an explicit owner decision (D1); it is never adopted by
@@ -14,7 +16,7 @@ default.
 Default access. Every route named here is reachable without a credential **in
 the shipped default configuration**. All recipe variants set
 `LocalLoginEnabled: "false"` and no station authorization file is present by
-default, so `authorize_credential` (`utils/auth.py:188-190`) takes the
+default, so `authorize_credential` (`utils/auth.py:188-189`) takes the
 open-access row and returns before any check, and the backend serves its
 plaintext listener (`app.py:396`). With station authorization or local login
 on, the same routes require a valid credential. The fixes don't change
@@ -74,6 +76,16 @@ authorization in either configuration.
     Once Item 3 anchors the pattern, the value is rejected at validation, and
     this handler would log the credential. Item 3b closes that in the same
     change.
+  - **Item 3c: the export link itself (owner decision D5 (b)).** The same
+    link interpolates `captureIdPath` unencoded and appends
+    `token=<credential>` with no `&` before it, so the server sees one
+    `captureIdPath` value and no `token` parameter. Today the result-history
+    download on such a station fails with 401; after Item 3 alone it would
+    fail with 400. A `buildExportUrl` helper percent-encodes the path and
+    joins the credential as its own `&token=` parameter only when auth is
+    on, which repairs that download. Item 3b doesn't depend on it: a client
+    that still sends the mis-joined value is rejected at validation, and its
+    query is withheld from the log.
 - **Item 4: text-generation failure reason.** On vLLM-capable images,
   `_failure_reason` (`src/backend/endpoints/text_generation.py:423-426`)
   returns the error's truthy `.reason` attribute, else `str(error)`
@@ -112,14 +124,16 @@ authorization in either configuration.
     payload stop working, and signed values surfaced through a metadata
     binding or a `{trigger.…}` placeholder read `***`.
 
-  The design recommends (b1). All three options ride the same build round as
-  Items 1-4.
+  The design recommends (b1), and the owner chose (b1) (task 9). All three
+  options ride the same build round as Items 1-4.
 
 ### Items reviewed and left unchanged (static-analysis dispositions)
 
-Six static-analysis findings need no code change. They are dismissed in task
-11, after the trunk rescan, with the platform's fixed reasons. Each
-justification below fits the platform's 280-character limit.
+Six static-analysis findings need no code change. They were dismissed on
+2026-10-15 with the platform's fixed reasons (owner decision D4). This spec
+changes none of their files, so they didn't wait for the build or the rescan;
+task 11 handles only the five findings this spec changes. Each justification
+below fits the platform's 280-character limit.
 
 | Location | Rule category | Dismissal reason | Justification |
 |---|---|---|---|
@@ -152,6 +166,10 @@ and aren't implemented here.
   handler logs `query_params` without masking. The shared redactor matches
   neither the re-encoded `token%3D<value>` form nor a `token=<value>` that
   directly follows a letter or digit.
+- **C3c (Item 3c).** WHEN the result-history download link is built THEN
+  `captureIdPath` is interpolated unencoded and, with auth on, the credential
+  is appended as `token=<value>` with no `&` before it, so parsing the link's
+  query doesn't return the path and the credential as two parameters.
 - **C4 (Item 4).** WHEN `_failure_reason` gets an error that is not a
   `GenerationError` THEN the caller receives that error's `.reason` attribute
   or `str(error)`.
@@ -164,17 +182,19 @@ Non-buggy inputs (`¬C`): every other route and handler; every slash-free id
 pair other than a `..` workflow id or an id with an embedded NUL; every
 `captureIdPath` of the exact writer shape; every query string that names no
 sensitive key; every `GenerationError` with a truthy `.reason`; every trigger
-payload without SigV4 values.
+payload without SigV4 values; every export link built with auth off for a
+writer-shape path (it parses back to the same `captureIdPath`).
 
 ### Validation constraint
 
 Fix and preservation checks are finite unit and property tests in the repo's
 existing styles. They run on the host (`--noconftest`) and, where they need
 the device's interpreter, libraries or a writable `/aws_dda`, in a throwaway
-container of the local backend image. End-to-end behavior on a built image is
-validated by the OWNER-gated on-device checks. The push, the build round, the
-on-device checks, the trunk merge and the static-analysis dismissals are
-separate gates.
+container of the local backend image. Item 3c's checks are jest unit and
+property tests run by the SPA's own test script. End-to-end behavior on a
+built image is validated by the OWNER-gated on-device checks. The push, the
+build round, the on-device checks, the trunk merge and the post-rescan
+reconciliation are separate gates.
 
 ### Completion criterion
 
@@ -226,6 +246,12 @@ masking. The shared redactor misses both forms of a mis-joined credential
 digit), so a credential inside a rejected query value is written to the log
 unmasked.
 
+1.7 WHEN the result-history download link is built
+(`ResultCardContent.tsx:302`) THEN the system interpolates `captureIdPath`
+unencoded and, with auth on, appends `token=<credential>` with no `&` before
+it, so the server receives one `captureIdPath` value carrying the credential
+and no `token` parameter.
+
 ### Expected Behavior (Correct)
 
 2.1 WHEN the uncaught-exception handler builds a 500 response THEN the system
@@ -259,7 +285,9 @@ and SHALL log the error at ERROR with `exc_info`.
 
 2.5 (OWNER DECISION D1) The system SHALL behave per the owner's answer:
 - (a): no change; this requirement and Acceptance Criteria 10 and 11 are N/A.
-- (b1): the system SHALL replace every SigV4 value with `***` in the `trigger`
+- (b1): the system SHALL replace every SigV4 value with `***` (a value being
+  the maximal run of characters other than `&`, `;`, `,`, `)`, `]`, `}`, `#`,
+  a quote or whitespace) in the `trigger`
   section of the persisted run-metadata JSON, of the `tags:` log argument and
   of the `/metadata` response, and in the `/log` response text, for new runs
   and for runs recorded before the upgrade, preserving every other byte. What a
@@ -274,6 +302,13 @@ and SHALL log the error at ERROR with `exc_info`.
 SHALL withhold the query string from the log when its text names a sensitive
 key (`_body_for_log`), and SHALL log a query string that names none
 byte-identically to today. The 400 response SHALL be unchanged.
+
+2.7 (owner decision D5 (b)) WHEN the result-history download link is built
+THEN the system SHALL percent-encode `captureIdPath` with
+`encodeURIComponent` and, only when auth is on, SHALL join the credential as
+its own `&token=` parameter, percent-encoded the same way. Parsing the link's
+query SHALL return exactly the `captureIdPath` and, with auth on, exactly the
+credential as `token`; with auth off the link SHALL carry no `token`.
 
 ### Unchanged Behavior (Regression Prevention)
 
@@ -312,8 +347,11 @@ path and named in the commit. The one hash-pinned file this spec changes is
 `test/backend-test/csi_nvargus_optional/goldens/backend_csi_consumers_sha256.json`.
 It changes only under D1 (b1) or (b2).
 
-3.7 WHEN the frontend is built THEN it SHALL be unchanged, unless the owner
-opts into the export-link join fix (owner decision D5).
+3.7 WHEN the frontend is built THEN it SHALL be unchanged except the
+result-history download link (2.7, owner decision D5 (b)). That link SHALL
+CONTINUE TO target the same route with the same `workflowId` segment, and
+with auth off the server SHALL receive the same `captureIdPath` value as
+today. Every other request the SPA builds SHALL be unchanged.
 
 ## Acceptance Criteria
 
@@ -364,9 +402,9 @@ opts into the export-link join fix (owner decision D5).
    behavior is unchanged. (Req 3.3)
 10. (Item 5; N/A under D1 (a)) A run whose trigger payload carries dummy SigV4
     values:
-    - none of the dummy values appears in the persisted metadata JSON, the
-      `tags:` line after the log filter, the `/metadata` response or the
-      `/log` response;
+    - none of the dummy values appears in the `trigger` section of the
+      persisted metadata JSON, the `tags:` line after the log filter and the
+      `/metadata` response, or anywhere in the `/log` response;
     - each SigV4 value reads `***`, and every other byte is preserved;
     - a run recorded before the upgrade is served masked by `/metadata` and
       `/log`;
@@ -395,8 +433,11 @@ opts into the export-link join fix (owner decision D5).
     follows, with at least 10 workflow runs and at least 10 requests per
     exercised route, and no backend crash, container restart or crash-loop.
     The MIC-730 and Orin passes include the jpeg folder-source non-regression
-    check. The lab Dell checks are GATED on the owner confirming the lab Dell
-    is up. (Req 2.1-2.6; steering `builds.md`)
+    check (defined in design "Per-item device check content"; it doesn't
+    replace the jpeg spec's thor1 check). At least one auth-enabled station
+    passes the frontend export-link check (Item 3c). The lab Dell checks are
+    GATED on the owner confirming the lab Dell is up. (Req 2.1-2.7; steering
+    `builds.md`)
 15. (OWNER-gated) After the trunk merge and the trunk rescan, each of the five
     changed static-analysis findings is closed or dismissed with a recorded
     reason:
@@ -405,9 +446,18 @@ opts into the export-link join fix (owner decision D5).
     - `download_file.py:318` and `:323` (Item 3);
     - `text_generation.py:660`, with its second path at `:713` (Item 4).
 
-    The six dismissals above are applied. Items 3b and 5 have no standalone
-    finding. They're verified by Acceptance Criteria 7 and 10-12, not counted
-    among the five. (Completion criterion)
+    The six dismissals above were applied on 2026-10-15 (owner decision D4)
+    and aren't part of this criterion. Items 3b, 3c and 5 have no standalone
+    finding. They're verified by Acceptance Criteria 7, 10-12 and 16, not
+    counted among the five. (Completion criterion)
+16. (Item 3c; owner decision D5 (b)) `buildExportUrl` returns
+    `<workflows endpoint>/<workflowId>/results/export?captureIdPath=<encoded>`,
+    plus `&token=<encoded credential>` only when auth is on. For any path and
+    credential, parsing its query returns exactly the `captureIdPath` and,
+    with auth on, exactly the credential as `token` (property test). The
+    result-history download link is built only through it, and the SPA's
+    test suite and build stay green against their pre-change baseline.
+    (Req 1.7, 2.7, 3.7)
 
 ## Out of Scope
 
@@ -415,10 +465,9 @@ opts into the export-link join fix (owner decision D5).
   per-request authorization matrix. The fixes hold in both configurations and
   don't change authorization.
 - The six items left unchanged and their optional one-line hardenings.
-- The export-link join in `ResultCardContent.tsx:302`, unless the owner opts in
-  through D5. Without it, the result-history download on a station with
-  authorization or local login on still fails. Today it fails with 401; after
-  Item 3 it fails with 400 (owner memo D2).
+- Other SPA links that carry `token=`. They already join it with `&` (for
+  example `api/WorkflowAPI.ts:179`); only the result-history link changes
+  (Item 3c).
 - The access-logging route class (`endpoints/route/access_log_router.py`) and
   the shared redactor's name-matching rule. The access-log route logs the raw
   request line only for the routers built on it (`get_api_router()`,

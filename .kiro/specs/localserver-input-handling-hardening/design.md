@@ -9,18 +9,23 @@ containment check (Items 2 and 3), with the log line of a now-rejected export
 query closed alongside (Item 3b); a text-generation failure reason that returns
 raw error text on vLLM-capable images (Item 4); and the trigger payload's
 retention of presigned-URL query material across its stored, served and logged
-sinks (Item 5, an owner decision designed both ways). Each fix is local to the
-handler or helper that owns the input. Every change preserves current behavior
-except the two places called out: Item 1's 500 body, and Item 5's full form,
-which the owner gates.
+sinks (Item 5, an owner decision designed both ways). Owner decision D5 (b)
+adds one frontend change to the round: the result-history download link that
+feeds Item 3's route joins its credential correctly (Item 3c, Change 6). Each
+fix is local to the handler or helper that owns the input. Every change
+preserves current behavior except the per-item changes listed under Changes
+Required (owner memo D2). Item 5's full form, which the owner gates, is the
+only one that changes what a run reads back.
 
 The technology stack is locked and unchanged: the Python FastAPI backend
 (pydantic 2.6.4 / fastapi 0.109.2 / starlette 0.36.3 / uvicorn 0.23.2 on the
 device image; backend interpreter 3.11 on JP5/JP7/x86 and 3.10 on JP6); the
 `os.path.realpath` + strictly-below `startswith` containment idiom already used
 in the backend (`run_retention._within`); the standard library `re` for the new
-SigV4 masker; and the repo's `pytest` + `hypothesis` stack. No new dependency,
-framework or module is added, and no analyzer suppression is introduced.
+SigV4 masker; the repo's `pytest` + `hypothesis` stack; and, for Item 3c, the
+SPA's own TypeScript, jest and `fast-check` (already a `src/frontend`
+devDependency). No new dependency, framework or module is added, and no
+analyzer suppression is introduced.
 
 Items 1-4 are deterministic, local edits validated by host-run unit and
 property tests. The two containment properties also run in the device
@@ -148,8 +153,8 @@ isBugCondition(captureIdPath):
 ```
 
 The exploration test asserts both negations for the `..`-segment value: the
-mounted route answers 400, and the direct call raises 404 with no `open` of
-the target. A third assertion covers output encoding: the 404 detail for a
+mounted route answers 400, and the direct call raises 404 with no `open` call
+at all. A third assertion covers output encoding: the 404 detail for a
 missing accepted value is the fixed string, without the echoed input (`:321`).
 
 The request validator applies `pattern=` with search, not full-match
@@ -219,6 +224,28 @@ pattern, the value is rejected at validation, and this handler would log the
 credential. Item 3b masks it. The exploration test asserts that the dummy
 value is absent from both the handler's log records and the 400 body.
 
+### Item 3c — the export link (`ResultCardContent.tsx:302`; owner decision D5 (b))
+
+```
+isBugCondition(captureIdPath, token, authEnabled):
+    url = the result-history download link the SPA builds
+    q   = the parsed query of url (URLSearchParams)
+    return q.get("captureIdPath") != captureIdPath
+        or (authEnabled and q.get("token") != token)
+        or (not authEnabled and q.has("token"))
+    # unfixed, auth on: the template appends token=<credential> with no "&",
+    # so q has one captureIdPath value ending "token=<credential>" and no token
+```
+
+The link is built inline in the download mutation as
+`` `…/results/export?captureIdPath=${result.captureIdPath}${authEnabled ? `token=${encodeURIComponent(token)}` : ""}` ``.
+For the writer shape with auth off, the unencoded path parses back unchanged
+(it holds no reserved character), so the shipped auth-off download works. With
+auth on it never does. The helper doesn't exist on the unfixed tree, so the
+counterexample is recorded as an observation of the shipped template (task
+3.6). The jest tests, written before the edit and unchanged after it, assert
+the fixed helper and its use at the call site.
+
 ### Item 4 — `_failure_reason` (`text_generation.py:423-426`, sinks at `:662`, `:713`)
 
 ```
@@ -267,14 +294,14 @@ and `X-Amz-Security-Token` are masked (the `-` before the name makes
 `signature`/`token` whole tokens for the existing rule), while
 `X-Amz-Credential` and `X-Amz-Date` are not; the served run-metadata JSON and
 the stored column keep the whole URL. The payload-reference fetch path has its
-own redactor that drops the whole query (`payload_fetch.py:663-674`), but it
+own redactor that drops the whole query (`payload_fetch.py:664-674`), but it
 is used only for that path's logging, not for the metadata or `tags:` paths.
 
 ## Expected Behavior (Preservation Requirements)
 
 - P-handlers: `http_exception_handler` (`:90-95`), the request-validation
   handler's response body (`:85-87`) and the mapped domain handlers
-  (`:111-162`) are untouched. Only the uncaught-500 body (Change 1) changes,
+  (`:109-153`) are untouched. Only the uncaught-500 body (Change 1) changes,
   plus the validation handler's **log** line for a query naming a sensitive
   key (Change 3b). A secret-free query's log line is byte-identical (Req 3.1).
 - P-routes: legitimate input-image and export calls serve the same artifact
@@ -285,6 +312,9 @@ is used only for that path's logging, not for the metadata or `tags:` paths.
 - P-trigger: a context with no SigV4 value is stored, persisted, served and
   logged byte-identically under every D1 option; `{trigger.…}` resolution over
   non-signed fields and the continuous-run prefilter are unchanged (Req 3.4).
+- P-link: with auth off, the server receives the same `captureIdPath` from the
+  result-history link as today; the link targets the same route and
+  `workflowId` segment; every other SPA request is unchanged (Req 3.7).
 
 ## Hypothesized Root Cause (confirmed)
 
@@ -298,6 +328,9 @@ is used only for that path's logging, not for the metadata or `tags:` paths.
   `%3D` in the re-encoded text, and its whole-token rule on the raw text. The
   earlier unanchored pattern meant the auth-enabled download value never
   reached this handler.
+- Item 3c: the link template concatenates `token=` without a separator and
+  interpolates `captureIdPath` raw, instead of building each query value with
+  `encodeURIComponent` and `&` as `api/WorkflowAPI.ts:179` does.
 - Item 4: `_failure_reason` falls back to `str(error)` for the general case
   instead of distinguishing the `GenerationError` contract from an unexpected
   error.
@@ -313,7 +346,15 @@ is used only for that path's logging, not for the metadata or `tags:` paths.
 - **Property 2 (Item 1 preservation).** `http_exception_handler` and the
   request-validation handler produce byte-identical **response bodies** to the
   unfixed tree over a generated exception set. The uncaught handler's log
-  record keeps carrying `exc_info` for the raised exception.
+  record keeps carrying `exc_info` for the raised exception. The oracle is the
+  unfixed expressions: for `http_exception_handler`,
+  `{"message": str(exc.detail), "request_id": None}` with `exc.status_code`
+  (the handlers' `get_request_id()` outside a request, as in the
+  `--noconftest` runs); for the validation handler, the unfixed message
+  expression (`exception_handlers.py:85-87`), `str(exc)` when
+  `safe_errors == errors` and otherwise
+  `"{} validation error(s): {}".format(len(safe_errors), safe_errors)`, with
+  status 400.
 - **Property 3 (Item 2 fix + containment).** Over ids drawn from
   `st.text(alphabet=st.characters(blacklist_characters="/\x00"))` ∪
   `{".", ".."}` on a seeded temp tree, when the resolved jsonl path is not
@@ -321,7 +362,9 @@ is used only for that path's logging, not for the metadata or `tags:` paths.
   never calls `open`; when it is contained the outcome matches today's — 200
   for a readable jsonl whose `source-ref` exists, 500 with the fixed detail for
   a missing or unparseable jsonl, 404 for a missing image. A slash-free id with
-  no `..` resolves to exactly today's path. The embedded-NUL case is a separate
+  no `..` gets today's outcome. The property compares outcomes (status, detail
+  and served bytes), not path strings, because `realpath` drops a `.` segment
+  the literal path keeps. The embedded-NUL case is a separate
   explicit member (`"a\x00b"`) carrying `skipif(sys.version_info < (3, 10))`,
   not a generated id: the generator excludes `\x00` because on the host
   interpreter (3.9.5) `realpath` does not raise on a NUL, so a generated NUL id
@@ -347,6 +390,11 @@ is used only for that path's logging, not for the metadata or `tags:` paths.
   other byte, is a fixed point (a second pass writes the same mask), and
   returns a non-string unchanged. Scoped to the literal form; the
   percent-encoded and JSON-key forms are out of scope (bugfix Out of Scope).
+  A value is the maximal run of characters other than `&`, `;`, `,`, `)`,
+  `]`, `}`, `#`, a quote or whitespace. The generator draws values from
+  `[A-Za-z0-9%._~/+=-]`, each followed by one of those terminators or the end
+  of the string, and draws filler text that can't itself form a SigV4 `name=`
+  (no `x`/`X`).
 - **Property 8 (Item 5 preservation).** A context with no SigV4 value is
   returned byte-identically by `redacted_run_view` and `redact_signed_query`.
   Checked at the post-fix checkpoint (it describes the fixed helper).
@@ -365,6 +413,15 @@ is used only for that path's logging, not for the metadata or `tags:` paths.
   `route_class` keyword. So the validation handler's record is the only backend
   log line for a rejected export query, and moving the download routes onto
   `AccessLogRoute` fails this test instead of silently adding an unmasked sink.
+- **Property 10 (Item 3c fix + preservation).** For any `workflowId`,
+  `captureIdPath` and credential, `buildExportUrl` returns
+  `<workflows endpoint>/<workflowId>/results/export?…` whose parsed query
+  (`URLSearchParams`) holds exactly `captureIdPath` and, iff auth is on,
+  exactly the credential as `token`. With auth off and a writer-shape path,
+  the server receives the same `captureIdPath` as today. Generators draw full
+  Unicode strings (no lone surrogates, which `encodeURIComponent` rejects and
+  neither input can hold) and strings dense in `&`, `=`, `#`, `+`, `%`, `/`,
+  `?` and spaces.
 
 ### Properties summary table
 
@@ -379,6 +436,7 @@ is used only for that path's logging, not for the metadata or `tags:` paths.
 | 7 | 5 | fix (incl. AC11) | 2.5 | host property on `redact_signed_query` / `redacted_run_view` (task 4.1) |
 | 8 | 5 | preservation | 3.4 | host property on the fixed helper (task 4.1) |
 | 9 | 3b | fix + preservation + sink guard | 1.6, 2.6, 3.1 | host unit/property on the validation handler's log; host `ast` guard on the download router |
+| 10 | 3c | fix + preservation | 1.7, 2.7, 3.7 | jest unit + `fast-check` property on `buildExportUrl`, and a call-site check, via `src/frontend`'s `npm test` |
 
 ## Fix Implementation
 
@@ -442,9 +500,9 @@ is used only for that path's logging, not for the metadata or `tags:` paths.
   **not** surface `request_id` (no `request_id`/`requestId` use anywhere in
   `src/frontend/src`), so an operator reading the UI sees only the fixed message
   and correlates out-of-band — by reading the response JSON or by a time-window
-  search of the LocalServer log; folding the id into the fixed body text is an
-  owner option (owner memo D2.2). For Item 1, two alternatives were considered
-  and rejected:
+  search of the LocalServer log. Folding the id into the body text (owner memo
+  D2.2) is not part of this round; any opt-in is a follow-up round. For Item 1,
+  two alternatives were considered and rejected:
   - Keeping the class name and dropping only the value. Class names still
     describe internals, and the SPA shows `data.message` verbatim.
   - Returning a sanitized summary of `str(value)`. There's no bounded rule for
@@ -507,7 +565,8 @@ is used only for that path's logging, not for the metadata or `tags:` paths.
   `payload_fetch._redact` — rejected because it also discards non-signed query
   fields a metadata binding may map. The separate frontend export-link join
   (`ResultCardContent.tsx:302`, a missing `&` before the appended token) is its
-  own owner decision (DD8 below, owner memo D5).
+  own owner decision (DD8 below, owner memo D5); the owner chose (b), so it is
+  fixed in this round (Item 3c, Change 6).
 - **DD6 — Item 5 layers and the behavior change.** The run reloads the context
   from `trigger_context_json` (`pipeline_executor.py:1559-1561`) and the
   Bedrock reference-image path fetches a URL resolved from `payload_json`
@@ -548,12 +607,16 @@ is used only for that path's logging, not for the metadata or `tags:` paths.
     the download router, so the change would alter no outcome for this item,
     while changing the access log of every route built on it.
 
-  The frontend join (`ResultCardContent.tsx:302`) stays a separate owner
-  option (owner memo D5). It repairs the auth-enabled download itself, and
-  the properly joined `&token=` form is one the shared redactor already masks
-  (confirmed offline). Item 3b doesn't depend on it. A frontend fix rides the
-  same per-arch component build, because both images are built every round
-  (`build-custom.sh:208`). It adds a frontend device check, not a build round.
+  The frontend join (`ResultCardContent.tsx:302`) is fixed in this round
+  under owner decision D5 (b) (Item 3c, Change 6). It repairs the
+  auth-enabled download itself, and the properly joined `&token=` form is one
+  the shared redactor already masks (confirmed offline). Item 3b doesn't
+  depend on it: a client that still sends the mis-joined value is rejected at
+  validation, and its query is withheld from the log. The frontend fix rides
+  the same per-arch component build, because both images are built every
+  round (`build-custom.sh:208`/`:211-214`: both branches build react-webapp,
+  and the frontend service has no profile). It adds a frontend device check,
+  not a build round.
 
 ### Changes Required
 
@@ -575,7 +638,7 @@ return JSONResponse(
 
 Nothing else in the module changes except Change 3b. `http_exception_handler`
 (`:90-95`), the request-validation handler's **body**, and the mapped domain
-handlers (`:111-162`) are untouched.
+handlers (`:109-153`) are untouched.
 
 - Behavior change / customer impact: the 500 **body** `message` is the fixed
   string plus the existing `request_id`; it no longer carries the exception
@@ -587,8 +650,8 @@ handlers (`:111-162`) are untouched.
   `request_id` (it appears nowhere in `src/frontend/src`), so after this change
   an operator sees the fixed message with no in-UI correlation handle;
   correlation is by the response JSON's `request_id` or a time-window log
-  search (owner memo D2.2 offers folding the id into the fixed text as an
-  option).
+  search. Folding the id into the body (owner memo D2.2) is not part of this
+  round; any opt-in is a follow-up round.
 - Affected images: all backend images (JP5, JP6, JP7, x86 CPU, x86 NVIDIA);
   backend only.
 
@@ -700,8 +763,10 @@ filesystem-layer defense behind it and the symlink guard. (`base` is from the
   `DDA_SYSTEM_FOLDER`, GET consumes it) is unchanged. The one caller affected is
   the result-history download on a station with authorization or local login
   on: today that mis-joined value is accepted and the route answers 401; after
-  this change it is rejected with 400. The owner may also fix the join (owner
-  memo D5).
+  this change it is rejected with 400. Change 6 (owner decision D5 (b)) fixes
+  the link in the same build, so the shipped SPA sends a well-formed query
+  and that download works again; only a client that still sends the
+  mis-joined value gets the 400.
 - Affected images: all backend images; backend only.
 
 #### Change 3b — mask the validation handler's query log (Item 3b)
@@ -765,9 +830,12 @@ independently-adoptable, independently-revertable layers.
 
 New helpers, standard-library only, in
 `src/backend/workflow_engine/trigger_runtime.py` beside
-`serialize_trigger_context`. `pipeline_executor` and `api` import them with a
-new `from workflow_engine.trigger_runtime import redact_signed_query,
-redacted_run_view`. `trigger_runtime`'s module-level imports are stdlib-only
+`serialize_trigger_context`. `pipeline_executor` adds
+`from workflow_engine.trigger_runtime import redacted_run_view`, and `api`
+adds `from workflow_engine.trigger_runtime import redact_signed_query,
+redacted_run_view`. Each module imports only the names it uses, so no unused
+import is added for a code-quality rule to flag. `trigger_runtime`'s
+module-level imports are stdlib-only
 (`heapq`, `json`, `logging`, `os`, `threading`, `time`,
 `concurrent.futures`, `dataclasses`, `typing`), so importing it from
 `pipeline_executor` and `api` adds no import cycle (confirmed by reading its
@@ -778,7 +846,7 @@ import re
 
 _SIGV4_PARAM_RE = re.compile(
     r"(?i)(X-Amz-(?:Algorithm|Credential|Date|Expires|SignedHeaders|Signature|Security-Token))"
-    r"(=)([^&\"'\s]+)"
+    r"(=)([^&;,)\]}#\"'\s]+)"
 )
 _MASK = "***"
 
@@ -825,9 +893,12 @@ input (the seeded `tag_values["trigger"]` is the run's live context,
 D1 (b1)).** Four edits:
 - `_persist_run_metadata` (`pipeline_executor.py:3123-3148`): dump
   `redacted_run_view(tag_values or {})` instead of `tag_values or {}` at
-  `:3147`. Covers both call sites (`:2355`, `:2370`).
-- The `tags:` log (`pipeline_executor.py:2371-2375`): pass
-  `redacted_run_view(tag_values)` as the logged argument.
+  `:3147` (the view is computed before the file is opened). Covers both call
+  sites (`:2355`, `:2370`).
+- The `tags:` log (`pipeline_executor.py:2371-2375`): compute
+  `logged_tags = redacted_run_view(tag_values)` inside
+  `try/except RecursionError`. On `RecursionError` use the fixed placeholder
+  `"<tags withheld: too deeply nested to mask>"`. Log `logged_tags`.
 - `get_workflow_execution_metadata` (`workflow_engine/api.py:543-561`): return
   `redacted_run_view(run_artifacts.read_run_metadata(...))`, so runs recorded
   before the upgrade are also served masked.
@@ -887,10 +958,43 @@ D1 (b1)).** Four edits:
   value.
 - Affected images: all backend images; backend only.
 
+#### Change 6 — the result-history export link (Item 3c, owner decision D5 (b))
+
+**File**: `src/frontend/src/components/result-history/utils.ts`. Add one pure
+helper beside `getResultHistoryFilterParams`:
+
+```ts
+export const buildExportUrl = ({
+  workflowsEndpoint,
+  workflowId,
+  captureIdPath,
+  authEnabled,
+  token,
+}: ExportUrlParams): string => {
+  const url = `${workflowsEndpoint}/${workflowId}/results/export?captureIdPath=${encodeURIComponent(captureIdPath)}`;
+  return authEnabled ? `${url}&token=${encodeURIComponent(token)}` : url;
+};
+```
+
+**File**: `src/frontend/src/components/result-history/ResultCardContent.tsx`
+(`:302`). Build the download link with it:
+`link.href = buildExportUrl({ workflowsEndpoint: APIList.workflows, workflowId, captureIdPath: result.captureIdPath, authEnabled, token });`.
+Nothing else in the SPA changes, and no dependency is added. The `workflowId`
+segment stays as today (unencoded), so the route and its path are unchanged.
+
+- Behavior change / customer impact: on a station with authorization or
+  local login on, the result-history download works again (today 401; after
+  Item 3 alone, 400). With auth off the link's `captureIdPath` is
+  percent-encoded, which the server decodes to the same value, so the
+  download is unchanged.
+- Affected images: the react-webapp image on every architecture. It is built
+  every round (`build-custom.sh:208`/`:211-214`), so this adds a frontend
+  device check (task 8), not a build round.
+
 ### Not changed
 
 - `http_exception_handler`, the request-validation handler's **body** and the
-  mapped domain handlers (`exception_handlers.py:90-162`), beyond Change 1's
+  mapped domain handlers (`exception_handlers.py:90-153`), beyond Change 1's
   `:103`/`:107` and Change 3b's log line.
 - The input-image route's final "image not found" 404 (`download_file.py:137-140`).
   It names the two requested path segments and carries no error text or
@@ -906,6 +1010,9 @@ D1 (b1)).** Four edits:
 - `src/backend/workflow_engine/vendor/workflow_core/stream_url.py` and the
   shared `RedactingFilter` (Item 5 uses a scoped helper, DD5).
 - The vLLM runtime companion server (`vllm_runtime/server.py`), loopback only.
+- Every SPA request other than the result-history download link (Change 6),
+  including the other links that already join `&token=`
+  (`api/WorkflowAPI.ts:179`).
 - `.kiro/specs/security-scan-remediation-high/requirements.md` (pinned).
 
 ## Error Handling
@@ -934,15 +1041,35 @@ D1 (b1)).** Four edits:
   `exc_info` and returns the fixed string (recoverable per request — the
   502/SSE is still returned). No exception escapes the helper.
 - **Change 5 (`redact_signed_query` / `redacted_run_view` / `_redact_leaves`).**
-  Total: a non-string or no-match returns unchanged; the regex substitution
-  can't raise on a `str`; `_redact_leaves` only recurses into dict/list/tuple
-  and returns any other leaf unchanged. The Layer A edits sit inside
-  `_persist_run_metadata`'s existing best-effort containment (a failure there is
-  already logged and swallowed and never changes run status) and the two serve
-  routes' best-effort reads. Layer B keeps `serialize_trigger_context`'s
-  existing non-JSON-native-degrades-to-string behavior, with the stringified
-  form additionally passed through `redact_signed_query` by the `default`
-  callable, so the degrade path masks rather than leaks a signed value.
+  `redact_signed_query` is total: a non-string or no-match returns unchanged,
+  and the regex substitution can't raise on a `str`. `_redact_leaves` only
+  recurses into dict/list/tuple and returns any other leaf unchanged, but it
+  recurses one frame per nesting level (plus a comprehension frame on
+  3.10/3.11), so a context nested deeper than the recursion limit allows
+  raises `RecursionError`. Only pathological nesting reaches this, and each
+  sink bounds it:
+  - At the `tags:` call site, which runs after the run is committed COMPLETED
+    and inside the `try` whose `except` marks the run failed, it's caught and
+    the line carries the placeholder
+    `"<tags withheld: too deeply nested to mask>"`. The run status is
+    unaffected.
+  - In `_persist_run_metadata`, the view is computed before the file is
+    opened, inside the existing best-effort containment (a failure there is
+    already logged and swallowed and never changes run status). That run gets
+    no metadata JSON, and an error is logged.
+  - At `/metadata`, it reaches the global handler (Change 1's fixed 500).
+
+  The `/log` route passes `read_run_log`'s best-effort text through
+  `redact_signed_query`, which is total. Layer B keeps
+  `serialize_trigger_context`'s existing non-JSON-native-degrades-to-string
+  behavior, with the stringified form additionally passed through
+  `redact_signed_query` by the `default` callable, so the degrade path masks
+  rather than leaks a signed value.
+- **Change 6 (export link).** `encodeURIComponent` throws `URIError` only on a
+  lone surrogate, which neither the server-written `captureIdPath` (ASCII) nor
+  a server-issued credential holds. Any throw inside the download mutation
+  reaches its existing `onError`, which shows "Failed to download images.", as
+  any other failure there does today.
 
 ## Validation Rules
 
@@ -965,6 +1092,10 @@ D1 (b1)).** Four edits:
   the message bytes. `redact_signed_query` accepts any value and is total; no
   size or type limit is added (payload size is bounded upstream by the
   broker/IPC path, unchanged).
+- **The export link (Item 3c).** Built only by `buildExportUrl`.
+  `captureIdPath` and the credential are each percent-encoded with
+  `encodeURIComponent`, and the credential is joined as `&token=` only when
+  auth is on. The server-side rules above still apply to what arrives.
 
 ## Invariant Ownership
 
@@ -988,6 +1119,10 @@ D1 (b1)).** Four edits:
   stays off the access-logging route class. A structural guard test owns that
   (Property 9), because it's a registration choice in `download_file.py`, not
   logic the handler can enforce.
+- **"The export link carries the path and the credential as two encoded
+  query parameters"** — owned by `buildExportUrl` (Item 3c), the one place
+  the result-history download link is built; a call-site check in its tests
+  keeps `ResultCardContent.tsx` on it.
 - **"Signed query material is not served, persisted or logged"** — owned, if
   adopted, at the serve/log boundaries (Layer A: `_persist_run_metadata`, the
   `/metadata` and `/log` routes, the `tags:` log) and, under (b2), the persist
@@ -1033,6 +1168,9 @@ D1 (b1)).** Four edits:
   value inside its string form is still masked rather than stored raw.
 - Fixed point (Item 5): a payload already carrying `...=***` is re-matched and
   the same `***` is written, so a second pass is identical.
+- A credential or path holding `&`, `=`, `#`, `+`, `%` or a space (Item 3c):
+  `encodeURIComponent` encodes each of them, so the value arrives intact as its
+  own parameter (`+` is sent as `%2B`, never read back as a space).
 
 ## Testing Strategy
 
@@ -1076,7 +1214,7 @@ modules.
 No local image carries this tree's pinned backend stack on 3.10. The JP6 3.10
 NUL semantics are covered two ways: a stdlib-only probe, in which
 `os.path.realpath` raised `ValueError` on an embedded NUL under a local
-3.10.12, and the Orin device check. If a local JP6 backend image (Python
+3.10.12, and the Orin device check (Item 2's `a%00b` request, task 8). If a local JP6 backend image (Python
 3.10) with the same pins is available at task time, run the two containment
 modules there too and record it. The explicit `a\x00b` NUL member carries
 `skipif(sys.version_info < (3, 10))`; the Property 3/4 generators exclude
@@ -1124,7 +1262,8 @@ the bug-present condition, and `¬C` inputs are in task 2.
     unanchored pattern accepts. PASSES after the anchor.)
   - (containment) Call the function directly, bypassing the validator, with
     `<tmp>/aws_dda/system/capture-id-path-2025-01-01-00-00-00/../../../target.json`.
-    Assert `HTTPException` 404 and no recorded `open` of the target. (FAILS
+    Assert `HTTPException` 404 and no recorded `open` call at all (the unfixed
+    route opens the `..`/symlink path string, not the target's). (FAILS
     unfixed: it opens. PASSES after the fix.)
   - (output encoding) For a missing accepted value, assert the 404 detail is
     exactly `"The server can't get the capture id file. Check the path and try again."`.
@@ -1172,7 +1311,9 @@ assertion, the observed unfixed value, and the opened path. Also record the
 The task-1 tests, unchanged, now PASS. The property variants (Properties 1, 3,
 4, 5 and 9) run here (authored in task 1), plus the helper-level Properties 7
 and 8 and the serve-time masking cases authored in task 4.1/4.2. Under (b2),
-the Layer B case added in task 4.3 also runs.
+the Layer B case added in task 4.3 also runs. Item 3c's jest tests (Property
+10) run with the SPA's full suite and build, compared with the frontend
+baseline taken in task 3.6.
 
 ### Preservation checking (task 2: PASSES on the unfixed tree, frozen, still PASSES after the fix)
 
@@ -1205,6 +1346,11 @@ These are the `¬C` cases, observed on the unfixed tree and frozen.
 
 ### Unit and property tests (added, repo styles)
 
+Every new property carries `@settings(max_examples=50, deadline=None)`: the
+host and container runs use `--noconftest`, which drops the suites'
+hypothesis profiles, and the TestClient-driven Properties 4 and 9 would
+otherwise hit the 200 ms default deadline.
+
 - Item 1: the `TestUncaughtExceptionBody` class in
   `test/backend-test/stream_ingest/test_log_redaction.py`. Property 1 draws
   exceptions from
@@ -1230,7 +1376,7 @@ These are the `¬C` cases, observed on the unfixed tree and frozen.
   authoritative run is the device container. This module also holds the AC5
   **symlink** case: make `<tmp>/aws_dda/system/capture-id-path-<ts>` a symlink
   to a `target.json` outside `<tmp>/aws_dda/system`, call the function directly,
-  and assert 404 with no `open` of the target — the only way Item 3's
+  and assert 404 with no recorded `open` call at all — the only way Item 3's
   containment branch is reachable after anchoring (any non-symlink `..`-segment
   value is a 400). Any additions to the full-app
   `api-endpoints/test_inference_result_api.py` run in the device container only.
@@ -1245,6 +1391,15 @@ These are the `¬C` cases, observed on the unfixed tree and frozen.
     module is never imported on the host.
 
   Runs on the host.
+- Item 3c: `src/frontend/src/components/result-history/utils.test.ts`, run
+  by the SPA's own `npm test` (jest). It holds unit cases for auth on and off
+  with the writer-shape path and a credential holding reserved characters;
+  Property 10 as a `fast-check` property (already a `src/frontend`
+  devDependency) that parses the built URL with `new URL(…).searchParams`; and
+  a call-site check that reads `ResultCardContent.tsx` and asserts the
+  download link is built through `buildExportUrl`, with the mis-joined
+  template gone. It is written before the edit and run on the unfixed tree
+  (it fails there: no helper, and the template is present).
 - Item 4: `test/backend-test/text_generation/test_failure_reason.py`
   (direct import). Property 5 as above; a unit case pins the 502 and SSE bodies
   for a `GenerationError` via a minimal app + `TestClient`, as in
@@ -1286,9 +1441,10 @@ Per-file run location is recorded in tasks.md and `verification-notes.md`
 
 Unit/property (host or device container): all function-level fixes, the
 pattern/containment predicates, the redaction helpers, and the two serve
-routes' masking via lifted functions. Integration (OWNER-gated, on device): the
-full route round-trips, the vLLM 502/SSE on JP6/JP7, and the trigger-payload
-persist/serve/log on a real run. The design is testable at the function level
+routes' masking via lifted functions, plus the export-link helper (jest).
+Integration (OWNER-gated, on device): the full route round-trips, the vLLM
+502/SSE on JP6/JP7, the trigger-payload persist/serve/log on a real run, and
+the result-history download on an auth-enabled station. The design is testable at the function level
 because each fix is local to one handler/helper; nothing needs a full pipeline
 to validate the input-handling decision. A design note: the full-app
 `api-endpoints/*` suites don't collect on the development host (they need the
@@ -1305,18 +1461,21 @@ modules, and the full-app additions run in the device container.
 | 3b (validation log) | yes | yes | yes | yes | yes | yes | backend |
 | 4 (failure-reason) | no* | yes | yes | no | no | no | backend |
 | 5 (trigger payload) | yes | yes | yes | yes | yes | yes | backend |
+| 3c (export link) | yes | yes | yes | yes | yes | yes | frontend (react-webapp) |
 
 \* JP5 defaults to `VLLM_ENABLE=0`, so the text-generation router is not
 registered and Item 4 has no runtime effect there (a flag-enabled JP5 vLLM
-build would include it). The generic arm64 CPU image installs no vLLM wheel. No
-frontend (react-webapp) change is required by any item; the two frontend
-image-source cases are dismissed (bugfix), and the optional export-link join
-(owner memo D5) would ride the same component builds (both images are built every round,
-`build-custom.sh:208`), adding a frontend device check, not a build round.
+build would include it). The generic arm64 CPU image installs no vLLM wheel.
+Items 1-5 need no frontend change, and the two frontend image-source cases are
+dismissed (bugfix). Item 3c (owner decision D5 (b)) is the one frontend change;
+it rides the same component builds (both images are built every round,
+`build-custom.sh:208`/`:211-214`) and adds a frontend device check, not a
+build round.
 
 ## Build Rounds and Sequencing
 
-All items are backend device code, so they share one LocalServer build per
+Items 1-5 are backend device code and Item 3c is in the react-webapp image
+that every build produces, so they share one LocalServer build per
 architecture. The recommendation is to batch this round with the pending jpeg
 round, so a single build per arch produces an image carrying both fixes and one
 on-device pass per device verifies both.
@@ -1358,19 +1517,20 @@ mechanics follow from the two branches both touching `pipeline_executor.py`:
   recomputing **every** pinned entry from the merged tree
   (`sha256sum` each path), not by taking either side — taking this spec's side
   would drop jpeg's `nodes.py` value and vice-versa.
-- **Layer A's new import is placed so it can't collide with jpeg's.** Layer A
-  (and `api.py`) add `from workflow_engine.trigger_runtime import
-  redact_signed_query, redacted_run_view`. jpeg inserts its own import block in
-  `pipeline_executor.py` right after `from workflow_engine.run_log import
-  RunLogCapture` (`:129`). To keep the two import edits non-overlapping, this
-  spec adds its `trigger_runtime` import to the **existing**
-  `from workflow_engine import …` grouping near `:88` (or imports it lazily
-  inside the two functions); it is not inserted at `:129`. The "hunks don't
-  overlap" claim covers the function-body hunks and this import placement.
+- **Layer A's new import is placed so it can't collide with jpeg's.**
+  `pipeline_executor` adds `from workflow_engine.trigger_runtime import
+  redacted_run_view`, and `api.py` adds `from workflow_engine.trigger_runtime
+  import redact_signed_query, redacted_run_view`; each module imports only the
+  names it uses, so no unused import is added for a code-quality rule to flag.
+  jpeg inserts its own import block in `pipeline_executor.py` right after
+  `from workflow_engine.run_log import RunLogCapture` (`:129`). To keep the two
+  import edits non-overlapping, this spec adds its `trigger_runtime` import to
+  the **existing** `from workflow_engine import …` grouping near `:88`; it is
+  not inserted at `:129`. The "hunks don't overlap" claim covers the
+  function-body hunks and this import placement.
 
-Recommended sequencing (strictly one variant at a time per server, per
-steering; the owner triggers builds from the Portal, which builds any
-`source_ref`):
+Recommended sequencing (strictly one variant at a time, per steering; the
+owner triggers builds from the Portal, which builds any `source_ref`):
 
 1. Bring `spec/jpeg-folder-source-decode` up to the trunk tip (merge trunk in;
    never rebase/force), per that spec's task 6, and re-run its local suites.
@@ -1387,7 +1547,11 @@ steering; the owner triggers builds from the Portal, which builds any
    built-image check (its task 7) runs on the `amd64`, `amd64Nvidia`, `arm64`
    and `arm64JP7` builds. The hardening fixes add the JP5/JP6 builds and share
    amd64/amd64Nvidia/JP7. Record the build-source change (owner memo D3) in
-   jpeg's `verification-notes.md` "Task 6".
+   jpeg's `verification-notes.md` "Task 6". Perform jpeg task 7's per-build
+   duties in full on these builds: confirm from the amd64 build log that the
+   image is Ubuntu 22.04 with GStreamer 1.20.3; record the first
+   amd64/amd64Nvidia/arm64 versions that contain C3/C3b (for jpeg task 10);
+   and run the offline built-image check above.
 5. Verify both fixes in one on-device pass per device (jpeg's checks plus this
    spec's).
 6. **Trunk merge, gated on both specs' hardware gates (task 10).** Merge
@@ -1397,7 +1561,7 @@ steering; the owner triggers builds from the Portal, which builds any
    spec's own trunk-merge precondition — its task 8 (lab Dell, amd64) and task
    8b (thor1) have passed. Reason: the combined ref carries jpeg's Ubuntu-22.04
    (x86/arm64-CPU) device fix, whose primary hardware check is jpeg task 8 on
-   the lab Dell; merging on this spec's task-8 alone (which accepts a Dell
+   the lab Dell; merging on this spec's task-8 alone (which accepts a lab Dell
    built-only disposition) would land that fix on the trunk unverified, against
    jpeg task 11 and the steering's rule that on-device code reaches the trunk
    only after real-hardware verification.
@@ -1407,15 +1571,17 @@ steering; the owner triggers builds from the Portal, which builds any
      trunk — this spec's fixes were verified on MIC-730/Orin/thor1 in the
      combined images, with amd64/amd64Nvidia left owner-recorded built-only —
      and leave jpeg to its own task 11. Record that the trunk tree then differs
-     from the built (combined) tree by jpeg's files.
+     from the built (combined) tree by jpeg's files. Merge with the same
+     pattern (into `remediation`, fast-forward `integration/all-specs`, then
+     merge to `main`). jpeg's later trunk merge then meets the same CSI golden
+     conflict and recomputes every pinned entry from its merged tree.
    - **When both hold**, this one merge also performs jpeg's task 11: record it
      in jpeg's `verification-notes.md`; carry jpeg task 11's PR note (any
      ComputeStack deploy from the trunk now publishes C1 with C1b); use jpeg's
      trunk-merge pattern (merge into `remediation`, then fast-forward
      `integration/all-specs`), then also merge to `main` (the owner's
-     instruction for this spec); and fast-forward `remediation` to
-     `integration/all-specs` — or record that it is left behind. See task 10 for
-     the exact precondition and the failure path.
+     instruction for this spec). See task 10 for the exact precondition and the
+     failure path.
 
 Keeping the branches separate would need a second build round per architecture.
 A change to the D1 answer after task 7 starts would need another build round
@@ -1435,23 +1601,32 @@ items end-to-end, then soak at least 30 minutes with at least 10 workflow runs
 and at least 10 requests per exercised route, confirming no crash, container
 restart or crash-loop. Device mapping:
 
-- **arm64JP5 → MIC-730**: Items 1, 2, 3, 3b, 5, plus the jpeg folder-source
-  non-regression check. (Item 4 n/a unless a vLLM-enabled JP5 build.)
-- **arm64JP6 → Orin**: Items 1, 2, 3, 3b, 4, 5, plus the jpeg folder-source
-  non-regression check (and confirm the PNG staging path still runs).
-- **arm64JP7 → thor1**: Items 1, 2, 3, 3b, 4, 5 (shares the jpeg spec's task 8b
-  thor1 verification build).
-- **amd64 → the lab Dell**: Items 1, 2, 3, 3b, 5. **GATED** on the owner
+- **arm64JP5 → MIC-730**: Items 1, 2, 3, 3b, 3c, 5, plus the jpeg
+  folder-source non-regression check (Per-item device check content). (Item 4
+  n/a unless a vLLM-enabled JP5 build.)
+- **arm64JP6 → Orin**: Items 1, 2, 3, 3b, 3c, 4, 5, plus the jpeg
+  folder-source non-regression check (Per-item device check content; it also
+  confirms the PNG staging path still runs).
+- **arm64JP7 → thor1**: Items 1, 2, 3, 3b, 3c, 4, 5 (shares the jpeg spec's
+  task 8b thor1 verification build).
+- **amd64 → the lab Dell**: Items 1, 2, 3, 3b, 3c, 5. **GATED** on the owner
   confirming the lab Dell is up (offline for a GPU upgrade).
-- **amd64Nvidia → the lab Dell (nvidia profile)**: Items 1, 2, 3, 3b, 5.
+- **amd64Nvidia → the lab Dell (nvidia profile)**: Items 1, 2, 3, 3b, 3c, 5.
   **GATED** on the lab Dell being up and switched; otherwise recorded
-  built-only. (Item 4 n/a: no vLLM wheel.)
+  built-only. (Item 4 n/a: no vLLM wheel.) jpeg task 9's preconditions apply:
+  switch the lab Dell to amd64Nvidia only after jpeg task 8 passes on amd64;
+  don't re-run station quick setup; the image's Volta (sm_70) support is
+  UNVERIFIED (jpeg task 9's open item).
 - **arm64 (generic CPU) → no lab device**: built-only; record the offline image
   check. (Item 4 n/a: no vLLM wheel.)
 
 Per-item device check content (dummy values only; record only masked output
 for Item 5). Each check names a deterministic inducer so it can't pass
-vacuously:
+vacuously. On an auth-enabled station every check's requests carry a valid
+credential: `token=<valid>` on the download routes (Items 1, 2, 3) and the
+bearer header on the API routes (Item 4's generate routes, Item 5's
+`/metadata` and `/log`). Item 3b's request carries only the mis-joined dummy
+value, which validation rejects first.
 - Item 1: use the deterministic inducer — write a non-JSON scratch file
   `/aws_dda/system/capture-id-path-2000-01-01-00-00-00` (exactly the writer
   shape, so it passes the anchored pattern and the containment check), then
@@ -1475,9 +1650,28 @@ vacuously:
   and httpx 0.28 all rewrite `/../` out of the path), so it would hit the route
   with `workflowId` already resolved and never exercise the guard — use the
   `%2E%2E` form, which reaches the route as `workflowId == ".."` (confirmed
-  offline against the backend stack). Remove the seed; backend healthy.
+  offline against the backend stack). Then send
+  `GET /workflows/<scratch-wf>/capture-details/a%00b/input-image` and expect
+  404 with `message` exactly `"Server cannot find the input image path."` and
+  a healthy backend. The current build answers it with a 500 whose detail
+  carries the NUL error. The server decodes `%00` before routing, so the route
+  sees `captureId == "a\x00b"`. On the Orin (Python 3.10) this is the device
+  evidence for AC4's 3.10 clause. If a device rejects the NUL before the route
+  (at the router or the database lookup), record that outcome. Then reword
+  AC4's NUL bullet and the three "Orin check" claims (Testing Strategy, task 5,
+  verification-notes Task 5) to "3.10 covered by the stdlib probe only".
+  Remove the seed; backend healthy.
 - Item 3: POST then GET export with the server-returned `captureIdPath` → zip; a
   value with an appended `/../` → 400 at validation; backend healthy.
+- Item 3c (frontend, owner decision D5 (b)): in the device SPA, open a
+  workflow's result history, select a few results and choose Download
+  results; expect the zip. With auth off, the link carries
+  `captureIdPath=%2Faws_dda%2Fsystem%2Fcapture-id-path-<ts>` and no `token`.
+  On at least one auth-enabled station (station authorization or local login
+  on), the same download succeeds (the current build fails it with 401), the
+  link carries `&token=` as its own parameter (record the shape only, never
+  the credential), and `application.log` has no validation-handler record for
+  that request. Backend healthy.
 - Item 3b: send one request with a mis-joined dummy credential,
   `GET /workflows/<wf>/results/export?captureIdPath=/aws_dda/system/capture-id-path-2025-01-01-00-00-00token=DUMMYTOKEN`.
   Expect 400 with no dummy value in the body. Then check the backend's logs:
@@ -1493,9 +1687,17 @@ vacuously:
   routes aren't access-logged (Bug Details, Item 3b). If step 2 finds the
   dummy value in an access-log line, record it and stop: the route has gained
   a sink this spec doesn't cover. Don't narrow the check.
-- Item 4 (JP6/JP7): confirm a `GenerationError` still returns its reason in the
-  502/SSE, using a **truncated JPEG** (a valid header with cut-off data) as the
-  deterministic inducer: it raises `GenerationError("failed to decode the
+- Item 4 (JP6/JP7): with a multimodal model READY (a text-only model ignores
+  the image with a warning and answers 200), POST
+  `/text-generation/<model>/generate` and
+  `/text-generation/<model>/generate-stream` with
+  `{"prompt": "…", "image": "<base64 of a JPEG cut after its header>"}`;
+  expect a 502 whose `reason` starts with
+  `"failed to decode the supplied image bytes:"`, and exactly one SSE
+  `{"error": {"reason": …}}` event. This confirms a `GenerationError` still
+  returns its reason in the 502/SSE, using a **truncated JPEG** (a valid header
+  with cut-off data) as the deterministic inducer: it raises
+  `GenerationError("failed to decode the
   supplied image bytes: …")` in the manager (`manager.py:1972-1979`) without
   touching engine state. Do **not** induce an out-of-memory reason: that path
   can mark the model FAILED (`manager.py:1805-1806`) and disturb the soak. The
@@ -1516,6 +1718,24 @@ vacuously:
      whether any signed value the run reads back is affected (the accepted
      change): a fetch, a metadata binding or a `{trigger.…}` placeholder.
      Backend healthy.
+- jpeg folder-source non-regression (MIC-730, Orin). The combined images carry
+  the jpeg fix's C3/C3b executor code and its C4 builder code on JP5 and JP6,
+  which the jpeg spec doesn't otherwise rebuild, so these two passes are that
+  code's hardware evidence there:
+  1. a `folder_source` → `capture` workflow over a scratch folder of at least
+     3 JPEGs completes for each image, and the images are consumed;
+  2. a non-bridged mixed flow (`folder_source` first, plus
+     `custom_python_source` → `capture`) completes, and its logged launch
+     string keeps the file segment first;
+  3. neither the `Pinned jpegdec …` nor the `Moved the Frame_Feed segment …`
+     INFO line appears in either run's `run.log` (Jetson arches are
+     unconstrained);
+  4. on the Orin only, the folder run decodes a staged `.dda_decoded.png` (the
+     `pngdec` chain, jpeg design D9) rather than `jpegdec`, and both files are
+     consumed after the run.
+
+  Record the results in both specs' notes. This check doesn't replace jpeg
+  task 8b (thor1).
 
 ## Rollback Considerations
 
@@ -1523,9 +1743,14 @@ Each change is a self-contained function/constant edit plus its tests. To keep
 rollback granular (and to match the preservation rebaseline, which only applies
 under Item 5), the commit split in tasks.md is: Changes 1 + 3b (the handler
 file); Change 2; Change 3 (the constant + the export route); Change 4; Layer A;
-Layer B — each with its own baseline update where one applies. Only Layer A and
-Layer B touch the hash-pinned `pipeline_executor.py`, so only their commits
-carry the CSI golden rebaseline; a revert of either restores the prior hash. No
+Layer B; and Change 6 (the frontend export link, owner decision D5 (b)) — each
+with its own baseline update where one applies. Each commit carries its item's
+task-1/2 tests and properties; the 4.1 helper and its tests ride commit (v),
+and Change 6's jest tests ride its own commit. Only Layer A touches the
+hash-pinned `pipeline_executor.py` (Layer B edits only `trigger_runtime.py`),
+so only its commit carries the CSI golden rebaseline; reverting it restores
+the prior hash. Change 6 touches only the frontend and reverts on its own; a
+revert brings back the mis-joined link, which Item 3 then answers with 400. No
 schema or data migration is involved (the `trigger_context_json` column shape is
 unchanged; Layer B masks only the string content of new rows).
 
@@ -1618,8 +1843,8 @@ Layer B and device-request semantics were re-confirmed offline (dummy values).
 - **H1 (trunk-merge gating).** Addressed. The combined ref is merged to the
   trunk (task 10 / Build Rounds step 6) only after BOTH this spec's task 8 and
   the jpeg spec's own trunk-merge precondition (jpeg task 8 on the lab Dell and
-  task 8b on thor1) pass. If the jpeg precondition can't be met (the Dell is
-  down), the owner either waits or merges `spec/localserver-input-handling`
+  task 8b on thor1) pass. If the jpeg precondition can't be met (the lab Dell
+  is down), the owner either waits or merges `spec/localserver-input-handling`
   alone and leaves jpeg to its own task 11, recording that the trunk tree then
   differs from the built tree by jpeg's files. When both hold, the one merge
   also performs jpeg's task 11 (record it in jpeg's notes, carry its PR note,
@@ -1678,3 +1903,53 @@ Layer B and device-request semantics were re-confirmed offline (dummy values).
   use `.invalid`), L10 (`mqtt.cpp:51` dismissal justification repeated;
   "traversal" reworded to "a `..`-segment value") are all addressed in the
   sections above.
+
+The responses below cover iteration 4 (verdict CHANGES_REQUESTED: 0 HIGH, 3
+MEDIUM, 10 LOW). They were applied at the start of implementation, after the
+owner's answers of 2026-10-15 (D1 (b1); D2 accepted with no D2.2 fold; D3
+batch; D4 dismiss the six now; D5 (b)). Their code and test parts land with
+tasks 3-5.
+
+- **M1 (AC4's 3.10 NUL clause).** Item 2's device check now also sends
+  `GET /workflows/<scratch-wf>/capture-details/a%00b/input-image` and expects
+  the route's own 404 body. Task 8 and verification-notes Task 8 carry it,
+  with the rewording rule if a device rejects the NUL before the route.
+- **M2 (jpeg folder-source non-regression).** Defined in "Per-item device
+  check content" with four sub-checks and pointed to from the arm64JP5 and
+  arm64JP6 bullets, task 8 and AC14. Task 7 step (1) adds the same definition
+  to jpeg's notes in the merge-up commit; it doesn't replace jpeg task 8b.
+- **M3 (owner options with no implementation path).** Resolved by the owner's
+  answers: fix (i) for D5, because the owner chose (b), so Item 3c / Change 6
+  / task 3.6 are unconditional and task 8 gains a frontend device check on an
+  auth-enabled station; and fix (ii) for D2.2, so the fold option is not part
+  of this round (DD3, Change 1) and any opt-in is a follow-up round. Task 9
+  records D1, D2.2, D3 and D5.
+- **L1 (SigV4 value class).** The value ends at the shared redactor's
+  terminators plus `#` (`[^&;,)\]}#"'\s]+`); Property 7 and bugfix 2.5 (b1)
+  define the value the same way.
+- **L2 (`tags:` call site).** The `tags:` argument is computed inside
+  `try/except RecursionError` with a fixed placeholder; Error Handling states
+  the bound per sink, and task 4.2 adds a test for the guard.
+- **L3 (test definitions).** `@settings(max_examples=50, deadline=None)` on new
+  properties; Property 2's oracle; Property 3 compares outcomes; Item 3 (b)/(d)
+  assert no `open` call at all; task 2 names the Item 5 file; the D1 (a) xfail
+  is the one sanctioned post-freeze edit; each commit carries its item's tests.
+- **L4 (device preconditions).** Item 4 needs a READY multimodal model and
+  states the request; the auth-enabled credential sentence covers Items 1-5.
+- **L5 (jpeg cross-spec mechanics).** jpeg task 7's per-build duties, jpeg task
+  9's amd64Nvidia preconditions, the dropped redundant fast-forward clause, and
+  fallback (b)'s merge pattern with the CSI recompute note.
+- **L6 (task-7 pushes).** Task 7 authorizes the two pushes only after the
+  hygiene check over both diffs and the owner's go, merge commits only.
+- **L7 (inconsistencies).** Overview, Rollback and tasks Notes reworded ("Only
+  Layer A touches `pipeline_executor.py`"); the dismissal timing matches the
+  D4 answer (dismissed on 2026-10-15; task 11 handles only the five changed
+  findings); AC10 bullet 1 scoped to the `trigger` section; the lazy-import
+  alternative is dropped and the import lines are exact.
+- **L8 (wording and citations).** The build-order phrase reads "strictly one
+  variant at a time" everywhere; "the lab Dell" throughout; `auth.py:188-189`, `exception_handlers.py:109-153` and `:90-153`,
+  `payload_fetch.py:664-674`, `build-custom.sh:208`/`:211-214`.
+- **L9 (neutral-wording check).** Task 6 runs the uncommitted wording
+  checklist in the state directory over the diff, the commit messages and this
+  spec directory, recording pass/fail only.
+- **L10** concerns the owner memo, not this spec; it is corrected there.
