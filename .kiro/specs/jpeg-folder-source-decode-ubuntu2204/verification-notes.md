@@ -1943,3 +1943,19 @@ goldens and this spec directory) and both commit messages.
 - The trunk merge.
 - The owner's Q1 decision (task 12).
 - amd64 stays not cleared for station rollout until task 8 passes.
+- Batched round (localserver-input-handling-hardening, owner memo D3): the combined builds from
+  `build/jpeg-and-input-handling` also put this fix's C3/C3b executor code and C4 builder code
+  into the arm64JP5 and arm64JP6 images, which design D3 doesn't otherwise rebuild. That spec's
+  task 8 therefore runs a jpeg folder-source non-regression check on the MIC-730 (JP5) and the
+  Orin (JP6):
+  1. a `folder_source` → `capture` workflow over a scratch folder of at least 3 JPEGs
+     completes for each image, and the images are consumed;
+  2. a non-bridged mixed flow (`folder_source` first, plus `custom_python_source` → `capture`)
+     completes, and its logged launch string keeps the file segment first;
+  3. neither the `Pinned jpegdec …` nor the `Moved the Frame_Feed segment …` INFO line appears
+     in either run's `run.log` (Jetson arches are unconstrained);
+  4. on the Orin only, the folder run decodes a staged `.dda_decoded.png` (the `pngdec` chain,
+     design D9) rather than `jpegdec`, and both files are consumed after the run.
+
+  Record the results here and in that spec's notes ("Task 8"). This check doesn't replace
+  task 8b (thor1).
