@@ -92,7 +92,7 @@ graph TD
     T3[3 Fixes: Changes 1-4, 3b and 6]
     T9{9 OWNER DECISION D1: Item 5 scope}
     T4[4 Change 5: redactor + Layer A, Layer B per D1]
-    T5[5 Local checkpoint: Properties 1-9, preservation]
+    T5[5 Local checkpoint: Properties 1-10, preservation]
     T6{6 Push feature branch, no trunk merge}
     T7[7 OWNER: one build per arch, combined jpeg ref]
     T8[8 OWNER: on-device checks per arch]

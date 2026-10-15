@@ -133,9 +133,16 @@ and is frozen.
 - Item 4 (Property 6): `_failure_reason(GenerationError("qwen2-vl", "oom"))`
   returned `"oom"`; the 502 body was `{"model_name": "qwen2-vl", "reason": "oom"}`
   and the SSE event `data: {"error": {"reason": "oom"}}\n\n` exactly.
-- Item 5 (observation-first): the no-SigV4 context (`image_url` with
-  `?part=42&lane=3`) persisted and logged byte-identically, with no `***`
-  introduced; the frozen literal check asserts byte-identity after the fix.
+- Item 5 (observation-first): the frozen `TestItem5Preservation` case asserts
+  that the no-SigV4 context (`image_url` with `?part=42&lane=3`) keeps its URL
+  in the persisted JSON and the `tags:` line and that no `***` is introduced —
+  a substring-level check, not a byte-literal one. Byte identity of the
+  persisted JSON, the formatted `tags:` line, and the `/metadata` and `/log`
+  bodies is pinned by the appended `TestItem5NoSigV4ByteIdentity` cases (below
+  the task-4 marker, so the frozen head stays byte-identical). Their expected
+  literals were captured by running this file's own harness against a
+  `git archive 296c230c` copy of the pre-change tree, identical across two host
+  runs (3.9.5) and the 3.11.9 container, so the check stays observation-first.
 
 Commands (wrapped in `timeout`): host runs via
 `PYTHONPATH=src/backend:test/backend-test:test/backend-test/workflow_engine
@@ -177,8 +184,8 @@ Edits, by file + function:
   (`isinstance(error, GenerationError) and error.reason` → `error.reason`; else
   `logger.error("Unexpected text generation failure", exc_info=error)` and the
   fixed string). No call-site or shape change.
-- **Change 6** (task 3.6, Item 3c) is recorded under Task 6 (frontend); it is
-  not a backend change.
+- **Change 6** (task 3.6, Item 3c) is recorded in its own subsection below,
+  "Change 6 — frontend export link (task 3.6)"; it is not a backend change.
 
 No hash-pinned file was touched by Changes 1-4, 3b or 6: after commit (iv) the
 CSI surface suite showed only the pre-existing
@@ -204,6 +211,26 @@ Property 10 at 200 runs, and the call-site check); the full suite is unchanged
 except the pre-existing flaky `DeployedWorkflowDetails.exploration` property
 suite (see Task 5); `npm run build` compiled with the same warning set as the
 baseline (rc=0).
+
+Post-change SPA totals (whole suite, `CI=true npm test -- --watchAll=false`,
+with both `utils.test.ts` and the wide-input `utils.property.test.ts` present):
+37 suites / 314 tests, of which 36 suites / 313 tests passed. The one failure
+was the pre-existing flaky `DeployedWorkflowDetails.exploration.test.tsx` (it
+imports none of `result-history/`); run alone three times straight afterward it
+passed, failed, then passed, confirming seed-dependent flakiness, not a
+regression. The two `result-history/utils*.test.ts` suites passed every run
+(6 tests). Counts line up with the baseline: 35 baseline suites + the two new
+`result-history` suites = 37; 308 + 5 (`utils.test.ts`) + 1
+(`utils.property.test.ts`) = 314. The two frontend production files
+(`utils.ts`, `ResultCardContent.tsx`) are byte-identical to the committed tree,
+so `npm run build` is unaffected and was not re-run.
+
+Freeze-evidence caveat: `utils.test.ts` is not in
+`.agents/localserver-input-handling/frozen/` (that set holds the five backend
+files only), and it landed in the same commit as the fix. "Written before the
+edit and unchanged after it" therefore rests on the authoring run recorded
+above, not on a byte-for-byte frozen copy. The new `utils.property.test.ts` is
+a review follow-up (it post-dates the fix) and makes no freeze claim.
 
 ## Task 9: Item 5 owner decision (D1) — DONE (owner answered 2026-10-15)
 
@@ -365,6 +392,55 @@ three runs, so it is pre-existing seed-dependent flakiness, not a regression.
 The no-build/no-device contract was honored: no component or image was built,
 nothing was deployed, pushed or run on a device. `npm run build` was a local
 compile check only; its `build/` output was removed.
+
+### Review follow-up test coverage (frozen files unchanged)
+
+A review pass found that a few spec-named cases and generator ranges were
+thinner than the design. They are addressed without editing any frozen file:
+the five frozen backend files stay byte-identical to their `frozen/` copies,
+and the trigger module's edits are below its `# ---- appended in task 4`
+marker, so its frozen head (185 lines) is unchanged (confirmed by
+`frozen_check.sh`).
+
+- **Item 5 byte identity (AC12).** `test_trigger_payload_redaction.py` gains
+  `TestItem5NoSigV4ByteIdentity` (appended below the marker): byte-literal
+  assertions for the persisted `{capture_id}.json`, the `RedactingFilter`
+  formatted `tags:` line, and the `/metadata` and `/log` bodies of a no-SigV4
+  run. The literals were captured on a `git archive 296c230c` copy with the
+  file's own harness, identical across two host runs (3.9.5) and the 3.11.9
+  container, so they stay observation-first. Host and container: 10 passed.
+- **Item 5 masker casing (Property 7).** The Property 7 generator now draws
+  each SigV4 name with per-character random casing (the former no-op
+  `_case_mix` is gone), and a lowercase `x-amz-credential=` `@example` pins
+  that the `(?i)` masker still masks it. In the same appended region.
+- **New module** `test_input_handling_spec_named_cases.py` (not frozen; it
+  reuses the frozen modules' lifted-route helpers so the code under test is
+  still the shipped route). Host: 4 passed, 1 skipped; device container (3.11):
+  5 passed. It holds:
+  - AC5: the exact writer shape plus a trailing newline is rejected 400 at the
+    mounted route, handler not entered (the `$`-vs-trailing-newline case Python
+    `re` and the validator engine treat differently);
+  - Req 2.2: a contained malformed input-image jsonl answers 500 with the fixed
+    detail and logs exactly one WARNING record carrying `exc_info` — that record
+    is now the only diagnostic;
+  - Req 2.4: `_failure_reason(GenerationError(model, ""))` returns the fixed
+    string and logs one ERROR record carrying the error (the falsy-reason
+    branch the frozen Property 5 generator, `min_size=1`, never drew);
+  - Item 3 containment positive branch: a contained, existing capture file is
+    opened on the host (then 442 for an empty list), exercising the branch the
+    frozen Property 4 containment half never reaches because it seeds a file
+    only when the value escapes;
+  - AC6 end to end (container only): the exact writer-shape value written under
+    the real system folder round-trips through the mounted route — validator,
+    containment guard, open and zip — to a zip holding `manifest` and both
+    images. Skipped on the host (`inference_results_utils` needs the device
+    stack). Task 8's on-device POST-then-GET remains the first full-app run.
+- **Item 3c wide inputs (Property 10).** A new frontend file
+  `result-history/utils.property.test.ts` adds a property over
+  `fc.fullUnicodeString()` (no lone surrogates) and a reserved-dense arbitrary
+  over `& = # + % / ?` and space, the range design Property 10 names; the unit
+  `utils.test.ts` property draws `fc.string()`, which defaults to grapheme-ASCII
+  in the installed fast-check 3.23.2. SPA: both suites pass (6 tests).
 
 ## Task 6: commit (local part) — DONE; push PENDING (owner-gated)
 
