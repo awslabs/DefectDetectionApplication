@@ -1,5 +1,5 @@
 {
-  "note": "Post-fix record, approved by the repository owner in the approval block (spec security-scan-remediation-high, design 'R14 and R15 fixtures and deploy constraints'). rescopes: each split statement of the R15 sites, with the removed statement copied from the Baseline_Template at 4a3f960 and the added ones rendered by CDK from the site code without policy minimization, all in the sorted-key JSON form iam_statements_multiset uses; carrier is the logical id whose statement is replaced; only unscopable_actions may stay on '*'. refreshed_resources: logical ids whose encryption properties (or, for a new KMS key or alias, the whole resource) the Baseline_Template takes from a fresh fixture synth. unfixed_snapshot_sha256: each Unfixed_Snapshot at 4a3f960, which never changes. Read by test_preservation_iam_cdk_synth.py.",
+  "note": "Post-fix record, approved by the repository owner in the approval block (spec security-scan-remediation-high, design 'R14 and R15 fixtures and deploy constraints'). rescopes: each split statement of the R15 sites, with the removed statement copied from the Baseline_Template at 4a3f960 and the added ones rendered by CDK from the site code without policy minimization, all in the sorted-key JSON form iam_statements_multiset uses; carrier is the logical id whose statement is replaced; only unscopable_actions may stay on '*'. refreshed_resources: logical ids whose encryption properties (or, for a new KMS key or alias, the whole resource) the Baseline_Template takes from a fresh fixture synth. unfixed_snapshot_sha256: each Unfixed_Snapshot at 4a3f960, which never changes. Read by test_preservation_iam_cdk_synth.py. conditioned and retired (portal-authorization-and-iam-scoping, design I5 'IAM-baseline golden update'): a conditioned entry is a factory statement the tag condition narrows in place - removed, added (same effect and resources, added_condition non-empty) and an optional unconditioned carve_out on the same resources whose extra actions are the ABAC status read only; a retired entry is a statement removed with a reason naming its replacement. Each carries count, its copies in the Baseline_Template before the edit (one per factory role for a factory statement). Both are applied to the Baseline_Template by a scripted edit keyed on the statement JSON, never by regeneration, and the drift test reverses them by count before its I1-I4 comparison.",
   "approval": {
     "approved_by": "Ryan Vanderwerf",
     "approved_on": "2026-10-05"
@@ -80,7 +80,74 @@
         "AccountTablesKeyF0219603",
         "AccountTablesKeyAliasF8ABBD99"
       ],
-      "unfixed_snapshot_sha256": "01a4f4be17104b617e0a211c5db1699d2edc1c33d54f458c42d35961dcc32298"
+      "unfixed_snapshot_sha256": "01a4f4be17104b617e0a211c5db1699d2edc1c33d54f458c42d35961dcc32298",
+      "conditioned": [
+        {
+          "site": "createLambdaRole data-plane object statement (compute-stack.ts, dataPlaneGrant objectLevel; Requirement 7.2)",
+          "finding_ids": [
+            "portal-authz-scoping I5"
+          ],
+          "carrier": "createLambdaRole (factory; one copy per role)",
+          "count": 41,
+          "removed": [
+            "{\"Action\": [\"s3:GetObject\", \"s3:PutObject\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*/*\"}"
+          ],
+          "added": [
+            "{\"Action\": [\"s3:GetObject\", \"s3:PutObject\"], \"Condition\": {\"StringEquals\": {\"aws:ResourceTag/dda-portal:managed\": \"true\"}}, \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*/*\"}"
+          ],
+          "added_condition": {
+            "StringEquals": {
+              "aws:ResourceTag/dda-portal:managed": "true"
+            }
+          }
+        },
+        {
+          "site": "createLambdaRole data-plane bucket-level statement (compute-stack.ts, dataPlaneGrant bucketLevel plus tagDiscovery; Requirements 7.2, 7.4)",
+          "finding_ids": [
+            "portal-authz-scoping I5"
+          ],
+          "carrier": "createLambdaRole (factory; one copy per role)",
+          "count": 41,
+          "removed": [
+            "{\"Action\": [\"s3:ListBucket\", \"s3:GetBucketLocation\", \"s3:GetBucketTagging\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*\"}"
+          ],
+          "added": [
+            "{\"Action\": [\"s3:GetBucketLocation\", \"s3:ListBucket\"], \"Condition\": {\"StringEquals\": {\"aws:ResourceTag/dda-portal:managed\": \"true\"}}, \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*\"}"
+          ],
+          "added_condition": {
+            "StringEquals": {
+              "aws:ResourceTag/dda-portal:managed": "true"
+            }
+          },
+          "carve_out": "{\"Action\": [\"s3:GetBucketABAC\", \"s3:GetBucketTagging\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*\"}"
+        }
+      ],
+      "retired": [
+        {
+          "site": "createLambdaRole execute-api:Invoke (the signed HTTP call the UseCases handler made to POST /shared-components/provision)",
+          "finding_ids": [
+            "portal-authz-scoping I3"
+          ],
+          "carrier": "createLambdaRole (factory)",
+          "count": 41,
+          "removed": [
+            "{\"Action\": \"execute-api:Invoke\", \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:execute-api:\", {\"Ref\": \"AWS::Region\"}, \":\", {\"Ref\": \"AWS::AccountId\"}, \":*/*\"]]}}"
+          ],
+          "reason": "Replaced by lambda:InvokeFunction on the SharedComponents function, granted to the UseCases role only: the provisioning call is a direct invoke (Requirement 5.2)."
+        },
+        {
+          "site": "UpdateLambdaEnv custom resource (the post-deploy API_GATEWAY_ID environment patch of the UseCases function)",
+          "finding_ids": [
+            "portal-authz-scoping I3"
+          ],
+          "carrier": "UpdateLambdaEnvServiceRoleDefaultPolicyAA319DDF",
+          "count": 1,
+          "removed": [
+            "{\"Action\": [\"lambda:GetFunctionConfiguration\", \"lambda:UpdateFunctionConfiguration\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::GetAtt\": [\"UseCasesHandler9D45DC90\", \"Arn\"]}}"
+          ],
+          "reason": "The HTTP hop and its environment patch are retired with the direct lambda:InvokeFunction grant (Requirement 5.2); the UpdateLambdaEnv function, its role and the LambdaEnvUpdater resource are no longer synthesized."
+        }
+      ]
     },
     "DDAPortalUseCaseAccountStack": {
       "rescopes": [
