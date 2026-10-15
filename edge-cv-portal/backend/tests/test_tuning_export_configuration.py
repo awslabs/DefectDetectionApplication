@@ -646,8 +646,10 @@ class TestDeviceGrant:
         dep_env.set_settings(inference_uploader_s3_bucket="new-results")
         assert dep_env.deploy()[0] == 201
 
-        assert len(dep_env.iam.put_calls) == 2
-        assert dep_env.iam.put_calls[-1][2]["Statement"][0]["Resource"] == \
+        tuning_puts = [call for call in dep_env.iam.put_calls
+                       if call[1] == "DDAWorkflowTuningSampleAccess"]
+        assert len(tuning_puts) == 2
+        assert tuning_puts[-1][2]["Statement"][0]["Resource"] == \
             "arn:aws:s3:::new-results/workflow-tuning/*"
 
 

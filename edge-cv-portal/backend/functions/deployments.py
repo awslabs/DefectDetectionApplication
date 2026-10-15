@@ -33,6 +33,10 @@ import deployment_preflight
 # with usecases.py (which validates the settings), so what the Portal
 # accepts and what deployments deliver can never diverge.
 import tuning_settings
+# The Device_Access_Document on the devices' token-exchange role
+# (portal-authorization-and-iam-scoping, design I6): pure builders plus the
+# IAM-writing pair, shared with usecases.py; the client is passed in.
+import device_grants
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -1541,6 +1545,16 @@ def create_deployment(body, user):
             components_map, usecase, account_id, region=region,
             session_name=f"tuning-{user['user_id'][:20]}-"
                          f"{int(datetime.utcnow().timestamp())}"[:64])
+
+        # Device_Access_Document (portal-authorization-and-iam-scoping,
+        # design I6): the use case's buckets outside the template patterns
+        # are granted to the devices' role before the Greengrass
+        # create_deployment call below. None when the use case needs no
+        # statement (no IAM client is requested then).
+        device_access = deliver_device_access(
+            usecase, region=region,
+            session_name=f"device-access-{user['user_id'][:20]}-"
+                         f"{int(datetime.utcnow().timestamp())}"[:64])
         
         # Ensure ShadowManager carries the portal synchronization config for
         # the camera-registry-sync named shadows. ShadowManager is already an
@@ -1775,6 +1789,9 @@ def create_deployment(body, user):
         # responses stay byte-identical.
         if deployment_warnings:
             response_body['warnings'] = deployment_warnings
+        # Additive likewise: only when the device grant was attempted.
+        if device_access is not None:
+            response_body['device_grants'] = {'device_access': device_access}
         return create_response(201, response_body)
         
     except ClientError as e:
@@ -3172,6 +3189,31 @@ def deliver_workflow_tuning(components_map, usecase, account_id=None,
     return config
 
 
+def deliver_device_access(usecase, region=None, session_name=None):
+    """Write the use case's statements into the Device_Access_Document before
+    the deployment is submitted, so the devices' first artifact download
+    never races the IAM write (portal-authorization-and-iam-scoping, design
+    I6; Requirement 8.2).
+
+    Runs outside ``deliver_workflow_tuning`` and requests the IAM client only
+    when the use case has a statement to write: a use case whose buckets all
+    match the template patterns touches no IAM here (removing a stale
+    statement is the use-case PUT / DELETE hooks' job). Best-effort like the
+    tuning grant. Returns the status, or None when nothing was attempted."""
+    if not device_grants.usecase_statements(usecase):
+        return None
+    try:
+        iam_client = get_usecase_client(
+            'iam', usecase, session_name=session_name, region=region)
+    except Exception as e:
+        logger.warning(
+            f"Could not obtain the IAM client for "
+            f"{device_grants.DEVICE_ACCESS_POLICY_NAME}: {e}")
+        return device_grants.failed_result(e)
+    return device_grants.grant_device_access(
+        usecase, iam_client=iam_client, region=region)
+
+
 def resolve_target_thing_names(iot_client, target_devices, target_thing_group):
     """
     The individual device thing names a deployment targets: the explicit
@@ -4548,6 +4590,11 @@ def create_workflow_deployment(body, user):
             components_map, usecase, account_id, region=region,
             session_name=session_name)
 
+        # Device_Access_Document (design I6): same as create_deployment,
+        # before the Greengrass create_deployment call below.
+        device_access = deliver_device_access(
+            usecase, region=region, session_name=session_name)
+
         if not deployment_name:
             if is_revision and existing_deployment.get('deploymentName'):
                 deployment_name = existing_deployment['deploymentName']
@@ -4682,6 +4729,9 @@ def create_workflow_deployment(body, user):
         # mirroring create_deployment (10.3/10.4 byte-identity).
         if deployment_warnings:
             response_body['warnings'] = deployment_warnings
+        # Additive likewise: only when the device grant was attempted.
+        if device_access is not None:
+            response_body['device_grants'] = {'device_access': device_access}
         return create_response(201, response_body)
 
     except ClientError as e:

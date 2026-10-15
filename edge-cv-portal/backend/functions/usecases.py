@@ -42,12 +42,19 @@ from shared_utils import (
     # validator, and the reachability probe of a bucket created without a use
     # case (design I5 "Registration-time reporting").
     attach_bucket, _probe, data_plane_scoping,
+    # The IAM client the Device_Access_Document hooks write with (design I6).
+    get_usecase_client,
 )
 # Use_Case settings for VLM/LLM Anomaly Tuning Sample_Export (spec:
 # quality-prompt-tuning, Requirements 2.1, 2.9). Pure module, shared with
 # deployments.py (which delivers the configuration and the device grant)
 # so the accepted values and the delivered ones can never diverge.
 import tuning_settings
+# The Device_Access_Document on the devices' token-exchange role
+# (portal-authorization-and-iam-scoping, design I6), shared with
+# deployments.py: the PUT hook keeps the use case's statements in step with
+# its buckets, DELETE removes them.
+import device_grants
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -1154,6 +1161,21 @@ def remove_account_grants(account_id: str, record: dict) -> dict:
         'component_bucket_policy': _remove_component_bucket_grants(component_bucket_name(), account_id),
         'eventbridge': _remove_eventbridge_permission(account_id),
     }
+
+
+def _write_device_access(write, usecase: dict) -> dict:
+    """Run one of device_grants' writers (grant_device_access /
+    revoke_device_access) for `usecase` with the IAM client of its account:
+    this function's execution role for a single-account use case, the
+    assumed DDAPortalAccessRole otherwise (design I6). Best-effort; the
+    status is returned, never raised."""
+    try:
+        iam_client = get_usecase_client('iam', usecase)
+    except Exception as e:
+        logger.warning(f"Could not obtain the IAM client for {device_grants.DEVICE_ACCESS_POLICY_NAME} "
+                       f"(use case {usecase.get('usecase_id')}): {e}")
+        return device_grants.failed_result(e)
+    return write(usecase, iam_client=iam_client)
 
 
 def _portal_tagged_buckets() -> dict:
@@ -2614,6 +2636,17 @@ def update_usecase(usecase_id, event, user):
         registration.update({name: add_results[name].report() for name in added})
 
         reloaded = table.get_item(Key={'usecase_id': usecase_id}).get('Item') or {}
+
+        # The Device_Access_Document follows the record (design I6): when the
+        # buckets devices read outside the template patterns changed — a
+        # changed s3_bucket, or an add / remove of such a bucket — the use
+        # case's statements are rewritten from the record as written, after
+        # the Attach_Step accepted every bucket in it.
+        device_reports = {}
+        if reloaded and (device_grants.device_read_buckets(reloaded)
+                         != device_grants.device_read_buckets(record)):
+            device_reports['device_grants'] = {
+                'device_access': _write_device_access(device_grants.grant_device_access, reloaded)}
         return create_response(200, {
             'message': 'Use case updated successfully',
             'added': added, 'already_present': already_present,
@@ -2621,6 +2654,7 @@ def update_usecase(usecase_id, event, user):
             'allowed_s3_buckets': sorted(allowed_s3_buckets(reloaded)),
             'registration': registration,
             **grant_reports,
+            **device_reports,
         })
         
     except Exception as e:
@@ -2650,11 +2684,14 @@ def delete_usecase(usecase_id, user):
         table.delete_item(Key={'usecase_id': usecase_id})
 
         # The account's grants go once no other use case references the
-        # account (Requirement 3.4); best-effort, the deletion stands.
+        # account (Requirement 3.4); the use case's statements leave the
+        # Device_Access_Document (design I6). Best-effort, the deletion stands.
         if record is None:
             grants_removed = {'status': 'skipped', 'reason': 'usecase_not_found'}
         else:
             grants_removed = remove_account_grants(record.get('account_id'), record)
+            grants_removed['device_access'] = _write_device_access(
+                device_grants.revoke_device_access, record)
         
         log_audit_event(
             user['user_id'], 'delete_usecase', 'usecase', usecase_id, 'success'

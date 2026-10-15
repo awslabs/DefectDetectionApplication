@@ -36,6 +36,11 @@ READ_SID = "AllowGreengrassDeviceRead-{}"
 LIST_SID = "AllowGreengrassDeviceList-{}"
 EVENT_SID = "AllowUseCaseAccount-{}"
 VERIFY_SESSION = "dda-portal-verify-control"
+# DELETE also reports the use case's Device_Access_Document revoke in
+# grants_removed (design I6). The records here hold no statement in it (the
+# device role is absent in moto), so the revoke changes nothing.
+DEVICE_ACCESS_UNCHANGED = {"status": "unchanged", "role_name": "GreengrassV2TokenExchangeRole",
+                           "policy_name": "DDAUseCaseDeviceAccess"}
 
 
 @pytest.fixture(scope="module")
@@ -759,7 +764,7 @@ def test_delete_keeps_the_grants_while_another_use_case_references_the_account(e
     status, payload, _ = delete(env, admin(env), usecase_id)
     assert status == 200
     assert payload["grants_removed"] == {"status": "skipped", "reason": "account_still_referenced",
-                                         "account_id": TRUSTED}
+                                         "account_id": TRUSTED, "device_access": DEVICE_ACCESS_UNCHANGED}
     assert env.fakes.s3.sids() == sorted([READ_SID.format(TRUSTED), LIST_SID.format(TRUSTED)])
 
 
@@ -771,7 +776,8 @@ def test_delete_never_removes_the_portal_accounts_grants(env, kind, reason):
     env.fakes.events.statements[EVENT_SID.format(PORTAL)] = PORTAL
     status, payload, _ = delete(env, admin(env), usecase_id)
     assert status == 200
-    assert payload["grants_removed"] == {"status": "skipped", "reason": reason, "account_id": PORTAL}
+    assert payload["grants_removed"] == {"status": "skipped", "reason": reason, "account_id": PORTAL,
+                                         "device_access": DEVICE_ACCESS_UNCHANGED}
     assert env.fakes.s3.calls == [] and env.fakes.events.calls == []
 
 

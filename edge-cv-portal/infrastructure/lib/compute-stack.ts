@@ -1096,6 +1096,16 @@ export class ComputeStack extends cdk.Stack {
       // created.
       resources: ['arn:aws:s3:::*'],
     }));
+    // PUT /usecases/{id} (a change of the buckets devices read) and DELETE
+    // /usecases/{id} keep the Device_Access_Document on the devices'
+    // token-exchange role in this account in step with the use case
+    // (single-account use cases run the IAM write on this role).
+    usecasesRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'DeviceRoleInlinePolicyGrants',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:GetRolePolicy', 'iam:PutRolePolicy'],
+      resources: [`arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/GreengrassV2TokenExchangeRole`],
+    }));
     const useCasesHandler = new lambda.Function(this, 'UseCasesHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'usecases.handler',
@@ -1252,11 +1262,13 @@ export class ComputeStack extends cdk.Stack {
     });
 
     // Deployments Lambda Handler
+    // Held in a local so the device-role grant below lands on this role only.
+    const deploymentsRole = createLambdaRole('Deployments');
     const deploymentsHandler = new lambda.Function(this, 'DeploymentsHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'deployments.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
-      role: createLambdaRole('Deployments'),
+      role: deploymentsRole,
       environment: {
         ...lambdaEnvironment,
         ...streamCameraFeatureFloorEnvironment,
@@ -1269,6 +1281,18 @@ export class ComputeStack extends cdk.Stack {
       layers: [sharedLayer, workflowCoreLayer],
       timeout: cdk.Duration.seconds(60),
     });
+    // The portal-written inline policies on the devices' token-exchange role
+    // in this account (single-account use cases; the use-case account stack
+    // grants DDAPortalAccessRole the same for the others): the
+    // Device_Access_Document written before each deployment is submitted and
+    // DDAWorkflowTuningSampleAccess. Read-compare-write on that one role
+    // only: no attach, create, delete or PassRole.
+    deploymentsRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'DeviceRoleInlinePolicyGrants',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:GetRolePolicy', 'iam:PutRolePolicy'],
+      resources: [`arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/GreengrassV2TokenExchangeRole`],
+    }));
 
     // Component store limit auto-remediation sweep: detects devices whose
     // latest deployment failed with the Nucleus "Component store size limit

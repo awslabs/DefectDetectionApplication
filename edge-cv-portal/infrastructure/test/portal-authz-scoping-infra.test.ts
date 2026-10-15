@@ -31,6 +31,13 @@
  *     the five tag / ABAC control-plane actions;
  *   - DATA_PLANE_SCOPING reaches the handlers' environment.
  *
+ * The Device_Access_Document grant (design I6; task 6.1; Requirement 8.2):
+ * the Deployments and UseCases roles gain iam:GetRolePolicy /
+ * iam:PutRolePolicy on this account's GreengrassV2TokenExchangeRole, the
+ * CameraRegistry role's statement on the same ARN is unchanged, and no other
+ * role holds iam:PutRolePolicy beside the StationProvisioning role's
+ * pre-existing GreengrassV2TokenExchangeRole* statement.
+ *
  * Conventions follow usecase-bucket-config-iam.test.ts: synthesize
  * StorageStack + ComputeStack once in beforeAll, read the parent template and
  * the ApiGateway nested stack's template, assert on raw CloudFormation
@@ -656,5 +663,71 @@ describe('DATA_PLANE_SCOPING reaches every compute handler (default synth)', () 
     for (const fn of shared) {
       expect(fn.Properties.Environment.Variables.DATA_PLANE_SCOPING).toBe(DATA_PLANE_SCOPING);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Device_Access_Document grant (task 6.1)
+// ---------------------------------------------------------------------------
+
+describe('iam:PutRolePolicy on the devices\' token-exchange role (task 6.1)', () => {
+  // This account's device role, exactly: never a wildcard account segment.
+  const DEVICE_ROLE_ARN = 'arn:aws:iam::${AWS::AccountId}:role/GreengrassV2TokenExchangeRole';
+  const PROVISIONER_ROLES_ARN = `${DEVICE_ROLE_ARN}*`;
+
+  /** Every Allow statement holding iam:PutRolePolicy, by role (hash suffix dropped). */
+  function putRolePolicyHolders(): Array<{ role: string; statement: any }> {
+    const holders: Array<{ role: string; statement: any }> = [];
+    for (const template of [computeTemplate, apiTemplate]) {
+      for (const [roleId, statements] of allowStatementsByRole(template)) {
+        for (const statement of statements) {
+          if (actionsOf(statement).includes('iam:PutRolePolicy')) {
+            holders.push({ role: roleId.replace(/[0-9A-F]{8}$/, ''), statement });
+          }
+        }
+      }
+    }
+    return holders.sort((a, b) => a.role.localeCompare(b.role));
+  }
+
+  test('exactly the Deployments, UseCases and CameraRegistry roles hold it on the device role ARN', () => {
+    const onDeviceRole = putRolePolicyHolders()
+      .filter(({ statement }) => resourcesOf(statement).includes(DEVICE_ROLE_ARN))
+      .map(({ role }) => role);
+    expect(onDeviceRole).toEqual(['CameraRegistryRole', 'DeploymentsRole', 'UseCasesRole']);
+  });
+
+  test('the Deployments and UseCases statements are GetRolePolicy / PutRolePolicy on that ARN only, unconditioned', () => {
+    for (const role of ['DeploymentsRole', 'UseCasesRole']) {
+      const statements = putRolePolicyHolders().filter((holder) => holder.role === role).map((h) => h.statement);
+      expect({ role, count: statements.length }).toEqual({ role, count: 1 });
+      const [statement] = statements;
+      expect([...actionsOf(statement)].sort()).toEqual(['iam:GetRolePolicy', 'iam:PutRolePolicy']);
+      expect(resourcesOf(statement)).toEqual([DEVICE_ROLE_ARN]);
+      expect(statement.Condition).toBeUndefined();
+      expect(statement.Sid).toBe('DeviceRoleInlinePolicyGrants');
+    }
+  });
+
+  test('the CameraRegistry statement on the same ARN is unchanged', () => {
+    const statements = putRolePolicyHolders()
+      .filter((holder) => holder.role === 'CameraRegistryRole')
+      .map((holder) => holder.statement);
+    expect(statements).toHaveLength(1);
+    expect(statements[0].Sid).toBe('StreamCameraDeviceReadGrant');
+    expect([...actionsOf(statements[0])].sort()).toEqual(['iam:GetRolePolicy', 'iam:PutRolePolicy']);
+    expect(resourcesOf(statements[0])).toEqual([DEVICE_ROLE_ARN]);
+    expect(statements[0].Condition).toBeUndefined();
+  });
+
+  test('beside them only the StationProvisioning provisioner statement holds it, unchanged', () => {
+    const others = putRolePolicyHolders().filter(
+      ({ role }) => !['CameraRegistryRole', 'DeploymentsRole', 'UseCasesRole'].includes(role));
+    expect(others.map(({ role }) => role)).toEqual(['StationProvisioningRole']);
+    const [{ statement }] = others;
+    expect([...actionsOf(statement)].sort()).toEqual(
+      ['iam:AttachRolePolicy', 'iam:CreateRole', 'iam:GetRole', 'iam:PassRole', 'iam:PutRolePolicy']);
+    expect(resourcesOf(statement)).toEqual([PROVISIONER_ROLES_ARN]);
+    expect(statement.Condition).toBeUndefined();
   });
 });
