@@ -44,7 +44,7 @@ from starlette.status import HTTP_404_NOT_FOUND
 
 # Custom Modules
 from utils.auth import authorize_credential
-from utils.constants import SNAPSHOT_FILE_PATTERN, PREDICTION, CAPTURED_IDS_PATH_PATTERN, DDA_SYSTEM_FOLDER
+from utils.constants import SNAPSHOT_FILE_PATTERN, PREDICTION, CAPTURED_IDS_PATH_PATTERN, DDA_SYSTEM_FOLDER, INFERENCE_RESULTS_DIR
 from utils import utils, inference_results_utils
 import logging
 from model.workflow import Workflow
@@ -108,16 +108,29 @@ def load_input_image_from_worflow_by_capture_id(workflowId: str, captureId: str,
         capture_details = inference_result_accessor.get_inference_result(db, captureId)
         if capture_details is None:
             logger.info("Getting image from jsonl file")
-            jsonl_file = f"/aws_dda/inference-results/{workflowId}/{captureId}.jsonl"
+            jsonl_file = None
+            try:
+                base = os.path.realpath(INFERENCE_RESULTS_DIR)
+                jsonl_file = os.path.realpath(
+                    os.path.join(INFERENCE_RESULTS_DIR, workflowId, f"{captureId}.jsonl")
+                )
+            except ValueError:  # embedded NUL: cannot name a file inside
+                jsonl_file = None
+            if jsonl_file is None or not jsonl_file.startswith(base + os.sep):
+                raise HTTPException(
+                    status_code=HTTP_404_NOT_FOUND,
+                    detail="Server cannot find the input image path.",
+                )
             try:
                 with open(jsonl_file, 'r') as f:
                     json_str = f.read()
                     json_dict = json.loads(json_str)
                     image_path = json_dict["deviceGroundTruthData"][0]["source-ref"]
-            except Exception as e:
+            except Exception:
+                logger.warning("Could not read the input-image jsonl", exc_info=True)
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Server cannot find the input image path, Error {e}.",
+                    detail="Server cannot find the input image path.",
                 )
         else:
             image_path = capture_details.inputImageFilePath
