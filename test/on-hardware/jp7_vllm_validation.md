@@ -53,7 +53,7 @@ document.
 >
 > | Runbook stage | Harness coverage |
 > |---|---|
-> | 0–4 (prereqs, build, register, package/publish, deploy) | **Manual** — portal/build-server steps, out of harness scope |
+> | 0–4 (prereqs, build, register, package/publish, deploy) | **Manual** — portal steps (Build Fleet build, registration, packaging, deployment), out of harness scope |
 > | 1.4 In-container GPU checks | **Manual** — `docker exec` on the device (Req 2.8, 6.7) |
 > | 5 Stage L — READY propagation | Automated: `stages/test_20_vllm_textgen.py` (expected models → READY within `vllm_ready_s`) |
 > | 6 Stage G — non-streaming generate | Automated: `stages/test_20_vllm_textgen.py` (non-empty text + latency/token metrics) |
@@ -65,16 +65,22 @@ document.
 
 ## 0. Prerequisites
 
-- **Ubuntu 24.04 arm64 build server** (aarch64, docker + the compose v2
-  plugin + GDK installed; see the README's
-  "JetPack 7 (JP7) Build Server" section and `setup-build-server.sh`).
-  Builds must run **one at a time** (see `.kiro/steering/builds.md`).
+- **Build Fleet** in the portal
+  ([README Step 4](../../README.md#step-4-build-the-dda-localserver-component-build-fleet)):
+  a portal user with the `DataScientist`, `UseCaseAdmin` or `PortalAdmin`
+  role submits the build. Ephemeral JP7 builds run on an Ubuntu 24.04 arm64
+  build instance, selected automatically; a dedicated build server must be
+  **ARM64** and launched with **Ubuntu 24.04**
+  ([README 4.5](../../README.md#45-jetpack-7-jp7-builds)).
 - **Jetson Thor developer kit (128 GB), JetPack 7.1 or 7.2
-  (Jetson Linux r38.x)**, provisioned as a Greengrass core device whose
-  thing records Target_Architecture `arm64_jp7`, with:
-  - the JP7 host prerequisites from the README's
-    "JetPack 7 (JP7) Devices" section applied (NVIDIA Container Runtime
-    registered with Docker, compose v2 plugin, r38.x driver stack);
+  (Jetson Linux r38.x)**, provisioned with **Add Device**
+  ([README Step 7](../../README.md#step-7-set-up-edge-devices-add-device)) as a
+  Greengrass core device whose thing records Target_Architecture `arm64_jp7`,
+  with:
+  - the JP7 host prerequisites from
+    [README 7.6 JetPack 7 (JP7) Devices](../../README.md#76-jetpack-7-jp7-devices)
+    applied (NVIDIA Container Runtime registered with Docker, compose v2
+    plugin, r38.x driver stack);
   - internet reachability to `huggingface.co` (HF-sourced weights download
     on device) and to the component artifact bucket;
   - ≥ 30 GB free disk for the Qwen weights + staging;
@@ -101,28 +107,21 @@ adjust the script payload to `0.5` before running it).
 
 ---
 
-## 1. Build the JP7 image (Ubuntu 24.04 arm64 build server)
+## 1. Build the JP7 image (Build Fleet)
 
 ### 1.1 Default build (vLLM enabled)
 
-On the arm64 build server, from the repo root, with **default build args**
-(no `VLLM_*` overrides):
-
-```bash
-# ensure no other build is running
-pgrep -af "gdk component build"; pgrep -af "build-custom.sh"
-
-# build + publish the JP7 LocalServer component
-./gdk-component-build-and-publish.sh aarch64 7 2>&1 | tee .gdk_build_jp7.log
-```
-
-(Equivalently: set `gdk-config.json` to `aws.edgeml.dda.LocalServer.arm64JP7`
-and run `gdk component build`, which invokes
-`bash build-custom.sh aws.edgeml.dda.LocalServer.arm64JP7 NEXT_PATCH`, then
-`gdk component publish`.) Expect the ~1–2 h `ONNXRUNTIME_GPU=1` source build
-**plus the multi-hour from-source vLLM compile** (the measured duration
-range is recorded in the README's JP7 build section; record the figure from
-this run if it is still the placeholder).
+On the portal's **Builds** page, submit a build with the **JP7** target
+([README 4.2](../../README.md#42-start-a-build)). Portal builds always use the
+default build options, which include vLLM for JP7. Open the build job and
+follow its **Build log**
+([README 4.3](../../README.md#43-monitor-a-build)). Expect the ~1–2 h
+`ONNXRUNTIME_GPU=1` source build **plus the multi-hour from-source vLLM
+compile**. The README gives no build duration
+([README 4.5](../../README.md#45-jetpack-7-jp7-builds)); record the measured
+duration in the results table. If the job fails on its runtime limit, a
+PortalAdmin raises **Max runtime (hours)** or adds a JP7 runtime budget
+(README 4.5) and the build is submitted again.
 
 **Expected outcomes** (all visible in the build log):
 
@@ -135,7 +134,7 @@ this run if it is still the placeholder).
    torchaudio==2.9.0 triton==3.5.0` from
    `https://download.pytorch.org/whl/cu130`, and its import gate prints
    `torch 2.9.0+cu130 cuda 13.0` (a CUDA 13.x build — `torch.cuda.is_available()`
-   is deliberately **not** asserted at build time; the build server has no
+   is deliberately **not** asserted at build time; the build instance has no
    Thor GPU).
 5. The **vLLM layer** runs `install_vllm_gpu.sh`: prerequisite checks pass,
    the ccache presence/absence message is logged, vLLM is cloned at tag
@@ -156,8 +155,8 @@ this run if it is still the placeholder).
    `pip check` reports no broken requirements.
 9. In-image backend tests and the six security audit gates run under the
    image's DDA interpreter (python3.11) and pass.
-10. `gdk component publish` registers a new
-    `aws.edgeml.dda.LocalServer.arm64JP7` component version.
+10. The build job ends `succeeded`, with a **Published version** of
+    `aws.edgeml.dda.LocalServer.arm64JP7`.
 
 **Failure triage**
 
@@ -170,11 +169,13 @@ this run if it is still the placeholder).
 | `app deps OK` or `pip check` fails | vLLM's transitive installs clobbered an app dependency (most likely numpy). Inspect the pip log for what was upgraded; the `numpy>=1.24,<2` co-constraint must have held. |
 | ccache "not found" message | **Not an error** (Req 1.12) — the build proceeds without compiler caching; expect a longer compile. |
 | Rebuild recompiles everything despite ccache | Confirm ccache is on PATH inside the build and the cache dir persists between builds; vLLM's setup.py auto-wires ccache when present. |
-| Two builds ran concurrently | Model versioning is corrupted — stop both, clean `greengrass-build/` + `custom-build/`, rebuild one at a time. |
 
-### 1.2 `VLLM_ENABLE=0` variant (expectation only — optional to execute)
+### 1.2 `VLLM_ENABLE=0` variant (manual; expectation only — optional to execute)
 
-A build with the layers disabled:
+Build Fleet has no vLLM-free option
+([README 4.2](../../README.md#42-start-a-build)), so this variant is a manual
+build on an Ubuntu 24.04 arm64 host prepared with `setup-build-server.sh`. A
+build with the layers disabled:
 
 ```bash
 cd src
@@ -195,9 +196,13 @@ Do **not** deploy this variant image for the remaining stages.
 
 ### 1.3 Deploy the new LocalServer component version
 
-Deploy the freshly published `aws.edgeml.dda.LocalServer.arm64JP7` version
-to the target Thor (portal Deployments page or your standard fleet flow) and
-wait for the Greengrass deployment to complete.
+`arm64JP7` is not copied into multi-account Use_Case accounts, so it can be
+deployed only in a single-account setup
+([README 4.4](../../README.md#44-use-the-published-component)). Revise the
+Thor's deployment: click **Update to latest** on the
+`aws.edgeml.dda.LocalServer.arm64JP7` row, then **Update Deployment**
+([README Revise a Deployment](../../README.md#revise-a-deployment)). Wait for
+the Greengrass deployment to complete.
 
 **Expected on-device** (via SSH):
 
@@ -610,7 +615,7 @@ re-checking boxes by hand.
 
 | # | Stage | Smoke_Model (`facebook/opt-125m`) | Realistic_Model (`Qwen/Qwen2.5-7B-Instruct`) | Notes |
 |---|---|---|---|---|
-| 1 | Image build (default args) | ☐ pass ☐ fail | — | build log ref + measured vLLM build duration (for the README) |
+| 1 | Image build (default args) | ☐ pass ☐ fail | — | build log ref + measured vLLM build duration |
 | 1.2 | `VLLM_ENABLE=0` variant (optional) | ☐ pass ☐ fail ☐ skipped | — | |
 | 1.3 | LocalServer deploy + probe | ☐ pass ☐ fail | — | component version |
 | 1.4 | In-container `torch.cuda.is_available()` | ☐ pass ☐ fail | — | |

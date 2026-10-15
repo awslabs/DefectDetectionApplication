@@ -10,7 +10,10 @@ CUDA context creation fails device-wide (kernel signature: `Can't map dma
 attachment!` + NVRM `osCreateOsDescriptorFromFileHandle ... Error (89)`), so
 devices without a CSI camera keep the daemon disabled.
 
-To use a CSI camera, the device must be provisioned with the flag:
+**Add Device** has no CSI opt-in: its setup command runs `setup_station.sh`
+without the flag, which disables `nvargus-daemon` and clears the opt-in marker.
+To use a CSI camera, provision the device manually with the flag (manual path,
+see [station_install/README.md](station_install/README.md#manual-provisioning-not-the-normal-path)):
 
 ```bash
 sudo ENABLE_CSI_CAMERA=1 bash setup_station.sh <aws-region> <thing_name>
@@ -25,18 +28,14 @@ marker at every deployment:
 - **Marker absent** (the default): every deployment disables and stops
   `nvidia-csi-capture.service`. Re-provision with `ENABLE_CSI_CAMERA=1` to
   opt in; re-provisioning without the flag clears the marker and opts the
-  device back out.
+  device back out. A later Add Device setup on the device also opts it out.
 
 ## Installation
 
-On your Jetson device, run:
-
-```bash
-# After deploying the component, install the capture service
-cd /greengrass/v2/packages/artifacts-unarchived/aws.edgeml.dda.LocalServer.arm64/*/aws.edgeml.dda.LocalServer.arm64-aarch64/custom-build/aws.edgeml.dda.LocalServer.arm64/host_scripts
-
-sudo bash install_nvidia_csi_service.sh
-```
+No manual install step is needed. The JetPack LocalServer components
+(`aws.edgeml.dda.LocalServer.arm64JP5`, `arm64JP6` and `arm64JP7`) run
+`install_nvidia_csi_service.sh` in their install step, and it installs the
+capture service only when the opt-in marker is present.
 
 ## Verify Service
 
@@ -64,6 +63,10 @@ ls -lh /aws_dda/nvidia-csi-capture/
   pipeline** (a single persistent Argus session at 3264x2464 @ 21fps — never
   one session per frame; single-frame session churn is the driver-defect
   trigger pattern that degrades `nvargus-daemon`)
+- The pipeline uses manual exposure and gain:
+  `aeantibanding=0 wbmode=0 exposuretimerange="$EXPOSURE $EXPOSURE" gainrange="$GAIN $GAIN"`
+  (`src/host_scripts/nvidia_csi_capture.sh`), with the values from the config
+  file below
 - The pipeline stages frames continuously via `multifilesink`; the supervisor
   promotes the newest complete frame to
   `/aws_dda/nvidia-csi-capture/latest.jpg` by atomic rename, so consumers

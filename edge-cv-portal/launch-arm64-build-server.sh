@@ -323,7 +323,7 @@ echo ""
 # Find the Ubuntu ARM64 AMI for the requested release if not specified.
 # 18.04 (bionic) remains the default for the existing JP4/JP5/JP6 flow;
 # --ubuntu-version 24.04 (noble) provisions a JetPack 7 (JP7) build server
-# (see the README "JetPack 7 (JP7) Build Server" section).
+# (manual path; Build Fleet, README Step 4, is the supported way to build JP7).
 if [ -z "$AMI_ID" ]; then
     case "$UBUNTU_VERSION" in
         18.04) UBUNTU_CODENAME="bionic"; UBUNTU_SSD_PATH="hvm-ssd" ;;
@@ -488,10 +488,11 @@ echo "  cd DefectDetectionApplication"
 echo "  ./setup-build-server.sh"
 echo ""
 if [ "$UBUNTU_VERSION" = "24.04" ]; then
-    echo "Ubuntu 24.04 (JP7 build server): follow the README section"
-    echo "'JetPack 7 (JP7) Build Server (Ubuntu 24.04 arm64)' for the noble-specific"
-    echo "prerequisites (Docker Engine + buildx and the docker-compose command shim),"
-    echo "then build the JP7 component:"
+    echo "Ubuntu 24.04 (JP7 build server): Build Fleet (the portal's Builds page,"
+    echo "README Step 4) is the supported way to build JP7. For a manual build, this"
+    echo "noble host needs Docker Engine with buildx and a docker-compose command"
+    echo "shim (noble ships only the 'docker compose' plugin; setup-build-server.sh"
+    echo "writes the shim to /usr/local/bin/docker-compose), then build the JP7 component:"
     echo "  ./gdk-component-build-and-publish.sh aarch64 7"
 else
     echo "Then build the ARM64 component:"

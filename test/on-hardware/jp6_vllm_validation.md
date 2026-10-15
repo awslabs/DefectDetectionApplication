@@ -44,7 +44,7 @@ document.
 >
 > | Runbook stage | Harness coverage |
 > |---|---|
-> | 0–4 (prereqs, build, register, package/publish, deploy) | **Manual** — portal/build-server steps, out of harness scope |
+> | 0–4 (prereqs, build, register, package/publish, deploy) | **Manual** — portal steps (Build Fleet build, registration, packaging, deployment), out of harness scope |
 > | 5 Stage L — READY propagation | Automated: `stages/test_20_vllm_textgen.py` (expected models → READY within `vllm_ready_s`) |
 > | 6 Stage G — non-streaming generate | Automated: `stages/test_20_vllm_textgen.py` (non-empty text + latency/token metrics) |
 > | 7 Stage S — SSE streaming | Automated: `stages/test_20_vllm_textgen.py` (incremental tokens + `done` termination) |
@@ -55,11 +55,14 @@ document.
 
 ## 0. Prerequisites
 
-- **arm64 build server** (aarch64, Ubuntu 20.04+, docker + docker-compose +
-  GDK installed; see `setup-build-server.sh`). Builds must run **one at a
-  time** (see `.kiro/steering/builds.md`).
-- **64 GB AGX Orin, JetPack 6 (L4T r36.4.x)**, provisioned as a Greengrass
-  core device whose thing records Target_Architecture `arm64_jp6`, with:
+- **Build Fleet** in the portal
+  ([README Step 4](../../README.md#step-4-build-the-dda-localserver-component-build-fleet)):
+  a portal user with the `DataScientist`, `UseCaseAdmin` or `PortalAdmin`
+  role submits the build.
+- **64 GB AGX Orin, JetPack 6 (L4T r36.4.x)**, provisioned with **Add Device**
+  ([README Step 7](../../README.md#step-7-set-up-edge-devices-add-device)) as a
+  Greengrass core device whose thing records Target_Architecture `arm64_jp6`,
+  with:
   - internet reachability to `huggingface.co` (HF-sourced weights download on
     device) and to the component artifact bucket;
   - ≥ 30 GB free disk for the Qwen weights + staging;
@@ -82,26 +85,16 @@ through the portal API with exactly the engine configurations above
 
 ---
 
-## 1. Build the JP6 image (arm64 build server)
+## 1. Build the JP6 image (Build Fleet)
 
 ### 1.1 Default build (vLLM enabled)
 
-On the arm64 build server, from the repo root, with **default build args**
-(no `VLLM_*` overrides):
-
-```bash
-# ensure no other build is running
-pgrep -af "gdk component build"; pgrep -af "build-custom.sh"
-
-# build + publish the JP6 LocalServer component
-./gdk-component-build-and-publish.sh aarch64 6 2>&1 | tee .gdk_build_jp6.log
-```
-
-(Equivalently: set `gdk-config.json` to `aws.edgeml.dda.LocalServer.arm64JP6`
-and run `gdk component build`, which invokes
-`bash build-custom.sh aws.edgeml.dda.LocalServer.arm64JP6 NEXT_PATCH`, then
-`gdk component publish`.) Expect ~1–2 h with the default
-`ONNXRUNTIME_GPU=1` source build.
+On the portal's **Builds** page, submit a build with the **JP6** target
+([README 4.2](../../README.md#42-start-a-build)). Portal builds always use the
+default build options, which include vLLM for JP6. Open the build job and
+follow its **Build log**
+([README 4.3](../../README.md#43-monitor-a-build)). Expect ~1–2 h with the
+default `ONNXRUNTIME_GPU=1` source build.
 
 **Expected outcomes** (all visible in the build log):
 
@@ -120,22 +113,24 @@ and run `gdk component build`, which invokes
    reports no broken requirements.
 8. In-image backend tests and the six security audit gates run under the
    image's DDA interpreter (python3.10) and pass.
-9. `gdk component publish` registers a new
-   `aws.edgeml.dda.LocalServer.arm64JP6` component version.
+9. The build job ends `succeeded`, with a **Published version** of
+   `aws.edgeml.dda.LocalServer.arm64JP6`.
 
 **Failure triage**
 
 | Symptom | Triage |
 |---|---|
-| vLLM pip resolution fails (`No matching distribution … vllm==0.10.2+cu126`) | The build is loud by design (Requirement 1.7). Check network reachability of `pypi.jetson-ai-lab.io` from the build server; confirm the build really targets python 3.10 (`Backend python: 3.10` line — the jp6/cu126 wheels are cp310-only). |
+| vLLM pip resolution fails (`No matching distribution … vllm==0.10.2+cu126`) | The build is loud by design (Requirement 1.7). Check network reachability of `pypi.jetson-ai-lab.io` from the build instance; confirm the build really targets python 3.10 (`Backend python: 3.10` line — the jp6/cu126 wheels are cp310-only). |
 | `classic API OK` verification fails | Wrong wheel resolved (V1-only build or hijacked pin). Confirm the installed `vllm.__version__` and that the index was used as `--extra-index-url`. |
 | `app deps OK` or `pip check` fails | The vllm/torch transitive installs clobbered an app dependency (most likely numpy). Inspect the pip log for what was upgraded; the `numpy>=1.26,<2` co-constraint must have held. |
 | `libcudart.so.11` check fails | The `cuda114` multi-stage COPY regressed against the new base; verify the `l4t-cuda:11.4.19-runtime` stage digest still pulls. |
-| Two builds ran concurrently | Model versioning is corrupted — stop both, clean `greengrass-build/` + `custom-build/`, rebuild one at a time. |
 
-### 1.2 `VLLM_ENABLE=0` variant (expectation only — optional to execute)
+### 1.2 `VLLM_ENABLE=0` variant (manual; expectation only — optional to execute)
 
-A build with the layer disabled:
+Build Fleet has no vLLM-free option
+([README 4.2](../../README.md#42-start-a-build)), so this variant is a manual
+build on an arm64 host prepared with `setup-build-server.sh`. A build with the
+layer disabled:
 
 ```bash
 cd src
@@ -156,9 +151,13 @@ stages.
 
 ### 1.3 Deploy the new LocalServer component version
 
-Deploy the freshly published `aws.edgeml.dda.LocalServer.arm64JP6` version to
-the target Orin (portal Deployments page or your standard fleet flow) and
-wait for the Greengrass deployment to complete.
+In a multi-account setup, first copy the new version into the Use_Case
+account with **Re-provision Shared Components**
+([README 4.4](../../README.md#44-use-the-published-component)). Then revise
+the Orin's deployment: click **Update to latest** on the
+`aws.edgeml.dda.LocalServer.arm64JP6` row, then **Update Deployment**
+([README Revise a Deployment](../../README.md#revise-a-deployment)). Wait for
+the Greengrass deployment to complete.
 
 **Expected on-device** (via SSH):
 

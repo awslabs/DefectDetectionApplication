@@ -15,9 +15,8 @@ Complete guide for deploying, configuring, and managing the Defect Detection App
 9. [Portal Users and Privilege (Portal_Identity Registry)](#portal-users-and-privilege-portal_identity-registry)
 
 **Related Guides:**
-- [DATA_ACCOUNT_SETUP.md](DATA_ACCOUNT_SETUP.md) - Detailed data account configuration scenarios
-- [SHARED_COMPONENTS.md](SHARED_COMPONENTS.md) - Greengrass component provisioning
-- [DEPLOYMENT.md](DEPLOYMENT.md) - Quick deployment reference
+- [README: Deployment](../README.md#deployment) - Portal deployment, Build Fleet builds, accounts, and device setup
+- [README: 3.1 Shared Components](../README.md#31-shared-components) - Greengrass component provisioning
 
 ---
 
@@ -226,8 +225,6 @@ Select option `2` for Data Account Role.
 
 **Note**: The bucket policy for SageMaker access is **automatically configured** when you onboard the UseCase in the portal. The Portal assumes the Data Account role and adds the necessary bucket policy statements.
 
-> **📖 See [DATA_ACCOUNT_SETUP.md](DATA_ACCOUNT_SETUP.md) for detailed scenarios and step-by-step guides.**
-
 ### Tag S3 Buckets
 
 The portal uses tag-based access, and a use case can only be configured with
@@ -362,7 +359,7 @@ aws sagemaker list-algorithms --name-contains "computer-vision-defect-detection"
 │     └─> Creates: Greengrass components in UseCase Account               │
 │     └─> Updates: S3 bucket policy for cross-account access              │
 │                                                                          │
-│  6. Setup Edge Device (on physical device)                              │
+│  6. Add Device, run setup command (on device)                           │
 │     └─> Creates: GreengrassV2TokenExchangeRole                          │
 │     └─> Attaches: DDAPortalComponentAccessPolicy                        │
 │     └─> Tags: Device for portal discovery                               │
@@ -450,7 +447,7 @@ writes this tag on the customer's bucket itself.
 ### Step 4: Create UseCase in Portal
 
 1. Login to portal as PortalAdmin
-2. Go to **Use Cases** → **Create Use Case**
+2. Go to **Use Cases** → **Onboard New Use Case**
 3. Enter:
    - **Name**: Customer project name
    - **AWS Account ID**: Customer's UseCase Account ID
@@ -504,7 +501,7 @@ aws dynamodb put-item \
 
 ### Via Portal UI
 
-1. Navigate to **Use Cases** → **Create Use Case**
+1. Navigate to **Use Cases** → **Onboard New Use Case**
 2. Fill in the wizard:
    - **Basic Info**: Name, description, cost center
    - **AWS Account**: Role ARN, External ID, SageMaker Role ARN
@@ -538,7 +535,7 @@ bucket answers `400 bucket_not_eligible`.
 - Data Account External ID
 - Data S3 Bucket name
 
-> **📖 See [DATA_ACCOUNT_SETUP.md](DATA_ACCOUNT_SETUP.md) for detailed setup instructions.
+> **📖 See [Data Account Setup (Optional)](#data-account-setup-optional) for setup instructions.
 
 ### Via API
 
@@ -708,32 +705,21 @@ never a key); every change to a use case's allowed set writes
 ### Device Management
 - View portal-managed Greengrass core devices (tagged `dda-portal:managed=true`)
 - Monitor device status, installed components, and deployments
-- Devices must be set up using `setup_station.sh` script
+- Devices are registered with **Add Device** (see [Device Setup](#device-setup))
 
 ### Device Setup
 
-Devices are registered using the `setup_station.sh` script in the `station_install/` folder. This script:
-- Installs Python 3.9, Java, Docker, and dependencies
+Register devices with **Add Device** on the **Devices** page and run the generated setup command on each device ([README Step 7](../README.md#step-7-set-up-edge-devices-add-device)). The command runs `station_install/setup_station.sh` on the device with short-lived credentials, so the device needs no AWS CLI credentials. The setup:
+- Installs Java, Python 3.11, the AWS CLI, GStreamer, and Docker
 - Downloads and installs AWS IoT Greengrass Core v2
-- Creates an IoT Thing and provisions certificates
-- Creates `GreengrassV2TokenExchangeRole` for device credentials
-- Attaches `DDAPortalComponentAccessPolicy` for cross-account S3 access and ECR image pulls
+- Creates an IoT Thing in the device group and provisions certificates
+- Sets up `GreengrassV2TokenExchangeRole` for device credentials
+- Attaches `DDAPortalComponentAccessPolicy` for cross-account S3 access and ECR image pulls, and warns when it cannot verify or attach it
 - Tags the Greengrass Core Device with `dda-portal:managed=true` for portal discovery
 
-**Prerequisites:**
-1. Deploy `UseCaseAccountStack` first (creates `DDAPortalComponentAccessPolicy`)
-2. AWS CLI configured on the device with UseCase Account credentials
+**Prerequisite:** Deploy `UseCaseAccountStack` first (creates `DDAPortalComponentAccessPolicy`).
 
-**Setup Command:**
-```bash
-cd station_install
-sudo ./setup_station.sh <aws-region> <thing-name>
-
-# Example:
-sudo ./setup_station.sh us-east-1 manufacturing-line-1-device
-```
-
-**For Existing Devices** (set up before portal tagging):
+**For Existing Devices** (set up outside Add Device, or before portal tagging):
 ```bash
 # Tag the Greengrass Core Device (not IoT Thing)
 aws greengrassv2 tag-resource \
@@ -750,6 +736,7 @@ aws iam attach-role-policy \
 - Create Greengrass deployments
 - Target specific devices or groups
 - Monitor deployment status
+- Each device or thing group has one current deployment, and a new deployment for the same target replaces it. Change it with **Revise Deployment** ([README: Revise a Deployment](../README.md#revise-a-deployment))
 
 ---
 
@@ -805,10 +792,10 @@ aws dynamodb update-item \
 
 ### Devices Not Showing
 
-**Cause**: Devices not tagged with `dda-portal:managed=true` or not set up via `setup_station.sh`.
+**Cause**: Devices not tagged with `dda-portal:managed=true` or not set up with **Add Device**.
 
 **Fix**: 
-1. Ensure the device was set up using `setup_station.sh` (which auto-tags)
+1. Set the device up with **Add Device** (the setup tags the core device)
 2. For existing devices, manually tag them:
 ```bash
 aws greengrassv2 tag-resource \
@@ -998,8 +985,6 @@ This creates a bucket policy allowing `DDASageMakerExecutionRole` from the UseCa
      --role-session-name test \
      --external-id YOUR_EXTERNAL_ID
    ```
-
-> **📖 See [DATA_ACCOUNT_SETUP.md](DATA_ACCOUNT_SETUP.md) for complete troubleshooting guide.
 
 ### Lambda Timeout on Large Operations
 

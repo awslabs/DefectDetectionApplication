@@ -4,32 +4,25 @@ This directory contains scripts and configuration files for provisioning and man
 
 ## Quick Start
 
-### Prerequisites
+Set devices up from the DDA Portal with **Add Device**
+([README Step 7](../README.md#step-7-set-up-edge-devices-add-device)). The
+portal generates a one-line setup command that you run on the device. The
+command runs this directory's `setup_station.sh` with short-lived credentials,
+so the device needs no repository checkout and no AWS login
+([quick_setup/README.md](quick_setup/README.md)). Device prerequisites are in
+[README 7.1](../README.md#71-device-prerequisites).
 
-- AWS Account with appropriate IAM permissions
-- EC2 instance or physical device (ARM64 or x86_64) running Ubuntu 20.04, 22.04, or 24.04
-- AWS CLI configured with credentials
-- SSH access to the device
+Then deploy from the portal. Give each device one deployment that lists all of
+its components (LocalServer plus its models and workflows), and revise that
+deployment to add or update components
+([Deploy DDA Application to Edge Device](../README.md#deploy-dda-application-to-edge-device)).
 
-### 1. Launch an Edge Device (EC2)
+### Manual provisioning (not the normal path)
 
-```bash
-./launch-edge-device.sh <region> <device-name>
-```
-
-Example:
-```bash
-./launch-edge-device.sh us-east-1 my-defect-detector
-```
-
-This script:
-- Creates an EC2 instance with appropriate security groups
-- Generates SSH key pair
-- Outputs connection details
-
-### 2. Provision the Device
-
-SSH into the device and run the setup script:
+Run `setup_station.sh` by hand only for what Add Device does not offer, such as
+the CSI camera opt-in `ENABLE_CSI_CAMERA=1` (see
+[NVIDIA_CSI_SETUP.md](../NVIDIA_CSI_SETUP.md)). The manual run needs AWS
+credentials for the UseCase account on the device.
 
 ```bash
 ssh -i "your-key.pem" ubuntu@device-ip
@@ -42,24 +35,6 @@ Example:
 ```bash
 sudo ./setup_station.sh us-east-1 my-defect-detector
 ```
-
-This script:
-- Installs system dependencies (Java, Python 3.9, Docker, GStreamer)
-- Installs AWS Greengrass Core
-- Provisions the device as an IoT Thing
-- Configures IAM roles and policies
-- Sets up directory structure for inference and image capture
-
-### 3. Deploy Models to Device
-
-From the DDA Portal:
-1. Go to **Devices** page
-2. Select your device
-3. Go to **Deployments** tab
-4. Create a new deployment with:
-   - `aws.edgeml.dda.LocalServer.*` (required first)
-   - Your trained model components
-5. Monitor deployment status
 
 
 ## Configuration Files
@@ -748,28 +723,21 @@ aws logs filter-log-events \
 
 ## Advanced Configuration
 
-### Custom Instance Type
+### EC2 Test Devices
 
-For larger models or higher throughput, use a larger instance:
-
-```bash
-./launch-edge-device.sh us-east-1 my-device t3.large
-```
+To test without edge hardware, launch an Ubuntu EC2 instance (see
+[README 7.1](../README.md#71-device-prerequisites)) and register each instance
+with **Add Device**. For larger models or higher throughput, use a larger
+instance type.
 
 Recommended instance types:
-- `t3.medium` - Small models, testing (default)
+- `t3.medium` - Small models, testing
 - `t3.large` - Medium models, production
 - `g4dn.xlarge` - GPU acceleration (NVIDIA)
 
-### Multiple Devices
-
-To provision multiple devices:
-
-```bash
-for i in {1..3}; do
-  ./launch-edge-device.sh us-east-1 device-$i
-done
-```
+`launch-edge-device.sh` (manual path) launches an instance itself
+(`--instance-type` overrides its default type) and runs `setup_station.sh` on
+it instead of Add Device.
 
 ### Custom Greengrass Configuration
 
@@ -778,6 +746,11 @@ Edit `setup_station.sh` to customize:
 - Python version (line ~100)
 - System users and groups (line ~300)
 - Directory permissions (line ~400)
+
+Devices set up with Add Device get these edits only after the next portal
+infrastructure deploy (`cdk deploy`): the setup bundle is built from
+`station_install/` at deploy time
+(`edge-cv-portal/infrastructure/scripts/build-quick-setup-bundle.sh`).
 
 ## Security Considerations
 
@@ -794,10 +767,10 @@ For issues or questions:
 1. Check device logs: `/aws_dda/greengrass/v2/logs/`
 2. Run diagnostics: `/aws_dda/check-cloudwatch-logging.sh`
 3. Review CloudWatch Logs in AWS console
-4. Check DDA Portal documentation: `edge-cv-portal/SINGLE_ACCOUNT_SETUP_GUIDE.md`
+4. Check the DDA Portal documentation: [README.md](../README.md)
 
 ## Related Documentation
 
-- [DDA Portal Setup Guide](../edge-cv-portal/SINGLE_ACCOUNT_SETUP_GUIDE.md)
+- [DDA Portal Setup Guide](../README.md)
 - [AWS Greengrass Documentation](https://docs.aws.amazon.com/greengrass/)
 - [AWS IoT Core Documentation](https://docs.aws.amazon.com/iot-core/)

@@ -288,7 +288,7 @@ For segmentation tasks, masks are PNG files with pixel colors representing diffe
 
 ### Portal Registration and Training
 
-For complete instructions on registering datasets in the portal and training models, see [QUICK_START_DATASET.md](../QUICK_START_DATASET.md).
+For complete instructions on registering datasets in the portal and training models, see [Path B: Pre-Labeled Datasets (Quick Start)](../README.md#path-b-pre-labeled-datasets-quick-start).
 
 ## Cookie Dataset
 

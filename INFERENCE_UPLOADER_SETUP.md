@@ -42,6 +42,9 @@ Edge Device
 
 ### Step 1: Build and Publish Component (Portal Account)
 
+This script is the manual, and only, way to publish the component: neither the
+portal deploy nor Build Fleet builds it.
+
 ```bash
 cd DefectDetectionApplication
 ./build-inference-uploader.sh
@@ -58,11 +61,11 @@ This will:
 cd edge-cv-portal/infrastructure
 npm run build
 rm -rf cdk.out
-cdk deploy EdgeCVPortalStack-UseCaseAccountStack --context usecase_account_id=198226511894
+cdk deploy EdgeCVPortalStack-UseCaseAccountStack --context usecase_account_id=<usecase-account-id>
 ```
 
 This creates:
-- S3 bucket: `dda-inference-results-198226511894`
+- S3 bucket: `dda-inference-results-<usecase-account-id>`
 - IAM permissions for devices to upload
 - IAM permissions for portal to read
 
@@ -83,17 +86,23 @@ POST /api/v1/shared-components/provision
 
 ### Step 4: Deploy to Devices
 
-Create a deployment in the portal with:
+When the UseCase enables the uploader (`enable_inference_uploader`, see
+[edge-cv-portal/INFERENCE_UPLOADER_CONFIG.md](edge-cv-portal/INFERENCE_UPLOADER_CONFIG.md)),
+the portal adds `aws.edgeml.dda.InferenceUploader` with the UseCase's settings
+to every deployment that contains LocalServer or a model component. To pick it
+up on a device, revise the device's deployment and click **Update Deployment**
+([README: Revise a Deployment](README.md#revise-a-deployment)).
 
-**Required Components**:
+You can also add the component to the device's deployment by hand, next to the
+components the device already runs:
 - `aws.edgeml.dda.LocalServer.{arch}` (already required)
-- `aws.edgeml.dda.InferenceUploader` v1.0.0 (NEW)
+- `aws.edgeml.dda.InferenceUploader` v1.0.0
 - Model component (e.g., `model-cookie-defect-detection-arm64-cpu`)
 
 **Component Configuration** for `aws.edgeml.dda.InferenceUploader`:
 ```json
 {
-  "s3Bucket": "dda-inference-results-198226511894",
+  "s3Bucket": "dda-inference-results-<usecase-account-id>",
   "s3Prefix": "{usecase-id}/{device-id}",
   "uploadIntervalSeconds": 300,
   "batchSize": 100,
@@ -133,7 +142,7 @@ s3://dda-inference-results-{account}/
 
 Example:
 ```
-s3://dda-inference-results-198226511894/
+s3://dda-inference-results-<usecase-account-id>/
   └─> cookie-factory/
        └─> dda_edge_server_2/
             └─> cc3ke9hm/
