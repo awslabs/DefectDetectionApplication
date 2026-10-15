@@ -205,8 +205,16 @@ _VALUE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwyz0123456789%._
 _TERMINATORS = "&;,)]}# '\"\t\n"
 
 
-def _case_mix(name):
-    return name  # names are matched case-insensitively; keep as written
+# Signed parameters are matched case-insensitively (design Property 7, "random
+# order and casing"). Drawing each name with per-character random casing pins
+# the masker's case-insensitive flag: a lowercase ``x-amz-credential=`` must
+# still be masked. The matched name's own bytes are preserved, so the expected
+# reconstruction below reuses the drawn (cased) name.
+_sigv4_name = st.sampled_from(_SIGV4_NAMES).flatmap(
+    lambda name: st.tuples(
+        *(st.sampled_from([ch.lower(), ch.upper()]) for ch in name)
+    ).map(lambda chars: "".join(chars))
+)
 
 
 class TestItem5Helpers:
@@ -215,13 +223,14 @@ class TestItem5Helpers:
     @settings(max_examples=50, deadline=None)
     @given(
         pairs=st.lists(
-            st.tuples(st.sampled_from(_SIGV4_NAMES),
+            st.tuples(_sigv4_name,
                       st.text(alphabet=_VALUE_CHARS, min_size=1, max_size=20),
                       st.sampled_from(list(_TERMINATORS) + [""])),
             min_size=1, max_size=6),
         filler=st.text(alphabet="abcdefghijklmnopqrstuvwyz /:.", max_size=10),
     )
     @example(pairs=[("X-Amz-Credential", "DUMMYKEYID", "&")], filler="")
+    @example(pairs=[("x-amz-credential", "DUMMYKEYID", "&")], filler="")
     def test_property_7_masking_preservation_fixed_point(self, pairs, filler):
         # Build a URL-ish string of SigV4 name=value pairs separated by their
         # drawn terminators, with non-SigV4 filler between.
@@ -364,3 +373,118 @@ class TestItem5RecursionGuard:
                       and "completed; tags:" in str(r.msg)]
         assert tags_lines
         assert "<tags withheld: too deeply nested to mask>" in tags_lines[-1]
+
+
+# ---- appended for the no-SigV4 byte-identity cases (AC12) ----
+# The frozen task-2 case (TestItem5Preservation) checks that the no-SigV4 URL
+# survives and that no mask is introduced. These literals pin byte identity at
+# every sink. They were captured by running this file's own harness against a
+# ``git archive 296c230c`` copy of the tree (the pre-change code), confirmed
+# identical across two host runs (CPython 3.9.5) and the device container
+# (3.11.9), so the check stays observation-first: the fix must reproduce these
+# bytes exactly. ``_run_and_capture`` embeds no absolute path, so the strings
+# are fully deterministic.
+_NO_SIGV4_URL = TestItem5Preservation._NO_SIGV4_URL
+
+_NO_SIGV4_PERSISTED = (
+    "{\n"
+    '  "is_anomalous": false,\n'
+    '  "trigger": {\n'
+    '    "topic": "line/inspect",\n'
+    '    "payload": "{\\"part_id\\": \\"P-1\\", \\"image_url\\": '
+    '\\"https://dummy.invalid/a.jpg?part=42&lane=3\\"}",\n'
+    '    "qos": 1,\n'
+    '    "timestamp": 1760000000.25,\n'
+    '    "payload_json": {\n'
+    '      "part_id": "P-1",\n'
+    '      "image_url": "https://dummy.invalid/a.jpg?part=42&lane=3"\n'
+    "    }\n"
+    "  }\n"
+    "}"
+)
+
+_NO_SIGV4_TAGS_LINE = (
+    "Workflow execution exec-1 completed; tags: "
+    "{'is_anomalous': False, 'trigger': {'topic': 'line/inspect', "
+    "'payload': '{\"part_id\": \"P-1\", \"image_url\": "
+    "\"https://dummy.invalid/a.jpg?part=42&lane=3\"}', 'qos': 1, "
+    "'timestamp': 1760000000.25, 'payload_json': {'part_id': 'P-1', "
+    "'image_url': 'https://dummy.invalid/a.jpg?part=42&lane=3'}}}"
+)
+
+# What FastAPI serializes for the GET /metadata body (compact separators) and
+# the GET /log body (the tags line plus the writer's trailing newline).
+_NO_SIGV4_METADATA_BODY = (
+    '{"is_anomalous":false,"trigger":{"topic":"line/inspect",'
+    '"payload":"{\\"part_id\\": \\"P-1\\", \\"image_url\\": '
+    '\\"https://dummy.invalid/a.jpg?part=42&lane=3\\"}","qos":1,'
+    '"timestamp":1760000000.25,"payload_json":{"part_id":"P-1",'
+    '"image_url":"https://dummy.invalid/a.jpg?part=42&lane=3"}}}'
+)
+_NO_SIGV4_LOG_BODY = _NO_SIGV4_TAGS_LINE + "\n"
+
+
+def _serve_client(session_factory):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    app = FastAPI()
+    app.include_router(workflow_engine_api.router)
+
+    def override_get_db():
+        db = session_factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[workflow_engine_api.get_db] = override_get_db
+    return TestClient(app)
+
+
+class TestItem5NoSigV4ByteIdentity:
+    """task 2 byte identity (AC12): a no-SigV4 run persists, logs and serves
+    the exact pre-change bytes after the fix, at every sink. The literals were
+    captured on the unfixed tree (see above), so this pins what the frozen
+    substring case only observes."""
+
+    def test_persisted_json_and_tags_line_are_byte_identical(
+        self, tmp_path, session_factory, caplog
+    ):
+        persisted, tags_line = _run_and_capture(
+            tmp_path, session_factory, _context(_NO_SIGV4_URL), caplog)
+        assert persisted == _NO_SIGV4_PERSISTED
+        assert tags_line == _NO_SIGV4_TAGS_LINE
+
+    def test_metadata_and_log_are_served_byte_identical(
+        self, tmp_path, session_factory
+    ):
+        output_dir = os.path.join(str(tmp_path), "run")
+        os.makedirs(output_dir)
+        capture_id = "cap-nosig"
+        with open(os.path.join(output_dir, capture_id + ".json"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(_NO_SIGV4_PERSISTED)
+        log_path = os.path.join(output_dir, "run.log")
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(_NO_SIGV4_LOG_BODY)
+        session = session_factory()
+        try:
+            session.add(WorkflowRegistration(
+                id="wf-1:3", workflow_id="wf-1", version="3", arch="x86_64",
+                artifact_path=output_dir, status="registered",
+                registered_at=int(time.time())))
+            session.add(WorkflowExecution(
+                id="exec-nosig", registration_id="wf-1:3",
+                started_at=int(time.time()), finished_at=int(time.time()),
+                status=EXECUTION_STATUS_COMPLETED, output_dir=output_dir,
+                capture_id=capture_id, log_path=log_path))
+            session.commit()
+        finally:
+            session.close()
+        client = _serve_client(session_factory)
+        metadata = client.get("/workflows/executions/exec-nosig/metadata")
+        assert metadata.status_code == 200
+        assert metadata.content.decode("utf-8") == _NO_SIGV4_METADATA_BODY
+        log = client.get("/workflows/executions/exec-nosig/log")
+        assert log.status_code == 200
+        assert log.text == _NO_SIGV4_LOG_BODY
