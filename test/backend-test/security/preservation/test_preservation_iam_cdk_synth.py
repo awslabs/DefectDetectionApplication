@@ -112,6 +112,7 @@ FIXTURE_CONTEXT = [
     "--context", "portalAccountId=111111111111",
     "--context", "externalId=fixture-eid",
     "--context", "trustedUseCaseAccountIds=222222222222,333333333333",
+    "--context", "portalRegistryEnforced=false",
 ]
 
 # stack -> (fixed baseline, unfixed baseline, optional --app override)

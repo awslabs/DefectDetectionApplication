@@ -1037,6 +1037,10 @@ a privilege source — see
 | **Operator** | Per-UseCase | Can create deployments, manage devices, view logs |
 | **Viewer** | Per-UseCase | Read-only access to view usecases, jobs, models, deployments |
 
+A role held at the account level (`global`) applies to every use case, assigned
+or not, until a use-case row overrides it there; the use-case list in the UI
+shows a user's assignments, not their reach.
+
 ### Permission Matrix
 
 | Action | PortalAdmin | UseCaseAdmin | DataScientist | Operator | Viewer |
@@ -1310,23 +1314,38 @@ The script passes this through as the CDK context value
 `-c portalRegistryEnforced=true`. Accepted affirmatives are `1`, `true`, `yes`,
 `on`, `enabled` (trimmed, case-insensitive) — exactly what the Lambda layer
 accepts, so a value that reads "on" at deploy time can never land as "off" in
-the handler. Any other value deploys enforcement **off**; to turn it back off,
-deploy with `PORTAL_REGISTRY_ENFORCED=false`.
+the handler. Accepted negatives are `0`, `false`, `no`, `off`, `disabled`; the
+app refuses to synthesize any other value, so a typo such as `ture` stops the
+deploy instead of deploying enforcement off. To turn it back off, deploy with
+`PORTAL_REGISTRY_ENFORCED=false`.
 
 **Unset keeps the deployed value.** When the variable is unset (or empty),
-`deploy-infrastructure.sh`, `deploy-frontend.sh` (its ComputeStack redeploy)
-and `infrastructure/deploy_portal_fixes.sh` read the value the deployed
-`EdgeCVPortal*` handlers carry and pass that, so a routine deploy never changes
-enforcement. A mixed state resolves to on. With no portal handler deployed yet
-they pass nothing, and the CDK default, off, applies; `cdk.json` deliberately
-does not carry the key. If the deployed value cannot be read (credentials,
-`lambda:ListFunctions` permission), the deploy stops and asks for an explicit
-`PORTAL_REGISTRY_ENFORCED=true` or `=false`. The logic lives in
-`scripts/portal-registry-enforcement.sh`.
+`deploy-infrastructure.sh`, `deploy-frontend.sh` (its ComputeStack redeploy),
+`infrastructure/deploy_portal_fixes.sh` and `infrastructure/deploy-auth.sh`
+read the value the deployed `EdgeCVPortal*` handlers carry and pass that, so a
+routine deploy never changes enforcement. A mixed state resolves to on. With no
+portal handler deployed yet (a fresh install) they pass
+`-c allowLegacyRoles=true`, the acknowledgement the app requires to deploy the
+CDK default, off; `cdk.json` deliberately carries neither key. If the deployed
+value cannot be read (credentials, `lambda:ListFunctions` permission), the
+deploy stops and asks for an explicit `PORTAL_REGISTRY_ENFORCED=true` or
+`=false`. The logic lives in `scripts/portal-registry-enforcement.sh`. Each
+script logs the effective value and where it came from —
+`Portal_Identity enforcement: <value> (requested)`, `(kept from deployed)`, or
+`CDK default (off), acknowledged (fresh install)` — and `deploy-portal.sh`
+keeps that line in its Deployment_Log. `deploy-auth.sh` passes the value
+although the Auth stack never reads it, because the CDK CLI synthesizes the
+whole app before it deploys one stack.
 
-A bare `npx cdk deploy` (for example `npm run deploy` in `infrastructure/`)
-bypasses the scripts and still resolves the flag off: pass
-`-c portalRegistryEnforced=true` yourself.
+A bare `npx cdk deploy`, `cdk synth` or `cdk diff` in `infrastructure/`
+(including `npm run deploy` and `npm run synth`) runs none of the scripts, so
+the app asks for the value itself: it refuses to synthesize until you pass
+`-c portalRegistryEnforced=true` or `-c portalRegistryEnforced=false` (or
+another accepted spelling above), or, on a fresh install,
+`-c allowLegacyRoles=true` to deploy with enforcement off. An unrecognized
+value is refused the same way, and the message names it. With the npm scripts,
+pass the flag after `--`, for example
+`npm run deploy -- -c portalRegistryEnforced=true`.
 
 Check what is deployed:
 

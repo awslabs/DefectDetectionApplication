@@ -54,6 +54,73 @@ export function portalRegistryEnforced(contextValue: unknown): string {
   return 'false';
 }
 
+// ---------------------------------------------------------------------------
+// Synth-time enforcement acknowledgement (portal-authorization-and-iam-
+// scoping, design I7 "Design (D7-A)"). bin/app.ts refuses to synthesize when
+// `portalRegistryEnforced` is absent or unrecognized and the fresh-install
+// acknowledgement `allowLegacyRoles` is not given, because
+// portalRegistryEnforced() resolves both to 'false': a bare `cdk deploy`, or a
+// typo such as 'ture', would otherwise turn enforcement off unannounced.
+// ---------------------------------------------------------------------------
+
+/**
+ * The spellings that name enforcement off explicitly, beside the on set of
+ * {@link portalRegistryEnforced} ('1'/'true'/'yes'/'on'/'enabled'); both are
+ * compared after trimming, case-insensitively.
+ */
+export const ENFORCEMENT_OFF_VALUES = ['0', 'false', 'no', 'off', 'disabled'];
+
+/** True for boolean `true` or a string in portalRegistryEnforced()'s on set. */
+function isOnValue(value: unknown): boolean {
+  return portalRegistryEnforced(value) === 'true';
+}
+
+/**
+ * How the `portalRegistryEnforced` context value reads: 'absent' (undefined,
+ * null, or a string that is empty after trimming, so
+ * `-c portalRegistryEnforced=` is absent), 'recognized' (a boolean, or a
+ * string in the on set or {@link ENFORCEMENT_OFF_VALUES}) or 'unrecognized'
+ * (anything else).
+ */
+export function enforcementContextKind(enforcedCtx: unknown): 'absent' | 'recognized' | 'unrecognized' {
+  if (enforcedCtx === undefined || enforcedCtx === null) return 'absent';
+  if (typeof enforcedCtx === 'boolean') return 'recognized';
+  if (typeof enforcedCtx !== 'string') return 'unrecognized';
+  const normalized = enforcedCtx.trim().toLowerCase();
+  if (normalized.length === 0) return 'absent';
+  if (isOnValue(normalized) || ENFORCEMENT_OFF_VALUES.includes(normalized)) return 'recognized';
+  return 'unrecognized';
+}
+
+/**
+ * True iff the app may synthesize: `portalRegistryEnforced` is recognized, or
+ * the `allowLegacyRoles` acknowledgement is truthy (the on set). The deploy
+ * scripts pass the acknowledgement only on a fresh install, where no portal
+ * handler is deployed yet and the CDK default, off, is the intended value.
+ */
+export function legacyRolesAcknowledged(enforcedCtx: unknown, ack: unknown): boolean {
+  return enforcementContextKind(enforcedCtx) === 'recognized' || isOnValue(ack);
+}
+
+/**
+ * The message bin/app.ts throws when {@link legacyRolesAcknowledged} refuses:
+ * two sentences naming the ways forward, plus a third naming the value for an
+ * unrecognized one. Branches on {@link enforcementContextKind}, so the
+ * predicate and the message cannot disagree.
+ */
+export function enforcementRefusalMessage(enforcedCtx: unknown): string {
+  const remedy =
+    'portalRegistryEnforced is unset. Pass -c portalRegistryEnforced=true|false (deploy scripts ' +
+    'resolve this from the deployed value) or -c allowLegacyRoles=true to deploy a fresh install ' +
+    'with enforcement off.';
+  if (enforcementContextKind(enforcedCtx) !== 'unrecognized') return remedy;
+  const value = typeof enforcedCtx === 'string' ? enforcedCtx : JSON.stringify(enforcedCtx);
+  return (
+    `${remedy} \`portalRegistryEnforced=${value}\` is not a recognized spelling; use one of ` +
+    '1/true/yes/on/enabled or 0/false/no/off/disabled.'
+  );
+}
+
 /**
  * Normalizes the `cloudFrontDomain` CDK context value to the bare domain
  * (portal-deploy-flag-hardening Req 3). Consumers prepend the scheme

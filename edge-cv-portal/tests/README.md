@@ -6,7 +6,8 @@ Offline `bats` test harness for the one-command portal deploy orchestrator
 ## Prerequisites
 
 [Bats](https://github.com/bats-core/bats-core) (Bash Automated Testing System),
-version 1.2+.
+version 1.2+ (`registry_enforcement.bats` needs 1.5+: it calls
+`bats_require_minimum_version` and `run --separate-stderr`).
 
 ```bash
 # macOS
@@ -34,7 +35,8 @@ bats .                 # run every *.bats file in this directory
 | `helpers/stub.sh` | Single generic stub backing every stubbed executable. Records each invocation (name, order, `$PWD`, args, selected env vars, stdin) to `$STUB_TRACE` and emits caller-controlled stdout/stderr/exit codes. Serves canned `aws` responses. |
 | `test_helper.bash` | `bats` setup helper: builds a temp `bin/` (prepended to `PATH`) with PATH-shadow stubs for `deploy-account-role.sh`, `deploy-auth.sh`, `deploy-infrastructure.sh`, `deploy-frontend.sh`, `configure-bucket-cors.sh` and for `aws`/`node`/`cdk`/`npx`; seeds a fake `edge-cv-portal` working tree; and provides seed + trace-query helpers. |
 | `harness.bats` | Self-tests proving the harness works offline. |
-| `registry_enforcement.bats` | `scripts/portal-registry-enforcement.sh` and the three deploy scripts that use it: an unset `PORTAL_REGISTRY_ENFORCED` keeps the deployed value, an explicit one wins, a fresh install passes nothing, and a failed lookup stops the deploy. |
+| `registry_enforcement.bats` | `scripts/portal-registry-enforcement.sh` and the three deploy scripts that use it: an unset `PORTAL_REGISTRY_ENFORCED` keeps the deployed value, an explicit one wins, a fresh install passes no enforcement value, and a failed lookup stops the deploy. |
+| `cdk_context_guard.bats` | Every script that synthesizes the portal app passes the enforcement context: the pinned set of four scripts, every `cdk bootstrap` naming an app with `-a` or carrying the context itself, `deploy-auth.sh`'s bootstrap and deploy context on a fresh install, a deployed value and a failed lookup, and the provenance and `Data-plane scoping:` lines of the deploy scripts. |
 
 ## Using the harness in a test
 

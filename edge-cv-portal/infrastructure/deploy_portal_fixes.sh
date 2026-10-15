@@ -49,9 +49,11 @@ TRUSTED="${TRUSTED_USECASE_ACCOUNT_IDS:-$ACCOUNT}"
 # Which stacks to deploy (default: all).
 CDK_STACKS="${CDK_STACKS:---all}"
 
-# Optional data-bucket allowlist (comma-separated bucket names or ARNs) that the
-# portal Lambda roles may access on the S3 data plane. Empty/unset => all
-# buckets (arn:aws:s3:::*) on the data plane (default).
+# Optional data-bucket allowlist (comma-separated bucket names or ARNs) for the
+# portal Lambda roles' S3 data plane. Read only under the 'tag-objects-only' and
+# 'allowlist' data-plane scopings (dataPlaneGrant in lib/context-helpers.ts);
+# the deployed 'tag' scoping conditions the data plane on the bucket's
+# dda-portal:managed tag and ignores it.
 DATA_BUCKET_ALLOWLIST="${DATA_BUCKET_ALLOWLIST:-}"
 
 # Portal_Identity enforcement: keep the deployed value unless asked otherwise.
@@ -59,17 +61,36 @@ DATA_BUCKET_ALLOWLIST="${DATA_BUCKET_ALLOWLIST:-}"
 if ! ENFORCED=$(portal_registry_enforced_for_deploy "$REGION"); then
   exit 1
 fi
-ENFORCED_ARGS=()
+# bin/app.ts refuses to synthesize without a recognized portalRegistryEnforced
+# unless allowLegacyRoles=true acknowledges a fresh install (no portal handler
+# deployed yet); the effective value and its provenance go to the deploy log
+# (portal-authorization-and-iam-scoping, D7-A).
 if [ -n "$ENFORCED" ]; then
   ENFORCED_ARGS=(-c "portalRegistryEnforced=$ENFORCED")
+  if [ -n "${PORTAL_REGISTRY_ENFORCED:-}" ]; then
+    ENFORCEMENT_PROVENANCE="Portal_Identity enforcement: $ENFORCED (requested)"
+  else
+    ENFORCEMENT_PROVENANCE="Portal_Identity enforcement: $ENFORCED (kept from deployed)"
+  fi
+else
+  ENFORCED_ARGS=(-c "allowLegacyRoles=true")
+  ENFORCEMENT_PROVENANCE="Portal_Identity enforcement: CDK default (off), acknowledged (fresh install)"
 fi
+
+# The deploy itself needs no build (cdk.json runs bin/app.ts through ts-node);
+# the build writes lib/context-helpers.js, from which the data-plane scoping
+# this deploy gives every portal handler (DATA_PLANE_SCOPING;
+# portal-authorization-and-iam-scoping, design I5) is read for the log.
+npm run build || exit 1
 
 echo "=== $(date -u '+%FT%TZ') portal deploy start ==="
 echo "  account=$ACCOUNT region=$REGION"
 echo "  trustedUseCaseAccountIds=$TRUSTED"
-echo "  dataBucketAllowlist=${DATA_BUCKET_ALLOWLIST:-<all buckets (default)>}"
+echo "  dataBucketAllowlist=${DATA_BUCKET_ALLOWLIST:-<unset>}"
 echo "  portalRegistryEnforced=${ENFORCED:-<CDK default (off)>}"
 echo "  stacks=$CDK_STACKS"
+echo "$ENFORCEMENT_PROVENANCE"
+echo "Data-plane scoping: $(node -e "console.log(require('./lib/context-helpers').DATA_PLANE_SCOPING)")"
 
 npx cdk deploy $CDK_STACKS \
   --require-approval never \

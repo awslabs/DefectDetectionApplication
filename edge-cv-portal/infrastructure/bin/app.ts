@@ -10,7 +10,12 @@ import { NodeDesignerStack } from '../lib/node-designer-stack';
 import { BuildFleetStack } from '../lib/build-fleet-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
 import { FrontendStack } from '../lib/frontend-stack';
-import { detectorExportImageDefault, normalizeCloudFrontDomain } from '../lib/context-helpers';
+import {
+  detectorExportImageDefault,
+  enforcementRefusalMessage,
+  legacyRolesAcknowledged,
+  normalizeCloudFrontDomain,
+} from '../lib/context-helpers';
 
 // One SSM String parameter, read synchronously via the AWS CLI (the same
 // mechanism as the trusted-account fallback below). Throws on any failure;
@@ -40,6 +45,19 @@ const app = new cdk.App(
     ? { context: { detectorExportImage: detectorExportImageFallback } }
     : undefined,
 );
+
+// Portal_Identity enforcement must be stated, never defaulted by omission
+// (portal-authorization-and-iam-scoping, design I7 D7-A): an absent or
+// unrecognized `portalRegistryEnforced` resolves to off, so without the
+// fresh-install acknowledgement `allowLegacyRoles` the app refuses to
+// synthesize, before any stack exists. The CLI synthesizes the whole app even
+// when it deploys one named stack, so this covers every deploy path; the
+// deploy scripts pass the deployed value or, on a fresh install, the
+// acknowledgement.
+const registryEnforcedContext = app.node.tryGetContext('portalRegistryEnforced');
+if (!legacyRolesAcknowledged(registryEnforcedContext, app.node.tryGetContext('allowLegacyRoles'))) {
+  throw new Error(enforcementRefusalMessage(registryEnforcedContext));
+}
 
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
@@ -138,10 +156,12 @@ const trustedUseCaseAccountIds: string[] = resolveTrustedUseCaseAccountIds()
   .split(',')
   .map((id: string) => id.trim())
   .filter((id: string) => id.length > 0);
-// Optional allowlist of data buckets the portal Lambda roles may access on the
-// S3 data plane. Comma-separated bucket names or ARNs via CDK context
-// (`-c dataBucketAllowlist=bucket-a,bucket-b`). Empty/unset => all buckets
-// (arn:aws:s3:::*) on the data plane (default; control-plane never granted).
+// Optional allowlist of data buckets for the portal Lambda roles' S3 data
+// plane. Comma-separated bucket names or ARNs via CDK context
+// (`-c dataBucketAllowlist=bucket-a,bucket-b`). Read only under the
+// 'tag-objects-only' and 'allowlist' data-plane scopings (dataPlaneGrant in
+// lib/context-helpers.ts); the deployed 'tag' scoping conditions the data
+// plane on the bucket's dda-portal:managed tag and ignores it.
 const dataBucketAllowlist: string[] = (app.node.tryGetContext('dataBucketAllowlist') || '')
   .split(',')
   .map((b: string) => b.trim())

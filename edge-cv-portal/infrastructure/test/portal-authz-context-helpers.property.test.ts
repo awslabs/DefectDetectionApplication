@@ -10,14 +10,23 @@
  *             list grant; the only unconditioned statement on every bucket
  *             is tag discovery with exactly its two actions.
  *             Validates: Requirements 7.1, 7.2
+ *
+ * Property 9: The app refuses to synthesize iff registry enforcement is
+ *             absent or unrecognized and the acknowledgement is not truthy.
+ *             Validates: Requirement 9.1
  */
 
 import * as fc from 'fast-check';
 import {
   DATA_PLANE_SCOPING,
   DataPlaneScoping,
+  ENFORCEMENT_OFF_VALUES,
   PORTAL_MANAGED_TAG_CONDITION,
   dataPlaneGrant,
+  enforcementContextKind,
+  enforcementRefusalMessage,
+  legacyRolesAcknowledged,
+  portalRegistryEnforced,
 } from '../lib/context-helpers';
 
 const RUNS = { numRuns: 100 };
@@ -204,5 +213,121 @@ describe('Feature: portal-authorization-and-iam-scoping, Property 7: The data-pl
     expect(first.objectLevel.conditions).not.toBe(PORTAL_MANAGED_TAG_CONDITION);
     expect(first.objectLevel.conditions).not.toBe(second.objectLevel.conditions);
     expect(first.objectLevel.conditions).not.toBe(first.bucketLevel.conditions);
+  });
+});
+
+// The oracle restates Requirement 9.1 from the inputs: the two recognized
+// sets, compared after trimming, case-insensitively; a boolean is recognized;
+// undefined, null and a blank string are absent; anything else is
+// unrecognized. The acknowledgement is truthy for boolean true or a member of
+// the on set.
+const ON_SPELLINGS = ['1', 'true', 'yes', 'on', 'enabled'];
+const OFF_SPELLINGS = ['0', 'false', 'no', 'off', 'disabled'];
+const ABSENT_REMEDY =
+  'portalRegistryEnforced is unset. Pass -c portalRegistryEnforced=true|false (deploy scripts ' +
+  'resolve this from the deployed value) or -c allowLegacyRoles=true to deploy a fresh install ' +
+  'with enforcement off.';
+
+function oracleKind(value: unknown): 'absent' | 'recognized' | 'unrecognized' {
+  if (value === undefined || value === null) return 'absent';
+  if (typeof value === 'boolean') return 'recognized';
+  if (typeof value !== 'string') return 'unrecognized';
+  const normalized = value.trim().toLowerCase();
+  if (normalized === '') return 'absent';
+  return ON_SPELLINGS.includes(normalized) || OFF_SPELLINGS.includes(normalized) ? 'recognized' : 'unrecognized';
+}
+
+function oracleAcknowledged(ack: unknown): boolean {
+  return ack === true || (typeof ack === 'string' && ON_SPELLINGS.includes(ack.trim().toLowerCase()));
+}
+
+const whitespaceArb = fc.array(fc.constantFrom(' ', '\t', '\n'), { maxLength: 3 }).map((chars) => chars.join(''));
+// A recognized spelling with arbitrary case and surrounding whitespace.
+const spelledArb = (spellings: string[]) =>
+  fc
+    .tuple(whitespaceArb, fc.constantFrom(...spellings), fc.array(fc.boolean(), { minLength: 8, maxLength: 8 }), whitespaceArb)
+    .map(([before, word, upper, after]) =>
+      before + word.split('').map((char, i) => (upper[i] ? char.toUpperCase() : char)).join('') + after,
+    );
+const recognizedArb = fc.oneof(fc.boolean(), spelledArb(ON_SPELLINGS), spelledArb(OFF_SPELLINGS));
+const absentArb = fc.oneof(fc.constant(undefined), fc.constant(null), whitespaceArb);
+const unrecognizedArb = fc.oneof(
+  fc.constantFrom('ture', 'maybe', 'tru', 'flase', 'of', 'enable', 'disable', '2', 'y', 'n'),
+  fc.string({ minLength: 1, maxLength: 12 }).filter((s) => oracleKind(s) === 'unrecognized'),
+  fc.integer(),
+  fc.constant({ enabled: true }),
+);
+const enforcementArb = fc.oneof(recognizedArb, absentArb, unrecognizedArb);
+const ackArb = fc.oneof(fc.constant(undefined), fc.boolean(), spelledArb(ON_SPELLINGS), spelledArb(OFF_SPELLINGS),
+  fc.string({ maxLength: 8 }));
+
+describe('Feature: portal-authorization-and-iam-scoping, Property 9: The app refuses to synthesize iff registry enforcement is absent or unrecognized and the acknowledgement is not truthy', () => {
+  it('refuses exactly the absent or unrecognized values without a truthy acknowledgement (Validates: Requirement 9.1)', () => {
+    fc.assert(
+      fc.property(enforcementArb, ackArb, (enforced, ack) => {
+        const accepted = oracleKind(enforced) === 'recognized' || oracleAcknowledged(ack);
+        expect(legacyRolesAcknowledged(enforced, ack)).toBe(accepted);
+      }),
+      RUNS,
+    );
+  });
+
+  it('accepts every recognized spelling, in any case and with surrounding whitespace, without an acknowledgement (Validates: Requirement 9.1)', () => {
+    fc.assert(
+      fc.property(recognizedArb, (enforced) => {
+        expect(enforcementContextKind(enforced)).toBe('recognized');
+        expect(legacyRolesAcknowledged(enforced, undefined)).toBe(true);
+      }),
+      RUNS,
+    );
+  });
+
+  it('classifies like the oracle, and the predicate agrees with the classification (Validates: Requirement 9.1)', () => {
+    fc.assert(
+      fc.property(enforcementArb, (enforced) => {
+        const kind = enforcementContextKind(enforced);
+        expect(kind).toBe(oracleKind(enforced));
+        expect(legacyRolesAcknowledged(enforced, undefined)).toBe(kind === 'recognized');
+      }),
+      RUNS,
+    );
+  });
+
+  it('names the ways forward, and the value when it is unrecognized (Validates: Requirement 9.1)', () => {
+    fc.assert(
+      fc.property(fc.oneof(absentArb, unrecognizedArb), (enforced) => {
+        const message = enforcementRefusalMessage(enforced);
+        if (oracleKind(enforced) === 'absent') {
+          expect(message).toBe(ABSENT_REMEDY);
+        } else {
+          const shown = typeof enforced === 'string' ? enforced : JSON.stringify(enforced);
+          expect(message).toBe(
+            `${ABSENT_REMEDY} \`portalRegistryEnforced=${shown}\` is not a recognized spelling; ` +
+              'use one of 1/true/yes/on/enabled or 0/false/no/off/disabled.',
+          );
+        }
+      }),
+      RUNS,
+    );
+  });
+
+  it('exports the off set the requirement names', () => {
+    expect(ENFORCEMENT_OFF_VALUES).toEqual(OFF_SPELLINGS);
+  });
+
+  it.each(['ture', 'maybe'])('refuses %s and names it', (value) => {
+    expect(enforcementContextKind(value)).toBe('unrecognized');
+    expect(legacyRolesAcknowledged(value, undefined)).toBe(false);
+    const message = enforcementRefusalMessage(value);
+    expect(message).toContain(`\`portalRegistryEnforced=${value}\` is not a recognized spelling`);
+    expect(message).toContain('1/true/yes/on/enabled or 0/false/no/off/disabled');
+    // The acknowledgement still lets a fresh install through.
+    expect(legacyRolesAcknowledged(value, 'true')).toBe(true);
+  });
+
+  it.each(['0', 'disabled'])('accepts %s and resolves enforcement off', (value) => {
+    expect(enforcementContextKind(value)).toBe('recognized');
+    expect(legacyRolesAcknowledged(value, undefined)).toBe(true);
+    expect(portalRegistryEnforced(value)).toBe('false');
   });
 });

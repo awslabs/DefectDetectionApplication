@@ -31,6 +31,11 @@ npm ci
 echo "🔨 Building TypeScript..."
 npm run build
 
+# The S3 data-plane scoping this build gives every portal handler
+# (DATA_PLANE_SCOPING; portal-authorization-and-iam-scoping, design I5), read
+# from the built lib/context-helpers.js, the source the CDK synthesizes from.
+echo "Data-plane scoping: $(node -e "console.log(require('./lib/context-helpers').DATA_PLANE_SCOPING)")"
+
 echo "🧹 Clearing CDK cache to force layer update..."
 rm -rf cdk.out
 
@@ -64,8 +69,20 @@ fi
 if ! ENFORCED=$(portal_registry_enforced_for_deploy "$AWS_REGION"); then
   exit 1
 fi
+# bin/app.ts refuses to synthesize without a recognized portalRegistryEnforced
+# unless allowLegacyRoles=true acknowledges a fresh install (no portal handler
+# deployed yet, so the CDK default, off, applies); the effective value and its
+# provenance go to the deploy log (portal-authorization-and-iam-scoping, D7-A).
 if [ -n "$ENFORCED" ]; then
   CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c portalRegistryEnforced=$ENFORCED"
+  if [ -n "${PORTAL_REGISTRY_ENFORCED:-}" ]; then
+    echo "Portal_Identity enforcement: $ENFORCED (requested)"
+  else
+    echo "Portal_Identity enforcement: $ENFORCED (kept from deployed)"
+  fi
+else
+  CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c allowLegacyRoles=true"
+  echo "Portal_Identity enforcement: CDK default (off), acknowledged (fresh install)"
 fi
 # Production posture (ADMIN_GUIDE "The enforcement flag"): a deploy that leaves
 # enforcement off must never be silent. The resolved value is passed through

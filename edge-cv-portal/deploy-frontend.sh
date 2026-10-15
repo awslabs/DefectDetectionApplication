@@ -167,14 +167,29 @@ TRUSTED="${TRUSTED_USECASE_ACCOUNT_IDS:-$ACCOUNT}"
 if ! ENFORCED=$(portal_registry_enforced_for_deploy "$CDK_REGION"); then
   exit 1
 fi
-ENFORCED_ARGS=()
+# bin/app.ts refuses to synthesize without a recognized portalRegistryEnforced
+# unless allowLegacyRoles=true acknowledges a fresh install (no portal handler
+# deployed yet); the effective value and its provenance go to the deploy log
+# (portal-authorization-and-iam-scoping, D7-A).
 if [ -n "$ENFORCED" ]; then
   ENFORCED_ARGS=(-c "portalRegistryEnforced=$ENFORCED")
+  if [ -n "${PORTAL_REGISTRY_ENFORCED:-}" ]; then
+    echo "Portal_Identity enforcement: $ENFORCED (requested)"
+  else
+    echo "Portal_Identity enforcement: $ENFORCED (kept from deployed)"
+  fi
+else
+  ENFORCED_ARGS=(-c "allowLegacyRoles=true")
+  echo "Portal_Identity enforcement: CDK default (off), acknowledged (fresh install)"
 fi
 
 echo "Redeploying compute stack with CloudFront domain: $CLOUDFRONT_URL"
 echo "   Trusted UseCase accounts: $TRUSTED"
 npm run build
+# The S3 data-plane scoping this build gives every portal handler
+# (DATA_PLANE_SCOPING; portal-authorization-and-iam-scoping, design I5), read
+# from the built lib/context-helpers.js, the source the CDK synthesizes from.
+echo "Data-plane scoping: $(node -e "console.log(require('./lib/context-helpers').DATA_PLANE_SCOPING)")"
 npx cdk deploy EdgeCVPortalComputeStack --require-approval never \
   -c cloudFrontDomain="$CLOUDFRONT_URL" \
   -c "trustedUseCaseAccountIds=$TRUSTED" \
