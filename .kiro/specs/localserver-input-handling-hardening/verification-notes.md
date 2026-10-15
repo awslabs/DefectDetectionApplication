@@ -594,17 +594,128 @@ Nothing was merged into or pushed to the trunk, and no build was dispatched.
 
 ## Owner-gated — PENDING (not executed in this run)
 
-### Task 7: build round — PENDING
-Record: the jpeg-branch merge-up result, the combined ref
-`build/jpeg-and-input-handling`, the recomputed CSI golden hashes for **every**
-pinned entry from the merged tree (resolved by recompute, not by taking a
-branch's side), the re-run CSI + both specs' suites on it, the build-gate replay
-on the combined ref, the two pushes and their hygiene result, the pre-build
-checks, and each architecture's build
-(component name + version) — strictly one variant at a time. These are jpeg's
-task-7 builds too: record jpeg's offline built-image check on the
-amd64/amd64Nvidia/arm64/arm64JP7 builds and the build-source change (owner memo
-D3) in jpeg's `verification-notes.md` "Task 6". Combined with the jpeg round.
+### Task 7: build round — local part DONE (2026-10-15); pushes and builds PENDING
+
+Local part only: no push, no build, no deploy, no device or AWS action. The
+trunk `integration/all-specs` was `795ce528` (read-only `git ls-remote`).
+
+**Refs.**
+- `spec/jpeg-folder-source-decode`: `3a30a1d3` → `be5da984` Merge
+  origin/integration/all-specs (parents `3a30a1d3`, `795ce528`; no conflict;
+  the result differs from the trunk by jpeg's own 87 files only) →
+  `fbcb56bb` docs(spec), the jpeg folder-source non-regression check
+  (design "Per-item device check content") appended verbatim to jpeg's
+  notes under "Owner-gated (tasks 7 to 12)", stating it doesn't replace jpeg
+  task 8b. It is a separate docs commit after the merge commit, so the merge
+  commit carries no content of its own. Not pushed.
+- `spec/localserver-input-handling`: `f73bb81a`, unchanged in this step.
+- `build/jpeg-and-input-handling`: created from the trunk tip `795ce528` in
+  its own worktree, no upstream set. `a0904083` merges
+  `spec/jpeg-folder-source-decode` (`--no-ff`, no conflict); `16d6378f`
+  merges `spec/localserver-input-handling` (parents `a0904083`, `f73bb81a`).
+  `pipeline_executor.py` auto-merged (separate hunks, no markers). The only
+  conflict was the CSI golden, resolved below. Then this docs commit. The
+  branch delta against the trunk is 110 files, exactly the union of the two
+  feature deltas. Not pushed.
+
+**CSI golden recompute**
+(`test/backend-test/csi_nvargus_optional/goldens/backend_csi_consumers_sha256.json`,
+in merge commit `16d6378f`). Every entry is `sha256sum` of the merged file;
+neither side was taken.
+
+| Entry | jpeg side (`fbcb56bb`) | this branch (`f73bb81a`) | Merged tree (after) |
+|---|---|---|---|
+| `src/backend/gstreamer/pipeline_builder.py` | `4b27ee43…` | `bf7221c7…` | `4b27ee43e059bd27fe5070b1ca3248343414dbe82acdbcd6ef00d6cf88d0dcf4` (jpeg's C4 file) |
+| `src/backend/workflow_engine/csi_capture.py` | `193cdfcd…` | `193cdfcd…` | `193cdfcd558f2fc569ea99cdd45d89a3a9da9ca13058410a65eec88fdd7b32ee` (unchanged) |
+| `src/backend/workflow_engine/pipeline_executor.py` | `103bc023…` | `8edf43bf…` | `d475fd476a3ebe52c66c41d69437e0d6aadce0063fdea9c84ae05ea8755d48c5` (both edits; new value) |
+| `src/backend/workflow_engine/vendor/workflow_core/catalog/nodes.py` | `2b0d9b8c…` | `35bc1b2b…` (stale) | `2b0d9b8c1512726a5542482a596021f5917c5ea75cee3de7bed35b191070772d` (jpeg's file) |
+
+The trunk values equal this branch's except `pipeline_executor.py`
+(`7b80c297…`). The trunk's `nodes.py` entry `35bc1b2b…` was stale (the file
+is `e9cc8f43…` there), which was this spec's one pre-existing CSI failure; the
+recompute clears it. `test_preservation_csi_surface.py`: 20 passed before the
+merge commit and in the suite run below. No other golden pins a file either
+branch changed (the security baselines are unchanged against the trunk).
+
+**This spec's suites on `16d6378f`** (the Task 5 / Task 6 commands and image
+IDs; `comm -13` of sorted failing/erroring ids). No new failing id against
+`296c230c` or the merged `b7f6f019`.
+
+| Suite | `b7f6f019` (Task 6) | Combined tree |
+|---|---|---|
+| `stream_ingest/` | 241 passed, 23 skipped, 2 errors | 241 passed, 23 skipped, 2 errors |
+| `text_generation/` | 25 passed | 25 passed |
+| `workflow_engine/` | 1924 passed, 14 skipped, 2 failed, 5 errors | quiet-host run: 2240 passed, 14 skipped, 2 failed, 5 errors |
+| `output_bindings_fixes/` | 29 passed, 7 errors | 29 passed, 7 errors |
+| text-generation consumers | 74 passed, 1 failed | 74 passed, 1 failed |
+| download-route source checks | 30 passed, 1 error | 30 passed, 1 error |
+| CSI surface | 19 passed, 1 failed (`nodes.py`) | 20 passed |
+| two guard suites | 4 passed, 3 skipped | 4 passed, 3 skipped |
+
+- `workflow_engine/` rose by jpeg's tests. The first run, beside the jpeg
+  suites on a busy host, also failed
+  `test_opcua_binding_preservation.py::test_all_success_output_bindings_finalize_completed`,
+  the 200 ms Hypothesis deadline case jpeg's notes record as failing on a
+  cold or busy host on both trees. The quiet-host re-run of the whole
+  directory passed it, and its failing ids equal the baseline set.
+- Frozen files: the five are byte-identical to `frozen/`.
+- Device container (3.11.9, by image ID): the frozen files, the metadata
+  persistence file and the three per-item modules 85 passed;
+  `test_inference_result_api.py` + `test_workflows_api.py` on a writable
+  `git archive` copy 42 passed.
+- NUL probe (3.10.12, 3.11.9, host 3.9.5): identical to the `b7f6f019` probe.
+- SPA: 37 suites / 314 tests; the one failing suite is the pre-existing
+  seed-dependent `DeployedWorkflowDetails.exploration.test.tsx` (1 case this
+  run). Both `result-history/utils*.test.ts` suites pass. `npm run build`
+  compiled with the standing warning set; `build/` was removed.
+- Build-gate replay (AC13, 141-line body, derived `set +e` copy, writable
+  `git archive` copy, by image ID): every pytest count line and every failing
+  id equal the `296c230c` and `b7f6f019` runs, and jpeg's Task 5 run. The six
+  security audit gates pass. The only two `GATE-CMD-FAILED` results are the
+  known off-device blocks (`line=9`, `libtritonserver.so`; `line=24`,
+  GStreamer/PyAV).
+
+jpeg's suites on the same tree are in jpeg's notes ("Task 7, combined round").
+No new failing id there either.
+
+**Hygiene** (pass/fail only). The hygiene gate and the wording checklist ran
+on every new commit's staged added lines and message (both merges, the jpeg
+docs commit and this one), on the jpeg merge-up delta, on the combined
+branch delta against the trunk (`git diff 795ce528..HEAD`, added lines) and
+all its commit messages, and on both spec directories. Label swap: 0
+originals everywhere. Identifier grep: 0 matches everywhere. Neutral-wording
+terms: pass on every input above. Identifier classes: pass on every new
+commit, every message and this spec directory. The combined delta and the
+jpeg spec directory carry the pushed jpeg branch's pre-existing class hits
+(loopback and wildcard listener addresses, dotted version strings, and the
+name of a pattern class in jpeg's hygiene record), identical in count to
+`3a30a1d3`; nothing new. The literal merge-up diff `3a30a1d3..be5da984` is
+trunk content already on the trunk. No `.agents/` or plan file is in either
+delta; `security-scan-remediation-high/requirements.md` and the security
+baselines are unchanged against the trunk.
+
+**Pre-build checks** (`.kiro/steering/builds.md`, read-only and local parts).
+- No `gdk component build`, `build-custom.sh` or `run_jp_builds.sh` process,
+  and no local Portal deploy or `cdk` process, at the time of the check.
+- No preservation-tracked file (compose file, Dockerfiles, requirements,
+  recipe variants, `setup_station.sh`, `gdk-config.json`) is in the combined
+  delta. The recomputed CSI entries are in and equal `sha256sum` of the
+  committed files.
+- `edge-cv-portal/infrastructure/cdk.out` is absent in this worktree and in
+  the other local checkouts checked, and the ref tracks none.
+- Guard suites: 4 passed, 3 skipped. Build-gate replay: green as above.
+
+**Still PENDING (owner):**
+the jpeg branch push (`git push origin spec/jpeg-folder-source-decode`) and
+the combined push (`git push -u origin build/jpeg-and-input-handling`), each
+with the owner's go; on the build server, at dispatch time: no build or
+Portal deploy running, `cdk.out` moved aside in the build checkout, guard
+suites green; then one build per architecture, strictly one at a time
+(`amd64`, `amd64Nvidia`, `arm64`, `arm64JP5`, `arm64JP6`, `arm64JP7`), each
+recorded by component name and version. These are jpeg's task-7 builds too:
+jpeg's offline built-image check on the amd64/amd64Nvidia/arm64/arm64JP7
+builds goes in jpeg's notes. The build-source change (owner memo D3) is now
+recorded in jpeg's notes "Task 6".
 
 ### Task 8: on-device verification — PENDING
 Per architecture (MIC-730 / Orin / thor1 / the lab Dell for amd64 and
@@ -680,11 +791,6 @@ The five findings this spec changes stay open until task 11.
   clear; the engine-wrapped Item 4 path keeps its contract reason and may still
   be flagged. Anything still flagged is dismissed in task 11 with a recorded
   reason. Settled only by the post-merge rescan.
-- Whether merging the two feature branches is textually clean beyond the
-  predicted CSI golden recompute (the golden conflict spans jpeg's adjacent
-  `nodes.py` line; Layer A's `trigger_runtime` import is placed to avoid jpeg's
-  `:129` import block). A read-only `git merge-tree` showed no conflict markers
-  in the function bodies; the real merge is task 7.
 - Whether `%00` in a path segment reaches the input-image route on device
   (Item 2's `a%00b` request). Task 8 records the outcome either way.
 - Whether a multimodal model is READY on the Orin and thor1 for Item 4's
