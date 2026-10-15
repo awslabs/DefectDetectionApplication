@@ -5,7 +5,8 @@ Recording fakes for the use-case authorization suites
 `install(uc, shared, mp)` puts recording STS / S3 / EventBridge / Lambda
 clients on the usecases module only (the sibling suite's pattern: the
 handler's `boto3.client` is replaced, the shared layer keeps moto), a
-recording attach validator that admits every bucket, a recording
+recording Attach_Step (the attach validator plus the ABAC registration)
+that admits every bucket, a recording
 `log_audit_event` on both modules, and a write recorder around the
 handler's DynamoDB tables, so a test can assert which calls and writes
 happened and in which order. The use-case table is a private moto table
@@ -225,8 +226,9 @@ class FakeLambda:
 
 
 class RecordingValidator:
-    """Stand-in for the sibling's attach validator: records every keyword
-    call and admits the bucket."""
+    """Stand-in for the Attach_Step (`attach_bucket`, which runs the
+    sibling's attach validator): records every keyword call, `source`
+    included, and admits the bucket as tagged, ABAC-enabled and reachable."""
 
     def __init__(self, shared):
         self.shared = shared
@@ -234,9 +236,10 @@ class RecordingValidator:
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
-        return self.shared.EligibilityResult(
+        eligibility = self.shared.EligibilityResult(
             eligible=True, reason="eligible", tags={MANAGED: "true"},
             portal_created=False, claimed_by=None)
+        return self.shared.AttachOutcome(eligibility, True, True, True, None, "already_enabled")
 
 
 class AuditRecorder:
@@ -344,7 +347,7 @@ def install(uc, shared, mp, trusted: str = TRUSTED) -> Fakes:
 
     mp.setattr(uc, "boto3", SimpleNamespace(client=client, resource=real_boto3.resource))
     mp.setattr(uc, "sts", fakes.sts)
-    mp.setattr(uc, "check_bucket_attachable", fakes.validator)
+    mp.setattr(uc, "attach_bucket", fakes.validator)
     for module in (shared, uc):
         mp.setattr(module, "log_audit_event", fakes.audit)
     mp.setattr(uc, "dynamodb", RecordingDynamo(

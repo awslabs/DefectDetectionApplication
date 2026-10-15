@@ -19,8 +19,14 @@ from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, get_usecase,
     get_s3_client_for_bucket, assert_bucket_allowed, allowed_s3_buckets,
-    check_bucket_attachable, audit_bucket_allowed,
-    BucketConfigError, bucket_config_error_response
+    audit_bucket_allowed,
+    BucketConfigError, bucket_config_error_response,
+    # portal-authorization-and-iam-scoping (design I1, I5): the account
+    # grammar of the data-account triple, the Attach_Step, the deployed
+    # Data_Plane_Scoping and the registration remedies list_buckets offers.
+    validate_account_id, validate_role_arn, attach_bucket, data_plane_scoping,
+    REGISTRATION_REMEDY_ENABLE_ABAC, REGISTRATION_REMEDY_CROSS_ACCOUNT,
+    REGISTRATION_REMEDY_REDEPLOY,
 )
 
 # Configure logging
@@ -172,6 +178,28 @@ def handler(event: Dict, context: Any) -> Dict:
 
 
 
+def _is_access_denied(error: ClientError) -> bool:
+    response = getattr(error, 'response', None) or {}
+    code = str((response.get('Error') or {}).get('Code') or '')
+    status = (response.get('ResponseMetadata') or {}).get('HTTPStatusCode')
+    return code in ('AccessDenied', '403') or status == 403
+
+
+def _listing_remedy(bucket: str, *, assumed_role: bool) -> str:
+    """The remedy list_buckets reports for a tagged bucket whose
+    GetBucketLocation was denied (portal-authorization-and-iam-scoping,
+    design I5). With an assumed role the bucket's own account decides
+    (DDAPortalAccessRole's tag condition applies once ABAC is on there);
+    on the execution role under 'tag-objects-only' the bucket-level grant
+    names the deployed allowlist, so the portal must be redeployed; under
+    'tag' the bucket's ABAC is off."""
+    if assumed_role:
+        return REGISTRATION_REMEDY_CROSS_ACCOUNT.format(bucket=bucket)
+    if data_plane_scoping() == 'tag-objects-only':
+        return REGISTRATION_REMEDY_REDEPLOY
+    return REGISTRATION_REMEDY_ENABLE_ABAC.format(bucket=bucket)
+
+
 def list_buckets(event: Dict) -> Dict:
     """
     List S3 buckets in the data account that have the dda-portal:managed tag.
@@ -266,6 +294,12 @@ def list_buckets(event: Dict) -> Dict:
                     logger.warning(f"Could not get details for bucket {bucket_name}: {str(e)}")
                     # Still include the bucket but with limited info
                     entry['region'] = 'unknown'
+                    if _is_access_denied(e):
+                        # GetBucketLocation is tag-conditioned: a denied
+                        # tagged bucket is reported, with its remedy, rather
+                        # than failing the listing (design I5).
+                        entry['abac_enabled'] = False
+                        entry['remedy'] = _listing_remedy(bucket_name, assumed_role=bool(credentials))
                 buckets.append(entry)
         
         # Also include the configured data bucket if it exists
@@ -710,6 +744,45 @@ def _is_clear(value) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+DATA_ACCOUNT_FIELDS = ('data_account_id', 'data_account_role_arn', 'data_account_external_id')
+DATA_ACCESS_ROLE_NAME = 'DDAPortalDataAccessRole'
+
+
+def _data_account_triple_refusal(record: Dict, body: Dict):
+    """(error_code, message) when a body touching the data-account triple
+    leaves it malformed, else None (portal-authorization-and-iam-scoping,
+    Requirement 3.1: the same grammar as POST /usecases, on the body merged
+    over the stored record).
+
+    A separate data account (an id other than the use case's own account)
+    needs a twelve-digit id and exactly its DDAPortalDataAccessRole; a role
+    ARN or an external id with no data account id anywhere is refused. A
+    data account id equal to the use case's account names no separate data
+    account and gets no grammar, as on creation. No STS call.
+    """
+    if not any(field in body for field in DATA_ACCOUNT_FIELDS):
+        return None
+    merged = {field: (body[field] if field in body else record.get(field))
+              for field in DATA_ACCOUNT_FIELDS}
+    data_account_id = merged['data_account_id']
+    if _is_clear(data_account_id):
+        if not _is_clear(merged['data_account_role_arn']) or \
+                not _is_clear(merged['data_account_external_id']):
+            return 'INVALID_ACCOUNT_ID', 'supply data_account_id for the data account role'
+        return None
+    if data_account_id == record.get('account_id'):
+        return None
+    if not validate_account_id(data_account_id):
+        return 'INVALID_ACCOUNT_ID', 'data_account_id must be a twelve-digit AWS account id'
+    role_arn = merged['data_account_role_arn']
+    if _is_clear(role_arn):
+        return 'INVALID_ROLE_ARN', 'supply data_account_role_arn for the separate data account'
+    if not validate_role_arn(role_arn, data_account_id, role_name=DATA_ACCESS_ROLE_NAME):
+        return ('INVALID_ROLE_ARN',
+                f'data_account_role_arn must be arn:aws:iam::{data_account_id}:role/{DATA_ACCESS_ROLE_NAME}')
+    return None
+
+
 def configure_data_account(event: Dict) -> Dict:
     """
     Configure data account settings for a usecase.
@@ -754,6 +827,13 @@ def configure_data_account(event: Dict) -> Dict:
         if record is None:
             return create_response(404, {'error': 'Use case not found',
                                          'error_code': 'usecase_not_found'})
+        # The data-account triple's grammar, before the bucket attach and the
+        # write (portal-authorization-and-iam-scoping, Requirement 3.1).
+        grammar_error = _data_account_triple_refusal(record, body)
+        if grammar_error:
+            code, message = grammar_error
+            logger.warning(f"Data account grammar refused ({code}): {message}")
+            return create_response(400, {'error': message, 'error_code': code})
         effective = dict(record)
         effective.update({field: body[field] for field in data_fields if field in body})
         new_bucket = body.get('data_s3_bucket')
@@ -761,12 +841,15 @@ def configure_data_account(event: Dict) -> Dict:
             'data_s3_bucket' in body and not _is_clear(new_bucket)
             and new_bucket != (None if _is_clear(record.get('data_s3_bucket'))
                                else record.get('data_s3_bucket')))
-        attach_result = None
+        # The Attach_Step (design I5): the sibling's validator, then ABAC on a
+        # tagged portal-account data bucket and its reachability reported.
+        attached = None
         if bucket_changed:
             try:
-                attach_result = check_bucket_attachable(
+                attached = attach_bucket(
                     target_usecase_id=usecase_id, usecase_like=effective, bucket=new_bucket,
-                    user=user, event=event, purpose='configure-data-s3-bucket', retry=False)
+                    user=user, event=event, purpose='configure-data-s3-bucket', retry=False,
+                    source='configure_data_account')
             except BucketConfigError as e:
                 return bucket_config_error_response(e)
         
@@ -800,11 +883,13 @@ def configure_data_account(event: Dict) -> Dict:
         )
         if bucket_changed:
             audit_bucket_allowed(user, usecase_id, new_bucket, 'data_s3_bucket',
-                                 'configure', attach_result, event)
+                                 'configure', attached.eligibility, event)
         
         return create_response(200, {
             'message': 'Data account configuration updated',
-            'usecase_id': usecase_id
+            'usecase_id': usecase_id,
+            # The Registration_Report of the bucket this request attached.
+            'registration': {new_bucket: attached.report()} if bucket_changed else {},
         })
         
     except ClientError as e:

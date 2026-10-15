@@ -18,7 +18,7 @@ from shared_utils import (
     validate_usecase_access,
     # Use-case bucket configuration (design §5): the allowed-set helpers, the
     # attach validator and the error / audit shapes every record writer shares.
-    allowed_s3_buckets, portal_owned_buckets, check_bucket_attachable,
+    allowed_s3_buckets, portal_owned_buckets,
     audit_bucket_allowed, read_bucket_tags, is_membership_name,
     is_valid_bucket_name, caller_is_portal_admin, is_cross_account_setup,
     BucketConfigError, BucketNotEligible, InvalidBucketName,
@@ -38,6 +38,10 @@ from shared_utils import (
     INTERNAL_MARKER_KEY, internal_marker,
     # The key-namespace check of the one tag list the portal writes (design I5).
     assert_portal_tags,
+    # The Attach_Step every bucket record writer runs where it ran the attach
+    # validator, and the reachability probe of a bucket created without a use
+    # case (design I5 "Registration-time reporting").
+    attach_bucket, _probe, data_plane_scoping,
 )
 # Use_Case settings for VLM/LLM Anomaly Tuning Sample_Export (spec:
 # quality-prompt-tuning, Requirements 2.1, 2.9). Pure module, shared with
@@ -1407,21 +1411,26 @@ def create_s3_bucket(event, user):
             eligible=True, reason='eligible', tags=read_tags, portal_created=True,
             claimed_by=read_tags.get(PORTAL_USECASE_ID_TAG) or None)
 
-        # 6. Auto-add to the use case, with the read tags as the evidence.
+        # 6. Auto-add to the use case, with the read tags as the evidence,
+        # through the Attach_Step (design I5): the bucket is ABAC-enabled
+        # already unless the enable above failed, in which case the step
+        # enables it, and the step reports reachability.
         added_to_usecase = False
         add_error = None
+        attached = None
         if usecase_id:
             try:
-                result = check_bucket_attachable(
+                attached = attach_bucket(
                     target_usecase_id=usecase_id, usecase_like=record, bucket=name,
-                    user=user, event=event, purpose='auto-add-bucket', evidence=evidence)
+                    user=user, event=event, purpose='auto-add-bucket', evidence=evidence,
+                    source='create_s3_bucket')
                 outcome = _add_additional_bucket(table, usecase_id, name)
                 if outcome == 'usecase_not_found':
                     add_error = {'error_code': 'usecase_not_found', 'remedy': REMEDY_ADD_LATER}
                 else:
                     added_to_usecase = True
                     audit_bucket_allowed(user, usecase_id, name, 'additional_s3_buckets',
-                                         'auto_add', result, event)
+                                         'auto_add', attached.eligibility, event)
             except BucketNotEligible as e:
                 add_error = {'error_code': 'bucket_not_eligible', 'reason': e.reason, 'remedy': e.remedy}
             except ClientError as e:
@@ -1435,11 +1444,23 @@ def create_s3_bucket(event, user):
              'added_to_usecase': added_to_usecase}, event=event)
 
         # The registration fields (portal-authorization-and-iam-scoping, design
-        # I5 "Registration-time reporting"): a 201 means the tags were
-        # confirmed, and ABAC is enabled when the creation-time enable was.
+        # I5 "Registration-time reporting"), never null: a 201 means the tags
+        # were confirmed; ABAC is enabled when the creation-time enable or the
+        # auto-add's Attach_Step enabled it. Without an Attach_Step (no use
+        # case, or the auto-add was refused) the handler probes the bucket
+        # itself, with the client that created it.
+        if attached is not None:
+            abac_enabled = abac == 'enabled' or attached.abac_action in ('enabled', 'already_enabled')
+            iam_reachable, remedy = attached.iam_reachable, attached.remedy
+        else:
+            abac_enabled = abac == 'enabled'
+            iam_reachable, remedy = _probe(
+                name, s3_client=s3, tagged=True, abac_enabled=abac_enabled, account_kind='portal',
+                scoping=data_plane_scoping(), just_enabled=(abac == 'enabled'))
         bucket = {'name': name, 'region': region, 'portal_created': True, 'tags': tag_keys,
                   'abac': abac, 'added_to_usecase': added_to_usecase,
-                  'tagged': True, 'abac_enabled': abac == 'enabled'}
+                  'tagged': True, 'abac_enabled': abac_enabled,
+                  'iam_reachable': iam_reachable, 'remedy': remedy}
         if add_error is not None:
             bucket['add_error'] = add_error
         return create_response(201, {'bucket': bucket})
@@ -2042,14 +2063,18 @@ def create_usecase(event, user):
                                   'configure-data-s3-bucket', True))
         attach_checks.extend(('additional_s3_buckets', name, 'allow-additional-bucket', False)
                              for name in additional)
-        attached = []          # (attribute, bucket, EligibilityResult) for the audit rows
+        # Each check runs through the Attach_Step (portal-authorization-and-iam-
+        # scoping, design I5): the sibling's validator, then ABAC enabled on a
+        # tagged portal-account bucket and its reachability reported.
+        attached = []          # (attribute, bucket, AttachOutcome) for the audit rows
         rejected = []
         first_error = None
         for attribute, bucket, purpose, retry in attach_checks:
             try:
-                attached.append((attribute, bucket, check_bucket_attachable(
+                attached.append((attribute, bucket, attach_bucket(
                     target_usecase_id=usecase_id, usecase_like=item, bucket=bucket,
-                    user=user, event=event, purpose=purpose, retry=retry)))
+                    user=user, event=event, purpose=purpose, retry=retry,
+                    source='create_usecase')))
             except BucketConfigError as e:
                 rejected.append(_rejection(bucket, e))
                 first_error = first_error or e
@@ -2062,9 +2087,12 @@ def create_usecase(event, user):
 
         table.put_item(Item=item)
 
-        # The attach audit row, once per bucket the record names (design §1.6).
-        for attribute, bucket, result in attached:
-            audit_bucket_allowed(user, usecase_id, bucket, attribute, 'create', result, event)
+        # The attach audit row, once per bucket the record names (design §1.6),
+        # and the Registration_Report entry of each (design I5).
+        for attribute, bucket, outcome in attached:
+            audit_bucket_allowed(user, usecase_id, bucket, attribute, 'create',
+                                 outcome.eligibility, event)
+        registration = {bucket: outcome.report() for _, bucket, outcome in attached}
         
         # Auto-assign creator as UseCaseAdmin
         try:
@@ -2311,6 +2339,7 @@ def create_usecase(event, user):
             'data_bucket_cors': data_bucket_cors_result,
             'data_bucket_tag': data_bucket_tag_result,
             'eventbridge': eventbridge_result,
+            'registration': registration,
             'message': 'Use case created successfully'
         })
         
@@ -2462,16 +2491,19 @@ def update_usecase(usecase_id, event, user):
                 reason='too_many_buckets', remedy=REMEDY_TOO_MANY))
 
         # Every bucket entering the record is validated; every refusal is
-        # reported, nothing is written while any remains.
-        configured_results = {}        # attribute -> (bucket, EligibilityResult)
-        add_results = {}               # bucket -> EligibilityResult
+        # reported, nothing is written while any remains. Each check runs
+        # through the Attach_Step (portal-authorization-and-iam-scoping,
+        # design I5), which enables ABAC on a tagged portal-account bucket.
+        configured_results = {}        # attribute -> (bucket, AttachOutcome)
+        add_results = {}               # bucket -> AttachOutcome
         rejected = []
         first_error = None
         for attribute, bucket, purpose in configured_changes:
             try:
-                configured_results[attribute] = (bucket, check_bucket_attachable(
+                configured_results[attribute] = (bucket, attach_bucket(
                     target_usecase_id=usecase_id, usecase_like=effective, bucket=bucket,
-                    user=user, event=event, purpose=purpose, retry=False))
+                    user=user, event=event, purpose=purpose, retry=False,
+                    source='update_usecase'))
             except BucketConfigError as e:
                 rejected.append(_rejection(bucket, e))
                 first_error = first_error or e
@@ -2479,9 +2511,10 @@ def update_usecase(usecase_id, event, user):
             if name in current:
                 continue
             try:
-                add_results[name] = check_bucket_attachable(
+                add_results[name] = attach_bucket(
                     target_usecase_id=usecase_id, usecase_like=effective, bucket=name,
-                    user=user, event=event, purpose='allow-additional-bucket', retry=False)
+                    user=user, event=event, purpose='allow-additional-bucket', retry=False,
+                    source='update_usecase')
             except BucketConfigError as e:
                 rejected.append(_rejection(name, e))
                 first_error = first_error or e
@@ -2516,8 +2549,8 @@ def update_usecase(usecase_id, event, user):
                 raise
             logger.warning(f"Use case {usecase_id} disappeared before the update was written")
             return _usecase_not_found()
-        for attribute, (bucket, result) in configured_results.items():
-            audit_bucket_allowed(user, usecase_id, bucket, attribute, 'api', result, event)
+        for attribute, (bucket, outcome) in configured_results.items():
+            audit_bucket_allowed(user, usecase_id, bucket, attribute, 'api', outcome.eligibility, event)
 
         # Grant maintenance on an account move (design I1): the previous
         # account's grants are removed when no other use case references it,
@@ -2542,7 +2575,7 @@ def update_usecase(usecase_id, event, user):
                 if outcome == 'added':
                     added.append(name)
                     audit_bucket_allowed(user, usecase_id, name, 'additional_s3_buckets',
-                                         'api', add_results[name], event)
+                                         'api', add_results[name].eligibility, event)
                 elif outcome == 'already_present':
                     already_present.append(name)
                 else:
@@ -2575,12 +2608,18 @@ def update_usecase(usecase_id, event, user):
             'success', {'updated_fields': list(body.keys())}
         )
         
+        # The Registration_Report (design I5): one entry per bucket this
+        # request Attached — a changed configured bucket and each one added.
+        registration = {bucket: outcome.report() for bucket, outcome in configured_results.values()}
+        registration.update({name: add_results[name].report() for name in added})
+
         reloaded = table.get_item(Key={'usecase_id': usecase_id}).get('Item') or {}
         return create_response(200, {
             'message': 'Use case updated successfully',
             'added': added, 'already_present': already_present,
             'removed': removed, 'not_present': not_present,
             'allowed_s3_buckets': sorted(allowed_s3_buckets(reloaded)),
+            'registration': registration,
             **grant_reports,
         })
         

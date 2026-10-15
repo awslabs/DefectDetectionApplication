@@ -145,6 +145,8 @@ class ScriptedBucketS3:
         self.abac_error = abac_error
         self.calls: List[Any] = []
         self.sent_tags: List[Dict] = []
+        self.regions: Dict[str, str] = {}        # bucket -> the region it was created in
+        self.abac_enabled: set = set()           # buckets with a put_bucket_abac that did not raise
 
     def ops(self):
         return [name for name, _ in self.calls]
@@ -153,14 +155,33 @@ class ScriptedBucketS3:
         self.calls.append(("create_bucket", kwargs))
         if self.create_error is not None:
             raise self.create_error
-        self.sent_tags = list(kwargs.get("CreateBucketConfiguration", {}).get("Tags", []))
+        configuration = kwargs.get("CreateBucketConfiguration", {})
+        self.sent_tags = list(configuration.get("Tags", []))
+        self.regions[kwargs["Bucket"]] = configuration.get("LocationConstraint") or "us-east-1"
         return {}
 
     def put_bucket_abac(self, **kwargs):
         self.calls.append(("put_bucket_abac", kwargs))
         if self.abac_error is not None:
             raise self.abac_error
+        self.abac_enabled.add(kwargs["Bucket"])
         return {}
+
+    # The Attach_Step's and the probe's calls (portal-authorization-and-iam-
+    # scoping, Requirement 10.4(g)).
+    def get_bucket_abac(self, **kwargs):
+        self.calls.append(("get_bucket_abac", kwargs))
+        enabled = kwargs["Bucket"] in self.abac_enabled
+        return {"AbacStatus": {"Status": "Enabled" if enabled else "Disabled"}}
+
+    def head_bucket(self, **kwargs):
+        self.calls.append(("head_bucket", kwargs))
+        region = self.regions.get(kwargs["Bucket"], "us-east-1")
+        return {"ResponseMetadata": {"HTTPHeaders": {"x-amz-bucket-region": region}}}
+
+    def list_objects_v2(self, **kwargs):
+        self.calls.append(("list_objects_v2", kwargs))
+        return {"KeyCount": 0}
 
     def get_bucket_tagging(self, **kwargs):
         self.calls.append(("get_bucket_tagging", kwargs))
@@ -407,7 +428,23 @@ class Harness:
 
         self.monkeypatch.setattr(self.uc, "boto3", SimpleNamespace(
             client=client, resource=real_boto3.resource))
-        return SimpleNamespace(s3=s3, s3control=s3control, tagging=tagging, factory=factory)
+        # The shared layer's clients reach the same scripted fake while a
+        # bucket stub is installed, so the auto-add and wizard paths run the
+        # real Attach_Step and probe; recorded apart, so the `factory`
+        # indices above are unchanged (Requirement 10.4(g)).
+        shared_factory = Recorder()
+        if listing is None:
+            real_create = self.shared.create_boto3_client
+
+            def shared_client(service, credentials, region=None):
+                shared_factory.calls.append((service, credentials, region))
+                if service == "s3":
+                    return s3
+                return real_create(service, credentials, region)
+
+            self.monkeypatch.setattr(self.shared, "create_boto3_client", shared_client)
+        return SimpleNamespace(s3=s3, s3control=s3control, tagging=tagging, factory=factory,
+                               shared_factory=shared_factory)
 
     def proxy_table(self, module, **overrides):
         """Replace `module.dynamodb` so its use-cases table is a TableProxy."""
@@ -1076,6 +1113,7 @@ def test_create_s3_bucket_without_usecase_requires_portal_admin(h):
         "name": name, "region": "us-east-1", "portal_created": True,
         "tags": [MANAGED, CREATED_BY], "abac": "enabled", "added_to_usecase": False}
     assert payload["bucket"]["tagged"] is True and payload["bucket"]["abac_enabled"] is True
+    assert payload["bucket"]["iam_reachable"] is True and payload["bucket"]["remedy"] is None
     assert stubs.s3control.calls == []
     success = h.audit.of("create_s3_bucket", user_id=portal_admin["user_id"], result="success")
     assert [row["details"] for row in success] == [{
@@ -1142,7 +1180,9 @@ def test_create_s3_bucket_call_order(h):
     name = h.name()
     status, payload = h.create_bucket(h.usecase_admin(usecase_id), {"name": name, "usecase_id": usecase_id})
     assert status == 201, payload
-    assert stubs.s3.ops() == ["create_bucket", "put_bucket_abac", "get_bucket_tagging"]
+    # The auto-add's Attach_Step (already enabled) and its probe follow.
+    assert stubs.s3.ops() == ["create_bucket", "put_bucket_abac", "get_bucket_tagging",
+                              "head_bucket", "get_bucket_abac", "head_bucket", "list_objects_v2"]
     assert stubs.s3control.calls == []                          # the read confirmed the keys
     assert stubs.factory.calls[0] == ("s3", {"region_name": "us-east-1"})
     create_kwargs = stubs.s3.calls[0][1]
@@ -1159,6 +1199,10 @@ def test_create_s3_bucket_call_order(h):
     assert status == 201 and payload["bucket"]["region"] == "eu-west-1"
     assert stubs.factory.calls[0] == ("s3", {"region_name": "eu-west-1"})
     assert stubs.s3.calls[0][1]["CreateBucketConfiguration"]["LocationConstraint"] == "eu-west-1"
+    # The wizard path probes on the handler's own client.
+    assert stubs.s3.ops() == ["create_bucket", "put_bucket_abac", "get_bucket_tagging",
+                              "head_bucket", "list_objects_v2"]
+    assert stubs.shared_factory.calls == []
 
 
 def test_create_s3_bucket_tag_resource_fallback(h):
@@ -1170,7 +1214,8 @@ def test_create_s3_bucket_tag_resource_fallback(h):
     assert status == 201, payload
     assert stubs.s3.ops() == ["create_bucket", "put_bucket_abac",
                               "get_bucket_tagging", "get_bucket_tagging", "get_bucket_tagging",
-                              "get_bucket_tagging"]
+                              "get_bucket_tagging",
+                              "head_bucket", "get_bucket_abac", "head_bucket", "list_objects_v2"]
     assert stubs.s3control.calls == [{
         "AccountId": PORTAL_ACCOUNT, "ResourceArn": f"arn:aws:s3:::{name}",
         "Tags": [{"Key": MANAGED, "Value": "true"}, {"Key": CREATED_BY, "Value": "portal"},
@@ -1253,7 +1298,10 @@ def test_create_s3_bucket_reports_abac_failure_and_still_tags(h):
     status, payload = h.create_bucket(h.usecase_admin(usecase_id), {"name": name, "usecase_id": usecase_id})
     assert status == 201, payload
     assert payload["bucket"]["abac"] == "failed" and payload["bucket"]["added_to_usecase"] is True
-    assert stubs.s3.ops() == ["create_bucket", "put_bucket_abac", "get_bucket_tagging"]
+    # The auto-add's Attach_Step finds ABAC off and enables it again.
+    assert stubs.s3.ops() == ["create_bucket", "put_bucket_abac", "get_bucket_tagging",
+                              "head_bucket", "get_bucket_abac", "put_bucket_abac",
+                              "head_bucket", "list_objects_v2"]
     success = h.audit.of("create_s3_bucket", result="success")
     assert success[-1]["details"]["abac"] == "failed"
 
@@ -1271,6 +1319,7 @@ def test_create_s3_bucket_auto_add_success_row(h):
         "name": name, "region": "us-east-1", "portal_created": True,
         "tags": [MANAGED, CREATED_BY, CLAIM], "abac": "enabled", "added_to_usecase": True}
     assert payload["bucket"]["tagged"] is True and payload["bucket"]["abac_enabled"] is True
+    assert payload["bucket"]["iam_reachable"] is True and payload["bucket"]["remedy"] is None
     assert h.record(usecase_id)["additional_s3_buckets"] == [name]
     rows = allowed_rows(h, user_id=admin["user_id"], resource_id=usecase_id)
     assert [row["details"] for row in rows] == [
