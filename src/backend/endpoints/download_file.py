@@ -328,12 +328,20 @@ def get_inference_result_data_for_retraining(
     # First, POST to /workflows/{workflow_id}/results/export, which writes out the data to a file on disk
     # Then, GET from /workflows/{workflow_id}/results/export (here), which loads the data from said file on disk
     if captureIdPath:
-        if not os.path.exists(captureIdPath):
+        resolved = None
+        try:
+            base = os.path.realpath(DDA_SYSTEM_FOLDER)
+            resolved = os.path.realpath(captureIdPath)
+        except ValueError:  # embedded NUL: cannot name a file inside
+            resolved = None
+        if (resolved is None
+                or not resolved.startswith(base + os.sep)
+                or not os.path.exists(resolved)):
             raise HTTPException(
                 status_code=HTTP_404_NOT_FOUND,
-                detail=f"The server can't get the capture id file. Error: 'The path {captureIdPath} couldn't be found'. Check the path and try again.",
+                detail="The server can't get the capture id file. Check the path and try again.",
             )
-        with open(captureIdPath) as json_file:
+        with open(resolved) as json_file:
             inference_result_data_list = json.load(json_file)
     else:
         # Regular case, query the data ourselves

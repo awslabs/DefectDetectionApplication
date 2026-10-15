@@ -106,7 +106,7 @@ INFERENCE_OUTPUT_MASK_CONTENT_TYPE_PREFIX = "mask" # available since inference a
 INFERENCE_OUTPUT_OVERLAY_CONTENT_TYPE = "overlay.jpg" # available since inference app 1.20230911.528802a8
 
 EDGE_AGENT_VENV_PATH = DDA_GREENGRASS_ROOT_FOLDER + "/work/" + LFV_AGENT_GG_COMPONENT_NAME
-CAPTURED_IDS_PATH_PATTERN = r"\/aws_dda\/system\/capture-id-path-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}"
+CAPTURED_IDS_PATH_PATTERN = r"^/aws_dda/system/capture-id-path-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}$"
 SNAPSHOT_FILE_PATTERN = r"(snapshotfile/)?snapshot-.*-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.tar\.gz"
 CAPTURED_IMAGE_FOLDER_PATTHERN = r"\/aws_dda\/image-capture\/[a-zA-Z0-9]+"
 CAPTURED_IMAGE_FILE_PATH_PATTHERN = r"\/aws_dda\/image-capture\/[a-zA-Z0-9_/s-]+"
