@@ -285,7 +285,7 @@ class RecordingDynamo:
         self._real = real
         self._log = log
 
-    def Table(self, name):            # noqa: N802 - boto3 resource API
+    def Table(self, name):            # the boto3 resource API's method name
         return RecordingTable(self._real.Table(name), name, self._log)
 
 

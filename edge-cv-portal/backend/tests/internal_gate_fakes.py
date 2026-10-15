@@ -72,7 +72,7 @@ class FakeDynamo:
     def __init__(self):
         self.table = FakeTable()
 
-    def Table(self, name):            # noqa: N802 - boto3 resource API
+    def Table(self, name):            # the boto3 resource API's method name
         return self.table
 
 

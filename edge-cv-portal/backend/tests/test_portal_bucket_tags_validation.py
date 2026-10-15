@@ -95,7 +95,9 @@ class TagRecordingS3Control:
 
 @pytest.fixture(scope="module")
 def uc(aws_stack):
-    import shared_utils  # noqa: F401 - the real layer, imported inside the mock
+    # Import the real layer while the moto mock is active, before usecases
+    # (which imports it); the name itself is not used here.
+    import shared_utils
     sys.modules.pop("usecases", None)
     import usecases
     return usecases
