@@ -55,3 +55,31 @@ export const getResultHistoryFilterParams = (tokens: readonly PropertyFilterToke
 
 export const isInferenceResultPage = (pageType: HistoryResultPageType): boolean =>
   pageType === HistoryResultPageType.INFERENCE_RESULT;
+
+interface ExportUrlParams {
+  workflowsEndpoint: string;
+  workflowId: string;
+  captureIdPath: string;
+  authEnabled: boolean;
+  token: string;
+}
+
+/**
+ * The result-history download link for the retraining export route. The
+ * captureIdPath is percent-encoded, and the credential is joined as its own
+ * "&token=" parameter only when authorization is on, so the server receives
+ * the path and (with auth on) the credential as two separate query parameters
+ * (localserver-input-handling-hardening Item 3c).
+ */
+export const buildExportUrl = ({
+  workflowsEndpoint,
+  workflowId,
+  captureIdPath,
+  authEnabled,
+  token,
+}: ExportUrlParams): string => {
+  const url = `${workflowsEndpoint}/${workflowId}/results/export?captureIdPath=${encodeURIComponent(
+    captureIdPath,
+  )}`;
+  return authEnabled ? `${url}&token=${encodeURIComponent(token)}` : url;
+};

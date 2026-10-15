@@ -68,7 +68,7 @@ import {
 import DownloadModal from "./DownloadModal";
 import EditNotesModal from "./EditNotesModal";
 import { AppLayoutContext } from "components/layout/AppLayoutContext";
-import { getResultHistoryFilterParams } from "./utils";
+import { buildExportUrl, getResultHistoryFilterParams } from "./utils";
 import useAuth from "components/auth/authHook";
 import { APIList } from "config/Interface";
 import { AxiosError } from "axios";
@@ -299,7 +299,13 @@ export default function ResultCardContent({
         }
       }
       const link = document.createElement("a");
-      link.href = `${APIList.workflows}/${workflowId}/results/export?captureIdPath=${result.captureIdPath}${authEnabled ? `token=${encodeURIComponent(token)}` : ""}`;
+      link.href = buildExportUrl({
+        workflowsEndpoint: APIList.workflows,
+        workflowId,
+        captureIdPath: result.captureIdPath,
+        authEnabled,
+        token,
+      });
       link.click();
       return { resultIds };
     },
