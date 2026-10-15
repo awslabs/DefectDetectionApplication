@@ -187,8 +187,8 @@ flowchart TD
     - _Requirements: 5.4, 5.5_
     - Verification: `npx jest test/route-auth-inventory.test.ts`
 
-- [ ] 4. Dead and dormant code (I4 — D4)
-  - [ ] 4.1 Remove `manifest_validator.py` and the dead router branch
+- [x] 4. Dead and dormant code (I4 — D4)
+  - [x] 4.1 Remove `manifest_validator.py` and the dead router branch
     - Confirm (and record in the Verification_Notes) `grep -rn "manifest_validator" edge-cv-portal/infrastructure/lib edge-cv-portal/backend --include=*.py --include=*.ts` returns prose mentions only; if a consumer appears, STOP and record it in `design.md` D4 before deleting anything
     - `git rm edge-cv-portal/backend/functions/manifest_validator.py`; reword the comments at `dda_labeling_worker.py:76, 227, 1308, 1380, 1387` and `dda_manifest.py:395`; delete `data_management.py:161–162`
     - `test_data_management_router.py`: `POST .../transform-manifest` → 404; `test_no_dormant_manifest_validator.py`: file absent, no `handler:` names it

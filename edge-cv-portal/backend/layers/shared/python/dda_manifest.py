@@ -392,7 +392,7 @@ def _human_annotated_value(record: Dict) -> str:
 def _validate_no_colons_in_key(mask_s3_uri: str) -> None:
     """
     Reject mask object keys containing colons (the known GT timestamp bug
-    that manifest_validator.py exists to fix; req 10.4).
+    the manifest checks flag; req 10.4).
     """
     if not mask_s3_uri or not mask_s3_uri.startswith('s3://'):
         raise ValueError(f'invalid mask S3 URI: {mask_s3_uri!r}')
