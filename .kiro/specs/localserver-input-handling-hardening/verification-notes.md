@@ -2,7 +2,9 @@
 
 **Status:** tasks 1-5 complete locally; the owner's answers of 2026-10-15 are
 applied (D1 (b1), D2 accepted / D2.2 no fold, D3 batch, D4 the six dismissed
-2026-10-15, D5 (b)); the task-9 gate is recorded with D1 (b1). The
+2026-10-15, D5 (b)); the task-9 gate is recorded with D1 (b1). Task 6's
+local part is done: the moved trunk is merged in (merge commit, no rebase)
+and task 5 is re-run on the merged tree with no new failing id. The
 feature-branch commits are local and unpushed. Tasks 6 (push), 7 (build), 8
 (on-device), 10 (trunk merge) and 11 (post-rescan reconciliation) are
 owner-gated and not run here. Nothing has been built, pushed, deployed or run
@@ -354,7 +356,10 @@ Affected-suite comparison, HEAD vs the 296c230c baseline (host, `--noconftest`;
 the text-generation consumers (1 pre-existing: the `vllm_model_reload`
 hash-pin), the download-route source checks (1 pre-existing collection error),
 the CSI surface (only `nodes.py`), and the two guard suites (0). HEAD passing
-counts rose only by the new tests (e.g. `workflow_engine/` 1898 → 1919).
+counts rose only by the new tests. These totals predate the review follow-ups
+and the trunk merge; the current totals are in "Task 5 re-run on the merged
+tree" under Task 6 (e.g. `workflow_engine/` 1898 passed / 10 skipped at the
+baseline → 1924 passed / 14 skipped on the merged tree).
 
 CSI preservation: after the Layer A rebaseline the `pipeline_executor.py` entry
 passes; only the pre-existing `vendor/workflow_core/catalog/nodes.py` entry
@@ -413,28 +418,44 @@ marker, so its frozen head (185 lines) is unchanged (confirmed by
   each SigV4 name with per-character random casing (the former no-op
   `_case_mix` is gone), and a lowercase `x-amz-credential=` `@example` pins
   that the `(?i)` masker still masks it. In the same appended region.
-- **New module** `test_input_handling_spec_named_cases.py` (not frozen; it
-  reuses the frozen modules' lifted-route helpers so the code under test is
-  still the shipped route). Host: 4 passed, 1 skipped; device container (3.11):
-  5 passed. It holds:
-  - AC5: the exact writer shape plus a trailing newline is rejected 400 at the
-    mounted route, handler not entered (the `$`-vs-trailing-newline case Python
-    `re` and the validator engine treat differently);
-  - Req 2.2: a contained malformed input-image jsonl answers 500 with the fixed
-    detail and logs exactly one WARNING record carrying `exc_info` — that record
-    is now the only diagnostic;
-  - Req 2.4: `_failure_reason(GenerationError(model, ""))` returns the fixed
-    string and logs one ERROR record carrying the error (the falsy-reason
-    branch the frozen Property 5 generator, `min_size=1`, never drew);
-  - Item 3 containment positive branch: a contained, existing capture file is
-    opened on the host (then 442 for an empty list), exercising the branch the
-    frozen Property 4 containment half never reaches because it seeds a file
-    only when the value escapes;
-  - AC6 end to end (container only): the exact writer-shape value written under
-    the real system folder round-trips through the mounted route — validator,
-    containment guard, open and zip — to a zip holding `manifest` and both
-    images. Skipped on the host (`inference_results_utils` needs the device
-    stack). Task 8's on-device POST-then-GET remains the first full-app run.
+- **Per-item spec-named modules** (not frozen). These cases first landed in
+  one shared module (`a86c65e5`). In task 6 they were split into one module
+  per item, and the shared module was removed (`a2925e43`), so each item's
+  follow-up tests revert with that item's fix (see "Rollback pairs" under
+  Task 6). Each module imports only its own item's frozen helpers, so the code
+  under test is still the shipped route compiled with `ast`. Host: 4 passed,
+  1 skipped; device container (3.11): 5 passed.
+  - `workflow_engine/test_input_image_spec_named_cases.py` (Item 2,
+    `6cb1812c`): Req 2.2, a contained malformed input-image jsonl answers 500
+    with the fixed detail and logs exactly one WARNING record carrying
+    `exc_info`. That record is now the only diagnostic.
+  - `workflow_engine/test_export_path_spec_named_cases.py` (Item 3,
+    `728015f3`):
+    - AC5: the exact writer shape plus a trailing newline is rejected 400 at
+      the mounted route, and the handler is not entered (Python `re` and the
+      validator engine treat `$` before a trailing newline differently);
+    - Item 3 containment positive branch: a contained, existing capture file
+      is opened on the host (then 442 for an empty list). The frozen
+      Property 4 containment half never reaches this branch, because it seeds
+      a file only when the value escapes;
+    - AC6 end to end (container only): the exact writer-shape value, written
+      under the real system folder, round-trips through the mounted route
+      (validator, containment guard, open and zip) to a zip holding
+      `manifest` and both images. It is skipped on the host
+      (`inference_results_utils` needs the device stack). It keeps its
+      footprint in that shared folder to what it wrote. It skips when the
+      writer-shape file already exists, and it snapshots the folder listing
+      before the request. Afterwards it removes only the writer-shape file and
+      the `manifest-*` entries that are new since the snapshot. A scratch
+      container run confirmed both rules: a pre-existing `manifest-*` entry
+      and an unrelated file stayed in place, and a pre-existing writer-shape
+      file made the case skip and was left untouched. Task 8's on-device
+      POST-then-GET remains the first full-app run.
+  - `text_generation/test_failure_reason_spec_named_cases.py` (Item 4,
+    `aea4027d`): Req 2.4, `_failure_reason(GenerationError(model, ""))`
+    returns the fixed string and logs one ERROR record carrying the error.
+    The frozen Property 5 generator (`min_size=1`) never draws this
+    falsy-reason branch.
 - **Item 3c wide inputs (Property 10).** A new frontend file
   `result-history/utils.property.test.ts` adds a property over
   `fc.fullUnicodeString()` (no lone surrogates) and a reserved-dense arbitrary
@@ -442,11 +463,12 @@ marker, so its frozen head (185 lines) is unchanged (confirmed by
   `utils.test.ts` property draws `fc.string()`, which defaults to grapheme-ASCII
   in the installed fast-check 3.23.2. SPA: both suites pass (6 tests).
 
-## Task 6: commit (local part) — DONE; push PENDING (owner-gated)
+## Task 6: commit, trunk merge-in and re-run (local part) — DONE; push PENDING (owner-gated)
 
-The fix commits are made locally on `spec/localserver-input-handling`; the push
-is not done (it needs the owner's go at task 6). Commit split and hashes
-(oldest first), each carrying its own item's tests:
+The commits are made locally on `spec/localserver-input-handling`. The push
+is not done; it needs the owner's go at task 6. Every commit on the branch
+that is not on the trunk, oldest first:
+- `296c230c` docs(spec): LocalServer input handling and error response hardening (the committed spec)
 - `e3aebb09` docs(spec): design review iteration 4 items + owner answers (d0)
 - `a1022f18` fix(backend): fixed 500 body; withhold credential-bearing query logs (i, Changes 1 + 3b)
 - `d953fabe` fix(backend): contain the input-image jsonl fallback path (ii, Change 2)
@@ -454,24 +476,118 @@ is not done (it needs the owner's go at task 6). Commit split and hashes
 - `db451906` fix(backend): fixed reason for unexpected text-generation errors (iv, Change 4)
 - `95c58736` fix(workflow-engine): mask signed query values in run metadata and logs (v, Layer A + CSI rebaseline)
 - `f280cc02` fix(frontend): build the result-history export link with encoded parameters (vii, Change 6 / Item 3c)
-- (d1) docs(spec): this verification-notes + tasks.md record
+- `c5d75239` docs(spec): record local verification of input-handling hardening (d1)
+- `01aec7e6` test(workflow-engine): pin no-SigV4 byte identity and mixed-case masking (review follow-up, Item 5)
+- `a86c65e5` test(backend): add boundary cases for export validation and error logging (review follow-up, shared module, Items 2-4)
+- `5063ccf4` test(frontend): widen the export-link property to full-Unicode inputs (review follow-up, Item 3c)
+- `80759d99` docs(spec): record review follow-up coverage and fix stale pointers
+- `6cb1812c` test(backend): add the input-image fallback logging case in its own module (Item 2)
+- `728015f3` test(backend): add the export-route boundary cases in their own module (Item 3; the AC6 cleanup fix)
+- `aea4027d` test(backend): add the empty-reason text-generation case in its own module (Item 4)
+- `a2925e43` test(backend): remove the shared spec-named case module
+- `b7f6f019` Merge origin/integration/all-specs into spec/localserver-input-handling (the trunk merge-in, below)
+- this docs(spec) commit: the Task 5 / Task 6 refresh in this file
 
-Each commit staged named files only (no `git add .`); the staged file list was
-checked to equal the commit's list before committing. The hygiene gate ran on
-every commit's staged added lines and its message, and the wording checklist's
-four checks (label swap → 0 originals; the identifier grep; the neutral-wording
-term grep; the identifier-class grep) passed for every commit (recorded
-pass/fail only). The whole committed spec directory also passes all four
-checks. Messages are framed as input validation / path containment / output
-encoding / error-response hardening, and each code-commit body states what was
-verified locally and that on-device verification is pending.
+**Rollback pairs** (design "Rollback Considerations"). Each item reverts as
+its fix commit plus its follow-up test commit:
+- Items 1 + 3b: `a1022f18` (no follow-up);
+- Item 2: `d953fabe` + `6cb1812c`;
+- Item 3: `73fec9f4` + `728015f3`;
+- Item 4: `db451906` + `aea4027d`;
+- Item 5 (Layer A): `95c58736` + `01aec7e6`;
+- Item 3c: `f280cc02` + `5063ccf4`.
 
-Scope (`git diff 296c230c`): the four spec files; the seven source files
-(`exception_handlers.py`, `download_file.py`, `constants.py`,
-`text_generation.py`, `trigger_runtime.py`, `pipeline_executor.py`, `api.py`);
-the CSI golden; the five backend test files; and the three frontend files
-(`result-history/utils.ts`, `utils.test.ts`, `ResultCardContent.tsx`). Empty:
-`.kiro/specs/security-scan-remediation-high/requirements.md`,
+`a86c65e5` added the shared module and `a2925e43` removed it, so together they
+are a no-op and no single-item revert needs them. Checked on a scratch clone
+of the merged tree: for each of Items 2, 3, 4 and 5, `git revert --no-commit`
+of the pair applied cleanly, and the remaining items' backend test modules
+then collected and passed on the host with no failure.
+
+**Trunk merge-in.** `git fetch origin` showed `origin/integration/all-specs`
+= `origin/remediation` = `795ce528`, two commits past this branch's base
+`f191d580`. The delta is under `hmi/` only, and no file overlaps this branch.
+It was merged with a merge commit, `b7f6f019` (parents `a2925e43` and
+`795ce528`), with no rebase and no force. The merge had no conflicts and
+staged `hmi/` files only. The branch is now 18 commits ahead of the trunk and
+0 behind, plus this docs commit.
+
+**Task 5 re-run on the merged tree** (`b7f6f019`, same commands and image IDs
+as Task 5). There is no new failing id against the `296c230c` baseline.
+- **Frozen files.** The five frozen files are byte-identical to their
+  `frozen/` copies, before and after the task-6 commits
+  (`test_trigger_payload_redaction.py` through its 185-line frozen head).
+- **Host** (`--noconftest`; `comm -13` of sorted failing/erroring ids against
+  the baseline):
+
+  | Suite | Baseline `296c230c` | Merged tree |
+  |---|---|---|
+  | `stream_ingest/` | 231 passed, 23 skipped, 2 errors | 241 passed, 23 skipped, 2 errors |
+  | `text_generation/` | 18 passed | 25 passed |
+  | `workflow_engine/` | 1898 passed, 10 skipped, 2 failed, 5 errors | 1924 passed, 14 skipped, 2 failed, 5 errors |
+  | `output_bindings_fixes/` | 29 passed, 7 errors | 29 passed, 7 errors |
+  | text-generation consumers | 74 passed, 1 failed | 74 passed, 1 failed |
+  | download-route source checks | 30 passed, 1 error | 30 passed, 1 error |
+  | CSI surface | 19 passed, 1 failed (`nodes.py`) | 19 passed, 1 failed (`nodes.py`) |
+  | two guard suites | 4 passed, 3 skipped | 4 passed, 3 skipped |
+
+  Every failing or erroring id on the merged tree is in the baseline set; the
+  counts rose only by this spec's tests. The pre-split HEAD re-run showed
+  `workflow_engine/` at 1925 passed / 14 skipped. The merged tree has one
+  fewer there, because the Item 4 case moved to `text_generation/`.
+- **Device container** (3.11.9, by image ID):
+  - the five frozen files, `test_trigger_metadata_persistence.py` and the
+    three per-item modules: 85 passed (the NUL members and the AC6 case run);
+  - `test_inference_result_api.py` + `test_workflows_api.py`, against a
+    writable `git archive` copy: 42 passed, equal to the baseline.
+- **NUL probe** (3.10.12, 3.11.9, host 3.9.5): identical to the pre-merge
+  HEAD probe. Under 3.10 and 3.11 both routes answer 404 with their fixed
+  details and 0 open calls. Under the host's 3.9.5 the input-image route
+  answers 500 with the fixed detail, and the export route answers 404 with
+  the fixed detail.
+- **SPA** (`CI=true npm test -- --watchAll=false`): 37 suites / 314 tests. Both
+  `result-history/utils*.test.ts` suites pass (Property 10 included). The one
+  failing suite is the pre-existing seed-dependent
+  `DeployedWorkflowDetails.exploration.test.tsx` (2 of its property cases this
+  run). Run alone three more times it failed, passed, then failed, consistent
+  with the flakiness recorded in Task 5. The merge brought no `src/frontend`
+  change. `npm run build` compiled with the standing warning set (rc=0), and
+  its `build/` output was removed.
+- **Build-gate replay** (AC13; the same 141-line body and derived `set +e`
+  copy, by image ID, writable `git archive` copy). The per-gate summary
+  matches the base run when line numbers and timings are ignored, and every
+  pytest count line is identical. The six security audit gates pass. The
+  only two `GATE-CMD-FAILED` results are the pre-existing off-device blocks
+  (`libtritonserver.so`; GStreamer/PyAV).
+
+**Hygiene.** Each commit staged named files only (no `git add .`), and the
+staged file list was checked to equal the commit's list before committing.
+The hygiene gate ran on every commit's staged added lines and its message,
+including the merge message. The wording checklist's four checks passed for
+every commit: the label swap finds 0 originals, plus the identifier grep, the
+neutral-wording term grep and the identifier-class grep (recorded as
+pass/fail only). The push-gate run over the full branch delta against the
+trunk (`git diff 795ce528..HEAD`, added lines), every commit message on the
+branch (`git log --format=%B 795ce528..HEAD`) and every file in this spec
+directory also passed all four checks. Messages are framed as input
+validation, path containment, output encoding or error-response hardening.
+Each code and test commit body states what was verified locally and that
+on-device verification is pending.
+
+**Scope** (`git diff 795ce528..HEAD`, the branch against the trunk): 25 files.
+- the four spec files plus `.config.kiro`;
+- the seven source files: `exception_handlers.py`, `download_file.py`,
+  `constants.py`, `text_generation.py`, `trigger_runtime.py`,
+  `pipeline_executor.py` and `api.py`;
+- the CSI golden;
+- eight backend test files: the five frozen modules, plus the three per-item
+  spec-named modules (`test_input_image_spec_named_cases.py`,
+  `test_export_path_spec_named_cases.py`,
+  `text_generation/test_failure_reason_spec_named_cases.py`);
+- four frontend files under `result-history/`: `utils.ts` and
+  `ResultCardContent.tsx`, plus the tests `utils.test.ts` and
+  `utils.property.test.ts`.
+
+Empty against the trunk: `.kiro/specs/security-scan-remediation-high/requirements.md`,
 `src/backend/endpoints/route/access_log_router.py`, and any
 `src/frontend`/`hmi`/`edge-cv-portal`/`vendor` path outside `result-history`.
 Nothing was merged into or pushed to the trunk, and no build was dispatched.
