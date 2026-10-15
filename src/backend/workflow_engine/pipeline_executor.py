@@ -88,6 +88,7 @@ from typing import Any, Callable, Dict, List, Optional
 from workflow_engine import branching, csi_capture, detections, run_artifacts
 from workflow_engine import executor as executor_hook
 from workflow_engine import python_bridge, rendering, roi_crop
+from workflow_engine.trigger_runtime import redacted_run_view
 from workflow_engine.aravis_feed import AravisFeedError, plan_aravis_feeds
 from workflow_engine.python_source import (
     PythonSourceError,
@@ -2461,10 +2462,18 @@ class WorkflowExecutor:
             # dir — vlm-parity-run-results Requirement 2.2).
             self._persist_node_frames(session, execution, document, work_dir)
             self._persist_run_metadata(execution, tag_values)
+            # Mask the trigger section's signed query values in the logged
+            # tags (Item 5 Layer A). Contained: only pathological nesting can
+            # raise RecursionError here, which runs after the run is committed
+            # COMPLETED, so it never changes the run status.
+            try:
+                logged_tags = redacted_run_view(tag_values)
+            except RecursionError:
+                logged_tags = "<tags withheld: too deeply nested to mask>"
             logger.info(
                 "Workflow execution %s completed; tags: %s",
                 execution_id,
-                tag_values,
+                logged_tags,
             )
         except Exception:  # noqa: BLE001 - contained per 13.7
             logger.exception(
@@ -3234,10 +3243,14 @@ class WorkflowExecutor:
             if not output_dir or not capture_id:
                 return
             path = os.path.join(output_dir, "{0}.json".format(capture_id))
+            # The trigger section is persisted with its signed query values
+            # masked (Item 5 Layer A); the view is computed before the file is
+            # opened and every other field is unchanged.
+            view = redacted_run_view(tag_values or {})
             with open(path, "w", encoding="utf-8") as f:
                 # default=str keeps the view serializable when tag values
                 # carry non-JSON types (best-effort stringification).
-                json.dump(tag_values or {}, f, indent=2, default=str)
+                json.dump(view, f, indent=2, default=str)
             logger.info("Persisted run metadata JSON to %s", path)
         except Exception:  # noqa: BLE001 - contained per 13.7 / R8.5
             logger.exception(
