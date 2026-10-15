@@ -226,12 +226,76 @@ def test_device_role_classification_and_exit_2_for_hand_attached_s3():
                             "HandGetEverything": managed("HandGetEverything", HAND_GET_ALL)})
     status, lines, state = run_check(iam)
     assert verdicts(state) == {
-        "GreengrassComponentS3Access": "in-template", "CloudWatchLogsPolicy": "in-template",
+        "GreengrassComponentS3Access": "in-template-legacy", "CloudWatchLogsPolicy": "in-template",
         "DDAUseCaseDeviceAccess": "portal-written", "DDAWorkflowTuningSampleAccess": "portal-written",
         "DDAPortalComponentAccessPolicy": "in-template", "HandGetEverything": "hand-attached"}
     assert status == 2
     assert "hand-attached S3 statements: 2" in lines
     assert any(line.startswith("  HandGetEverything [-] ") and "arn:aws:s3:::*" in line for line in lines)
+
+
+# ------------------------------------------- current vs legacy station templates
+def _station_documents():
+    """The S3 documents the three station files write today, read from the
+    repository: setup_station.sh's GreengrassComponentS3Access (inside a
+    double-quoted command string), create-edge-device-iam-role.sh's
+    INLINE_POLICY heredoc and edge-device-iam-policy.json."""
+    setup = _read("station_install/setup_station.sh")
+    anchor = setup.index("--policy-name GreengrassComponentS3Access")
+    start = setup.index("--policy-document '", anchor) + len("--policy-document '")
+    end = setup.index("}'\"; then", start) + 1
+    edge = _read("station_install/create-edge-device-iam-role.sh")
+    body_start = edge.index("\n", edge.index("INLINE_POLICY=$(cat <<'EOF'")) + 1
+    body_end = edge.index("\nEOF\n", body_start)
+    return {
+        "GreengrassComponentS3Access": json.loads(setup[start:end].replace('\\"', '"')),
+        "dda-edge-device-policy": json.loads(edge[body_start:body_end]),
+        "DDAEdgeDevicePolicy": json.loads(_read("station_install/edge-device-iam-policy.json")),
+    }
+
+
+# The S3 statements the station files wrote before task 6.2 converged them.
+LEGACY_STATION_DOCUMENTS = {
+    "GreengrassComponentS3Access": doc(allow(
+        ["s3:GetObject", "s3:GetObjectVersion"],
+        ["arn:aws:s3:::dda-component-*/*", "arn:aws:s3:::dda-component-us-east-1-*/*"])),
+    "dda-edge-device-policy": doc(allow(
+        ["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:GetBucketLocation",
+         "s3:GetBucketVersioning", "s3:ListBucketVersions"],
+        ["arn:aws:s3:::dda-component-*", "arn:aws:s3:::dda-component-*/*",
+         "arn:aws:s3:::dda-inference-results-*", "arn:aws:s3:::dda-inference-results-*/*"],
+        "S3Permissions")),
+    "DDAEdgeDevicePolicy": doc(allow(
+        ["s3:GetObject", "s3:GetObjectVersion"],
+        ["arn:aws:s3:::dda-component-*/*", "arn:aws:s3:::greengrass-component-artifacts-*/*"],
+        "GreengrassComponentDownload")),
+}
+
+
+def test_a_role_built_from_the_current_station_templates_is_in_template():
+    documents = _station_documents()
+    iam = FakeIAM(device_role(), inline=documents,
+                  attached={"DDAPortalComponentAccessPolicy": managed("DDAPortalComponentAccessPolicy",
+                                                                      TEMPLATE_COMPONENT_ACCESS)})
+    status, lines, state = run_check(iam)
+    assert set(verdicts(state).values()) == {"in-template"}
+    assert status == 0 and "hand-attached S3 statements: 0" in lines
+
+
+def test_a_role_built_from_the_earlier_station_templates_is_legacy_not_hand_attached():
+    iam = FakeIAM(device_role(), inline=dict(LEGACY_STATION_DOCUMENTS), attached={})
+    status, lines, state = run_check(iam)
+    assert verdicts(state) == {name: "in-template-legacy" for name in LEGACY_STATION_DOCUMENTS}
+    assert status == 0 and "hand-attached S3 statements: 0" in lines
+    # each earlier shape is outside the current templates, so it is legacy only
+    for document in LEGACY_STATION_DOCUMENTS.values():
+        for statement in document["Statement"]:
+            assert not drift.covered_by_templates(statement, drift.DEVICE_ROLE_TEMPLATE_S3_STATEMENTS)
+            assert drift.covered_by_templates(statement, drift.LEGACY_DEVICE_ROLE_S3_STATEMENTS)
+    # a legacy-named policy beyond both sets stays hand-attached
+    widened = doc(allow(["s3:GetObject"], "arn:aws:s3:::*"))
+    iam = FakeIAM(device_role(), inline={"GreengrassComponentS3Access": widened}, attached={})
+    assert verdicts(run_check(iam)[2]) == {"GreengrassComponentS3Access": "hand-attached"}
 
 
 def test_hand_attached_policy_without_s3_does_not_fail_the_check():

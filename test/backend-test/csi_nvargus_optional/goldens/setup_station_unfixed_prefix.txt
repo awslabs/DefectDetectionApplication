@@ -1440,17 +1440,17 @@ else
       --policy-document '{
         \"Version\": \"2012-10-17\",
         \"Statement\": [
-          {
-            \"Effect\": \"Allow\",
-            \"Action\": [
-              \"s3:GetObject\",
-              \"s3:GetObjectVersion\"
-            ],
-            \"Resource\": [
-              \"arn:aws:s3:::dda-component-*/*\",
-              \"arn:aws:s3:::dda-component-us-east-1-*/*\"
-            ]
-          }
+          {\"Sid\": \"AllowPortalComponentBucketAccess\", \"Effect\": \"Allow\",
+           \"Action\": [\"s3:GetObject\", \"s3:GetBucketLocation\"],
+           \"Resource\": [\"arn:aws:s3:::dda-component-*\", \"arn:aws:s3:::dda-component-*/*\"]},
+          {\"Sid\": \"AllowDDABucketPatternAccess\", \"Effect\": \"Allow\",
+           \"Action\": [\"s3:GetObject\", \"s3:GetBucketLocation\", \"s3:HeadObject\"],
+           \"Resource\": [\"arn:aws:s3:::dda-*\",
+                        \"arn:aws:s3:::dda-*/*\"]},
+          {\"Sid\": \"AllowInferenceResultsUpload\", \"Effect\": \"Allow\",
+           \"Action\": [\"s3:PutObject\", \"s3:PutObjectTagging\",
+                      \"s3:GetObject\", \"s3:GetBucketLocation\"],
+           \"Resource\": [\"arn:aws:s3:::dda-inference-results-*\", \"arn:aws:s3:::dda-inference-results-*/*\"]}
         ]
       }'"; then
         echo "   ✓ S3 component access policy attached"

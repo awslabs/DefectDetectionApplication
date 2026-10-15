@@ -10,6 +10,9 @@ Given a role name, lists its inline and attached policies and classifies each:
   ``<role name>Access`` policy the Greengrass provisioner creates) whose S3
   statements stay within the template statement set (non-S3 statements are
   not compared); for a portal Lambda role, a policy the CDK stacks create;
+* ``in-template-legacy`` - a Device_Role_Template policy in the S3 shape an
+  earlier station installer wrote (re-running setup_station.sh converges it;
+  it does not fail the check);
 * ``portal-written`` - DDAWorkflowTuningSampleAccess and
   DDAStreamCameraCredentialRead in the shapes their writers produce, and the
   Device_Access_Document DDAUseCaseDeviceAccess when every statement has the
@@ -80,13 +83,26 @@ DEVICE_ROLE_TEMPLATE_POLICIES = (
 )
 PROVISIONER_POLICY_SUFFIX = 'Access'
 DEVICE_ROLE_TEMPLATE_S3_STATEMENTS = (
-    # usecase-account-stack.ts DDAPortalComponentAccessPolicy
+    # usecase-account-stack.ts DDAPortalComponentAccessPolicy; setup_station.sh
+    # GreengrassComponentS3Access, create-edge-device-iam-role.sh
+    # dda-edge-device-policy and edge-device-iam-policy.json write the same set
     (('s3:GetObject', 's3:GetBucketLocation'),
      ('arn:aws:s3:::dda-component-*', 'arn:aws:s3:::dda-component-*/*')),
     (('s3:GetObject', 's3:GetBucketLocation', 's3:HeadObject'),
      ('arn:aws:s3:::dda-*', 'arn:aws:s3:::dda-*/*', 'arn:aws:s3:::*-dda-*', 'arn:aws:s3:::*-dda-*/*')),
     (('s3:PutObject', 's3:PutObjectTagging', 's3:GetObject', 's3:GetBucketLocation'),
      ('arn:aws:s3:::dda-inference-results-*', 'arn:aws:s3:::dda-inference-results-*/*')),
+    # edge-device-iam-policy.json GreengrassComponentDownload
+    (('s3:GetObject', 's3:GetObjectVersion'),
+     ('arn:aws:s3:::greengrass-component-artifacts-*/*',)),
+    # the Greengrass provisioner's role access policy
+    (('s3:GetBucketLocation',), ('*',)),
+)
+# The S3 statements the three station files wrote before they converged on the
+# account stack's statement set. A role provisioned with an earlier installer
+# carries them until setup_station.sh runs again; a template-named policy within
+# them classifies as `in-template-legacy` (a repository shape, not hand-attached).
+LEGACY_DEVICE_ROLE_S3_STATEMENTS = (
     # setup_station.sh GreengrassComponentS3Access
     (('s3:GetObject', 's3:GetObjectVersion'),
      ('arn:aws:s3:::dda-component-*/*', 'arn:aws:s3:::dda-component-us-east-1-*/*')),
@@ -98,8 +114,6 @@ DEVICE_ROLE_TEMPLATE_S3_STATEMENTS = (
     # edge-device-iam-policy.json
     (('s3:GetObject', 's3:GetObjectVersion'),
      ('arn:aws:s3:::dda-component-*/*', 'arn:aws:s3:::greengrass-component-artifacts-*/*')),
-    # the Greengrass provisioner's role access policy
-    (('s3:GetBucketLocation',), ('*',)),
 )
 
 # Portal Lambda roles: CloudFormation-created roles of the portal stacks.
@@ -120,6 +134,7 @@ _SID = re.compile(SID_RE)
 _EXPLICIT_BUCKET_ARN = re.compile(r'^arn:aws:s3:::[A-Za-z0-9._-]+(/\*)?$')
 
 IN_TEMPLATE = 'in-template'
+LEGACY_TEMPLATE = 'in-template-legacy'
 PORTAL_WRITTEN = 'portal-written'
 HAND_ATTACHED = 'hand-attached'
 
@@ -228,8 +243,11 @@ def is_device_template_name(name: str, kind: str, role_name: str) -> bool:
 
 def classify_policy(name: str, document: Dict[str, Any], *, kind: str, portal_lambda_role: bool,
                     role_prefix: str = PORTAL_ROLE_PREFIX, role_name: str = '') -> str:
-    """`in-template` | `portal-written` | `hand-attached` for one policy.
-    `kind` is 'inline', 'aws-managed' or 'customer-managed'."""
+    """`in-template` | `in-template-legacy` | `portal-written` | `hand-attached`
+    for one policy. `kind` is 'inline', 'aws-managed' or 'customer-managed'.
+    `in-template-legacy`: a device-role template policy whose S3 statements are
+    within the statement set an earlier station installer wrote, but not within
+    the current templates (re-running setup_station.sh converges it)."""
     if name == DEVICE_ACCESS_POLICY_NAME:
         return PORTAL_WRITTEN if _portal_written_device_access(document) else HAND_ATTACHED
     if name == TUNING_SAMPLE_POLICY_NAME:
@@ -244,10 +262,13 @@ def classify_policy(name: str, document: Dict[str, Any], *, kind: str, portal_la
         if kind == 'customer-managed':
             return IN_TEMPLATE if name.startswith(role_prefix) else HAND_ATTACHED
         return IN_TEMPLATE if CDK_INLINE_POLICY_RE.match(name) else HAND_ATTACHED
-    if kind != 'aws-managed' and is_device_template_name(name, kind, role_name) and all(
-            covered_by_templates(s, DEVICE_ROLE_TEMPLATE_S3_STATEMENTS)
-            for s in statements(document) if is_s3_statement(s)):
-        return IN_TEMPLATE
+    if kind != 'aws-managed' and is_device_template_name(name, kind, role_name):
+        s3 = [s for s in statements(document) if is_s3_statement(s)]
+        if all(covered_by_templates(s, DEVICE_ROLE_TEMPLATE_S3_STATEMENTS) for s in s3):
+            return IN_TEMPLATE
+        if all(covered_by_templates(s, DEVICE_ROLE_TEMPLATE_S3_STATEMENTS + LEGACY_DEVICE_ROLE_S3_STATEMENTS)
+               for s in s3):
+            return LEGACY_TEMPLATE
     return HAND_ATTACHED
 
 
