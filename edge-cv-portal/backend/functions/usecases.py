@@ -8,7 +8,10 @@ from datetime import datetime
 import uuid
 import boto3
 import requests
-from botocore.exceptions import ClientError
+from boto3.dynamodb.conditions import Attr
+from botocore.exceptions import (
+    ClientError, ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError,
+)
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, is_super_user, validate_required_fields,
@@ -25,6 +28,13 @@ from shared_utils import (
     PORTAL_CREATED_BY_VALUE, REMEDY_FOR_REASON, REMEDY_ACCOUNT,
     REMEDY_OTHER_USECASE, REMEDY_PORTAL_BUCKET, REMEDY_TOO_MANY,
     _usecases_configuring_bucket,
+    # Portal authorization and IAM scoping (design I1): the registry error
+    # the creation permission check can raise, the account grammar, the
+    # trusted-account check, and the one component bucket name and policy
+    # bound both component bucket policy writers share.
+    RegistryUnavailable, validate_account_id, validate_role_arn,
+    account_trusted, TrustedAccountsNotConfigured,
+    component_bucket_name, COMPONENT_BUCKET_POLICY_MAX_BYTES,
 )
 # Use_Case settings for VLM/LLM Anomaly Tuning Sample_Export (spec:
 # quality-prompt-tuning, Requirements 2.1, 2.9). Pure module, shared with
@@ -52,6 +62,35 @@ REMEDY_BUCKET_ALREADY_EXISTS = ("Select the existing bucket instead; if it is no
                                 "for the portal an AWS administrator must tag it.")
 REMEDY_TAGGING_FAILED = ("The bucket was created but could not be tagged; an AWS "
                          "administrator must tag it before it can be allowed.")
+
+# Portal authorization and IAM scoping (design I1). The role names the
+# account templates create (the only ones the account grammar accepts), the
+# Proof_Of_Control session, the STS error codes that mean "unavailable"
+# rather than "denied", and the seven account fields the PUT rules are keyed
+# on (Account_Field_Changes).
+USECASE_ACCESS_ROLE_NAME = 'DDAPortalAccessRole'
+DATA_ACCESS_ROLE_NAME = 'DDAPortalDataAccessRole'
+VERIFY_CONTROL_SESSION_NAME = 'dda-portal-verify-control'
+VERIFY_CONTROL_DURATION_SECONDS = 900
+STS_UNAVAILABLE_CODES = frozenset({'Throttling', 'ThrottlingException', 'RequestLimitExceeded'})
+STS_UNAVAILABLE_MESSAGE = 'STS is temporarily unavailable; retry'
+ACCOUNT_FIELDS = ('account_id', 'cross_account_role_arn', 'external_id', 'data_account_id',
+                  'data_account_role_arn', 'data_account_external_id',
+                  'sagemaker_execution_role_arn')
+DATA_ACCOUNT_FIELDS = frozenset({'data_account_id', 'data_account_role_arn',
+                                 'data_account_external_id'})
+USECASE_ACCOUNT_FIELDS = frozenset({'account_id', 'cross_account_role_arn', 'external_id'})
+REMEDY_ACCOUNT_NOT_TRUSTED = 'Add the account to trustedUseCaseAccountIds and redeploy the portal.'
+REMEDY_ACCOUNT_CONTROL = ('Deploy DDAPortalUseCaseAccountStack in the use-case account and supply '
+                          'its external id.')
+# Statement ids of the per-account grants on the component bucket policy and
+# the default event bus (update_component_bucket_policy_for_greengrass,
+# configure_eventbridge_permission and the shared-components writer).
+GREENGRASS_DEVICE_READ_SID = 'AllowGreengrassDeviceRead-{account}'
+GREENGRASS_DEVICE_LIST_SID = 'AllowGreengrassDeviceList-{account}'
+SHARED_COMPONENTS_ROLES_SID = 'AllowUseCaseAccountsGreengrassAccess'
+SHARED_COMPONENTS_SERVICE_SID = 'AllowGreengrassServiceAccess'
+EVENTBRIDGE_STATEMENT_ID = 'AllowUseCaseAccount-{account}'
 
 
 class InvalidField(ValueError):
@@ -330,6 +369,53 @@ def assume_role(role_arn: str, external_id: str, session_name: str) -> dict:
     except ClientError as e:
         logger.error(f"Failed to assume role {role_arn}: {str(e)}")
         raise
+
+
+def verify_account_control(role_arn: str, external_id, expected_account_id: str) -> dict:
+    """Proof_Of_Control (design I1 D2): one sts:AssumeRole on the use case's
+    DDAPortalAccessRole with the supplied external id, shared by
+    create_usecase, update_usecase and verify_role.
+
+    Called only after the account passed the trusted-account check, so a
+    denial means the role or the external id in that account is wrong.
+    The temporary credentials are never logged or returned.
+
+    Returns:
+        {'ok': True, 'assumed_role_arn': <AssumedRoleUser.Arn>} or
+        {'ok': False, 'reason': 'access_denied' | 'no_such_entity' |
+         'account_mismatch' | 'sts_unavailable', 'detail': '<Code>: <Message>'}.
+    """
+    params = {
+        'RoleArn': role_arn,
+        'RoleSessionName': VERIFY_CONTROL_SESSION_NAME,
+        'DurationSeconds': VERIFY_CONTROL_DURATION_SECONDS,
+    }
+    if external_id:
+        params['ExternalId'] = external_id
+    try:
+        response = boto3.client('sts').assume_role(**params)
+    except ClientError as e:
+        error = e.response.get('Error', {})
+        code = error.get('Code', 'Unknown')
+        detail = f"{code}: {error.get('Message', '')}"
+        if code in STS_UNAVAILABLE_CODES:
+            logger.error(f"STS unavailable while assuming {role_arn}: {code}")
+            return {'ok': False, 'reason': 'sts_unavailable', 'detail': detail}
+        reason = 'no_such_entity' if code == 'NoSuchEntity' else 'access_denied'
+        logger.warning(f"Proof of control failed for {role_arn}: {code}")
+        return {'ok': False, 'reason': reason, 'detail': detail}
+    except (EndpointConnectionError, ConnectTimeoutError, ReadTimeoutError) as e:
+        logger.error(f"STS unreachable while assuming {role_arn}: {type(e).__name__}")
+        return {'ok': False, 'reason': 'sts_unavailable', 'detail': f"{type(e).__name__}: {e}"}
+    assumed_role_arn = response['AssumedRoleUser']['Arn']
+    assumed_account = assumed_role_arn.split(':')[4]
+    if assumed_account != expected_account_id:
+        logger.warning(f"Proof of control for {role_arn} assumed a role in account "
+                       f"{assumed_account}, expected {expected_account_id}")
+        return {'ok': False, 'reason': 'account_mismatch',
+                'detail': (f"AccountMismatch: the assumed role is in account {assumed_account}, "
+                           f"not {expected_account_id}")}
+    return {'ok': True, 'assumed_role_arn': assumed_role_arn}
 
 
 def update_data_bucket_policy_for_sagemaker(
@@ -760,7 +846,8 @@ def update_component_bucket_policy_for_greengrass(
     and we need to allow the Greengrass device role from the usecase account to access it.
     
     Args:
-        component_bucket_name: S3 bucket name in Portal Account (e.g., dda-component-us-east-1-164152369890)
+        component_bucket_name: S3 bucket name in Portal Account (component_bucket_name(), e.g.
+            dda-component-<region>-<portal account id>)
         device_account_id: AWS Account ID where devices will run (the usecase account)
     
     Returns:
@@ -788,9 +875,10 @@ def update_component_bucket_policy_for_greengrass(
             else:
                 raise
         
-        # Define the Greengrass device access statements
-        greengrass_read_sid = f"AllowGreengrassDeviceRead-{device_account_id}"
-        greengrass_list_sid = f"AllowGreengrassDeviceList-{device_account_id}"
+        # Define the Greengrass device access statements (remove_account_grants
+        # removes them by the same statement ids)
+        greengrass_read_sid = GREENGRASS_DEVICE_READ_SID.format(account=device_account_id)
+        greengrass_list_sid = GREENGRASS_DEVICE_LIST_SID.format(account=device_account_id)
         
         # Check if statements already exist for this device account
         existing_sids = {stmt.get('Sid') for stmt in existing_policy.get('Statement', [])}
@@ -835,11 +923,25 @@ def update_component_bucket_policy_for_greengrass(
         
         # Add new statements to policy
         existing_policy['Statement'].extend(statements_to_add)
+
+        # Bounded growth (Requirement 3.3): refuse a policy S3 would reject
+        # rather than attempt the PutBucketPolicy.
+        policy_document = json.dumps(existing_policy)
+        if len(policy_document.encode()) > COMPONENT_BUCKET_POLICY_MAX_BYTES:
+            logger.warning(
+                f"Component bucket policy for {component_bucket_name} would exceed "
+                f"{COMPONENT_BUCKET_POLICY_MAX_BYTES} bytes with device account "
+                f"{device_account_id}; not written")
+            return {
+                'status': 'failed',
+                'error': 'component bucket policy would exceed the size limit',
+                'bucket': component_bucket_name
+            }
         
         # Put updated bucket policy
         s3_component.put_bucket_policy(
             Bucket=component_bucket_name,
-            Policy=json.dumps(existing_policy)
+            Policy=policy_document
         )
         
         logger.info(f"Successfully updated component bucket policy for {component_bucket_name}")
@@ -901,7 +1003,7 @@ def configure_eventbridge_permission(usecase_account_id: str) -> dict:
         logger.info(f"Configuring EventBridge permission for UseCase Account {usecase_account_id}")
         
         events_client = boto3.client('events')
-        statement_id = f"AllowUseCaseAccount-{usecase_account_id}"
+        statement_id = EVENTBRIDGE_STATEMENT_ID.format(account=usecase_account_id)
         
         # Check if permission already exists
         try:
@@ -964,6 +1066,159 @@ def configure_eventbridge_permission(usecase_account_id: str) -> dict:
             'error': str(e),
             'usecase_account_id': usecase_account_id
         }
+
+
+def add_account_grants(account_id: str) -> dict:
+    """The grants creation writes for a use case's account, for an account
+    move on PUT /usecases/{id} (design I1): the component bucket statements
+    for the account's device role and the EventBridge PutEvents permission.
+    Best-effort; both writers report their own failures."""
+    return {
+        'component_bucket_policy': update_component_bucket_policy_for_greengrass(
+            component_bucket_name=component_bucket_name(), device_account_id=account_id),
+        'eventbridge': configure_eventbridge_permission(account_id),
+    }
+
+
+def _usecases_in_account(table, account_id: str) -> set:
+    """Ids of the use case records whose account_id is `account_id`."""
+    usecase_ids = set()
+    scan_args = {'FilterExpression': Attr('account_id').eq(account_id),
+                 'ProjectionExpression': 'usecase_id'}
+    while True:
+        page = table.scan(**scan_args)
+        usecase_ids.update(item['usecase_id'] for item in page.get('Items', []))
+        if 'LastEvaluatedKey' not in page:
+            return usecase_ids
+        scan_args['ExclusiveStartKey'] = page['LastEvaluatedKey']
+
+
+def _principal_account(principal) -> str:
+    """The account of an IAM principal in a bucket policy: a bare account id,
+    or the account segment of an IAM ARN; None for anything else."""
+    if not isinstance(principal, str):
+        return None
+    if principal.isdigit():
+        return principal
+    parts = principal.split(':')
+    return parts[4] if principal.startswith('arn:') and len(parts) > 5 else None
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    return list(value) if isinstance(value, list) else [value]
+
+
+def _remove_component_bucket_grants(bucket: str, account_id: str) -> dict:
+    """Remove an account's grants from the component bucket policy: the two
+    AllowGreengrassDevice{Read,List}-<account> statements, the account's
+    principals in AllowUseCaseAccountsGreengrassAccess and the account in
+    the aws:SourceAccount condition of AllowGreengrassServiceAccess. A
+    statement left without principals or source accounts is dropped. S3
+    stores no policy without statements, so a removal that would empty the
+    policy is reported failed and nothing is written."""
+    s3_component = boto3.client('s3')
+    try:
+        try:
+            policy = json.loads(s3_component.get_bucket_policy(Bucket=bucket)['Policy'])
+        except ClientError as e:
+            if e.response.get('Error', {}).get('Code') == 'NoSuchBucketPolicy':
+                return {'status': 'not_present', 'bucket': bucket}
+            raise
+        device_sids = {GREENGRASS_DEVICE_READ_SID.format(account=account_id),
+                       GREENGRASS_DEVICE_LIST_SID.format(account=account_id)}
+        kept = []
+        changed = False
+        for statement in policy.get('Statement', []):
+            sid = statement.get('Sid')
+            if sid in device_sids:
+                changed = True
+                continue
+            if sid == SHARED_COMPONENTS_ROLES_SID and isinstance(statement.get('Principal'), dict):
+                principals = _as_list(statement['Principal'].get('AWS'))
+                remaining = [p for p in principals if _principal_account(p) != account_id]
+                if len(remaining) != len(principals):
+                    changed = True
+                    if not remaining:
+                        continue
+                    statement['Principal'] = {**statement['Principal'], 'AWS': remaining}
+            if sid == SHARED_COMPONENTS_SERVICE_SID:
+                string_equals = (statement.get('Condition') or {}).get('StringEquals') or {}
+                accounts = _as_list(string_equals.get('aws:SourceAccount'))
+                remaining = [a for a in accounts if a != account_id]
+                if len(remaining) != len(accounts):
+                    changed = True
+                    if not remaining:
+                        continue
+                    string_equals['aws:SourceAccount'] = remaining
+            kept.append(statement)
+        if not changed:
+            return {'status': 'not_present', 'bucket': bucket}
+        if not kept:
+            logger.warning(f"Removing account {account_id} would leave the policy of {bucket} "
+                           f"without statements; not written")
+            return {'status': 'failed', 'bucket': bucket,
+                    'error': 'removing the account would leave the component bucket policy empty'}
+        policy['Statement'] = kept
+        s3_component.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy))
+        return {'status': 'success', 'bucket': bucket}
+    except ClientError as e:
+        error = e.response.get('Error', {})
+        logger.warning(f"Could not remove account {account_id} from the policy of {bucket}: "
+                       f"{error.get('Code')}")
+        return {'status': 'failed', 'bucket': bucket,
+                'error': f"{error.get('Code')}: {error.get('Message')}"}
+    except Exception as e:
+        logger.warning(f"Could not remove account {account_id} from the policy of {bucket}: {e}")
+        return {'status': 'failed', 'bucket': bucket, 'error': str(e)}
+
+
+def _remove_eventbridge_permission(account_id: str) -> dict:
+    """Remove the account's PutEvents permission on the default event bus."""
+    statement_id = EVENTBRIDGE_STATEMENT_ID.format(account=account_id)
+    try:
+        boto3.client('events').remove_permission(EventBusName='default', StatementId=statement_id)
+        return {'status': 'success', 'statement_id': statement_id}
+    except ClientError as e:
+        error = e.response.get('Error', {})
+        if error.get('Code') == 'ResourceNotFoundException':
+            return {'status': 'not_present', 'statement_id': statement_id}
+        logger.warning(f"Could not remove EventBridge permission {statement_id}: {error.get('Code')}")
+        return {'status': 'failed', 'statement_id': statement_id,
+                'error': f"{error.get('Code')}: {error.get('Message')}"}
+    except Exception as e:
+        logger.warning(f"Could not remove EventBridge permission {statement_id}: {e}")
+        return {'status': 'failed', 'statement_id': statement_id, 'error': str(e)}
+
+
+def remove_account_grants(account_id: str, record: dict) -> dict:
+    """Remove the grants creation wrote for a use case's account once no use
+    case references that account any more (Requirement 3.4): on DELETE
+    /usecases/{id} and on PUT /usecases/{id} when the use case moves to
+    another account. Best-effort; returned as `grants_removed`.
+
+    Skipped for a Single_Account_Record and for the portal account itself:
+    the portal never removes its own account's statements.
+    """
+    if not is_cross_account_setup(record):
+        return {'status': 'skipped', 'reason': 'single_account', 'account_id': account_id}
+    if account_id == os.environ.get('PORTAL_ACCOUNT_ID'):
+        return {'status': 'skipped', 'reason': 'portal_account', 'account_id': account_id}
+    try:
+        others = _usecases_in_account(dynamodb.Table(USECASES_TABLE), account_id)
+    except Exception as e:
+        logger.warning(f"Could not check which use cases reference account {account_id}: {e}")
+        return {'status': 'failed', 'account_id': account_id, 'error': str(e)}
+    others.discard(record.get('usecase_id'))
+    if others:
+        return {'status': 'skipped', 'reason': 'account_still_referenced', 'account_id': account_id}
+    return {
+        'status': 'completed',
+        'account_id': account_id,
+        'component_bucket_policy': _remove_component_bucket_grants(component_bucket_name(), account_id),
+        'eventbridge': _remove_eventbridge_permission(account_id),
+    }
 
 
 def _portal_tagged_buckets() -> dict:
@@ -1298,6 +1553,9 @@ def handler(event, context):
         
         if http_method == 'GET' and not path_parameters.get('id'):
             return list_usecases(user)
+        elif http_method == 'POST' and path.endswith('/verify-role'):
+            # Ahead of the generic POST, which would otherwise take it.
+            return verify_role(event, user)
         elif http_method == 'POST':
             return create_usecase(event, user)
         elif http_method == 'GET' and path_parameters.get('id'):
@@ -1306,8 +1564,6 @@ def handler(event, context):
             return update_usecase(path_parameters['id'], event, user)
         elif http_method == 'DELETE' and path_parameters.get('id'):
             return delete_usecase(path_parameters['id'], user)
-        elif http_method == 'POST' and path.endswith('/verify-role'):
-            return verify_role(event, user)
         
         return create_response(404, {'error': 'Not found'})
         
@@ -1383,9 +1639,218 @@ def list_usecases(user):
         return create_response(500, {'error': f'Failed to list use cases: {str(e)}'})
 
 
-def verify_role(event, user):
-    """Verify that a cross-account role can be assumed"""
+# ------------------------------------------------------------------------
+# Account grammar, trusted-account check and Proof_Of_Control (design I1).
+# ------------------------------------------------------------------------
+
+def _account_value(value):
+    """The comparable value of an account field: None for None, '' or
+    whitespace (absent), the value itself otherwise."""
+    return None if _is_clear(value) else value
+
+
+def _usecase_account_grammar(account_id, cross_account_role_arn):
+    """(error_code, message) when account_id or the pinned
+    DDAPortalAccessRole ARN in it is malformed, else None (Requirement 3.1)."""
+    if not validate_account_id(account_id):
+        return 'INVALID_ACCOUNT_ID', 'account_id must be a twelve-digit AWS account id'
+    if not validate_role_arn(cross_account_role_arn, account_id, role_name=USECASE_ACCESS_ROLE_NAME):
+        return ('INVALID_ROLE_ARN',
+                f'cross_account_role_arn must be arn:aws:iam::{account_id}:role/{USECASE_ACCESS_ROLE_NAME}')
+    return None
+
+
+def _sagemaker_role_grammar(sagemaker_role_arn, account_id, *, move=False):
+    """(error_code, message) when the SageMaker execution role is not an IAM
+    role ARN in account_id, else None. On an account move the message names
+    the remedy: the role must be supplied in the new account."""
+    if validate_role_arn(sagemaker_role_arn, account_id):
+        return None
+    if move:
+        return 'INVALID_ROLE_ARN', f'supply sagemaker_execution_role_arn in account {account_id}'
+    return ('INVALID_ROLE_ARN',
+            f'sagemaker_execution_role_arn must be an IAM role ARN in account {account_id}')
+
+
+def _data_account_grammar(account_id, data_account_id, data_account_role_arn):
+    """(error_code, message) for a separate data account (data_account_id set
+    and different from account_id) whose id is malformed or whose role ARN is
+    missing or not the pinned DDAPortalDataAccessRole, else None."""
+    if _account_value(data_account_id) is None or data_account_id == account_id:
+        return None
+    if not validate_account_id(data_account_id):
+        return 'INVALID_ACCOUNT_ID', 'data_account_id must be a twelve-digit AWS account id'
+    if _account_value(data_account_role_arn) is None:
+        return 'INVALID_ROLE_ARN', 'supply data_account_role_arn for the separate data account'
+    if not validate_role_arn(data_account_role_arn, data_account_id, role_name=DATA_ACCESS_ROLE_NAME):
+        return ('INVALID_ROLE_ARN',
+                f'data_account_role_arn must be arn:aws:iam::{data_account_id}:role/{DATA_ACCESS_ROLE_NAME}')
+    return None
+
+
+def _grammar_refusal(error) -> dict:
+    code, message = error
+    logger.warning(f"Account grammar refused ({code}): {message}")
+    return create_response(400, {'error': message, 'error_code': code})
+
+
+def _account_not_trusted_message(account_id) -> str:
+    return (f"account {account_id} is not in the portal's trusted use-case accounts; "
+            "add it to trustedUseCaseAccountIds and redeploy the portal")
+
+
+def _account_control_refusal(user, event, action: str, resource_id: str, *,
+                             account_id: str, role_arn: str, external_id) -> dict:
+    """The trusted-account check, then Proof_Of_Control, for a multi-account
+    configuration about to be written (create_usecase, update_usecase).
+    None when both pass; otherwise the refusal to answer, audited as an
+    `action` failure. No STS call is made for an untrusted account."""
     try:
+        trusted = account_trusted(account_id)
+    except TrustedAccountsNotConfigured as e:
+        logger.error(f"{action}: {e}")
+        return create_response(500, {'error': str(e)})
+    if not trusted:
+        logger.warning(f"{action}: account {account_id} is not a trusted use-case account")
+        log_audit_event(user['user_id'], action, 'usecase', resource_id, 'failure',
+                        {'reason': 'account_not_trusted', 'account_id': account_id}, event=event)
+        return create_response(400, {
+            'error': _account_not_trusted_message(account_id),
+            'error_code': 'ACCOUNT_NOT_TRUSTED',
+            'remedy': REMEDY_ACCOUNT_NOT_TRUSTED,
+        })
+    proof = verify_account_control(role_arn, external_id, account_id)
+    if proof['ok']:
+        return None
+    if proof['reason'] == 'sts_unavailable':
+        log_audit_event(user['user_id'], action, 'usecase', resource_id, 'failure',
+                        {'reason': 'sts_unavailable', 'account_id': account_id}, event=event)
+        return create_response(503, {'error': STS_UNAVAILABLE_MESSAGE, 'error_code': 'STS_UNAVAILABLE'})
+    log_audit_event(user['user_id'], action, 'usecase', resource_id, 'failure',
+                    {'reason': 'account_control_not_verified', 'account_id': account_id},
+                    event=event)
+    return create_response(400, {
+        'error': (f"The portal could not assume {role_arn} in account {account_id} with the "
+                  "supplied external id. Deploy DDAPortalUseCaseAccountStack in that account "
+                  "and supply its external id."),
+        'error_code': 'ACCOUNT_CONTROL_NOT_VERIFIED',
+        'remedy': REMEDY_ACCOUNT_CONTROL,
+    })
+
+
+def _account_rules(usecase_id: str, body: dict, record: dict, user, event):
+    """The PUT /usecases/{id} rules on the seven account fields (design I1
+    "update_usecase rule"), evaluated on the Account_Field_Changes: a field
+    whose normalized body value differs from the stored one, never key
+    presence (the Edit modal echoes the stored account fields on every save).
+
+    Runs after the record fetch and before the attach validation, so an
+    account change that fails here makes no eligibility probe. The portal
+    account is PORTAL_ACCOUNT_ID from the environment, so the paths that
+    skip or refuse make no STS call of any kind.
+
+    Returns (refusal, move): the response to answer, or None; and
+    {'old_account_id', 'new_account_id'} when the body moves the use case to
+    another account (proven), else None.
+    """
+    changes = {field for field in ACCOUNT_FIELDS
+               if field in body and _account_value(body[field]) != _account_value(record.get(field))}
+    if not changes:
+        return None, None
+    merged = {field: _account_value(body[field] if field in body else record.get(field))
+              for field in ACCOUNT_FIELDS}
+    portal_account = os.environ.get('PORTAL_ACCOUNT_ID') or None
+    new_account = merged['account_id']
+    # An absent account_id counts as the portal account.
+    to_portal_account = new_account is None or new_account == portal_account
+    moving = 'account_id' in changes and not to_portal_account
+
+    if not is_cross_account_setup(record):
+        if not moving:
+            # The record stays single-account: no trusted check and no proof.
+            if 'cross_account_role_arn' in changes:
+                return _grammar_refusal((
+                    'INVALID_ROLE_ARN',
+                    'a single-account use case does not carry a cross-account role; '
+                    'supply account_id to move it to another account')), None
+            error = None
+            if changes & DATA_ACCOUNT_FIELDS:
+                error = _data_account_grammar(new_account or portal_account,
+                                              merged['data_account_id'],
+                                              merged['data_account_role_arn'])
+            if error is None and 'sagemaker_execution_role_arn' in changes:
+                error = _sagemaker_role_grammar(merged['sagemaker_execution_role_arn'],
+                                                portal_account)
+            return (_grammar_refusal(error) if error else None), None
+        # Single-account -> multi-account: the body names the new account's role.
+        if 'cross_account_role_arn' not in changes or merged['cross_account_role_arn'] is None:
+            return _grammar_refusal((
+                'INVALID_ROLE_ARN',
+                'a cross-account role ARN is required to move a use case to another account')), None
+    elif 'account_id' in changes and to_portal_account:
+        return _grammar_refusal((
+            'INVALID_ACCOUNT_ID',
+            'a multi-account use case cannot be converted to single-account; '
+            'create a new use case')), None
+
+    proving = moving or bool(changes & USECASE_ACCOUNT_FIELDS)
+    error = None
+    if proving:
+        error = (_usecase_account_grammar(new_account, merged['cross_account_role_arn'])
+                 or _sagemaker_role_grammar(merged['sagemaker_execution_role_arn'], new_account,
+                                            move=moving))
+    elif 'sagemaker_execution_role_arn' in changes:
+        error = _sagemaker_role_grammar(merged['sagemaker_execution_role_arn'], new_account)
+    if error is None and changes & DATA_ACCOUNT_FIELDS:
+        error = _data_account_grammar(new_account, merged['data_account_id'],
+                                      merged['data_account_role_arn'])
+    if error is not None:
+        return _grammar_refusal(error), None
+    if not proving:
+        # A change confined to the data-account triple or to the SageMaker
+        # execution role: grammar only, no STS.
+        return None, None
+    refusal = _account_control_refusal(
+        user, event, 'update_usecase', usecase_id, account_id=new_account,
+        role_arn=merged['cross_account_role_arn'], external_id=merged['external_id'])
+    if refusal is not None:
+        return refusal, None
+    if moving:
+        return None, {'old_account_id': record.get('account_id'), 'new_account_id': new_account}
+    return None, None
+
+
+def verify_role(event, user):
+    """Verify that the portal can assume a use-case account's
+    DDAPortalAccessRole (the onboarding wizard's Verify step).
+
+    Gated like creation (CREATE_USECASES at the global scope); the role ARN
+    must be the pinned DDAPortalAccessRole of a trusted account, and the
+    optional account_id must name the same account, before the one
+    Proof_Of_Control STS call. The 200 body and the STS-denial 400 body
+    keep their existing shapes; every other refusal carries `status:
+    'failed'`, `error` and `error_code`.
+    """
+    try:
+        try:
+            allowed = rbac_manager.has_permission(
+                user['user_id'], 'global', Permission.CREATE_USECASES, user)
+        except RegistryUnavailable as e:
+            logger.error(f"Authorization check for verify_role failed: {e}")
+            log_audit_event(user['user_id'], 'verify_role', 'usecase', 'new', 'failure',
+                            {'reason': 'registry_unavailable'}, event=event)
+            return create_response(500, {'error': 'Authorization check failed'})
+        if not allowed:
+            log_audit_event(
+                user['user_id'], 'unauthorized_access', 'api_endpoint',
+                event.get('path', 'unknown'), 'denied',
+                details={'required_permission': Permission.CREATE_USECASES.value}, event=event)
+            return create_response(403, {
+                'status': 'failed',
+                'error': 'Insufficient permissions to verify roles for use-case onboarding',
+                'error_code': 'INSUFFICIENT_PERMISSIONS',
+            })
+
         body = json.loads(event.get('body', '{}'))
         role_arn = body.get('role_arn')
         external_id = body.get('external_id')
@@ -1393,42 +1858,91 @@ def verify_role(event, user):
         if not role_arn:
             return create_response(400, {'error': 'role_arn is required'})
 
-        try:
-            assume_params = {
-                'RoleArn': role_arn,
-                'RoleSessionName': 'verify-role-access',
-                'DurationSeconds': 900
-            }
-            if external_id:
-                assume_params['ExternalId'] = external_id
-
-            response = sts.assume_role(**assume_params)
-            account_id = response['AssumedRoleUser']['Arn'].split(':')[4]
-
-            return create_response(200, {
-                'status': 'success',
-                'account_id': account_id,
-                'assumed_role': response['AssumedRoleUser']['Arn']
-            })
-        except ClientError as e:
-            error_code = e.response['Error']['Code']
-            error_msg = e.response['Error']['Message']
-            logger.warning(f"Role verification failed: {error_code} - {error_msg}")
+        parts = role_arn.split(':') if isinstance(role_arn, str) else []
+        expected_account_id = parts[4] if len(parts) > 5 else None
+        if not validate_role_arn(role_arn, expected_account_id, role_name=USECASE_ACCESS_ROLE_NAME):
+            logger.warning("verify-role: role_arn is not a DDAPortalAccessRole ARN")
             return create_response(400, {
                 'status': 'failed',
-                'error': f"{error_code}: {error_msg}"
+                'error': f'role_arn must be arn:aws:iam::<account>:role/{USECASE_ACCESS_ROLE_NAME}',
+                'error_code': 'INVALID_ROLE_ARN',
             })
+        body_account_id = body.get('account_id')
+        if not _is_clear(body_account_id) and body_account_id != expected_account_id:
+            logger.warning("verify-role: account_id does not match role_arn")
+            return create_response(400, {
+                'status': 'failed',
+                'error': 'account_id does not match role_arn',
+                'error_code': 'INVALID_ACCOUNT_ID',
+            })
+        try:
+            trusted = account_trusted(expected_account_id)
+        except TrustedAccountsNotConfigured as e:
+            logger.error(f"verify_role: {e}")
+            return create_response(500, {'status': 'failed', 'error': str(e)})
+        if not trusted:
+            logger.warning(f"verify-role: account {expected_account_id} is not a trusted use-case account")
+            log_audit_event(user['user_id'], 'verify_role', 'usecase', 'new', 'failure',
+                            {'reason': 'account_not_trusted', 'account_id': expected_account_id},
+                            event=event)
+            return create_response(400, {
+                'status': 'failed',
+                'error': _account_not_trusted_message(expected_account_id),
+                'error_code': 'ACCOUNT_NOT_TRUSTED',
+            })
+
+        proof = verify_account_control(role_arn, external_id, expected_account_id)
+        if proof['ok']:
+            return create_response(200, {
+                'status': 'success',
+                'account_id': expected_account_id,
+                'assumed_role': proof['assumed_role_arn']
+            })
+        if proof['reason'] == 'sts_unavailable':
+            return create_response(503, {
+                'status': 'failed',
+                'error': STS_UNAVAILABLE_MESSAGE,
+                'error_code': 'STS_UNAVAILABLE',
+            })
+        logger.warning(f"Role verification failed: {proof['detail']}")
+        return create_response(400, {
+            'status': 'failed',
+            'error': proof['detail']
+        })
     except Exception as e:
         logger.error(f"Error verifying role: {str(e)}")
         return create_response(500, {'error': 'Failed to verify role'})
 
 
 def create_usecase(event, user):
-    """Create a new use case - any authenticated user can create"""
+    """Create a use case (POST /usecases).
+
+    Requires Permission.CREATE_USECASES at the global scope, resolved by
+    rbac_manager in both registry enforcement states (PortalAdmin holds it
+    in the role matrix); the creator is then assigned UseCaseAdmin on the
+    new use case. A multi-account body (one naming account_id) must pass the
+    account grammar, name an account in the portal's trusted list and pass
+    Proof_Of_Control before the record is written or any account grant is
+    made (design I1). A single-account body takes the account from
+    sts:GetCallerIdentity, with no trusted check and no proof.
+    """
     try:
-        # Any authenticated user can create a usecase
-        # They will be automatically assigned as UseCaseAdmin
-        
+        try:
+            allowed = rbac_manager.has_permission(
+                user['user_id'], 'global', Permission.CREATE_USECASES, user)
+        except RegistryUnavailable as e:
+            logger.error(f"Authorization check for create_usecase failed: {e}")
+            log_audit_event(user['user_id'], 'create_usecase', 'usecase', 'new', 'failure',
+                            {'reason': 'registry_unavailable'}, event=event)
+            return create_response(500, {'error': 'Authorization check failed'})
+        if not allowed:
+            log_audit_event(
+                user['user_id'], 'unauthorized_access', 'api_endpoint',
+                event.get('path', 'unknown'), 'denied',
+                details={'required_permission': Permission.CREATE_USECASES.value}, event=event)
+            return create_response(403, {'error': 'Insufficient permissions to create use cases',
+                                         'error_code': 'INSUFFICIENT_PERMISSIONS'})
+
         body = json.loads(event.get('body', '{}'))
         
         # For single-account setup: only name and s3_bucket are required
@@ -1448,12 +1962,35 @@ def create_usecase(event, user):
         if validation_error:
             return create_response(400, {'error': validation_error})
 
+        # Account grammar (Requirement 3.1), before any STS call: the pinned
+        # role names in the named account, the SageMaker execution role in
+        # the same account, and the data-account triple of a separate data
+        # account. A single-account body names no account of its own; its
+        # data-account triple is checked once the account is known (below).
+        if not is_single_account:
+            grammar_error = (
+                _usecase_account_grammar(body['account_id'], body['cross_account_role_arn'])
+                or _sagemaker_role_grammar(body['sagemaker_execution_role_arn'], body['account_id'])
+                or _data_account_grammar(body['account_id'], body.get('data_account_id'),
+                                         body.get('data_account_role_arn')))
+            if grammar_error:
+                return _grammar_refusal(grammar_error)
+
         # Workflow tuning Sample_Export settings (spec:
         # quality-prompt-tuning, Requirements 2.1, 2.9): optional at
         # creation, validated with exactly the same rules as an update.
         settings_error = tuning_settings.validate_settings(body)
         if settings_error:
             return create_response(400, {'error': settings_error})
+
+        # Trusted-account check, then Proof_Of_Control (design I1 D2), before
+        # anything is written and before any account grant.
+        if not is_single_account:
+            refusal = _account_control_refusal(
+                user, event, 'create_usecase', 'new', account_id=body['account_id'],
+                role_arn=body['cross_account_role_arn'], external_id=body.get('external_id'))
+            if refusal is not None:
+                return refusal
         
         table = dynamodb.Table(USECASES_TABLE)
         usecase_id = str(uuid.uuid4())
@@ -1472,6 +2009,10 @@ def create_usecase(event, user):
             except Exception as e:
                 logger.error(f"Failed to auto-detect account ID: {str(e)}")
                 return create_response(500, {'error': 'Failed to auto-detect AWS account ID'})
+            grammar_error = _data_account_grammar(account_id, body.get('data_account_id'),
+                                                  body.get('data_account_role_arn'))
+            if grammar_error:
+                return _grammar_refusal(grammar_error)
         else:
             account_id = body['account_id']
             sagemaker_role_arn = body['sagemaker_execution_role_arn']
@@ -1715,13 +2256,15 @@ def create_usecase(event, user):
         # Update component bucket policy to allow Greengrass devices to download components
         # Component bucket is in Portal Account, devices are in UseCase Account
         component_bucket_policy_result = None
-        component_bucket_name = os.environ.get('COMPONENT_BUCKET', 'dda-component-us-east-1-164152369890')
+        # COMPONENT_BUCKET when set, else the {prefix}-{region}-{account}
+        # name the SharedComponents function resolves too (Requirement 3.5).
+        component_bucket = component_bucket_name()
         
         logger.info(f"Updating component bucket policy for devices in usecase account {account_id}")
         
         try:
             component_bucket_policy_result = update_component_bucket_policy_for_greengrass(
-                component_bucket_name=component_bucket_name,
+                component_bucket_name=component_bucket,
                 device_account_id=account_id  # Devices will be in the usecase account
             )
             
@@ -1954,13 +2497,22 @@ def update_usecase(usecase_id, event, user):
         record = table.get_item(Key={'usecase_id': usecase_id}).get('Item')
         if record is None:
             return _usecase_not_found()
+
+        # Account rules (design I1 "update_usecase rule"), keyed on the
+        # Account_Field_Changes: grammar, trusted check and Proof_Of_Control
+        # before any eligibility probe and before update_item.
+        account_refusal, account_move = _account_rules(usecase_id, body, record, user, event)
+        if account_refusal is not None:
+            return account_refusal
         
         updatable_fields = [
             'name', 'description', 's3_bucket', 'region', 'owner', 'default_device_group',
-            'cross_account_role_arn', 'account_id',
+            'cross_account_role_arn', 'account_id', 'external_id',
             # Data Account fields
             'data_account_id', 'data_account_role_arn', 'data_account_external_id',
             'data_s3_bucket',
+            # Travels with an account move (design I1)
+            'sagemaker_execution_role_arn',
             # Workflow tuning Sample_Export settings (quality-prompt-tuning
             # 2.1, 2.9) — validated above
             tuning_settings.SAMPLE_EXPORT_FIELD,
@@ -2050,6 +2602,16 @@ def update_usecase(usecase_id, event, user):
         for attribute, (bucket, result) in configured_results.items():
             audit_bucket_allowed(user, usecase_id, bucket, attribute, 'api', result, event)
 
+        # Grant maintenance on an account move (design I1): the previous
+        # account's grants are removed when no other use case references it,
+        # then the new account gets the grants creation writes. Best-effort,
+        # reported beside the other keys of the 200.
+        grant_reports = {}
+        if account_move is not None:
+            grant_reports['grants_removed'] = remove_account_grants(
+                account_move['old_account_id'], record)
+            grant_reports['grants_added'] = add_account_grants(account_move['new_account_id'])
+
         # Adds, then removes (design §5.1); each change is independently
         # valid, so a write failure mid-sequence reports what was applied.
         added, already_present, removed, not_present = [], [], [], []
@@ -2102,6 +2664,7 @@ def update_usecase(usecase_id, event, user):
             'added': added, 'already_present': already_present,
             'removed': removed, 'not_present': not_present,
             'allowed_s3_buckets': sorted(allowed_s3_buckets(reloaded)),
+            **grant_reports,
         })
         
     except Exception as e:
@@ -2124,16 +2687,25 @@ def delete_usecase(usecase_id, user):
             return create_response(403, {'error': 'Insufficient permissions to delete use case'})
         
         table = dynamodb.Table(USECASES_TABLE)
+        record = table.get_item(Key={'usecase_id': usecase_id}).get('Item')
         
         # TODO: Check if use case has active resources before deletion
         
         table.delete_item(Key={'usecase_id': usecase_id})
+
+        # The account's grants go once no other use case references the
+        # account (Requirement 3.4); best-effort, the deletion stands.
+        if record is None:
+            grants_removed = {'status': 'skipped', 'reason': 'usecase_not_found'}
+        else:
+            grants_removed = remove_account_grants(record.get('account_id'), record)
         
         log_audit_event(
             user['user_id'], 'delete_usecase', 'usecase', usecase_id, 'success'
         )
         
-        return create_response(200, {'message': 'Use case deleted successfully'})
+        return create_response(200, {'message': 'Use case deleted successfully',
+                                     'grants_removed': grants_removed})
         
     except Exception as e:
         logger.error(f"Error deleting use case: {str(e)}")

@@ -61,9 +61,9 @@ from botocore.exceptions import ClientError
 
 ACCOUNT = "acct-main"
 ROOT_ARN = f"arn:aws:iam::{ACCOUNT}:root"
-CROSS_ROLE = "arn:aws:iam::acct-remote:role/DDAPortalAccessRole"
-DATA_ROLE = "arn:aws:iam::acct-data:role/DDAPortalDataAccessRole"
-SAGEMAKER_ROLE = "arn:aws:iam::acct-remote:role/DDASageMakerExecutionRole"
+CROSS_ROLE = "arn:aws:iam::222222222222:role/DDAPortalAccessRole"
+DATA_ROLE = "arn:aws:iam::333333333333:role/DDAPortalDataAccessRole"
+SAGEMAKER_ROLE = "arn:aws:iam::222222222222:role/DDASageMakerExecutionRole"
 ARTIFACTS = "test-portal-artifacts"              # conftest's PORTAL_ARTIFACTS_BUCKET
 PORTAL_ACCOUNT = "acct-portal"
 MANAGED = "dda-portal:managed"
@@ -418,6 +418,7 @@ class Harness:
 def h(aws_stack, shared, uc, dm, monkeypatch):
     monkeypatch.delenv(shared.PORTAL_REGISTRY_ENFORCED_ENV, raising=False)
     monkeypatch.setenv("PORTAL_ACCOUNT_ID", PORTAL_ACCOUNT)
+    monkeypatch.setenv("TRUSTED_USECASE_ACCOUNT_IDS", "222222222222")
     monkeypatch.delenv("COMPONENT_BUCKET", raising=False)
     audit = AuditLog(shared.log_audit_event)
     for module in (shared, uc, dm):
@@ -851,8 +852,21 @@ def single_account_body(h, **fields):
     return body
 
 
-def test_create_usecase_requires_an_eligible_s3_bucket(h):
+def test_create_usecase_without_the_creation_permission_is_403(h):
+    """POST /usecases requires CREATE_USECASES (portal-authorization-and-iam-
+    scoping, D1): a DataScientist claim is refused before any eligibility
+    probe and no record is written."""
     creator = h.user("DataScientist")
+    body = single_account_body(h)
+    status, payload = h.create_usecase(creator, body)
+    assert status == 403, payload
+    assert payload["error_code"] == "INSUFFICIENT_PERMISSIONS"
+    assert h.probes.calls == []
+    assert not [item for item in h.tables.usecases.scan()["Items"] if item.get("name") == body["name"]]
+
+
+def test_create_usecase_requires_an_eligible_s3_bucket(h):
+    creator = h.portal_admin()
     untagged = h.untagged_bucket()
     status, payload = h.create_usecase(creator, single_account_body(h, s3_bucket=untagged))
     assert status == 400, payload
@@ -875,7 +889,7 @@ def test_create_usecase_requires_an_eligible_s3_bucket(h):
 
 
 def test_create_usecase_audits_source_create_for_every_attached_bucket(h):
-    creator = h.user("DataScientist")
+    creator = h.portal_admin()
     data, extra_a, extra_b = h.tagged_bucket(prefix="data"), h.tagged_bucket(prefix="xa"), h.tagged_bucket(prefix="xb")
     body = single_account_body(h, data_s3_bucket=data, additional_s3_buckets=[extra_a, extra_b, extra_a])
     status, payload = h.create_usecase(creator, body)
@@ -898,7 +912,7 @@ def test_create_usecase_audits_source_create_for_every_attached_bucket(h):
 
 
 def test_create_usecase_additional_list_validation(h):
-    creator = h.user("DataScientist")
+    creator = h.portal_admin()
     status, payload = h.create_usecase(creator, single_account_body(
         h, additional_s3_buckets=[f"bucket-{i}" for i in range(11)]))
     assert status == 400 and payload["error_code"] == "invalid_field"
@@ -923,11 +937,11 @@ def test_create_usecase_probes_data_bucket_through_the_data_account_role(h):
     creds = {"AccessKeyId": "testing", "SecretAccessKey": "testing", "SessionToken": "testing"}
     sts = Recorder(result=creds)
     h.monkeypatch.setattr(h.shared, "assume_usecase_role", sts)
-    creator = h.user("DataScientist")
+    creator = h.portal_admin()
     data = h.tagged_bucket(prefix="data")
-    body = single_account_body(h, account_id="acct-remote", cross_account_role_arn=CROSS_ROLE,
+    body = single_account_body(h, account_id="222222222222", cross_account_role_arn=CROSS_ROLE,
                                sagemaker_execution_role_arn=SAGEMAKER_ROLE, external_id="ext-1",
-                               data_account_id="acct-data", data_account_role_arn=DATA_ROLE,
+                               data_account_id="333333333333", data_account_role_arn=DATA_ROLE,
                                data_account_external_id="ext-data", data_s3_bucket=data)
     status, payload = h.create_usecase(creator, body)
     assert status == 201, payload
@@ -950,11 +964,11 @@ def test_create_usecase_credentials_unavailable_when_the_data_account_role_is_de
         return creds
 
     h.monkeypatch.setattr(h.shared, "assume_usecase_role", assume)
-    creator = h.user("DataScientist")
+    creator = h.portal_admin()
     data = h.tagged_bucket(prefix="data")
-    body = single_account_body(h, account_id="acct-remote", cross_account_role_arn=CROSS_ROLE,
+    body = single_account_body(h, account_id="222222222222", cross_account_role_arn=CROSS_ROLE,
                                sagemaker_execution_role_arn=SAGEMAKER_ROLE, external_id="ext-1",
-                               data_account_id="acct-data", data_account_role_arn=DATA_ROLE,
+                               data_account_id="333333333333", data_account_role_arn=DATA_ROLE,
                                data_account_external_id="ext-data", data_s3_bucket=data)
     status, payload = h.create_usecase(creator, body)
     assert status == 400, payload
@@ -979,7 +993,7 @@ def test_create_usecase_retries_bounded(h):
                 raise step
             return step
 
-    creator = h.user("DataScientist")
+    creator = h.portal_admin()
     fresh = h.name("fresh")
     scripted = ScriptedS3([client_error("NoSuchTagSet", 404), client_error("NoSuchTagSet", 404),
                            {"TagSet": tag_set(dda_portal__managed="true")}])

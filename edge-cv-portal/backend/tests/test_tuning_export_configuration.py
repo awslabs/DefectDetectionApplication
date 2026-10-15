@@ -296,7 +296,11 @@ class UseCaseEnv:
             self.env.s3.put_bucket_tagging(
                 Bucket=bucket,
                 Tagging={"TagSet": [{"Key": "dda-portal:managed", "Value": "true"}]})
-        event = self.env.event("POST", "/usecases", self.user, body=body)
+        # Creation requires CREATE_USECASES at the global scope
+        # (portal-authorization-and-iam-scoping D1): a global PortalAdmin.
+        creator = self.env.make_user(role="PortalAdmin")
+        self.env.assign_role(creator, "global", "PortalAdmin")
+        event = self.env.event("POST", "/usecases", creator, body=body)
         response = self.usecases.handler(event, None)
         return response["statusCode"], json.loads(response["body"])
 
