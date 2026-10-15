@@ -745,8 +745,14 @@ export class ApiGatewayStack extends cdk.NestedStack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
     });
 
+    // The UseCases function reaches the provisioning with a direct invoke;
+    // this route serves the PortalAdmin "Re-provision Shared Components"
+    // action and is Cognito-authorized like every sibling method.
     const provisionSharedResource = sharedComponentsResource.addResource('provision');
-    provisionSharedResource.addMethod('POST', sharedComponentsIntegration);
+    provisionSharedResource.addMethod('POST', sharedComponentsIntegration, {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    });
 
     const statusSharedResource = sharedComponentsResource.addResource('status');
     statusSharedResource.addMethod('GET', sharedComponentsIntegration, {

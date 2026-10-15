@@ -552,16 +552,6 @@ export class ComputeStack extends cdk.Stack {
         ),
       }));
 
-      // execute-api: scope Invoke to this portal account's API Gateway. The
-      // portal REST API is created after this role in the same stack, so the
-      // concrete API id is not resolvable at createLambdaRole time; fall back to
-      // a portal-account-scoped ARN rather than a global '*'.
-      role.addToPolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['execute-api:Invoke'],
-        resources: [`arn:aws:execute-api:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:*/*`],
-      }));
-
       // S3 CORS on the portal artifacts bucket. Cross-account CORS on Data
       // Account buckets is separately granted via the assumed role (unchanged).
       role.addToPolicy(new iam.PolicyStatement({
@@ -728,6 +718,10 @@ export class ComputeStack extends cdk.Stack {
       // workflows/{usecase_id}/... prefixes.
       WORKFLOWS_S3_PREFIX: 'workflows',
       PORTAL_ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
+      // The Trusted_Account_List (the accounts the factory's sts:AssumeRole
+      // statement names), checked by the use-case handlers before any STS
+      // call (portal-authorization-and-iam-scoping, design I1).
+      TRUSTED_USECASE_ACCOUNT_IDS: props.trustedUseCaseAccountIds.join(','),
       USER_POOL_ID: props.userPool.userPoolId,
       // Shared component configuration - update DDA_LOCAL_SERVER_VERSION when publishing new component versions
       DDA_LOCAL_SERVER_VERSION: '1.0.63',
@@ -1567,6 +1561,12 @@ export class ComputeStack extends cdk.Stack {
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(120), // 2 minutes for cross-account component creation
     });
+
+    // Use-case creation starts the shared-components provisioning with a
+    // direct asynchronous invoke (an Internal_Invocation), the pattern the
+    // compile / package / publish chain uses.
+    sharedComponentsHandler.grantInvoke(useCasesHandler);
+    useCasesHandler.addEnvironment('SHARED_COMPONENTS_FUNCTION_NAME', sharedComponentsHandler.functionName);
 
     // Data Accounts Lambda Handler for managing registered Data Accounts
     const dataAccountsHandler = new lambda.Function(this, 'DataAccountsHandler', {
@@ -3976,77 +3976,6 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     workflowTuningApiStack.addDependency(quickSetupApiStack);
     workflowTuningApiStack.addDependency(ddaLabelingApiStack);
     workflowTuningApiStack.addDependency(workflowManagerGapsApiStack);
-
-    // Custom Resource to update UseCases Lambda environment variable with API Gateway ID
-    // This avoids circular dependency by updating the Lambda AFTER both resources are created
-    const updateLambdaEnv = new lambda.Function(this, 'UpdateLambdaEnv', {
-      runtime: lambda.Runtime.PYTHON_3_11,
-      handler: 'index.handler',
-      code: lambda.Code.fromInline(`
-import json
-import boto3
-import cfnresponse
-
-lambda_client = boto3.client('lambda')
-
-def handler(event, context):
-    try:
-        if event['RequestType'] in ['Create', 'Update']:
-            function_name = event['ResourceProperties']['FunctionName']
-            api_gateway_id = event['ResourceProperties']['ApiGatewayId']
-            
-            # Get current environment variables
-            response = lambda_client.get_function_configuration(FunctionName=function_name)
-            env_vars = response.get('Environment', {}).get('Variables', {})
-            
-            # Add API_GATEWAY_ID
-            env_vars['API_GATEWAY_ID'] = api_gateway_id
-            
-            # Update Lambda environment
-            lambda_client.update_function_configuration(
-                FunctionName=function_name,
-                Environment={'Variables': env_vars}
-            )
-            
-            print(f"Updated {function_name} with API_GATEWAY_ID={api_gateway_id}")
-            cfnresponse.send(event, context, cfnresponse.SUCCESS, {
-                'Message': f'Updated Lambda environment'
-            })
-        else:
-            cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        cfnresponse.send(event, context, cfnresponse.FAILED, {
-            'Message': str(e)
-        })
-      `),
-      timeout: cdk.Duration.seconds(60),
-    });
-
-    // Grant permissions to update Lambda configuration
-    updateLambdaEnv.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'lambda:GetFunctionConfiguration',
-        'lambda:UpdateFunctionConfiguration',
-      ],
-      resources: [useCasesHandler.functionArn],
-    }));
-
-    // Create custom resource
-    const lambdaEnvUpdater = new cdk.CustomResource(this, 'LambdaEnvUpdater', {
-      serviceToken: updateLambdaEnv.functionArn,
-      properties: {
-        FunctionName: useCasesHandler.functionName,
-        ApiGatewayId: apiGatewayStack.api.restApiId,
-        // Force update when API changes
-        Timestamp: Date.now().toString(),
-      },
-    });
-
-    // Ensure custom resource runs after both Lambda and API Gateway are created
-    lambdaEnvUpdater.node.addDependency(useCasesHandler);
-    lambdaEnvUpdater.node.addDependency(apiGatewayStack);
 
     // Outputs
     new cdk.CfnOutput(this, 'ApiUrl', {

@@ -31,7 +31,9 @@ sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, validate_required_fields, assume_cross_account_role,
-    create_boto3_client, get_usecase_region, caller_is_portal_admin
+    create_boto3_client, get_usecase_region, caller_is_portal_admin,
+    INTERNAL_MARKER_KEY, is_internal_invocation,
+    component_bucket_name, COMPONENT_BUCKET_POLICY_MAX_BYTES,
 )
 
 logger = logging.getLogger()
@@ -49,9 +51,10 @@ SHARED_COMPONENTS_TABLE = os.environ.get('SHARED_COMPONENTS_TABLE', 'SharedCompo
 PORTAL_ACCOUNT_ID = os.environ.get('PORTAL_ACCOUNT_ID')
 AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 
-# Component bucket follows GDK naming convention: {bucket_prefix}-{region}-{account_id}
-COMPONENT_BUCKET_PREFIX = os.environ.get('COMPONENT_BUCKET_PREFIX', 'dda-component')
-COMPONENT_BUCKET = os.environ.get('COMPONENT_BUCKET', f'{COMPONENT_BUCKET_PREFIX}-{AWS_REGION}-{PORTAL_ACCOUNT_ID}')
+# Component bucket follows GDK naming convention: {bucket_prefix}-{region}-{account_id}.
+# One shared-layer derivation, so this writer and the UseCases one resolve
+# the same name (COMPONENT_BUCKET when set).
+COMPONENT_BUCKET = component_bucket_name()
 
 # DDA shared components (versions discovered dynamically from Greengrass)
 # NOTE: the JetPack-specific ARM64 variants (arm64JP5 / arm64JP6) are published by
@@ -530,6 +533,11 @@ def add_usecase_to_component_bucket_policy(cross_account_role_arn: str) -> bool:
     2. Greengrass service principal for component creation validation
     
     This runs in the Portal Account context (not cross-account).
+
+    The UseCases function (usecases.update_component_bucket_policy_for_greengrass)
+    get-modify-puts the same policy; on creation it invokes this function
+    only after its own write has returned, which keeps the two writers
+    sequential.
     """
     try:
         # Extract account ID from the cross_account_role_arn
@@ -665,10 +673,19 @@ def add_usecase_to_component_bucket_policy(cross_account_role_arn: str) -> bool:
             current_policy['Statement'].append(service_statement)
             logger.info(f"Created Greengrass service statement for accounts {portal_account_id}, {account_id}")
         
+        # Bounded growth (Requirement 3.3): refuse a policy S3 would reject
+        # rather than attempt the PutBucketPolicy.
+        policy_document = json.dumps(current_policy)
+        if len(policy_document.encode()) > COMPONENT_BUCKET_POLICY_MAX_BYTES:
+            logger.warning(
+                f"Component bucket policy for {COMPONENT_BUCKET} would exceed "
+                f"{COMPONENT_BUCKET_POLICY_MAX_BYTES} bytes with account {account_id}; not written")
+            return False
+
         # Apply updated policy
         s3.put_bucket_policy(
             Bucket=COMPONENT_BUCKET,
-            Policy=json.dumps(current_policy)
+            Policy=policy_document
         )
         
         logger.info(f"Successfully updated bucket policy for {COMPONENT_BUCKET}")
@@ -740,10 +757,12 @@ def handler(event: Dict, context: Any) -> Dict:
 def provision_components(event: Dict, user: Dict) -> Dict:
     """
     Provision shared components for a usecase.
-    Called during usecase onboarding.
-    
-    This endpoint is called by Lambda with SigV4 signing (not Cognito JWT).
-    The user context is passed in the request body since there's no Cognito authorizer.
+
+    Two callers: the UseCases function on use-case creation, with a direct
+    asynchronous invoke (an Internal_Invocation whose marker names the
+    creating user), and a PortalAdmin through the Cognito-authorized
+    POST /shared-components/provision route ("Re-provision Shared
+    Components"). Any other caller is refused 403 (design I3, D3).
     
     Returns 202 Accepted immediately and provisions components asynchronously.
     This avoids API Gateway 29-second timeout for long-running cross-account operations.
@@ -759,16 +778,10 @@ def provision_components(event: Dict, user: Dict) -> Dict:
         usecase_id = body['usecase_id']
         # component_version is deprecated - versions are now discovered dynamically per platform
         
-        # For SigV4-signed requests (Lambda-to-Lambda), user_id comes from the payload
-        # For Cognito JWT requests (user-initiated), user_id comes from the authorizer context
-        if body.get('user_id'):
-            # SigV4-signed request from Lambda - use user_id from payload
-            user_id = body['user_id']
-            logger.info(f"Using user_id from payload (SigV4-signed request): {user_id}")
-        else:
-            # Cognito JWT request - use user_id from authorizer context
-            user_id = user.get('user_id', 'unknown')
-            logger.info(f"Using user_id from authorizer context (Cognito JWT): {user_id}")
+        # The acting user follows the event source: the marker's user for the
+        # UseCases function's invoke, the Cognito caller otherwise.
+        internal = is_internal_invocation(event)
+        user_id = event[INTERNAL_MARKER_KEY]['user_id'] if internal else user.get('user_id', 'unknown')
         
         # Get usecase details
         table = dynamodb.Table(USECASES_TABLE)
@@ -779,16 +792,17 @@ def provision_components(event: Dict, user: Dict) -> Dict:
         
         usecase = response['Item']
         
-        # For SigV4-signed requests from Lambda, skip permission check
-        # The Lambda's IAM role provides authentication
-        # For Cognito JWT requests, check user has permission
-        if not body.get('user_id'):
-            # Cognito JWT request - check permissions
-            if not check_user_access(user_id, usecase_id, 'UseCaseAdmin', user):
-                return create_response(403, {'error': 'Insufficient permissions'})
-        else:
-            # SigV4-signed request - Lambda is authenticated via IAM role
-            logger.info(f"SigV4-signed request from Lambda - skipping permission check")
+        # A user-initiated request needs PortalAdmin: provisioning writes the
+        # portal-owned component bucket policy and shares portal components
+        # into the use case's account. The creation path's invoke already
+        # passed the creation permission.
+        if not internal and not check_user_access(user_id, usecase_id, 'PortalAdmin', user):
+            log_audit_event(
+                user_id, 'unauthorized_access', 'api_endpoint', event.get('path', 'unknown'),
+                'denied', details={'required_role': 'PortalAdmin', 'usecase_id': usecase_id},
+                event=event)
+            return create_response(403, {'error': 'Insufficient permissions',
+                                         'error_code': 'INSUFFICIENT_PERMISSIONS'})
         
         # Return 202 Accepted immediately - provisioning happens asynchronously
         # This avoids API Gateway 29-second timeout for long-running cross-account operations

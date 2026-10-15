@@ -793,6 +793,42 @@ def test_delete_of_an_unknown_use_case_still_answers_200(env):
     assert payload["grants_removed"] == {"status": "skipped", "reason": "usecase_not_found"}
 
 
+# ============================== shared-components provisioning on create
+
+def test_provisioning_invoke_is_issued_after_the_component_bucket_write(env):
+    caller = admin(env)
+    status, payload, _ = create(env, caller, fx.multi_account_body(provision_shared_components=True))
+    assert status == 201, payload
+    ops = env.fakes.log.ops()
+    assert ops.index(("s3", "put_bucket_policy")) < ops.index(("lambda", "invoke"))
+    [invocation] = env.fakes.lam.invocations
+    assert (invocation["FunctionName"], invocation["InvocationType"]) == (
+        fx.SHARED_COMPONENTS_FUNCTION, "Event")
+    event = json.loads(invocation["Payload"])
+    assert (event["httpMethod"], event["path"]) == ("POST", "/api/v1/shared-components/provision")
+    assert json.loads(event["body"]) == {"usecase_id": payload["usecase"]["usecase_id"],
+                                         "account_id": TRUSTED}
+    assert event["dda_internal"] == {"source": "usecases", "purpose": "provision_on_create",
+                                     "user_id": caller["user_id"]}
+    assert event["requestContext"] == {"authorizer": {"claims": {"sub": caller["user_id"]}}}
+    assert payload["shared_components"] == {"status": "accepted"}
+    assert payload["usecase"]["shared_components"] == {"status": "provisioning",
+                                                       "message": "Provisioning in progress"}
+
+
+@pytest.mark.parametrize("failure", ["invoke-error", "not-configured"])
+def test_failed_provisioning_invoke_still_creates_the_use_case(env, failure):
+    if failure == "invoke-error":
+        env.fakes.lam.error = client_error("AccessDeniedException", "not authorized", 403, "Invoke")
+    else:
+        env.mp.delenv("SHARED_COMPONENTS_FUNCTION_NAME")
+    status, payload, _ = create(env, admin(env), fx.multi_account_body(provision_shared_components=True))
+    assert status == 201, payload
+    assert payload["shared_components"]["status"] == "failed"
+    assert payload["shared_components"]["error"]
+    assert fx.record(payload["usecase"]["usecase_id"]) is not None
+
+
 # ======================================= component bucket policy writer
 
 def test_component_bucket_grants_are_idempotent(env):

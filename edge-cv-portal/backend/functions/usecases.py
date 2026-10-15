@@ -7,7 +7,6 @@ import os
 from datetime import datetime
 import uuid
 import boto3
-import requests
 from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import (
     ClientError, ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError,
@@ -35,6 +34,8 @@ from shared_utils import (
     RegistryUnavailable, validate_account_id, validate_role_arn,
     account_trusted, TrustedAccountsNotConfigured,
     component_bucket_name, COMPONENT_BUCKET_POLICY_MAX_BYTES,
+    # The marker of the direct provisioning invoke (design I3).
+    INTERNAL_MARKER_KEY, internal_marker,
 )
 # Use_Case settings for VLM/LLM Anomaly Tuning Sample_Export (spec:
 # quality-prompt-tuning, Requirements 2.1, 2.9). Pure module, shared with
@@ -211,137 +212,62 @@ def _remove_additional_bucket(table, usecase_id: str, name: str) -> str:
     return 'concurrent_update'
 
 
-def provision_shared_components_via_api(
+def provision_shared_components_internal(
     usecase_id: str,
-    usecase_account_id: str,
+    account_id: str,
     cross_account_role_arn: str,
     external_id: str,
-    user_id: str,
-    auth_token: str = None
+    user_id: str
 ) -> dict:
     """
-    Call the SharedComponentsHandler Lambda via API Gateway to provision shared components.
-    
-    This avoids the need to import the shared_components module, which may not be available
-    in the Lambda layer. Instead, we call the provisioning API endpoint which routes to
-    the SharedComponentsHandler Lambda function.
-    
-    For internal Lambda-to-Lambda calls, we use AWS SigV4 signing with the Lambda's IAM role
-    instead of JWT tokens. This allows the call to pass through the Cognito authorizer.
-    
+    Start the shared-components provisioning of a new use case with a direct,
+    asynchronous invoke of the SharedComponents function (an
+    Internal_Invocation, design I3): an API-Gateway-shaped event for
+    POST /shared-components/provision whose top-level marker names the
+    creating user, so the provisioning skips its PortalAdmin check (creation
+    already passed CREATE_USECASES) and attributes its audit to that user.
+
+    The provisioning reads the role ARN and external id from the stored
+    record, so the body carries only the use case and its account.
+
+    Ordering: the SharedComponents function get-modify-puts the component
+    bucket policy that update_component_bucket_policy_for_greengrass writes
+    too. create_usecase calls this only after that write has returned, which
+    keeps the two writers sequential now that the invoke is asynchronous.
+
     Args:
         usecase_id: UUID of the usecase
-        usecase_account_id: AWS Account ID of the usecase
-        cross_account_role_arn: IAM role ARN for cross-account access
-        external_id: External ID for role assumption
-        user_id: User ID making the request
-        auth_token: Optional auth token for API call (not used for internal calls)
-    
+        account_id: AWS Account ID of the usecase
+        cross_account_role_arn: IAM role ARN for cross-account access (stored on the record)
+        external_id: External ID for role assumption (stored on the record)
+        user_id: User ID of the creator (the provisioning's audit actor)
+
     Returns:
-        dict with provisioning results
+        {'status': 'accepted'} once the invoke is queued, else
+        {'status': 'failed', 'error': <reason>}
     """
+    function_name = os.environ.get('SHARED_COMPONENTS_FUNCTION_NAME')
+    if not function_name:
+        logger.warning("SHARED_COMPONENTS_FUNCTION_NAME is not set; shared components not provisioned")
+        return {'status': 'failed', 'error': 'SHARED_COMPONENTS_FUNCTION_NAME is not configured'}
+    event = {
+        'httpMethod': 'POST',
+        'path': '/api/v1/shared-components/provision',
+        'body': json.dumps({'usecase_id': usecase_id, 'account_id': account_id}),
+        'requestContext': {'authorizer': {'claims': {'sub': user_id}}},
+        INTERNAL_MARKER_KEY: internal_marker('usecases', 'provision_on_create', user_id),
+    }
     try:
-        from botocore.auth import SigV4Auth
-        from botocore.awsrequest import AWSRequest
-        
-        # Get the Portal API URL from environment or construct it
-        portal_api_url = os.environ.get('PORTAL_API_URL')
-        
-        # If not explicitly set, construct from AWS environment variables
-        if not portal_api_url:
-            # AWS Lambda always has AWS_REGION available
-            region = os.environ.get('AWS_REGION', 'us-east-1')
-            # Get API Gateway ID from the API_GATEWAY_ID environment variable
-            api_id = os.environ.get('API_GATEWAY_ID')
-            
-            if api_id:
-                portal_api_url = f"https://{api_id}.execute-api.{region}.amazonaws.com/v1"
-                logger.info(f"Constructed PORTAL_API_URL from API_GATEWAY_ID: {portal_api_url}")
-            else:
-                logger.warning("Neither PORTAL_API_URL nor API_GATEWAY_ID configured, skipping shared components provisioning")
-                return {'status': 'skipped', 'reason': 'API URL not configured'}
-        
-        logger.info(f"provision_shared_components_via_api called for usecase {usecase_id}")
-        logger.info(f"Using PORTAL_API_URL: {portal_api_url}")
-        
-        # Prepare the provisioning request
-        provision_url = f"{portal_api_url}/shared-components/provision"
-        
-        payload = {
-            'usecase_id': usecase_id,
-            'user_id': user_id,  # Pass user context for authorization in SharedComponentsHandler
-            'account_id': usecase_account_id
-        }
-        
-        logger.info(f"Calling provisioning API: {provision_url} for usecase {usecase_id}")
-        logger.info(f"Provisioning payload: {payload}")
-        
-        # Prepare request body
-        body = json.dumps(payload)
-        
-        # Create an AWS request for SigV4 signing
-        # This allows the Lambda's IAM role to authenticate with API Gateway
-        request = AWSRequest(
-            method='POST',
-            url=provision_url,
-            data=body,
-            headers={'Content-Type': 'application/json'}
+        boto3.client('lambda').invoke(
+            FunctionName=function_name,
+            InvocationType='Event',
+            Payload=json.dumps(event)
         )
-        
-        # Get credentials and sign the request
-        credentials = boto3.Session().get_credentials()
-        region = os.environ.get('AWS_REGION', 'us-east-1')
-        logger.info(f"Signing request with region: {region}")
-        
-        SigV4Auth(credentials, 'execute-api', region).add_auth(request)
-        
-        # Log the signed headers for debugging
-        logger.info(f"Request headers after signing: Authorization header present: {'Authorization' in request.headers}")
-        
-        # Make the signed request
-        response = requests.post(
-            provision_url,
-            headers=dict(request.headers),
-            data=request.body,
-            timeout=120  # 2 minutes timeout for provisioning
-        )
-        
-        logger.info(f"Provisioning API response status: {response.status_code}")
-        
-        # Check response status
-        if response.status_code == 200:
-            result = response.json()
-            logger.info(f"Provisioning API returned success: {result}")
-            return result
-        elif response.status_code == 202:
-            # Accepted - provisioning is async
-            result = response.json()
-            logger.info(f"Provisioning API accepted request (async): {result}")
-            return result
-        else:
-            error_msg = f"Provisioning API returned status {response.status_code}"
-            try:
-                error_detail = response.json()
-                logger.error(f"{error_msg}: {error_detail}")
-                return {'status': 'failed', 'error': error_detail}
-            except:
-                logger.error(f"{error_msg}: {response.text}")
-                return {'status': 'failed', 'error': error_msg}
-    
-    except requests.exceptions.Timeout:
-        error_msg = "Provisioning API call timed out"
-        logger.error(error_msg)
-        return {'status': 'failed', 'error': error_msg}
-    
-    except requests.exceptions.ConnectionError as e:
-        error_msg = f"Failed to connect to provisioning API: {str(e)}"
-        logger.error(error_msg)
-        return {'status': 'failed', 'error': error_msg}
-    
     except Exception as e:
-        error_msg = f"Unexpected error calling provisioning API: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        return {'status': 'failed', 'error': error_msg}
+        logger.warning(f"Could not invoke the shared-components provisioning for usecase {usecase_id}: {e}")
+        return {'status': 'failed', 'error': f"Failed to invoke shared-components provisioning: {e}"}
+    logger.info(f"Shared-components provisioning invoked for usecase {usecase_id}")
+    return {'status': 'accepted'}
 
 
 def assume_role(role_arn: str, external_id: str, session_name: str) -> dict:
@@ -938,7 +864,10 @@ def update_component_bucket_policy_for_greengrass(
                 'bucket': component_bucket_name
             }
         
-        # Put updated bucket policy
+        # Put updated bucket policy. The SharedComponents function
+        # (add_usecase_to_component_bucket_policy) get-modify-puts the same
+        # policy; create_usecase issues its provisioning invoke only after this
+        # write has returned, which keeps the two writers sequential.
         s3_component.put_bucket_policy(
             Bucket=component_bucket_name,
             Policy=policy_document
@@ -2287,8 +2216,11 @@ def create_usecase(event, user):
             component_bucket_policy_result = {'status': 'failed', 'error': str(e)}
         
         # Provision shared components (dda-LocalServer) to the usecase account
-        # This creates read-only copies of portal-managed components
-        # We call the provisioning API endpoint instead of importing the module
+        # This creates read-only copies of portal-managed components, through
+        # a direct asynchronous invoke of the SharedComponents function.
+        # Ordering: that function also get-modify-puts the component bucket
+        # policy written just above, so the invoke is issued only after
+        # update_component_bucket_policy_for_greengrass has returned.
         shared_components_result = None
         provision_shared = body.get('provision_shared_components', True)
         
@@ -2297,47 +2229,22 @@ def create_usecase(event, user):
         if provision_shared:
             logger.info(f"Starting shared components provisioning for usecase {usecase_id}")
             try:
-                # Extract auth token from event headers if available
-                # Note: We don't pass auth token for internal API calls - the provisioning endpoint
-                # will use the Lambda's IAM role for authorization instead
-                
-                shared_components_result = provision_shared_components_via_api(
+                shared_components_result = provision_shared_components_internal(
                     usecase_id=usecase_id,
-                    usecase_account_id=account_id,
+                    account_id=account_id,
                     cross_account_role_arn=cross_account_role_arn,
                     external_id=item['external_id'],
-                    user_id=user['user_id'],
-                    auth_token=None  # Don't pass auth token for internal calls
+                    user_id=user['user_id']
                 )
                 
-                # Check if provisioning was accepted (202) or completed (200)
-                # 202 means async provisioning started - the database will be updated by the background thread
-                # 200 means provisioning completed synchronously (fallback case)
-                if shared_components_result.get('status') in ['accepted', 'success', 'completed']:
-                    logger.info(f"Provisioning accepted/completed with status: {shared_components_result.get('status')}")
-                    
-                    # For async provisioning (202 Accepted), don't update the database here
-                    # The background thread will update it when provisioning completes
-                    # For now, leave shared_components_provisioned as False
-                    if shared_components_result.get('status') == 'accepted':
-                        logger.info(f"Async provisioning started for usecase {usecase_id} - will be updated by background thread")
-                        item['shared_components_provisioned'] = False
-                        item['shared_components'] = {'status': 'provisioning', 'message': 'Provisioning in progress'}
-                    else:
-                        # Synchronous completion (fallback case)
-                        table.update_item(
-                            Key={'usecase_id': usecase_id},
-                            UpdateExpression='SET shared_components_provisioned = :provisioned, shared_components = :components',
-                            ExpressionAttributeValues={
-                                ':provisioned': True,
-                                ':components': shared_components_result
-                            }
-                        )
-                        item['shared_components_provisioned'] = True
-                        item['shared_components'] = shared_components_result
-                        logger.info(f"Provisioned shared components for usecase {usecase_id}: {shared_components_result}")
+                # Accepted: the provisioning runs asynchronously and updates
+                # the record itself when it completes.
+                if shared_components_result.get('status') == 'accepted':
+                    logger.info(f"Async provisioning started for usecase {usecase_id} - will be updated by the provisioning function")
+                    item['shared_components_provisioned'] = False
+                    item['shared_components'] = {'status': 'provisioning', 'message': 'Provisioning in progress'}
                 else:
-                    # Provisioning failed or was skipped, but don't fail usecase creation
+                    # Provisioning could not be started, but don't fail usecase creation
                     logger.warning(f"Shared components provisioning returned status: {shared_components_result.get('status')}, full result: {shared_components_result}")
                     item['shared_components_provisioned'] = False
                     item['shared_components'] = shared_components_result
