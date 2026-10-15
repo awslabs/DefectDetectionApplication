@@ -39,7 +39,7 @@ permissions are the *intersection* of the assumed role and that session policy.
 
 The credentials are short-lived and issued per device: each exchange serves one
 registration, and the credentials last at most 1 hour and never past the setup
-token's expiry. Their reach is broader than that one device:
+token's expiry. The session policy sets these resource scopes:
 
 - The IoT thing and thing-group actions are limited to the registered thing
   name and Device_Group.
@@ -73,7 +73,7 @@ Which role is assumed depends on the Use_Case:
   Greengrass TES role setup, `greengrass:TagResource`, `sts:GetCallerIdentity`).
   The Lambda always assumes it *with* the per-device session policy, so the
   station receives the intersection of the two. That intersection limits the
-  thing and thing-group actions to the registered device, but still allows
+  thing and thing-group actions to the registered device, and allows
   new versions of the shared `GreengrassV2IoTThingPolicy` IoT policy and
   changes to roles named `GreengrassV2TokenExchangeRole*`, which all devices
   in the account use.

@@ -1,3 +1,8 @@
+The steps below run the tests on a host. They work only once the native
+dependencies (the edgemlsdk build and the other `build-custom.sh` artifacts)
+are built and installed on that host. Otherwise use the flask-app image
+([Running the backend tests inside the flask-app image](#running-the-backend-tests-inside-the-flask-app-image)).
+
 To run the pytest suite you need to do the following tasks
 
 - Install Debian dependencies (apt version of docker is too old)
@@ -22,7 +27,7 @@ To run the pytest suite you need to do the following tasks
 - install the artifacts from the build
 
 - Set python path to include edgemlSDK binaries
-export PYTHONPATH=$PYTHONPATH:/home/<username>/<checkoutdir>/src/backend:/home/ryvan/<username>/<checkoutdir>/edgemlsdk/src/src/bindings/python/python_package/src/
+export PYTHONPATH=$PYTHONPATH:/home/<username>/<checkoutdir>/src/backend:/home/<username>/<checkoutdir>/edgemlsdk/src/src/bindings/python/python_package/src/
 
 - run the tests!
 - cd test

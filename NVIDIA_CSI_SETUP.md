@@ -30,6 +30,12 @@ marker at every deployment:
   opt in; re-provisioning without the flag clears the marker and opts the
   device back out. A later Add Device setup on the device also opts it out.
 
+A manual `setup_station.sh` run does not record the device's Target
+Architecture. After it, open the device in the portal and set **Target
+Architecture (DDA)** on **Overview** with **Edit**
+([README 7.5](README.md#75-verify-the-device)). vLLM and node-plugin
+deployments are rejected until it is set.
+
 ## Installation
 
 No manual install step is needed. The JetPack LocalServer components

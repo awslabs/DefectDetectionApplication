@@ -348,14 +348,19 @@ curl -s -X POST "$PORTAL_API/api/v1/training/$TRAINING_ID/package" \
 
 Repeat per model (Smoke_Model first).
 
-1. Portal → **Deployments** → create a deployment for the use case.
-2. Target the Thor device (thing) — its recorded architecture must be
+1. Portal → **Deployments** → open the Thor's deployment (the one revised in
+   Stage 1.3) and click **Revise Deployment**
+   ([README Add Models or Workflows Later](../../README.md#add-models-or-workflows-later)).
+2. The target is the Thor device (thing) — its recorded architecture must be
    `arm64_jp7`.
-3. Add the component `model-vllm-{safe_model_name}` version `1.0.0`
-   (the LocalServer dependency `aws.edgeml.dda.LocalServer.arm64JP7` is a
-   HARD dependency of the component's recipe — the version deployed in
-   Stage 1.3 must be present/compatible).
-4. Submit.
+3. Add the component `model-vllm-{safe_model_name}` version `1.0.0` next to
+   the components already listed. Keep `aws.edgeml.dda.LocalServer.arm64JP7`
+   and any model added in an earlier pass: the revision replaces the device's
+   component list (the LocalServer dependency is a HARD dependency of the
+   component's recipe — the version deployed in Stage 1.3 must be
+   present/compatible).
+4. Click **Update Deployment**. If a **Components will be removed** dialog
+   appears, a component was left out: cancel and add it back.
 
 **Expected outcomes**
 

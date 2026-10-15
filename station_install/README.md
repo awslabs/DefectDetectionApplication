@@ -36,6 +36,11 @@ Example:
 sudo ./setup_station.sh us-east-1 my-defect-detector
 ```
 
+A manual run does not record the device's Target Architecture. After it, open
+the device in the portal and set **Target Architecture (DDA)** on **Overview**
+with **Edit** ([README 7.5](../README.md#75-verify-the-device)). vLLM and
+node-plugin deployments are rejected until it is set.
+
 
 ## Configuration Files
 

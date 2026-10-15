@@ -19,8 +19,8 @@
 #   --ami-id AMI             AMI ID (default: latest Ubuntu ARM64 AMI for --ubuntu-version)
 #   --ubuntu-version VER     Ubuntu LTS version for the default AMI lookup:
 #                            18.04 (default), 20.04, 22.04, or 24.04
-#                            (use 24.04 for JP7 build servers; see README "JetPack 7
-#                            (JP7) Build Server" section for provisioning steps)
+#                            (use 24.04 for JP7 build servers; Build Fleet,
+#                            README Step 4, is the supported JP7 path)
 #   --flavor FLAVOR          Ubuntu flavor: pro (Ubuntu Pro) or standard
 #                            (default: standard)
 #   --dry-run                Show what would be created without creating
