@@ -87,6 +87,15 @@ describe("image routes (token in query, Requirements 1.3, 5.5)", () => {
     expect(parsed.searchParams.get("token")).toBe("t&k=v#f");
     expect(parsed.hash).toBe("");
   });
+
+  it("carries no token parameter at all when there is no token for this origin", () => {
+    // Callers pass null when the stored session belongs to another origin (or
+    // there is none), so no token= of any kind appears in the URL.
+    expect(outputImageUrl("exec-1", null)).toBe("/workflows/executions/exec-1/output-image");
+    const url = nodeImageUrl("exec-1", "vlm_node", "reference", null);
+    expect(url).toBe("/workflows/executions/exec-1/node-image?nodeId=vlm_node&port=reference");
+    expect(new URL(url, "https://device:5443").searchParams.has("token")).toBe(false);
+  });
 });
 
 /**

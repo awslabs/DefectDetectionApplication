@@ -129,13 +129,15 @@ into the served HTML's `dda-api-base` meta tag:
 API_BASE=5000                        # default: LocalServer on this host:5000
 API_BASE=http://192.168.8.224:5000   # LocalServer on another machine
 API_BASE= ./serve-hmi.sh             # stamp nothing (same-origin, as before)
+API_ALLOW_HOSTS=.plant.example,100.64.0.0/10 ./serve-hmi.sh   # more ?api= hosts (below)
 ```
 
 Stamping happens in a temp copy, so the built `dist/` is never modified.
 
 `api/base.ts` resolves `API_Base` synchronously, first usable value winning:
 
-1. the page URL's `?api=` parameter — `?api=5000`, `?api=http://host:5000`
+1. the page URL's `?api=` parameter — `?api=5000`, `?api=http://192.168.8.224:5000` —
+   for the hosts listed under "What `?api=` may name" below
 2. the `dda-api-base` meta tag (what `serve-hmi.sh` stamps)
 3. the build-time `VITE_API_BASE`
 4. same-origin (empty) — the original behaviour, so a bundle served by the
@@ -143,7 +145,43 @@ Stamping happens in a temp copy, so the built `dist/` is never modified.
 
 A value that cannot be parsed falls through to the next source rather than
 throwing, so a typo can't brick the kiosk. `API_BASE` itself is validated at
-startup and refuses to serve on a malformed value.
+startup and refuses to serve on a malformed value. Sources 2-4 (and the
+`__DDA_HMI_API_BASE__` global) are set by whoever deploys the bundle, so they
+can name any host.
+
+### What `?api=` may name
+
+Anyone who can send the operator a link can set `?api=`, and the HMI sends its
+session token and the login form's credentials to its `API_Base`. So `?api=`
+keeps working across hosts (a bare port, or a full `http(s)://` base on another
+machine), but only for these hosts:
+
+- this page's own host, on any port (`?api=5000` always qualifies)
+- an IPv4 address in 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8
+  or 169.254.0.0/16, which covers stations addressed by IP on the plant
+  network
+- an IPv6 address in ::1/128, fc00::/7 or fe80::/10
+- a name ending in `.local`, or a single-label name such as `station-01`
+- a host on the deploy-time allow list: the `dda-api-allow-hosts` meta tag
+  (stamped by `serve-hmi.sh` from `API_ALLOW_HOSTS`) and the build-time
+  `VITE_API_ALLOW_HOSTS`, combined. Each is a comma-separated list of exact
+  names or IP addresses (`station-01.plant.example`, `203.0.113.7`,
+  `[2001:db8::7]`), `.suffix` domains (`.plant.example` covers that name and
+  every name under it) and IPv4 CIDRs (`100.64.0.0/10`)
+
+The host is checked as the browser's URL parser normalizes it, so
+`http://3232235786:5000` counts as 192.168.1.10, while a look-alike such as
+`192.168.1.10.example.com` is a DNS name and needs an allow-list entry. A value
+with a user name (`http://user@host`) is never used.
+
+100.64.0.0/10 (carrier-grade NAT, also used by some VPNs such as Tailscale) is
+not in the built-in list, because addresses in it can belong to other
+customers of the same carrier. If stations are reached through such a VPN, add
+the range (or a narrower one) with `API_ALLOW_HOSTS=100.64.0.0/10`.
+
+For any other host the page ignores `?api=`, continues with the next source,
+and shows a non-blocking notice at the top of the screen naming the ignored
+host and the address it uses instead. The notice can be dismissed.
 
 Cross-origin works because the backend already sends
 `Access-Control-Allow-Origin: *`. Note the bundle must be built with relative
@@ -182,12 +220,23 @@ disabled. The layout targets 1920x1080 full screen; it also stays usable at
   no tokens and requires none, so the app is entered directly with no form —
   presenting one there is a dead end whose only possible outcome is a 403.
 - Otherwise the app shows a login form and submits to `POST /local-auth/login`.
-  An unreachable or unparseable status also keeps the form, rather than
-  entering an app that would then fail every request.
+  The form names the LocalServer address (`host:port`) the credentials will
+  be sent to. An unreachable or unparseable status also keeps the form,
+  rather than entering an app that would then fail every request.
 - On success, the session token and its expiry are stored in
-  `localStorage["hmi.session"]`, so a kiosk page reload resumes without
-  prompting. Credentials are kept in memory only, never persisted; they back
-  a single automatic re-login if a request hits a 401.
+  `localStorage["hmi.session"]`, together with the origin of the LocalServer
+  that issued them, so a kiosk page reload resumes without prompting.
+  Credentials are kept in memory only, never persisted; they back a single
+  automatic re-login if a request hits a 401.
+- The token (the `Authorization` header and the image URLs' `token=`) and the
+  re-login credentials are only sent to that origin. When the page points at
+  another LocalServer, for example through `?api=`, the app is signed out
+  there and shows the login form; the stored session stays for its own
+  LocalServer. The HMI keeps one session, so signing in to another LocalServer
+  replaces it.
+- After updating to the origin-bound session, each kiosk shows the login form
+  once: a session stored by an earlier bundle does not record its LocalServer,
+  so it is ignored. Devices with local login disabled are not affected.
 - The app polls run state every 2 seconds and refreshes the registration
   list about every 30 seconds to pick up newly deployed workflows.
 
@@ -200,3 +249,32 @@ disabled. The layout targets 1920x1080 full screen; it also stays usable at
 | Login form says local login is disabled after submitting | The device's LocalServer runs with local auth turned off (login route returns 403); the app should not have shown the form at all — see the row above |
 | Images broken but text data fine | Image routes take the token as a query parameter — usually a stale session; reload to re-login |
 | App loads but no workflow shown | No `registered` workflow registrations on the device, or the poller can't reach the API (check the on-screen connection state) |
+| Notice "Ignored ?api= host ..." at the top of the screen | The `?api=` host is not one `?api=` may name (see "What `?api=` may name"). Use the station's IP address, add the host to `API_ALLOW_HOSTS`, or set the base with `API_BASE` instead |
+| Login form appears once after updating the bundle | Expected: sessions are now bound to the LocalServer that issued them, and an older stored session is ignored. Sign in once |
+| Login form names an address you don't expect | The page was opened with a `?api=` pointing elsewhere. Don't sign in; open the kiosk URL without `?api=` |
+
+## Changelog
+
+### [Unreleased]
+
+#### Changed - `?api=` host check and origin-bound sessions (2026-10-14)
+
+- `?api=` is used only for this page's host, private-network, loopback and
+  link-local IP addresses, `.local` and single-label names, and hosts on the
+  new deploy-time allow list (`dda-api-allow-hosts` meta tag, stamped by
+  `serve-hmi.sh` from the new `API_ALLOW_HOSTS`; or `VITE_API_ALLOW_HOSTS` at
+  build time). Bare ports and cross-host bases by IP address work as before.
+  For any other host the page uses the next configured source and shows a
+  dismissible notice naming the ignored host. 100.64.0.0/10 is not built in;
+  allow it explicitly where a VPN uses it.
+- The stored session records the LocalServer origin that issued it. The
+  `Authorization` header, the image URLs' `token=` and the re-login
+  credentials are only sent to that origin; for any other the app is signed
+  out. Image URLs carry no `token=` when there is no session for the current
+  origin.
+- The login form names the LocalServer address (`host:port`) the credentials
+  will be sent to.
+- Upgrade note: each kiosk shows the login form once after the update,
+  because a session stored by an earlier bundle has no origin and is ignored.
+  The `dda-api-base` meta tag, `VITE_API_BASE` and `__DDA_HMI_API_BASE__`
+  behave as before. No backend change.

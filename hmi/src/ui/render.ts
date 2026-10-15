@@ -9,7 +9,10 @@
  *
  * Covered display criteria:
  *  - Login form with credentials-rejected / login-disabled messages
- *    (Requirements 1.6, 1.7).
+ *    (Requirements 1.6, 1.7), naming the LocalServer `host:port` the
+ *    credentials are posted to.
+ *  - A non-blocking, dismissible notice naming a `?api=` host that was
+ *    ignored (`api/base.ts`).
  *  - Header: workflow name + displayed run's start time (6.3), connection
  *    badge with last-update time (8.1), in-progress indicator (3.3).
  *  - Verdict panel: icon + word (never color alone, 4.2) at ≥ 48 px via
@@ -31,6 +34,7 @@
  */
 
 import { loadSession } from "../auth/session";
+import { getApiAddress, getApiBaseNotice } from "../api/base";
 import { nodeImageUrl, outputImageUrl } from "../api/routes";
 import type { ResultImage } from "../api/types";
 import { formatDateTime, formatTime } from "../logic/format";
@@ -100,6 +104,21 @@ button { font: inherit; cursor: pointer; }
   border-radius: 8px; background: #2f6fed; color: #fff;
 }
 .login-error { color: #ff8b8b; font-size: 15px; min-height: 20px; }
+.login-target { font-size: 15px; color: #aab2bd; overflow-wrap: anywhere; }
+.login-target-address { color: #e8eaed; }
+
+/* ---- Ignored-?api= notice: fixed, so it never moves the layout below ---- */
+.api-notice {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 10;
+  display: flex; align-items: center; gap: 16px;
+  max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 8px;
+  background: #2b2411; border: 1px solid #ffd166; color: #ffd166;
+  font-size: 15px; overflow-wrap: anywhere;
+}
+.api-notice-dismiss {
+  flex: none; padding: 6px 12px; font-size: 14px; font-weight: 600;
+  border: 1px solid #ffd166; border-radius: 6px; background: transparent; color: #ffd166;
+}
 
 /* ---- Three-band kiosk layout (Requirement 6.1) ---- */
 .kiosk {
@@ -281,7 +300,11 @@ function updateImagePanel(panel: ImagePanel, url: string | null, placeholderText
 }
 
 /** Builds the image URL for one selected results entry (1.3, 5.5). */
-function imageUrlFor(executionId: string, image: ResultImage, token: string): string | null {
+function imageUrlFor(
+  executionId: string,
+  image: ResultImage,
+  token: string | null,
+): string | null {
   if (image.kind === "output") return outputImageUrl(executionId, token);
   if (image.nodeId === undefined || image.port === undefined) return null;
   return nodeImageUrl(executionId, image.nodeId, image.port, token);
@@ -319,12 +342,29 @@ export function createRenderer(root: HTMLElement, callbacks: RenderCallbacks): R
   loginError.setAttribute("role", "alert");
   const loginButton = el("button", undefined, "Sign in");
   loginButton.type = "submit";
-  loginBox.append(loginTitle, userLabel, passLabel, loginError, loginButton);
+  // The LocalServer host:port the credentials are posted to (filled on render).
+  const loginTarget = el("div", "login-target hidden");
+  const loginTargetAddress = el("strong", "login-target-address");
+  loginTarget.append("Signing in to ", loginTargetAddress);
+  loginBox.append(loginTitle, loginTarget, userLabel, passLabel, loginError, loginButton);
   loginScreen.append(loginBox);
   loginBox.addEventListener("submit", (event) => {
     event.preventDefault();
     callbacks.onLoginSubmit(userInput.value, passInput.value);
   });
+
+  // ---- ignored-?api= notice: fixed overlay, dismissible, shown on any screen ----
+  const apiNotice = el("div", "api-notice hidden");
+  apiNotice.setAttribute("role", "status");
+  const apiNoticeText = el("span", "api-notice-text");
+  const apiNoticeDismiss = el("button", "api-notice-dismiss", "Dismiss");
+  apiNoticeDismiss.type = "button";
+  let apiNoticeDismissed = false;
+  apiNoticeDismiss.addEventListener("click", () => {
+    apiNoticeDismissed = true;
+    apiNotice.classList.add("hidden");
+  });
+  apiNotice.append(apiNoticeText, apiNoticeDismiss);
 
   // ---- kiosk: header ----
   const kiosk = el("div", "kiosk");
@@ -385,10 +425,29 @@ export function createRenderer(root: HTMLElement, callbacks: RenderCallbacks): R
   historyStrip.append(historyTiles, historyEmpty, historySide);
 
   kiosk.append(header, main, historyStrip);
-  root.replaceChildren(loginScreen, kiosk);
+  root.replaceChildren(loginScreen, kiosk, apiNotice);
 
   // ---- incremental render ----
   let renderedHistoryKey = "";
+
+  /**
+   * The ignored-`?api=` notice and the login form's target address. Text is
+   * only written when it changes, so the notice's live region is not
+   * re-announced on every 2-second poll.
+   */
+  function renderApiTarget(onLogin: boolean): void {
+    const notice = getApiBaseNotice();
+    if (apiNoticeText.textContent !== (notice ?? "")) {
+      apiNoticeText.textContent = notice ?? "";
+    }
+    apiNotice.classList.toggle("hidden", notice === null || apiNoticeDismissed);
+    if (!onLogin) return;
+    const address = getApiAddress();
+    if (loginTargetAddress.textContent !== address) {
+      loginTargetAddress.textContent = address;
+    }
+    loginTarget.classList.toggle("hidden", address === "");
+  }
 
   function renderHistory(state: AppState): void {
     const { history, mode, displayedRun } = state.live;
@@ -500,7 +559,8 @@ export function createRenderer(root: HTMLElement, callbacks: RenderCallbacks): R
 
   function renderImages(state: AppState): void {
     const { images, displayedRun } = state.live;
-    const token = loadSession()?.token ?? "";
+    // Only a session the current API origin issued; otherwise no token=.
+    const token = loadSession()?.token ?? null;
     const executionId = displayedRun?.executionId ?? "";
 
     const referenceImage = images?.reference ?? null;
@@ -527,6 +587,7 @@ export function createRenderer(root: HTMLElement, callbacks: RenderCallbacks): R
     const onLogin = state.auth.screen === "login";
     loginScreen.classList.toggle("hidden", !onLogin);
     kiosk.classList.toggle("hidden", onLogin);
+    renderApiTarget(onLogin);
     if (onLogin) {
       loginError.textContent =
         state.auth.loginError === "disabled"
