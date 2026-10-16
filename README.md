@@ -1066,10 +1066,13 @@ in the latest `DDAPortalComponentAccessPolicy` (and re-applied as the
 device before this was added:
 
 ```bash
-# Refresh the managed policy (re-run in the UseCase account)
-./edge-cv-portal/deploy-account-role.sh        # updates DDAPortalComponentAccessPolicy
+# Multi-account: refresh the managed policy by redeploying the UseCase Account
+# stack, which owns DDAPortalComponentAccessPolicy. Run in the UseCase Account,
+# with the same Portal Account ID and External ID as before (see below).
+cd edge-cv-portal
+./deploy-portal.sh usecase
 
-# OR add the permissions directly to the device role:
+# Single-account (or to fix one device role directly): add the permissions to the device role:
 aws iam put-role-policy --role-name GreengrassV2TokenExchangeRole \
   --policy-name ECRComponentAccess \
   --policy-document '{
@@ -1085,6 +1088,8 @@ aws iam put-role-policy --role-name GreengrassV2TokenExchangeRole \
 ```
 `ecr:GetAuthorizationToken` does not support resource scoping and must use `"*"`.
 No device restart is needed — the role change takes effect on the next deployment retry.
+
+`./deploy-portal.sh usecase` redeploys the whole `DDAPortalUseCaseAccountStack`. The Portal Account ID and External ID you enter go into the `DDAPortalAccessRole` trust policy, so reuse the values from the first run (both are in `edge-cv-portal/usecase-account-*-config.txt`; answer `Y` when the script offers to reuse its External ID). A different value, including the new External ID a blank answer generates, locks the portal out of the account. A single-account setup has no script that updates an existing `DDAPortalComponentAccessPolicy` (`deploy-account-role.sh` leaves it as is), so use `put-role-policy` there.
 
 **Deployment Fails** (`COMPONENT_VERSION_REQUIREMENTS_NOT_MET`):
 - Verify component exists in your account
