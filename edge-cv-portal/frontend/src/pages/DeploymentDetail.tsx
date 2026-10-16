@@ -40,6 +40,40 @@ interface ErrorMessage {
   detailed_status_reason?: string;
 }
 
+// Current device state of the deployment's model components, read from each
+// device's dda-model-status shadow (spec triton-model-cleanup-wedge, D11).
+// Present only for the latest deployment of its target, and only when a
+// device reports a model that is not READY or self-heal activity.
+interface ModelReadinessNotReady {
+  model: string;
+  status?: string;
+  since?: string;
+  stalled?: boolean;
+  reason?: string;
+}
+
+interface ModelReadinessSelfHeal {
+  state: string | null;
+  enabled?: boolean;
+  attempts_in_24h?: number;
+  last_requested_at: string | null;
+  rearms_at: string | null;
+}
+
+interface ModelReadinessDevice {
+  core_device: string;
+  shadow_updated_at: string | null;
+  not_ready: ModelReadinessNotReady[];
+  self_heal?: ModelReadinessSelfHeal;
+}
+
+interface ModelReadiness {
+  warning: string;
+  devices: ModelReadinessDevice[];
+  checked_devices: number;
+  truncated: boolean;
+}
+
 interface DeploymentDetail {
   deployment_id: string;
   deployment_name: string;
@@ -60,6 +94,7 @@ interface DeploymentDetail {
   usecase_id: string;
   effective_deployments?: EffectiveDeployment[];
   error_messages?: ErrorMessage[];
+  model_readiness?: ModelReadiness;
 }
 
 export default function DeploymentDetail() {
@@ -167,6 +202,25 @@ export default function DeploymentDetail() {
   const formatTimestamp = (timestamp?: string) => {
     if (!timestamp) return '-';
     return new Date(timestamp).toLocaleString();
+  };
+
+  // "model-a: LOADING since <ts>, stalled (reason)"
+  const formatNotReadyLine = (item: ModelReadinessNotReady) => {
+    let line = `${item.model}: ${item.status || 'not READY'}`;
+    if (item.since) line += ` since ${formatTimestamp(item.since)}`;
+    if (item.stalled) line += ', stalled';
+    if (item.reason) line += ` (${item.reason})`;
+    return line;
+  };
+
+  // "Self-heal: exhausted, enabled, 3 attempt(s) in 24 h, last requested <ts>, re-arms <ts>"
+  const formatSelfHealLine = (selfHeal: ModelReadinessSelfHeal) => {
+    const parts = [selfHeal.state || 'unknown state'];
+    if (selfHeal.enabled !== undefined) parts.push(selfHeal.enabled ? 'enabled' : 'disabled');
+    if (selfHeal.attempts_in_24h !== undefined) parts.push(`${selfHeal.attempts_in_24h} attempt(s) in 24 h`);
+    if (selfHeal.last_requested_at) parts.push(`last requested ${formatTimestamp(selfHeal.last_requested_at)}`);
+    if (selfHeal.rearms_at) parts.push(`re-arms ${formatTimestamp(selfHeal.rearms_at)}`);
+    return `Self-heal: ${parts.join(', ')}`;
   };
 
   // Calculate deployment progress
@@ -380,6 +434,33 @@ export default function DeploymentDetail() {
                               )}
                             </Box>
                           ))}
+                        </SpaceBetween>
+                      </Alert>
+                    )}
+
+                    {/* Current device state of the deployment's models (dda-model-status shadow) */}
+                    {deployment.model_readiness && deployment.model_readiness.devices?.length > 0 && (
+                      <Alert type="warning" header="Models not ready on the device (current state)">
+                        <SpaceBetween size="s">
+                          <Box>{deployment.model_readiness.warning}</Box>
+                          {deployment.model_readiness.devices.map((dev) => (
+                            <Box key={dev.core_device}>
+                              <Box variant="strong">Device: {dev.core_device}</Box>
+                              <Box>
+                                Current device state, shadow updated {formatTimestamp(dev.shadow_updated_at || undefined)}
+                              </Box>
+                              {dev.not_ready.map((item) => (
+                                <Box key={item.model}>{formatNotReadyLine(item)}</Box>
+                              ))}
+                              {dev.self_heal && <Box>{formatSelfHealLine(dev.self_heal)}</Box>}
+                            </Box>
+                          ))}
+                          {deployment.model_readiness.truncated && (
+                            <Box>
+                              Checked {deployment.model_readiness.checked_devices} device(s); other devices
+                              of this deployment were not checked.
+                            </Box>
+                          )}
                         </SpaceBetween>
                       </Alert>
                     )}
