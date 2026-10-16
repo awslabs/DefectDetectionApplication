@@ -102,6 +102,9 @@ cd edge-cv-portal
 
 # 2. Multi-account only: deploy the UseCase account role (in UseCase Account)
 ./deploy-portal.sh usecase
+#    Then, in the Portal Account, add the UseCase Account ID to the SSM parameter
+#    /dda-portal/trusted-usecase-account-ids and re-run ./deploy-portal.sh single-account
+#    (README.md, Step 5.1)
 
 # 3. (Optional) Deploy Data Account Role (in Data Account, if using a separate one)
 ./deploy-portal.sh data
