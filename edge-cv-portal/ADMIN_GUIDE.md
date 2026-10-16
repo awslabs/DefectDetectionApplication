@@ -90,7 +90,7 @@ The portal uses two different scoping models depending on where data is stored:
 
 ### Prerequisites
 
-- AWS CLI configured with admin credentials and a default region
+- AWS CLI configured with admin credentials, with a region: a default region (`aws configure`) or `AWS_REGION` (`deploy-portal.sh` also takes `--region <region>`)
 - Node.js 18+, Python 3.11+
 - AWS CDK: `npm install -g aws-cdk`
 - Docker (the compute stack builds a Lambda container image during `cdk deploy`)
@@ -117,7 +117,7 @@ Options: `--profile <name>`, `--region <region>`, `--sso` (SSO on the auth stack
 
 **Outputs you need below:** the `EdgeCVPortalAuthStack` outputs (`UserPoolId`, `UserPoolClientId`, `AuthConfig`) are printed by the auth step and recorded in the log; the Portal URL (`DistributionDomainName`) is in the Deployment Summary.
 
-**Manual path.** The same four scripts can be run by hand, in that order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`); run `cdk bootstrap` yourself first. This is useful to repeat a single step, for example `./deploy-frontend.sh` after a frontend change.
+**Manual path.** The same four scripts can be run by hand, in that order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`); run `cdk bootstrap` yourself first. This is useful to repeat a single step, for example `./deploy-frontend.sh` after a frontend change. Run on their own, the scripts use `AWS_REGION` (or `AWS_DEFAULT_REGION`) when set, otherwise the CLI's default region; `deploy-auth.sh` also takes `--region`.
 
 ### Create Admin User
 

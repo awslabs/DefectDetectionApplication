@@ -109,13 +109,13 @@ Portal Account          UseCase Account         Data Account (Optional)
 
 ### Prerequisites
 
-- AWS CLI configured, with a default region (`aws configure`)
+- AWS CLI configured, with a region: a default region (`aws configure`) or `AWS_REGION` (`deploy-portal.sh` also takes `--region <region>`)
 - Node.js 18+, Python 3.11+
 - AWS CDK: `npm install -g aws-cdk`
 - Docker (the compute stack builds a Lambda container image during `cdk deploy`)
 - [AWS Marketplace subscription](https://aws.amazon.com/marketplace/pp/prodview-j72hhmlt6avp6) (in UseCase Account — see below)
 
-> `deploy-portal.sh` (Step 1.2) checks the AWS CLI, your credentials, the region, Node.js and CDK before it changes anything, and runs `cdk bootstrap` for you when the account/region is not bootstrapped (or its bootstrap version is below 21). It does not check Docker, the Marketplace subscription, or the API Gateway CloudWatch Logs role from Step 1.1.
+> `deploy-portal.sh` (Step 1.2) checks the AWS CLI, your credentials, the region, Node.js and CDK before it changes anything, and runs `cdk bootstrap` for you when the account/region is not bootstrapped (or its bootstrap version is below 21). It takes the region from `--region`, else `AWS_REGION` / `AWS_DEFAULT_REGION`, else the CLI's default region, and every step deploys to that region. It does not check Docker, the Marketplace subscription, or the API Gateway CloudWatch Logs role from Step 1.1.
 
 > **Important: AWS Marketplace Subscription Required**
 > 
@@ -187,7 +187,7 @@ Useful options (`./deploy-portal.sh --help` lists them all):
   ./deploy-portal.sh single-account --non-interactive
   ```
 
-**Manual path (advanced).** The four scripts above remain runnable on their own, in the same order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`). Use them to repeat a single step, e.g. `./deploy-frontend.sh` after a frontend change. When you skip the orchestrator, run `npx cdk bootstrap` yourself first from `edge-cv-portal/infrastructure/` (where `cdk.json` lives); `deploy-infrastructure.sh` handles the npm install and `cdk deploy` for you after that.
+**Manual path (advanced).** The four scripts above remain runnable on their own, in the same order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`). Use them to repeat a single step, e.g. `./deploy-frontend.sh` after a frontend change. When you skip the orchestrator, run `npx cdk bootstrap` yourself first from `edge-cv-portal/infrastructure/` (where `cdk.json` lives); `deploy-infrastructure.sh` handles the npm install and `cdk deploy` for you after that. Run on their own, the scripts use `AWS_REGION` (or `AWS_DEFAULT_REGION`) when set, otherwise the CLI's default region; `deploy-auth.sh` also takes `--region`.
 
 > **Registry enforcement and allowed buckets.** Production deployments run with the Portal_Identity registry enforced: `PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh`, after `edge-cv-portal/backfill_portal_registry.py` has been applied and the accounts verified (a fresh install starts with enforcement off, and the script prints a warning whenever the value it resolves for a deploy is not `true`). Independently of that flag, the portal reads and writes S3 only in each use case's **allowed buckets** — its configured S3 bucket, its Data Account bucket, and the **Additional S3 buckets** a UseCaseAdmin allows (Use Cases → Edit → Allowed buckets, or "Allow for this use case" in Data Management). A bucket must be tagged `dda-portal:managed=true` (`aws s3control tag-resource --account-id ACCOUNT_ID --resource-arn arn:aws:s3:::BUCKET --tags Key=dda-portal:managed,Value=true`, plus `aws s3api put-bucket-abac --bucket BUCKET --abac-status Status=Enabled` for a bucket reached through a cross-account role) **before** a use case is created with it or allows it; buckets created through the portal are tagged, ABAC-enabled and allowed automatically. See `edge-cv-portal/ADMIN_GUIDE.md`, "Use case buckets and Additional S3 buckets" and "The enforcement flag".
 
