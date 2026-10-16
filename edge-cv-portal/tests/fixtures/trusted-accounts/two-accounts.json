@@ -1,0 +1,35 @@
+{
+  "Resources": {
+    "PortalLambdaRoleDefaultPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Resource": [
+                "arn:aws:iam::123456789012:role/DDAPortalAccessRole",
+                "arn:aws:iam::222222222222:role/DDAPortalAccessRole"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "QuickSetupRoleDefaultPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Resource": "arn:aws:iam::222222222222:role/DDAPortalAccessRole"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

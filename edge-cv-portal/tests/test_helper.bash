@@ -15,6 +15,17 @@
 #   * trace query helpers: stub_calls, stub_called, stub_call_count,
 #     stub_pwd_of, stub_args_of, stub_env_of, stub_env_value, stub_stdin_of,
 #     stub_order_of
+#   * hermetic setup, trusted-account, template and trace helpers (bottom of
+#     this file): portal_scrub_aws_env, portal_require_stubbed_tools,
+#     install_real_if_present, stub_tools_ignore_stdin, trusted_param_*,
+#     portal_not_deployed / deploy_stack_template / deploy_portal_stacks /
+#     deny_stack_template / missing_stacks, set_profile_account /
+#     set_profile_region, set_cdk_json_context / set_cdk_context_json /
+#     set_user_cdk_json, seed_frontend_stack_outputs, output_has_line,
+#     log_has_line / log_line_of and the per-call trace queries
+#     (stub_trace_table, stub_call_index, stub_call_count_matching,
+#     stub_call_*_n, stub_call_has_pair, stub_env_values_all,
+#     stub_regions_used)
 #
 # The harness is fully offline. Nothing here contacts AWS or the network.
 
@@ -244,3 +255,181 @@ stub_env_value() { stub_env_of "$1" | sed -n "s/^$2=//p"; }
 
 # stub_stdin_of <name> -> stdin the first call received
 stub_stdin_of() { _b64d "$(_first_line_for "$1" | cut -f5)"; }
+
+# ---------------------------------------------------------------------------
+# Hermetic setup, trusted-account, template and trace helpers
+# ---------------------------------------------------------------------------
+
+# portal_scrub_aws_env -> nothing from the caller's shell: no AWS identity or
+# credential source, region, trusted list or deploy input; config/credentials
+# /dev/null, IMDS off; HOME (so ~/.cdk.json) and TMPDIR inside the sandbox.
+# Call after portal_harness_setup; a test then sets only what it needs.
+portal_scrub_aws_env() {
+  unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY \
+        AWS_SESSION_TOKEN AWS_SECURITY_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME \
+        AWS_WEB_IDENTITY_TOKEN_FILE AWS_CONTAINER_CREDENTIALS_RELATIVE_URI \
+        AWS_CONTAINER_CREDENTIALS_FULL_URI AWS_CONTAINER_AUTHORIZATION_TOKEN \
+        AWS_REGION AWS_DEFAULT_REGION \
+        CDK_DEFAULT_REGION CDK_DEFAULT_ACCOUNT TRUSTED_USECASE_ACCOUNT_IDS \
+        PORTAL_TRUSTED_ACCOUNTS_COMPARED PORTAL_REGISTRY_ENFORCED DATA_BUCKET_ALLOWLIST \
+        cloudFrontDomain CDK_STACKS PORTAL_DEPLOY_TOPOLOGY PORTAL_DEPLOY_NON_INTERACTIVE \
+        PORTAL_DEPLOY_SSO PORTAL_ACCOUNT_ID EXTERNAL_ID DATA_BUCKET_NAMES \
+        SSO_METADATA_URL SSO_PROVIDER_NAME COGNITO_DOMAIN_PREFIX
+  export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_EC2_METADATA_DISABLED=true
+  export HOME="$PORTAL_SANDBOX/home" TMPDIR="$PORTAL_SANDBOX/tmp"
+  mkdir -p "$HOME" "$TMPDIR"
+}
+
+# portal_require_stubbed_tools [name ...] -> fail unless aws, node, cdk, npx and
+# every named tool resolve to the stubs in $PORTAL_BIN.
+portal_require_stubbed_tools() {
+  local t got
+  for t in aws node cdk npx "$@"; do
+    got="$(command -v "$t" 2>/dev/null || true)"
+    if [ "$got" != "$PORTAL_BIN/$t" ]; then
+      echo "refusing to run: '$t' resolves to '${got:-nothing}', not $PORTAL_BIN/$t" >&2
+      return 1
+    fi
+  done
+}
+
+# install_real_if_present <path relative to edge-cv-portal/> -> copy the real
+# file into the fake tree (replacing a seeded stub link). A file this checkout
+# does not have (an older commit) is skipped: the test then fails on its
+# assertions, not in setup.
+install_real_if_present() {
+  local rel="$1"
+  [ -f "$PORTAL_REAL_DIR/$rel" ] || return 0
+  mkdir -p "$(dirname "$PORTAL_TREE/$rel")"
+  rm -f "$PORTAL_TREE/$rel"
+  cp "$PORTAL_REAL_DIR/$rel" "$PORTAL_TREE/$rel"
+  chmod +x "$PORTAL_TREE/$rel"
+}
+
+# stub_tools_ignore_stdin -> the tool stubs leave stdin unread, so answers piped
+# to a real deploy-account-role.sh reach its own prompts.
+stub_tools_ignore_stdin() { export STUB_IGNORE_STDIN_FOR="aws npx npm cdk node sleep"; }
+
+# SSM /dda-portal/trusted-usecase-account-ids (state file; a put creates it)
+trusted_param_absent() { export STUB_SSM_TRUSTED_FILE="$PORTAL_SANDBOX/ssm-trusted-usecase-account-ids"; rm -f "$STUB_SSM_TRUSTED_FILE"; }
+trusted_param_found() { trusted_param_absent; printf '%s' "$1" > "$STUB_SSM_TRUSTED_FILE"; }
+trusted_param_read_fails() {
+  [ -n "${STUB_SSM_TRUSTED_FILE:-}" ] || trusted_param_absent
+  export STUB_SSM_TRUSTED_GET_STDERR="${1:-An error occurred (AccessDeniedException) when calling the GetParameter operation: User: arn:aws:sts::123456789012:assumed-role/stub/stub is not authorized to perform: ssm:GetParameter}"
+}
+trusted_param_write_fails() {
+  [ -n "${STUB_SSM_TRUSTED_FILE:-}" ] || trusted_param_absent
+  export STUB_SSM_TRUSTED_PUT_STDERR="${1:-An error occurred (AccessDeniedException) when calling the PutParameter operation: User: arn:aws:sts::123456789012:assumed-role/stub/stub is not authorized to perform: ssm:PutParameter}"
+}
+trusted_param_value() { cat "$STUB_SSM_TRUSTED_FILE" 2>/dev/null; }
+
+# Deployed stack templates for `cloudformation get-template`
+# (fixtures/trusted-accounts/<name>.json). portal_not_deployed: no stack has a
+# template, so get-template answers "does not exist".
+portal_not_deployed() { export STUB_CFN_TEMPLATES_DIR="$PORTAL_SANDBOX/cfn-templates"; mkdir -p "$STUB_CFN_TEMPLATES_DIR"; }
+deploy_stack_template() { portal_not_deployed; cp "$PORTAL_TESTS_DIR/fixtures/trusted-accounts/$2.json" "$STUB_CFN_TEMPLATES_DIR/$1.json"; }
+# deploy_portal_stacks <compute> [<nodedesigner>|-] [<syntheticdata>|-]  (defaults: the previous one)
+deploy_portal_stacks() {
+  local c="$1" n="${2:-$1}" s="${3:-${2:-$1}}"
+  deploy_stack_template EdgeCVPortalComputeStack "$c"
+  [ "$n" = - ] || deploy_stack_template EdgeCVPortalNodeDesignerStack "$n"
+  [ "$s" = - ] || deploy_stack_template EdgeCVPortalSyntheticDataStack "$s"
+}
+deny_stack_template() { portal_not_deployed; : > "$STUB_CFN_TEMPLATES_DIR/$1.denied"; }
+missing_stacks() { export STUB_CFN_MISSING_STACKS="$*"; }
+
+# Per-profile identity: `aws sts` / `aws configure get region` under AWS_PROFILE=<profile>
+set_profile_account() { export STUB_AWS_PROFILE_ACCOUNTS="${STUB_AWS_PROFILE_ACCOUNTS:+$STUB_AWS_PROFILE_ACCOUNTS }$1=$2"; }
+set_profile_region() { export STUB_AWS_PROFILE_REGIONS="${STUB_AWS_PROFILE_REGIONS:+$STUB_AWS_PROFILE_REGIONS }$1=$2"; }
+
+# CDK context files the helper reads (fake tree / sandbox HOME)
+set_cdk_json_context() { printf '{\n  "app": "npx ts-node bin/app.ts",\n  "context": %s\n}\n' "$1" > "$PORTAL_TREE/infrastructure/cdk.json"; }
+set_cdk_context_json() { printf '%s\n' "$1" > "$PORTAL_TREE/infrastructure/cdk.context.json"; }
+set_user_cdk_json() { printf '%s\n' "$1" > "$HOME/.cdk.json"; }
+
+# The stack outputs deploy-frontend.sh and the Deployment Summary read.
+seed_frontend_stack_outputs() {
+  set_cfn_output EdgeCVPortalFrontendStack FrontendBucketName portal-frontend-bucket
+  set_cfn_output EdgeCVPortalFrontendStack DistributionId EDISTRIBUTION1
+  set_cfn_output EdgeCVPortalFrontendStack DistributionDomainName d1.cloudfront.net
+  set_cfn_output EdgeCVPortalAuthStack AuthConfig '{"userPoolId":"pool","userPoolWebClientId":"client1","region":"eu-west-1"}'
+  set_cfn_output EdgeCVPortalComputeStack ApiUrl https://api.example.invalid/v1/
+}
+
+# Exact compare-line pieces (scripts/portal-trusted-accounts.sh)
+PT_WARN='⚠️'
+PT_ADDS_NOTE=' (the portal may then assume their DDAPortalAccessRole)'
+
+# output_has_line <text> -> one line of the last `run` output is exactly <text>
+output_has_line() { local l; for l in "${lines[@]}"; do [ "$l" = "$1" ] && return 0; done; return 1; }
+# log_has_line <text> / log_line_of <fixed text>   ($PORTAL_SANDBOX/deploy.log)
+log_has_line() { grep -qxF -- "$1" "$PORTAL_SANDBOX/deploy.log"; }
+log_line_of() { grep -nF -m1 -- "$1" "$PORTAL_SANDBOX/deploy.log" | cut -d: -f1; }
+
+# stub_trace_table -> per call: n TAB name TAB pwd TAB args (space-joined) TAB env (space-joined)
+# (fields split by parameter expansion: `IFS=$'\t' read` would merge an empty
+# args or env field into the next one, tab being IFS whitespace)
+stub_trace_table() {
+  local n=0 line name pwd a e rest
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    name="${line%%$'\t'*}"; rest="${line#*$'\t'}"
+    pwd="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+    a="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+    e="${rest%%$'\t'*}"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$n" "$name" "$pwd" \
+      "$(_b64d "$a" | tr '\n\t' '  ' | sed 's/ $//')" "$(_b64d "$e" | tr '\n\t' '  ' | sed 's/ $//')"
+  done < "$STUB_TRACE"
+}
+# stub_call_index <name> <ERE on the space-joined args> -> index of the first match ("" if none)
+stub_call_index() {
+  stub_trace_table | STUB_Q_NAME="$1" STUB_Q_RE="$2" awk -F'\t' \
+    '!found && $2 == ENVIRON["STUB_Q_NAME"] && $4 ~ ENVIRON["STUB_Q_RE"] { print $1; found = 1 }'
+}
+# stub_call_count_matching <name> <ERE on the space-joined args> -> number of matching calls
+stub_call_count_matching() {
+  stub_trace_table | STUB_Q_NAME="$1" STUB_Q_RE="$2" awk -F'\t' \
+    '$2 == ENVIRON["STUB_Q_NAME"] && $4 ~ ENVIRON["STUB_Q_RE"] { c++ } END { print c + 0 }'
+}
+# stub_call_args_n / stub_call_env_n / stub_call_env_value_n / stub_call_pwd_n <n> ...
+#   -> call n's args (one per line), "VAR=value" env lines, one env value, $PWD
+stub_call_args_n() { _b64d "$(sed -n "${1}p" "$STUB_TRACE" | cut -f3)"; }
+stub_call_env_n() { _b64d "$(sed -n "${1}p" "$STUB_TRACE" | cut -f4)"; }
+stub_call_env_value_n() { stub_call_env_n "$1" | sed -n "s/^$2=//p"; }
+stub_call_pwd_n() { sed -n "${1}p" "$STUB_TRACE" | cut -f2; }
+# stub_call_has_pair <n> <option> <value> -> call n's argv has <option> then <value>
+stub_call_has_pair() {
+  local prev="" a
+  while IFS= read -r a; do
+    if [ "$prev" = "$2" ] && [ "$a" = "$3" ]; then return 0; fi
+    prev="$a"
+  done < <(stub_call_args_n "$1")
+  return 1
+}
+# stub_env_values_all <name> <VAR> -> per call of <name>: its value of VAR, or <unset>
+stub_env_values_all() {
+  local n
+  while IFS= read -r n; do
+    if stub_call_env_n "$n" | grep -q "^$2="; then stub_call_env_value_n "$n" "$2"; else echo "<unset>"; fi
+  done < <(awk -F'\t' -v want="$1" '$1 == want { print NR }' "$STUB_TRACE")
+}
+# stub_regions_used -> "<n> <name> <region>" for every regional aws/npx/cdk call
+# (aws configure/sts/iam skipped): an explicit --region; the env region the CLI
+# would use (AWS_REGION > AWS_DEFAULT_REGION > the stub's configured region,
+# else NONE), for aws only without --region; and any aws://<acct>/<region>.
+stub_regions_used() {
+  stub_trace_table | awk -F'\t' -v cfg="${STUB_AWS_CONFIG_REGION:-}" '
+    $2 != "aws" && $2 != "npx" && $2 != "cdk" { next }
+    $2 == "aws" && $4 ~ /^(configure|sts|iam)( |$)/ { next }
+    {
+      explicit = ""
+      if (match($4, /--region [^ ]+/)) explicit = substr($4, RSTART + 9, RLENGTH - 9)
+      if (match($5, /(^| )AWS_REGION=[^ ]+/)) { s = substr($5, RSTART, RLENGTH); sub(/^ /, "", s); envr = substr(s, 12) }
+      else if (match($5, /(^| )AWS_DEFAULT_REGION=[^ ]+/)) { s = substr($5, RSTART, RLENGTH); sub(/^ /, "", s); envr = substr(s, 20) }
+      else envr = (cfg == "" ? "NONE" : cfg)
+      if (explicit != "") print $1, $2, explicit
+      if ($2 != "aws" || explicit == "") print $1, $2, envr
+      t = $4
+      while (match(t, /aws:\/\/[0-9]+\/[^ ]+/)) { r = substr(t, RSTART, RLENGTH); sub(/^aws:\/\/[0-9]+\//, "", r); print $1, $2, r; t = substr(t, RSTART + RLENGTH) }
+    }'
+}
