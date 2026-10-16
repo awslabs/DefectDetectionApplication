@@ -1068,9 +1068,10 @@ device before this was added:
 ```bash
 # Multi-account: refresh the managed policy by redeploying the UseCase Account
 # stack, which owns DDAPortalComponentAccessPolicy. Run in the UseCase Account,
-# with the same Portal Account ID and External ID as before (see below).
+# in the region the UseCase stack was deployed to, with the same Portal Account
+# ID and External ID as before (see below).
 cd edge-cv-portal
-./deploy-portal.sh usecase
+./deploy-portal.sh usecase --region <region>
 
 # Single-account (or to fix one device role directly): add the permissions to the device role:
 aws iam put-role-policy --role-name GreengrassV2TokenExchangeRole \
@@ -1090,6 +1091,25 @@ aws iam put-role-policy --role-name GreengrassV2TokenExchangeRole \
 No device restart is needed — the role change takes effect on the next deployment retry.
 
 `./deploy-portal.sh usecase` redeploys the whole `DDAPortalUseCaseAccountStack`. The Portal Account ID and External ID you enter go into the `DDAPortalAccessRole` trust policy, so reuse the values from the first run (both are in `edge-cv-portal/usecase-account-*-config.txt`; answer `Y` when the script offers to reuse its External ID). A different value, including the new External ID a blank answer generates, locks the portal out of the account. A single-account setup has no script that updates an existing `DDAPortalComponentAccessPolicy` (`deploy-account-role.sh` leaves it as is), so use `put-role-policy` there.
+
+Pass the region the UseCase stack was deployed to with `--region <region>`: the config file does not record it, and without the flag the command uses `AWS_REGION` / `AWS_DEFAULT_REGION`, else your CLI default region. To find that region (read-only, in the UseCase Account):
+
+```bash
+for r in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do
+  aws cloudformation describe-stacks --stack-name DDAPortalUseCaseAccountStack --region "$r" \
+    --query 'Stacks[0].StackName' --output text >/dev/null 2>&1 && echo "$r"
+done
+```
+
+Without the config file, read both values from the role's trust policy in the UseCase Account, then pass them explicitly (never leave the External ID blank, which generates a new one):
+
+```bash
+aws iam get-role --role-name DDAPortalAccessRole --query 'Role.AssumeRolePolicyDocument'
+# Principal.AWS                          -> arn:aws:iam::<Portal Account ID>:root
+# Condition.StringEquals."sts:ExternalId" -> the External ID
+./deploy-portal.sh usecase --region <region> --non-interactive \
+    --portal-account-id <Portal Account ID> --external-id <External ID>
+```
 
 **Deployment Fails** (`COMPONENT_VERSION_REQUIREMENTS_NOT_MET`):
 - Verify component exists in your account
