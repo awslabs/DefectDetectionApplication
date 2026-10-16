@@ -656,7 +656,12 @@ elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
         echo -e "${YELLOW}⚠ CDK bootstrap is missing or outdated (version: $BOOTSTRAP_VERSION, need: 21+)${NC}"
         echo "Running cdk bootstrap..."
         cd infrastructure
-        npx cdk bootstrap
+        # Bootstrap through this account's own app: a bare `cdk bootstrap`
+        # here synthesizes the portal app in cdk.json, which refuses to synth
+        # without trustedUseCaseAccountIds (never set in a UseCase account).
+        npx cdk bootstrap "aws://${CURRENT_ACCOUNT}/${CURRENT_REGION}" \
+            -a "npx ts-node bin/usecase-account-app.ts" \
+            $CDK_CONTEXT
         cd ..
     fi
     
@@ -843,20 +848,26 @@ elif [ "$DEPLOYMENT_TYPE" = "data" ]; then
     echo "Installing CDK dependencies..."
     (cd infrastructure && npm ci)
 
+    # Build CDK context args
+    CDK_CONTEXT="-c portalAccountId=$PORTAL_ACCOUNT_ID -c externalId=$EXTERNAL_ID"
+    if [ -n "$DATA_BUCKETS" ]; then
+        CDK_CONTEXT="$CDK_CONTEXT -c dataBucketNames=$DATA_BUCKETS"
+    fi
+    
     # Check CDK bootstrap
     BOOTSTRAP_VERSION=$(aws ssm get-parameter --name /cdk-bootstrap/hnb659fds/version --query 'Parameter.Value' --output text 2>/dev/null || echo "0")
     if [ "$BOOTSTRAP_VERSION" = "0" ] || [ "$BOOTSTRAP_VERSION" -lt 21 ]; then
         echo -e "${YELLOW}⚠ CDK bootstrap is missing or outdated (version: $BOOTSTRAP_VERSION, need: 21+)${NC}"
         echo "Running cdk bootstrap..."
         cd infrastructure
-        npx cdk bootstrap
+        # Bootstrap through this account's own app (the data app exits 1
+        # without its context): a bare `cdk bootstrap` here synthesizes the
+        # portal app in cdk.json, which refuses to synth without
+        # trustedUseCaseAccountIds (never set in a Data account).
+        npx cdk bootstrap "aws://${CURRENT_ACCOUNT}/${CURRENT_REGION}" \
+            -a "npx ts-node bin/data-account-app.ts" \
+            $CDK_CONTEXT
         cd ..
-    fi
-    
-    # Build CDK context args
-    CDK_CONTEXT="-c portalAccountId=$PORTAL_ACCOUNT_ID -c externalId=$EXTERNAL_ID"
-    if [ -n "$DATA_BUCKETS" ]; then
-        CDK_CONTEXT="$CDK_CONTEXT -c dataBucketNames=$DATA_BUCKETS"
     fi
     
     # Deploy the stack
