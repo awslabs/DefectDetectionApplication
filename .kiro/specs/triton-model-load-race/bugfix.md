@@ -61,3 +61,16 @@ manual LocalServer restart.
 Intermittent, hard-to-diagnose "models stuck LOADING" after any deploy that
 delivers model updates; requires manual device intervention (LocalServer
 restart) to recover. Undermines confidence in Portal-driven deploys.
+
+## Follow-up (2026-10-15)
+
+Root cause #1 above was incomplete. The model component's Shutdown script,
+`src/backend/dda_triton/convert_model_cleanup.py`, deletes the model's Triton
+repository directories even when StopModel answers 403 "LOADING", and the
+original incident's component log shows it did: the cookies component's
+Shutdown logged the 403 "Model current state is LOADING" at 04:36:31.991 and
+`Cleaned directory: …/base_model-cookies…` at 04:36:31.993, 154 ms before the
+stub's failed read recorded above. The atomic publish in this spec is real but
+secondary. The deletion under an in-flight load, Triton 2.45.0's unbounded wait
+for the stub and the silent Startup exit are fixed in
+[`triton-model-cleanup-wedge`](../triton-model-cleanup-wedge/bugfix.md).
