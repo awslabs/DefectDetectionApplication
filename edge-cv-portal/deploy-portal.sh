@@ -88,7 +88,21 @@ Options:
   --help                      Show this help message and exit
 
 Environment passthrough (forwarded unchanged to the frontend step):
-  TRUSTED_USECASE_ACCOUNT_IDS, DATA_BUCKET_ALLOWLIST, cloudFrontDomain
+  DATA_BUCKET_ALLOWLIST, cloudFrontDomain
+
+Trusted UseCase accounts (single-account topology):
+  TRUSTED_USECASE_ACCOUNT_IDS   Comma-separated 12-digit account IDs whose
+                                DDAPortalAccessRole the portal may assume.
+                                Resolved once, before any step, in the CDK
+                                app's order: trustedUseCaseAccountIds CDK
+                                context (infrastructure/cdk.json,
+                                cdk.context.json, ~/.cdk.json), this variable,
+                                SSM /dda-portal/trusted-usecase-account-ids;
+                                else the list the deployed portal stacks grant.
+                                On a first deploy with none of these it is the
+                                deploying account, stored in that SSM parameter
+                                (an existing parameter is never overwritten).
+                                The list and its source are printed and logged.
 
 SSO environment (forwarded unchanged when --sso is used):
   SSO_METADATA_URL, SSO_PROVIDER_NAME, COGNITO_DOMAIN_PREFIX
@@ -533,6 +547,99 @@ check_prerequisites() {
 }
 
 # ---------------------------------------------------------------------------
+# Trusted UseCase account list (single-account topology)
+# ---------------------------------------------------------------------------
+# resolve_trusted_accounts -> resolve the trusted UseCase account list ONCE,
+# after the prerequisite gate and before the bootstrap and the first step, so
+# every step synthesizes the portal app with the same list: the auth and
+# infrastructure steps read TRUSTED_USECASE_ACCOUNT_IDS through bin/app.ts, and
+# the frontend step's ComputeStack redeploy resolves through the same helper
+# (scripts/portal-trusted-accounts.sh), which then finds that variable.
+#
+# The helper's order: CDK context trustedUseCaseAccountIds (infrastructure/
+# cdk.json, cdk.context.json, ~/.cdk.json) > TRUSTED_USECASE_ACCOUNT_IDS > SSM
+# /dda-portal/trusted-usecase-account-ids > the list the deployed portal stacks
+# grant; any lookup error stops. Only when none of these exists and
+# EdgeCVPortalComputeStack is not deployed (a first deploy) is the list the
+# deploying account, ACCOUNT (never wider). That value is stored in the SSM
+# parameter, create-only, so later runs and the scripts run on their own (which
+# have no default) find it.
+#
+# A list from CDK context or TRUSTED_USECASE_ACCOUNT_IDS is left exactly as the
+# operator set it (bin/app.ts reads it the same way); a list from any other
+# source is exported as TRUSTED_USECASE_ACCOUNT_IDS. The list, its source and a
+# comparison with the deployed stacks are printed and kept in
+# TRUSTED_ACCOUNTS_REPORT for the Deployment_Log; the summary shows the list.
+# Returns non-zero, before anything is changed, when the list cannot be
+# determined.
+TRUSTED_ACCOUNTS=""
+TRUSTED_ACCOUNTS_LABEL=""
+TRUSTED_ACCOUNTS_REPORT=""
+resolve_trusted_accounts() {
+    local helper="$PORTAL_DIR/scripts/portal-trusted-accounts.sh"
+    if [ ! -f "$helper" ]; then
+        echo "deploy-portal.sh: missing $helper" >&2
+        return 2
+    fi
+    # shellcheck source=scripts/portal-trusted-accounts.sh
+    . "$helper"
+
+    local resolved="" kind ids label store_rc=0 report details=""
+    if ! resolved="$(portal_trusted_accounts_resolve "${REGION:-}")"; then
+        echo "   This account is ${ACCOUNT:-unknown}." >&2
+        return 2
+    fi
+
+    if [ "$resolved" = "none" ]; then
+        kind="default"
+        ids="${ACCOUNT:-}"
+        label="$(portal_trusted_accounts_label "$kind")"
+        portal_trusted_accounts_store "${REGION:-}" "$ids" || store_rc=$?
+        case "$store_rc" in
+            0)
+                label="$label; stored in SSM parameter $PORTAL_TRUSTED_SSM_PARAMETER"
+                ;;
+            2)
+                echo "deploy-portal.sh: SSM parameter $PORTAL_TRUSTED_SSM_PARAMETER was created after it was read; re-run to use it" >&2
+                return 2
+                ;;
+            *)
+                label="$label; not stored in SSM (see the error above)"
+                ;;
+        esac
+    else
+        kind="${resolved%% *}"
+        ids="${resolved#* }"
+        label="$(portal_trusted_accounts_label "$kind")"
+    fi
+
+    case "$kind" in
+        env|context:*) : ;;
+        *) export TRUSTED_USECASE_ACCOUNT_IDS="$ids" ;;
+    esac
+
+    case "$kind" in
+        env|ssm|context:*)
+            details="$(portal_trusted_accounts_compare "${REGION:-}" "$ids")"
+            ;;
+        deployed)
+            details="  To let deploy-auth.sh and deploy-infrastructure.sh run on their own, store it: aws ssm put-parameter --name $PORTAL_TRUSTED_SSM_PARAMETER --type String --value $ids --region ${REGION:-<region>}"
+            ;;
+    esac
+
+    report="Trusted UseCase accounts: $ids"$'\n'"  source: $label"
+    if [ -n "$details" ]; then
+        report="$report"$'\n'"$details"
+    fi
+    printf '%s\n' "$report"
+
+    TRUSTED_ACCOUNTS="$ids"
+    TRUSTED_ACCOUNTS_LABEL="$label"
+    TRUSTED_ACCOUNTS_REPORT="$report"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # CDK bootstrap version check + auto-bootstrap
 # ---------------------------------------------------------------------------
 # Minimum CDK bootstrap version the orchestrated CDK apps require (matches the
@@ -592,7 +699,9 @@ check_bootstrap() {
     fi
 
     echo "CDK bootstrap version '${version}' is below required ${BOOTSTRAP_MIN_VERSION}; running cdk bootstrap for aws://${account}/${region}"
-    if ! "${cdk_cmd[@]}" bootstrap "aws://${account}/${region}"; then
+    # Run from PORTAL_DIR (edge-cv-portal/, which has no cdk.json) whatever the
+    # operator's cwd: from infrastructure/ the CLI would synthesize the portal app.
+    if ! ( cd "$PORTAL_DIR" && "${cdk_cmd[@]}" bootstrap "aws://${account}/${region}" ); then
         echo "CDK bootstrap failed" >&2
         return 2
     fi
@@ -971,10 +1080,11 @@ collect_role_arns() {
 }
 
 # print_summary -> print the Deployment_Summary to stdout: topology, account,
-# region, the Portal URL (single-account only), the created role ARNs, the
-# External ID (usecase/data only), and EVERY step defined for the topology with
-# exactly one outcome of success|failure|not-run, followed by the Deployment_Log
-# location (Req 7.1, 7.2, 7.3, 7.5). The summary is assembled only from
+# region, the trusted UseCase account list and the Portal URL (single-account
+# only), the created role ARNs, the External ID (usecase/data only), and EVERY
+# step defined for the topology with exactly one outcome of
+# success|failure|not-run, followed by the Deployment_Log location (Req 7.1,
+# 7.2, 7.3, 7.5). The summary is assembled only from
 # CloudFormation outputs and the account-role config files — never from
 # credential material (Req 7.4).
 #
@@ -993,6 +1103,12 @@ print_summary() {
     printf 'Topology:        %s\n' "$topology"
     printf 'AWS Account:     %s\n' "$account"
     printf 'Region:          %s\n' "$region"
+
+    # The trusted UseCase account list every single-account step deployed, and
+    # where it came from (resolve_trusted_accounts).
+    if [ "$topology" = "single-account" ] && [ -n "${TRUSTED_ACCOUNTS:-}" ]; then
+        printf 'Trusted accounts: %s (%s)\n' "$TRUSTED_ACCOUNTS" "${TRUSTED_ACCOUNTS_LABEL:-}"
+    fi
 
     # Portal URL is meaningful only for the single-account topology, whose
     # frontend step publishes the CloudFront distribution (Req 7.1). An
@@ -1052,8 +1168,9 @@ print_summary() {
 # ---------------------------------------------------------------------------
 # main "$@" -> orchestrate the full one-command deploy:
 #   parse_args -> (help) -> topology validation -> non-interactive input
-#   validation -> prerequisite gate -> CDK bootstrap (before CDK-deploying
-#   steps) -> the per-topology ordered step sequence with stop-on-failure ->
+#   validation -> prerequisite gate -> trusted UseCase account list
+#   (single-account) -> CDK bootstrap (before CDK-deploying steps) -> the
+#   per-topology ordered step sequence with stop-on-failure ->
 #   Deployment_Summary.
 #
 # The step sequence is driven entirely by STEPS_FOR[$TOPOLOGY] (Req 1.1, 1.2,
@@ -1097,6 +1214,14 @@ main() {
     # exports ACCOUNT/REGION and prints them (Req 3.1-3.5, 3.8).
     check_prerequisites || exit $?
 
+    # Single-account: resolve the trusted UseCase account list once, before the
+    # bootstrap and the first step, so every step synthesizes the portal app
+    # with the same list (see resolve_trusted_accounts). usecase/data runs
+    # deploy their own CDK apps, which do not read it.
+    if [ "$TOPOLOGY" = "single-account" ]; then
+        resolve_trusted_accounts || exit $?
+    fi
+
     # Ordered step sequence for the resolved topology (Req 1.1, 1.2, 1.4, 4.4).
     local steps="${STEPS_FOR[$TOPOLOGY]}"
 
@@ -1117,6 +1242,10 @@ main() {
 
     # Create and announce the Deployment_Log before the first step (Req 6.6).
     init_log
+    # Record which trusted UseCase account list this run deploys, and why.
+    if [ -n "${TRUSTED_ACCOUNTS_REPORT:-}" ]; then
+        printf '%s\n' "$TRUSTED_ACCOUNTS_REPORT" >> "$LOG_FILE"
+    fi
 
     # Auth step arguments: forward --sso/--profile/--region as appropriate. The
     # SSO env (SSO_METADATA_URL, ...) is already exported unchanged by parse_args
