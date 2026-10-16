@@ -640,6 +640,13 @@ elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
     echo "External ID: ${EXTERNAL_ID:0:8}...${EXTERNAL_ID: -4}"
     echo ""
     
+    # Install the CDK app's dependencies (aws-cdk-lib, the project's CDK CLI)
+    # from the lockfile, as deploy-infrastructure.sh does: a fresh checkout has
+    # no infrastructure/node_modules, and only the single-account steps used to
+    # install it. npm ci rebuilds node_modules on every run, so re-runs are safe.
+    echo "Installing CDK dependencies..."
+    (cd infrastructure && npm ci)
+
     # Check CDK bootstrap
     BOOTSTRAP_VERSION=$(aws ssm get-parameter --name /cdk-bootstrap/hnb659fds/version --query 'Parameter.Value' --output text 2>/dev/null || echo "0")
 
@@ -829,6 +836,13 @@ elif [ "$DEPLOYMENT_TYPE" = "data" ]; then
     echo "External ID: ${EXTERNAL_ID:0:8}...${EXTERNAL_ID: -4}"
     echo ""
     
+    # Install the CDK app's dependencies (aws-cdk-lib, the project's CDK CLI)
+    # from the lockfile, as deploy-infrastructure.sh does: a fresh checkout has
+    # no infrastructure/node_modules, and only the single-account steps used to
+    # install it. npm ci rebuilds node_modules on every run, so re-runs are safe.
+    echo "Installing CDK dependencies..."
+    (cd infrastructure && npm ci)
+
     # Check CDK bootstrap
     BOOTSTRAP_VERSION=$(aws ssm get-parameter --name /cdk-bootstrap/hnb659fds/version --query 'Parameter.Value' --output text 2>/dev/null || echo "0")
     if [ "$BOOTSTRAP_VERSION" = "0" ] || [ "$BOOTSTRAP_VERSION" -lt 21 ]; then
