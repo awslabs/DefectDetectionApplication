@@ -7,7 +7,7 @@ set -e
 
 # Default values
 SSO_ENABLED=false
-AWS_PROFILE=""
+AWS_PROFILE="${AWS_PROFILE:-}"
 REGION=""
 
 # Parse command line arguments
@@ -30,7 +30,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "Options:"
       echo "  --sso              Enable SSO integration (requires SSO_* environment variables)"
-      echo "  --profile PROFILE  AWS CLI profile to use"
+      echo "  --profile PROFILE  AWS CLI profile to use (default: the exported AWS_PROFILE)"
       echo "  --region REGION    AWS region (default: AWS_REGION, then AWS_DEFAULT_REGION, then the profile's region)"
       echo "  --help             Show this help message"
       echo ""
