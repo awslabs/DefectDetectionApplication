@@ -11,7 +11,7 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
 - [Overview](#overview)
 - [Deployment](#deployment)
   - [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account)
-  - [Step 2: Build and Deploy Frontend](#step-2-build-and-deploy-frontend)
+  - [Step 2: Redeploy the Frontend (Optional)](#step-2-redeploy-the-frontend-optional)
   - [Step 3: Post-Deployment Setup](#step-3-post-deployment-setup)
   - [Step 4: Build the DDA LocalServer Component (Build Fleet)](#step-4-build-the-dda-localserver-component-build-fleet)
     - [JetPack 7 (JP7) Builds](#45-jetpack-7-jp7-builds)
@@ -76,12 +76,12 @@ DDA supports both single-account and multi-account architectures:
 **Single-Account** (Recommended for Getting Started)
 - All components in one AWS account
 - Simplest setup and management
-- Requires running `./deploy-account-role.sh` (select Option 1) to create the `DDASageMakerExecutionRole`
+- Deployed end to end by one command, `./deploy-portal.sh single-account`, which also creates the `DDASageMakerExecutionRole` (it runs `./deploy-account-role.sh single-account` as its first step)
 
 **Multi-Account** (Recommended for Production)
 - Separates Portal, UseCase, and Data accounts
 - Better security and governance
-- Requires cross-account IAM roles (created by `deploy-account-role.sh`)
+- Requires cross-account IAM roles, created by running `./deploy-portal.sh usecase` in the UseCase account and `./deploy-portal.sh data` in the Data account (see [Step 5](#step-5-set-up-accounts))
 
 #### Architecture Components
 
@@ -109,10 +109,13 @@ Portal Account          UseCase Account         Data Account (Optional)
 
 ### Prerequisites
 
-- AWS CLI configured
+- AWS CLI configured, with a default region (`aws configure`)
 - Node.js 18+, Python 3.11+
 - AWS CDK: `npm install -g aws-cdk`
+- Docker (the compute stack builds a Lambda container image during `cdk deploy`)
 - [AWS Marketplace subscription](https://aws.amazon.com/marketplace/pp/prodview-j72hhmlt6avp6) (in UseCase Account — see below)
+
+> `deploy-portal.sh` (Step 1.2) checks the AWS CLI, your credentials, the region, Node.js and CDK before it changes anything, and runs `cdk bootstrap` for you when the account/region is not bootstrapped (or its bootstrap version is below 21). It does not check Docker, the Marketplace subscription, or the API Gateway CloudWatch Logs role from Step 1.1.
 
 > **Important: AWS Marketplace Subscription Required**
 > 
@@ -156,30 +159,45 @@ aws apigateway update-account \
 
 > **Note**: This is a one-time setup per AWS account.
 
-#### 1.2 Deploy Portal Infrastructure with CDK
+#### 1.2 Deploy the Portal with One Command
+
+Run the orchestrator from the `edge-cv-portal` directory with the Portal Account's credentials. It deploys the whole portal end to end:
 
 ```bash
 cd edge-cv-portal
-
-# First time only: bootstrap CDK in your account
-cd infrastructure
-npm install
-npx cdk bootstrap
-cd ..
-
-# Deploy all stacks
-./deploy-infrastructure.sh
+./deploy-portal.sh single-account
 ```
 
-> **Note**: `cdk bootstrap` must be run from `edge-cv-portal/infrastructure/` where `cdk.json` lives. The `deploy-infrastructure.sh` script handles `npm install` and `cdk deploy` for you after that.
+`deploy-portal.sh` checks the prerequisites (AWS CLI, credentials, region, Node.js, CDK), bootstraps CDK in the account/region if needed, prints the resolved account, region and log path, and then runs the existing deployment scripts in this order:
+
+1. `./deploy-account-role.sh single-account` — IAM roles and policies (`DDASageMakerExecutionRole`, `DDAPortalComponentAccessPolicy`, `Greengrass_ServiceRole`)
+2. `infrastructure/deploy-auth.sh` — the Cognito `EdgeCVPortalAuthStack`
+3. `./deploy-infrastructure.sh` — the main CDK stacks (`cdk deploy --all`)
+4. `./deploy-frontend.sh` — generates `config.json` from the stack outputs, builds and publishes the React frontend, and redeploys the compute stack with the CloudFront domain
+
+Each step's output is shown on the terminal and written to `edge-cv-portal/deploy-portal-<UTC-timestamp>.log` (override with `--log-file <path>`). If a step fails, the command stops, prints `Deployment failed at step: <name>` and the log path, and rolls nothing back; fix the cause and re-run the same command. When every step succeeds it prints a **Deployment Summary** with the Portal URL (the CloudFront domain), the created role ARNs and each step's outcome.
+
+Useful options (`./deploy-portal.sh --help` lists them all):
+
+- `--profile <name>` / `--region <region>` — AWS CLI profile and region for all steps (env: `AWS_PROFILE`, `AWS_REGION`)
+- `--sso` — enable SSO on the auth stack; export `SSO_METADATA_URL` (and optionally `SSO_PROVIDER_NAME`, `COGNITO_DOMAIN_PREFIX`) first, see [edge-cv-portal/infrastructure/SSO_SETUP.md](edge-cv-portal/infrastructure/SSO_SETUP.md)
+- `--non-interactive` — never prompt (for CI). The `single-account` topology needs no further inputs:
+
+  ```bash
+  ./deploy-portal.sh single-account --non-interactive
+  ```
+
+**Manual path (advanced).** The four scripts above remain runnable on their own, in the same order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`). Use them to repeat a single step, e.g. `./deploy-frontend.sh` after a frontend change. When you skip the orchestrator, run `npx cdk bootstrap` yourself first from `edge-cv-portal/infrastructure/` (where `cdk.json` lives); `deploy-infrastructure.sh` handles the npm install and `cdk deploy` for you after that.
 
 > **Registry enforcement and allowed buckets.** Production deployments run with the Portal_Identity registry enforced: `PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh`, after `edge-cv-portal/backfill_portal_registry.py` has been applied and the accounts verified (a fresh install starts with enforcement off, and the script prints a warning whenever the value it resolves for a deploy is not `true`). Independently of that flag, the portal reads and writes S3 only in each use case's **allowed buckets** — its configured S3 bucket, its Data Account bucket, and the **Additional S3 buckets** a UseCaseAdmin allows (Use Cases → Edit → Allowed buckets, or "Allow for this use case" in Data Management). A bucket must be tagged `dda-portal:managed=true` (`aws s3control tag-resource --account-id ACCOUNT_ID --resource-arn arn:aws:s3:::BUCKET --tags Key=dda-portal:managed,Value=true`, plus `aws s3api put-bucket-abac --bucket BUCKET --abac-status Status=Enabled` for a bucket reached through a cross-account role) **before** a use case is created with it or allows it; buckets created through the portal are tagged, ABAC-enabled and allowed automatically. See `edge-cv-portal/ADMIN_GUIDE.md`, "Use case buckets and Additional S3 buckets" and "The enforcement flag".
 
 **What gets deployed:** CloudFront, API Gateway, Cognito, DynamoDB, Lambda functions, S3 buckets, IAM roles.
 
-**Save the CDK outputs:** `PortalApiEndpoint`, `PortalFrontendUrl`, `CognitoUserPoolId`, `CognitoClientId`.
+**Save the CDK outputs:** `ApiUrl` (`EdgeCVPortalComputeStack`), `DistributionDomainName` (`EdgeCVPortalFrontendStack`), and `UserPoolId`, `UserPoolClientId`, `AuthConfig` (`EdgeCVPortalAuthStack`). The Deployment Summary prints the Portal URL (`https://` + `DistributionDomainName`), and the stack outputs printed during each `cdk deploy` are recorded in the deploy log, `edge-cv-portal/deploy-portal-<UTC-timestamp>.log`.
 
-### Step 2: Build and Deploy Frontend
+### Step 2: Redeploy the Frontend (Optional)
+
+`deploy-portal.sh` already built and published the frontend as its last step. To redeploy only the frontend later (for example after changing it), run:
 
 ```bash
 cd edge-cv-portal
@@ -319,25 +337,35 @@ To move a device to the new version, revise its deployment and click **Update to
 
 #### 5.1 UseCase Account (Required)
 
-```bash
-cd edge-cv-portal
-./deploy-account-role.sh
-```
+- **Single-account setup**: nothing to do — `./deploy-portal.sh single-account` (Step 1.2) already created the `DDASageMakerExecutionRole`.
+- **Multi-account setup**: run the orchestrator with the `usecase` topology **in the UseCase Account** (with that account's credentials). It runs only the account-role step, prompts for the Portal Account ID and External ID, and creates `DDAPortalAccessRole` + `DDASageMakerExecutionRole`:
 
-- **Option 1**: Single-account setup (creates `DDASageMakerExecutionRole`)
-- **Option 2**: Multi-account UseCase account (creates `DDAPortalAccessRole` + `DDASageMakerExecutionRole`)
+  ```bash
+  cd edge-cv-portal
+  ./deploy-portal.sh usecase
+  ```
 
-Save the generated `usecase-account-*-config.txt` file — you'll upload it when creating a UseCase.
+  Non-interactive (CI):
+
+  ```bash
+  ./deploy-portal.sh usecase --non-interactive \
+      --portal-account-id 123456789012 --external-id abc-123
+  ```
+
+The Deployment Summary prints the cross-account role ARN and the External ID. Save the generated `usecase-account-*-config.txt` file (written to `edge-cv-portal/`) — you'll upload it when creating a UseCase.
+
+> `./deploy-account-role.sh` can still be run directly (menu option 1 = single-account, 2 = UseCase account, 3 = Data account); it is the script the orchestrator runs for you.
 
 #### 5.2 Data Account (Optional, for multi-account)
 
-If your training data lives in a separate AWS account:
+If your training data lives in a separate AWS account, run the `data` topology **in the Data Account**:
 
 ```bash
 cd edge-cv-portal
-./deploy-account-role.sh
-# Select option 3: Data Account
+./deploy-portal.sh data
 ```
+
+For CI add `--non-interactive --portal-account-id <id> --external-id <id>`, and optionally `--data-buckets <bucket1,bucket2>`.
 
 Save the generated `data-account-*-config.txt` file, then register it in the portal:
 
@@ -992,7 +1020,9 @@ grep -i "error\|failed\|exception" /aws_dda/greengrass/v2/logs/*.log
 
 ### Portal Deployment Issues
 
-**CDK Bootstrap Error** (`SSM parameter /cdk-bootstrap/hnb659fds/version not found`):
+**`deploy-portal.sh` stops with `Deployment failed at step: <name>`**: the failed step's full output is in the log file the command printed (`edge-cv-portal/deploy-portal-<UTC-timestamp>.log`). Nothing is rolled back; fix the cause and re-run the same `./deploy-portal.sh` command — it re-runs every step, and the steps that already succeeded are safe to repeat.
+
+**CDK Bootstrap Error** (`SSM parameter /cdk-bootstrap/hnb659fds/version not found`) — `deploy-portal.sh` bootstraps for you; when running the scripts manually:
 ```bash
 cdk bootstrap aws://YOUR_ACCOUNT_ID/YOUR_REGION
 ```
@@ -1354,6 +1384,7 @@ defect-detection-application/
 │   │   ├── src/pages/           # Page components
 │   │   ├── src/components/      # Shared components
 │   │   └── src/services/        # API services
+│   ├── deploy-portal.sh         # One-command portal deploy (orchestrates the deploy-*.sh scripts)
 │   ├── deploy-account-role.sh   # Account setup
 │   ├── launch-arm64-build-server.sh  # Build server launcher
 │   └── deploy-frontend.sh       # Frontend deployment

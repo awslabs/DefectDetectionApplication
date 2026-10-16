@@ -93,24 +93,22 @@ Portal Account          UseCase Account         Data Account (Optional)
 ## Quick Deploy
 
 ```bash
-# 1. Deploy Portal Infrastructure (in Portal Account)
-cd edge-cv-portal/infrastructure
-cdk deploy --all
+# 1. Deploy the Portal (in Portal Account) — one command runs the account roles,
+#    the auth stack, the infrastructure (cdk deploy --all) and the frontend, in order
+cd edge-cv-portal
+./deploy-portal.sh single-account
+# Output: Deployment Summary with the Portal URL (https://<distribution>.cloudfront.net)
+# Log:    edge-cv-portal/deploy-portal-<UTC-timestamp>.log
 
-# 2. Build and Deploy Frontend
-cd ..
-./deploy-frontend.sh
-# This builds the React app and uploads to S3
-# Output: Portal URL (https://d1r8hupkjbsjb1.cloudfront.net)
+# 2. Multi-account only: deploy the UseCase account role (in UseCase Account)
+./deploy-portal.sh usecase
 
-# 3. Deploy UseCase Role (in UseCase Account)
-./deploy-account-role.sh  # Select option 1
-
-# 4. (Optional) Deploy Data Account Role (if using separate Data Account)
-./deploy-account-role.sh  # Select option 2
+# 3. (Optional) Deploy Data Account Role (in Data Account, if using a separate one)
+./deploy-portal.sh data
 # Then register in portal: Settings → Data Accounts → Add Data Account
 
-# 5. Create UseCase in portal with Role ARN + External ID
+# 4. Create UseCase in portal with Role ARN + External ID
+#    (printed in the Deployment Summary and saved to *-config.txt)
 #    The following are automatically configured during onboarding:
 #    - Bucket policy (for SageMaker cross-account access)
 #    - CORS (for browser uploads)
@@ -118,7 +116,7 @@ cd ..
 #    - Data Account dropdown selection (if registered)
 ```
 
-**Note**: Step 2 (`deploy-frontend.sh`) is required to make the Portal accessible. Without it, you'll see S3 "NoSuchKey" errors when accessing the CloudFront URL.
+**Note**: `deploy-portal.sh` runs `./deploy-account-role.sh`, `infrastructure/deploy-auth.sh`, `./deploy-infrastructure.sh` and `./deploy-frontend.sh` for you; each remains runnable on its own (for example `./deploy-frontend.sh` alone to republish the frontend). The frontend step is what makes the Portal accessible — without it you'll see S3 "NoSuchKey" errors when accessing the CloudFront URL. Run `./deploy-portal.sh --help` for the non-interactive (CI) flags.
 
 ### Post-Deployment Setup
 

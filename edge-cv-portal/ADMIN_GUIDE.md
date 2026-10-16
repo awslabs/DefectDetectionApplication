@@ -90,44 +90,34 @@ The portal uses two different scoping models depending on where data is stored:
 
 ### Prerequisites
 
-- AWS CLI configured with admin credentials
+- AWS CLI configured with admin credentials and a default region
 - Node.js 18+, Python 3.11+
 - AWS CDK: `npm install -g aws-cdk`
+- Docker (the compute stack builds a Lambda container image during `cdk deploy`)
 
-### Deploy Portal Infrastructure
+### Deploy the Portal (One Command)
 
-```bash
-cd edge-cv-portal/infrastructure
-npm install
-cdk bootstrap  # First time only
-cdk deploy --all --require-approval never
-```
-
-**Outputs to save:**
-- `ApiUrl` - Backend API endpoint
-- `UserPoolId` - Cognito User Pool ID
-- `UserPoolClientId` - Cognito Client ID
-- `DistributionDomainName` - CloudFront URL
-
-### Configure Frontend
+Run the orchestrator from the `edge-cv-portal` directory with the Portal Account's credentials:
 
 ```bash
-cd ../frontend
-npm install
-
-# Create config with CDK outputs
-cat > public/config.json << EOF
-{
-  "apiUrl": "<API_URL>",
-  "userPoolId": "<USER_POOL_ID>",
-  "userPoolClientId": "<CLIENT_ID>",
-  "region": "us-east-1"
-}
-EOF
-
-npm run build
-./deploy-frontend.sh
+cd edge-cv-portal
+./deploy-portal.sh single-account
 ```
+
+It checks the prerequisites (AWS CLI, credentials, region, Node.js, CDK), bootstraps CDK if needed, and then runs the existing scripts in order:
+
+1. `./deploy-account-role.sh single-account` — IAM roles and policies
+2. `infrastructure/deploy-auth.sh` — the Cognito `EdgeCVPortalAuthStack`
+3. `./deploy-infrastructure.sh` — the main CDK stacks (`cdk deploy --all`)
+4. `./deploy-frontend.sh` — generates `frontend/public/config.json` from the stack outputs, builds and publishes the frontend, and redeploys the compute stack with the CloudFront domain
+
+All output goes to the terminal and to `edge-cv-portal/deploy-portal-<UTC-timestamp>.log` (`--log-file <path>` to override). If a step fails, the command stops, prints the failed step and the log path, and rolls nothing back; fix the cause and re-run the same command. On success it prints a Deployment Summary with the Portal URL, the created role ARNs and each step's outcome.
+
+Options: `--profile <name>`, `--region <region>`, `--sso` (SSO on the auth stack; export the `SSO_*` variables first, see [SSO_SETUP.md](infrastructure/SSO_SETUP.md)) and `--non-interactive` (CI). `./deploy-portal.sh --help` lists them all.
+
+**Outputs you need below:** the `EdgeCVPortalAuthStack` outputs (`UserPoolId`, `UserPoolClientId`, `AuthConfig`) are printed by the auth step and recorded in the log; the Portal URL (`DistributionDomainName`) is in the Deployment Summary.
+
+**Manual path.** The same four scripts can be run by hand, in that order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`); run `cdk bootstrap` yourself first. This is useful to repeat a single step, for example `./deploy-frontend.sh` after a frontend change.
 
 ### Create Admin User
 
@@ -186,35 +176,46 @@ aws dynamodb put-item \
 
 ### UseCase Account Setup
 
-Run in the **UseCase Account** (where ML workloads will run):
+**Single-account setup:** nothing to do here. `./deploy-portal.sh single-account` ([Deploy the Portal](#deploy-the-portal-one-command)) already created the `DDASageMakerExecutionRole`. Continue with [Tag S3 Buckets](#tag-s3-buckets).
+
+**Multi-account setup:** run the orchestrator with the `usecase` topology in the **UseCase Account** (where ML workloads will run), with that account's credentials:
 
 ```bash
 cd edge-cv-portal
-./deploy-account-role.sh
+./deploy-portal.sh usecase
 ```
 
-Select option `1` for UseCase Account Role.
+It runs only the account-role step and prompts for the Portal Account ID and the External ID (leave the External ID blank to generate one). Non-interactive (CI):
+
+```bash
+./deploy-portal.sh usecase --non-interactive \
+    --portal-account-id 123456789012 --external-id abc-123
+```
 
 **What gets created:**
 - `DDAPortalAccessRole` - Cross-account access role
-- `DDASageMakerExecutionRole` - For training jobs
-- `DDAGroundTruthExecutionRole` - For labeling jobs
+- `DDASageMakerExecutionRole` - For training, compilation and labeling jobs
+- `DDAPortalComponentAccessPolicy` - For Greengrass devices to download component artifacts
 
 **Save these outputs:**
 - Role ARN
-- External ID (generated automatically)
+- External ID
 - SageMaker Execution Role ARN
+
+The Deployment Summary prints the Role ARN and the External ID. All three are saved in the generated `usecase-account-*-config.txt` file (written to `edge-cv-portal/`); you'll upload it when creating the UseCase.
+
+> `./deploy-account-role.sh` can still be run directly from `edge-cv-portal/` (menu option `1` = single-account, `2` = UseCase Account, `3` = Data Account); it is the script `deploy-portal.sh` runs for you.
 
 ### Data Account Setup (Optional)
 
-If storing training data in a separate account:
+If storing training data in a separate account, run the `data` topology in the **Data Account**:
 
 ```bash
 cd edge-cv-portal
-./deploy-account-role.sh
+./deploy-portal.sh data
 ```
 
-Select option `2` for Data Account Role.
+It prompts for the Portal Account ID, the External ID and, optionally, the data bucket names. For CI add `--non-interactive --portal-account-id <id> --external-id <id>`, and optionally `--data-buckets <bucket1,bucket2>`.
 
 **What gets created:**
 - `DDAPortalDataAccessRole` - For Portal to browse data and update bucket policies
@@ -223,6 +224,8 @@ Select option `2` for Data Account Role.
 **Save these outputs:**
 - Portal Access Role ARN
 - External ID
+
+Both are printed in the Deployment Summary and saved in the generated `data-account-*-config.txt` file (written to `edge-cv-portal/`). To register the account, upload that file under **Settings** → **Data Accounts** → **Add Data Account** to auto-fill the fields.
 
 **Note**: The bucket policy for SageMaker access is **automatically configured** when you onboard the UseCase in the portal. The Portal assumes the Data Account role and adds the necessary bucket policy statements.
 
@@ -403,12 +406,12 @@ aws cognito-idp admin-create-user \
 
 ### Step 2: Deploy UseCase Account Role
 
-Have the customer run in their AWS account:
+Have the customer run in their AWS account (details in [UseCase Account Setup](#usecase-account-setup)):
 
 ```bash
-./deploy-account-role.sh
-# Select option 1 (UseCase Account)
-# Enter Portal Account ID when prompted
+cd edge-cv-portal
+./deploy-portal.sh usecase
+# Enter the Portal Account ID and External ID when prompted
 ```
 
 ### Step 3: Tag the Customer's S3 Buckets and Enable ABAC
