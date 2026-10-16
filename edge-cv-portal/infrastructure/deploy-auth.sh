@@ -8,7 +8,7 @@ set -e
 # Default values
 SSO_ENABLED=false
 AWS_PROFILE=""
-REGION="us-east-1"
+REGION=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -31,7 +31,7 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --sso              Enable SSO integration (requires SSO_* environment variables)"
       echo "  --profile PROFILE  AWS CLI profile to use"
-      echo "  --region REGION    AWS region (default: us-east-1)"
+      echo "  --region REGION    AWS region (default: AWS_REGION, then AWS_DEFAULT_REGION, then the profile's region)"
       echo "  --help             Show this help message"
       echo ""
       echo "SSO Environment Variables (required when --sso is used):"
@@ -59,7 +59,19 @@ if [[ -n "$AWS_PROFILE" ]]; then
   echo "Using AWS profile: $AWS_PROFILE"
 fi
 
-# Set region
+# Region: --region wins, then AWS_REGION / AWS_DEFAULT_REGION (the AWS CLI's
+# own order), then the profile's configured region. Exported as AWS_REGION:
+# the CDK CLI ignores an inherited CDK_DEFAULT_REGION and deploys to
+# AWS_REGION (or its own default), so exporting only CDK_DEFAULT_REGION let
+# `cdk deploy` land in another region than the bootstrap check and outputs.
+if [[ -z "$REGION" ]]; then
+  REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}"
+fi
+if [[ -z "$REGION" ]]; then
+  echo "Error: no AWS region set. Pass --region <region>, export AWS_REGION, or run: aws configure set region <region>"
+  exit 1
+fi
+export AWS_REGION="$REGION"
 export CDK_DEFAULT_REGION="$REGION"
 echo "Deploying to region: $REGION"
 

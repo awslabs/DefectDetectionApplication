@@ -203,10 +203,12 @@ npx_args() { stub_args_of npx; }
     '{"userPoolId":"us-east-1_pool","userPoolWebClientId":"client1","region":"us-east-1"}'
   set_cfn_output EdgeCVPortalComputeStack ApiUrl https://api.example.invalid/v1/
   # `aws configure export-credentials` must fail so its output is not eval'd.
+  # The stub then has no configured region either, so the region comes from
+  # AWS_REGION (deploy-frontend.sh no longer falls back to us-east-1).
   set_region ""
   set_deployed_enforcement true
 
-  run bash -c 'cd "$PORTAL_TREE" && ./deploy-frontend.sh'
+  run bash -c 'cd "$PORTAL_TREE" && AWS_REGION=us-east-1 ./deploy-frontend.sh'
   [ "$status" -eq 0 ]
 
   run npx_args

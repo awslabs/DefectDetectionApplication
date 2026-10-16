@@ -10,13 +10,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Get AWS account ID
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-AWS_REGION=$(aws configure get region 2>/dev/null)
+# Region: an exported AWS_REGION / AWS_DEFAULT_REGION wins (the AWS CLI's own
+# order; deploy-portal.sh exports the region it resolved), else the profile's
+# configured region. `aws configure get region` reads only the config file and
+# exits 1 when none is set, hence `|| true` (a failing substitution would end
+# the script here under set -e). Exported so cdk deploy, describe-stacks and
+# the enforcement lookup below all use this region.
+AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}"
 if [ -z "$AWS_REGION" ]; then
-    echo "❌ ERROR: No AWS region configured."
-    echo "   Run: aws configure set region us-east-1"
-    echo "   Or set: export AWS_DEFAULT_REGION=us-east-1"
+    echo "❌ ERROR: No AWS region set."
+    echo "   Run: export AWS_REGION=us-east-1"
+    echo "   Or:  aws configure set region us-east-1"
     exit 1
 fi
+export AWS_REGION
 
 echo "🚀 Starting Edge CV Portal Infrastructure Deployment..."
 echo "📍 AWS Account: $AWS_ACCOUNT_ID | Region: $AWS_REGION"

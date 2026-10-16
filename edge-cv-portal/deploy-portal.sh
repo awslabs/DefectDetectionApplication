@@ -1079,6 +1079,15 @@ main() {
     # Reject an invalid/absent Deployment_Topology before any step runs (Req 4.3).
     validate_topology "${TOPOLOGY:-}" || exit $?
 
+    # Forward the AWS profile to every subsequent step so all AWS/CDK calls use
+    # the profile the operator selected (Req 8.4). Exported before the first AWS
+    # call, so the identity check and the `aws configure get region` lookup in
+    # the prerequisite gate read that same profile; exported later, a --profile
+    # flag resolved both from the default profile.
+    if [ -n "${PROFILE:-}" ]; then
+        export AWS_PROFILE="$PROFILE"
+    fi
+
     # Non_Interactive_Mode: fail fast if any required input is missing, before
     # any mutating step, reporting them all at once (Req 5.3).
     check_required_inputs || exit $?
@@ -1087,12 +1096,6 @@ main() {
     # no step runs and the command exits non-zero. On success it resolves and
     # exports ACCOUNT/REGION and prints them (Req 3.1-3.5, 3.8).
     check_prerequisites || exit $?
-
-    # Forward the AWS profile to every subsequent step so all AWS/CDK calls use
-    # the profile the operator selected (Req 8.4).
-    if [ -n "${PROFILE:-}" ]; then
-        export AWS_PROFILE="$PROFILE"
-    fi
 
     # Ordered step sequence for the resolved topology (Req 1.1, 1.2, 1.4, 4.4).
     local steps="${STEPS_FOR[$TOPOLOGY]}"

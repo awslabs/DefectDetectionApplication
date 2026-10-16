@@ -29,11 +29,28 @@ if ! aws sts get-caller-identity &> /dev/null; then
     exit 1
 fi
 
+# Region for every call below: an exported AWS_REGION / AWS_DEFAULT_REGION wins
+# (the AWS CLI's own order; deploy-portal.sh exports the region it resolved),
+# else the profile's configured region. `aws configure get region` reads only
+# the config file and exits 1 when none is set, hence `|| true` (a failing
+# substitution would end the script here under set -e). Exported so the SSM
+# bootstrap check and cdk bootstrap/deploy use the same region as the
+# Greengrass calls and the SageMaker Ground Truth account lookup.
+CURRENT_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}"
+if [ -z "$CURRENT_REGION" ]; then
+    echo -e "${RED}❌ ERROR: No AWS region set.${NC}"
+    echo "   Run: export AWS_REGION=<your-region>"
+    echo "   Or:  aws configure set region <your-region>"
+    exit 1
+fi
+export AWS_REGION="$CURRENT_REGION"
+
 echo "=========================================="
 echo "DDA Portal - Account Role Deployment"
 echo "=========================================="
 echo ""
 echo -e "${BLUE}ℹ Current AWS Account: $(aws sts get-caller-identity --query 'Account' --output text)${NC}"
+echo -e "${BLUE}ℹ Region: ${CURRENT_REGION}${NC}"
 echo ""
 
 # Show menu if no arguments provided
@@ -89,13 +106,6 @@ if [ "$DEPLOYMENT_TYPE" = "single-account" ]; then
     echo ""
     
     # Create trust policy for SageMaker
-    # Get current region and map to SageMaker account ID
-    CURRENT_REGION=$(aws configure get region 2>/dev/null)
-    if [ -z "$CURRENT_REGION" ]; then
-        echo -e "${RED}❌ ERROR: No AWS region configured.${NC}"
-        echo "   Run: aws configure set region <your-region>"
-        exit 1
-    fi
     
     # Map regions to SageMaker Ground Truth account IDs
     # https://docs.aws.amazon.com/sagemaker/latest/dg/sms-workforce-create-private-oidc.html
@@ -664,7 +674,6 @@ elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
     echo ""
     echo "Setting up Greengrass service role..."
     
-    CURRENT_REGION=$(aws configure get region || echo "us-east-1")
     EXISTING_GG_ROLE=$(aws greengrassv2 get-service-role-for-account --region "$CURRENT_REGION" 2>/dev/null || echo "")
     
     if echo "$EXISTING_GG_ROLE" | grep -q "roleArn"; then

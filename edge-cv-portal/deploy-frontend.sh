@@ -12,6 +12,22 @@ echo "DDA - Frontend Deployment"
 echo "=========================================="
 echo ""
 
+# Region for every AWS and CDK call below: an exported AWS_REGION /
+# AWS_DEFAULT_REGION wins (the AWS CLI's own order; deploy-portal.sh exports
+# the region it resolved), else the profile's configured region. `aws configure
+# get region` exits 1 when none is set, hence `|| true` under set -e. Exported
+# so the stack-output reads here and the compute-stack redeploy in Step 6 use
+# the same region (Step 6 used to fall back to us-east-1).
+AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || true)}}"
+if [ -z "$AWS_REGION" ]; then
+  echo "❌ ERROR: No AWS region set." >&2
+  echo "   Run: export AWS_REGION=us-east-1" >&2
+  echo "   Or:  aws configure set region us-east-1" >&2
+  exit 1
+fi
+export AWS_REGION
+echo "Region: $AWS_REGION"
+
 # Get the bucket name from CloudFormation
 BUCKET_NAME=$(aws cloudformation describe-stacks \
   --stack-name EdgeCVPortalFrontendStack \
@@ -147,7 +163,7 @@ if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null | grep
   unset _CREDS_ENV
 fi
 
-CDK_REGION="${CDK_DEFAULT_REGION:-${AWS_REGION:-us-east-1}}"
+CDK_REGION="$AWS_REGION"  # the region the stack outputs were read from (resolved at the top)
 ACCOUNT="${CDK_DEFAULT_ACCOUNT:-$(aws sts get-caller-identity --query Account --output text 2>/dev/null)}"
 if [ -z "$ACCOUNT" ] || [ "$ACCOUNT" = "None" ]; then
   echo "❌ ERROR: could not resolve AWS account. Check credentials (aws sts get-caller-identity)." >&2
