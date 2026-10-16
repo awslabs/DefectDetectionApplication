@@ -161,7 +161,9 @@ const trustedUseCaseAccountIds: string[] = resolveTrustedUseCaseAccountIds()
 // (`-c dataBucketAllowlist=bucket-a,bucket-b`). Read only under the
 // 'tag-objects-only' and 'allowlist' data-plane scopings (dataPlaneGrant in
 // lib/context-helpers.ts); the deployed 'tag' scoping conditions the data
-// plane on the bucket's dda-portal:managed tag and ignores it.
+// plane on the bucket's dda-portal:managed tag and ignores it. Every stack
+// whose roles carry the data plane (compute, node designer, synthetic data)
+// receives it, because the other two scopings throw on an empty list.
 const dataBucketAllowlist: string[] = (app.node.tryGetContext('dataBucketAllowlist') || '')
   .split(',')
   .map((b: string) => b.trim())
@@ -222,6 +224,7 @@ const nodeDesignerStack = new NodeDesignerStack(app, 'EdgeCVPortalNodeDesignerSt
   workflowVersionsTable: storageStack.workflowVersionsTable,
   testDatasetsTable: storageStack.testDatasetsTable,
   trustedUseCaseAccountIds,
+  dataBucketAllowlist,
   userPool: authStack.userPool,
   restApiId: computeStack.api.restApiId,
   restApiRootResourceId: computeStack.api.restApiRootResourceId,

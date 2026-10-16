@@ -29,7 +29,8 @@
  *   - the UseCases role keeps exactly the sibling's three statements, the
  *     DataManagement role gains s3:PutBucketABAC, no other role holds any of
  *     the five tag / ABAC control-plane actions;
- *   - DATA_PLANE_SCOPING reaches the handlers' environment.
+ *   - DATA_PLANE_SCOPING reaches the handlers' environment;
+ *   - bin/app.ts passes the bucket allowlist to all three stacks.
  *
  * The Device_Access_Document grant (design I6; task 6.1; Requirement 8.2):
  * the Deployments and UseCases roles gain iam:GetRolePolicy /
@@ -664,6 +665,26 @@ describe('DATA_PLANE_SCOPING reaches every compute handler (default synth)', () 
       expect(fn.Properties.Environment.Variables.DATA_PLANE_SCOPING).toBe(DATA_PLANE_SCOPING);
     }
   });
+});
+
+// 'tag' ignores the bucket allowlist, while 'tag-objects-only' and 'allowlist'
+// throw on an empty one, so a data-plane stack that bin/app.ts constructs
+// without it would stop the whole app's synth once the scoping changes
+// (the post-probe delta of task 5.3). The app is not synthesized here; its
+// source is read.
+describe('bin/app.ts hands the bucket allowlist to every data-plane stack', () => {
+  const appSource = fs.readFileSync(path.join(__dirname, '..', 'bin', 'app.ts'), 'utf8');
+
+  test.each(['ComputeStack', 'NodeDesignerStack', 'SyntheticDataStack'])(
+    '%s receives dataBucketAllowlist',
+    (stack) => {
+      const start = appSource.indexOf(`new ${stack}(app, `);
+      expect(start).toBeGreaterThan(-1);
+      const end = appSource.indexOf('\n});', start);
+      expect(end).toBeGreaterThan(start);
+      expect(appSource.slice(start, end)).toMatch(/^\s*dataBucketAllowlist,$/m);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

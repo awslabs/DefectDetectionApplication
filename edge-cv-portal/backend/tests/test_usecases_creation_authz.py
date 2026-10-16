@@ -393,6 +393,25 @@ def test_verify_role_missing_role_arn_keeps_its_400(env):
     assert env.fakes.sts.calls == []
 
 
+@pytest.mark.parametrize("error", STS_OUTAGES, ids=[
+    "Throttling", "ThrottlingException", "RequestLimitExceeded", "EndpointConnectionError",
+    "ConnectTimeoutError", "ReadTimeoutError"])
+def test_verify_role_sts_unavailable_is_503_and_audited(env, error):
+    # Requirement 2.7: the verify-role path audits an STS outage as a failure,
+    # like the create and update paths.
+    env.fakes.sts.outcome = error
+    caller = admin(env)
+    status, payload, _ = verify(env, caller, {"role_arn": access_role(TRUSTED), "external_id": "ext-1"})
+    assert (status, payload) == (503, {"status": "failed",
+                                       "error": "STS is temporarily unavailable; retry",
+                                       "error_code": "STS_UNAVAILABLE"})
+    assert env.fakes.writes() == []
+    assert without_event(env.fakes.audit.of("verify_role")) == [{
+        "user_id": caller["user_id"], "action": "verify_role", "resource_type": "usecase",
+        "resource_id": "new", "result": "failure",
+        "details": {"reason": "sts_unavailable", "account_id": TRUSTED}}]
+
+
 def _forbidden(env):
     return fx.user(env.stack, "DataScientist"), {"role_arn": access_role(TRUSTED), "external_id": "e"}
 

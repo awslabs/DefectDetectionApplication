@@ -1881,6 +1881,9 @@ def verify_role(event, user):
                 'assumed_role': proof['assumed_role_arn']
             })
         if proof['reason'] == 'sts_unavailable':
+            log_audit_event(user['user_id'], 'verify_role', 'usecase', 'new', 'failure',
+                            {'reason': 'sts_unavailable', 'account_id': expected_account_id},
+                            event=event)
             return create_response(503, {
                 'status': 'failed',
                 'error': STS_UNAVAILABLE_MESSAGE,
