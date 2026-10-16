@@ -22,8 +22,11 @@ Every path in the tree (`git ls-tree -r -z --name-only`) must pass:
      followed by optional spaces and then an extension or ':': CON, PRN,
      AUX, NUL, COM1-COM9, LPT0-LPT9, CONIN$, CONOUT$. So aux.py, nul and
      "NUL .txt" are reserved; auxiliary.py, nullable.ts and com10.txt are not.
-  4. No two paths that differ only by case. They collide on the default
-     case-insensitive file systems of Windows and macOS.
+  4. No two paths that differ only by case, such as Readme.md and README.md,
+     and no path that differs only by case from a directory, such as Foo
+     alongside foo/bar. They collide on the default case-insensitive file
+     systems of Windows and macOS. Two spellings of one directory, such as
+     Docs/a.md and docs/b.md, are not flagged: they merge into one directory.
   5. No path longer than MAX_PATH_LENGTH characters.
 
 Rules 1-3 mirror is_valid_win32_path() in Git's compat/mingw.c and
@@ -88,18 +91,40 @@ def path_problems(path):
 
 
 def case_collisions(paths):
-    """Map each path to the other paths that differ from it only by case."""
+    """
+    Find the paths that collide on a case-insensitive file system (rule 4).
+
+    Return two maps. The first maps each path to the other paths that differ
+    from it only by case, such as README.md for Readme.md. The second maps
+    each path to the directories that differ from it only by case, since a
+    file and a directory can't share a name: foo for Foo when foo/bar is
+    tracked, or A/foo for a/Foo when A/foo/x is. A directory is any leading
+    chain of components of a path. Two spellings of one directory, such as
+    Docs/a.md and docs/b.md, are in neither map: they merge into one directory.
+    """
     # casefold() is slightly stricter than NTFS, which upper-cases one
     # character at a time (casefold() also pairs "ß" with "ss").
     groups = defaultdict(list)
+    # Each spelling of each directory, keyed by casefold(), in first-seen order.
+    directories = defaultdict(dict)
     for path in paths:
         groups[path.casefold()].append(path)
+        # The directories of a/b/c are a/b and a.
+        directory = path.rpartition("/")[0]
+        while directory:
+            directories[directory.casefold()][directory] = None
+            directory = directory.rpartition("/")[0]
     collisions = {}
     for group in groups.values():
         if len(group) > 1:
             for path in group:
                 collisions[path] = [other for other in group if other != path]
-    return collisions
+    directory_collisions = {}
+    for path in paths:
+        spellings = [other for other in directories.get(path.casefold(), ()) if other != path]
+        if spellings:
+            directory_collisions[path] = spellings
+    return collisions, directory_collisions
 
 
 def report(message):
@@ -143,13 +168,18 @@ def main(argv=None):
     paths = [
         name.decode("utf-8", "surrogateescape") for name in listing.stdout.split(b"\0") if name
     ]
-    collisions = case_collisions(paths)
+    collisions, directory_collisions = case_collisions(paths)
     failed = 0
     for path in paths:
         problems = list(path_problems(path))
         if path in collisions:
             others = ", ".join(ascii(other) for other in collisions[path])
             problems.append(f"differs only by case from {others}")
+        if path in directory_collisions:
+            spellings = directory_collisions[path]
+            noun = "directory" if len(spellings) == 1 else "directories"
+            others = ", ".join(ascii(f"{spelling}/") for spelling in spellings)
+            problems.append(f"differs only by case from {noun} {others}")
         for problem in problems:
             report(f"{ascii(path)}: {problem}")
         failed += bool(problems)
