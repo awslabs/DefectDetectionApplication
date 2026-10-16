@@ -28,6 +28,31 @@ fi
 export AWS_REGION
 echo "Region: $AWS_REGION"
 
+# Trusted UseCase account list for the compute-stack redeploy in Step 6,
+# resolved first so a failure stops before any stack output is read or anything
+# is built, uploaded or deployed (scripts/portal-trusted-accounts.sh, the
+# helper deploy-portal.sh uses): CDK context trustedUseCaseAccountIds >
+# TRUSTED_USECASE_ACCOUNT_IDS > SSM /dda-portal/trusted-usecase-account-ids >
+# the list the deployed portal stacks grant. It never falls back to the
+# deploying account: on a multi-account portal that would drop every UseCase
+# account from the compute stack's grants.
+. "$SCRIPT_DIR/scripts/portal-trusted-accounts.sh"
+if ! TRUSTED_RESOLVED=$(portal_trusted_accounts_resolve "$AWS_REGION"); then
+  exit 1
+fi
+if [ "$TRUSTED_RESOLVED" = "none" ]; then
+  echo "❌ ERROR: no trusted UseCase account list is configured and EdgeCVPortalComputeStack is not deployed." >&2
+  echo "   Deploy the portal first (./deploy-portal.sh single-account), or set the list:" >&2
+  echo "   export TRUSTED_USECASE_ACCOUNT_IDS=<account-id>[,<account-id>...]" >&2
+  exit 1
+fi
+TRUSTED_SOURCE="${TRUSTED_RESOLVED%% *}"
+TRUSTED="${TRUSTED_RESOLVED#* }"
+echo "Trusted UseCase accounts: $TRUSTED ($(portal_trusted_accounts_label "$TRUSTED_SOURCE"))"
+if [ "$TRUSTED_SOURCE" != "deployed" ]; then
+  portal_trusted_accounts_compare "$AWS_REGION" "$TRUSTED"
+fi
+
 # Get the bucket name from CloudFormation
 BUCKET_NAME=$(aws cloudformation describe-stacks \
   --stack-name EdgeCVPortalFrontendStack \
@@ -152,10 +177,9 @@ echo "Step 6: Deploying backend with CloudFront domain for auto-CORS..."
 cd "$SCRIPT_DIR/infrastructure"
 
 # The ComputeStack constructor refuses to synth an sts:AssumeRole grant on a
-# wildcard account, so trustedUseCaseAccountIds must be supplied. Default to
-# the deploying account (single-account setup); override via
-# TRUSTED_USECASE_ACCOUNT_IDS for cross-account. Same pattern as
-# infrastructure/deploy_portal_fixes.sh.
+# wildcard account, so trustedUseCaseAccountIds must be supplied: $TRUSTED,
+# resolved at the top of this script, never the deploying account by default.
+# infrastructure/deploy_portal_fixes.sh resolves it the same way.
 
 # Resolve + export credentials for CDK's JS SDK (guarded so failure is non-fatal).
 if _CREDS_ENV=$(aws configure export-credentials --format env 2>/dev/null | grep -v AWS_CREDENTIAL_EXPIRATION); then
@@ -172,8 +196,6 @@ fi
 export CDK_DEFAULT_ACCOUNT="$ACCOUNT"
 export CDK_DEFAULT_REGION="$CDK_REGION"
 export AWS_REGION="$CDK_REGION"
-
-TRUSTED="${TRUSTED_USECASE_ACCOUNT_IDS:-$ACCOUNT}"
 
 # Portal_Identity enforcement: this redeploy must carry the flag, or it turns
 # enforcement off for every ComputeStack handler (the CDK default is off).
