@@ -155,7 +155,7 @@ class TestInferenceResultsUtils(LocalServerBaseTestCase):
     def test_get_infer_res_with_capture_id(self, human_review_required):
         query = GetInferenceResults(stream_id="testListImages", sort="desc", starting_point=0, max_results=2)
         output_image = query.get_infer_res_with_capture_id("A_jsonl_img0-1_0314-161130_161132", self.workflow_output_path)
-        assert "A_img1_03-14T16:11:32_2-1.jpg" in output_image['imageDataFilePath']
+        assert "A_img1_03-14T16-11-32_2-1.jpg" in output_image['imageDataFilePath']
 
     def test_convert_hex_color_to_rgb(self):
         background = {"hex-color": "#ffffff"}

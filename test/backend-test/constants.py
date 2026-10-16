@@ -13,12 +13,12 @@
 # limitations under the License.
 # time descending img0(newest)-img5(oldest)
 EXAMPLE_IMAGE_LIST = {
-    "5": "A_img0_03-14T16:11:30_1-1.jpg",
-    "4": "A_img1_03-14T16:11:32_2-1.jpg",
-    "3": "B_img2_03-14T16:11:56_18-1.jpg",
-    "2": "B_img3_03-14T16:11:57_19-1.jpg",
-    "1": "C_img4_03-14T16:12:27_39-1.jpg",
-    "0": "D_img5_03-14T16:12:27_39-1.jpg"
+    "5": "A_img0_03-14T16-11-30_1-1.jpg",
+    "4": "A_img1_03-14T16-11-32_2-1.jpg",
+    "3": "B_img2_03-14T16-11-56_18-1.jpg",
+    "2": "B_img3_03-14T16-11-57_19-1.jpg",
+    "1": "C_img4_03-14T16-12-27_39-1.jpg",
+    "0": "D_img5_03-14T16-12-27_39-1.jpg"
 }
 
 FAKE_TIME_STAMP = 1686260178341
