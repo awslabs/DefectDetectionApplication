@@ -569,7 +569,9 @@ check_prerequisites() {
 # operator set it (bin/app.ts reads it the same way); a list from any other
 # source is exported as TRUSTED_USECASE_ACCOUNT_IDS. The list, its source and a
 # comparison with the deployed stacks are printed and kept in
-# TRUSTED_ACCOUNTS_REPORT for the Deployment_Log; the summary shows the list.
+# TRUSTED_ACCOUNTS_REPORT for the Deployment_Log, including a failed store's
+# error, written through the same redaction filter as the step output; the
+# summary shows the list.
 # Returns non-zero, before anything is changed, when the list cannot be
 # determined.
 TRUSTED_ACCOUNTS=""
@@ -584,7 +586,7 @@ resolve_trusted_accounts() {
     # shellcheck source=scripts/portal-trusted-accounts.sh
     . "$helper"
 
-    local resolved="" kind ids label store_rc=0 report details=""
+    local resolved="" kind ids label store_rc=0 store_err="" report details=""
     if ! resolved="$(portal_trusted_accounts_resolve "${REGION:-}")"; then
         echo "   This account is ${ACCOUNT:-unknown}." >&2
         return 2
@@ -594,7 +596,9 @@ resolve_trusted_accounts() {
         kind="default"
         ids="${ACCOUNT:-}"
         label="$(portal_trusted_accounts_label "$kind")"
-        portal_trusted_accounts_store "${REGION:-}" "$ids" || store_rc=$?
+        # Capture the store error: this runs before init_log, so it must also go
+        # into TRUSTED_ACCOUNTS_REPORT to reach the Deployment_Log.
+        store_err="$(portal_trusted_accounts_store "${REGION:-}" "$ids" 2>&1)" || store_rc=$?
         case "$store_rc" in
             0)
                 label="$label; stored in SSM parameter $PORTAL_TRUSTED_SSM_PARAMETER"
@@ -604,6 +608,7 @@ resolve_trusted_accounts() {
                 return 2
                 ;;
             *)
+                printf '%s\n' "$store_err" | _redact >&2
                 label="$label; not stored in SSM (see the error above)"
                 ;;
         esac
@@ -636,6 +641,9 @@ resolve_trusted_accounts() {
     TRUSTED_ACCOUNTS="$ids"
     TRUSTED_ACCOUNTS_LABEL="$label"
     TRUSTED_ACCOUNTS_REPORT="$report"
+    if [ "$store_rc" -ne 0 ] && [ -n "$store_err" ]; then
+        TRUSTED_ACCOUNTS_REPORT="$store_err"$'\n'"$report"
+    fi
     return 0
 }
 
@@ -1244,7 +1252,7 @@ main() {
     init_log
     # Record which trusted UseCase account list this run deploys, and why.
     if [ -n "${TRUSTED_ACCOUNTS_REPORT:-}" ]; then
-        printf '%s\n' "$TRUSTED_ACCOUNTS_REPORT" >> "$LOG_FILE"
+        printf '%s\n' "$TRUSTED_ACCOUNTS_REPORT" | _redact >> "$LOG_FILE"
     fi
 
     # Auth step arguments: forward --sso/--profile/--region as appropriate. The
