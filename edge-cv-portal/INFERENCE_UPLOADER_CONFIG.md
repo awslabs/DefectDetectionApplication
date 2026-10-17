@@ -334,7 +334,8 @@ If you have existing deployments with InferenceUploader:
 
 2. **To Remove InferenceUploader:**
    - Set `enable_inference_uploader = false`
-   - Create new deployment (InferenceUploader will be removed)
+   - Revise the device's deployment (**Revise Deployment**, see [README: Revise a Deployment](../README.md#revise-a-deployment)). The revision pre-loads `aws.edgeml.dda.InferenceUploader` with the device's other components, so **Remove** it from the list
+   - Click **Update Deployment** and confirm the **Components will be removed** dialog
 
 ### New Deployments
 
@@ -343,7 +344,6 @@ All new deployments will NOT include InferenceUploader unless explicitly enabled
 ## Related Documentation
 
 - [INFERENCE_UPLOADER_SETUP.md](../INFERENCE_UPLOADER_SETUP.md) - Setup instructions
-- [TUTORIAL_MULTI_ACCOUNT_WORKFLOW.md](TUTORIAL_MULTI_ACCOUNT_WORKFLOW.md) - Multi-account setup
 - [ADMIN_GUIDE.md](ADMIN_GUIDE.md) - Portal administration
 
 ## Support

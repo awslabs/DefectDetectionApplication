@@ -1,5 +1,7 @@
 # Defect Detection Application (DDA)
 
+> **Legacy guide.** This is the standalone manual setup guide. The supported path is [README.md](README.md): Build Fleet builds, **Add Device** setup, and portal deployments.
+
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)](https://www.docker.com/)
@@ -13,7 +15,6 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
 - [Features](#features)
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
-- [Installation](#installation)
 - [Usage](#usage)
 - [Development](#development)
 - [Deployment](#deployment)
@@ -435,7 +436,7 @@ DDA consists of several key components:
    # Launch Ubuntu 20.04 ARM64 (JetPack 5 / arm64 CPU builds)
    # Storage: 512GB, Security: SSH (port 22)
    # Attach IAM role: dda-build-role
-   # AMI: Ubuntu 20.04 LTS ARM64 (see README.md for the JP6/JP7 build hosts)
+   # AMI: Ubuntu 20.04 LTS ARM64 (JP6/JP7: build with Build Fleet, README.md Step 4)
    ```
    
    **If your edge device is x86_64 CPU (Intel/AMD systems):**
@@ -585,7 +586,7 @@ DDA consists of several key components:
 
    ```
 
- **Note**: Before proceeding, we recommend following the steps in the [Model Loading](#model-loading) troubleshooting section to make sure the model can load without issues into Triton server.
+ **Note**: Before proceeding, we recommend following the steps in the [Model Loading](#common-issues) troubleshooting section to make sure the model can load without issues into Triton server.
 
 ## Usage
 

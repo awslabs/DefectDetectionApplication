@@ -11,11 +11,14 @@ on-device model serving (e.g. confirming an ONNX/RF-DETR model loaded).
 
 ## Prerequisites (one-time per device)
 
-1. **Deploy the Secure Tunneling component** to the device. Revise the device's
-   deployment to add:
-   - `aws.greengrass.SecureTunneling` (latest)
-   Keep it alongside the existing components (LocalServer, model component).
-   Do this when no other deployment is in progress.
+1. **Deploy the Secure Tunneling component** to the device. On the device's
+   **Remote Access** tab in the portal, turn on **Enable Secure Tunneling on
+   this device** ([README: Remote Device Access (SSH)](../README.md#remote-device-access-ssh)).
+   The portal adds `aws.greengrass.SecureTunneling` to the device's deployment
+   for you. Alternatively, revise the device's deployment yourself to add
+   `aws.greengrass.SecureTunneling` (latest), keeping the existing components
+   (LocalServer, model component). Do this when no other deployment is in
+   progress.
 
 2. **Device role**: the Greengrass Token Exchange role must allow the tunneling
    actions the component uses (subscribe/connect to the tunnel notifications).
@@ -89,9 +92,9 @@ the same local-proxy + SSH step.
 
 ```bash
 # Greengrass component logs (model component startup runs model_convertor.py):
-sudo tail -n 200 /greengrass/v2/logs/model-rf-detr-seg-nano-jetson-xavier-jp5.log
+sudo tail -n 200 /aws_dda/greengrass/v2/logs/model-rf-detr-seg-nano-jetson-xavier-jp5.log
 # LocalServer / flask-app + Triton logs:
-sudo tail -n 200 /greengrass/v2/logs/aws.edgeml.dda.LocalServer.arm64JP5.log
+sudo tail -n 200 /aws_dda/greengrass/v2/logs/aws.edgeml.dda.LocalServer.arm64JP5.log
 # Confirm the ONNX engine loaded model.onnx and the Triton model repo built.
 ```
 

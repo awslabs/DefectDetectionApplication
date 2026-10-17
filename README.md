@@ -349,12 +349,12 @@ This only needs to be done once per data account. All future UseCases can select
 
 ### Step 6: Create UseCase
 
-1. Go to **UseCases** → **Create UseCase**
+1. Go to **Use Cases** → **Onboard New Use Case**
 2. Choose setup type (Single Account or Multi-Account)
 3. For multi-account: upload `usecase-account-*-config.txt` to auto-fill role details
 4. Configure data account (select from registered accounts or enter manually)
 5. Select the use case's S3 bucket: an existing bucket must already be tagged `dda-portal:managed=true` (and ABAC-enabled when it is reached through a cross-account role), or a PortalAdmin creates one with **Create new bucket**, which tags and allows it automatically
-6. Click **Create**
+6. Click **Create Use Case**
 
 This provisions Greengrass components, creates `DDAPortalComponentAccessPolicy`, and sets up S3 buckets. The portal checks each configured bucket's tags through the use case's role at creation and answers `400 bucket_not_eligible` with a remedy for an untagged, unreadable or already-configured bucket (see `edge-cv-portal/ADMIN_GUIDE.md`, "Onboarding a New Customer").
 
@@ -421,7 +421,7 @@ For details of the setup flow, see [station_install/quick_setup/README.md](stati
 - Until it has run, the command works for whoever runs it first. Share it only with the person setting up the device, and click **Delete** or **Regenerate** if it may have reached anyone else.
 - **Regenerate**, in the **Device Registrations** panel, issues a new command for a registration that is not completed and invalidates the previous token. An `Expired` or `Failed` registration returns to `Pending`. An `In progress` registration keeps that status, and its new command is refused at the credential exchange, so **Regenerate** does not restart it.
 - **Delete** removes a registration that is not completed and invalidates its token.
-- Neither **Regenerate** nor **Delete** stops a run that has already exchanged its token: the run keeps its credentials until they expire (at most 1 hour) but can no longer report its result, so do not use either while the command is still running.
+- Neither **Regenerate** nor **Delete** stops a run that has already exchanged its token: the run's credentials stay valid until they expire (at most 1 hour) but can no longer report its result, so do not use either while the command is still running.
 - An invalid or expired token stops the installer with "Generate a new setup command from the Edge CV Portal and run it again." Repeated invalid attempts from the same IP address are rate-limited.
 
 #### 7.5 Verify the Device
@@ -508,9 +508,10 @@ A packaged workflow is offered only to devices whose recorded architecture is am
 ### Device Management (via Portal)
 
 - **Devices** page shows all registered devices with status, platform, architecture, last seen
-- Click a device for: Overview, Components, Deployments, Logs, Diagnostics
+- Click a device for: Overview, Components, Deployments, Cameras, Logs, Results, AI Diagnostics, Remote Access
 - Logs are sent to CloudWatch and viewable in the portal
-- Diagnostics show connectivity, Greengrass status, component health, storage, memory
+- **Results** browses the inference-results captures uploaded from the device
+- **AI Diagnostics** analyzes the device's logs with AI (**Analyze Logs with AI**) and lists detected issues
 
 ## Using the Portal
 
@@ -844,10 +845,14 @@ public IP, or VPN required.
 
 ### How it works
 
-1. **Enable** on the Remote Access tab deploys the AWS-managed
-   `aws.greengrass.SecureTunneling` component to the device (merged with its
-   existing components). Set the **SSH login user** (`ubuntu` on EC2,
-   `ggc_user` for the Greengrass default, or your device user).
+1. **Enable** on the Remote Access tab adds the AWS-managed
+   `aws.greengrass.SecureTunneling` component to the device's own
+   device-level deployment and keeps its other components. On a device that
+   gets its components from a thing group deployment, it creates a separate
+   device-level deployment that holds only SecureTunneling (see
+   [Thing Group Targets](#thing-group-targets)). Set the **SSH login user**
+   (`ubuntu` on EC2, `ggc_user` for the Greengrass default, or your device
+   user).
 2. **Open SSH session** creates a short-lived tunnel and returns a **source
    access token**.
 3. Locally, run the AWS IoT local proxy with that token and SSH to `localhost`:
@@ -891,8 +896,8 @@ For detailed instructions on Cookie and Alien sample datasets, see [datasets/REA
 
 The **Inference Uploader** component enables edge devices to automatically upload inference results to S3.
 
-- Automatically provisioned to UseCase accounts during onboarding
-- Enable per deployment: add `aws.edgeml.dda.InferenceUploader` component
+- Published once to the portal account with `./build-inference-uploader.sh`. This is a manual step: neither the portal deploy nor Build Fleet builds the component. The portal then shares it with UseCase accounts along with LocalServer.
+- Enable it per UseCase (`enable_inference_uploader`, see [edge-cv-portal/INFERENCE_UPLOADER_CONFIG.md](edge-cv-portal/INFERENCE_UPLOADER_CONFIG.md)). The portal then adds it to deployments that contain LocalServer or a model.
 - Configurable upload interval (10s to daily)
 - Results organized as: `s3://bucket/{usecase-id}/{device-id}/{model-id}/YYYY/MM/DD/`
 
@@ -978,15 +983,14 @@ df -h /aws_dda/
 # Check memory
 free -h
 
-# Check network connectivity
-aws sts get-caller-identity
-
 # CloudWatch diagnostics
 /aws_dda/check-cloudwatch-logging.sh us-east-1
 
 # Search logs for errors
 grep -i "error\|failed\|exception" /aws_dda/greengrass/v2/logs/*.log
 ```
+
+Connectivity shows as the device **Status** on **Devices** ([7.5](#75-verify-the-device)).
 
 ## Troubleshooting
 
@@ -1054,7 +1058,7 @@ aws iam put-role-policy --role-name GreengrassV2TokenExchangeRole \
   }'
 ```
 `ecr:GetAuthorizationToken` does not support resource scoping and must use `"*"`.
-No device restart is needed — the role change takes effect on the next deployment retry.
+No device restart is needed — the role change takes effect on the next deployment: revise the device's deployment ([Revise a Deployment](#revise-a-deployment)) and click **Update Deployment**.
 
 **Deployment Fails** (`COMPONENT_VERSION_REQUIREMENTS_NOT_MET`):
 - Verify component exists in your account
@@ -1092,7 +1096,7 @@ sudo rm -rf /aws_dda/greengrass/v2/packages/artifacts/aws.edgeml.dda.LocalServer
 sudo rm -rf /aws_dda/greengrass/v2/packages/artifacts-unarchived/aws.edgeml.dda.LocalServer.arm64/<OLD_VERSION>
 sudo systemctl start greengrass
 ```
-   Then re-trigger the deployment.
+   Then revise the device's deployment and click **Update Deployment** ([Revise a Deployment](#revise-a-deployment)).
 
    Alternatively, raise the store cap via the nucleus configuration (then let
    Greengrass garbage-collect unreferenced versions):
@@ -1261,7 +1265,7 @@ Log Streams (per device):
 **"Components detected but no logs yet"** in the portal:
 - LogManager uploads every 5 minutes — wait for the first upload cycle
 - Verify LogManager is installed: `ls /aws_dda/greengrass/v2/logs/aws.greengrass.LogManager.log`
-- If no LogManager log file exists, redeploy from the portal (LogManager is auto-included)
+- If no LogManager log file exists, revise the device's deployment (**Revise Deployment** → **Update Deployment**); LogManager is auto-included
 
 **LogManager installed but no CloudWatch log groups:**
 ```bash
@@ -1278,7 +1282,7 @@ aws iam list-attached-role-policies --role-name GreengrassV2TokenExchangeRole
 **LogManager running but portal still shows no logs:**
 - The portal searches for log streams matching `/thing/{device-id}` — verify your device's thing name matches
 - Check CloudWatch directly: `aws logs describe-log-groups --log-group-name-prefix "/aws/greengrass" --region us-east-1`
-- Redeploy from the portal to ensure LogManager config includes all component names
+- Revise the device's deployment (**Revise Deployment** → **Update Deployment**) to ensure LogManager config includes all component names
 
 ### Training Issues
 
@@ -1377,7 +1381,6 @@ defect-detection-application/
 | Document | Description |
 |----------|-------------|
 | [edge-cv-portal/ADMIN_GUIDE.md](edge-cv-portal/ADMIN_GUIDE.md) | Portal administration guide |
-| [edge-cv-portal/SHARED_COMPONENTS.md](edge-cv-portal/SHARED_COMPONENTS.md) | Shared Greengrass components |
 | [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) | Inference Uploader setup |
 | [datasets/README.md](datasets/README.md) | Sample datasets guide |
 
