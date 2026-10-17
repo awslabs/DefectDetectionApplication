@@ -694,19 +694,19 @@ Run from the worktree root unless noted.
     - Files: `.kiro/specs/triton-model-cleanup-wedge/{verification-notes.md,tasks.md}`
     - Verify: the hygiene check passes; `git show --stat HEAD` lists the two files.
 
-- [ ] 14. JP6 and JP7 builds; other devices
-  - [ ] 14.1 Build JP6, then JP7, each as in 8.1: one at a time, with the pre-build checks, its own
+- [x] 14. JP6 and JP7 builds; other devices
+  - [x] 14.1 Built with `SKIP_BACKEND_TESTS=1` and the gate replayed on each built image, as in 8.1, because the stream camera gate hangs on the build host; the JP6 replay leaves that gate out (verification-notes.md). Published after the G3 go. Build JP6, then JP7, each as in 8.1: one at a time, with the pre-build checks, its own
     log, and the restore. Build only, no publish.
     - Verify: each build exits 0, with every in-image gate passing. JP6 runs the patched python_backend
       layer.
-  - [ ] 14.2 **OWNER GATE G3.** Pause with a warning that asks, per device, for the go:
+  - [x] 14.2 **OWNER GATE G3.** Go on all three devices; JP6, JP7 and x86 verified and rolled back (verification-notes.md, "Other targets"). Pause with a warning that asks, per device, for the go:
     - a JP6 Jetson AGX Orin: R1 and R3;
     - a JP7 device: R1, as a non-regression check;
     - the x86 workstation: an x86 build on an x86_64 host, then R1 and R3. This host is aarch64 and
       cannot build x86.
     A go covers publishing that arch's version and deploying it there, with the same coordination,
     pre-state and restore as tasks 9-12. Without a go, the device is recorded as pending.
-  - [ ] 14.3 Record the builds and any device results in `verification-notes.md`. Commit C5,
+  - [x] 14.3 Record the builds and any device results in `verification-notes.md`. Commit C5,
     `docs(spec): record the JP6 and JP7 builds`.
     - Verify: the hygiene check passes.
 
@@ -718,8 +718,19 @@ Run from the worktree root unless noted.
     - R1-R3 and self-heal results;
     - what is owner-gated or pending: push and trunk merge, JP6/JP7/x86 device verification, the
       Portal deploy, the x86 workstation;
-    - follow-ups: `localserver-config-live-update`, F5c, H.
+    - follow-ups: `localserver-config-live-update`, F5c, H;
+    - host-tested follow-up on the local branch `wip/triton-cleanup-lock-fallback` (not pushed, not
+      merged): cleanup fallback, poll then skip when the lock is unusable. Its 2 tests pass on the
+      host, and the suites are green (triton_cleanup_wedge 381 passed, Python 3.8 subset 135 passed).
+      Device verification is pending with the next LocalServer build.
   - Tear down the temporary Portal principal, and run its verify step.
+  - List these leftovers in the final report and close each one with the owner's go:
+    - the published mixed-build arm64JP7 1.0.57 (backend from this branch, frontend from another
+      build): delete or deprecate it;
+    - the temporary worktree and ref that the x86 build used in the x86 workstation's clone: remove
+      both;
+    - the MIC-730's stale `model-r3-probe` UNAVAILABLE listing, which stays until the next backend
+      restart: decide whether to restart the backend.
   - Close every SSH master and port forward this work opened.
   - Confirm nothing was pushed.
   - Verify: the principal's verify step shows the deletion; `git status -sb` shows the branch ahead of

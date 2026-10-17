@@ -2,7 +2,9 @@
 
 Device: the MIC-730 (JP5, Jetson Xavier, Triton 2.45.0). Verified
 2026-10-16/17 on the built and published LocalServer, before the device-side
-commits. JP6, JP7 and x86 device verification is pending (tasks.md task 14).
+commits. JP6 (Jetson AGX Orin), JP7 (Jetson AGX Thor) and x86 (the x86
+workstation) were built from the committed branch and verified on 2026-10-17;
+see "Other targets (task 14)".
 
 ## Deviation (device verification, 2026-10-16)
 
@@ -198,9 +200,9 @@ code); the live check is deferred to the trunk merge.
 
 ## Restore and sustained health
 
-The PPE demo was stopped before the first change and restarted at the end
-(`demo.sh kick`, then `demo.sh start`). Within 2 min the clipper reported 195
-frames, 23 violation hits and 4 clips; the backend stayed healthy for 15 min
+The PPE demo was stopped before the first change and restarted at the end.
+Within 2 min it had processed 195 frames, with 23 violation hits and 4
+violation clips; the backend stayed healthy for 15 min
 while the demo ran. Differences from the pre-state:
 
 - LocalServer 1.0.54 -> 1.0.56 (intended).
@@ -213,6 +215,165 @@ while the demo ran. Differences from the pre-state:
 - After the last R3 capture (2026-10-17, no restart allowed), the backend
   lists `model-r3-probe` as `UNAVAILABLE` in `/feature-configurations` until
   its next restart; its repository entries are gone.
+
+## Other targets (task 14)
+
+Every build below is built from 7f690fc3, the committed branch head. The owner
+approved publishing and deploying on each device (gate G3). On each device the
+deployment was a copy of that device's own thing deployment with only the
+LocalServer version changed. Afterwards each device was rolled back to its
+pre-state LocalServer version, because another branch's fixes ship in other
+versions and the owner chooses what the devices run until the trunk merge.
+Publishing was additive only.
+
+### Builds and published versions
+
+| Target | Build | Gate on the built image | Published | Images (backend / frontend) |
+|---|---|---|---|---|
+| JP6 (`arm64JP6`) | Built on the arm64 build host. The edgemlsdk layer ran the python_backend clone, the patch, the source grep and the `libtriton_python.so` sentinel. | Exit 0, all six security gates passed, backend unit tests 63 passed. Stream camera gate not run (see below). | **1.0.80** | `8ab42856` / `c0a37de4` |
+| JP7 (`arm64JP7`) | Built on the arm64 build host. Backend and recipe changes only; `Dockerfile.jp7` is unchanged. | Exit 0 on the full gate, stream camera gate included, with the container limited to 8 CPUs. | **1.0.57** (mixed build, see below) | `5d64d2e9` / `c31091ae` |
+| x86 (`amd64`, CPU) | Built on the x86 workstation (x86_64, Ubuntu 20.04). The generic Dockerfile ran the python_backend clone, the patch, the source grep and the binary sentinel. The built image's `/opt/tritonserver/backends/python/libtriton_python.so` contains the sentinel string. | Exit 0 on the full gate (8 CPUs). All gates passed; full preservation suite 142 passed, 10 skipped. | **1.0.54** | `1e190d98` / `9dad4df7` |
+
+- All three builds ran with `SKIP_BACKEND_TESTS=1`, and the gate body of
+  `build-custom.sh` was replayed on the built image before publishing.
+  - On the arm64 host, the full JP6 and JP7 builds both stopped in the
+    in-image stream camera gate. JP7 stopped in the H.265 RTMP test, the JP5
+    hang. JP6 stopped in `test_software_decoding`.
+  - In the JP6 image on this host, PyAV's libx265 H.265 encoding of the probe
+    sample hangs at the base commit and at the branch head alike, with 1, 4 or
+    8 CPUs. This is not caused by this change. The test fixture encodes both
+    codecs, so the JP6 replay leaves out the whole stream camera gate.
+- Each cloud recipe has `aws.greengrass.Cli` with `DependencyType: SOFT` and
+  `ModelLoadSelfHealEnabled: "true"`.
+- For JP6, the image ids were checked equal to the build's ids right before
+  the push.
+- **JP7 1.0.57 is a mixed build.**
+  - Its backend image is this branch's.
+  - Its frontend image comes from another branch's build, which ran on the
+    same host during the push and re-tagged `react-webapp:latest`.
+  - It was deployed only for the R1 check below, which exercises the backend
+    only, and the device was rolled back afterwards. Do not deploy it anywhere
+    else.
+- On x86, `create_aws_triton_deps_pkg.sh` fails to rsync the python backend
+  files, because an earlier Dockerfile step has already moved them. This
+  predates the branch and is unchanged by it. The backend still ships through
+  the Triton tarball, as the sentinel check above shows.
+
+### Jetson AGX Orin (JP6, Triton 2.45.0)
+
+**Pre-state.** LocalServer 1.0.77, and three Triton models READY: cookies-binary,
+rf-detr-seg-nano and yolo-test. No vLLM model. Nothing was mid-run.
+
+**Deploy of 1.0.80.** COMPLETED in 5 min.
+
+- The five host scripts equal the source by sha256.
+- Watchdog start line: `Triton model-load watchdog started (self-heal on (ModelLoadSelfHealEnabled=true); GPU load signal /sys/devices/platform/bus@0/17000000.gpu/load; stall after 15m, at most 3 restarts per 24h and 30m apart)`.
+- All models READY. 15 min sustained health.
+
+**R1: PASS.** Backend restarted, so all models were UNKNOWN. `/start` for
+yolo-test, then its cleanup 1 s later. The cleanup logged, in order:
+
+- `a load is in flight (state LOADING); waiting up to 300s ...`
+- `load finished (READY); unloading before removing its repository entries`
+- `unloaded (state UNAVAILABLE)`
+- `Cleaned directory` x3
+- `Directory cleanup finished`
+
+It exited 0 after 5 s. There was no `pb_stub` line. The two other models were
+READY 42 s after their `/start`. A component restart brought yolo-test back to
+READY within 10 s.
+
+**R3: partially met, the same as JP5.**
+
+- With `base_model-r3-probe/8/model.py` removed, the stub was relaunched about
+  every 13 s: 19 `pb_stub.cc:2081] Failed to preinitialize Python stub: Python model file not found ...`
+  lines in 4 min.
+- The probe stayed `LOADING` for the whole 208 s observed.
+- A sibling load requested 15 s in was queued (`Enqueuing model ... for loading`)
+  but stayed blocked. Its model lock was released after 120 s with
+  `its load state stayed UNAVAILABLE without a recorded reason for 120s, so the load is treated as ended`.
+- After `model.py` was restored, both models were READY within 10 s. The
+  guarded cleanup then removed the scratch entries.
+
+**Rollback to 1.0.77.** COMPLETED. All models READY and 15 min sustained
+health. The installed component versions equal the pre-state.
+
+### Jetson AGX Thor (JP7, Triton 2.63.0)
+
+**Pre-state.** LocalServer 1.0.55, eight Triton models READY, and the vLLM
+model `qwen3-vl-8b-instruct` READY. Nothing was mid-run.
+
+- The owner's `ppe-detector-v3-static-test` workflow is triggered by MQTT. One
+  trigger produced a completed run with helmet, human and vest detections.
+
+**Deploy of 1.0.57.** COMPLETED in 16 min.
+
+- The host scripts equal the source.
+- Watchdog start line: `... self-heal on (ModelLoadSelfHealEnabled=true); GPU load signal unavailable; ...`.
+- Every model READY, and the vLLM model READY: it was reloaded during the
+  deployment and its engine process was running.
+- A triggered PPE run completed with 1 helmet, 2 human and 1 vest detections.
+- 15 min sustained health.
+
+**R1 (non-regression): PASS.** The cleanup output had the same sequence as on
+JP5 and JP6 and exited 0. There was no `pb_stub` line.
+
+- After the backend restart, the vLLM model went `LOADING`, then READY through
+  its reload after restart.
+- The other seven models were READY within 51 s of their `/start`.
+- yolo-test was READY within 5 s of a component restart.
+- The expected caveat, the vLLM model staying STAGED/UNKNOWN until its next
+  lazy load, was not observed. It was READY after both restarts.
+
+R3 was not run. The Thor uses Triton 2.63.0, and the python_backend patch
+applies only to the 2.45.0 builds.
+
+**Rollback to 1.0.55.** COMPLETED.
+
+- On the pre-state build, the backend aborted once during vLLM engine start-up,
+  about 80 s after it started:
+  `forkable.cc:57] Check failed: !std::exchange(is_forking_, true)`, exit
+  code 133. Docker restarted it (restart count 1).
+  - The same abort is recorded in the `run-detection-visibility` verification
+    notes on an earlier build, so it predates this change.
+- After the restart, four models were UNKNOWN. They were started and became
+  READY, and the vLLM model was READY.
+- A PPE run completed with the same detections.
+- 15 min sustained health, with no further restart.
+- Difference from the pre-state: `aws.greengrass.Cli` 2.18.3 -> 2.18.4,
+  re-resolved by the cloud deployments. This cannot be undone here.
+
+### x86 workstation (amd64 CPU, Triton 2.45.0)
+
+**Pre-state.** LocalServer 1.0.50 and four Triton models READY. No workflow
+registrations.
+
+**Deploy of 1.0.54.** COMPLETED.
+
+- The host scripts equal the source.
+- Watchdog start line: `... self-heal on (ModelLoadSelfHealEnabled=true); GPU load signal unavailable; ...`.
+- All models READY. 15 min sustained health.
+
+**R1: PASS.** The cleanup output had the same sequence and exited 0. There was
+no `pb_stub` line. The other three models were READY 16 s after their
+`/start`, and yolo-test was READY within 5 s of a component restart.
+
+**R3: partially met, the same as JP5.**
+
+- 21 `Failed to preinitialize Python stub` lines in about 3.5 min, one about
+  every 10 s.
+- The probe stayed `LOADING`, and the sibling load stayed blocked.
+- After `model.py` was restored, both models were READY within 10 s. The
+  guarded cleanup removed the scratch entries.
+
+**Rollback to 1.0.50.** COMPLETED. All models READY and 15 min sustained health.
+The installed component versions and the running backend image equal the
+pre-state.
+
+### SSH host keys
+
+The lab host keys were pinned on first use and are recorded outside the
+repository. All connections used `StrictHostKeyChecking=yes`.
 
 ## Findings
 
@@ -227,14 +388,35 @@ while the demo ran. Differences from the pre-state:
    show `disabledBy: "file"`, and the recovery action names the file. Carried
    as a NIT in `triton-python-stub-relaunch-loop`.
 3. **`aws.greengrass.Cli` 2.18.3 -> 2.18.4** during the verification's cloud
-   deployments (see Restore).
+   deployments (see Restore). The same happened on the Jetson AGX Thor.
+4. **The stub relaunch loop (criterion 2.4) also occurs on JP6 and x86.** Both
+   reproduce the JP5 behaviour: the stub start is bounded, but it is relaunched
+   about every 10-13 s inside one load call, and sibling loads stay blocked.
+   This is carried by `triton-python-stub-relaunch-loop`.
+5. **Shared image tags can mix builds (follow-up `build-publish-shared-tag-race`).**
+   The publish scripts push whatever `flask-app:latest` and
+   `react-webapp:latest` point to, without checking the image id. When two
+   builds run on one host, a publish can therefore pair one build's backend
+   with another build's frontend, as happened with JP7 1.0.57. Recommendation:
+   publish by image id, or tag each build's images uniquely.
+6. **PyAV libx265 hang in the JP6 image.** The in-image stream camera gate
+   cannot complete on the arm64 build host, at the base commit as well. This is
+   a follow-up together with the JP5 stream-gate hang.
+7. **Native abort during vLLM start-up on the Thor's pre-state build.** The
+   absl `forkable.cc` check failed once, and Docker restarted the container.
+   This predates this change; see the `run-detection-visibility` notes.
 
 ## Not verified
 
-- The generic (x86) Dockerfile's binary sentinel path, until an x86 build
-  runs.
+- Self-heal and F3 on JP6, JP7 and x86 (verified on JP5 only; not part of
+  task 14).
+- The amd64Nvidia target (not built; its build is on hold for an unrelated
+  reason).
 - Opt-out persistence across later cloud deployments that do not carry the
   merge.
 - SIGTERM reaching the convertor's Python process during a Startup.
+- The Startup record's `pbStubMissingFile` capture (D5) against a real
+  `pb_stub` line (host tests only). The F3 probe blocked in `initialize()`, so
+  the field stayed null, and the R3 scratch entry was not loaded by a component
+  Startup.
 - The x86 stub-CPU-only activity veto.
-- JP6, JP7 and x86 device verification (pending, task 14).
