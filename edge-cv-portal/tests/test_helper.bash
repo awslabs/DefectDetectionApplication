@@ -398,9 +398,10 @@ stub_call_env_n() { _b64d "$(sed -n "${1}p" "$STUB_TRACE" | cut -f4)"; }
 stub_call_env_value_n() { stub_call_env_n "$1" | sed -n "s/^$2=//p"; }
 stub_call_pwd_n() { sed -n "${1}p" "$STUB_TRACE" | cut -f2; }
 # stub_call_has_pair <n> <option> <value> -> call n's argv has <option> then <value>
+# (the decoded argv has no trailing newline, so the last arg is read too)
 stub_call_has_pair() {
   local prev="" a
-  while IFS= read -r a; do
+  while IFS= read -r a || [ -n "$a" ]; do
     if [ "$prev" = "$2" ] && [ "$a" = "$3" ]; then return 0; fi
     prev="$a"
   done < <(stub_call_args_n "$1")
