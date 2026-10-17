@@ -74,6 +74,7 @@ failed and nothing propagates (Requirement 13.7).
 """
 
 import copy
+import functools
 import inspect
 import json
 import logging
@@ -127,10 +128,15 @@ from workflow_engine.gst_plugins import workflow_plugin_path
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
 from workflow_engine.node_status import NodeStatusCollector, format_duration_ms
 from workflow_engine.run_log import RunLogCapture
+# Standard library only there (stream_feed), so importable at module level.
+from workflow_engine.run_retention import is_continuous_context
 from workflow_engine.vendor.workflow_core.catalog.nodes import (
     JPEGDEC_NATIVE_CAPS,
     JPEGDEC_NATIVE_CAPS_ARCHS,
 )
+# Workflow runs in flight, for the Triton self-heal (triton-model-cleanup-
+# wedge D7); standard library only.
+from utils import run_activity
 
 logger = logging.getLogger(__name__)
 
@@ -1551,6 +1557,22 @@ class WorkflowExecutor:
                     )
 
     @staticmethod
+    def _document_models(document: dict) -> List[str]:
+        """The distinct ``emltriton`` models of a document, in order."""
+        models = []
+        for segment in document.get("segments", []):
+            for element in segment.get("elements", []):
+                if element.get("factory") != "emltriton":
+                    continue
+                args = element.get("args")
+                if not isinstance(args, dict):
+                    continue
+                model = args.get("model")
+                if model and model not in models:
+                    models.append(model)
+        return models
+
+    @staticmethod
     def _await_model_readiness(document: dict) -> Optional[str]:
         """Wait, bounded, for every Triton model this document uses to be
         READY. Returns an operator-facing failure reason, or None to proceed.
@@ -1565,17 +1587,7 @@ class WorkflowExecutor:
         existed. The gate may make a cold run honest; it must never be the
         sole reason a previously working run stops working.
         """
-        models = []
-        for segment in document.get("segments", []):
-            for element in segment.get("elements", []):
-                if element.get("factory") != "emltriton":
-                    continue
-                args = element.get("args")
-                if not isinstance(args, dict):
-                    continue
-                model = args.get("model")
-                if model and model not in models:
-                    models.append(model)
+        models = WorkflowExecutor._document_models(document)
         if not models:
             return None
 
@@ -1621,6 +1633,8 @@ class WorkflowExecutor:
         # reference the collector safely on every terminal path
         # (node-execution-timing R4.1); reassigned by _begin_node_status.
         collector: Optional[NodeStatusCollector] = None
+        # This run's run-activity ticket (triton-model-cleanup-wedge D7).
+        ticket = None
         try:
             execution = session.get(WorkflowExecution, execution_id)
             if execution is None:
@@ -1645,9 +1659,30 @@ class WorkflowExecutor:
                 getattr(execution, "trigger_context_json", None)
             )
 
+            # Register the run for its whole life before anything is
+            # captured or prepared, so a Triton self-heal never restarts the
+            # backend under it (triton-model-cleanup-wedge D7). Never waits:
+            # during a quiesce the run is accepted and counts as in flight;
+            # only after the self-heal commit is it refused. Triggered and
+            # manual runs register the callback that marks the row failed if
+            # the restart cuts them off; continuous runs are reconciled at
+            # the next start instead.
+            continuous = is_continuous_context(trigger_context)
+            on_interrupt = None if continuous else functools.partial(
+                self._mark_failed_best_effort, execution_id)
+            ticket = run_activity.start_run(
+                "execution", execution_id, workflow=execution.registration_id,
+                continuous=continuous, on_interrupt=on_interrupt)
+            if ticket.refused is not None:
+                self._finish_failed(session, execution, error=ticket.refused)
+                return
+
             registration = session.get(
                 WorkflowRegistration, execution.registration_id
             )
+            if registration is not None:
+                run_activity.set_details(ticket, workflow_label="{0} v{1}".format(
+                    registration.workflow_id, registration.version))
             failure = self._preflight(registration)
             if failure is not None:
                 self._finish_failed(session, execution, error=failure)
@@ -1907,6 +1942,7 @@ class WorkflowExecutor:
             # pipeline asks Triton for a model it doesn't have and never
             # reaches PLAYING.
             self._resolve_model_names(document)
+            run_activity.set_details(ticket, models=self._document_models(document))
 
             # Triton readiness gate (cold-model-first-run-failure
             # Requirements 2.11-2.13, design.md Decisions 1-7). Runs HERE —
@@ -1929,6 +1965,12 @@ class WorkflowExecutor:
             if readiness_failure is not None:
                 self._finish_failed(session, execution,
                                     error=readiness_failure)
+                return
+            # A run that leaves its gate after a self-heal commit stops here,
+            # before its pipeline (triton-model-cleanup-wedge D7).
+            refused = run_activity.after_gate(ticket)
+            if refused is not None:
+                self._finish_failed(session, execution, error=refused)
                 return
 
             # The per-run artifact location: unique per execution so runs of
@@ -2484,6 +2526,7 @@ class WorkflowExecutor:
             if work_dir is not None:
                 shutil.rmtree(work_dir, ignore_errors=True)
             session.close()
+            run_activity.finish_run(ticket)
 
     # ------------------------------------------------------------------
     # Helpers

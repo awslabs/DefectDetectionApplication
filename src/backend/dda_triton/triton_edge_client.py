@@ -35,6 +35,7 @@ import threading
 import time
 from dda_triton.constants import TRITON_MODEL_DIR, TRITON_INSTALLATION_DIR
 from dda_triton.native_calls import TRITON_NATIVE_LOCK
+from dda_triton import load_tracker, model_locks
 import traceback
 
 # The native ListModels() binding is not safe to call concurrently: overlapping
@@ -63,9 +64,10 @@ class TritonEdgeClient:
         if hasattr(self, "triton_instance"):
             return
         self.triton_instance = None
-        self.create_server(
-            model_dir or TRITON_MODEL_DIR, installation_dir or TRITON_INSTALLATION_DIR
-        )
+        # The repository this client serves; its lock directory is shared with
+        # the host-side model scripts (dda_triton.model_locks.lock_dir_for).
+        self.model_dir = model_dir or TRITON_MODEL_DIR
+        self.create_server(self.model_dir, installation_dir or TRITON_INSTALLATION_DIR)
 
     def create_server(self, model_dir, installation_dir):
         try:
@@ -77,18 +79,21 @@ class TritonEdgeClient:
             logger.error(f"Failed to create triton_instance , error: {e}")
         return self.triton_instance
 
-    def _list_models_raw(self) -> str:
+    def _list_models_raw(self, quiet: bool = False) -> str:
         """Serialized, retried wrapper around the native ListModels() call.
 
         Returns the raw JSON index string; raises RuntimeError if Triton keeps
-        answering with an empty payload after the retries.
+        answering with an empty payload after the retries. ``quiet`` logs the
+        empty-answer retry line at DEBUG, for the callers that poll the index
+        (the load tracker every 2 s, the watchdog every 30 s).
         """
         for attempt in range(1, _LIST_MODELS_ATTEMPTS + 1):
             with self._list_models_lock:
                 raw = self.triton_instance.list_models()
             if raw and raw.strip():
                 return raw
-            logger.warning(
+            logger.log(
+                logging.DEBUG if quiet else logging.WARNING,
                 "Triton list_models() returned an empty response (attempt %d/%d)",
                 attempt,
                 _LIST_MODELS_ATTEMPTS,
@@ -127,6 +132,20 @@ class TritonEdgeClient:
             logger.error("Failed to list Triton models")
             raise e
 
+    def index_states(self):
+        """``{name: (state, reason)}`` from one native ListModels call.
+
+        Raises on failure and logs nothing above DEBUG itself, so a reader that
+        polls (the load tracker, the watchdog) stays quiet on an empty or
+        failing index.
+        """
+        index = json.loads(self._list_models_raw(quiet=True))
+        states = {}
+        for name, entry in index.items():
+            entry = entry if isinstance(entry, dict) else {}
+            states[name] = (entry.get("state", "UNKNOWN"), entry.get("reason"))
+        return states
+
     def get_model_description(self, model_id):
         try:
             with TRITON_NATIVE_LOCK:
@@ -145,9 +164,23 @@ class TritonEdgeClient:
             raise e
 
     def start_triton_model(self, model_id):
+        """Request a load of ``model_id``: the single Python load path.
+
+        The load holds the model's shared lock until it ends
+        (dda_triton.load_tracker); while a component Shutdown or a publish
+        holds the lock exclusive, ``ModelReleaseInProgress`` is raised and no
+        load is requested.
+        """
         try:
-            self.triton_instance.load_model(model_id)
+            load_tracker.request_load(
+                model_id,
+                self.triton_instance.load_model,
+                self.index_states,
+                lock_dir=model_locks.lock_dir_for(self.model_dir),
+            )
             return self.get_model_status(model_id)
+        except load_tracker.ModelReleaseInProgress:
+            raise
         except Exception as e:
             logger.error("Failed to start model")
             raise e

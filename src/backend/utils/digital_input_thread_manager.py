@@ -42,6 +42,7 @@ from resources.accessors.image_source_accessor import ImageSourceAccessor
 from utils.captured_images_utils import convert_captured_data_to_db
 from utils.common import DIOProcessHealthStatusEnum
 from utils import constants
+from utils import run_activity
 
 
 import logging
@@ -155,57 +156,67 @@ class DigitalInputThread(Thread):
             )
             return r.get("captureLocation")
 
-    def execute_workflow(self, latency_metrics, frame=None):
+    def execute_workflow(self, latency_metrics, frame=None, ticket=None):
         from utils.server_setup import inference_result_accessor
         """
         Function to handle workflow pipeline execution. This function is submitted to the thread pool.
+
+        ``ticket`` is the trigger's run-activity ticket (triton-model-cleanup-
+        wedge D7), registered on the DIO thread before the frame grab: the
+        work runs inside ``run_activity.bound(ticket)``, so the nested
+        ``run_pipeline`` registration is a no-op, and the ticket is finished
+        here, on the pool thread, when the work ends.
         """
         try:
-            inference_capture_id = ""
-            # Run inference if workflow configures a model
-            if self.workflow.get("featureConfigurations"):
-                with SessionLocal() as session:
-                    inference_capture_id, _ = self.gst_pipeline_executor.execute_workflow_pipeline(
-                        self.workflow, session, frame, latency_metrics=latency_metrics
-                    )
-                    with Timer(metric_name="InferenceResultStoringTime"):
-                        query = inference_results_utils.GetInferenceResults(
-                            self.workflow.get("workflowId"), None, 0, 1
-                        )
-                        inference_res = query.get_infer_res_with_capture_id(
-                            inference_capture_id, self.workflow.get("workflowOutputPath")
-                        )
-                        inference_res["captureType"] = INFERENCE
-                        db_inference_res = (
-                            inference_results_utils.convert_inference_res_to_save_in_db(
-                                inference_res, self.workflow
+            with run_activity.bound(ticket):
+                try:
+                    inference_capture_id = ""
+                    # Run inference if workflow configures a model
+                    if self.workflow.get("featureConfigurations"):
+                        with SessionLocal() as session:
+                            inference_capture_id, _ = self.gst_pipeline_executor.execute_workflow_pipeline(
+                                self.workflow, session, frame, latency_metrics=latency_metrics
                             )
-                        )
-                        inference_result_accessor.store_inference_result(session, db_inference_res)
+                            with Timer(metric_name="InferenceResultStoringTime"):
+                                query = inference_results_utils.GetInferenceResults(
+                                    self.workflow.get("workflowId"), None, 0, 1
+                                )
+                                inference_res = query.get_infer_res_with_capture_id(
+                                    inference_capture_id, self.workflow.get("workflowOutputPath")
+                                )
+                                inference_res["captureType"] = INFERENCE
+                                db_inference_res = (
+                                    inference_results_utils.convert_inference_res_to_save_in_db(
+                                        inference_res, self.workflow
+                                    )
+                                )
+                                inference_result_accessor.store_inference_result(session, db_inference_res)
 
-                    latency_metrics.commit_timestamps(session, inference_capture_id)
-            # Capture if workflow doesn't have a model
-            else:
-                with SessionLocal() as session:
-                    inference_capture_id = utils.generate_capture_id(
-                        self.workflow.get("workflowId")
-                    )
-                    captured_location = self.run_image_capture_pipeline(
-                        frame, prefix=inference_capture_id
-                    )
+                            latency_metrics.commit_timestamps(session, inference_capture_id)
+                    # Capture if workflow doesn't have a model
+                    else:
+                        with SessionLocal() as session:
+                            inference_capture_id = utils.generate_capture_id(
+                                self.workflow.get("workflowId")
+                            )
+                            captured_location = self.run_image_capture_pipeline(
+                                frame, prefix=inference_capture_id
+                            )
 
-                    captured_data = {
-                        "capturedLocation": captured_location,
-                        "captureTaskId": inference_capture_id,
-                    }
-                    db_captured_data = convert_captured_data_to_db(
-                        captured_data=captured_data, workflow_id=self.workflow.get("workflowId")
-                    )
-                    inference_result_accessor.store_captured_data(session, db_captured_data)
-            self.__update_health_status(DIOProcessHealthStatusEnum.RUNNING)
-        except Exception as err:
-            self.__update_health_status(DIOProcessHealthStatusEnum.ERROR, err)
-            logger.error(f"Inference failed for id {inference_capture_id} error: {err}.")
+                            captured_data = {
+                                "capturedLocation": captured_location,
+                                "captureTaskId": inference_capture_id,
+                            }
+                            db_captured_data = convert_captured_data_to_db(
+                                captured_data=captured_data, workflow_id=self.workflow.get("workflowId")
+                            )
+                            inference_result_accessor.store_captured_data(session, db_captured_data)
+                    self.__update_health_status(DIOProcessHealthStatusEnum.RUNNING)
+                except Exception as err:
+                    self.__update_health_status(DIOProcessHealthStatusEnum.ERROR, err)
+                    logger.error(f"Inference failed for id {inference_capture_id} error: {err}.")
+        finally:
+            run_activity.finish_run(ticket)
 
     def monitor_digital_input_events(self):
         """
@@ -227,6 +238,18 @@ class DigitalInputThread(Thread):
                     self.ready_event.clear()
             # Reduce cpu cycles by 50%. Sleep timer accuracy is 1 microsecond.
             time.sleep(self.polling_frequency)
+
+    def _configured_model_names(self):
+        """The workflow's configured ``modelName`` as a tuple (empty without
+        one), for the trigger's run-activity ticket."""
+        try:
+            configurations = self.workflow.get("featureConfigurations")
+            if not configurations:
+                return ()
+            model_name = (configurations[0] or {}).get("modelName")
+            return (model_name,) if model_name else ()
+        except Exception:  # noqa: BLE001 - instrumentation never fails a run
+            return ()
 
     def _get_image_source(self, workflow: Workflow):
         image_source_accessor = ImageSourceAccessor()
@@ -253,14 +276,32 @@ class DigitalInputThread(Thread):
         latency_metrics.add_timestamp(TRIGGER_TIMESTAMP)
 
         if self.future_in_progress is None or self.future_in_progress.done():
-            frame = None
-            self.image_source = self._get_image_source(self.workflow)
-            if self.image_source.get("type") == ImageSourceType.CAMERA:
-                camera_config = self._get_camera_config(self.image_source)
-                frame = get_camera_frame(self.camera_id, camera_config)
-                latency_metrics.add_timestamp(FRAME_CAPTURE_TIMESTAMP)
+            # Register the trigger as a run in flight before its frame grab,
+            # so a Triton self-heal never restarts the backend under it
+            # (triton-model-cleanup-wedge D7). Never waits; refused only
+            # while the backend is restarting: run_activity logs the INFO
+            # refusal line, nothing is captured or submitted, and the DIO
+            # health is not changed.
+            ticket = run_activity.start_run(
+                "pipeline", self.workflow_id, models=self._configured_model_names(),
+                workflow=self.workflow_id, bind=False)
+            if ticket.refused is None:
+                submitted = False
+                try:
+                    frame = None
+                    self.image_source = self._get_image_source(self.workflow)
+                    if self.image_source.get("type") == ImageSourceType.CAMERA:
+                        camera_config = self._get_camera_config(self.image_source)
+                        frame = get_camera_frame(self.camera_id, camera_config)
+                        latency_metrics.add_timestamp(FRAME_CAPTURE_TIMESTAMP)
 
-            self.future_in_progress = self.executor.submit(self.execute_workflow, latency_metrics, frame)
+                    self.future_in_progress = self.executor.submit(
+                        self.execute_workflow, latency_metrics, frame, ticket)
+                    submitted = True
+                finally:
+                    if not submitted:
+                        # The read, the grab or the submit raised.
+                        run_activity.finish_run(ticket)
 
         else:
             logger.error(f"Pipeline is full, unable to fulfill request, Increase latency")

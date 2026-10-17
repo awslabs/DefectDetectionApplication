@@ -66,6 +66,9 @@ import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from dda_logging.run_context import continuous_run
+# Workflow runs in flight, for the Triton self-heal (triton-model-cleanup-
+# wedge D7); standard library only.
+from utils import run_activity
 from workflow_engine.model_gate import STALL_AFTER_S, ModelGate, ModelWait
 from workflow_engine.stream_feed import (
     CONTINUOUS_SOURCE,
@@ -95,6 +98,9 @@ SUMMARY_INTERVAL_S = 60.0
 IDLE_POLL_S = 0.5
 #: How often the model gate is consulted, at most (Requirement 11.11).
 MODEL_POLL_S = 3.0
+#: Seconds between checks while a Triton self-heal quiesces or restarts the
+#: backend (triton-model-cleanup-wedge D7).
+QUIESCE_POLL_S = 1.0
 #: How often a stalled model wait is logged again.
 STALL_LOG_INTERVAL_S = 300.0
 
@@ -349,6 +355,13 @@ class ContinuousRunner:
             # cleared so the first tick after the wait is immediate.
             self._next_tick = None
             return MODEL_POLL_S
+        if run_activity.quiescing():
+            # A Triton self-heal is quiescing or restarting the backend: take
+            # no frame, insert no row and start no run. The schedule is
+            # cleared the same way, so the first tick after the quiesce ends
+            # is immediate (triton-model-cleanup-wedge D7).
+            self._next_tick = None
+            return QUIESCE_POLL_S
         if self._next_tick is None:
             self._next_tick = now
         if now < self._next_tick:
