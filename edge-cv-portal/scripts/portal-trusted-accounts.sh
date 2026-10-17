@@ -416,11 +416,15 @@ portal_trusted_accounts_label() {
 
 # portal_trusted_accounts_compare <region> <ids>
 #   Prints, indented, how <ids> differs from what each deployed portal stack
-#   grants: "matches the deployed stacks", or per stack "adds <ids>",
-#   "⚠️  <stack>: removes <ids>[; adds <ids>]" or "not compared (<reason>)".
-#   Prints nothing when EdgeCVPortalComputeStack is not deployed. Never fails.
+#   grants: "matches the deployed stacks", or per stack
+#   "⚠️  <stack>: removes <ids>[; adds <ids> (…)]",
+#   "⚠️  <stack>: adds <ids> (the portal may then assume their DDAPortalAccessRole)"
+#   or "not compared (<reason>)". An addition is flagged like a removal: it
+#   widens what the portal may do in that account. Prints nothing when
+#   EdgeCVPortalComputeStack is not deployed. Never fails.
 portal_trusted_accounts_compare() {
   local region="${1:-}" ids="${2:-}" stack rc adds removes lines=""
+  local adds_note=" (the portal may then assume their DDAPortalAccessRole)"
   for stack in $PORTAL_TRUSTED_STACKS; do
     rc=0
     _portal_trusted_stack_ids "$region" "$stack" 2>/dev/null || rc=$?
@@ -441,9 +445,9 @@ portal_trusted_accounts_compare() {
     adds="$(_portal_trusted_minus "$ids" "$_PT_IDS")"
     removes="$(_portal_trusted_minus "$_PT_IDS" "$ids")"
     if [ -n "$removes" ]; then
-      lines="${lines}  ⚠️  $stack: removes $removes${adds:+; adds $adds}"$'\n'
+      lines="${lines}  ⚠️  $stack: removes $removes${adds:+; adds $adds$adds_note}"$'\n'
     elif [ -n "$adds" ]; then
-      lines="${lines}  $stack: adds $adds"$'\n'
+      lines="${lines}  ⚠️  $stack: adds $adds$adds_note"$'\n'
     fi
   done
   if [ -z "$lines" ]; then
