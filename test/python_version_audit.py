@@ -68,7 +68,6 @@ SCOPED_ARTIFACTS = [
     "README.md",
     "README_main.md",
     "test/README.md",
-    "TEST_COVERAGE_PLAN.md",
 ]
 
 # ---------------------------------------------------------------------------
