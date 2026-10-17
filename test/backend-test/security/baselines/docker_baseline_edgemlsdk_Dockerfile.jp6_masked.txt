@@ -197,6 +197,7 @@ RUN . /tmp/build-env.sh && \
 # ── 14. Triton Inference Server ────────────────────────────────────────────
 COPY patches/edgeml-triton-server.diff /tmp/edgeml-triton-server.diff
 COPY patches/edgeml-triton-core.diff /tmp/edgeml-triton-core.diff
+COPY patches/edgeml-triton-python-backend.diff /tmp/edgeml-triton-python-backend.diff
 RUN . /tmp/build-env.sh && \
     cd /dependencies && \
     git clone https://github.com/triton-inference-server/server.git && \
@@ -206,7 +207,11 @@ RUN . /tmp/build-env.sh && \
     export PYBIND11_FINDPYTHON=ON && \
     export MAKEFLAGS="-j$JOBS" && \
     git apply edgeml-triton-server.diff && \
+    git clone --single-branch --depth=1 -b r24.04 https://github.com/triton-inference-server/python_backend.git build/python && \
+    git -C build/python apply /tmp/edgeml-triton-python-backend.diff && \
+    grep -q "initialization_timeout_ms = 10000" build/python/src/stub_launcher.cc && \
     python3.11 build.py --enable-logging --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
+        --no-force-clone \
         --build-parallel $TRITON_PARALLEL \
         --extra-core-cmake-arg=TRITON_ENABLE_ENSEMBLE=ON \
         --extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON \
@@ -221,6 +226,7 @@ RUN . /tmp/build-env.sh && \
         --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/include/python3.11 \
         --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.11 \
         --backend python --build-dir=$(pwd)/build && \
+    grep -a -q "Waiting for the stub health monitoring thread to start" build/python/install/backends/python/libtriton_python.so && \
     mv build/python/install/backends/python build/tritonserver/install/backends && \
     cp -a build/tritonserver/install/backends/python build/python/install/backends/python && \
     cd build/opt/ && \

@@ -321,6 +321,7 @@ RUN cd /dependencies && \
 # copy server diff and core diff
 COPY patches/edgeml-triton-server.diff /dependencies/server/edgeml-triton-server.diff
 COPY patches/edgeml-triton-core.diff /dependencies/server/edgeml-triton-core.diff
+COPY patches/edgeml-triton-python-backend.diff /dependencies/server/edgeml-triton-python-backend.diff
 #b64-dev required for triton metrics
 RUN apt-get install libb64-dev -y
 # Apply server patch, internally the server patch applies core patch, build triton.
@@ -348,7 +349,11 @@ RUN if [ "$OS" = "18.04" ]; then \
 RUN    export PYBIND11_FINDPYTHON=ON && \
     cd /dependencies/server && \ 
     git apply edgeml-triton-server.diff && \
+    git clone --single-branch --depth=1 -b r24.04 https://github.com/triton-inference-server/python_backend.git build/python && \
+    git -C build/python apply /dependencies/server/edgeml-triton-python-backend.diff && \
+    grep -q "initialization_timeout_ms = 10000" build/python/src/stub_launcher.cc && \
     python3.11 build.py --enable-logging  --enable-stats --enable-metrics --enable-cpu-metrics --no-container-build \
+    --no-force-clone \
     --extra-core-cmake-arg=TRITON_ENABLE_ENSEMBLE=ON \
     --extra-core-cmake-arg=PYBIND11_FINDPYTHON=ON \
     --extra-core-cmake-arg=-DPYBIND11_FINDPYTHON=ON \
@@ -361,6 +366,7 @@ RUN    export PYBIND11_FINDPYTHON=ON && \
     --extra-core-cmake-arg=-DPYTHON_INCLUDE_DIR=/usr/local/include/python3.11 \
     --extra-core-cmake-arg=PYBIND11_PYTHON_VERSION=3.11 \
     --backend python --build-dir=`pwd`/build
+RUN grep -a -q "Waiting for the stub health monitoring thread to start" /dependencies/server/build/python/install/backends/python/libtriton_python.so
 RUN mv /dependencies/server/build/python/install/backends/python /dependencies/server/build/tritonserver/install/backends
 
 RUN cd /dependencies/server/build/opt/ \
