@@ -201,28 +201,80 @@ These are automatically shared when you create a UseCase in the portal. The UseC
 
 #### 3.2 Create Portal Admin User
 
+Self sign-up is off, so you create the first PortalAdmin by hand with the AWS CLI, using credentials for the portal account. Two things make it a working admin:
+
+- **Its global row in the Portal_Identity registry**, the DynamoDB table `dda-portal-user-roles`. This row is what grants PortalAdmin, whether `PORTAL_REGISTRY_ENFORCED` is off (the fresh-install default) or on.
+- **The `custom:role=PortalAdmin` attribute.** The portal UI reads it to decide which pages to show; without it the admin gets a Viewer UI with no User Manager and none of the Builds, Build Fleet, or Settings pages that Step 4 uses. With enforcement on it grants nothing. Never grant or change a role by editing `custom:role` (for example with `admin-update-user-attributes`); use the User Manager.
+
+Registry background: [ADMIN_GUIDE.md, "Create Admin User"](edge-cv-portal/ADMIN_GUIDE.md#create-admin-user).
+
+Replace `<REGION>`, `<ADMIN_EMAIL>`, and `<YOUR_SECURE_PASSWORD>`, then run:
+
 ```bash
+# The region you deployed the portal to (deploy-infrastructure.sh printed it as "Region:")
+REGION="<REGION>"
+# A mailbox you control: password recovery is email-only
+ADMIN_EMAIL="<ADMIN_EMAIL>"
+
 # Get User Pool ID from CDK output (or use the value from config.json)
 USER_POOL_ID=$(aws cloudformation describe-stacks \
   --stack-name EdgeCVPortalAuthStack \
   --query 'Stacks[0].Outputs[?OutputKey==`AuthConfig`].OutputValue' \
-  --output text --region us-east-2 | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
+  --output text --region "$REGION" | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
 
+# 1. Create the account. The username can't be an email address (email is a sign-in alias).
+aws cognito-idp admin-create-user \
+  --user-pool-id "$USER_POOL_ID" \
+  --username admin \
+  --user-attributes \
+    Name=email,Value="$ADMIN_EMAIL" \
+    Name=email_verified,Value=true \
+    Name=given_name,Value=Portal \
+    Name=family_name,Value=Admin \
+    Name=custom:role,Value=PortalAdmin \
+  --message-action SUPPRESS \
+  --region "$REGION"
 
-
+# 2. Set a permanent password: 12+ characters with upper and lower case, a digit and a symbol.
+#    Keep the single quotes.
 aws cognito-idp admin-set-user-password \
-  --user-pool-id $USER_POOL_ID \
+  --user-pool-id "$USER_POOL_ID" \
   --username admin \
-  --password <YOUR_SECURE_PASSWORD> \
+  --password '<YOUR_SECURE_PASSWORD>' \
   --permanent \
-  --region $REGION
+  --region "$REGION"
 
-aws cognito-idp admin-update-user-attributes \
-  --user-pool-id $USER_POOL_ID \
+# 3. Grant PortalAdmin: write the account's global row in the Portal_Identity registry
+USER_SUB=$(aws cognito-idp admin-get-user \
+  --user-pool-id "$USER_POOL_ID" \
   --username admin \
-  --user-attributes Name=custom:role,Value=PortalAdmin \
-  --region $REGION
+  --query 'UserAttributes[?Name==`sub`].Value' \
+  --output text --region "$REGION")
+
+aws dynamodb put-item \
+  --table-name dda-portal-user-roles \
+  --region "$REGION" \
+  --item "{
+    \"user_id\":     {\"S\": \"$USER_SUB\"},
+    \"usecase_id\":  {\"S\": \"global\"},
+    \"role\":        {\"S\": \"PortalAdmin\"},
+    \"status\":      {\"S\": \"enabled\"},
+    \"username\":    {\"S\": \"admin\"},
+    \"email\":       {\"S\": \"$ADMIN_EMAIL\"},
+    \"assigned_by\": {\"S\": \"bootstrap\"},
+    \"assigned_at\": {\"N\": \"$(date +%s)\"}
+  }"
+
+# 4. Check the row: role should be PortalAdmin and status enabled
+aws dynamodb get-item \
+  --table-name dda-portal-user-roles \
+  --key "{\"user_id\": {\"S\": \"$USER_SUB\"}, \"usecase_id\": {\"S\": \"global\"}}" \
+  --region "$REGION"
 ```
+
+Authorization reads only `user_id` (the account's Cognito `sub`), `usecase_id` (`global`), `role` (exactly `PortalAdmin`), and, with enforcement on, `status` (`enabled`; any other value denies). The other attributes are the ones the User Manager also writes, for display and attribution; `assigned_at` is in epoch seconds.
+
+Sign in at the portal URL that `./deploy-frontend.sh` printed in Step 2 (the `FrontendUrl` output of `EdgeCVPortalFrontendStack`) with username `admin` and the password you set. Open the user menu (top right) and choose **User Manager**: the **Accounts** table lists the pool's accounts, including `admin`. Create every other account there with **Create user**, which writes both the Cognito account and its registry row.
 
 ### Step 4: Build the DDA LocalServer Component (Build Fleet)
 
