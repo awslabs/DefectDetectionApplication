@@ -85,6 +85,52 @@ if [ "$ENFORCED_ON" != "true" ]; then
   echo "⚠️  Portal_Identity enforcement is OFF for this deploy. Production deployments must run PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh after backfill_portal_registry.py has been run." >&2
 fi
 
+# Trusted UseCase account list, for visibility only. bin/app.ts synthesizes the
+# portal stacks with the first of CDK context trustedUseCaseAccountIds,
+# TRUSTED_USECASE_ACCOUNT_IDS and SSM /dda-portal/trusted-usecase-account-ids;
+# this script passes no list of its own. Print that list and how it differs
+# from what the deployed stacks grant (scripts/portal-trusted-accounts.sh), so
+# a deploy that drops or adds an account is never silent. It never changes the
+# list (no fallback to the deployed list) and never stops the deploy: it is
+# called with `|| true`, so errexit is off inside it. Under deploy-portal.sh,
+# which compared this list before its first step and exports
+# PORTAL_TRUSTED_ACCOUNTS_COMPARED, the comparison is not printed again.
+show_trusted_accounts() {
+  local helper="$SCRIPT_DIR/scripts/portal-trusted-accounts.sh" err="" resolved kind ids reason=""
+  if [ ! -f "$helper" ]; then
+    echo "Trusted UseCase accounts: not compared (scripts/portal-trusted-accounts.sh is missing)"
+    return 0
+  fi
+  # shellcheck source=scripts/portal-trusted-accounts.sh
+  . "$helper"
+  err="$(mktemp "${TMPDIR:-/tmp}/portal-trusted.XXXXXX" 2>/dev/null)" || err=""
+  if ! resolved="$(portal_trusted_accounts_resolve "$AWS_REGION" 2>"${err:-/dev/null}")"; then
+    [ -z "$err" ] || reason="$(sed -n '1{s/^❌ *//;p;}' "$err")"
+    [ -z "$err" ] || rm -f "$err"
+    echo "⚠️  Trusted UseCase accounts: not compared with the deployed stacks: ${reason:-the list could not be read}"
+    return 0
+  fi
+  [ -z "$err" ] || rm -f "$err"
+  case "$resolved" in
+    context:*|"env "*|"ssm "*) ;;
+    *)
+      # "deployed" or "none": nothing is configured, so the CDK app has no list.
+      echo "Trusted UseCase accounts: none configured (CDK context trustedUseCaseAccountIds, TRUSTED_USECASE_ACCOUNT_IDS or SSM $PORTAL_TRUSTED_SSM_PARAMETER); the CDK app needs one"
+      return 0
+      ;;
+  esac
+  kind="${resolved%% *}"
+  ids="${resolved#* }"
+  echo "Trusted UseCase accounts: $ids ($(portal_trusted_accounts_label "$kind"))"
+  if [ "${PORTAL_TRUSTED_ACCOUNTS_COMPARED:-}" = "$ids" ]; then
+    echo "  compared with the deployed stacks by deploy-portal.sh before its first step"
+  else
+    portal_trusted_accounts_compare "$AWS_REGION" "$ids"
+  fi
+  return 0
+}
+show_trusted_accounts || true
+
 # The project-local CLI (devDependency aws-cdk, installed by `npm ci` above):
 # aws-cdk-lib emits a cloud-assembly schema that an older global `cdk` on
 # PATH cannot read ("Cloud assembly schema version mismatch").

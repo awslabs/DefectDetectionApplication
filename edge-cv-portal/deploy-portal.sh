@@ -571,7 +571,9 @@ check_prerequisites() {
 # comparison with the deployed stacks are printed and kept in
 # TRUSTED_ACCOUNTS_REPORT for the Deployment_Log, including a failed store's
 # error, written through the same redaction filter as the step output; the
-# summary shows the list.
+# summary shows the list. A list compared here (CDK context, the variable or
+# the SSM parameter) is exported as PORTAL_TRUSTED_ACCOUNTS_COMPARED, so the
+# infrastructure step does not print the same comparison again.
 # Returns non-zero, before anything is changed, when the list cannot be
 # determined.
 TRUSTED_ACCOUNTS=""
@@ -630,6 +632,12 @@ resolve_trusted_accounts() {
         deployed)
             details="  To let deploy-auth.sh and deploy-infrastructure.sh run on their own, store it: aws ssm put-parameter --name $PORTAL_TRUSTED_SSM_PARAMETER --type String --value $ids --region ${REGION:-<region>}"
             ;;
+    esac
+
+    # deploy-infrastructure.sh compares the list it deploys too; tell it this
+    # list was compared here, so its step does not print the same lines again.
+    case "$kind" in
+        env|ssm|context:*) export PORTAL_TRUSTED_ACCOUNTS_COMPARED="$ids" ;;
     esac
 
     report="Trusted UseCase accounts: $ids"$'\n'"  source: $label"
