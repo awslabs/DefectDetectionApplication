@@ -10,6 +10,8 @@
 # must resolve to the stubs. Stack templates are the hand-written fixtures in
 # fixtures/trusted-accounts/.
 
+# stderr is set by bats' `run --separate-stderr`.
+# shellcheck disable=SC2154
 bats_require_minimum_version 1.5.0
 
 load test_helper

@@ -356,11 +356,15 @@ seed_frontend_stack_outputs() {
   set_cfn_output EdgeCVPortalComputeStack ApiUrl https://api.example.invalid/v1/
 }
 
-# Exact compare-line pieces (scripts/portal-trusted-accounts.sh)
+# Exact compare-line pieces (scripts/portal-trusted-accounts.sh), used by the
+# .bats files that load this helper.
+# shellcheck disable=SC2034
 PT_WARN='⚠️'
+# shellcheck disable=SC2034
 PT_ADDS_NOTE=' (the portal may then assume their DDAPortalAccessRole)'
 
 # output_has_line <text> -> one line of the last `run` output is exactly <text>
+# shellcheck disable=SC2154  # lines: set by bats' run
 output_has_line() { local l; for l in "${lines[@]}"; do [ "$l" = "$1" ] && return 0; done; return 1; }
 # log_has_line <text> / log_line_of <fixed text>   ($PORTAL_SANDBOX/deploy.log)
 log_has_line() { grep -qxF -- "$1" "$PORTAL_SANDBOX/deploy.log"; }
