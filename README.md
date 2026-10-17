@@ -206,7 +206,7 @@ Self sign-up is off, so you create the first PortalAdmin by hand with the AWS CL
 - **Its global row in the Portal_Identity registry**, the DynamoDB table `dda-portal-user-roles`. This row is what grants PortalAdmin, whether `PORTAL_REGISTRY_ENFORCED` is off (the fresh-install default) or on.
 - **The `custom:role=PortalAdmin` attribute.** The portal UI reads it to decide which pages to show; without it the admin gets a Viewer UI with no User Manager and none of the Builds, Build Fleet, or Settings pages that Step 4 uses. With enforcement on it grants nothing. Never grant or change a role by editing `custom:role` (for example with `admin-update-user-attributes`); use the User Manager.
 
-Registry background: [ADMIN_GUIDE.md, "Create Admin User"](edge-cv-portal/ADMIN_GUIDE.md#create-admin-user).
+Registry background: [ADMIN_GUIDE.md, "Portal Users and Privilege (Portal_Identity Registry)"](edge-cv-portal/ADMIN_GUIDE.md#portal-users-and-privilege-portal_identity-registry).
 
 Replace `<REGION>`, `<ADMIN_EMAIL>`, and `<YOUR_SECURE_PASSWORD>`, then run:
 
@@ -236,7 +236,8 @@ aws cognito-idp admin-create-user \
   --region "$REGION"
 
 # 2. Set a permanent password: 12+ characters with upper and lower case, a digit and a symbol.
-#    Keep the single quotes.
+#    Keep the single quotes, and pick a password without a single quote (') in it,
+#    because a single quote would end the quoted string.
 aws cognito-idp admin-set-user-password \
   --user-pool-id "$USER_POOL_ID" \
   --username admin \
