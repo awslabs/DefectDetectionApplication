@@ -199,6 +199,23 @@ models' loads SHALL proceed. This SHALL be delivered by backporting
 python_backend r25.08's bounded wait as a patch in the edgemlsdk build, without
 upgrading Triton.
 
+> **Deviation (device verification, 2026-10-16).** Criterion 2.4 is
+> **partially met** on JP5 (the MIC-730, LocalServer arm64JP5 1.0.56), agreed
+> with the owner.
+>
+> - Verified: each stub start is bounded at 10 s, and the patched
+>   `libtriton_python.so` is in the image (both sentinel strings present).
+> - Not met: when `base_<model>/<v>/model.py` is missing, the load relaunches
+>   the stub about every 10 s inside one load call (43 relaunches in 7.5 min).
+>   The model stays `LOADING` instead of going `UNAVAILABLE`, and other
+>   models' loads requested meanwhile stay blocked.
+> - Mitigations observed: self-heal, on by default, restarts the backend after
+>   15 min of such a loop (2.5, 2.6); restoring `model.py` makes the same load
+>   reach `READY` in 32-79 s.
+>
+> The relaunch loop is carried by the `triton-python-stub-relaunch-loop` spec
+> (`.kiro/specs/triton-python-stub-relaunch-loop/bugfix.md`).
+
 2.5 WHEN a model has been `LOADING` for at least 15 min, there is positive wedge
 evidence (its repository entries are missing or changed after its load
 request, or Triton's model index has not changed for 15 min), and no load shows
@@ -525,7 +542,7 @@ says how to restart the backend by hand.
 
 | Switch | How | Takes effect |
 |---|---|---|
-| LocalServer configuration `ModelLoadSelfHealEnabled` | The recipes ship `"true"`, and a missing key also means on. To opt one device out, merge `{"ModelLoadSelfHealEnabled": "false"}` into that device's LocalServer configuration, preferably in the device's deployment (a configuration update, `merge`, of the LocalServer component) so it persists with the deployment. For a test on the device: `sudo /aws_dda/greengrass/v2/bin/greengrass-cli deployment create --update-config '{"<LocalServer component name>": {"MERGE": {"ModelLoadSelfHealEnabled": "false"}}}'`. To opt back in, merge `"true"`, or reset the key with `{"<LocalServer component name>": {"RESET": ["/ModelLoadSelfHealEnabled"]}}`. Accepted values: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`, `enabled`/`disabled`. Any other value means off and logs a WARNING. If the configuration cannot be read, the last value read successfully applies; until a read succeeds after a backend start, self-heal stays off. | Opting out: at the next action at the latest, because the key is read again when an attempt starts and once more immediately before its point of no return. Opting back in: within 5 min. Reported state: within 5 min. No restart needed. |
+| LocalServer configuration `ModelLoadSelfHealEnabled` | The recipes ship `"true"`, and a missing key also means on. To opt one device out, merge `{"ModelLoadSelfHealEnabled": "false"}` into that device's LocalServer configuration through the device's cloud deployment: revise the deployment that targets the device (or its thing group) with a configuration update of the LocalServer component, `{"merge": "{\"ModelLoadSelfHealEnabled\":\"false\"}"}`, keeping every other component and configuration update. This is the supported opt-out for a LocalServer deployed from a thing or thing group, and it persists with the deployment. A local `sudo /aws_dda/greengrass/v2/bin/greengrass-cli deployment create --update-config '{"<LocalServer component name>": {"MERGE": {"ModelLoadSelfHealEnabled": "false"}}}'` does **not** opt such a device out: the local deployment reports SUCCEEDED, but the cloud deployment owns the component's configuration, and the effective value stays unchanged (verified on the MIC-730, 2026-10-16). The local form only works for a LocalServer that was deployed locally. To opt back in, merge `"true"`, or reset the key in the same cloud deployment with a configuration update `{"reset": ["/ModelLoadSelfHealEnabled"]}`. Accepted values: `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`, `enabled`/`disabled`. Any other value means off and logs a WARNING. If the configuration cannot be read, the last value read successfully applies; until a read succeeds after a backend start, self-heal stays off. | Opting out: at the next action at the latest, because the key is read again when an attempt starts and once more immediately before its point of no return. Opting back in: within 5 min. Reported state: within 5 min. No restart needed. |
 | Device file `/aws_dda/dda_triton/model_status/self-heal.disabled` | `sudo touch` it to turn self-heal off whatever the configuration says (it needs no Greengrass access); delete it to return to the configuration | At the next decision (within 30 s). It also stops an attempt that is already quiescing, up to the attempt's point of no return, which comes at most about 85 s after the `SELF-HEAL quiescing` line and never more than 120 s after it. From that point the restart is unconditional, and the `SELF-HEAL:` ERROR line follows within a second. |
 
 The attempt history lives in
@@ -636,3 +653,9 @@ delayed.
   WARNING and can stay `pending` or `running`; the Operator notes say that
   digital-input workflows fail their first trigger after a self-heal restart
   until their model is READY, and how to avoid it.
+- **2026-10-16** — after the JP5 device verification: 2.4 carries a deviation
+  record (partially met; the stub relaunch loop moves to the
+  `triton-python-stub-relaunch-loop` spec); the Operator notes name the cloud
+  configuration merge as the supported opt-out, because a local
+  `greengrass-cli` merge does not change a cloud-deployed LocalServer's
+  configuration.

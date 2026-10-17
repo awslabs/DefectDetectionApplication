@@ -159,8 +159,8 @@ Run from the worktree root unless noted.
 
 ## Tasks
 
-- [ ] 1. Spec documents (docs only)
-  - [ ] 1.1 Apply the nine NITs of the approved design review to `bugfix.md` and `design.md`.
+- [x] 1. Spec documents (docs only)
+  - [x] 1.1 Apply the nine NITs of the approved design review to `bugfix.md` and `design.md`.
     - Finding 1: D2 "Imports" and the Error Handling row. A failed `repo_entries` import skips the
       sweep and uses the unstamped trash name. In the fallback path, "terminal" means neither `LOADING`
       nor `UNLOADING`. Add the `test_cleanup_release.py` case to the Testing Strategy.
@@ -181,12 +181,12 @@ Run from the worktree root unless noted.
     - Add a revision-history entry to both documents.
     - Files: `.kiro/specs/triton-model-cleanup-wedge/bugfix.md`, `.kiro/specs/triton-model-cleanup-wedge/design.md`
     - Verify: re-read each finding against its edit; the hygiene check over both files reports nothing.
-  - [ ] 1.2 Add the D12 notes: the "Follow-up (2026-10-15)" section of
+  - [x] 1.2 Add the D12 notes: the "Follow-up (2026-10-15)" section of
     `triton-model-load-race/bugfix.md`, and the revision-history bullet of
     `cold-model-first-run-failure/bugfix.md`, both verbatim from D12.
     - Files: `.kiro/specs/triton-model-load-race/bugfix.md`, `.kiro/specs/cold-model-first-run-failure/bugfix.md`
     - Verify: `git diff` of each file shows only the appended text.
-  - [ ] 1.3 Write the follow-up spec `localserver-config-live-update`. It is documents only and is
+  - [x] 1.3 Write the follow-up spec `localserver-config-live-update`. It is documents only and is
     **not implemented in this run**.
     - **requirements.md** (EARS, in the repo's requirements format):
       - an inventory of every LocalServer configuration key, classified as read live or startup-only,
@@ -213,7 +213,7 @@ Run from the worktree root unless noted.
     - Files: `.kiro/specs/localserver-config-live-update/{requirements.md,design.md,tasks.md,.config.kiro}`
     - Verify: every key the inventory names has a file reference that `grep -n` confirms; the hygiene
       check passes.
-  - [ ] 1.4 Make two docs-only commits.
+  - [x] 1.4 Make two docs-only commits.
     - **Commit A:** `docs(spec): add the triton-model-cleanup-wedge bugfix spec`, with `bugfix.md`,
       `design.md`, `tasks.md` and `.config.kiro` of this spec plus the two task 1.2 files.
     - **Commit B:** `docs(spec): add the localserver-config-live-update spec`, with the four task 1.3
@@ -222,8 +222,8 @@ Run from the worktree root unless noted.
     - Verify: `git show --stat HEAD~1 HEAD` lists exactly those files; the hygiene check passes for
       each commit and message; `git status --short` shows no staged leftovers.
 
-- [ ] 2. Baseline and exploration (before any code change)
-  - [ ] 2.1 Record the preservation baseline from the base commit.
+- [x] 2. Baseline and exploration (before any code change)
+  - [x] 2.1 Record the preservation baseline from the base commit.
     - `git archive cc35b92a` into a scratch directory.
     - In that tree, run every suite named in design.md "Preservation checking", host and in-image.
     - Record per suite: the exact command that runs it, pass/skip/fail counts, failing ids and the
@@ -232,7 +232,7 @@ Run from the worktree root unless noted.
     - Files: none in the repository (evidence directory only).
     - Verify: each suite has a recorded command, counts and a failing-id list.
     - _Requirements: 3.1-3.14_
-  - [ ] 2.2 Write the exploration tests. Each **must FAIL on unfixed code**; record the counterexample
+  - [x] 2.2 Write the exploration tests. Each **must FAIL on unfixed code**; record the counterexample
     or failure for each.
     - Property 1: `test_exploration_cleanup_under_load.py`
     - Property 4: `test_exploration_run_gate_kick.py`
@@ -243,8 +243,8 @@ Run from the worktree root unless noted.
       table gives.
     - _Requirements: 1.1, 1.3, 1.4, 1.9, 2.1, 2.3, 2.7, 2.8_
 
-- [ ] 3. F1, the per-run gate, F3 and F5b
-  - [ ] 3.1 Add the host-shared modules. They use the standard library only, and must run on
+- [x] 3. F1, the per-run gate, F3 and F5b
+  - [x] 3.1 Add the host-shared modules. They use the standard library only, and must run on
     Python 3.8.
     - `model_locks.py` (D1 lock contract).
     - `repo_entries.py` (D4):
@@ -256,7 +256,7 @@ Run from the worktree root unless noted.
       oracle against the pre-change `_file_state` body), record cases in `test_startup_outcome_record.py`.
     - Verify: host-suite run of the three test files passes; the Python 3.8 run of them passes.
     - _Requirements: 2.1, 2.2, 2.3, 2.7, 3.14_
-  - [ ] 3.2 Add the load tracker and the single load path (D1).
+  - [x] 3.2 Add the load tracker and the single load path (D1).
     - `load_tracker.py`: `request_load`, `requested_at`, `inflight`, `ensure_tracker_thread`,
       `ModelReleaseInProgress`. Passes are contained.
     - `TritonEdgeClient`:
@@ -274,7 +274,7 @@ Run from the worktree root unless noted.
     - Verify: host-suite run of `test_load_tracker.py` passes; in-image
       `test/backend-test/utils/test_feature_configs_utils.py` passes at its baseline.
     - _Requirements: 2.2, 3.4, 3.10; Properties 2, 3_
-  - [ ] 3.3 Change the gates (D1, D4).
+  - [x] 3.3 Change the gates (D1, D4).
     - `ModelGate._file_state` delegates to `repo_entries`, reading `QUIET_PERIOD_S` at call time.
     - `_load` returns False on `ModelReleaseInProgress`, and `_maybe_load_unknown` then discards the
       model from `_load_requested`.
@@ -288,7 +288,7 @@ Run from the worktree root unless noted.
     - Verify: `test_exploration_run_gate_kick.py` now passes;
       `workflow_engine/test_workflow_continuous_model_gate.py` and the cold-model suites pass unchanged.
     - _Requirements: 2.2, 2.3, 3.9; Property 4_
-  - [ ] 3.4 Rewrite the cleanup around `release_model` (D2, finding 1).
+  - [x] 3.4 Rewrite the cleanup around `release_model` (D2, finding 1).
     - It keeps the CLI and the existing log lines.
     - Every HTTP call has a 10 s timeout.
     - The exclusive lock, the unload of a READY model, rename-to-trash under the lock, and the delete
@@ -300,7 +300,7 @@ Run from the worktree root unless noted.
     - Verify: `test_exploration_cleanup_under_load.py` now passes; `test_cleanup_release.py` passes on
       the host and under Python 3.8.
     - _Requirements: 2.1, 2.2, 3.1, 3.14; Property 1_
-  - [ ] 3.5 Change the convertor (D5, D9).
+  - [x] 3.5 Change the convertor (D5, D9).
     - Install the SIGTERM handler first.
     - Validate `--model_name`.
     - `start_model_detailed` with `StartOutcome`, the `observer` on `_wait_for_model_ready`, and
@@ -319,7 +319,7 @@ Run from the worktree root unless noted.
         unchanged;
       - the Python 3.8 run passes.
     - _Requirements: 2.7, 2.8, 3.2, 3.3, 3.14; Properties 5, 9_
-  - [ ] 3.6 Seed and update the harnesses.
+  - [x] 3.6 Seed and update the harnesses.
     - Add the three host-shared modules to `files_to_copy_to_dda_triton`.
     - Update `EXPECTED_DDA_TRITON_COPIES` and the three `SRC_AUX_DDA_TRITON` lists.
     - `test_eml_triton.py`, `test_triton_edge_client.py` and any other `dda_triton` test that publishes
@@ -329,20 +329,20 @@ Run from the worktree root unless noted.
     - Verify: in-image `test/backend-test/dda_triton` passes at its baseline; no `locks/` directory is
       left in the tree.
     - _Requirements: 3.2_
-  - [ ] 3.7 Checkpoint.
+  - [x] 3.7 Checkpoint.
     - Every task-3 test passes. The task 2.2 exploration tests pass.
     - The task 2.1 suites show no new failing id (`comm -13` on the sorted id lists), and the Python 3.8
       run passes.
     - Save `git diff` plus the new files as a snapshot in the evidence directory. No commit.
     - Verify: the comparison output is empty.
 
-- [ ] 4. F4: detection, self-heal on by default, run activity, surfaces
-  - [ ] 4.1 Exploration (Property 6): `test_exploration_wedge_report.py` **must FAIL on unfixed code**,
+- [x] 4. F4: detection, self-heal on by default, run activity, surfaces
+  - [x] 4.1 Exploration (Property 6): `test_exploration_wedge_report.py` **must FAIL on unfixed code**,
     because `loadHealth` is absent.
     - Files: `test/backend-test/triton_cleanup_wedge/test_exploration_wedge_report.py`
     - Verify: the host run fails for that reason.
     - _Requirements: 2.5_
-  - [ ] 4.2 Add `run_activity` (D7).
+  - [x] 4.2 Add `run_activity` (D7).
     - The IDLE/QUIESCING/RESTARTING table, the `QUIESCE_MAX_S` expiry, and the `ContextVar` ticket with
       `bind` and `bound`.
     - Refused tickets are no-ops (finding 3).
@@ -352,7 +352,7 @@ Run from the worktree root unless noted.
     - Files: `src/backend/utils/run_activity.py`; test `test_run_activity.py`.
     - Verify: `test_run_activity.py` passes (Property 8 cases, the 100 ms run stream, no hold).
     - _Requirements: 2.6, 3.5; Property 8_
-  - [ ] 4.3 Wire the registration points (D7).
+  - [x] 4.3 Wire the registration points (D7).
     - `PipelineExecutor.execute`: `start_run` after the pending check, with `on_interrupt` for
       triggered and manual runs; `set_details` twice; `after_gate`; `finish_run` in the `finally`.
     - The classic run: 503 on a refusal at registration and after the gate; `finish_run` in a `finally`.
@@ -374,7 +374,7 @@ Run from the worktree root unless noted.
       - `workflow_engine` and `csi_nvargus_optional` show no new failing id;
       - `test_cold_model_classic_path.py` passes.
     - _Requirements: 2.6, 3.5; Properties 8, 15_
-  - [ ] 4.4 Add watchdog detection (D6).
+  - [x] 4.4 Add watchdog detection (D6).
     - The tick, steps 1-9. The `since(m)` sightings.
     - The `/proc` stub-CPU sampler, and the Jetson GPU devfreq sampler.
     - The pure `evaluate_wedge`.
@@ -384,7 +384,7 @@ Run from the worktree root unless noted.
     - Files: `src/backend/dda_triton/load_watchdog.py`; test `test_load_watchdog_detection.py`.
     - Verify: it passes, including the Property 6 Hypothesis case and the wall-clock-jump case.
     - _Requirements: 2.5, 3.10, 3.11; Property 6_
-  - [ ] 4.5 Add self-heal (D7).
+  - [x] 4.5 Add self-heal (D7).
     - The switch reader: one module-level reader, the `StreamShadowName` success rule, the 60 s retry
       delay, the kill file.
     - `parse_self_heal_switch` and `decide_self_heal` (rules 1-9).
@@ -395,7 +395,7 @@ Run from the worktree root unless noted.
     - Verify: it passes, including the Property 7 Hypothesis timeline and every "way out before the
       commit" case.
     - _Requirements: 2.6; Property 7_
-  - [ ] 4.6 Wire the surfaces (D8, D4).
+  - [x] 4.6 Wire the surfaces (D8, D4).
     - `model_annotations`, `build_model_status_snapshot`, `self_heal_document`, the size ladder and the
       size-rejection retirement.
     - `get_features_triton` merges the annotations and appends record-backed `UNKNOWN` entries.
@@ -417,16 +417,16 @@ Run from the worktree root unless noted.
       - the guard suite is green;
       - `test_py310_compat.py` passes.
     - _Requirements: 2.5, 2.6, 2.7, 3.4, 3.8, 3.11; Properties 12, 16_
-  - [ ] 4.7 Checkpoint. As in 3.7, over every suite, and the snapshot is updated. No commit.
+  - [x] 4.7 Checkpoint. As in 3.7, over every suite, and the snapshot is updated. No commit.
     - Verify: no new failing id against the task 2.1 baseline.
 
-- [ ] 5. F2 and F5a (build inputs)
-  - [ ] 5.1 Exploration (Properties 10, 11): `test_exploration_python_backend_patch.py` and
+- [x] 5. F2 and F5a (build inputs)
+  - [x] 5.1 Exploration (Properties 10, 11): `test_exploration_python_backend_patch.py` and
     `test_exploration_cli_dependency.py` **must FAIL on unfixed code**.
     - Files: `test/backend-test/triton_cleanup_wedge/test_exploration_{python_backend_patch,cli_dependency}.py`
     - Verify: both fail, because the patch is absent and the dependency type is missing (HARD).
     - _Requirements: 2.4, 2.9_
-  - [ ] 5.2 Generate the patch and edit the Dockerfiles (D3).
+  - [x] 5.2 Generate the patch and edit the Dockerfiles (D3).
     - Regenerate the patch with D3's full-clone recipe: 2 files, 10 hunks, +53/-13.
     - `git apply --check` it on a shallow r24.04 clone with an absolute patch path.
     - Insert only new lines in the three Dockerfiles: the `COPY`, the pre-clone, the absolute-path
@@ -437,7 +437,7 @@ Run from the worktree root unless noted.
     - Verify: `test_exploration_python_backend_patch.py` passes; `git diff` of each Dockerfile shows
       added lines only.
     - _Requirements: 2.4, 3.7_
-  - [ ] 5.3 Rebaseline the Dockerfile pins, as design.md "Tests and baselines to update" lists.
+  - [x] 5.3 Rebaseline the Dockerfile pins, as design.md "Tests and baselines to update" lists.
     - Security: the two masked edgemlsdk baselines (delete each, then capture with
       `test_preservation_docker_masked_bytes.py`), and the `src/edgemlsdk/Dockerfile` hash in
       `docker_baseline_out_of_scope.json`.
@@ -451,7 +451,7 @@ Run from the worktree root unless noted.
       - each pinned hash equals `sha256sum` of its Dockerfile;
       - `edgemlsdk_pythondev/` and `edgemlsdk_cmake/` pass.
     - _Requirements: 2.4_
-  - [ ] 5.4 Make the CLI dependency SOFT (D10).
+  - [x] 5.4 Make the CLI dependency SOFT (D10).
     - All seven LocalServer recipes get `DependencyType: SOFT` with its comment, and
       `ModelLoadSelfHealEnabled: "true"` with its comment. `recipe.yaml` stays byte-identical to
       `recipe-arm64-jp6.yaml`.
@@ -472,20 +472,20 @@ Run from the worktree root unless noted.
         `vllm_hf_cache/` show no new failing id;
       - every golden's `git diff` shows only the two keys or the recipe hashes.
     - _Requirements: 2.9, 3.12, 3.13; Property 10_
-  - [ ] 5.5 Checkpoint.
+  - [x] 5.5 Checkpoint.
     - The guard suite is green. The full preservation suite in the image is green.
     - No new failing id on any suite.
     - The snapshot is updated. No commit.
     - Verify: as stated.
 
-- [ ] 6. F6: Portal deployment readiness warning
-  - [ ] 6.1 Give `get_usecase_client` and `create_boto3_client` an optional `config=None` keyword
+- [x] 6. F6: Portal deployment readiness warning
+  - [x] 6.1 Give `get_usecase_client` and `create_boto3_client` an optional `config=None` keyword
     (D11). Without it, the `boto3.client` calls are byte-for-byte today's.
     - Files: `edge-cv-portal/backend/layers/shared/python/shared_utils.py`; test
       `edge-cv-portal/backend/tests/test_shared_utils_client_config.py`.
     - Verify: the Portal backend run of that file passes.
     - _Requirements: 3.8_
-  - [ ] 6.2 Add `_read_model_status_shadow` and `_model_readiness_summary` (D11).
+  - [x] 6.2 Add `_read_model_status_shadow` and `_model_readiness_summary` (D11).
     - Only for the latest deployment of its target.
     - At most 20 devices.
     - `SHADOW_READ_CONFIG` (2 s connect and read timeouts, `total_max_attempts` 1), and the 5 s budget.
@@ -494,39 +494,39 @@ Run from the worktree root unless noted.
       `edge-cv-portal/backend/tests/test_deployment_model_readiness.py`.
     - Verify: that file passes; `tests/test_deployment_*.py` show no new failing id against task 2.1.
     - _Requirements: 2.10, 3.8; Property 14_
-  - [ ] 6.3 Add the optional `model_readiness` field and the Cloudscape warning `Alert` ("current
+  - [x] 6.3 Add the optional `model_readiness` field and the Cloudscape warning `Alert` ("current
     state" wording, the shadow time per device, one line per model).
     - Files: `edge-cv-portal/frontend/src/pages/DeploymentDetail.tsx`,
       `edge-cv-portal/frontend/src/pages/DeploymentDetail.modelReadiness.test.tsx`
     - Verify: `npx vitest run src/pages/DeploymentDetail.modelReadiness.test.tsx` passes; the full
       vitest run shows no new failure; `npm run build` exits 0.
     - _Requirements: 2.10_
-  - [ ] 6.4 Commit the Portal code: `feat(portal): show models that devices report as not ready on the
+  - [x] 6.4 Commit the Portal code: `feat(portal): show models that devices report as not ready on the
     latest deployment`. The message says it was verified by host tests only, and that the Portal is not
     deployed (G2).
     - Files: the six files of tasks 6.1-6.3 (three source files, three test files). Not `tasks.md`.
     - Verify: the hygiene check and the pin sweep pass; `git show --stat HEAD` lists exactly those files.
 
-- [ ] 7. Pre-build gate
-  - [ ] 7.1 Run every suite against the task 2.1 baseline: host, in-image, Python 3.8, and
+- [x] 7. Pre-build gate
+  - [x] 7.1 Run every suite against the task 2.1 baseline: host, in-image, Python 3.8, and
     `test/python_version_audit.py`. No new failing id.
     - Verify: the `comm -13` comparison output is empty.
-  - [ ] 7.2 Replay the in-image build gate. Run the body of `build-custom.sh`'s backend-test
+  - [x] 7.2 Replay the in-image build gate. Run the body of `build-custom.sh`'s backend-test
     `docker run … -c '…'` block against this worktree with the pinned image, exactly as the build does:
     `repo_audit.py`, the security exploration suites, the full preservation suite and the other audits.
     - Verify: the replay exits 0, and every gate in it prints its "passed" line.
-  - [ ] 7.3 Apply builds.md's checklist.
+  - [x] 7.3 Apply builds.md's checklist.
     - Every preservation-tracked file this branch changes is rebaselined.
     - The guard suite is green.
     - `edge-cv-portal/infrastructure/cdk.out` is moved aside if present.
     - No Portal deploy is running or planned during the build.
     - Verify: the guard suite output; `ls edge-cv-portal/infrastructure/cdk.out` is absent.
-  - [ ] 7.4 Record the exact source the build will use: `git rev-parse HEAD`, `git diff HEAD --binary`,
+  - [x] 7.4 Record the exact source the build will use: `git rev-parse HEAD`, `git diff HEAD --binary`,
     and the untracked source files with their sha256. Task 13 proves the commits equal this source.
     - Verify: the snapshot files exist, with recorded hashes.
 
-- [ ] 8. JP5 build and publish
-  - [ ] 8.1 Build JP5.
+- [x] 8. JP5 build and publish
+  - [x] 8.1 Build JP5.
     - Wait until no build runs (the pgrep checks, re-checked every few minutes).
     - `cp recipe-arm64-jp5.yaml recipe.yaml`.
     - `TARGETS="5" ./run_jp_builds.sh`. It swaps `gdk-config.json`, runs `gdk component build` and
@@ -535,19 +535,19 @@ Run from the worktree root unless noted.
     - Record the `flask-app:latest` and `react-webapp:latest` image ids the moment the build ends.
     - Verify: exit 0; the log shows the backend unit tests and every security gate passed; the
       python_backend layer ran the clone, apply and both `grep` sentinels (any failure fails the build).
-  - [ ] 8.2 Publish immediately. Re-run the pgrep checks, and confirm both image ids still equal those
+  - [x] 8.2 Publish immediately. Re-run the pgrep checks, and confirm both image ids still equal those
     recorded in 8.1. If either check fails, do not publish and do not retag: pause and report. Then run
     `./publish-ecr-only.sh aws.edgeml.dda.LocalServer.arm64JP5`, with its output in its own log.
     - Verify:
       - the published version is recorded;
       - `aws greengrassv2 get-component` for that version returns a recipe whose `aws.greengrass.Cli`
         dependency is `SOFT` and whose `DefaultConfiguration` carries `ModelLoadSelfHealEnabled: "true"`.
-  - [ ] 8.3 Restore with `git checkout -- gdk-config.json recipe.yaml`.
+  - [x] 8.3 Restore with `git checkout -- gdk-config.json recipe.yaml`.
     - Verify: `git status --short` shows only this branch's intended changes; `cmp recipe.yaml
       recipe-arm64-jp6.yaml` exits 0.
 
-- [ ] 9. MIC-730: coordination and the fixed LocalServer
-  - [ ] 9.1 Read-only inspection.
+- [x] 9. MIC-730: coordination and the fixed LocalServer
+  - [x] 9.1 Read-only inspection.
     - Open your own SSH control master, with the device's host key verified against the recorded
       known_hosts (`StrictHostKeyChecking=yes`, never `UserKnownHostsFile=/dev/null`). A mismatch
       means stop and report. Use your own port forward.
@@ -562,17 +562,17 @@ Run from the worktree root unless noted.
       - `docker inspect` start time and restart count;
       - one minute of the GPU load node.
     - Verify: every item is saved in the evidence directory.
-  - [ ] 9.2 **OWNER GATE G1.** Pause with a warning that names:
+  - [x] 9.2 **OWNER GATE G1.** Pause with a warning that names:
     - every change tasks 9-12 make;
     - the deliberate backend restarts;
     - that self-heal is armed by default once the fixed LocalServer runs;
     - the optional items: a scratch workflow run on the probe (self-heal step 1), and step 5's
       continuous workflow.
     Wait for the go, which confirms the demo work on the device is finished or stopped.
-  - [ ] 9.3 On the go, stop the demo's host trigger loop with the demo's own stop command, and confirm
+  - [x] 9.3 On the go, stop the demo's host trigger loop with the demo's own stop command, and confirm
     no run is in flight.
     - Verify: the trigger loop is gone; the device run list shows nothing `pending` or `running`.
-  - [ ] 9.4 Deploy the fixed LocalServer.
+  - [x] 9.4 Deploy the fixed LocalServer.
     - Copy the current deployment and change only the LocalServer version. No model component is added
       or updated, and workflows and triggers are idle (design "Rollout caveat").
     - Wait for COMPLETED.
@@ -585,8 +585,8 @@ Run from the worktree root unless noted.
       - the backend stays healthy for at least 15 min, with no restart.
     - _Requirements: 2.11, 3.11_
 
-- [ ] 10. Reproductions on the fixed build (design "On-Device Verification")
-  - [ ] 10.1 **R1.**
+- [x] 10. Reproductions on the fixed build (design "On-Device Verification")
+  - [x] 10.1 **R1.**
     - Restart the backend, and wait until it is healthy.
     - Request `/start` for the yolo-test model, then run its cleanup about 1 s later.
     - Recover with a component restart.
@@ -596,7 +596,7 @@ Run from the worktree root unless noted.
       - the backend log has no pb_stub missing-file line;
       - the other models reach READY in normal time.
     - _Requirements: 2.1, 2.2, 2.11; Property 1_
-  - [ ] 10.2 **R3.**
+  - [x] 10.2 **R3.** Partially met on JP5 (verification-notes.md, Deviation); the stub relaunch loop moves to `triton-python-stub-relaunch-loop`.
     - Copy the yolo-test entries under a scratch model name, renaming the names inside each
       `config.pbtxt`.
     - Remove `base_<scratch>/<v>/model.py`, then request `/start`.
@@ -606,7 +606,7 @@ Run from the worktree root unless noted.
       - sibling loads are unaffected;
       - with the file restored, `/start` gives READY.
     - _Requirements: 2.4, 2.11; Property 2_
-  - [ ] 10.3 **R2.**
+  - [x] 10.3 **R2.**
     - Deploy a revision that adds one unused, published JP5 model component, and merges
       `{"ModelLoadSelfHealEnabled": "true"}` into LocalServer, so the shape matches the incident's.
     - Trigger one PPE demo workflow run.
@@ -622,14 +622,14 @@ Run from the worktree root unless noted.
       - the backend stays healthy for at least 15 min after each of the two deployments.
     - _Requirements: 2.9, 2.11, 3.1_
 
-- [ ] 11. Self-heal and F3 on the device (design "On-Device Verification", steps 0-6)
-  - [ ] 11.1 **OWNER GATE G2**, only if the F6 live check is wanted.
+- [x] 11. Self-heal and F3 on the device (design "On-Device Verification", steps 0-6)
+  - [x] 11.1 **OWNER GATE G2**, only if the F6 live check is wanted.
     - Pause with a warning before any Portal deploy. The warning says that the deploy would publish this
       branch's Portal, and could replace newer live Portal code.
     - Recommend deferring the live F6 check to the trunk merge.
     - Without a go, F6 stays verified by host tests only, and is recorded as pending.
     - With a go: deploy only while no build runs, then move `cdk.out` aside again.
-  - [ ] 11.2 Run steps 0-4 and 6 exactly as the design states, using the scratch probe
+  - [x] 11.2 Run steps 0-4 and 6 exactly as the design states, using the scratch probe
     `model-selfheal-probe`, whose `initialize()` blocks without using CPU.
     - Every seeding and re-wedge happens while the kill file exists. Step 5 runs only with its go.
     - Run the F3 check between steps 3 and 4: a hand-run Startup of a scratch component.
@@ -651,7 +651,7 @@ Run from the worktree root unless noted.
       - step 6 restores `enabled: true`, `disabledBy: null` and nothing `LOADING`.
     - _Requirements: 2.5, 2.6, 2.7, 2.10, 2.11; Properties 6, 7, 12_
 
-- [ ] 12. Restore and sustained health
+- [x] 12. Restore and sustained health
   - Remove every scratch model, scratch component and seeded record. No kill file and no switch
     override is left.
   - Restart the demo's clipper and live view with the demo's own start command.
@@ -661,12 +661,12 @@ Run from the worktree root unless noted.
     from the pre-state is intended (the LocalServer version), or is reported plainly.
   - _Requirements: 2.11_
 
-- [ ] 13. Device-side commits and verification notes
-  - [ ] 13.1 Prove that what you commit is what was built and verified.
+- [x] 13. Device-side commits and verification notes
+  - [x] 13.1 Prove that what you commit is what was built and verified.
     - Verify: `git diff` between the task 7.4 snapshot and the working tree, for every file under
       `src/`, the recipes and the rewriters, is empty. Any difference needs a rebuild and a targeted
       re-verification first.
-  - [ ] 13.2 Make three code commits, in this order. Each passes the pin sweep and the hygiene check.
+  - [x] 13.2 Make three code commits, in this order. Each passes the pin sweep and the hygiene check.
     Check each commit's consistency on a `git archive` of it, with the host suites it touches.
     - **C1** `fix(triton): guard model-repository removals with a per-model load lock, record Startup outcomes, publish only changed entries, and detect and self-heal load wedges`:
       - everything under `src/backend/`;
@@ -684,7 +684,7 @@ Run from the worktree root unless noted.
       by the named suites. JP6, JP7 and x86 device verification are pending.
     - Verify: `git log --stat` shows exactly those file sets; `git status --short` shows no
       unintended tracked change.
-  - [ ] 13.3 Write `verification-notes.md`. It holds the R1-R3, self-heal, F3 and F6 results, with
+  - [x] 13.3 Write `verification-notes.md`. It holds the R1-R3, self-heal, F3 and F6 results, with
     log lines, versions and timings, and no identifiers. It also lists, as unverified items:
     - the x86 Dockerfile's binary sentinel path;
     - opt-out persistence across cloud deployments;
