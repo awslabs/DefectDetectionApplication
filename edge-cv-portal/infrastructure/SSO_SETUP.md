@@ -87,6 +87,8 @@ Configure your identity provider to send group/role information that maps to Por
    cdk deploy EdgeCVPortalAuthStack
    ```
 
+   > Deploying the whole portal with `deploy-portal.sh`? Export the `SSO_*` variables above and pass `--sso` instead (from `edge-cv-portal/`: `./deploy-portal.sh single-account --sso`). It forwards `--sso` and the `SSO_METADATA_URL`, `SSO_PROVIDER_NAME` and `COGNITO_DOMAIN_PREFIX` variables to `infrastructure/deploy-auth.sh`, which deploys this stack.
+
 3. **Configure Identity Provider**
    - Add the Cognito SAML endpoint as a service provider in your IdP
    - Configure attribute mappings as shown above

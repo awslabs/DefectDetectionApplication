@@ -6,7 +6,9 @@
 
 load test_helper
 
-setup() { portal_harness_setup; }
+# Hermetic: no AWS identity, region or config from the caller's shell, and
+# aws/node/cdk/npx must resolve to the stubs.
+setup() { portal_harness_setup; portal_scrub_aws_env; portal_require_stubbed_tools; }
 teardown() { portal_harness_teardown; }
 
 @test "harness: setup helper sources cleanly and defines its API" {
@@ -178,4 +180,204 @@ teardown() { portal_harness_teardown; }
   [ "$(stub_call_count deploy-infrastructure.sh)" = "1" ]
   stub_called cdk
   ! stub_called deploy-frontend.sh
+}
+
+# ---------------------------------------------------------------------------
+# Opt-in fixtures: the trusted UseCase account list, stack templates,
+# per-profile identities (helpers/stub.sh item 4). bats 1.2 compatible.
+# ---------------------------------------------------------------------------
+
+TRUSTED_PARAM=/dda-portal/trusted-usecase-account-ids
+
+@test "aws stub: the trusted-account parameter is found, absent or unreadable" {
+  trusted_param_found 123456789012
+  run aws ssm get-parameter --name "$TRUSTED_PARAM" --query Parameter.Value --output text < /dev/null
+  [ "$status" -eq 0 ]
+  [ "$output" = "123456789012" ]
+
+  trusted_param_absent
+  run aws ssm get-parameter --name "$TRUSTED_PARAM" --query Parameter.Value --output text < /dev/null
+  [ "$status" -eq 254 ]
+  [[ "$output" == *"An error occurred (ParameterNotFound) when calling the GetParameter operation"* ]]
+
+  trusted_param_read_fails
+  run aws ssm get-parameter --name "$TRUSTED_PARAM" --query Parameter.Value --output text < /dev/null
+  [ "$status" -eq 254 ]
+  [[ "$output" == *"An error occurred (AccessDeniedException) when calling the GetParameter operation"* ]]
+}
+
+@test "aws stub: put-parameter on the trusted-account parameter is create-only" {
+  trusted_param_absent
+  run aws ssm put-parameter --name "$TRUSTED_PARAM" --type String --value 111111111111 < /dev/null
+  [ "$status" -eq 0 ]
+  [ "$(trusted_param_value)" = "111111111111" ]
+
+  run aws ssm put-parameter --name "$TRUSTED_PARAM" --type String --value 222222222222 < /dev/null
+  [ "$status" -eq 254 ]
+  [[ "$output" == *"An error occurred (ParameterAlreadyExists) when calling the PutParameter operation"* ]]
+  [ "$(trusted_param_value)" = "111111111111" ]
+
+  run aws ssm put-parameter --name "$TRUSTED_PARAM" --type String --overwrite --value 222222222222 < /dev/null
+  [ "$status" -eq 0 ]
+  [ "$(trusted_param_value)" = "222222222222" ]
+
+  trusted_param_write_fails
+  run aws ssm put-parameter --name "$TRUSTED_PARAM" --type String --overwrite --value 333333333333 < /dev/null
+  [ "$status" -eq 254 ]
+  [[ "$output" == *"An error occurred (AccessDeniedException) when calling the PutParameter operation"* ]]
+  [ "$(trusted_param_value)" = "222222222222" ]
+}
+
+@test "aws stub: other ssm names keep the bootstrap-version answer" {
+  trusted_param_found 123456789012
+  set_bootstrap_version 21
+  run aws ssm get-parameter --name /cdk-bootstrap/hnb659fds/version --query Parameter.Value --output text < /dev/null
+  [ "$status" -eq 0 ]
+  [ "$output" = "21" ]
+
+  # Without the opt-in, the trusted name gets the legacy answer too.
+  unset STUB_SSM_TRUSTED_FILE
+  run aws ssm get-parameter --name "$TRUSTED_PARAM" --query Parameter.Value --output text < /dev/null
+  [ "$status" -eq 0 ]
+  [ "$output" = "21" ]
+}
+
+@test "aws stub: get-template serves fixture templates, missing stacks and denied reads" {
+  deploy_stack_template EdgeCVPortalComputeStack one-account
+  run aws cloudformation get-template --stack-name EdgeCVPortalComputeStack --region eu-west-1 \
+    --query TemplateBody --output json < /dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"arn:aws:iam::123456789012:role/DDAPortalAccessRole"'* ]]
+
+  run aws cloudformation get-template --stack-name EdgeCVPortalNodeDesignerStack --region eu-west-1 \
+    --query TemplateBody --output json < /dev/null
+  [ "$status" -eq 254 ]
+  [[ "$output" == *"Stack with id EdgeCVPortalNodeDesignerStack does not exist"* ]]
+
+  deny_stack_template EdgeCVPortalSyntheticDataStack
+  run aws cloudformation get-template --stack-name EdgeCVPortalSyntheticDataStack --region eu-west-1 \
+    --query TemplateBody --output json < /dev/null
+  [ "$status" -eq 254 ]
+  [[ "$output" == *"An error occurred (AccessDenied) when calling the GetTemplate operation"* ]]
+
+  # Without the opt-in, get-template stays an empty success.
+  unset STUB_CFN_TEMPLATES_DIR
+  run aws cloudformation get-template --stack-name EdgeCVPortalComputeStack --region eu-west-1 \
+    --query TemplateBody --output json < /dev/null
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "aws stub: describe-stacks reports the stacks listed as missing" {
+  missing_stacks CDKToolkit
+  run aws cloudformation describe-stacks --stack-name CDKToolkit --region eu-west-1 < /dev/null
+  [ "$status" -eq 254 ]
+  [[ "$output" == *"Stack with id CDKToolkit does not exist"* ]]
+
+  set_cfn_output EdgeCVPortalFrontendStack DistributionDomainName d1.cloudfront.net
+  run aws cloudformation describe-stacks --stack-name EdgeCVPortalFrontendStack \
+    --query "Stacks[0].Outputs[?OutputKey=='DistributionDomainName'].OutputValue" --output text < /dev/null
+  [ "$status" -eq 0 ]
+  [ "$output" = "d1.cloudfront.net" ]
+}
+
+@test "aws stub: configure export-credentials fails like a CLI without credentials" {
+  set_region us-east-1
+  run aws configure export-credentials --format env < /dev/null
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"us-east-1"* ]]
+
+  run aws configure get region < /dev/null
+  [ "$status" -eq 0 ]
+  [ "$output" = "us-east-1" ]
+}
+
+@test "aws stub: sts and configure get region follow the per-profile maps" {
+  set_profile_account prodprofile 333333333333
+  set_profile_region prodprofile eu-west-1
+
+  run env AWS_PROFILE=prodprofile aws sts get-caller-identity --query Account --output text < /dev/null
+  [ "$output" = "333333333333" ]
+  run env AWS_PROFILE=prodprofile aws configure get region < /dev/null
+  [ "$output" = "eu-west-1" ]
+
+  run aws sts get-caller-identity --query Account --output text < /dev/null
+  [ "$output" = "123456789012" ]
+  run aws configure get region < /dev/null
+  [ "$output" = "us-east-1" ]
+
+  run env AWS_PROFILE=unmapped aws sts get-caller-identity --query Account --output text < /dev/null
+  [ "$output" = "123456789012" ]
+  run env AWS_PROFILE=unmapped aws configure get region < /dev/null
+  [ "$output" = "us-east-1" ]
+}
+
+@test "stub: names in STUB_IGNORE_STDIN_FOR leave a piped feed unread" {
+  stub_tools_ignore_stdin
+  run bash -c 'printf "feed-line\n" | { aws sts get-caller-identity >/dev/null; read -r x; echo "read=[$x]"; }'
+  [ "$status" -eq 0 ]
+  [ "$output" = "read=[feed-line]" ]
+
+  unset STUB_IGNORE_STDIN_FOR
+  run bash -c 'printf "feed-line\n" | { aws sts get-caller-identity >/dev/null; read -r x; echo "read=[$x]"; }'
+  [ "$status" -eq 0 ]
+  [ "$output" = "read=[]" ]
+}
+
+@test "fixtures: the trusted-account templates grant what their names say" {
+  # Every DDAPortalAccessRole ARN string (12-digit account or *), first
+  # appearance first, deduplicated: what each fixture's name promises.
+  local d="$PORTAL_TESTS_DIR/fixtures/trusted-accounts" prog
+  prog='
+import json, re, sys
+pattern = re.compile(r"arn:aws:iam::(\d{12}|\*):role/DDAPortalAccessRole")
+def strings(node):
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from strings(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from strings(value)
+    elif isinstance(node, str):
+        yield node
+for path in sys.argv[1:]:
+    with open(path) as handle:
+        document = json.load(handle)
+    found = []
+    for text in strings(document):
+        match = pattern.fullmatch(text)
+        if match and match.group(1) not in found:
+            found.append(match.group(1))
+    print("%s %s" % (path.rsplit("/", 1)[1][:-len(".json")], ",".join(found) or "-"))
+'
+  run python3 -c "$prog" "$d/one-account.json" "$d/two-accounts.json" \
+    "$d/two-accounts-reordered.json" "$d/wildcard-era.json" "$d/no-grants.json" < /dev/null
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 5 ]
+  [ "${lines[0]}" = "one-account 123456789012" ]
+  [ "${lines[1]}" = "two-accounts 123456789012,222222222222" ]
+  [ "${lines[2]}" = "two-accounts-reordered 222222222222,123456789012" ]
+  [ "${lines[3]}" = "wildcard-era *" ]
+  [ "${lines[4]}" = "no-grants -" ]
+  # one-account also carries a longer role name, which must never count.
+  grep -qF '"arn:aws:iam::999999999999:role/DDAPortalAccessRoleLegacy"' "$d/one-account.json"
+}
+
+@test "harness: portal_scrub_aws_env clears the AWS identity and keeps HOME and TMPDIR in the sandbox" {
+  export AWS_PROFILE=prod AWS_ACCESS_KEY_ID=stub-access-key-id AWS_REGION=eu-west-1 \
+         TRUSTED_USECASE_ACCOUNT_IDS=123456789012
+  portal_scrub_aws_env
+  run bash -c 'echo "${AWS_PROFILE-unset} ${AWS_ACCESS_KEY_ID-unset} ${AWS_REGION-unset} ${TRUSTED_USECASE_ACCOUNT_IDS-unset}"'
+  [ "$output" = "unset unset unset unset" ]
+  [ "$AWS_CONFIG_FILE" = /dev/null ]
+  [ "$AWS_SHARED_CREDENTIALS_FILE" = /dev/null ]
+  [ "$AWS_EC2_METADATA_DISABLED" = true ]
+  [ "$HOME" = "$PORTAL_SANDBOX/home" ]
+  [ "$TMPDIR" = "$PORTAL_SANDBOX/tmp" ]
+  [ -d "$HOME" ]
+  [ -d "$TMPDIR" ]
+
+  run install_real_if_present no/such/file
+  [ "$status" -eq 0 ]
+  [ ! -e "$PORTAL_TREE/no" ]
 }
