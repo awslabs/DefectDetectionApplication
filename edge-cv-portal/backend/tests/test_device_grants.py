@@ -811,3 +811,73 @@ class TestDeleteHook:
         assert status == 200, payload
         assert payload["grants_removed"] == {"status": "skipped", "reason": "usecase_not_found"}
         assert hooks.requested == []
+
+
+class TestAccountMoveHook:
+    """A PUT that moves a use case to another account rewrites the
+    Device_Access_Document in both accounts (design I1, I6; Requirements
+    2.5.5, 8.2): the move revokes the use case's statement in the old
+    account's device role (with the stored record's client) and grants it in
+    the new account's (with the reloaded record's), reported under
+    grants_removed / grants_added. It does both even when the device-read
+    buckets are unchanged, which the bucket-change hook never covers.
+
+    The Drift_Check lists an account's own use cases whose statement is
+    missing or stale, never a leftover for a use case that has moved away, so
+    the revoke is the only thing that clears the old account; and without the
+    new-account grant the moved use case would read as 'missing' there once it
+    has a deployment.
+    """
+
+    @staticmethod
+    def _multi_record(usecase_id, account, bucket):
+        fx.usecases_table().put_item(Item={
+            "usecase_id": usecase_id, "name": "move-device", "account_id": account,
+            "cross_account_role_arn": fx.access_role(account),
+            "sagemaker_execution_role_arn": fx.sagemaker_role(account),
+            "external_id": "ext-stored", "s3_bucket": bucket,
+            "region": fx.REGION, "setup_type": "multi-account"})
+
+    def test_move_revokes_in_the_old_account_and_grants_in_the_new(self, hooks):
+        hooks.mp.setenv("TRUSTED_USECASE_ACCOUNT_IDS", f"{fx.TRUSTED},{fx.DATA}")
+        bucket = "customer-media"                 # out of the dda-* / *-dda-* pattern
+        usecase_id, neighbour = uid(), uid()
+        self._multi_record(usecase_id, fx.TRUSTED, bucket)
+
+        # The old account's device role already carries the moved use case's
+        # statement (an earlier deployment wrote it) beside a neighbour's.
+        old_iam = FakeIam(doc(read_statement(usecase_id, bucket),
+                              read_statement(neighbour, "neighbour-media")))
+        new_iam = FakeIam()
+        iams = {fx.TRUSTED: old_iam, fx.DATA: new_iam}
+
+        def client(service_name, usecase, session_name=None, region=None):
+            assert service_name == "iam", service_name
+            return iams[usecase["account_id"]]
+
+        hooks.mp.setattr(hooks.uc, "get_usecase_client", client)
+
+        body = {"account_id": fx.DATA, "cross_account_role_arn": fx.access_role(fx.DATA),
+                "external_id": "ext-moved", "sagemaker_execution_role_arn": fx.sagemaker_role(fx.DATA)}
+        status, payload, _ = put(hooks, usecase_id, body)
+        assert status == 200, payload
+
+        # The statement leaves the old account and appears in the new, each
+        # reported beside the other moved grants.
+        assert payload["grants_removed"]["device_access"]["status"] == "removed"
+        assert payload["grants_added"]["device_access"]["status"] == "granted"
+        assert old_iam.document() == doc(read_statement(neighbour, "neighbour-media"))
+        assert new_iam.document() == doc(read_statement(usecase_id, bucket))
+
+        # Drift_Check: the old account's leftover is invisible to it (the moved
+        # record names the new account, so the check skips the use case there),
+        # which is why the revoke is necessary; on the new account the grant the
+        # move wrote clears what would otherwise be a 'missing' finding.
+        drift = _load(_DRIFT_CHECK, "portal_role_drift_check_move_probe")
+        moved = fx.record(usecase_id)
+        assert moved["account_id"] == fx.DATA
+        assert drift.missing_or_stale(
+            [moved], {usecase_id}, fx.TRUSTED, doc(read_statement(usecase_id, bucket))) == []
+        assert drift.missing_or_stale([moved], {usecase_id}, fx.DATA, new_iam.document()) == []
+        assert drift.missing_or_stale([moved], {usecase_id}, fx.DATA, None) == [
+            (usecase_id, "missing", [bucket])]

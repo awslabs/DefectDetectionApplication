@@ -2640,14 +2640,34 @@ def update_usecase(usecase_id, event, user):
 
         reloaded = table.get_item(Key={'usecase_id': usecase_id}).get('Item') or {}
 
-        # The Device_Access_Document follows the record (design I6): when the
-        # buckets devices read outside the template patterns changed — a
-        # changed s3_bucket, or an add / remove of such a bucket — the use
-        # case's statements are rewritten from the record as written, after
-        # the Attach_Step accepted every bucket in it.
+        # The Device_Access_Document follows the record (design I6).
+        #
+        # On an account move the use case's statement must leave the old
+        # account's device role and appear in the new one, so the move revokes
+        # with the stored record's client (the old account) and grants with
+        # the reloaded record's (the new account). This is independent of the
+        # bucket-change hook below and of remove_account_grants, which skips a
+        # single-account or still-referenced old account while the moved use
+        # case's statement must still go. Both are reported beside the other
+        # moved grants, under grants_removed and grants_added (design I1;
+        # Requirements 2.5.5, 8.2). The Drift_Check lists an account's own use
+        # cases whose statement is missing or stale, not a leftover for a use
+        # case that has moved away, so the revoke is the only thing that
+        # clears the old account.
+        #
+        # On any other PUT the hook fires only when the out-of-pattern
+        # Device_Read_Buckets changed — a changed s3_bucket, or an add /
+        # remove of such a bucket — rewriting the use case's statements from
+        # the record as written, after the Attach_Step accepted every bucket.
         device_reports = {}
-        if reloaded and (device_grants.device_read_buckets(reloaded)
-                         != device_grants.device_read_buckets(record)):
+        if account_move is not None:
+            grant_reports['grants_removed']['device_access'] = _write_device_access(
+                device_grants.revoke_device_access, record)
+            if reloaded:
+                grant_reports['grants_added']['device_access'] = _write_device_access(
+                    device_grants.grant_device_access, reloaded)
+        elif reloaded and (device_grants.device_read_buckets(reloaded)
+                           != device_grants.device_read_buckets(record)):
             device_reports['device_grants'] = {
                 'device_access': _write_device_access(device_grants.grant_device_access, reloaded)}
         return create_response(200, {

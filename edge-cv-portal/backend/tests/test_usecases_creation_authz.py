@@ -566,9 +566,13 @@ def test_single_to_multi_is_proven_and_writes_the_new_accounts_grants(env):
             stored["sagemaker_execution_role_arn"]) == (
         TRUSTED, access_role(TRUSTED), "ext-moved", sagemaker_role(TRUSTED))
     assert payload["grants_removed"] == {"status": "skipped", "reason": "single_account",
-                                         "account_id": PORTAL}
+                                         "account_id": PORTAL, "device_access": DEVICE_ACCESS_UNCHANGED}
     assert payload["grants_added"]["component_bucket_policy"]["status"] == "success"
     assert payload["grants_added"]["eventbridge"]["status"] == "success"
+    # The move also grants the use case's device statement in the new account
+    # (design I6); the device role is absent in moto, so it is reported here
+    # only as a key. The per-account removal/grant is pinned in test_device_grants.
+    assert "device_access" in payload["grants_added"]
     assert env.fakes.s3.sids() == sorted([READ_SID.format(TRUSTED), LIST_SID.format(TRUSTED)])
     assert set(env.fakes.events.statements) == {EVENT_SID.format(TRUSTED)}
 
@@ -731,9 +735,11 @@ def test_move_removes_the_unreferenced_old_grants_then_writes_the_new_ones(env):
     assert payload["grants_removed"] == {
         "status": "completed", "account_id": TRUSTED,
         "component_bucket_policy": {"status": "success", "bucket": COMPONENT_BUCKET},
-        "eventbridge": {"status": "success", "statement_id": EVENT_SID.format(TRUSTED)}}
+        "eventbridge": {"status": "success", "statement_id": EVENT_SID.format(TRUSTED)},
+        "device_access": DEVICE_ACCESS_UNCHANGED}
     assert payload["grants_added"]["component_bucket_policy"]["status"] == "success"
     assert payload["grants_added"]["eventbridge"]["status"] == "success"
+    assert "device_access" in payload["grants_added"]
     statements = {s["Sid"]: s for s in env.fakes.s3.statements()}
     assert set(statements) == {READ_SID.format(SECOND), LIST_SID.format(SECOND),
                                "AllowGreengrassServiceAccess"}
@@ -754,7 +760,7 @@ def test_move_keeps_the_old_grants_while_another_use_case_references_the_account
     status, payload, _ = put(env, admin(env), usecase_id, move_body(SECOND))
     assert status == 200, payload
     assert payload["grants_removed"] == {"status": "skipped", "reason": "account_still_referenced",
-                                         "account_id": TRUSTED}
+                                         "account_id": TRUSTED, "device_access": DEVICE_ACCESS_UNCHANGED}
     assert env.fakes.s3.sids() == sorted([READ_SID.format(TRUSTED), LIST_SID.format(TRUSTED),
                                           READ_SID.format(SECOND), LIST_SID.format(SECOND)])
     assert set(env.fakes.events.statements) == {EVENT_SID.format(TRUSTED), EVENT_SID.format(SECOND)}
