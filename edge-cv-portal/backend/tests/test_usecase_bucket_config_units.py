@@ -580,10 +580,14 @@ def test_get_s3_client_for_bucket_non_member_name_is_invalid_bucket_name(portal_
 
 
 def test_get_s3_client_for_bucket_signature_unchanged_and_binds_first():
+    # The three original parameters are unchanged; the optional trailing
+    # `session_policy` keyword (workflow-debug-mode tasks.md 3.1) defaults to
+    # None, so every pre-existing call site binds exactly as before.
     import inspect
     sig = inspect.signature(su.get_s3_client_for_bucket)
-    assert list(sig.parameters) == ["usecase", "bucket_name", "session_name"]
+    assert list(sig.parameters) == ["usecase", "bucket_name", "session_name", "session_policy"]
     assert sig.parameters["session_name"].default == "portal-s3-access"
+    assert sig.parameters["session_policy"].default is None
     tree = ast.parse(inspect.getsource(su.get_s3_client_for_bucket))
     func = tree.body[0]
     body = [node for node in func.body if not (isinstance(node, ast.Expr)

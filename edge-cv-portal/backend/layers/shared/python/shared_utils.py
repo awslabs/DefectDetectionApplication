@@ -2470,15 +2470,21 @@ def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str 
         session_name: STS session name for role assumption (recorded as the
             `purpose` of a refusal)
         session_policy: Optional IAM policy document forwarded to
-            `assume_usecase_role` (sent to STS only when given)
+            `assume_usecase_role` (sent to STS only when given). Without it
+            the `assume_usecase_role` call is the pre-keyword three-argument
+            call, so every pre-existing caller and test double of that
+            function keeps working unchanged.
     
     Returns:
         boto3 S3 client with appropriate credentials
     """
     assert_bucket_allowed(usecase, bucket_name, purpose=session_name)
     role_arn, external_id = _select_s3_role_for_bucket(usecase, bucket_name)
-    credentials = assume_usecase_role(role_arn, external_id, session_name,
-                                      session_policy=session_policy)
+    if session_policy is None:
+        credentials = assume_usecase_role(role_arn, external_id, session_name)
+    else:
+        credentials = assume_usecase_role(role_arn, external_id, session_name,
+                                          session_policy=session_policy)
     return create_boto3_client('s3', credentials)
 
 
