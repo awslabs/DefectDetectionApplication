@@ -626,6 +626,14 @@ class Permission(Enum):
     BUILDS_CANCEL = "builds:cancel"
     BUILDS_READ = "builds:read"
     
+    # Workflow telemetry dashboards (workflow-telemetry-dashboards design
+    # §11.1): dashboards:read views dashboards and their tiles;
+    # dashboards:manage creates, edits and deletes them; telemetry:manage
+    # enables telemetry for a use case and tunes its settings.
+    DASHBOARDS_READ = "dashboards:read"
+    DASHBOARDS_MANAGE = "dashboards:manage"
+    TELEMETRY_MANAGE = "telemetry:manage"
+    
     # System Administration
     VIEW_AUDIT_LOGS = "view_audit_logs"
     MANAGE_SETTINGS = "manage_settings"
@@ -840,6 +848,8 @@ class RBACManager:
                 # Node Designer: read-only view of Custom_Node_Types and
                 # Plugin_Records (13.3)
                 Permission.NODE_DESIGNER_READ,
+                # Workflow telemetry dashboards: read-only (§11.1)
+                Permission.DASHBOARDS_READ,
             },
             
             Role.OPERATOR: {
@@ -868,6 +878,9 @@ class RBACManager:
                 # Node Designer: read-only view of Custom_Node_Types and
                 # Plugin_Records (13.3)
                 Permission.NODE_DESIGNER_READ,
+                # Workflow telemetry dashboards: view and manage (§11.1)
+                Permission.DASHBOARDS_READ,
+                Permission.DASHBOARDS_MANAGE,
             },
             
             Role.DATA_SCIENTIST: {
@@ -908,6 +921,9 @@ class RBACManager:
                 Permission.BUILDS_SUBMIT,
                 Permission.BUILDS_CANCEL,
                 Permission.BUILDS_READ,
+                # Workflow telemetry dashboards: view and manage (§11.1)
+                Permission.DASHBOARDS_READ,
+                Permission.DASHBOARDS_MANAGE,
             },
             
             Role.USECASE_ADMIN: {
@@ -972,6 +988,11 @@ class RBACManager:
                 Permission.BUILDS_SUBMIT,
                 Permission.BUILDS_CANCEL,
                 Permission.BUILDS_READ,
+                # Workflow telemetry dashboards: view and manage dashboards,
+                # and enable and tune telemetry for the use case (§11.1)
+                Permission.DASHBOARDS_READ,
+                Permission.DASHBOARDS_MANAGE,
+                Permission.TELEMETRY_MANAGE,
                 # Add UseCaseAdmin-specific permissions
                 Permission.UPDATE_USECASES,
                 Permission.DELETE_USECASES,
@@ -2315,17 +2336,24 @@ def portal_owned_buckets() -> FrozenSet[str]:
     """Buckets the portal owns for all use cases; never a member of any
     allowed set, never attachable (design §1.3).
 
-    The artifacts bucket (PORTAL_ARTIFACTS_BUCKET) and the Greengrass
+    The artifacts bucket (PORTAL_ARTIFACTS_BUCKET), the Greengrass
     component bucket (COMPONENT_BUCKET, or the `{prefix}-{region}-{account}`
-    derivation of shared_components.py when PORTAL_ACCOUNT_ID is set).
-    Empty names are omitted.
+    derivation of shared_components.py when PORTAL_ACCOUNT_ID is set) and
+    the workflow telemetry lake `edgecv-portal-telemetry-{account}-{region}`
+    (workflow-telemetry-dashboards design §7.5, tasks.md decision Q6: derived
+    from the same environment, so no new key is needed). Empty names are
+    omitted.
     """
     artifacts = os.environ.get('PORTAL_ARTIFACTS_BUCKET', '')
     component = os.environ.get('COMPONENT_BUCKET') or (
         f"{os.environ.get('COMPONENT_BUCKET_PREFIX', 'dda-component')}-"
         f"{os.environ.get('AWS_REGION', 'us-east-1')}-{os.environ.get('PORTAL_ACCOUNT_ID', '')}"
         if os.environ.get('PORTAL_ACCOUNT_ID') else '')
-    return frozenset(name for name in (artifacts, component) if name)
+    telemetry_lake = (
+        f"edgecv-portal-telemetry-{os.environ.get('PORTAL_ACCOUNT_ID', '')}-"
+        f"{os.environ.get('AWS_REGION', 'us-east-1')}"
+        if os.environ.get('PORTAL_ACCOUNT_ID') else '')
+    return frozenset(name for name in (artifacts, component, telemetry_lake) if name)
 
 
 def allowed_s3_buckets(usecase: Dict) -> FrozenSet[str]:
