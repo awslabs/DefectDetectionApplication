@@ -15,7 +15,7 @@ import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
 import * as contextHelpers from './context-helpers';
-import { SHARED_AUTHORIZER_CONTEXT_KEY, portalRegistryEnforced, sharedAuthorizerId } from './context-helpers';
+import { portalRegistryEnforced, sharedAuthorizerId } from './context-helpers';
 import * as crypto from 'crypto';
 import * as path from 'path';
 
@@ -62,6 +62,14 @@ export interface TelemetryStackProps extends cdk.StackProps {
   restApiRootResourceId: string;
   /** Stage the portal API serves on (ApiGatewayStack deployOptions). */
   apiStageName: string;
+  /**
+   * Id of the portal API's existing Cognito authorizer every `/telemetry/*`
+   * method attaches to (the CDK context value `sharedAuthorizerId`, which
+   * bin/app.ts passes through and deploy-infrastructure.sh resolves from the
+   * deployed API). Required and validated at synth: the stack creates no
+   * authorizer of its own.
+   */
+  sharedAuthorizerId: string;
   /** Test seam: the data-plane grant to wire instead of the lib/context-helpers export. */
   dataPlaneGrantOverride?: ((allowlist: string[]) => DataPlaneGrant) | null;
 }
@@ -134,11 +142,12 @@ export const TELEMETRY_API_RESOURCE_COUNT = 18;
  * maintenance schedule, the alarms, and registers the `/telemetry/*` routes on
  * the imported portal Rest API with CORS preflight and a route-salted
  * CfnDeployment (RETAIN). The routes attach to the portal API's existing
- * Cognito authorizer, whose id arrives as the CDK context value
- * `sharedAuthorizerId` (context-helpers.sharedAuthorizerId): API Gateway
- * allows 10 authorizers per REST API and the portal API carries one per
- * route-registering stack already, so this stack creates none. The only
- * shared-file edit is the additive instantiation in bin/app.ts. It joins the
+ * Cognito authorizer, whose id is the `sharedAuthorizerId` prop (bin/app.ts
+ * passes the CDK context value of that name and instantiates this stack
+ * only when it is present; context-helpers.sharedAuthorizerId validates it):
+ * API Gateway allows 10 authorizers per REST API and the portal API carries
+ * one per route-registering stack already, so this stack creates none. The
+ * only shared-file edit is the instantiation in bin/app.ts. It joins the
  * IAM synth gate with empty pre-feature baselines.
  */
 export class TelemetryStack extends cdk.Stack {
@@ -155,7 +164,7 @@ export class TelemetryStack extends cdk.Stack {
   public readonly deploymentValues: { [env: string]: number } = {};
   public readonly dataPlaneGrantWired: boolean;
   public readonly apiResourceCount: number;
-  /** The existing portal API authorizer every `/telemetry/*` method uses (`-c sharedAuthorizerId`). */
+  /** The existing portal API authorizer every `/telemetry/*` method uses (the `sharedAuthorizerId` prop). */
   public readonly sharedAuthorizerId: string;
 
   constructor(scope: Construct, id: string, props: TelemetryStackProps) {
@@ -169,12 +178,10 @@ export class TelemetryStack extends cdk.Stack {
       );
     }
 
-    // The existing authorizer the routes attach to; absent or malformed
-    // values stop the synth here, before any asset is staged.
-    this.sharedAuthorizerId = sharedAuthorizerId(
-      this.node.tryGetContext(SHARED_AUTHORIZER_CONTEXT_KEY),
-      'TelemetryStack',
-    );
+    // The existing authorizer the routes attach to. bin/app.ts constructs
+    // this stack only with a context value present; a blank or malformed
+    // prop still stops the synth here, before any asset is staged.
+    this.sharedAuthorizerId = sharedAuthorizerId(props.sharedAuthorizerId, 'TelemetryStack');
 
     const region = cdk.Aws.REGION;
     const account = cdk.Aws.ACCOUNT_ID;

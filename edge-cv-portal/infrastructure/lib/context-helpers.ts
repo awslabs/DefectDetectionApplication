@@ -127,18 +127,36 @@ export const PORTAL_API_AUTHORIZER_NAME = 'EdgeCVPortalAuthorizer';
 export const SHARED_AUTHORIZER_CONTEXT_KEY = 'sharedAuthorizerId';
 
 /**
- * Resolves the `sharedAuthorizerId` CDK context value: the id of an existing
- * Cognito authorizer on the portal REST API that the WorkflowDebugStack and
- * the TelemetryStack attach their methods to instead of creating one each.
+ * The `sharedAuthorizerId` CDK context value when one is given: the trimmed
+ * string for a non-blank value, undefined when the key is absent or blank.
+ * bin/app.ts calls this once and instantiates the WorkflowDebugStack and the
+ * TelemetryStack only when it returns a value, so every other stack
+ * synthesizes and deploys as before without the key (deploy-auth.sh,
+ * deploy-frontend.sh and deploy_portal_fixes.sh pass no such context, and a
+ * fresh install has no API to look the id up on yet). No validation here:
+ * the stacks receive the value as a prop and {@link sharedAuthorizerId}
+ * rejects a malformed one at synth.
+ */
+export function sharedAuthorizerIdIfGiven(contextValue: unknown): string | undefined {
+  if (contextValue === undefined || contextValue === null) return undefined;
+  const value = String(contextValue).trim();
+  return value.length > 0 ? value : undefined;
+}
+
+/**
+ * Validates the `sharedAuthorizerId` prop of the WorkflowDebugStack and the
+ * TelemetryStack: the id of an existing Cognito authorizer on the portal
+ * REST API that both attach their methods to instead of creating one each.
  *
  * API Gateway allows 10 authorizers per REST API, a quota that only AWS
  * Support raises, and the portal API already carries one per
  * route-registering stack; the first deploy of a stack that created its own
  * rolled back on that limit on 2026-10-18. The value is deploy-time input:
- * deploy-infrastructure.sh reads the Compute stack's `ApiId` output and
- * filters `aws apigateway get-authorizers` on
- * {@link PORTAL_API_AUTHORIZER_NAME}; an `--exclusively` deploy passes
- * `-c sharedAuthorizerId=<id>` by hand.
+ * deploy-infrastructure.sh reads the Compute stack's `ApiId` output, filters
+ * `aws apigateway get-authorizers` on {@link PORTAL_API_AUTHORIZER_NAME}
+ * and passes `-c sharedAuthorizerId=<id>`; an `--exclusively` deploy passes
+ * it by hand. bin/app.ts hands the context value to the two stacks as a
+ * prop ({@link sharedAuthorizerIdIfGiven}) and skips them when it is absent.
  *
  * Absent, blank and malformed values throw at synth, naming `consumer`:
  * there is no safe default. A made-up id deploys methods nobody can call,
@@ -153,9 +171,10 @@ export function sharedAuthorizerId(contextValue: unknown, consumer: string): str
   if (value.length === 0) {
     throw new Error(
       `${consumer} requires ${SHARED_AUTHORIZER_CONTEXT_KEY}: the id of an existing Cognito ` +
-        'authorizer on the portal REST API (pass -c sharedAuthorizerId=<id>; ' +
-        'deploy-infrastructure.sh resolves it from `aws apigateway get-authorizers` by the ' +
-        `name ${PORTAL_API_AUTHORIZER_NAME}). Refusing to synth: the API allows 10 ` +
+        'authorizer on the portal REST API. bin/app.ts passes the CDK context value ' +
+        '(-c sharedAuthorizerId=<id>, which deploy-infrastructure.sh resolves from ' +
+        `\`aws apigateway get-authorizers\` by the name ${PORTAL_API_AUTHORIZER_NAME}) and ` +
+        'skips the stack when it is absent. Refusing to synth: the API allows 10 ' +
         'authorizers and the stack never creates one of its own.',
     );
   }

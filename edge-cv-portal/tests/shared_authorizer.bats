@@ -5,11 +5,12 @@
 #
 # API Gateway allows 10 authorizers per REST API and the portal API carries
 # one per route-registering stack, so the workflow debug and telemetry stacks
-# attach their routes to the existing EdgeCVPortalAuthorizer and refuse to
-# synth without its id. The deploy script resolves that id from the Compute
-# stack's ApiId output and `aws apigateway get-authorizers`, an explicit
-# SHARED_AUTHORIZER_ID wins, and a failed lookup (a fresh install) must not
-# stop the script: the CDK app carries the instruction.
+# attach their routes to the existing EdgeCVPortalAuthorizer and bin/app.ts
+# instantiates them only when its id is present as CDK context. The deploy
+# script resolves that id from the Compute stack's ApiId output and
+# `aws apigateway get-authorizers`, an explicit SHARED_AUTHORIZER_ID wins, and
+# a failed lookup (a fresh install) must not stop the script: the CDK app then
+# skips the two stacks with a warning and deploys the rest.
 bats_require_minimum_version 1.5.0
 load test_helper
 setup() {

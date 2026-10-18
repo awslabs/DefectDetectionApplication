@@ -295,9 +295,10 @@ delivery:
   carries the Portal component policy for the image upload.
 - **RB-2, Portal deploy.** Deploy the Portal stacks and the frontend, never
   during a component build. `deploy-infrastructure.sh` resolves the shared
-  authorizer id and passes it as `-c sharedAuthorizerId=<id>`; the synth
-  stops with an instruction when it is missing. Set `registryEnforced` in the
-  frontend config to match the enforcement state.
+  authorizer id and passes it as `-c sharedAuthorizerId=<id>`; without it the
+  CDK app skips the two new stacks with a warning and deploys every other
+  stack as before (a fresh install runs the script twice). Set
+  `registryEnforced` in the frontend config to match the enforcement state.
 - **RB-3, use-case template.** Update the use-case account template in any
   cross-account use case; this also lands the shared telemetry read
   statements on the Portal access role.

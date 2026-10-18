@@ -8,9 +8,10 @@
  * assert on raw CloudFormation properties. A second synth with
  * portalRegistryEnforced on covers the environment flag, a third with a
  * deployment value out of range covers the synth-time guard, and synths
- * without the `sharedAuthorizerId` context cover the authorizer guard (the
- * stack attaches its routes to the portal API's existing Cognito authorizer
- * and creates none of its own).
+ * without a usable `sharedAuthorizerId` prop cover the authorizer guard (the
+ * stack attaches its routes to the portal API's existing Cognito authorizer,
+ * whose id bin/app.ts passes from the CDK context, and creates none of its
+ * own).
  */
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
@@ -29,18 +30,19 @@ const TRUSTED_B = '333333333333';
 const INGEST_FUNCTION_NAME = 'dda-portal-workflow-debug-ingest';
 const API_FUNCTION_NAME = 'dda-portal-workflow-debug-api';
 const MAINTENANCE_FUNCTION_NAME = 'dda-portal-workflow-debug-maintenance';
-/** The existing portal API authorizer the deploy passes as `-c sharedAuthorizerId` (a fixture id). */
+/** The existing portal API authorizer the deploy passes as `-c sharedAuthorizerId` and bin/app.ts hands the stack (a fixture id). */
 const SHARED_AUTHORIZER_ID = 'fixture0';
 
 let template: Template;
 let enforcedTemplate: Template;
 
 /**
- * Synthesize the stack with the shared authorizer id in context, as every
- * deploy passes it; a test overrides the key to exercise the synth guard.
+ * Synthesize the stack with the shared authorizer id as its prop, as
+ * bin/app.ts passes it from the CDK context; a test overrides the prop to
+ * exercise the synth guard.
  */
-function buildStack(context?: { [key: string]: unknown }): Template {
-  const app = new cdk.App({ context: { sharedAuthorizerId: SHARED_AUTHORIZER_ID, ...context } });
+function buildStack(context?: { [key: string]: unknown }, override?: Partial<WorkflowDebugStackProps>): Template {
+  const app = new cdk.App({ context });
   const storage = new StorageStack(app, 'Storage');
   const deps = new cdk.Stack(app, 'Deps');
   const props: WorkflowDebugStackProps = {
@@ -58,6 +60,8 @@ function buildStack(context?: { [key: string]: unknown }): Template {
     restApiId: 'testrestapiid',
     restApiRootResourceId: 'testrootresourceid',
     apiStageName: 'v1',
+    sharedAuthorizerId: SHARED_AUTHORIZER_ID,
+    ...override,
   };
   return Template.fromStack(new WorkflowDebugStack(app, 'WorkflowDebug', props));
 }
@@ -554,14 +558,17 @@ describe('the routes', () => {
     expect(Object.keys(enforcedTemplate.findResources('AWS::ApiGateway::Authorizer'))).toHaveLength(0);
   });
 
-  test('a missing, blank or malformed sharedAuthorizerId stops the synth', () => {
-    expect(() => buildStack({ sharedAuthorizerId: undefined })).toThrow(/WorkflowDebugStack requires sharedAuthorizerId/);
-    expect(() => buildStack({ sharedAuthorizerId: '' })).toThrow(/sharedAuthorizerId/);
-    expect(() => buildStack({ sharedAuthorizerId: '  ' })).toThrow(/sharedAuthorizerId/);
-    expect(() => buildStack({ sharedAuthorizerId: 'Fixture-0' })).toThrow(/lowercase letters and digits/);
-    expect(() => buildStack({ sharedAuthorizerId: 'abc123\tdef456' })).toThrow(/lowercase letters and digits/);
+  test('a missing, blank or malformed sharedAuthorizerId prop stops the synth', () => {
+    expect(() => buildStack(undefined, { sharedAuthorizerId: undefined })).toThrow(/WorkflowDebugStack requires sharedAuthorizerId/);
+    expect(() => buildStack(undefined, { sharedAuthorizerId: '' })).toThrow(/sharedAuthorizerId/);
+    expect(() => buildStack(undefined, { sharedAuthorizerId: '  ' })).toThrow(/sharedAuthorizerId/);
+    expect(() => buildStack(undefined, { sharedAuthorizerId: 'Fixture-0' })).toThrow(/lowercase letters and digits/);
+    expect(() => buildStack(undefined, { sharedAuthorizerId: 'abc123\tdef456' })).toThrow(/lowercase letters and digits/);
+    // The stack reads the prop, not the context: a context value alone does not satisfy it.
+    expect(() => buildStack({ sharedAuthorizerId: 'fixture2' }, { sharedAuthorizerId: undefined }))
+      .toThrow(/WorkflowDebugStack requires sharedAuthorizerId/);
     // A padded id is trimmed, not refused.
-    const padded = buildStack({ sharedAuthorizerId: ' fixture1 ' });
+    const padded = buildStack(undefined, { sharedAuthorizerId: ' fixture1 ' });
     const methods = Object.values(padded.findResources('AWS::ApiGateway::Method')) as any[];
     for (const method of methods.filter((m) => m.Properties.HttpMethod !== 'OPTIONS')) {
       expect(method.Properties.AuthorizerId).toBe('fixture1');
@@ -641,6 +648,7 @@ describe('deployment values (design §10, §13)', () => {
       restApiId: 'testrestapiid',
       restApiRootResourceId: 'testrootresourceid',
       apiStageName: 'v1',
+      sharedAuthorizerId: SHARED_AUTHORIZER_ID,
     })).toThrow(/trustedUseCaseAccountIds/);
   });
 });

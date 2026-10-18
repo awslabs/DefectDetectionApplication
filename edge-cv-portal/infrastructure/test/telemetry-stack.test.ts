@@ -8,9 +8,10 @@
  * assert on raw CloudFormation properties. A second synth with
  * portalRegistryEnforced on covers the environment flag; a third with an
  * injected dataPlaneGrant covers the wired branch; out-of-range deployment
- * values throw at synth, and so does a synth without the `sharedAuthorizerId`
- * context (the stack attaches its routes to the portal API's existing Cognito
- * authorizer and creates none of its own).
+ * values throw at synth, and so does a synth without a usable
+ * `sharedAuthorizerId` prop (the stack attaches its routes to the portal API's
+ * existing Cognito authorizer, whose id bin/app.ts passes from the CDK
+ * context, and creates none of its own).
  */
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
@@ -34,7 +35,7 @@ const ROLLUP = 'dda-portal-telemetry-rollup';
 const API = 'dda-portal-telemetry-api';
 const MAINTENANCE = 'dda-portal-telemetry-maintenance';
 const FUNCTION_NAMES = [INGEST, ROLLUP, API, MAINTENANCE];
-/** The existing portal API authorizer the deploy passes as `-c sharedAuthorizerId` (a fixture id). */
+/** The existing portal API authorizer the deploy passes as `-c sharedAuthorizerId` and bin/app.ts hands the stack (a fixture id). */
 const SHARED_AUTHORIZER_ID = 'fixture0';
 
 const helpersExportDataPlaneGrant =
@@ -56,11 +57,12 @@ let wiredTemplate: Template;
 let wiredStack: TelemetryStack;
 
 /**
- * Synthesize the stack with the shared authorizer id in context, as every
- * deploy passes it; a test overrides the key to exercise the synth guard.
+ * Synthesize the stack with the shared authorizer id as its prop, as
+ * bin/app.ts passes it from the CDK context; a test overrides the prop to
+ * exercise the synth guard.
  */
 function build(context?: { [key: string]: unknown }, override?: Partial<TelemetryStackProps>): TelemetryStack {
-  const app = new cdk.App({ context: { sharedAuthorizerId: SHARED_AUTHORIZER_ID, ...context } });
+  const app = new cdk.App({ context });
   const storage = new StorageStack(app, 'Storage');
   const deps = new cdk.Stack(app, 'Deps');
   const props: TelemetryStackProps = {
@@ -78,6 +80,7 @@ function build(context?: { [key: string]: unknown }, override?: Partial<Telemetr
     restApiId: 'testrestapiid',
     restApiRootResourceId: 'testrootresourceid',
     apiStageName: 'v1',
+    sharedAuthorizerId: SHARED_AUTHORIZER_ID,
     ...override,
   };
   return new TelemetryStack(app, 'Telemetry', props);
@@ -755,14 +758,17 @@ describe('the routes', () => {
     expect(wiredStack.sharedAuthorizerId).toBe(SHARED_AUTHORIZER_ID);
   });
 
-  test('a missing, blank or malformed sharedAuthorizerId stops the synth', () => {
-    expect(() => build({ sharedAuthorizerId: undefined })).toThrow(/TelemetryStack requires sharedAuthorizerId/);
-    expect(() => build({ sharedAuthorizerId: '' })).toThrow(/sharedAuthorizerId/);
-    expect(() => build({ sharedAuthorizerId: '  ' })).toThrow(/sharedAuthorizerId/);
-    expect(() => build({ sharedAuthorizerId: 'Fixture-0' })).toThrow(/lowercase letters and digits/);
-    expect(() => build({ sharedAuthorizerId: 'abc123\tdef456' })).toThrow(/lowercase letters and digits/);
+  test('a missing, blank or malformed sharedAuthorizerId prop stops the synth', () => {
+    expect(() => build(undefined, { sharedAuthorizerId: undefined })).toThrow(/TelemetryStack requires sharedAuthorizerId/);
+    expect(() => build(undefined, { sharedAuthorizerId: '' })).toThrow(/sharedAuthorizerId/);
+    expect(() => build(undefined, { sharedAuthorizerId: '  ' })).toThrow(/sharedAuthorizerId/);
+    expect(() => build(undefined, { sharedAuthorizerId: 'Fixture-0' })).toThrow(/lowercase letters and digits/);
+    expect(() => build(undefined, { sharedAuthorizerId: 'abc123\tdef456' })).toThrow(/lowercase letters and digits/);
+    // The stack reads the prop, not the context: a context value alone does not satisfy it.
+    expect(() => build({ sharedAuthorizerId: 'fixture2' }, { sharedAuthorizerId: undefined }))
+      .toThrow(/TelemetryStack requires sharedAuthorizerId/);
     // A padded id is trimmed, not refused.
-    expect(build({ sharedAuthorizerId: ' fixture1 ' }).sharedAuthorizerId).toBe('fixture1');
+    expect(build(undefined, { sharedAuthorizerId: ' fixture1 ' }).sharedAuthorizerId).toBe('fixture1');
   }, 300_000);
 
   test('the route-salted deployment is retained and depends on every method of the route table', () => {

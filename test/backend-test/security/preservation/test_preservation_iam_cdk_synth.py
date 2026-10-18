@@ -114,9 +114,10 @@ FIXTURE_CONTEXT = [
     "--context", "externalId=fixture-eid",
     "--context", "trustedUseCaseAccountIds=222222222222,333333333333",
     # The telemetry and workflow-debug stacks attach their routes to the
-    # portal API's existing Cognito authorizer and refuse to synth without
-    # its id (lib/context-helpers.ts sharedAuthorizerId); a fixture id keeps
-    # the synth hermetic. The value reaches no IAM statement.
+    # portal API's existing Cognito authorizer; bin/app.ts instantiates them
+    # only when its id is present (lib/context-helpers.ts
+    # sharedAuthorizerIdIfGiven), so a fixture id keeps both in the synth
+    # and hermetic. The value reaches no IAM statement.
     "--context", "sharedAuthorizerId=fixture0",
 ]
 

@@ -12,15 +12,19 @@
  * app and counts the AWS::ApiGateway::Authorizer resources across all of
  * their templates, nested stacks included: the total must stay within the
  * quota. A stack that creates no authorizer of its own (the telemetry and
- * debug stacks attach to the existing one through `-c sharedAuthorizerId`)
- * adds nothing here; a new stack that creates one fails this test before it
- * fails a deploy.
+ * debug stacks attach to the existing one through `-c sharedAuthorizerId`,
+ * which bin/app.ts hands them as the `sharedAuthorizerId` prop) adds nothing
+ * here; a new stack that creates one fails this test before it fails a
+ * deploy.
  *
  * The stack set is a mirror of bin/app.ts (the app is a script that reads
  * SSM and calls app.synth() at import, so it cannot be imported). The mirror
  * is checked against the bin/app.ts source: every `new <Stack>(app, ...)` it
  * contains must be constructed here, so a stack added to the app without a
- * line in this file fails the test instead of escaping the count.
+ * line in this file fails the test instead of escaping the count. This is
+ * the app WITH the context value, so all ten stacks are present; the real
+ * app without it (the two stacks skipped, every other stack synthesizing)
+ * is portal-app-without-shared-authorizer.test.ts.
  *
  * Conventions follow portal-registry-enforcement-infra.test.ts and
  * security-scan-remediation-infra.test.ts: one synth in beforeAll with a
@@ -46,7 +50,7 @@ import { WorkflowDebugStack } from '../lib/workflow-debug-stack';
 /** The API Gateway default quota for authorizers per REST API (Support-only increase). */
 const AUTHORIZERS_PER_REST_API = 10;
 const TRUSTED_USECASE_ACCOUNT_IDS = ['222222222222', '333333333333'];
-/** The existing portal API authorizer the deploy passes as `-c sharedAuthorizerId` (a fixture id). */
+/** The existing portal API authorizer the deploy passes as `-c sharedAuthorizerId` and bin/app.ts hands the two stacks (a fixture id). */
 const SHARED_AUTHORIZER_ID = 'fixture0';
 const APP_SOURCE = path.join(__dirname, '..', 'bin', 'app.ts');
 
@@ -71,7 +75,6 @@ beforeAll(() => {
   const app = new cdk.App({
     context: {
       trustedUseCaseAccountIds: TRUSTED_USECASE_ACCOUNT_IDS.join(','),
-      sharedAuthorizerId: SHARED_AUTHORIZER_ID,
     },
   });
 
@@ -164,6 +167,7 @@ beforeAll(() => {
     trustedUseCaseAccountIds: TRUSTED_USECASE_ACCOUNT_IDS,
     dataBucketAllowlist: [],
     ...api,
+    sharedAuthorizerId: SHARED_AUTHORIZER_ID,
   });
   new TelemetryStack(app, 'EdgeCVPortalTelemetryStack', {
     useCasesTable: storageStack.useCasesTable,
@@ -178,6 +182,7 @@ beforeAll(() => {
     trustedUseCaseAccountIds: TRUSTED_USECASE_ACCOUNT_IDS,
     dataBucketAllowlist: [],
     ...api,
+    sharedAuthorizerId: SHARED_AUTHORIZER_ID,
   });
   new FrontendStack(app, 'EdgeCVPortalFrontendStack', {
     apiUrl: computeStack.apiUrl,

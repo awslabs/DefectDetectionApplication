@@ -307,8 +307,9 @@ owner-approved action.
   fails; the remedy is an account-side policy change, never a recipe change.
 - **RB-2, Portal deploy:** the infrastructure, then the frontend; never during
   a component build. `deploy-infrastructure.sh` resolves the shared authorizer
-  id and passes it as `-c sharedAuthorizerId=<id>`; the synth stops with an
-  instruction when it is missing.
+  id and passes it as `-c sharedAuthorizerId=<id>`; without it the CDK app
+  skips the two new stacks with a warning and deploys every other stack as
+  before (a fresh install runs the script twice).
 - **RB-3, the results bucket:** create or confirm the lab bucket and apply the
   lifecycle rules with `scripts/telemetry_lifecycle.py`.
 - **RB-4, rollback:** destroy the telemetry stack and re-create the API
