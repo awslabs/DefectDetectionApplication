@@ -292,7 +292,13 @@ owner-approved action.
 - **RB-1, read-only pre-checks:** the demo device's publishing identity, the lab
   use cases' topology and role form, the enforcement state, the REST API's
   resource count against its limit (the telemetry routes add 18 resources, the
-  debug mode's about 10), the account quotas, the results bucket's existence
+  debug mode's about 10), the REST API's authorizer count against its limit
+  (`aws apigateway get-authorizers`: existing plus new must stay within 10,
+  a quota only AWS Support raises; the first deploy attempt rolled back on it
+  when each new stack still created its own authorizer, so both now attach to
+  the portal API's existing authorizer and add none, and the deploy passes its
+  id as the CDK context value `sharedAuthorizerId`), the account quotas, the
+  results bucket's existence
   and versioning and whether it reports its region, and the two device-side
   prerequisites: the devices' IoT policy allows publishing on the telemetry
   and debug topics, and the component access policy is attached to the
@@ -300,7 +306,9 @@ owner-approved action.
   whole core device on the first publish, so RB-1 stops when either check
   fails; the remedy is an account-side policy change, never a recipe change.
 - **RB-2, Portal deploy:** the infrastructure, then the frontend; never during
-  a component build.
+  a component build. `deploy-infrastructure.sh` resolves the shared authorizer
+  id and passes it as `-c sharedAuthorizerId=<id>`; the synth stops with an
+  instruction when it is missing.
 - **RB-3, the results bucket:** create or confirm the lab bucket and apply the
   lifecycle rules with `scripts/telemetry_lifecycle.py`.
 - **RB-4, rollback:** destroy the telemetry stack and re-create the API

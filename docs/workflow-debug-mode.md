@@ -279,7 +279,13 @@ delivery:
   the ingest will see; the demo use case's account topology and role form;
   the demo device has a device record for the use case (if not, set its
   Target architecture first) and its recorded architecture is not
-  `x86_64_nvidia`; the REST API still has room for the new routes; the
+  `x86_64_nvidia`; the REST API still has room for the new routes; the REST
+  API's authorizer count (`aws apigateway get-authorizers`: existing plus new
+  must stay within 10, a quota only AWS Support raises; the first deploy
+  attempt rolled back on it when this stack still created its own authorizer,
+  so the stack now attaches its routes to the portal API's existing authorizer
+  and adds none, and the deploy passes its id as the CDK context value
+  `sharedAuthorizerId`); the
   Region's `GetLogEvents` and `FilterLogEvents` quotas, so the read-pacing
   values are set knowingly; who holds `MANAGE_DEVICES`; the registry
   enforcement state (images need it on); the results bucket answers with its
@@ -288,8 +294,10 @@ delivery:
   whole core device, not drop one message); the device's token-exchange role
   carries the Portal component policy for the image upload.
 - **RB-2, Portal deploy.** Deploy the Portal stacks and the frontend, never
-  during a component build. Set `registryEnforced` in the frontend config to
-  match the enforcement state.
+  during a component build. `deploy-infrastructure.sh` resolves the shared
+  authorizer id and passes it as `-c sharedAuthorizerId=<id>`; the synth
+  stops with an instruction when it is missing. Set `registryEnforced` in the
+  frontend config to match the enforcement state.
 - **RB-3, use-case template.** Update the use-case account template in any
   cross-account use case; this also lands the shared telemetry read
   statements on the Portal access role.
