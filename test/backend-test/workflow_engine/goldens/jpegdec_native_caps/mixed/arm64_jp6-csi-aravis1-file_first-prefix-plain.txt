@@ -1,0 +1,1 @@
+filesrc blocksize=-1 location=/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png ! pngdec ! videoconvert ! fakesink appsrc name=appsrc caps=video/x-raw,format=GRAY8 ! videoconvert ! fakesink

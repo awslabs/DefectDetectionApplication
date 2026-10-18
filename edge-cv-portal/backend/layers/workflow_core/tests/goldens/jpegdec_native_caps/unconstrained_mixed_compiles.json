@@ -1,0 +1,6466 @@
+{
+  "csi_camera_source+aravis_camera_source+fan_in": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "csi_camera_source+aravis_camera_source+split": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "csi_camera_source+custom_python_source+fan_in": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "csi_camera_source+custom_python_source+split": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "csi_camera_source+rtmp_stream_source+fan_in": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "csi_camera_source+rtmp_stream_source+split": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "csi_camera_source+rtsp_camera_source+fan_in": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "csi_camera_source+rtsp_camera_source+split": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "folder_source+aravis_camera_source+fan_in": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "folder_source+aravis_camera_source+split": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "folder_source+custom_python_source+fan_in": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "folder_source+custom_python_source+split": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "folder_source+rtmp_stream_source+fan_in": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "folder_source+rtmp_stream_source+split": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "folder_source+rtsp_camera_source+fan_in": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            }
+          ],
+          "from": null,
+          "linkTo": "f0",
+          "name": "s1"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "f0"
+              },
+              "factory": "funnel",
+              "nodeId": null
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s2"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  },
+  "folder_source+rtsp_camera_source+split": {
+    "arm64_jp5": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp5",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp6": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "pngdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp6",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "arm64_jp7": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "blocksize": -1,
+                "location": "/data/images"
+              },
+              "factory": "filesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "emexifextract",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "method": "automatic"
+              },
+              "factory": "videoflip",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "name": "appsrc_feed"
+              },
+              "factory": "appsrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "arm64_jp7",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    },
+    "x86_64+simulation": {
+      "executorBindings": [],
+      "pluginDependencies": [],
+      "schemaVersion": 1,
+      "segments": [
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "file"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "file"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_file"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/file-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_file"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s0"
+        },
+        {
+          "elements": [
+            {
+              "args": {
+                "location": "{dataset_location}"
+              },
+              "factory": "multifilesrc",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "jpegparse",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2
+              },
+              "factory": "jpegdec",
+              "nodeId": "feed"
+            },
+            {
+              "args": {},
+              "factory": "videoconvert",
+              "nodeId": "feed"
+            },
+            {
+              "args": {
+                "idct-method": 2,
+                "quality": 100
+              },
+              "factory": "jpegenc",
+              "nodeId": "cap_feed"
+            },
+            {
+              "args": {
+                "buffer-message-id": "file-target_/out/feed-jpg",
+                "interval": 0,
+                "meta": ""
+              },
+              "factory": "emlcapture",
+              "nodeId": "cap_feed"
+            }
+          ],
+          "from": null,
+          "linkTo": null,
+          "name": "s1"
+        }
+      ],
+      "targetArch": "x86_64",
+      "workflowId": "wf-jpegdec",
+      "workflowVersion": "1"
+    }
+  }
+}

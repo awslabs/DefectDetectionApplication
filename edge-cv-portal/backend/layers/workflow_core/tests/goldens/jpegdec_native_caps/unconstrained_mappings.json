@@ -1,0 +1,298 @@
+{
+  "csi_camera_source": {
+    "arm64_jp5": {
+      "arch": "arm64_jp5",
+      "element_chain": [
+        {
+          "args_template": {
+            "blocksize": -1,
+            "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+          },
+          "factory": "filesrc"
+        },
+        {
+          "args_template": {},
+          "factory": "emexifextract"
+        },
+        {
+          "args_template": {},
+          "factory": "jpegparse"
+        },
+        {
+          "args_template": {
+            "idct-method": 2
+          },
+          "factory": "jpegdec"
+        },
+        {
+          "args_template": {},
+          "factory": "videoconvert"
+        },
+        {
+          "args_template": {
+            "method": "automatic"
+          },
+          "factory": "videoflip"
+        }
+      ],
+      "executor_binding": null,
+      "plugin_dependencies": [
+        "coreelements",
+        "emexifextract",
+        "jpeg",
+        "videoconvertscale",
+        "videofilter"
+      ]
+    },
+    "arm64_jp6": {
+      "arch": "arm64_jp6",
+      "element_chain": [
+        {
+          "args_template": {
+            "blocksize": -1,
+            "location": "/aws_dda/nvidia-csi-capture/latest.jpg.dda_decoded.png"
+          },
+          "factory": "filesrc"
+        },
+        {
+          "args_template": {},
+          "factory": "pngdec"
+        },
+        {
+          "args_template": {},
+          "factory": "videoconvert"
+        }
+      ],
+      "executor_binding": null,
+      "plugin_dependencies": [
+        "coreelements",
+        "png",
+        "videoconvertscale",
+        "python:pillow"
+      ]
+    },
+    "arm64_jp7": {
+      "arch": "arm64_jp7",
+      "element_chain": [
+        {
+          "args_template": {
+            "blocksize": -1,
+            "location": "/aws_dda/nvidia-csi-capture/latest.jpg"
+          },
+          "factory": "filesrc"
+        },
+        {
+          "args_template": {},
+          "factory": "emexifextract"
+        },
+        {
+          "args_template": {},
+          "factory": "jpegparse"
+        },
+        {
+          "args_template": {
+            "idct-method": 2
+          },
+          "factory": "jpegdec"
+        },
+        {
+          "args_template": {},
+          "factory": "videoconvert"
+        },
+        {
+          "args_template": {
+            "method": "automatic"
+          },
+          "factory": "videoflip"
+        }
+      ],
+      "executor_binding": null,
+      "plugin_dependencies": [
+        "coreelements",
+        "emexifextract",
+        "jpeg",
+        "videoconvertscale",
+        "videofilter"
+      ]
+    },
+    "sim": {
+      "arch": "sim",
+      "element_chain": [
+        {
+          "args_template": {
+            "location": "{dataset_location}"
+          },
+          "factory": "multifilesrc"
+        },
+        {
+          "args_template": {},
+          "factory": "jpegparse"
+        },
+        {
+          "args_template": {
+            "idct-method": 2
+          },
+          "factory": "jpegdec"
+        },
+        {
+          "args_template": {},
+          "factory": "videoconvert"
+        }
+      ],
+      "executor_binding": null,
+      "plugin_dependencies": [
+        "multifile",
+        "jpeg",
+        "videoconvertscale"
+      ]
+    }
+  },
+  "folder_source": {
+    "arm64_jp5": {
+      "arch": "arm64_jp5",
+      "element_chain": [
+        {
+          "args_template": {
+            "blocksize": -1,
+            "location": "{location}"
+          },
+          "factory": "filesrc"
+        },
+        {
+          "args_template": {},
+          "factory": "emexifextract"
+        },
+        {
+          "args_template": {},
+          "factory": "jpegparse"
+        },
+        {
+          "args_template": {
+            "idct-method": 2
+          },
+          "factory": "jpegdec"
+        },
+        {
+          "args_template": {},
+          "factory": "videoconvert"
+        },
+        {
+          "args_template": {
+            "method": "automatic"
+          },
+          "factory": "videoflip"
+        }
+      ],
+      "executor_binding": null,
+      "plugin_dependencies": [
+        "coreelements",
+        "emexifextract",
+        "jpeg",
+        "videoconvertscale",
+        "videofilter"
+      ]
+    },
+    "arm64_jp6": {
+      "arch": "arm64_jp6",
+      "element_chain": [
+        {
+          "args_template": {
+            "blocksize": -1,
+            "location": "{location}"
+          },
+          "factory": "filesrc"
+        },
+        {
+          "args_template": {},
+          "factory": "pngdec"
+        },
+        {
+          "args_template": {},
+          "factory": "videoconvert"
+        }
+      ],
+      "executor_binding": null,
+      "plugin_dependencies": [
+        "coreelements",
+        "png",
+        "videoconvertscale",
+        "python:pillow"
+      ]
+    },
+    "arm64_jp7": {
+      "arch": "arm64_jp7",
+      "element_chain": [
+        {
+          "args_template": {
+            "blocksize": -1,
+            "location": "{location}"
+          },
+          "factory": "filesrc"
+        },
+        {
+          "args_template": {},
+          "factory": "emexifextract"
+        },
+        {
+          "args_template": {},
+          "factory": "jpegparse"
+        },
+        {
+          "args_template": {
+            "idct-method": 2
+          },
+          "factory": "jpegdec"
+        },
+        {
+          "args_template": {},
+          "factory": "videoconvert"
+        },
+        {
+          "args_template": {
+            "method": "automatic"
+          },
+          "factory": "videoflip"
+        }
+      ],
+      "executor_binding": null,
+      "plugin_dependencies": [
+        "coreelements",
+        "emexifextract",
+        "jpeg",
+        "videoconvertscale",
+        "videofilter"
+      ]
+    },
+    "sim": {
+      "arch": "sim",
+      "element_chain": [
+        {
+          "args_template": {
+            "location": "{dataset_location}"
+          },
+          "factory": "multifilesrc"
+        },
+        {
+          "args_template": {},
+          "factory": "jpegparse"
+        },
+        {
+          "args_template": {
+            "idct-method": 2
+          },
+          "factory": "jpegdec"
+        },
+        {
+          "args_template": {},
+          "factory": "videoconvert"
+        }
+      ],
+      "executor_binding": null,
+      "plugin_dependencies": [
+        "multifile",
+        "jpeg",
+        "videoconvertscale"
+      ]
+    }
+  }
+}

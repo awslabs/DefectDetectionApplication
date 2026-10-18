@@ -258,8 +258,18 @@ class TestCsiCameraSourceNodeType:
         descriptor = get_node_type("csi_camera_source")
         assert {m.arch for m in descriptor.mappings} == set(ARCHITECTURES)
         # Non-JP6 physical archs: the standard JPEG file chain reading
-        # the staged capture frame (Requirement 1.3).
-        for arch in ("x86_64", "x86_64_nvidia", "arm64_cpu", "arm64_jp5"):
+        # the staged capture frame (Requirement 1.3). On the Ubuntu 22.04
+        # targets a capsfilter pins jpegdec to its native formats
+        # (jpeg-folder-source-decode-ubuntu2204).
+        for arch in ("x86_64", "x86_64_nvidia", "arm64_cpu"):
+            mapping = descriptor.mapping_for(arch)
+            factories = [entry["factory"] for entry in mapping.element_chain]
+            assert factories == ["filesrc", "emexifextract", "jpegparse",
+                                 "jpegdec", "capsfilter", "videoconvert",
+                                 "videoflip"], arch
+            assert mapping.element_chain[0]["args_template"]["location"] == (
+                "/aws_dda/nvidia-csi-capture/latest.jpg"), arch
+        for arch in ("arm64_jp5", "arm64_jp7"):
             mapping = descriptor.mapping_for(arch)
             factories = [entry["factory"] for entry in mapping.element_chain]
             assert factories == ["filesrc", "emexifextract", "jpegparse",
