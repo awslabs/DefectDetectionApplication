@@ -118,7 +118,26 @@ def registration_to_dict(registration: WorkflowRegistration) -> dict:
     }
     if registration.status != STATUS_REGISTERED:
         payload["invalidReason"] = runtime.invalid_reason(registration.id)
+    # Workflow debug mode (workflow-debug-mode R2.7; additive): whether a
+    # debug session is active for this workflow on this device and when it
+    # expires. Absent while the Debug_Agent is not running, so the payload
+    # is exactly the pre-feature one then.
+    debug = _debug_status(registration.workflow_id)
+    if debug is not None:
+        payload["debug"] = debug
     return payload
+
+
+def _debug_status(workflow_id: str):
+    """``{active, expiresAt}`` from the Debug_Agent's status, or ``None``
+    without an agent; contained so the registrations API never fails over
+    telemetry."""
+    try:
+        from workflow_engine.telemetry.debug.agent import debug_status_for
+
+        return debug_status_for(workflow_id)
+    except Exception:  # noqa: BLE001 - additive field, never a 500
+        return None
 
 
 def execution_to_dict(execution: WorkflowExecution) -> dict:

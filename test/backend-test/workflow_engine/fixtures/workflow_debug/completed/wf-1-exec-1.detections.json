@@ -1,0 +1,2 @@
+{"detections": {"0": {"class_label": "person", "confidence": 0.93, "bounding_box": [10, 20, 110, 220]},
+                "1": {"class_label": "vest", "confidence": 0.71, "bounding_box": [30, 60, 90, 160]}}}

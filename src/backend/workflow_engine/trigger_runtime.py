@@ -70,6 +70,8 @@ from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from workflow_engine.telemetry import hooks as telemetry_hooks
+
 logger = logging.getLogger(__name__)
 
 # Concurrency_Policy values (per-trigger-node ``concurrency_policy``
@@ -299,6 +301,7 @@ class TriggerGate:
         in_flight_probe: Callable[[str], bool],
         timer_factory: Callable = threading.Timer,
         clock: Callable[[], float] = time.monotonic,
+        registration_id: Optional[str] = None,
     ) -> None:
         self.policy = policy
         self._queue = queue
@@ -306,6 +309,10 @@ class TriggerGate:
         self._in_flight_probe = in_flight_probe
         self._timer_factory = timer_factory
         self._clock = clock
+        # The owning registration, for the telemetry drop notifications
+        # (workflow-telemetry-dashboards design §5.2); None in tests that
+        # build a gate alone.
+        self._registration_id = registration_id
         self._lock = threading.Lock()
         self._debounce_timer = None
         self._debounce_context: Optional[Dict[str, Any]] = None
@@ -332,6 +339,9 @@ class TriggerGate:
                     "flight (concurrency_policy=drop); discarding",
                     node_id,
                 )
+                telemetry_hooks.notify_trigger_dropped(
+                    self._registration_id, node_id, "drop_policy"
+                )
                 return False
             self._enqueue(context)
             return True
@@ -343,6 +353,9 @@ class TriggerGate:
                 "discarding firing",
                 node_id,
                 self.policy.queue_depth,
+            )
+            telemetry_hooks.notify_trigger_dropped(
+                self._registration_id, node_id, "queue_full"
             )
             return False
         self._enqueue(context)
@@ -638,6 +651,7 @@ class WorkflowActivationCore:
             self.dispatcher.is_in_flight,
             timer_factory=self._timer_factory,
             clock=self._clock,
+            registration_id=self.registration_id,
         )
         self._gates[policy.trigger_node_id] = gate
         return gate

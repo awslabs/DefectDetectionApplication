@@ -83,6 +83,7 @@ import re
 import shutil
 import tempfile
 import time
+import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -130,6 +131,8 @@ from workflow_engine.node_status import NodeStatusCollector, format_duration_ms
 from workflow_engine.run_log import RunLogCapture
 # Standard library only there (stream_feed), so importable at module level.
 from workflow_engine.run_retention import is_continuous_context
+from workflow_engine.telemetry import hooks as telemetry_hooks
+from workflow_engine.telemetry.hooks import RunRecord
 from workflow_engine.vendor.workflow_core.catalog.nodes import (
     JPEGDEC_NATIVE_CAPS,
     JPEGDEC_NATIVE_CAPS_ARCHS,
@@ -661,6 +664,18 @@ EXECUTION_STATUS_PENDING = "pending"
 EXECUTION_STATUS_RUNNING = "running"
 EXECUTION_STATUS_COMPLETED = "completed"
 EXECUTION_STATUS_FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class _RegistrationIdentity:
+    """The three registration fields a run's telemetry ``RunRecord`` needs,
+    copied when the registration row is loaded so the ``finally`` block
+    never reads them through the run's (possibly broken) session."""
+
+    id: str
+    workflow_id: str
+    version: str
+
 
 #: Post-run handler signature: (registration, compiled_document,
 #: tag_values) -> None. Task 12.4 registers the executor-binding
@@ -1573,7 +1588,9 @@ class WorkflowExecutor:
         return models
 
     @staticmethod
-    def _await_model_readiness(document: dict) -> Optional[str]:
+    def _await_model_readiness(
+        document: dict, on_outcome: Optional[Callable] = None
+    ) -> Optional[str]:
         """Wait, bounded, for every Triton model this document uses to be
         READY. Returns an operator-facing failure reason, or None to proceed.
 
@@ -1586,6 +1603,12 @@ class WorkflowExecutor:
         pipeline, which then behaves exactly as it did before the gate
         existed. The gate may make a cold run honest; it must never be the
         sole reason a previously working run stops working.
+
+        ``on_outcome(model, outcome)``, when given, is called for every
+        model's ``ReadinessOutcome`` inside the same containment (the
+        telemetry hooks report the state and the wait per model,
+        workflow-telemetry-dashboards design §5.2); the return value and
+        every existing caller are unchanged.
         """
         models = WorkflowExecutor._document_models(document)
         if not models:
@@ -1602,6 +1625,14 @@ class WorkflowExecutor:
         for model in models:
             try:
                 outcome = ensure_model_ready(model, model)
+                if on_outcome is not None:
+                    try:
+                        on_outcome(model, outcome)
+                    except Exception:  # noqa: BLE001 - a hook never changes the decision
+                        logger.debug(
+                            "Readiness outcome hook raised for model %s",
+                            model, exc_info=True,
+                        )
             except Exception:  # noqa: BLE001 - see docstring
                 logger.exception(
                     "Triton readiness check raised for model %s; continuing "
@@ -1635,6 +1666,16 @@ class WorkflowExecutor:
         collector: Optional[NodeStatusCollector] = None
         # This run's run-activity ticket (triton-model-cleanup-wedge D7).
         ticket = None
+        # Telemetry hook state (workflow-telemetry-dashboards design §5.2):
+        # bound before the ``try`` so the ``finally`` can build the run's
+        # RunRecord on every terminal path, including the early exits.
+        execution = registration = tag_values = None
+        trigger_context: Dict[str, Any] = {}
+        enqueued_at_s = accepted_ms = run_started_ms = None
+        readiness_wait_ms = 0
+        failure_traceback: Optional[str] = None
+        ctx_token = None
+        registration_snapshot = None
         try:
             execution = session.get(WorkflowExecution, execution_id)
             if execution is None:
@@ -1650,6 +1691,11 @@ class WorkflowExecutor:
                     execution.status,
                 )
                 return
+            # The enqueue time, still intact (the RUNNING transition below
+            # overwrites ``started_at``), and the moment this executor
+            # picked the run up (R2.2 of the dashboards).
+            enqueued_at_s = execution.started_at
+            accepted_ms = int(time.time() * 1000)
 
             # The run's Trigger_Context (custom-python-source Requirements
             # 2.1-2.4): read back what the Trigger_Runtime persisted for
@@ -1683,6 +1729,15 @@ class WorkflowExecutor:
             if registration is not None:
                 run_activity.set_details(ticket, workflow_label="{0} v{1}".format(
                     registration.workflow_id, registration.version))
+                # The identity the RunRecord needs, copied now so the
+                # ``finally`` never has to touch the run's session for it.
+                registration_snapshot = _RegistrationIdentity(
+                    registration.id, registration.workflow_id,
+                    registration.version,
+                )
+                ctx_token = telemetry_hooks.CURRENT_EXECUTION.set(
+                    (registration.id, registration.workflow_id, execution_id)
+                )
             failure = self._preflight(registration)
             if failure is not None:
                 self._finish_failed(session, execution, error=failure)
@@ -1732,6 +1787,7 @@ class WorkflowExecutor:
                     session, document, resolution
                 )
             except AravisFeedError as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 logger.error(
                     "Workflow execution %s failed in the Aravis frame feed "
                     "(node %s): %s",
@@ -1765,6 +1821,7 @@ class WorkflowExecutor:
             except (
                 PythonSourceError, python_bridge.CustomPythonNodeError
             ) as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 failing_node_id = getattr(e, "node_id", None)
                 logger.error(
                     "Workflow execution %s failed in the Custom Python "
@@ -1801,6 +1858,7 @@ class WorkflowExecutor:
                     )
                 )
             except StreamFeedError as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 logger.error(
                     "Workflow execution %s failed in the stream camera feed "
                     "(node %s): %s",
@@ -1883,6 +1941,7 @@ class WorkflowExecutor:
             try:
                 self._prepare_csi_captures(capture_plan, registration.arch)
             except FrameSourceError as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 logger.error(
                     "Workflow execution %s failed preparing its CSI capture "
                     "(node %s): %s",
@@ -1907,6 +1966,7 @@ class WorkflowExecutor:
             try:
                 folder_frames = self._stage_frame_sources(document)
             except FrameSourceError as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 logger.error(
                     "Workflow execution %s failed resolving its image source "
                     "(node %s): %s",
@@ -1961,7 +2021,24 @@ class WorkflowExecutor:
             # reaches the failure handler that relocates folder-source
             # frames to failed/ — Requirement 2.2 is satisfied by ordering
             # rather than by a special case (design.md Decision 7).
-            readiness_failure = self._await_model_readiness(document)
+            def _on_readiness_outcome(model, outcome):
+                # Telemetry (dashboards design §5.2): report each model's
+                # state and add its wait to this run's total, so the
+                # RunRecord's latency sample can exclude it.
+                nonlocal readiness_wait_ms
+                waited_ms = int(
+                    (getattr(outcome, "waited_seconds", 0.0) or 0.0) * 1000
+                )
+                readiness_wait_ms += waited_ms
+                telemetry_hooks.notify_model_readiness(
+                    registration.id, execution_id, model,
+                    getattr(outcome, "state", None), waited_ms,
+                    bool(getattr(outcome, "ready", False)),
+                )
+
+            readiness_failure = self._await_model_readiness(
+                document, on_outcome=_on_readiness_outcome
+            )
             if readiness_failure is not None:
                 self._finish_failed(session, execution,
                                     error=readiness_failure)
@@ -2079,6 +2156,10 @@ class WorkflowExecutor:
             # (collector = None).
             collector = self._begin_node_status(name_map, document)
 
+            # The RUNNING transition: the pipeline time of the run starts
+            # here (telemetry ``run_started_ms``; the row's ``started_at``
+            # keeps its one-second resolution and semantics).
+            run_started_ms = int(time.time() * 1000)
             execution.status = EXECUTION_STATUS_RUNNING
             execution.started_at = int(time.time())
             session.commit()
@@ -2190,6 +2271,7 @@ class WorkflowExecutor:
                             status_sink=self._status_sink(collector),
                         )
             except Exception as e:  # noqa: BLE001 - contained per 13.7
+                failure_traceback = traceback.format_exc()[-8192:]
                 # A failed pipeline run relocates every directory-resolved
                 # source image to failed/ so the folder still drains,
                 # mirroring the legacy except branch
@@ -2363,6 +2445,7 @@ class WorkflowExecutor:
                         ),
                     )
                 except Exception as e:  # noqa: BLE001 - contained per 13.7
+                    failure_traceback = traceback.format_exc()[-8192:]
                     failing_node_id = getattr(e, "node_id", None)
                     logger.error(
                         "Workflow execution %s failed in Bedrock inference "
@@ -2458,6 +2541,7 @@ class WorkflowExecutor:
                     session, execution, collector
                 )
             except OutputBindingError as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 failing_node_id = getattr(e, "node_id", None)
                 logger.error(
                     "Workflow execution %s failed in an output binding "
@@ -2509,6 +2593,7 @@ class WorkflowExecutor:
                 tag_values,
             )
         except Exception:  # noqa: BLE001 - contained per 13.7
+            failure_traceback = traceback.format_exc()[-8192:]
             logger.exception(
                 "Workflow execution %s failed unexpectedly", execution_id
             )
@@ -2521,12 +2606,86 @@ class WorkflowExecutor:
             # once on every terminal path (node-execution-timing R4.1,
             # R4.3). Contained: a timing-log failure never affects the run.
             self._emit_timing_logs(collector)
+            # Telemetry (dashboards design §5.2): hand the finished run to
+            # the observers, then leave the run's context. Only when a
+            # registration was loaded (the early exits above have nothing
+            # to report); contained, never raises.
+            if registration is not None and registration_snapshot is not None:
+                self._notify_run_finished(
+                    execution_id, execution, registration_snapshot, collector,
+                    tag_values, trigger_context, enqueued_at_s, accepted_ms,
+                    run_started_ms, readiness_wait_ms, failure_traceback,
+                )
+            if ctx_token is not None:
+                try:
+                    telemetry_hooks.CURRENT_EXECUTION.reset(ctx_token)
+                except Exception:  # noqa: BLE001 - never fails the run
+                    telemetry_hooks.CURRENT_EXECUTION.set(None)
             if log_capture is not None:
                 log_capture.stop()
             if work_dir is not None:
                 shutil.rmtree(work_dir, ignore_errors=True)
             session.close()
             run_activity.finish_run(ticket)
+
+    def _notify_run_finished(
+        self,
+        execution_id: str,
+        execution: Optional[WorkflowExecution],
+        registration: "_RegistrationIdentity",
+        collector: Optional[NodeStatusCollector],
+        tag_values: Optional[dict],
+        trigger_context: Dict[str, Any],
+        enqueued_at_s: Optional[int],
+        accepted_ms: Optional[int],
+        run_started_ms: Optional[int],
+        readiness_wait_ms: int,
+        failure_traceback: Optional[str],
+    ) -> None:
+        """Build the run's :class:`RunRecord` and call
+        ``telemetry_hooks.notify_run_finished`` (dashboards design §5.2).
+
+        The terminal row is read through a **fresh** session: on the
+        unexpected-failure path the run's own session may be the thing
+        that broke, which is why ``_mark_failed_best_effort`` already uses
+        one, and the fresh read sees the terminal ``status``, ``error``,
+        ``failing_node_id``, ``capture_id``, ``output_dir`` and
+        ``log_path`` that path wrote. Falls back to the in-memory row when
+        the read fails. Contained: never raises into the run."""
+        try:
+            terminal_row = None
+            try:
+                fresh = self._session_factory()
+                try:
+                    terminal_row = fresh.get(WorkflowExecution, execution_id)
+                    if terminal_row is not None:
+                        # Detach a plain snapshot before the session closes.
+                        fresh.expunge(terminal_row)
+                finally:
+                    fresh.close()
+            except Exception:  # noqa: BLE001 - fall back to the in-memory row
+                logger.debug(
+                    "Telemetry: fresh read of execution %s failed; using the "
+                    "in-memory row", execution_id, exc_info=True,
+                )
+                terminal_row = None
+            if terminal_row is None:
+                terminal_row = execution
+            if terminal_row is None:
+                return
+            telemetry_hooks.notify_run_finished(
+                RunRecord.from_execution(
+                    terminal_row, registration, collector, tag_values,
+                    trigger_context, enqueued_at_s, accepted_ms,
+                    run_started_ms, int(time.time() * 1000),
+                    readiness_wait_ms, failure_traceback,
+                )
+            )
+        except Exception:  # noqa: BLE001 - telemetry never fails a run
+            logger.debug(
+                "Telemetry: could not report execution %s", execution_id,
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Helpers

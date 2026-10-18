@@ -1,0 +1,4 @@
+2026-10-17 10:15:02,123 INFO workflow_engine.pipeline_executor: Workflow execution exec-1 (wf-1 v3) starting pipeline: videotestsrc ! emltriton model=plates ! fakesink
+2026-10-17 10:15:02,456 INFO workflow_engine.node_status: node n1 resolved
+line two of the same message
+2026-10-17 10:15:03,001 INFO workflow_engine.pipeline_executor: Workflow execution exec-1 completed; tags: {'url': 'rtsp://admin:hunter2@camera.local/main', 'is_anomalous': False}

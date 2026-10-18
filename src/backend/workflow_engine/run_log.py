@@ -66,6 +66,13 @@ DEFAULT_BACKUP_COUNT = 1
 #: the log viewer (Requirement 6) to make a failure's error evident.
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
+#: Filters every capture handler created from now on carries (additive,
+#: workflow-debug-mode design §5.1 ``logtap.py``). Empty by default, so the
+#: capture behaves exactly as before; the debug mode's level guard appends
+#: its ``DebugOnlyFilter`` here while a DEBUG session is active so that
+#: ``run.log`` stays byte-identical whether or not a session runs.
+CAPTURE_FILTERS: list = []
+
 
 class RunLogCapture:
     """Capture the ``workflow_engine``/``gstreamer`` logs of one run to a file.
@@ -123,6 +130,8 @@ class RunLogCapture:
             # Run logs are downloadable, so they are redacted like every
             # other log (rtsp-rtmp-stream-cameras Requirements 6.1, 6.3).
             install_redaction([handler])
+            for capture_filter in CAPTURE_FILTERS:
+                handler.addFilter(capture_filter)
             for name in self._logger_names:
                 lg = logging.getLogger(name)
                 lg.addHandler(handler)
