@@ -1575,7 +1575,8 @@ def get_usecase_client(service_name: str, usecase: Dict, session_name: str = Non
             return boto3.client(service_name, **extra)
 
 
-def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
+def assume_usecase_role(role_arn: str, external_id: str, session_name: str,
+                        session_policy: Optional[Dict] = None) -> Dict:
     """Assume cross-account role for UseCase Account access
     
     For single-account setups (where role_arn is the root ARN), returns current credentials
@@ -1585,6 +1586,10 @@ def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> D
         role_arn: ARN of the role to assume
         external_id: External ID for role assumption (can be None if role doesn't require it)
         session_name: Name for the assumed role session
+        session_policy: Optional IAM policy document narrowing the assumed
+            session (workflow-telemetry-dashboards design §14.4). Sent to
+            STS as ``Policy`` only when given; without it the call is
+            byte-identical to before this keyword existed.
     
     Returns:
         Credentials dict with AccessKeyId, SecretAccessKey, SessionToken
@@ -1616,6 +1621,10 @@ def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> D
         # Only include ExternalId if provided (some roles don't require it)
         if external_id:
             assume_params['ExternalId'] = external_id
+        
+        # Only include the session policy when the caller narrows the session
+        if session_policy is not None:
+            assume_params['Policy'] = json.dumps(session_policy)
         
         response = sts_client.assume_role(**assume_params)
         return response['Credentials']
@@ -2417,7 +2426,8 @@ def _select_s3_role_for_bucket(usecase: Dict, bucket_name: str) -> Tuple[Optiona
     return role_arn, external_id
 
 
-def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str = 'portal-s3-access'):
+def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str = 'portal-s3-access',
+                             session_policy: Optional[Dict] = None):
     """
     Get an S3 client with the correct credentials for accessing a bucket.
     
@@ -2431,13 +2441,16 @@ def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str 
         bucket_name: S3 bucket name to access
         session_name: STS session name for role assumption (recorded as the
             `purpose` of a refusal)
+        session_policy: Optional IAM policy document forwarded to
+            `assume_usecase_role` (sent to STS only when given)
     
     Returns:
         boto3 S3 client with appropriate credentials
     """
     assert_bucket_allowed(usecase, bucket_name, purpose=session_name)
     role_arn, external_id = _select_s3_role_for_bucket(usecase, bucket_name)
-    credentials = assume_usecase_role(role_arn, external_id, session_name)
+    credentials = assume_usecase_role(role_arn, external_id, session_name,
+                                      session_policy=session_policy)
     return create_boto3_client('s3', credentials)
 
 
