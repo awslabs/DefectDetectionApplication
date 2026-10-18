@@ -281,7 +281,11 @@ def test_portal_owned_buckets_both_set(monkeypatch):
     monkeypatch.setenv("PORTAL_ARTIFACTS_BUCKET", "arts")
     monkeypatch.setenv("COMPONENT_BUCKET", "comp-explicit")
     monkeypatch.setenv("PORTAL_ACCOUNT_ID", "acct-portal")
-    assert su.portal_owned_buckets() == frozenset({"arts", "comp-explicit"})
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    # The workflow telemetry lake is derived from the same environment
+    # (workflow-telemetry-dashboards tasks.md Q6) whenever the account id is set.
+    assert su.portal_owned_buckets() == frozenset(
+        {"arts", "comp-explicit", "edgecv-portal-telemetry-acct-portal-us-east-1"})
 
 
 def test_portal_owned_buckets_prefix_derivation(monkeypatch):
@@ -290,10 +294,14 @@ def test_portal_owned_buckets_prefix_derivation(monkeypatch):
     monkeypatch.setenv("PORTAL_ACCOUNT_ID", "acct-portal")
     monkeypatch.setenv("COMPONENT_BUCKET_PREFIX", "custom-prefix")
     monkeypatch.setenv("AWS_REGION", "eu-west-1")
-    assert su.portal_owned_buckets() == frozenset({"arts", "custom-prefix-eu-west-1-acct-portal"})
+    assert su.portal_owned_buckets() == frozenset(
+        {"arts", "custom-prefix-eu-west-1-acct-portal",
+         "edgecv-portal-telemetry-acct-portal-eu-west-1"})
     monkeypatch.delenv("COMPONENT_BUCKET_PREFIX")
     monkeypatch.delenv("AWS_REGION")
-    assert su.portal_owned_buckets() == frozenset({"arts", "dda-component-us-east-1-acct-portal"})
+    assert su.portal_owned_buckets() == frozenset(
+        {"arts", "dda-component-us-east-1-acct-portal",
+         "edgecv-portal-telemetry-acct-portal-us-east-1"})
 
 
 def test_portal_owned_buckets_without_account_id_is_artifacts_only(monkeypatch):
