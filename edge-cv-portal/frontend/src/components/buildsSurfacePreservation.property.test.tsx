@@ -155,6 +155,9 @@ function PRE_FIX_NAV_ORACLE(role: UserRole | undefined): NavItem[] {
  * - "Debug log" (workflow-debug-mode Req 2.6, 3.1, the entry after "Devices"
  *   for every role holding VIEW_DEVICE_LOGS; covered by
  *   `Layout.navigationItems.test.tsx`).
+ * - "Workflow dashboards" (workflow-telemetry-dashboards design §11.4, the
+ *   entry after "Deployments" for every role holding dashboards:read; covered
+ *   by `Layout.navigationItems.test.tsx`).
  */
 function withoutBuildsEntry(items: readonly NavItem[]): NavItem[] {
   return items.filter(
@@ -164,7 +167,8 @@ function withoutBuildsEntry(items: readonly NavItem[]): NavItem[] {
         (item.text === 'Builds' ||
           item.text === 'Synthetic Data' ||
           item.text === 'Workflow Tuning' ||
-          item.text === 'Debug log')
+          item.text === 'Debug log' ||
+          item.text === 'Workflow dashboards')
       )
   );
 }

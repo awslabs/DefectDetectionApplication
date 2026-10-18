@@ -1,0 +1,8 @@
+{
+  "Viewer": {"dashboards:read": true, "dashboards:manage": false, "telemetry:manage": false},
+  "Operator": {"dashboards:read": true, "dashboards:manage": true, "telemetry:manage": false},
+  "DataScientist": {"dashboards:read": true, "dashboards:manage": true, "telemetry:manage": false},
+  "UseCaseAdmin": {"dashboards:read": true, "dashboards:manage": true, "telemetry:manage": true},
+  "PortalAdmin": {"dashboards:read": true, "dashboards:manage": true, "telemetry:manage": true},
+  "DataLabeler": {"dashboards:read": false, "dashboards:manage": false, "telemetry:manage": false}
+}

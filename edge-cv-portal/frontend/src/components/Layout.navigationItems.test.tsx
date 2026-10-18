@@ -69,9 +69,37 @@ describe('buildNavigationItems — Viewer', () => {
       'Node Designer',
       'Components',
       'Deployments',
+      'Workflow dashboards',
       'Devices',
       'Debug log',
     ]);
+  });
+});
+
+describe('buildNavigationItems — the "Workflow dashboards" entry (workflow-telemetry-dashboards design §11.4)', () => {
+  it.each<UserRole>(['Viewer', 'Operator', 'DataScientist', 'UseCaseAdmin', 'PortalAdmin'])(
+    'is present for %s, pointing at /workflow-dashboards, right after Deployments',
+    (role) => {
+      const items = buildNavigationItems(role);
+      const texts = linkTexts(items);
+      expect(texts).toContain('Workflow dashboards');
+      expect(hrefFor(items, 'Workflow dashboards')).toBe('/workflow-dashboards');
+      expect(texts.indexOf('Workflow dashboards')).toBe(texts.indexOf('Deployments') + 1);
+    }
+  );
+
+  it('is absent for DataLabeler, whose navigation is the labeler workspace only', () => {
+    expect(linkTexts(buildNavigationItems('DataLabeler'))).toEqual(['My Labeling Tasks']);
+  });
+
+  it('is absent for a missing role (loading state)', () => {
+    expect(linkTexts(buildNavigationItems(undefined))).not.toContain('Workflow dashboards');
+  });
+
+  it('keeps "Devices" and "Debug log" right after it', () => {
+    const texts = linkTexts(buildNavigationItems('Operator'));
+    expect(texts.indexOf('Devices')).toBe(texts.indexOf('Workflow dashboards') + 1);
+    expect(texts.indexOf('Debug log')).toBe(texts.indexOf('Devices') + 1);
   });
 });
 

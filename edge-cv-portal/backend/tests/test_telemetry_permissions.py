@@ -147,11 +147,18 @@ def test_claim_alone_still_decides_while_enforcement_is_off(env, su, monkeypatch
     assert rbac_manager.has_permission(labeler["user_id"], usecase_id, Permission.DASHBOARDS_READ, labeler) is False
 
 
-@pytest.mark.skipif(not os.path.exists(FRONTEND_MATRIX), reason="the frontend matrix file is written by tasks.md 5.1")
 def test_frontend_matrix_file_equals_the_backend_matrix():
+    """The shared fixture of tasks.md 5.1: the frontend commits the §11.1 table
+    once as ``src/utils/telemetryPermissionsMatrix.json`` (read by
+    ``utils/telemetryPermissions.ts`` and its test) and this test asserts the
+    same table against the RBAC manager, so the two sides cannot drift."""
+    assert os.path.exists(FRONTEND_MATRIX), "the frontend matrix fixture is missing: " + FRONTEND_MATRIX
     with open(FRONTEND_MATRIX, encoding="utf-8") as fh:
         shared = json.load(fh)
     assert shared == MATRIX
+    assert set(shared) == set(MATRIX)
+    for role_name, row in shared.items():
+        assert set(row) == set(PERMISSION_ATTRIBUTES), role_name
 
 
 class TestPortalOwnedBuckets:

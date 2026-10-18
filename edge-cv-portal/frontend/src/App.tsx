@@ -46,6 +46,10 @@ import SyntheticData from './pages/synthetic/SyntheticData';
 import SyntheticSessionDetail from './pages/synthetic/SyntheticSessionDetail';
 import DebugSessions from './pages/debug/DebugSessions';
 import DebugViewer from './pages/debug/DebugViewer';
+import WorkflowDashboards from './pages/telemetry/WorkflowDashboards';
+import CreateDashboard from './pages/telemetry/CreateDashboard';
+import DashboardView from './pages/telemetry/DashboardView';
+import TelemetrySettings from './pages/telemetry/TelemetrySettings';
 import WorkflowTuningLanding from './pages/workflow-tuning/WorkflowTuningLanding';
 import AnomalyTuningOverview from './pages/workflow-tuning/AnomalyTuningOverview';
 import AnomalyTuningSession from './pages/workflow-tuning/AnomalyTuningSession';
@@ -63,6 +67,11 @@ import { BUILDS_ACCESS_ROLES } from './utils/buildsAccess';
 import { SYNTHETIC_ACCESS_ROLES } from './utils/syntheticAccess';
 import { WORKFLOW_TUNING_ACCESS_ROLES } from './utils/workflowTuningAccess';
 import { DEBUG_VIEW_ROLES } from './utils/debugAccess';
+import {
+  DASHBOARDS_MANAGE_ROLES,
+  DASHBOARDS_READ_ROLES,
+  TELEMETRY_MANAGE_ROLES,
+} from './utils/telemetryPermissions';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -257,6 +266,45 @@ function App() {
                   element={
                     <RequireRole roles={DEBUG_VIEW_ROLES}>
                       <DebugViewer />
+                    </RequireRole>
+                  }
+                />
+                {/* Workflow telemetry dashboards (workflow-telemetry-dashboards
+                    design §11.2, §11.4): the list and a dashboard for every role
+                    holding dashboards:read (every role but DataLabeler), the
+                    create wizard for dashboards:manage, the settings page for
+                    telemetry:manage. Every /telemetry/** API route independently
+                    checks has_permission and audits denials; the client-side
+                    matrix is the shared fixture telemetryPermissionsMatrix.json. */}
+                <Route
+                  path="workflow-dashboards"
+                  element={
+                    <RequireRole roles={DASHBOARDS_READ_ROLES}>
+                      <WorkflowDashboards />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="workflow-dashboards/create"
+                  element={
+                    <RequireRole roles={DASHBOARDS_MANAGE_ROLES}>
+                      <CreateDashboard />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="workflow-dashboards/:dashboardId"
+                  element={
+                    <RequireRole roles={DASHBOARDS_READ_ROLES}>
+                      <DashboardView />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="telemetry-settings/:usecaseId"
+                  element={
+                    <RequireRole roles={TELEMETRY_MANAGE_ROLES}>
+                      <TelemetrySettings />
                     </RequireRole>
                   }
                 />
