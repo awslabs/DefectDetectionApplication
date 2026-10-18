@@ -228,16 +228,17 @@ bounded by the leases), and the two DynamoDB lines together stay well under
 what per-frame writes would have cost. Halving the summary interval doubles
 the message, write and roll-up lines.
 
-## The unsupported `amd64Nvidia` variant
+## The `amd64Nvidia` variant
 
-Six of the seven LocalServer recipes grant the component the IPC publish
-permission the telemetry agent needs. The `amd64Nvidia` recipe does not, and
-that variant is **unsupported** for telemetry until the recipe gains the
-statement, which is a separate owner-gated deployment. A device of that
-variant is recorded with the target architecture `x86_64_nvidia`; when its
-publish failures climb while its flow is `silent`, the Health panel shows the
-variant hint naming the cause, and the device page shows the same target
-architecture. No other variant produces the hint.
+All seven LocalServer recipes grant the component the IPC publish permission
+the telemetry agent needs. The `amd64Nvidia` recipe gained it with the trunk
+integration, and that variant's device verification is pending with its first
+build. A device of that variant is recorded with the target architecture
+`x86_64_nvidia`; when its publish failures climb while its flow is `silent`,
+the Health panel still shows the variant hint, which now points at a device
+running a LocalServer built before the recipe change (redeploy a current
+build), and the device page shows the same target architecture. No other
+variant produces the hint.
 
 ## PPE demo onboarding
 

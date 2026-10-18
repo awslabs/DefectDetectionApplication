@@ -197,17 +197,18 @@ The frontend learns the switch from its deployed `config.json`
 (`registryEnforced`, absent means off, the same default as the backend). The
 server decides regardless of what the page shows.
 
-## The unsupported `amd64Nvidia` variant
+## The `amd64Nvidia` variant
 
-The `amd64Nvidia` LocalServer recipe lacks the IPC statement that publishing
-on the debug topic needs. On such a device the session becomes `active`
-(the shadow read and the reported writes work), but every record publish is
-denied, so the stream stays empty while the device's `publishFailures`
-counter climbs. The device record for that hardware says
+The `amd64Nvidia` LocalServer recipe carries the IPC statement that
+publishing on the debug topic needs since the trunk integration; that
+variant's device verification is pending with its first build. A device still
+running a LocalServer built before that change behaves as before: the session
+becomes `active` (the shadow read and the reported writes work), but every
+record publish is denied, so the stream stays empty while the device's
+`publishFailures` counter climbs. The device record for that hardware says
 `target_architecture: x86_64_nvidia`; the sessions table shows a notice
 naming the device when its record says so and its publish failures are above
-zero. Debug mode is unsupported on this variant until its recipe gains the
-statement; that one-line recipe change is a separate, owner-gated deployment.
+zero, and the remedy is to redeploy a current build.
 
 ## The viewer
 
