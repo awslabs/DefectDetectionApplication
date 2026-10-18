@@ -28,12 +28,22 @@ tests, the ``publish_via_ipc`` factoring test and the debug agent tests do).
 The exception classes are plain classes, so a test that raises them through
 ``publish_via_ipc`` exercises the production ``except`` clauses, and the
 ``connect`` stub refuses to connect: tests must inject their IPC client.
+
+The stub package carries ``__dda_host_stub__ = True`` (``HOST_STUB_MARKER``)
+so a guard can tell it from the real SDK. Once installed it stays in
+``sys.modules`` for the rest of the pytest process, so a later-collected
+module that gates itself with ``pytest.importorskip("awsiot")`` (e.g.
+``triton_cleanup_wedge/test_dio_run_registration.py``) is not skipped under
+it; run such directories as their own pytest process, or have the guard also
+skip when ``getattr(awsiot, HOST_STUB_MARKER, False)``.
 """
 import importlib.util
 import sys
 import types
 
 INSTALLED = []
+#: Attribute set on the stub ``awsiot`` package (never on the real SDK).
+HOST_STUB_MARKER = "__dda_host_stub__"
 
 
 class QOS:
@@ -99,11 +109,14 @@ def _permissive(module):
 
 
 def install_awsiot_stubs_if_missing():
-    """Install the stub family into ``sys.modules`` when ``awsiot`` is not
-    importable. Idempotent. Returns the names installed by this call."""
+    """Install the stub family into ``sys.modules`` only when ``awsiot`` is
+    genuinely absent (not already imported, not importable); a really
+    installed SDK always wins. Idempotent. Returns the names installed by
+    this call."""
     if "awsiot" in sys.modules or importlib.util.find_spec("awsiot") is not None:
         return []
     awsiot = types.ModuleType("awsiot")
+    setattr(awsiot, HOST_STUB_MARKER, True)
     ggc = _permissive(types.ModuleType("awsiot.greengrasscoreipc"))
     model = _permissive(types.ModuleType("awsiot.greengrasscoreipc.model"))
     client = _permissive(types.ModuleType("awsiot.greengrasscoreipc.client"))
