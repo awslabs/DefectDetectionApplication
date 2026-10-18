@@ -193,7 +193,11 @@ def test_embedded_templates_come_from_the_repository():
     unnoticed."""
     sources = "\n".join(_read(rel) for rel in (
         "station_install/setup_station.sh", "station_install/create-edge-device-iam-role.sh",
-        "station_install/edge-device-iam-policy.json", "README.md",
+        # station_install/README.md names the device role templates (including the
+        # DDAEdgeDevicePolicy attach name for edge-device-iam-policy.json); the root
+        # README stopped documenting manual device IAM after the Build Fleet / Add
+        # Device rewrite.
+        "station_install/edge-device-iam-policy.json", "station_install/README.md", "README.md",
         "edge-cv-portal/infrastructure/lib/usecase-account-stack.ts",
         "edge-cv-portal/infrastructure/lib/compute-stack.ts"))
     for name in drift.DEVICE_ROLE_TEMPLATE_POLICIES:

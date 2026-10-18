@@ -57,10 +57,11 @@ come from three places:
 
 - **The device role templates.** `setup_station.sh` (inline
   `GreengrassComponentS3Access`), `create-edge-device-iam-role.sh` (inline
-  `dda-edge-device-policy`) and `edge-device-iam-policy.json` write the S3
-  statement set of the `DDAPortalComponentAccessPolicy` managed policy of the
-  use-case account stack (`edge-cv-portal/infrastructure/lib/usecase-account-stack.ts`),
-  and nothing broader:
+  `dda-edge-device-policy`) and `edge-device-iam-policy.json` (attached as the
+  `DDAEdgeDevicePolicy` policy) write the S3 statement set of the
+  `DDAPortalComponentAccessPolicy` managed policy of the use-case account stack
+  (`edge-cv-portal/infrastructure/lib/usecase-account-stack.ts`), and nothing
+  broader:
   - `s3:GetObject`, `s3:GetBucketLocation` on the component bucket
     (`dda-component-*`);
   - `s3:GetObject`, `s3:GetBucketLocation` (and `s3:HeadObject`) on buckets
