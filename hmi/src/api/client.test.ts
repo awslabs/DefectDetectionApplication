@@ -7,9 +7,11 @@ import {
   login,
   resetApiClient,
 } from "./client";
+import { resetApiBase, setApiBase } from "./base";
 import {
   executionMetadataUrl,
   executionResultsUrl,
+  loginUrl,
   registrationExecutionsUrl,
   registrationsUrl,
 } from "./routes";
@@ -102,6 +104,7 @@ beforeEach(() => {
 afterEach(() => {
   resetApiClient();
   clearRetainedCredentials();
+  resetApiBase();
 });
 
 describe("apiFetch bearer header (1.2)", () => {
@@ -120,6 +123,76 @@ describe("apiFetch bearer header (1.2)", () => {
     const requests = setup(() => jsonResponse(401));
     await apiFetch("/workflows/registrations");
     expect(requests[0]!.authorization).toBeNull();
+  });
+});
+
+describe("apiFetch origin binding", () => {
+  const STATION_A = "http://192.168.8.224:5000";
+  const STATION_B = "http://192.168.8.225:5000";
+
+  it("sends the token only to the origin that issued it", async () => {
+    saveSession({ token: "tok-A", expiresAt: 9e9, origin: STATION_A }, storage);
+    const requests = setup(() => jsonResponse(200, {}));
+
+    await apiFetch(`${STATION_B}/workflows/registrations`);
+    await apiFetch(`${STATION_A}/workflows/registrations`);
+
+    expect(requests.map((r) => r.authorization)).toEqual([null, "Bearer tok-A"]);
+  });
+
+  it("is signed out after the API base moves to another LocalServer", async () => {
+    setApiBase(STATION_A);
+    saveSession({ token: "tok-A", expiresAt: 9e9 }, storage); // bound to A
+    setApiBase(STATION_B);
+    const requests = setup(() => jsonResponse(200, {}));
+
+    await apiFetch(registrationsUrl());
+
+    expect(requests[0]!.url).toBe(`${STATION_B}/workflows/registrations`);
+    expect(requests[0]!.authorization).toBeNull();
+  });
+
+  it("sends no Authorization header for a legacy session without an origin", async () => {
+    storage.data.set(SESSION_STORAGE_KEY, JSON.stringify({ token: "legacy", expiresAt: 9e9 }));
+    const requests = setup(() => jsonResponse(200, {}));
+    await apiFetch("/workflows/registrations");
+    expect(requests[0]!.authorization).toBeNull();
+  });
+
+  it("never re-submits credentials another origin accepted, and keeps that origin's session", async () => {
+    setApiBase(STATION_A);
+    saveSession({ token: "tok-A", expiresAt: 9e9 }, storage);
+    retainCredentials({ username: "op", password: "pw" });
+    setApiBase(STATION_B);
+    const requests = setup(() => jsonResponse(401));
+
+    const result = await apiFetch(registrationsUrl());
+
+    expect(result).toEqual({ ok: false, kind: "http-401", status: 401 });
+    // No login POST to B with A's credentials, and no token sent to B.
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.authorization).toBeNull();
+    expect(authExpiredCalls).toBe(1);
+    // B's sign-out does not discard A's session.
+    expect(JSON.parse(storage.data.get(SESSION_STORAGE_KEY)!)).toMatchObject({
+      token: "tok-A",
+      origin: STATION_A,
+    });
+  });
+
+  it("binds the login's session to the login URL's origin", async () => {
+    setApiBase(STATION_B);
+    const requests = setup(() => jsonResponse(200, { token: "tok-B", expiresAt: 9e9 }));
+
+    const result = await login({ username: "op", password: "pw" });
+
+    expect(requests[0]!.url).toBe(loginUrl());
+    expect(result).toEqual({
+      ok: true,
+      session: { token: "tok-B", expiresAt: 9e9, origin: STATION_B },
+    });
+    await apiFetch(registrationsUrl());
+    expect(requests[1]!.authorization).toBe("Bearer tok-B");
   });
 });
 
@@ -255,14 +328,15 @@ describe("single re-login on 401 (1.4, 1.8)", () => {
 
 describe("login response handling (1.2, 1.6, 1.7)", () => {
   it("stores token + expiresAt and retains credentials on success (1.2)", async () => {
+    setApiBase("http://192.168.8.224:5000");
     setup(() => jsonResponse(200, { token: "tok", expiresAt: 123 }));
 
     const result = await login({ username: "op", password: "pw" });
 
-    expect(result).toEqual({ ok: true, session: { token: "tok", expiresAt: 123 } });
-    expect(storage.data.get(SESSION_STORAGE_KEY)).toBe(
-      '{"token":"tok","expiresAt":123}',
-    );
+    // The session records the LocalServer that issued it.
+    const session = { token: "tok", expiresAt: 123, origin: "http://192.168.8.224:5000" };
+    expect(result).toEqual({ ok: true, session });
+    expect(storage.data.get(SESSION_STORAGE_KEY)).toBe(JSON.stringify(session));
   });
 
   it("maps HTTP 403 to the local-login-disabled state (1.6)", async () => {

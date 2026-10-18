@@ -40,7 +40,7 @@ class TestCapturedImagesUtils(LocalServerBaseTestCase):
 
     def tearDown(self):
         super().tearDown()
-        copy_image = "test/backend-test/utils/tmp/A_img0_03-14T16:11:30_1-1.jpg"
+        copy_image = "test/backend-test/utils/tmp/A_img0_03-14T16-11-30_1-1.jpg"
         shutil.copy(copy_image, self.path + 'test-1.jpg')
         shutil.copy(copy_image, self.path + 'test-2.jpg')
 

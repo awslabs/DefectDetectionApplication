@@ -16,7 +16,7 @@ This guide explains how to import pre-trained PyTorch models from various platfo
   - [EfficientNet from Azure ML](#example-3-efficientnet-from-azure-ml)
   - [Custom Anomaly Detection from Local Training](#example-4-custom-anomaly-detection-from-local-training)
   - [Segmentation Model from Hugging Face](#example-5-segmentation-model-from-hugging-face)
-- [Export Scripts (Manual Packaging)](#export-scripts-manual-packaging)
+- [Export Scripts (Manual Packaging)](#export-scripts)
 - [Validation Checklist](#validation-checklist)
 - [Troubleshooting](#troubleshooting)
 

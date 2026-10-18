@@ -1,0 +1,38 @@
+# Fail when a tracked path cannot be checked out on Windows.
+#
+# Git for Windows refuses paths that NTFS cannot represent (for example a ':'
+# in a file name), and `git clone` then stops with "invalid path ..." and
+# "unable to checkout working tree". Linux and macOS accept those paths, so
+# this job checks every path in the commit's tree with
+# .github/scripts/check_windows_paths.py. Run the same check locally with
+#   python3 .github/scripts/check_windows_paths.py
+name: Windows paths
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check tracked paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The check reads tree objects only. A depth-1, blob-less fetch still
+      # has every tree of the commit, so `git ls-tree -r HEAD` lists the whole
+      # repository, and the sparse checkout downloads a single blob: the script.
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github/scripts/check_windows_paths.py
+          sparse-checkout-cone-mode: false
+
+      - name: Check paths
+        run: python3 .github/scripts/check_windows_paths.py

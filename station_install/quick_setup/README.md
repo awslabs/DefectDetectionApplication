@@ -32,11 +32,24 @@ from the portal artifacts bucket — the station never needs repository access.
 
 ## Credential model & the station-provisioning role
 
-`POST /quick-setup/credentials` mints least-privilege credentials by calling
+`POST /quick-setup/credentials` mints credentials by calling
 `sts:AssumeRole` **with a per-device session policy**
 (`backend/functions/session_policy.py::build_session_policy`). The effective
-permissions are the *intersection* of the assumed role and that session policy,
-so every issuance is scoped to the single registered thing name and Device_Group.
+permissions are the *intersection* of the assumed role and that session policy.
+
+The credentials are short-lived and issued per device: each exchange serves one
+registration, and the credentials last at most 1 hour and never past the setup
+token's expiry. The session policy sets these resource scopes:
+
+- The IoT thing and thing-group actions are limited to the registered thing
+  name and Device_Group.
+- The IoT certificate, policy, policy-version, endpoint and role-alias actions
+  use `Resource: "*"`.
+- The IAM role and policy actions are limited to the names
+  `GreengrassV2TokenExchangeRole*` and `GreengrassV2TokenExchangeRoleAccess*`.
+  `setup_station.sh` installs every device with the
+  `GreengrassV2TokenExchangeRole` role and the `GreengrassV2IoTThingPolicy` IoT
+  policy, so these names are shared by all devices in the account.
 
 Which role is assumed depends on the Use_Case:
 
@@ -58,8 +71,12 @@ Which role is assumed depends on the Use_Case:
 - Holds the provisioning **action ceiling** (the same action set as
   `build_session_policy`: IoT thing/group/cert/policy/endpoint/role-alias,
   Greengrass TES role setup, `greengrass:TagResource`, `sts:GetCallerIdentity`).
-  Because the Lambda always assumes it *with* the per-device session policy, the
-  station only ever receives the narrowed, device-scoped subset.
+  The Lambda always assumes it *with* the per-device session policy, so the
+  station receives the intersection of the two. That intersection limits the
+  thing and thing-group actions to the registered device, and allows
+  new versions of the shared `GreengrassV2IoTThingPolicy` IoT policy and
+  changes to roles named `GreengrassV2TokenExchangeRole*`, which all devices
+  in the account use.
 - The Lambda receives its ARN via the `QUICK_SETUP_PROVISIONING_ROLE_ARN`
   environment variable and selects it automatically when a Use_Case's
   `cross_account_role_arn` ends in `:root`.

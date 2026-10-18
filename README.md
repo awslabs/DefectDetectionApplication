@@ -13,14 +13,14 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
   - [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account)
   - [Step 2: Build and Deploy Frontend](#step-2-build-and-deploy-frontend)
   - [Step 3: Post-Deployment Setup](#step-3-post-deployment-setup)
-  - [Step 4: Build DDA Application](#step-4-build-dda-application-build-server)
-    - [JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
+  - [Step 4: Build the DDA LocalServer Component (Build Fleet)](#step-4-build-the-dda-localserver-component-build-fleet)
+    - [JetPack 7 (JP7) Builds](#45-jetpack-7-jp7-builds)
   - [Step 5: Set Up Accounts](#step-5-set-up-accounts)
   - [Step 6: Create UseCase](#step-6-create-usecase)
-  - [Step 7: Setting Up Edge Servers](#step-7-setting-up-edge-servers)
-    - [JetPack 7 (JP7) Devices](#jetpack-7-jp7-devices-jetson-thor-jetpack-71--72)
+  - [Step 7: Set Up Edge Devices (Add Device)](#step-7-set-up-edge-devices-add-device)
+    - [JetPack 7 (JP7) Devices](#76-jetpack-7-jp7-devices)
 - [Deploy DDA Application to Edge Device](#deploy-dda-application-to-edge-device)
-- [Deployments](#deployments)
+  - [Revise a Deployment](#revise-a-deployment)
 - [Devices](#devices)
 - [Using the Portal](#using-the-portal)
 - [ML Workflow](#ml-workflow)
@@ -60,10 +60,12 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 | **Training** | SageMaker training with AWS Marketplace algorithm and manifest validation |
 | **Compilation** | Compile models for edge (x86-64, ARM64) |
 | **Components** | Manage Greengrass components |
-| **Deployments** | Deploy models to edge devices with optional Inference Uploader |
+| **Builds** | Build and publish the DDA LocalServer component (JP5, JP6, JP7, AMD64, AMD64_NVIDIA) on ephemeral or dedicated build compute |
+| **Build Fleet** | Launch, start, stop, and terminate dedicated build servers (PortalAdmin only) |
+| **Deployments** | Deploy LocalServer, models, and workflows to edge devices, revise a device's deployment, optional Inference Uploader |
 | **Inference Uploader** | Automatically upload inference results from edge devices to S3 |
-| **Devices** | Monitor IoT Greengrass devices |
-| **Settings** | Portal configuration and Data Accounts management (PortalAdmin only) |
+| **Devices** | Register devices with a one-line setup command (Add Device) and monitor IoT Greengrass devices |
+| **Settings** | Portal configuration, Data Accounts, and Build Infrastructure settings (PortalAdmin only) |
 
 ## Deployment
 
@@ -190,234 +192,181 @@ This automatically generates `config.json` from CDK stack outputs, builds the Re
 
 #### 3.1 Shared Components
 
-When you deploy the portal infrastructure, the following Greengrass components are automatically provisioned and shared with UseCase accounts:
+The portal shares the following Greengrass components with UseCase accounts:
 
-- **LocalServer** - Core DDA inference component. The backend container packages the **NVIDIA Triton Inference Server**, which loads compiled models and serves inference; the GStreamer pipeline calls into Triton via the `emltriton` plugin.
+- **LocalServer** - Core DDA inference component. The backend container packages the **NVIDIA Triton Inference Server**, which loads compiled models and serves inference; the GStreamer pipeline calls into Triton via the `emltriton` plugin. The portal deploy does not create it: build it with Build Fleet in [Step 4](#step-4-build-the-dda-localserver-component-build-fleet) before you create a UseCase, because a variant with no published version is not shared.
 - **InferenceUploader** - Optional component for uploading inference results to S3
 
 These are automatically shared when you create a UseCase in the portal. The UseCase creation also provisions the `DDAPortalComponentAccessPolicy` required by edge devices.
 
 #### 3.2 Create Portal Admin User
 
+Self sign-up is off, so you create the first PortalAdmin by hand with the AWS CLI, using credentials for the portal account. Two things make it a working admin:
+
+- **Its global row in the Portal_Identity registry**, the DynamoDB table `dda-portal-user-roles`. This row is what grants PortalAdmin, whether `PORTAL_REGISTRY_ENFORCED` is off (the fresh-install default) or on.
+- **The `custom:role=PortalAdmin` attribute.** The portal UI reads it to decide which pages to show; without it the admin gets a Viewer UI with no User Manager and none of the Builds, Build Fleet, or Settings pages that Step 4 uses. With enforcement on it grants nothing. Never grant or change a role by editing `custom:role` (for example with `admin-update-user-attributes`); use the User Manager.
+
+Registry background: [ADMIN_GUIDE.md, "Portal Users and Privilege (Portal_Identity Registry)"](edge-cv-portal/ADMIN_GUIDE.md#portal-users-and-privilege-portal_identity-registry).
+
+Replace `<REGION>`, `<ADMIN_EMAIL>`, and `<YOUR_SECURE_PASSWORD>`, then run:
+
 ```bash
+# The region you deployed the portal to (deploy-infrastructure.sh printed it as "Region:")
+REGION="<REGION>"
+# A mailbox you control: password recovery is email-only
+ADMIN_EMAIL="<ADMIN_EMAIL>"
+
 # Get User Pool ID from CDK output (or use the value from config.json)
 USER_POOL_ID=$(aws cloudformation describe-stacks \
   --stack-name EdgeCVPortalAuthStack \
   --query 'Stacks[0].Outputs[?OutputKey==`AuthConfig`].OutputValue' \
-  --output text --region us-east-2 | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
+  --output text --region "$REGION" | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
 
+# 1. Create the account. The username can't be an email address (email is a sign-in alias).
+aws cognito-idp admin-create-user \
+  --user-pool-id "$USER_POOL_ID" \
+  --username admin \
+  --user-attributes \
+    Name=email,Value="$ADMIN_EMAIL" \
+    Name=email_verified,Value=true \
+    Name=given_name,Value=Portal \
+    Name=family_name,Value=Admin \
+    Name=custom:role,Value=PortalAdmin \
+  --message-action SUPPRESS \
+  --region "$REGION"
 
-
+# 2. Set a permanent password: 12+ characters with upper and lower case, a digit and a symbol.
+#    Keep the single quotes, and pick a password without a single quote (') in it,
+#    because a single quote would end the quoted string.
 aws cognito-idp admin-set-user-password \
-  --user-pool-id $USER_POOL_ID \
+  --user-pool-id "$USER_POOL_ID" \
   --username admin \
-  --password <YOUR_SECURE_PASSWORD> \
+  --password '<YOUR_SECURE_PASSWORD>' \
   --permanent \
-  --region $REGION
+  --region "$REGION"
 
-aws cognito-idp admin-update-user-attributes \
-  --user-pool-id $USER_POOL_ID \
+# 3. Grant PortalAdmin: write the account's global row in the Portal_Identity registry
+USER_SUB=$(aws cognito-idp admin-get-user \
+  --user-pool-id "$USER_POOL_ID" \
   --username admin \
-  --user-attributes Name=custom:role,Value=PortalAdmin \
-  --region $REGION
+  --query 'UserAttributes[?Name==`sub`].Value' \
+  --output text --region "$REGION")
+
+aws dynamodb put-item \
+  --table-name dda-portal-user-roles \
+  --region "$REGION" \
+  --item "{
+    \"user_id\":     {\"S\": \"$USER_SUB\"},
+    \"usecase_id\":  {\"S\": \"global\"},
+    \"role\":        {\"S\": \"PortalAdmin\"},
+    \"status\":      {\"S\": \"enabled\"},
+    \"username\":    {\"S\": \"admin\"},
+    \"email\":       {\"S\": \"$ADMIN_EMAIL\"},
+    \"assigned_by\": {\"S\": \"bootstrap\"},
+    \"assigned_at\": {\"N\": \"$(date +%s)\"}
+  }"
+
+# 4. Check the row: role should be PortalAdmin and status enabled
+aws dynamodb get-item \
+  --table-name dda-portal-user-roles \
+  --key "{\"user_id\": {\"S\": \"$USER_SUB\"}, \"usecase_id\": {\"S\": \"global\"}}" \
+  --region "$REGION"
 ```
 
-### Step 4: Build DDA Application (Build Server)
+Authorization reads only `user_id` (the account's Cognito `sub`), `usecase_id` (`global`), `role` (exactly `PortalAdmin`), and, with enforcement on, `status` (`enabled`; any other value denies). The other attributes are the ones the User Manager also writes, for display and attribution; `assigned_at` is in epoch seconds.
 
-The DDA application is the core Greengrass component that runs inference on edge devices.
+Sign in at the portal URL that `./deploy-frontend.sh` printed in Step 2 (the `FrontendUrl` output of `EdgeCVPortalFrontendStack`) with username `admin` and the password you set. Open the user menu (top right) and choose **User Manager**: the **Accounts** table lists the pool's accounts, including `admin`. Create every other account there with **Create user**, which writes both the Cognito account and its registry row.
 
-#### 4.1 Build and Publish
+### Step 4: Build the DDA LocalServer Component (Build Fleet)
 
-Before launching the build server, find your public IP to configure SSH access in the security group:
+The DDA application runs on each edge device as the LocalServer Greengrass component, `aws.edgeml.dda.LocalServer.<variant>`, with one variant per device architecture. Build it from the portal's **Builds** page: the portal provisions build compute, builds the component from a GitHub repository, and publishes it to AWS IoT Greengrass in the portal account. This is the LocalServer component that [3.1 Shared Components](#31-shared-components) shares with UseCase accounts, so build every variant your devices need before you create the UseCase in [Step 6](#step-6-create-usecase).
 
-```bash
-curl -L https://ifconfig.me
-```
+#### 4.1 One-Time Setup
 
-Then launch and connect:
+Step 1 already deployed the build fleet (`EdgeCVPortalBuildFleetStack`): the build job API and dispatcher, a dedicated build VPC, and the `dda-build-role` instance profile. Build instances have no SSH key and no inbound rules; the portal runs builds on them through AWS Systems Manager. The default **Ephemeral compute** mode needs no further setup.
 
-```bash
-# Launch build server (from edge-cv-portal directory)
-cd edge-cv-portal
-./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME --region REGION
+| Task | Page | Roles |
+|------|------|-------|
+| Submit, monitor, cancel, and retry builds | **Builds** (`/builds`) | DataScientist, UseCaseAdmin, PortalAdmin |
+| Launch, start, stop, and terminate dedicated build servers | **Build Fleet** (`/admin/fleet`) | PortalAdmin |
+| Change build defaults | **Settings** → **Build Infrastructure** | PortalAdmin |
 
-# Set permissions on your key pair
-chmod 400 ~/.ssh/YOUR_KEY_NAME.pem
+Optional PortalAdmin setup:
 
-# Connect to the build server
-ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@<PUBLIC_IP>
+- **Settings** → **Build Infrastructure**: **ARM64 instance type** (default `m6g.4xlarge`), **x86_64 instance type** (default `m6i.4xlarge`), **Volume size (GB)** (default 200), **Max runtime (hours)** (default 4), **Ephemeral runners** (Spot instances, off by default), **Default Ubuntu flavor**, and optional **Per-target volume sizes** and **Runtime budgets (per target and mode)**. A build keeps the settings that were in effect when it was submitted.
+- **Build Fleet** → **Launch server** (dedicated builds): enter a **Server name**; pick the **CPU architecture** (**ARM64** for JP5, JP6, and JP7, **x86_64** for AMD64 and AMD64_NVIDIA) and the **Ubuntu flavor** (**Standard** or **Ubuntu Pro**); for ARM64, also pick the **Ubuntu version** (**Ubuntu 22.04 (default)** for JP5/JP6, **Ubuntu 24.04** for JP7). The build environment installs automatically, and the server shows `running` when it is ready. **Start** works on a stopped server; **Stop** and **Terminate** work only while no build runs on the server. **Terminate** asks you to type the server name and permanently destroys the instance and its build workspace. Stop dedicated servers you are not using to save cost.
+- Subscribe to the `dda-portal-build-alerts` SNS topic for orphaned-runner notifications.
 
-# Clone the repo and build
-mkdir -p ~/workspace
-cd ~/workspace
-git clone https://github.com/awslabs/DefectDetectionApplication.git
-cd DefectDetectionApplication
-./setup-build-server.sh
-./gdk-component-build-and-publish.sh
-```
+#### 4.2 Start a Build
 
-**Selecting the build target.** For ARM64 builds, pass the architecture and the
-target (`cpu` for a generic non-Jetson arm64 host, or the JetPack version) so the
-correct base image, recipe, and component name are used. JetPack 4 is no longer
-supported:
+On **Builds**, fill in **Submit build**:
 
-```bash
-./gdk-component-build-and-publish.sh aarch64 cpu # generic arm64 CPU (e.g. Graviton) -> aws.edgeml.dda.LocalServer.arm64
-./gdk-component-build-and-publish.sh aarch64 5   # JetPack 5   (L4T r35.x) -> aws.edgeml.dda.LocalServer.arm64JP5
-./gdk-component-build-and-publish.sh aarch64 6   # JetPack 6   (L4T r36.x) -> aws.edgeml.dda.LocalServer.arm64JP6
-./gdk-component-build-and-publish.sh aarch64 7   # JetPack 7   (L4T r38.x) -> aws.edgeml.dda.LocalServer.arm64JP7
-./gdk-component-build-and-publish.sh x86_64      # x86_64                  -> aws.edgeml.dda.LocalServer.amd64
-```
+1. **Build targets**: select one or more. Each target becomes its own build job; the jobs run one after another in the order you selected them.
 
-Each JetPack target builds against its matching base image (JP5:
-`l4t-jetpack:r35.4.1`, JP6: `l4t-jetpack:r36.3.0`, JP7: digest-pinned
-`nvcr.io/nvidia/cuda` CUDA 13.0.x Ubuntu 24.04 arm64 — NGC publishes no
-`l4t-jetpack` r38.x tag) and is published as a distinct component. Deploy the
-component that matches the device's JetPack version (or the arm64 CPU
-component on a non-Jetson arm64 host), and compile models for the matching
-compilation target (Jetson JetPack 5.x / 6.x / 7.x, or arm64 CPU).
+   | Target | Component | Devices (Target Architecture) |
+   |--------|-----------|-------------------------------|
+   | JP5 | `aws.edgeml.dda.LocalServer.arm64JP5` | Jetson, JetPack 5 (L4T R35, Ubuntu 20.04): `arm64_jp5` |
+   | JP6 | `aws.edgeml.dda.LocalServer.arm64JP6` | Jetson, JetPack 6 (L4T R36, Ubuntu 22.04): `arm64_jp6` |
+   | JP7 | `aws.edgeml.dda.LocalServer.arm64JP7` | Jetson Thor, JetPack 7 (L4T R38, Ubuntu 24.04): `arm64_jp7` |
+   | AMD64 | `aws.edgeml.dda.LocalServer.amd64` | x86_64 CPU: `x86_64` |
+   | AMD64_NVIDIA | `aws.edgeml.dda.LocalServer.amd64Nvidia` | x86_64 with an NVIDIA GPU: `x86_64_nvidia` |
 
-> **JetPack 7 builds require an Ubuntu 24.04 arm64 build server.** See
-> [JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
-> below for provisioning steps.
+2. **Repository**: pre-filled with the configured repository (`https://github.com/awslabs/DefectDetectionApplication` by default). To build a fork, enter `https://github.com/<owner>/<repo>`; only HTTPS GitHub repositories are accepted.
+3. **Branch or ref** (optional): pick a discovered branch, or type any branch, tag, or 40-character commit SHA. Leave it empty to build the repository's default branch. Branch discovery works only for public repositories; if it fails, you can still type a ref.
+4. **Execution mode**: **Ephemeral compute** (default) launches a build instance for the job and terminates it when the job ends. **Dedicated build server** runs on a running fleet server that you select; its CPU architecture must match every selected target. This option is unavailable until the fleet has a server.
+5. Click **Submit build request**. The page confirms how many build jobs were created.
 
-**Launch script options:**
-- `--key-name KEY` (required) - SSH key pair name
-- `--subnet-id SUBNET` - Subnet ID for VPC selection
-- `--security-group-id SG` - Security group ID
-- `--instance-type TYPE` - EC2 instance type (default: m6g.4xlarge)
-- `--volume-size SIZE` - Root volume size in GB (default: 100)
-- `--region REGION` - AWS region (default: us-east-1)
-- `--iam-profile PROFILE` - IAM instance profile name (default: dda-build-role, auto-created if missing)
+Portal builds always use the default build options: the JetPack targets compile the GPU ONNX Runtime from source, and JP6 and JP7 include vLLM. The portal has no option for a vLLM-free (`VLLM_ENABLE=0`) or CPU-only ONNX Runtime image.
 
-**What the build script does:**
-- Creates IAM role (`dda-build-role`) if needed
-- Detects architecture (x86_64 or aarch64)
-- Builds Docker images (backend and frontend)
-- Publishes to AWS Greengrass component repository
+> **Not a Build Fleet target:** the generic ARM64 CPU component, `aws.edgeml.dda.LocalServer.arm64` (non-Jetson arm64 devices such as AWS Graviton, Target Architecture `arm64_cpu`), cannot be built from the portal.
 
-**Debugging:** `VERBOSE=1 ./gdk-component-build-and-publish.sh`
+#### 4.3 Monitor a Build
 
-**Publishing without rebuilding (`publish-ecr-only.sh`).** `gdk-component-build-and-publish.sh` always does a clean rebuild before publishing. If you have already built the images (e.g. the build succeeded but the publish failed because an auth/login session expired), use `publish-ecr-only.sh` to publish the **already-built** images without spending ~15-20 minutes on another build:
+The **Builds** table lists the build jobs of the last 90 days, newest first, and refreshes every 15 seconds. It shows **Build job**, **Status**, **Target**, **Mode**, **Requested by**, **Submitted**, **Started**, **Ended**, and, for succeeded jobs, **Published version**.
 
-```bash
-./publish-ecr-only.sh        # aarch64 JetPack 5 (aws.edgeml.dda.LocalServer.arm64JP5)
-```
+| Status | Meaning |
+|--------|---------|
+| `queued` | Waiting to start, for example behind the previous target of the same request or a build already running on the dedicated server |
+| `provisioning` | The ephemeral build instance is starting (ephemeral mode only) |
+| `building` | The build is running |
+| `publishing` | The component is being published to Greengrass |
+| `succeeded` | Published; see **Published version** |
+| `failed` | The build or the publish failed, or the job exceeded its runtime limit |
+| `interrupted` | The build compute was lost before the build finished (for example, a reclaimed Spot instance) |
+| `cancelled` | Cancelled by a user |
 
-It reuses the locally-built `flask-app:latest` / `react-webapp:latest` images and the existing `custom-build/` staging directory, and runs only the ECR + S3 publish path used for >2 GB artifacts: bump to the next patch version, push the images to ECR, upload the small scripts/compose zip to S3, rewrite the recipe to reference the `docker:` + S3 artifacts, register the new component version, and tag it for portal discovery. It fails fast if AWS credentials are invalid or the built images/staging dir are missing (run a build first). It currently targets the arm64 JetPack 5 component; edit `COMPONENT_NAME`/`ARCH` near the top for other targets.
+Click a **Build job** to open its detail page:
 
-> **Notice**: Stop the EC2 build server after building to avoid unnecessary costs.
+- **Job information**: target, execution mode, requester, **Repository**, **Source ref**, **Resolved commit**, and the submitted, started, and ended times.
+- **Build log**: the build output (CloudWatch Logs group `/dda/portal-builds`), refreshed every 30 seconds while the job runs. Output can take a few minutes to appear after the job starts.
+- **Execution diagnostics**, when the portal retained them: classification, command status and response code, queue-wait, provisioning, and execution times, the timeout budget, the last heartbeat and progress, runner disk space, and stdout/stderr excerpts.
+- **Published artifacts** (succeeded jobs): **Component**, **Published version**, and **Pushed images**.
+- A **Build failed** alert with the error. When the publish step failed, it lists what was and was not published.
 
-<details>
-<summary><strong>Manual Setup (Optional)</strong></summary>
+Actions:
 
-If you prefer manual IAM role and EC2 setup, create a role with trust policy for `ec2.amazonaws.com` and attach permissions for Greengrass, IoT, S3, EC2, CloudWatch Logs, CloudWatch Metrics, and ECR. See the inline policy in the collapsed section of the original documentation.
+- **Cancel** (table) or **Cancel build** (detail page) is available while a job is `queued`, `building`, or `publishing`. A queued job is cancelled at once. A running build is cancelled only if its build process is confirmed stopped within 5 minutes; otherwise the job keeps its status. A job cannot be cancelled while it is `provisioning`.
+- **Retry** (table) or **Retry build** (detail page) is available for `interrupted` jobs and reruns the same target and execution mode. For a `failed` job, submit a new build.
+- A job that runs past its runtime limit fails: **Max runtime (hours)** (default 4), or the runtime budget set for its target and mode.
 
-</details>
+#### 4.4 Use the Published Component
 
-#### 4.2 JetPack 7 (JP7) Build Server (Ubuntu 24.04 arm64)
+Each successful build publishes the next patch version of its component (the first build publishes `1.0.0`) to AWS IoT Greengrass in the portal account and region, tagged `dda-portal:managed=true`. The container images go to the `dda/flask-app` and `dda/react-webapp` ECR repositories in the same account and are listed under **Pushed images**.
 
-The JP7 target (`aws.edgeml.dda.LocalServer.arm64JP7`, JetPack 7.1/7.2, Jetson
-Linux r38.x) is built on an **Ubuntu 24.04 LTS (noble) arm64** host. The
-JP5/JP6 build-server flow above applies, with the noble-specific deltas
-documented here. Following this section end-to-end produces a host that builds
-the JP7 component and that the portal accepts as capable of JP7 dispatched
-builds.
+Every build of a target publishes to the same component, whatever its repository or ref. A build of a fork or a test branch therefore becomes that component's latest version, which Create Deployment adds by default and offers through **Update to latest**, and which the next copy to UseCase accounts takes. Build only refs that are meant for rollout.
 
-**1. Host: Ubuntu 24.04 LTS on arm64.** An AWS Graviton instance (e.g.
-`m6g.4xlarge`, the launcher default) or Jetson Thor-class hardware. The launch
-script accepts a Ubuntu version parameter:
+How the new version becomes deployable:
 
-```bash
-cd edge-cv-portal
-./launch-arm64-build-server.sh --key-name YOUR_KEY_NAME --region REGION --ubuntu-version 24.04
-```
+- **Single-account setup** (the UseCase uses the portal account): the version appears on **Create Deployment** right away, on the **Recommended** and **Portal Components** tabs.
+- **Multi-account setup**: the portal copies LocalServer components into each UseCase account. Creating a UseCase ([Step 6](#step-6-create-usecase)) copies the latest version of each published variant. After a later build, a UseCaseAdmin or PortalAdmin opens **Use Cases** → **Actions** → **Re-provision Shared Components** for the UseCase. A PortalAdmin can also click **Update All Usecases** in the **Shared Components Status** panel when it lists UseCases that need an update. The copy covers the `arm64JP5`, `arm64JP6`, `amd64`, and generic `arm64` variants. `arm64JP7` and `amd64Nvidia` are not copied yet, so in a multi-account setup those builds do not appear on Create Deployment.
 
-`--ubuntu-version 24.04` resolves the latest Ubuntu 24.04 arm64 AMI (Ubuntu
-Pro preferred, standard fallback). All other launcher options are unchanged;
-`--ami-id` still overrides the lookup entirely.
+To move a device to the new version, revise its deployment and click **Update to latest** on the LocalServer row (see [Revise a Deployment](#revise-a-deployment)).
 
-**2. Docker Engine + buildx + `docker-compose` shim.** Connect as `ubuntu`
-(`ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@<PUBLIC_IP>`) and install Docker
-Engine with the buildx and compose v2 plugins from Ubuntu's repositories:
+#### 4.5 JetPack 7 (JP7) Builds
 
-```bash
-sudo apt-get update
-sudo apt-get install -y docker.io docker-buildx docker-compose-v2
-sudo usermod -aG docker ubuntu   # re-login (or `newgrp docker`) to pick up the group
-```
-
-Ubuntu 24.04 ships only the `docker compose` **plugin** — there is no legacy
-`docker-compose` command — while `build-custom.sh` invokes `docker-compose`.
-Provide a `docker-compose` shim that delegates to the plugin:
-
-```bash
-printf '#!/bin/sh\nexec docker compose "$@"\n' | sudo tee /usr/local/bin/docker-compose >/dev/null
-sudo chmod +x /usr/local/bin/docker-compose
-docker-compose version   # must print the compose v2 version
-```
-
-(Installing the standalone compose v2 binary as `/usr/local/bin/docker-compose`
-is an equivalent alternative.)
-
-**3. Build tooling: zip, python3, GDK CLI.**
-
-```bash
-sudo apt-get install -y zip python3 python3-pip git curl
-# noble's python is PEP 668 "externally managed" — user-level installs need the flag
-pip3 install --user --break-system-packages 'botocore[crt]'
-pip3 install --user --break-system-packages git+https://github.com/aws-greengrass/aws-greengrass-gdk-cli.git@v1.6.2
-export PATH="$HOME/.local/bin:$PATH"   # persist via ~/.bashrc
-gdk --help                             # verify the CLI resolves
-```
-
-**4. Repository clone as the `ubuntu` user.** Portal-dispatched builds run as
-`ubuntu` from the repository directory recorded on the server (default
-`/home/ubuntu/DefectDetectionApplication`), so clone the tree there, owned by
-that user:
-
-```bash
-cd ~   # /home/ubuntu
-git clone https://github.com/awslabs/DefectDetectionApplication.git
-cd DefectDetectionApplication
-```
-
-**5. Build the JP7 component.**
-
-```bash
-./gdk-component-build-and-publish.sh aarch64 7   # -> aws.edgeml.dda.LocalServer.arm64JP7
-```
-
-The target derivation, recipe (`recipe-arm64-jp7.yaml`), and packaging follow
-the same flow as JP5/JP6. Builds must run **one at a time** per host (see
-`.kiro/steering/builds.md`); a JP7 build with the default GPU onnxruntime
-compile takes ~1–2 h, and the default from-source vLLM build (`VLLM_ENABLE=1`,
-see [Using LLMs (vLLM)](#using-llms-vllm)) adds **~N–M h** on top of that.
-<!-- TODO(jp7-vllm-enablement): replace ~N–M h with the bounded range measured
-     on the build server during the VLLM_ENABLE=1 validation build -->
-To skip the from-source vLLM compile entirely, build with
-`--build-arg VLLM_ENABLE=0`: the resulting image carries no vLLM or torch
-install, the backend's capability probe runs the pre-feature (vision-only)
-startup sequence, and vLLM model features are unavailable on devices running
-that image.
-
-**6. Portal registration (dispatched builds).** Portal-dispatched JP7 builds
-use the existing dedicated-server registration flow: the **Build Server
-Fleet** page (PortalAdmin only, `admin/fleet`). A fleet server launched with
-the arm64 CPU architecture is recorded with `arch=arm64` — that recorded
-architecture (plus the server being in the `running` state) is exactly what
-makes the portal accept it as capable of the JP7 target. The portal dispatch
-maps `BUILD_TARGET=JP7` to `./portal-build.sh aarch64 7` on the registered
-server. If no running arm64 server is registered, JP7 dispatches fail with a
-missing-capability diagnostic before any build work starts.
-
-> **Note**: The fleet page's own launcher clones the repository to the
-> location recorded on the server (default
-> `/home/ubuntu/DefectDetectionApplication`, owned by `ubuntu`) and
-> bootstraps with `setup-build-server.sh`. For a JP7-capable host on Ubuntu
-> 24.04, additionally apply steps 2–3 above on the launched server (the
-> `docker-compose` shim in particular). The dispatcher runs
-> `scripts/portal-build-agent.sh` from that recorded repository directory.
+- Ephemeral JP7 builds run on an Ubuntu 24.04 arm64 build instance, selected automatically.
+- Dedicated JP7 builds need an **ARM64** server launched with **Ubuntu 24.04**. The portal rejects a JP7 request for a server on another Ubuntu release.
+- No prebuilt GPU ONNX Runtime or vLLM wheels exist for Jetson Thor, so the JP7 image compiles both from source (vLLM `v0.11.2`). If JP7 builds fail on the runtime limit, a PortalAdmin can raise **Max runtime (hours)** or add a JP7 entry under **Runtime budgets (per target and mode)** in **Settings** → **Build Infrastructure**, then submit the build again.
 
 ### Step 5: Set Up Accounts
 
@@ -453,178 +402,169 @@ This only needs to be done once per data account. All future UseCases can select
 
 ### Step 6: Create UseCase
 
-1. Go to **UseCases** → **Create UseCase**
+1. Go to **Use Cases** → **Onboard New Use Case**
 2. Choose setup type (Single Account or Multi-Account)
 3. For multi-account: upload `usecase-account-*-config.txt` to auto-fill role details
 4. Configure data account (select from registered accounts or enter manually)
 5. Select the use case's S3 bucket: an existing bucket must already be tagged `dda-portal:managed=true` (and ABAC-enabled when it is reached through a cross-account role), or a PortalAdmin creates one with **Create new bucket**, which tags and allows it automatically
-6. Click **Create**
+6. Click **Create Use Case**
 
 This provisions Greengrass components, creates `DDAPortalComponentAccessPolicy`, and sets up S3 buckets. The portal checks each configured bucket's tags through the use case's role at creation and answers `400 bucket_not_eligible` with a remedy for an untagged, unreadable or already-configured bucket (see `edge-cv-portal/ADMIN_GUIDE.md`, "Onboarding a New Customer").
 
-### Step 7: Setting Up Edge Servers
+### Step 7: Set Up Edge Devices (Add Device)
 
-Edge device setup is a manual process. After building the DDA application, provision edge servers with AWS IoT Greengrass using the scripts in /station_install/setup_station.sh on the device itself.
+Register each edge device with **Add Device** on the **Devices** page. The portal generates a one-line setup command that contains a single-use setup token. Running the command on the device installs AWS IoT Greengrass and the DDA host dependencies, provisions the device in the UseCase account, and registers it with the portal. The device needs no repository checkout, AWS login, IAM user, or access keys. Create the UseCase first ([Step 6](#step-6-create-usecase)): every device is registered under a UseCase.
 
-**Prerequisites:**
-- DDA application built and published (Step 4)
-- Device credentials configured using `station_install/edge-device-iam-policy.json` (see [Edge Device IAM Permissions](#edge-device-iam-permissions) below)
+#### 7.1 Device Prerequisites
 
-#### Testing with EC2 Instances
+- Ubuntu 20.04, 22.04, or 24.04 on x86_64 or aarch64. That covers Jetson devices on JetPack 5 (Ubuntu 20.04), JetPack 6 (Ubuntu 22.04), or JetPack 7 (Ubuntu 24.04), x86_64 machines with or without an NVIDIA GPU, and generic arm64 machines. JetPack 4 (Ubuntu 18.04) is not supported.
+- `sudo` access and the `curl` (or `wget`), `sha256sum`, `tar`, and `lsb_release` commands.
+- At least 2 GB free on `/` for the installer. The LocalServer container images deployed later are larger than 2 GB, so leave room for them.
+- Outbound internet access to the portal API and AWS. The installer downloads packages and the Greengrass software.
 
-```bash
-# Launch edge device (from the station_install directory)
-cd station_install
-./launch-edge-device.sh \
-  -n dda-edge-1 \
-  -k YOUR_KEY_NAME \
-  -c auto
+The installer checks these first. If any are missing, it lists every unmet prerequisite and exits without changing the system.
 
-# Set permissions on your key pair
-chmod 400 ~/.ssh/YOUR_KEY_NAME.pem
+x86_64 machines with an NVIDIA GPU also need the NVIDIA driver and the NVIDIA Container Toolkit, configured for Docker, before you deploy `aws.edgeml.dda.LocalServer.amd64Nvidia`. The setup does not install them, and it registers the NVIDIA container runtime only on Jetson.
 
-# Connect and setup
-ssh -i ~/.ssh/YOUR_KEY_NAME.pem ubuntu@<PUBLIC_IP>
-scp -r -i ~/.ssh/YOUR_KEY_NAME.pem ./station_install ubuntu@<PUBLIC_IP>:/tmp/
-cd /tmp/station_install
-sudo ./setup_station.sh us-east-1 dda-edge-1
-```
+To try the portal without edge hardware, launch an Ubuntu x86_64 EC2 instance with 30 GB or more of disk and run the setup command on it. A Graviton (arm64) instance is detected as `arm64_cpu` and needs the generic ARM64 LocalServer, which Build Fleet does not build ([4.2](#42-start-a-build)).
 
-#### Production Deployment (Jetson Devices)
+#### 7.2 Register the Device
 
-```bash
-# Copy station_install to Jetson device
-scp -r ./station_install <jetson-user>@<jetson-ip>:/tmp/
+Registering a device takes the Operator, UseCaseAdmin, or PortalAdmin role.
 
-# SSH and run setup
-ssh <jetson-user>@<jetson-ip>
-cd /tmp/station_install
-sudo ./setup_station.sh <region> <device-name>
-```
+1. Go to **Devices**, select the UseCase in **Use Case**, and click **Add Device**.
+2. In **Register Edge Device**, fill in:
+   - **Device name**: the IoT Thing name for the device, 1–128 letters, digits, colons (`:`), underscores (`_`), or hyphens (`-`). The name must not already exist in the UseCase account or in another registration.
+   - **Device group**: an existing IoT thing group, or a new group name (same characters). The device joins this group during setup. If the group already has a group deployment, the device receives that deployment once it is set up ([Thing Group Targets](#thing-group-targets)).
+3. Click **Register device**. The **Setup command for `<device name>`** dialog shows the command and when its token expires. Click **Copy command**.
 
-The setup script installs system dependencies (Java, Python 3.11, Docker, GStreamer), installs Greengrass Core, provisions the device as an IoT Thing, configures IAM roles, and sets up directory structure.
-
-#### JetPack 7 (JP7) Devices (Jetson Thor, JetPack 7.1 / 7.2)
-
-The JP7 component (`aws.edgeml.dda.LocalServer.arm64JP7`) supports devices
-running **JetPack 7.1 (Jetson Linux r38.4)** and **JetPack 7.2** on Ubuntu
-24.04 LTS. One component artifact covers both releases — no release-specific
-configuration, rebuild, or manual step differs between 7.1 and 7.2. Device
-setup follows the standard Jetson flow above (`station_install/setup_station.sh`);
-the device is recorded with architecture `arm64_jp7`, and the portal deploys
-the JP7 component only to devices recorded with that exact architecture
-(JP5/JP6 devices are incompatible with the JP7 component and vice versa).
-
-**Host-side prerequisites (JetPack 7.1 and 7.2)**
-
-- **NVIDIA Container Runtime registered with Docker.** The DDA backend
-  container gets GPU access via `runtime: nvidia` in docker-compose, which
-  requires the `nvidia` runtime wired into `/etc/docker/daemon.json`.
-  `setup_station.sh` (and `station_install/patch_docker_host_prereqs.sh` for
-  already-provisioned hosts) registers it idempotently via `nvidia-ctk` or a
-  direct `daemon.json` merge. JetPack 7 ships the NVIDIA Container Toolkit
-  with the OS image; if `nvidia-ctk`/`nvidia-container-runtime` is missing,
-  install `nvidia-container-toolkit` from the JetPack apt repositories before
-  deploying.
-- **Docker Engine with the `docker compose` plugin.** Ubuntu 24.04 ships the
-  compose v2 plugin; the JP7 recipe lifecycle invokes `docker compose` (not
-  the legacy `docker-compose` v1 binary), which `setup_station.sh` installs
-  where absent.
-- **systemd.** The recipe's Install step runs
-  `host_scripts/install_nvidia_csi_service.sh`, which installs, enables, and
-  starts the `nvidia-csi-capture` systemd service (the CSI camera capture
-  bridge) and installs `jq` where missing — standard on JetPack 7 OS images,
-  listed here for completeness.
-- **JetPack 7 host driver stack (CUDA 13.0 userspace).** The JP7 image is
-  built against CUDA 13.0 / TensorRT 10.x; the host must be flashed with
-  JetPack 7.1 or 7.2 so the r38.x driver interfaces the container runtime
-  injects are present. Deploying the JP7 component to an r35/r36
-  (JetPack 5/6) host is not supported — use the matching JP5/JP6 component.
-- Additional host packages or driver interfaces discovered during on-hardware
-  verification are recorded here per release as they are found (see
-  Requirement 8.5 of the jetpack7-support spec); if the backend container
-  fails to start because of a missing host library or driver interface, the
-  container logs retain the startup error for inspection (the component
-  reports the deployment failed rather than RUNNING if the backend does not
-  pass its healthcheck within the 300-second start budget).
-
-**Known limitations on JP7**
-
-- **DLR-only (Neo-compiled) models are not supported.** The JP7 image does
-  not carry the JP5/JP6 CUDA 11.4 cudart + TensorRT 8 compatibility stages
-  that r35-era `libdlr.so` binaries require; those libraries' transitive L4T
-  driver dependencies do not exist on Thor. Model engines are imported lazily
-  per runner, so this degrades **per model**, not at startup: the LocalServer
-  starts and serves other model types normally, and only a DLR-only model
-  fails at its first load on a JP7 device. Use ONNX (GPU onnxruntime with
-  CUDA and TensorRT execution providers is built in) or Triton-served models
-  instead.
-- **vLLM is enabled by default via a from-source build.** No prebuilt vLLM
-  wheel exists for Jetson Thor / CUDA 13.0 (cu130), so the JP7 image compiles
-  vLLM from source during the image build (`install_vllm_gpu.sh`, vLLM
-  `v0.11.2`, Thor `sm_110`, against `torch==2.9.0+cu130`), and the portal
-  offers `arm64_jp7` as a vLLM-supported architecture. The from-source
-  compile adds build time on the JP7 build server — see
-  [JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
-  for the expected duration and the `VLLM_ENABLE=0` opt-out.
-
-#### Edge Device IAM Permissions
-
-Edge devices need IAM permissions for S3, CloudWatch Logs, cross-account access, IoT Core, and Greengrass. Use the policy in `station_install/edge-device-iam-policy.json`:
+The command has this form. Always copy the real command from the portal, because it contains the token and the installer checksum:
 
 ```bash
-aws iam create-user --user-name dda-edge-device
-aws iam put-user-policy \
-  --user-name dda-edge-device \
-  --policy-name DDAEdgeDevicePolicy \
-  --policy-document file://station_install/edge-device-iam-policy.json
-aws iam create-access-key --user-name dda-edge-device
+curl -fsSL https://<portal-api>/quick-setup/bootstrap -o /tmp/dda-qs.sh && echo "<sha256>  /tmp/dda-qs.sh" | sha256sum -c - && sudo bash /tmp/dda-qs.sh --endpoint https://<portal-api>/quick-setup --token <setup-token>
 ```
+
+The registration appears in the **Device Registrations** panel with **Status** `Pending` and its **Token Expires** time.
+
+#### 7.3 Run the Setup Command on the Device
+
+Paste the command into a shell on the device, as a user that can run `sudo`, and keep the shell session open until the command finishes. The command:
+
+1. Downloads the installer and verifies its SHA-256 checksum before running it.
+2. Checks the prerequisites.
+3. Downloads the setup bundle and verifies its checksum.
+4. Exchanges the token for short-lived AWS credentials limited to the provisioning steps for this device. The token is used up here. The credentials stay in memory and are cleared when the run ends.
+5. Provisions the device. It installs Java, Python 3.11, the AWS CLI, GStreamer, and Docker; on Jetson it also registers the NVIDIA container runtime. It installs Greengrass Core v2 under `/aws_dda/greengrass/v2`, creates the IoT thing in the device group, sets up the `GreengrassV2TokenExchangeRole` permissions, and tags the core device `dda-portal:managed=true` so the portal lists it.
+6. Checks that the device is in the device group and that the `greengrass` service is active.
+7. Detects the device's DDA Target Architecture (`arm64_jp5`, `arm64_jp6`, `arm64_jp7`, `x86_64`, `x86_64_nvidia`, or `arm64_cpu`) and reports the result to the portal.
+
+The output shows each step and ends with `✅ Station Quick Setup completed successfully`. The full log is in `/var/log/dda-quick-setup-<timestamp>.log` (in `/tmp` if `/var/log` is not writable).
+
+A run that is interrupted after the token exchange (step 4), for example by Ctrl-C, a closed SSH session, or a reboot, reports no result to the portal, so the registration stays `In progress` ([7.4 Setup Token Rules](#74-setup-token-rules)). The same happens when the output warns that the setup status could not be reported to the Edge CV Portal.
+
+If the output warns that `DDAPortalComponentAccessPolicy` could not be verified or attached, make sure that policy is attached to `GreengrassV2TokenExchangeRole` in the UseCase account. Without it, deployments can fail with S3 or ECR access errors (see [Edge Device Issues](#edge-device-issues)).
+
+For details of the setup flow, see [station_install/quick_setup/README.md](station_install/quick_setup/README.md).
+
+#### 7.4 Setup Token Rules
+
+- A token is valid for 90 minutes from when the command is generated.
+- Run the command with at least 15 minutes of validity left. The credential exchange refuses a token closer to expiry.
+- A token works once. It is consumed when the device exchanges it for credentials, so the same command cannot be run a second time.
+- Until it has run, the command works for whoever runs it first. Share it only with the person setting up the device, and click **Delete** or **Regenerate** if it may have reached anyone else.
+- **Regenerate**, in the **Device Registrations** panel, issues a new command for a registration that is not completed and invalidates the previous token. An `Expired` or `Failed` registration returns to `Pending`. An `In progress` registration keeps that status, and its new command is refused at the credential exchange, so **Regenerate** does not restart it.
+- **Delete** removes a registration that is not completed and invalidates its token.
+- Neither **Regenerate** nor **Delete** stops a run that has already exchanged its token: the run's credentials stay valid until they expire (at most 1 hour) but can no longer report its result, so do not use either while the command is still running.
+- An invalid or expired token stops the installer with "Generate a new setup command from the Edge CV Portal and run it again." Repeated invalid attempts from the same IP address are rate-limited.
+
+#### 7.5 Verify the Device
+
+- **Devices** → **Refresh**: the registration **Status** goes from `Pending` to `In progress` to `Completed` (or `Failed`).
+- The device appears in the **Devices** table under its device name. Its **Status** shows `Healthy` once Greengrass connects. It has no DDA components until you deploy them.
+- Open the device. **Overview** shows the **Target Architecture (DDA)** that the setup recorded, for example `arm64_jp6`. If it shows **Not recorded**, click **Edit** and set it: vLLM and node-plugin deployments are rejected without it, and Create Deployment can only filter LocalServer variants for a device whose architecture is recorded.
+- On the device, `sudo systemctl status greengrass` shows the service running. More commands are in [Edge Device Management](#edge-device-management).
+- If the registration **Status** is `Failed`, read the log on the device and fix the cause. Then click **Regenerate** and run the new command.
+
+#### 7.6 JetPack 7 (JP7) Devices
+
+- Jetson Thor devices on JetPack 7 (L4T R38, Ubuntu 24.04) are recorded as `arm64_jp7` and need `aws.edgeml.dda.LocalServer.arm64JP7`. Create Deployment does not offer them the JP5 or JP6 LocalServer, and it does not offer the JP7 LocalServer to JP5 or JP6 devices.
+- GPU access needs the NVIDIA container runtime registered with Docker. The setup registers it with `nvidia-ctk` or in `/etc/docker/daemon.json`. If the output warns that neither `nvidia-ctk` nor `nvidia-container-runtime` was found, GPU containers will not start: install the NVIDIA Container Toolkit on the device before you deploy.
+- DLR-only (Neo-compiled) models are not supported on JP7. Use ONNX models instead ([Using ONNX Models](#using-onnx-models)).
+- The JP7 LocalServer includes vLLM ([Using LLMs (vLLM)](#using-llms-vllm)).
 
 ## Deploy DDA Application to Edge Device
 
-> **Alert**: The DDA application (LocalServer component) must be deployed before any other components or models.
+Every device needs the LocalServer variant that matches its **Target Architecture (DDA)** (see the table in [4.2 Start a Build](#42-start-a-build)) before models or workflows can run on it. All deployments are created and revised in the portal.
 
-All deployments are managed through the portal:
+### Create the First Deployment
 
-1. Go to **Deployments** → **Create Deployment**
-2. Select your edge device or device group
-3. Add `aws.edgeml.dda.LocalServer.<arch>` (arm64 or x86_64)
-4. Click **Deploy**
-5. Verify on **Devices** page → select device → **Components** tab
+1. Go to **Deployments** → **Create Deployment**.
+2. **Use Case**: select the UseCase the device is registered in. **Deployment Name** is optional; without one, the portal names the deployment `portal-deployment-<timestamp>`.
+3. **Deployment Target**: keep **Specific Devices** and select the device in **Target Devices**. Select one device per deployment (see [One Deployment per Device](#one-deployment-per-device)). If the device's group already has a deployment, the device already runs it: revise the group deployment instead ([Thing Group Targets](#thing-group-targets)). The portal does not warn you when a device-level deployment overlaps a group deployment.
+4. **Components**: the **Recommended** tab lists the LocalServer variant that matches the device's recorded architecture. Click **Add**. Add exactly one LocalServer variant: two variants on one device conflict. If the device has no recorded Target Architecture, Create Deployment cannot filter the JetPack variants, so set it first ([7.5 Verify the Device](#75-verify-the-device)).
+5. Optional: under **Advanced Options**, set **Auto Rollback** (on by default) and **Component Update Timeout** (60 seconds by default).
+6. Click **Create Deployment**. The deployment's detail page opens.
+7. Verify on **Devices** → device → **Components**: `aws.edgeml.dda.LocalServer.<variant>` reaches Lifecycle State **Running**.
 
-## Deployments
+If the device already has a deployment, the form switches to **Update Deployment**. See [Revise a Deployment](#revise-a-deployment).
 
-Deployments follow a two-step process, all managed through the portal:
+### One Deployment per Device
 
-### Step 1: Deploy DDA LocalServer (Infrastructure)
+A Greengrass deployment targets one device or one thing group, and each target has one current deployment. A new deployment for the same target replaces the previous one instead of running alongside it. The portal treats the new deployment as a revision: it keeps the deployment name, titles the form **Update Deployment**, and shows the **Revising existing deployment** banner ("A device can only have one active deployment …"). The **Deployments** list shows each target's current deployment.
 
-1. **Deployments** → **Create Deployment** → Add `aws.edgeml.dda.LocalServer.<arch>` → **Deploy**
+A deployment's component list is the complete list for its target. Greengrass removes components that are installed on the device but left out of the new deployment. For a device target, the portal lists them in a **Components will be removed** dialog before it submits; **Continue Deployment** goes ahead. So every deployment and revision must include LocalServer and every model, workflow, and plugin component the device should keep. The dialog does not list `aws.greengrass.SecureTunneling`, the Remote Access component, so enable Remote Access again if a deployment leaves it out.
 
-### Step 2: Deploy Trained ML Models
+There is one exception. A component you remove that a remaining component still requires stays installed as a dependency: model components depend on their LocalServer variant, and workflow components depend on their models. In that case the portal stops with **Deployment not submitted: de-selected component(s) will remain installed on the device**. Acknowledge the named component and submit again, or also remove the components that require it.
 
-1. **Deployments** → **Create Deployment** → Add your compiled model component
-2. Optionally enable **Inference Uploader** for S3 sync
-3. **Deploy**
+Other portal actions also revise a device's deployment. On a device that has its own deployment, enabling or disabling Remote Access ([Remote Device Access (SSH)](#remote-device-access-ssh)) revises that deployment: it adds or removes `aws.greengrass.SecureTunneling` and keeps the other components. Devices managed through a thing group behave differently ([Thing Group Targets](#thing-group-targets)).
+
+### Revise a Deployment
+
+1. Open the deployment (**Deployments** → deployment ID, or **Devices** → device → **Deployments** tab) and click **Revise Deployment**. On **Create Deployment**, selecting the same single device has the same effect, but only before you add any component: the form loads the current components only while none are selected, and the **Deployment Target** field is below **Components**. For a thing group, use **Revise Deployment** ([Thing Group Targets](#thing-group-targets)).
+2. The form loads the target's current deployment: its name and its components. `aws.greengrass.Nucleus`, `aws.greengrass.LogManager`, and `aws.greengrass.ShadowManager` are not listed because the portal adds them again ([Deployment Options](#deployment-options)).
+3. Change the list. You can **Add** components, **Remove** components, or update versions. A component with a newer version shows an **update available** badge; **Update to latest** (one component) or **Update all to latest** changes the version in place. This is how a new LocalServer build reaches a device.
+4. Click **Update Deployment**, and confirm the **Components will be removed** dialog if it appears.
+5. The portal creates a new deployment for the same target, which replaces the old one. With **Auto Rollback** on, a failed revision is rolled back automatically.
+
+Revision needs exactly one selected device, or a thing group. With several devices selected, the portal does not load an existing deployment.
+
+### Add Models or Workflows Later
+
+To add models, workflows, or plugins to a device that already runs LocalServer, revise its deployment: open it, click **Revise Deployment**, add the components (the **Recommended** tab lists the model components for the device's architecture), and click **Update Deployment**. LocalServer and the other components stay because they are pre-loaded.
+
+Some shortcuts open Create Deployment with components already selected: **Deploy Selected** on the **Components** page, **Deploy Component** on a component's page, **Deploy this workflow** after packaging a workflow, and **Clone Deployment**. These select only those components and do not load the device's current deployment. Add LocalServer and everything else the device should keep (the **Components will be removed** dialog shows what would be removed), or start from **Revise Deployment** instead. If the device has Remote Access enabled, a shortcut deployment that leaves out `aws.greengrass.SecureTunneling` removes it from the device, and the dialog does not list it. Enable Remote Access again on the device's **Remote Access** tab afterwards.
+
+A packaged workflow is offered only to devices whose recorded architecture is among the architectures it was packaged for.
+
+### Thing Group Targets
+
+- **Deployment Target** → **Thing Group**, then enter the **Thing Group Name**, for example the device group chosen in Add Device. Every device in the group gets the group's components, and devices added to the group later receive the group's deployment too. The group has one current deployment of its own. To revise it, open the group deployment and click **Revise Deployment**, which sets the group name in one step and pre-loads the group's component list. What you submit replaces that list on every member. Group deployments get no **Components will be removed** dialog, so check the deployment name and component list before you submit any group deployment, including the first.
+- A device that also has its own device-level deployment runs both deployments at once, and its components can conflict. When you target a group, the portal lists members that have their own deployment (**Devices in this group have individual deployments**) and asks you to confirm with **Deploy anyway**. It recommends cancelling those individual deployments first (**Cancel Deployment**, available while a deployment is `ACTIVE`). Greengrass cancels a deployment only for devices that have not received it yet, so a device that already applied its own deployment keeps those components.
+- So use one approach per device, and decide before its first deployment: deploy to the device, or to its group, not both. Devices registered with Add Device are already members of their device group.
+- Remote Access reads and writes only device-level deployments. On a device that gets its components from a group deployment, enabling Remote Access creates a separate device-level deployment that contains only `aws.greengrass.SecureTunneling`, and disabling it afterwards leaves the component installed.
+- For a group, the portal cannot check member architectures. Keep one architecture per group and add the LocalServer variant for it.
 
 ### Deployment Options
 
-- **Specific Devices**: Deploy to individual devices (recommended for testing)
-- **Thing Groups**: Deploy to all devices in an IoT thing group (recommended for production)
-- **Auto-Included**: `aws.greengrass.Nucleus` and `aws.greengrass.LogManager` are automatically included
+- **Auto-included components**: when a deployment contains LocalServer or a model component, the portal adds `aws.greengrass.Nucleus` (pinned to the Nucleus version the device runs, when it can be read), `aws.greengrass.LogManager` (uploads logs to CloudWatch every 5 minutes), `aws.greengrass.ShadowManager` (syncs the camera registry, camera bindings, and model status shadows with IoT Core), and `aws.edgeml.dda.InferenceUploader` when the UseCase enables it.
+- **Advanced Options**: **Auto Rollback** sets the Greengrass failure handling to `ROLLBACK` (off: `DO_NOTHING`). **Component Update Timeout** sets `timeoutInSeconds` in the Greengrass component update policy.
 
 ### Monitoring Deployments
 
-Go to **Deployments** page → select deployment to see status (InProgress, Succeeded, Failed, Cancelled), target, components, and per-device status.
+- **Deployments**: select the UseCase. The table shows **Deployment ID**, **Name**, **Target**, **Status**, **Latest**, and **Created**. You can filter by status: `ACTIVE`, `COMPLETED`, `FAILED`, `CANCELED`, or `INACTIVE`.
+- Deployment detail: **Status**, **Target**, **Components**, and **Latest for Target**, with **Auto-refresh** (every 5 seconds) while the deployment is `ACTIVE`. The tabs are **Overview** (IDs, revision ID, and per-device failure details), **Device Status** (each device's status, such as `QUEUED`, `IN_PROGRESS`, `SUCCEEDED`, `FAILED`, `REJECTED`, `TIMED_OUT`, or `CANCELED`, with the reason), **Components**, **Deployment Policies**, and **AI Diagnostics**.
+- Actions: **Revise Deployment**; **Clone Deployment**, which opens Create Deployment with the same components (except the `aws.greengrass.*` ones) and no target; and **Cancel Deployment** while the deployment is `ACTIVE`.
+- On the device page, the **Components** tab lists the installed components with their lifecycle state, and the **Deployments** tab lists the device's effective deployments.
 
 ## Devices
 
 ### Device Management (via Portal)
 
 - **Devices** page shows all registered devices with status, platform, architecture, last seen
-- Click a device for: Overview, Components, Deployments, Logs, Diagnostics
+- Click a device for: Overview, Components, Deployments, Cameras, Logs, Results, AI Diagnostics, Remote Access
 - Logs are sent to CloudWatch and viewable in the portal
-- Diagnostics show connectivity, Greengrass status, component health, storage, memory
+- **Results** browses the inference-results captures uploaded from the device
+- **AI Diagnostics** analyzes the device's logs with AI (**Analyze Logs with AI**) and lists detected issues
 
 ## Using the Portal
 
@@ -635,7 +575,7 @@ Go to **Deployments** page → select deployment to see status (InProgress, Succ
 2. Transform    → Click "Transform Manifest" (auto-fills URIs)
 3. Training     → Select job (shows ✓ Transformed) → Start training
 4. Compilation  → Select target architecture (ARM64/x86)
-5. Deployment   → Create deployment → Optional: Inference Uploader
+5. Deployment   → Revise the device's deployment → Add the model (keep LocalServer) → Optional: Inference Uploader
 ```
 
 ### Data Management
@@ -718,7 +658,7 @@ LocalServer backend image built with the ONNX GPU runtime (see
 
 > **Note**: `dlr` (Neo-compiled) models are not supported on **JetPack 7** —
 > migrate those models to `runtime: onnx`. See
-> [JetPack 7 (JP7) Devices](#jetpack-7-jp7-devices-jetson-thor-jetpack-71--72).
+> [JetPack 7 (JP7) Devices](#76-jetpack-7-jp7-devices).
 
 ### Object detection (YOLO)
 
@@ -825,19 +765,23 @@ index to drop when using softmax). NMS-only keys (`iou_threshold`) are ignored.
    - **Convert & Import** — this writes a device-correct manifest
      (`runtime: onnx`, and for detection the `task`/`detection` fields including
      `layout`) and packages `model.onnx`.
-3. Compile targets / publish as usual, then **deploy the model component** to
-   the device.
+3. Compile targets / publish as usual, then revise the device's deployment to
+   add the model component ([Add Models or Workflows Later](#add-models-or-workflows-later)).
 
 ### Build requirement for GPU
 
-The default LocalServer backend image installs the **CPU** ONNX Runtime. GPU
-(CUDA/TensorRT) needs the from-source GPU runtime, which is built **by default**
-for JetPack 5, 6, and 7 by `gdk-component-build-and-publish.sh`:
+On JetPack 5, 6, and 7, GPU (CUDA/TensorRT) needs a LocalServer image with the
+GPU ONNX Runtime, which is compiled from source. Build Fleet builds of the JP5,
+JP6, and JP7 targets always include it
+([Step 4](#step-4-build-the-dda-localserver-component-build-fleet)).
+
+Build Fleet does not offer a CPU-only ONNX Runtime image for the JetPack
+targets; the manual build below is the path for that variant, and it publishes
+the next version of the same LocalServer component
+([4.4](#44-use-the-published-component)):
 
 ```bash
-./gdk-component-build-and-publish.sh aarch64 7   # JP7: onnxruntime-gpu (CUDA 13.0 / TRT 10.14)
-./gdk-component-build-and-publish.sh aarch64 6   # JP6: onnxruntime-gpu (CUDA 12.6 / TRT 10.3)
-./gdk-component-build-and-publish.sh aarch64 5   # JP5: onnxruntime-gpu (CUDA 11.4 / TRT 8.5)
+ONNXRUNTIME_GPU=0 ./gdk-component-build-and-publish.sh aarch64 6   # JP6; use 5 or 7 for JP5 or JP7
 ```
 
 `build-custom.sh` defaults `ONNXRUNTIME_GPU=1` for JP5/JP6/JP7 (the source build adds
@@ -860,25 +804,22 @@ LocalServer image installs `vllm==0.10.2+cu126` from the Jetson AI Lab index
 **by default**; the JP7 image builds vLLM **`v0.11.2` from source by
 default** (`install_vllm_gpu.sh`, Thor `sm_110`, against
 `torch==2.9.0+cu130`) since no prebuilt Thor/cu130 wheel exists — see
-[JetPack 7 (JP7) Devices](#jetpack-7-jp7-devices-jetson-thor-jetpack-71--72).
+[JetPack 7 (JP7) Devices](#76-jetpack-7-jp7-devices).
 The deployment architecture gate rejects vLLM components targeted at JP5 or
 CPU-only devices. The full stage-by-stage validation procedure lives in
 [test/on-hardware/jp6_vllm_validation.md](test/on-hardware/jp6_vllm_validation.md).
 
 ### Build requirement
 
-The default JP6 and JP7 builds include vLLM — nothing extra to enable:
+Build Fleet's JP6 and JP7 builds include vLLM; there is nothing extra to enable
+([Step 4](#step-4-build-the-dda-localserver-component-build-fleet)).
 
-```bash
-./gdk-component-build-and-publish.sh aarch64 6   # vLLM layer on by default (VLLM_ENABLE=1)
-./gdk-component-build-and-publish.sh aarch64 7   # vLLM built from source by default (VLLM_ENABLE=1)
-```
+The JP7 build compiles vLLM from source (no prebuilt Thor/cu130 wheel exists).
+If JP7 builds fail on the runtime limit, see
+[JetPack 7 (JP7) Builds](#45-jetpack-7-jp7-builds).
 
-The JP7 build compiles vLLM from source (no prebuilt Thor/cu130 wheel exists),
-which adds substantial build time on the JP7 build server — see
-[JetPack 7 (JP7) Build Server](#42-jetpack-7-jp7-build-server-ubuntu-2404-arm64)
-for the expected duration; JP7 builds run on the build server one at a time.
-
+Build Fleet does not offer a vLLM-free image, so that variant needs a manual
+Docker build of the LocalServer backend image.
 To build an explicitly vLLM-free JP6 or JP7 image, pass
 `--build-arg VLLM_ENABLE=0`; the image then carries no vLLM install (on JP7
 the torch/vLLM layers are skipped entirely), the app's capability probe runs
@@ -919,8 +860,9 @@ poor — it's a plumbing smoke test, not a usable assistant.
    This packages for the `jetson-xavier-jp6` target and publishes the
    Greengrass component `model-vllm-opt125m-smoke` version `1.0.0`.
 
-3. **Deploy** — Portal → **Deployments**: target the JP6 device and add the
-   `model-vllm-opt125m-smoke` component. The device downloads the weights
+3. **Deploy** — Portal → **Deployments**: revise the JP6 device's deployment to
+   add the `model-vllm-opt125m-smoke` component (see
+   [Add Models or Workflows Later](#add-models-or-workflows-later)). The device downloads the weights
    from Hugging Face (internet access required) and loads the model without
    restarting LocalServer.
 
@@ -956,10 +898,14 @@ public IP, or VPN required.
 
 ### How it works
 
-1. **Enable** on the Remote Access tab deploys the AWS-managed
-   `aws.greengrass.SecureTunneling` component to the device (merged with its
-   existing components). Set the **SSH login user** (`ubuntu` on EC2,
-   `ggc_user` for the Greengrass default, or your device user).
+1. **Enable** on the Remote Access tab adds the AWS-managed
+   `aws.greengrass.SecureTunneling` component to the device's own
+   device-level deployment and keeps its other components. On a device that
+   gets its components from a thing group deployment, it creates a separate
+   device-level deployment that holds only SecureTunneling (see
+   [Thing Group Targets](#thing-group-targets)). Set the **SSH login user**
+   (`ubuntu` on EC2, `ggc_user` for the Greengrass default, or your device
+   user).
 2. **Open SSH session** creates a short-lived tunnel and returns a **source
    access token**.
 3. Locally, run the AWS IoT local proxy with that token and SSH to `localhost`:
@@ -1003,8 +949,8 @@ For detailed instructions on Cookie and Alien sample datasets, see [datasets/REA
 
 The **Inference Uploader** component enables edge devices to automatically upload inference results to S3.
 
-- Automatically provisioned to UseCase accounts during onboarding
-- Enable per deployment: add `aws.edgeml.dda.InferenceUploader` component
+- Published once to the portal account with `./build-inference-uploader.sh`. This is a manual step: neither the portal deploy nor Build Fleet builds the component. The portal then shares it with UseCase accounts along with LocalServer.
+- Enable it per UseCase (`enable_inference_uploader`, see [edge-cv-portal/INFERENCE_UPLOADER_CONFIG.md](edge-cv-portal/INFERENCE_UPLOADER_CONFIG.md)). The portal then adds it to deployments that contain LocalServer or a model.
 - Configurable upload interval (10s to daily)
 - Results organized as: `s3://bucket/{usecase-id}/{device-id}/{model-id}/YYYY/MM/DD/`
 
@@ -1012,7 +958,7 @@ See [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) for detailed conf
 
 ## Edge Device Management
 
-Edge device provisioning and management is a manual process. The portal handles deployments, but device setup requires SSH access.
+Devices are provisioned from the portal with **Add Device** (see [Step 7](#step-7-set-up-edge-devices-add-device)). The commands below inspect and troubleshoot a provisioned device and need a shell on it: a local console, SSH, or [Remote Device Access](#remote-device-access-ssh). A device set up with Add Device has no AWS CLI credentials configured, so run the `aws` commands from a workstation with credentials for the UseCase account.
 
 ### Directory Structure on Device
 
@@ -1090,15 +1036,14 @@ df -h /aws_dda/
 # Check memory
 free -h
 
-# Check network connectivity
-aws sts get-caller-identity
-
 # CloudWatch diagnostics
 /aws_dda/check-cloudwatch-logging.sh us-east-1
 
 # Search logs for errors
 grep -i "error\|failed\|exception" /aws_dda/greengrass/v2/logs/*.log
 ```
+
+Connectivity shows as the device **Status** on **Devices** ([7.5](#75-verify-the-device)).
 
 ## Troubleshooting
 
@@ -1166,7 +1111,7 @@ aws iam put-role-policy --role-name GreengrassV2TokenExchangeRole \
   }'
 ```
 `ecr:GetAuthorizationToken` does not support resource scoping and must use `"*"`.
-No device restart is needed — the role change takes effect on the next deployment retry.
+No device restart is needed — the role change takes effect on the next deployment: revise the device's deployment ([Revise a Deployment](#revise-a-deployment)) and click **Update Deployment**.
 
 **Deployment Fails** (`COMPONENT_VERSION_REQUIREMENTS_NOT_MET`):
 - Verify component exists in your account
@@ -1204,7 +1149,7 @@ sudo rm -rf /aws_dda/greengrass/v2/packages/artifacts/aws.edgeml.dda.LocalServer
 sudo rm -rf /aws_dda/greengrass/v2/packages/artifacts-unarchived/aws.edgeml.dda.LocalServer.arm64/<OLD_VERSION>
 sudo systemctl start greengrass
 ```
-   Then re-trigger the deployment.
+   Then revise the device's deployment and click **Update Deployment** ([Revise a Deployment](#revise-a-deployment)).
 
    Alternatively, raise the store cap via the nucleus configuration (then let
    Greengrass garbage-collect unreferenced versions):
@@ -1215,11 +1160,16 @@ sudo systemctl start greengrass
 ```
 
 3. **Prevent recurrence:** publish the LocalServer component through the ECR/S3
-   path so artifacts stay small (a few MB instead of multiple GB). This happens
-   automatically when the packaged artifact exceeds 2 GB — see
-   `gdk-component-build-and-publish.sh`. Rebuild/publish for the device's
-   architecture (e.g. `./gdk-component-build-and-publish.sh aarch64 5` for
-   JetPack 5) and deploy that version. ECR-based components also require the
+   path so artifacts stay small (a few MB instead of multiple GB). Build Fleet
+   builds do this automatically when the packaged artifact exceeds 2 GB. Build
+   the device's variant with Build Fleet
+   ([Step 4](#step-4-build-the-dda-localserver-component-build-fleet)) and move
+   the device to the new version: revise its deployment and click
+   **Update to latest** on the LocalServer row
+   ([4.4 Use the Published Component](#44-use-the-published-component)). Build
+   Fleet does not build the generic ARM64 variant; for it, the manual path is
+   `./gdk-component-build-and-publish.sh aarch64 cpu`, which applies the same
+   2 GB rule. ECR-based components also require the
    device token-exchange role to have `ecr:GetAuthorizationToken`,
    `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, and `s3:GetObject` in the
    device's region.
@@ -1368,7 +1318,7 @@ Log Streams (per device):
 **"Components detected but no logs yet"** in the portal:
 - LogManager uploads every 5 minutes — wait for the first upload cycle
 - Verify LogManager is installed: `ls /aws_dda/greengrass/v2/logs/aws.greengrass.LogManager.log`
-- If no LogManager log file exists, redeploy from the portal (LogManager is auto-included)
+- If no LogManager log file exists, revise the device's deployment (**Revise Deployment** → **Update Deployment**); LogManager is auto-included
 
 **LogManager installed but no CloudWatch log groups:**
 ```bash
@@ -1385,7 +1335,7 @@ aws iam list-attached-role-policies --role-name GreengrassV2TokenExchangeRole
 **LogManager running but portal still shows no logs:**
 - The portal searches for log streams matching `/thing/{device-id}` — verify your device's thing name matches
 - Check CloudWatch directly: `aws logs describe-log-groups --log-group-name-prefix "/aws/greengrass" --region us-east-1`
-- Redeploy from the portal to ensure LogManager config includes all component names
+- Revise the device's deployment (**Revise Deployment** → **Update Deployment**) to ensure LogManager config includes all component names
 
 ### Training Issues
 
@@ -1407,23 +1357,33 @@ cd edge-cv-portal
 
 ### Build Issues
 
+**Build Fleet build failed or interrupted:** open the build job on **Builds**.
+Its detail page shows the status, the **Build log** (CloudWatch Logs group
+`/dda/portal-builds`), the **Execution diagnostics** when the portal retained
+them, and a **Build failed** or **Build interrupted** alert
+([4.3 Monitor a Build](#43-monitor-a-build)). **Retry build** reruns an
+`interrupted` job; for a `failed` job, fix the cause and submit a new build.
+
+The rest of this section applies to manual builds with
+`gdk-component-build-and-publish.sh` in a local working tree, for example for a
+variant Build Fleet does not offer. Build Fleet runs each job on its own
+ephemeral instance, or one job at a time on a dedicated server.
+
 **Parallel builds/publishes clobber each other (wrong image published / staging
 corruption).** Do **not** run two component builds or publishes at the same time
 from the **same working tree**. The build tags a single shared local image
-`flask-app:latest`, pushes to the shared `dda/flask-app` ECR repo (image tag =
-component version), and writes to shared staging dirs (`greengrass-build/`,
+`flask-app:latest`, pushes to the shared `dda/flask-app` ECR repo (image tag
+`<variant>-<version>`), and writes to shared staging dirs (`greengrass-build/`,
 `custom-build/`, `.gdk/`). Running two at once races:
 
 - A second build can overwrite `flask-app:latest` in between the first build
-  finishing and its `docker tag flask-app:latest <ecr>:<version>` step, so the
+  finishing and its `docker tag flask-app:latest <ecr>:<variant>-<version>` step, so the
   **wrong image gets pushed** for that version.
 - Concurrent runs overwrite each other's `greengrass-build/`/`custom-build/`
   staging and generated `gdk-config.json`.
-- JetPack targets share the `dda/flask-app` repo with `tag = component version`;
-  if two components land on the same version number, the ECR tag is overwritten.
 
 Guidance:
-- **`gdk-component-build-and-publish.sh` (official publish): run sequentially**
+- **`gdk-component-build-and-publish.sh`: run sequentially**
   — finish JP6, then JP5. It hardcodes `flask-app:latest` and the shared staging
   dirs, so parallel runs are unsafe even in separate checkouts.
 - **Only** the raw backend image build can be parallelized, and only when each
@@ -1435,8 +1395,8 @@ Guidance:
   # copy the gitignored edgemlsdk staging into the worktree first:
   cp -r <main-tree>/src/backend/edgemlsdk src/backend/edgemlsdk
   ```
-  Even then, the shared `dda/flask-app` ECR repo means the **publish** step still
-  must be serialized (or use per-JetPack version numbers that never collide).
+  Even then, the **publish** step still must be serialized: it pushes the local
+  `flask-app:latest` image.
 
 ## Project Structure
 
@@ -1474,7 +1434,6 @@ defect-detection-application/
 | Document | Description |
 |----------|-------------|
 | [edge-cv-portal/ADMIN_GUIDE.md](edge-cv-portal/ADMIN_GUIDE.md) | Portal administration guide |
-| [edge-cv-portal/SHARED_COMPONENTS.md](edge-cv-portal/SHARED_COMPONENTS.md) | Shared Greengrass components |
 | [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) | Inference Uploader setup |
 | [datasets/README.md](datasets/README.md) | Sample datasets guide |
 

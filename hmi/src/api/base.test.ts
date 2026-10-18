@@ -4,17 +4,29 @@
  * The critical property is that the DEFAULT is unchanged: with nothing
  * configured every builder must still emit the root-relative, same-origin URLs
  * the LocalServer's `/hmi` mount has always served. The rest covers the
- * precedence order and the accepted value forms.
+ * precedence order, the accepted value forms, the `?api=` host policy's place
+ * in the precedence (the policy itself is `hosts.test.ts`), and the API origin
+ * a session is bound to.
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  API_ALLOW_HOSTS_META_NAME,
+  API_BASE_META_NAME,
+  apiAllowHostsFromMeta,
   apiBaseFromMeta,
   apiBaseFromSearch,
+  apiBaseNoticeText,
+  getApiAddress,
   getApiBase,
+  getApiBaseNotice,
+  getApiBaseRejection,
+  getApiOrigin,
   normalizeApiBase,
+  requestOrigin,
   resetApiBase,
   resolveApiBase,
+  resolveApiBaseDetailed,
   setApiBase,
 } from "./base";
 import {
@@ -27,14 +39,24 @@ import {
   registrationsUrl,
 } from "./routes";
 
-function fakeDoc(content: string | null): Document {
+/** A host document with a `dda-api-base` and, optionally, a `dda-api-allow-hosts` tag. */
+function fakeDoc(content: string | null, allowHosts: string | null = null): Document {
   return {
-    querySelector: (_sel: string) =>
-      content === null
+    querySelector: (selector: string) => {
+      const value = selector.includes(`"${API_ALLOW_HOSTS_META_NAME}"`)
+        ? allowHosts
+        : selector.includes(`"${API_BASE_META_NAME}"`)
+          ? content
+          : null;
+      return value === null
         ? null
-        : ({ getAttribute: (_a: string) => content } as unknown as Element),
+        : ({ getAttribute: (_a: string) => value } as unknown as Element);
+    },
   } as unknown as Document;
 }
+
+/** A kiosk page on the plant network, as `location` would describe it. */
+const PAGE = { pageProtocol: "http:", pageHostname: "192.168.8.10" };
 
 beforeEach(() => {
   resetApiBase();
@@ -91,6 +113,11 @@ describe("readers", () => {
     expect(apiBaseFromMeta(fakeDoc("http://h:5000"))).toBe("http://h:5000");
     expect(apiBaseFromMeta(fakeDoc(null))).toBeNull();
   });
+
+  it("reads the dda-api-allow-hosts meta tag", () => {
+    expect(apiAllowHostsFromMeta(fakeDoc(null, ".plant.example"))).toBe(".plant.example");
+    expect(apiAllowHostsFromMeta(fakeDoc("http://h:5000"))).toBeNull();
+  });
 });
 
 describe("resolveApiBase precedence", () => {
@@ -100,14 +127,51 @@ describe("resolveApiBase precedence", () => {
     ).toBe("");
   });
 
-  it("prefers the query parameter over the meta tag and the build-time value", () => {
+  it("prefers an allowed query parameter over the meta tag and the build-time value", () => {
+    // Another station on the plant network, by IP address: still per-URL.
     expect(
-      resolveApiBase({
-        search: "?api=http://from-query:1",
+      resolveApiBaseDetailed({
+        search: "?api=http://192.168.8.224:5000",
         doc: fakeDoc("http://from-meta:2"),
         buildTime: "http://from-build:3",
+        ...PAGE,
       }),
-    ).toBe("http://from-query:1");
+    ).toEqual({ base: "http://192.168.8.224:5000", rejected: null });
+  });
+
+  it("ignores a query parameter naming any other host, falling back to the meta tag", () => {
+    // Before the host policy this won, and the token and credentials followed.
+    expect(
+      resolveApiBaseDetailed({
+        search: "?api=https://other.example",
+        doc: fakeDoc("http://from-meta:2"),
+        buildTime: "http://from-build:3",
+        ...PAGE,
+      }),
+    ).toEqual({
+      base: "http://from-meta:2",
+      rejected: { reason: "host-not-allowed", host: "other.example" },
+    });
+  });
+
+  it("falls back to the build-time value, then same-origin, after an ignored query parameter", () => {
+    const rejected = { reason: "host-not-allowed", host: "other.example" };
+    expect(
+      resolveApiBaseDetailed({
+        search: "?api=http://other.example:5000",
+        doc: fakeDoc(""),
+        buildTime: "http://from-build:3",
+        ...PAGE,
+      }),
+    ).toEqual({ base: "http://from-build:3", rejected });
+    expect(
+      resolveApiBaseDetailed({
+        search: "?api=//other.example:5000",
+        doc: fakeDoc(null),
+        buildTime: null,
+        ...PAGE,
+      }),
+    ).toEqual({ base: "", rejected });
   });
 
   it("prefers the meta tag over the build-time value", () => {
@@ -140,6 +204,125 @@ describe("resolveApiBase precedence", () => {
         buildTime: null,
       }),
     ).toBe("http://from-meta:2");
+    // A value normalizeApiBase cannot use falls through silently, as before.
+    expect(
+      resolveApiBaseDetailed({
+        search: "?api=not-a-valid-origin",
+        doc: fakeDoc("http://from-meta:2"),
+        buildTime: null,
+      }).rejected,
+    ).toBeNull();
+  });
+
+  it("does not host-check the deploy-time sources", () => {
+    // The meta tag, VITE_API_BASE and the global behave exactly as before.
+    expect(resolveApiBase({ search: "", doc: fakeDoc("https://api.example.com"), buildTime: null, ...PAGE })).toBe(
+      "https://api.example.com",
+    );
+    expect(resolveApiBase({ search: "", doc: fakeDoc(null), buildTime: "https://api.example.com", ...PAGE })).toBe(
+      "https://api.example.com",
+    );
+  });
+});
+
+describe("?api= host policy in the precedence", () => {
+  it("keeps the bare port on the page's own host", () => {
+    expect(resolveApiBaseDetailed({ search: "?api=5000", doc: fakeDoc(null), buildTime: null, ...PAGE })).toEqual({
+      base: "http://192.168.8.10:5000",
+      rejected: null,
+    });
+  });
+
+  it("accepts the page's own host on another port, even as a public name", () => {
+    expect(
+      resolveApiBase({
+        search: "?api=https://hmi.example.com:5443",
+        doc: fakeDoc(null),
+        buildTime: null,
+        pageProtocol: "https:",
+        pageHostname: "hmi.example.com",
+      }),
+    ).toBe("https://hmi.example.com:5443");
+  });
+
+  it("accepts hosts from the meta-tag and the build-time allow lists", () => {
+    const inputs = {
+      doc: fakeDoc(null, ".plant.example"),
+      buildTime: null,
+      buildTimeAllowHosts: "100.64.0.0/10",
+      ...PAGE,
+    };
+    expect(resolveApiBase({ ...inputs, search: "?api=http://station-01.plant.example:5000" })).toBe(
+      "http://station-01.plant.example:5000",
+    );
+    expect(resolveApiBase({ ...inputs, search: "?api=http://100.100.1.2:5000" })).toBe(
+      "http://100.100.1.2:5000",
+    );
+    expect(resolveApiBaseDetailed({ ...inputs, search: "?api=http://station-01.other.example" }).rejected).toEqual({
+      reason: "host-not-allowed",
+      host: "station-01.other.example",
+    });
+  });
+
+  it("reports user info and unparseable values", () => {
+    expect(
+      resolveApiBaseDetailed({ search: "?api=http://op@192.168.8.224:5000", doc: fakeDoc(null), buildTime: null, ...PAGE })
+        .rejected,
+    ).toEqual({ reason: "userinfo", host: "192.168.8.224" });
+    expect(
+      resolveApiBaseDetailed({ search: "?api=http://exa%20mple.com", doc: fakeDoc(null), buildTime: null, ...PAGE })
+        .rejected,
+    ).toEqual({ reason: "invalid", host: null });
+  });
+});
+
+describe("ignored ?api= notice", () => {
+  it("names the ignored host, the reason, and where the HMI connects instead", () => {
+    expect(apiBaseNoticeText({ reason: "host-not-allowed", host: "other.example" }, "192.168.8.10:5000")).toBe(
+      'Ignored ?api= host "other.example": it is not this page\'s host, a private-network address ' +
+        "or an allowed host. Using 192.168.8.10:5000 instead.",
+    );
+    expect(apiBaseNoticeText({ reason: "userinfo", host: "192.168.8.224" }, "")).toBe(
+      'Ignored ?api= host "192.168.8.224": addresses with a user name or password are not accepted.',
+    );
+    expect(apiBaseNoticeText({ reason: "invalid", host: null }, "")).toBe(
+      "Ignored ?api=: the value is not a valid address.",
+    );
+  });
+
+  it("is absent when nothing was ignored", () => {
+    setApiBase("http://192.168.8.224:5000");
+    expect(getApiBaseRejection()).toBeNull();
+    expect(getApiBaseNotice()).toBeNull();
+  });
+});
+
+describe("API origin and address", () => {
+  it("resolves a request URL's origin the way fetch does", () => {
+    expect(requestOrigin("/local-auth/login", "http://192.168.8.10:8081/hmi/triple.html")).toBe(
+      "http://192.168.8.10:8081",
+    );
+    expect(requestOrigin("//192.168.8.224:5000/x", "https://kiosk/")).toBe("https://192.168.8.224:5000");
+    expect(requestOrigin("http://3232235786:5000/x", undefined)).toBe("http://192.168.1.10:5000");
+    // Undeterminable: relative with no page, or unparseable.
+    expect(requestOrigin("/local-auth/login", undefined)).toBe("");
+    expect(requestOrigin("http://exa mple.com/x", undefined)).toBe("");
+  });
+
+  it("is the API_Base's origin, with host:port always spelled out for the login form", () => {
+    setApiBase("http://192.168.8.224:5000/");
+    expect(getApiOrigin()).toBe("http://192.168.8.224:5000");
+    expect(getApiAddress()).toBe("192.168.8.224:5000");
+    setApiBase("https://station-01.local");
+    expect(getApiAddress()).toBe("station-01.local:443");
+    setApiBase("http://[FE80::1]:5000");
+    expect(getApiAddress()).toBe("[fe80::1]:5000");
+  });
+
+  it("is undeterminable for a same-origin base without a page location", () => {
+    setApiBase("");
+    expect(getApiOrigin()).toBe("");
+    expect(getApiAddress()).toBe("");
   });
 });
 

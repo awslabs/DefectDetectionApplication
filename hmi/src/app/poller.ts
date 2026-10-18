@@ -66,12 +66,19 @@ export const RUN_CACHE_CAPACITY = 20;
 // Per-execution LRU cache
 // --------------------------------------------------------------------------
 
-/** Cached immutable data of one terminal run; null fields = fetch failed. */
+/**
+ * Cached immutable data of one terminal run.
+ *
+ * `images` is present only once a `/results` request has succeeded. The
+ * metadata fetch usually creates the entry before any `/results` request, and
+ * a failed request caches nothing, so neither stands in for the run's
+ * inventory: the next load of the run's data asks again.
+ */
 interface RunCacheEntry {
   /** Parsed metadata, or null when the fetch failed after its retry (4.9). */
   metadata: RunMetadata | null;
-  /** Results `images` inventory, or null when the fetch failed. */
-  images: ResultImage[] | null;
+  /** Results `images` inventory; absent until a `/results` request succeeds. */
+  images?: ResultImage[];
 }
 
 /**
@@ -179,22 +186,26 @@ export function createPoller(deps: PollerDeps): Poller {
     }
     cache.set(execution.executionId, {
       metadata,
-      images: cached?.images ?? null,
+      images: cached?.images,
     });
     return metadata;
   }
 
-  /** Results inventory for one run, cached. */
-  async function ensureResults(
-    execution: Execution,
-    refetchNull = false,
-  ): Promise<ResultImage[] | null> {
+  /**
+   * Results inventory for one run, cached once a request succeeds.
+   *
+   * A failed request returns null and caches nothing, so it is not final: the
+   * next load of the run's data requests it again. Run data is loaded only
+   * when a run becomes the latest terminal run, on a forced refresh and on a
+   * history selection, not on every cycle, so a run whose results cannot be
+   * retrieved costs one request per load, never one per cycle.
+   */
+  async function ensureResults(execution: Execution): Promise<ResultImage[] | null> {
     const cached = cache.get(execution.executionId);
-    if (cached !== undefined && (cached.images !== null || !refetchNull)) {
-      return cached.images;
-    }
+    if (cached?.images !== undefined) return cached.images;
     const result = await apiFetch(executionResultsUrl(execution.executionId));
-    const images = result.ok ? parseResultImages(result.data) : null;
+    if (!result.ok) return null;
+    const images = parseResultImages(result.data);
     cache.set(execution.executionId, {
       metadata: cached?.metadata ?? null,
       images,
@@ -222,7 +233,7 @@ export function createPoller(deps: PollerDeps): Poller {
   async function loadRunData(run: Execution, historical: boolean): Promise<void> {
     const metadata =
       run.status === "completed" ? await ensureMetadata(run, historical) : null;
-    const images = await ensureResults(run, historical);
+    const images = await ensureResults(run);
     if (
       historical &&
       images === null &&
