@@ -39,7 +39,7 @@ __all__ = [
     "DEVICE_SESSION_CAP", "HISTORY_DAYS", "SEQ_TTL_SECONDS",
     "session_pk", "pair_sk", "seq_sk", "usecase_counter_key", "device_counter_key",
     "pairlock_key", "by_usecase_pk", "by_pair_pk", "gsi_sort", "device_of_pair_sk",
-    "can_transition", "is_live", "creation_actions", "stop_actions", "seq_item",
+    "can_transition", "is_live", "creation_actions", "shadow_result_actions", "stop_actions", "seq_item",
     "serialize_actions", "deserialize_item", "cancellation_to_error",
 ]
 
@@ -128,13 +128,18 @@ def _ttl_seconds(expires_at_ms: int, extra_seconds: int) -> int:
 
 def meta_item(*, session_id: str, usecase_id: str, workflow_id: str, workflow_version: Optional[str],
               devices: List[str], all_devices: bool, enabled_at: int, expires_at: int, actor: str,
-              options: Dict[str, Any], log_group: str) -> Dict[str, Any]:
+              options: Dict[str, Any], log_group: str,
+              media: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """``media`` (``{bucket, region, region_source}``) records what the API
+    resolved for the shadow entries, so the maintenance function can rebuild
+    an identical entry when it retries a failed shadow write."""
     return {
         "pk": session_pk(session_id), "sk": META_SK,
         "session_id": session_id, "usecase_id": usecase_id, "workflow_id": workflow_id,
         "workflow_version": workflow_version, "device_ids": list(devices), "all_devices": bool(all_devices),
         "state": PENDING, "enabledAt": int(enabled_at), "expiresAt": int(expires_at), "actor": actor,
         "options": dict(options), "counters": {"records": 0, "bytes": 0}, "logGroup": log_group,
+        "media": dict(media or {}),
         "gsi_usecase": by_usecase_pk(usecase_id), "gsi_sort": gsi_sort(expires_at, session_id),
         "expires_at": _ttl_seconds(expires_at, HISTORY_DAYS * 24 * 60 * 60),
     }
@@ -164,7 +169,8 @@ def seq_item(session_id: str, instance: str, seq: int, now_ms: int) -> Dict[str,
 def creation_actions(table_name: str, *, session_id: str, usecase_id: str, workflow_id: str,
                      workflow_version: Optional[str], devices: Iterable[str], all_devices: bool,
                      enabled_at: int, expires_at: int, actor: str, options: Dict[str, Any],
-                     log_group: str, max_sessions_per_usecase: int) -> List[Dict[str, Any]]:
+                     log_group: str, max_sessions_per_usecase: int,
+                     media: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """The ``3N + 2`` plain-Python actions of the creation transaction, in
     the order META, the PAIR#s, the use-case counter, the device counters,
     the PAIRLOCK markers. ``serialize_actions`` turns them into the
@@ -182,7 +188,7 @@ def creation_actions(table_name: str, *, session_id: str, usecase_id: str, workf
             "Item": meta_item(session_id=session_id, usecase_id=usecase_id, workflow_id=workflow_id,
                               workflow_version=workflow_version, devices=device_list,
                               all_devices=all_devices, enabled_at=enabled_at, expires_at=expires_at,
-                              actor=actor, options=options, log_group=log_group),
+                              actor=actor, options=options, log_group=log_group, media=media),
             "ConditionExpression": "attribute_not_exists(pk)",
         },
     }]
@@ -222,6 +228,43 @@ def creation_actions(table_name: str, *, session_id: str, usecase_id: str, workf
             "ReturnValuesOnConditionCheckFailure": "ALL_OLD",
         }})
     assert len(actions) == 3 * len(device_list) + 2
+    assert len(actions) <= MAX_TRANSACTION_ACTIONS
+    return actions
+
+
+def shadow_result_actions(table_name: str, session_id: str, results: Dict[str, Dict[str, Any]], *,
+                          activate: bool) -> List[Dict[str, Any]]:
+    """Record the shadow write results on the ``PAIR#`` items and, when every
+    write is ``ok`` (``activate``), move META and every PAIR# to ``active`` in
+    the same transaction (META conditioned on ``pending``, so a session
+    stopped meanwhile is never reactivated)."""
+    actions: List[Dict[str, Any]] = []
+    if activate:
+        actions.append({"Update": {
+            "TableName": table_name,
+            "Key": {"pk": session_pk(session_id), "sk": META_SK},
+            "UpdateExpression": "SET #state = :active",
+            "ConditionExpression": "#state = :pending",
+            "ExpressionAttributeNames": {"#state": "state"},
+            "ExpressionAttributeValues": {":active": ACTIVE, ":pending": PENDING},
+        }})
+    for device_id, result in results.items():
+        expression = "SET shadow = :shadow"
+        values: Dict[str, Any] = {":shadow": dict(result)}
+        names = {}
+        if activate:
+            expression += ", #state = :active"
+            values[":active"] = ACTIVE
+            names["#state"] = "state"
+        action: Dict[str, Any] = {
+            "TableName": table_name,
+            "Key": {"pk": session_pk(session_id), "sk": pair_sk(device_id)},
+            "UpdateExpression": expression,
+            "ExpressionAttributeValues": values,
+        }
+        if names:
+            action["ExpressionAttributeNames"] = names
+        actions.append({"Update": action})
     assert len(actions) <= MAX_TRANSACTION_ACTIONS
     return actions
 
