@@ -15,6 +15,17 @@ import { Construct } from 'constructs';
 const DEBUG_RULE_SQL =
   "SELECT encode(*, 'base64') AS p, topic() AS t, principal() AS pr, clientid() AS c, timestamp() AS r, newuuid() AS m FROM 'dda/debug/+/+/+'";
 
+/**
+ * The SQL of the workflow telemetry ingest rules (workflow-telemetry-dashboards
+ * design §6.1): the same shape as the debug rule's over the telemetry root.
+ * The Portal-account copy in telemetry-stack.ts uses the identical text.
+ */
+const TELEMETRY_RULE_SQL =
+  "SELECT encode(*, 'base64') AS p, topic() AS t, principal() AS pr, clientid() AS c, timestamp() AS r, newuuid() AS m FROM 'dda/telemetry/+/+/+'";
+
+/** Sid of the unconditional live-frame sweep grant on DDAPortalAccessRole (dashboards design §14.2). */
+export const TELEMETRY_LIVE_FRAME_EXPIRY_SID = 'TelemetryLiveFrameExpiry';
+
 /** Sids of the statements addTelemetrySharedStatements adds exactly once. */
 export const TELEMETRY_MEDIA_RETENTION_READ_SID = 'TelemetryMediaRetentionRead';
 export const TELEMETRY_CONVENTION_RULE_READ_SID = 'TelemetryConventionRuleRead';
@@ -1092,6 +1103,97 @@ export class UseCaseAccountStack extends cdk.Stack {
     (debugRuleErrorLogGroup.node.defaultChild as logs.CfnLogGroup)
       .cfnOptions.condition = debugCrossAccountCondition;
     debugIngestRule.cfnOptions.condition = debugCrossAccountCondition;
+
+    // Workflow telemetry dashboards (workflow-telemetry-dashboards design
+    // §6.1, §14.2): the cross-account copy of the telemetry ingest rule.
+    // Devices of a use case in this account publish their summaries, events
+    // and live-frame notices on dda/telemetry/+/+/+; the rule invokes the
+    // Portal account's telemetry ingest function through the alias named
+    // after this account (acct-<this account>). The Lambda action carries no
+    // role (the alias resource policy authorizes iot.amazonaws.com of this
+    // account); the only role is the error action's, writing rule errors to a
+    // log group in this account. Deploy-time condition like the two blocks
+    // above: in the single-account topology the Portal's TelemetryStack
+    // provisions the equivalent rule (dda_tel_ingest_portal).
+    const telemetryCrossAccountCondition = new cdk.CfnCondition(
+      this, 'TelemetryCrossAccountCondition', {
+        expression: cdk.Fn.conditionNot(
+          cdk.Fn.conditionEquals(portalAccountId, cdk.Aws.ACCOUNT_ID)
+        ),
+      }
+    );
+
+    const telemetryRuleErrorLogGroup = new logs.LogGroup(this, 'TelemetryRuleErrorLogGroup', {
+      logGroupName: '/dda/telemetry/rule-errors',
+      retention: logs.RetentionDays.TWO_WEEKS,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const telemetryRuleErrorRole = new iam.Role(this, 'TelemetryRuleErrorRole', {
+      roleName: 'DDATelemetryRuleErrorRole',
+      description: 'Error-action role of the dda_tel_ingest IoT topic rule (writes rule errors to CloudWatch Logs in this account)',
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com', {
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': this.account },
+          ArnLike: { 'aws:SourceArn': `arn:aws:iot:${region}:${this.account}:rule/dda_tel_*` },
+        },
+      }),
+    });
+
+    telemetryRuleErrorRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'WriteTelemetryRuleErrors',
+        effect: iam.Effect.ALLOW,
+        actions: ['logs:CreateLogStream', 'logs:DescribeLogStreams', 'logs:PutLogEvents'],
+        resources: [`arn:aws:logs:${region}:${this.account}:log-group:/dda/telemetry/rule-errors:*`],
+      })
+    );
+
+    const telemetryIngestRule = new iot.CfnTopicRule(this, 'TelemetryIngestRule', {
+      ruleName: 'dda_tel_ingest',
+      topicRulePayload: {
+        sql: TELEMETRY_RULE_SQL,
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        description: 'Deliver dda/telemetry messages of this account\'s devices to the DDA Portal workflow telemetry ingest alias',
+        actions: [
+          {
+            lambda: {
+              functionArn: `arn:aws:lambda:${region}:${portalAccountId}:function:dda-portal-telemetry-ingest:acct-${this.account}`,
+            },
+          },
+        ],
+        errorAction: {
+          cloudwatchLogs: {
+            logGroupName: telemetryRuleErrorLogGroup.logGroupName,
+            roleArn: telemetryRuleErrorRole.roleArn,
+          },
+        },
+      },
+    });
+
+    // Attach the cross-account condition to exactly the four fixed-name
+    // telemetry resources.
+    (telemetryRuleErrorRole.node.defaultChild as iam.CfnRole)
+      .cfnOptions.condition = telemetryCrossAccountCondition;
+    (telemetryRuleErrorRole.node.findChild('DefaultPolicy').node.defaultChild as iam.CfnPolicy)
+      .cfnOptions.condition = telemetryCrossAccountCondition;
+    (telemetryRuleErrorLogGroup.node.defaultChild as logs.CfnLogGroup)
+      .cfnOptions.condition = telemetryCrossAccountCondition;
+    telemetryIngestRule.cfnOptions.condition = telemetryCrossAccountCondition;
+
+    // The live-frame sweep of the telemetry maintenance function (dashboards
+    // design §12.4, §14.2): deletes frames older than 23 h under
+    // dda-telemetry/live/ of the default Results_Bucket, through the
+    // live-expiry session policy. Unconditional, like the shared statements.
+    this.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: TELEMETRY_LIVE_FRAME_EXPIRY_SID,
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:DeleteObject'],
+        resources: [`arn:aws:s3:::dda-inference-results-${this.account}/dda-telemetry/live/*`],
+      })
+    );
 
     // The read-only statements the telemetry and debug Portal functions need
     // on this role in every topology (workflow-telemetry-dashboards design

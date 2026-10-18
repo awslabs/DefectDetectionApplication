@@ -135,6 +135,14 @@ SYNTH_STACKS = {
         "iam_baseline_EdgeCVPortalWorkflowDebugStack.unfixed.template.json",
         None,
     ),
+    # workflow-telemetry-dashboards (tasks.md 4.3): the same pattern, EMPTY
+    # pre-feature baselines and every synthesized statement listed in
+    # iam_post_fix_approved_additions.json under its attribution.
+    "EdgeCVPortalTelemetryStack": (
+        "iam_baseline_EdgeCVPortalTelemetryStack.template.json",
+        "iam_baseline_EdgeCVPortalTelemetryStack.unfixed.template.json",
+        None,
+    ),
 }
 
 

@@ -39,5 +39,9 @@
  "EdgeCVPortalWorkflowDebugStack": {
   "added": [],
   "removed": []
+ },
+ "EdgeCVPortalTelemetryStack": {
+  "added": [],
+  "removed": []
  }
 }

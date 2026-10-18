@@ -129,6 +129,11 @@
       "rescopes": [],
       "refreshed_resources": [],
       "unfixed_snapshot_sha256": "ee7e956dd3f27d402afd61c7a9781b1847c38317112eb294d12a0aac596cfce8"
+    },
+    "EdgeCVPortalTelemetryStack": {
+      "rescopes": [],
+      "refreshed_resources": [],
+      "unfixed_snapshot_sha256": "ee7e956dd3f27d402afd61c7a9781b1847c38317112eb294d12a0aac596cfce8"
     }
   }
 }

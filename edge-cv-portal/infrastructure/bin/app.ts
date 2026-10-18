@@ -10,6 +10,7 @@ import { NodeDesignerStack } from '../lib/node-designer-stack';
 import { BuildFleetStack } from '../lib/build-fleet-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
 import { WorkflowDebugStack } from '../lib/workflow-debug-stack';
+import { TelemetryStack } from '../lib/telemetry-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { detectorExportImageDefault, normalizeCloudFrontDomain } from '../lib/context-helpers';
 
@@ -267,6 +268,35 @@ const workflowDebugStack = new WorkflowDebugStack(app, 'EdgeCVPortalWorkflowDebu
   userRolesTable: storageStack.userRolesTable,
   devicesTable: storageStack.devicesTable,
   deploymentsTable: storageStack.deploymentsTable,
+  auditLogTable: storageStack.auditLogTable,
+  settingsTable: storageStack.settingsTable,
+  workflowsTable: storageStack.workflowsTable,
+  workflowVersionsTable: storageStack.workflowVersionsTable,
+  portalArtifactsBucket: storageStack.portalArtifactsBucket,
+  userPool: authStack.userPool,
+  trustedUseCaseAccountIds,
+  dataBucketAllowlist,
+  restApiId: computeStack.api.restApiId,
+  restApiRootResourceId: computeStack.api.restApiRootResourceId,
+  // Must match ApiGatewayStack deployOptions.stageName.
+  apiStageName: 'v1',
+});
+
+// Workflow telemetry dashboards (workflow-telemetry-dashboards design §2.2):
+// a self-contained stack (the four telemetry tables, the lake bucket and its
+// two Firehose streams, the ingest/roll-up/API/maintenance functions with
+// their own layers, the per-account ingest aliases with their on-failure
+// queue, the Portal-account dda_tel_ingest_portal rule, the 5-minute
+// maintenance schedule, the alarms, and the /telemetry/... routes registered
+// against the ComputeStack API). Deployment values: -c telemetryNowPollSeconds,
+// telemetryLiveMaxLeases, telemetryLiveMaxViewMinutes, telemetryClipRetentionDays,
+// telemetryLakeRetentionDays, telemetryIngestConcurrency.
+const telemetryStack = new TelemetryStack(app, 'EdgeCVPortalTelemetryStack', {
+  env,
+  description: 'Workflow telemetry dashboards infrastructure (summaries, events, aggregates, lake, dashboards API) for Edge CV Portal',
+  useCasesTable: storageStack.useCasesTable,
+  userRolesTable: storageStack.userRolesTable,
+  devicesTable: storageStack.devicesTable,
   auditLogTable: storageStack.auditLogTable,
   settingsTable: storageStack.settingsTable,
   workflowsTable: storageStack.workflowsTable,
