@@ -233,11 +233,13 @@ def creation_actions(table_name: str, *, session_id: str, usecase_id: str, workf
 
 
 def shadow_result_actions(table_name: str, session_id: str, results: Dict[str, Dict[str, Any]], *,
-                          activate: bool) -> List[Dict[str, Any]]:
+                          activate: bool, all_devices: Iterable[str] = ()) -> List[Dict[str, Any]]:
     """Record the shadow write results on the ``PAIR#`` items and, when every
-    write is ``ok`` (``activate``), move META and every PAIR# to ``active`` in
-    the same transaction (META conditioned on ``pending``, so a session
-    stopped meanwhile is never reactivated)."""
+    write is ``ok`` (``activate``), move META and **every** PAIR# to ``active``
+    in the same transaction (META conditioned on ``pending``, so a session
+    stopped meanwhile is never reactivated). ``all_devices`` names the PAIR#
+    items without a new result that must still change state (the maintenance
+    retry rewrites only the failed devices)."""
     actions: List[Dict[str, Any]] = []
     if activate:
         actions.append({"Update": {
@@ -248,18 +250,28 @@ def shadow_result_actions(table_name: str, session_id: str, results: Dict[str, D
             "ExpressionAttributeNames": {"#state": "state"},
             "ExpressionAttributeValues": {":active": ACTIVE, ":pending": PENDING},
         }})
-    for device_id, result in results.items():
-        expression = "SET shadow = :shadow"
-        values: Dict[str, Any] = {":shadow": dict(result)}
-        names = {}
+    devices = list(results.keys())
+    for device_id in all_devices:
+        if str(device_id) not in results and str(device_id) not in devices:
+            devices.append(str(device_id))
+    for device_id in devices:
+        result = results.get(device_id)
+        expression_parts = []
+        values: Dict[str, Any] = {}
+        names: Dict[str, str] = {}
+        if result is not None:
+            expression_parts.append("shadow = :shadow")
+            values[":shadow"] = dict(result)
         if activate:
-            expression += ", #state = :active"
+            expression_parts.append("#state = :active")
             values[":active"] = ACTIVE
             names["#state"] = "state"
+        if not expression_parts:
+            continue
         action: Dict[str, Any] = {
             "TableName": table_name,
             "Key": {"pk": session_pk(session_id), "sk": pair_sk(device_id)},
-            "UpdateExpression": expression,
+            "UpdateExpression": "SET " + ", ".join(expression_parts),
             "ExpressionAttributeValues": values,
         }
         if names:
