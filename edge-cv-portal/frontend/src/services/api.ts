@@ -53,6 +53,18 @@ import type {
   SyntheticSessionSummary,
 } from '../pages/synthetic/types';
 import type {
+  CreateDebugSessionBody,
+  CreateDebugSessionResponse,
+  DebugConsoleLinkResponse,
+  DebugErrorBody,
+  DebugImageUrlResponse,
+  DebugLogQuery,
+  DebugLogResponse,
+  DebugSession,
+  ListDebugSessionsResponse,
+  StopDebugSessionResponse,
+} from '../pages/debug/types';
+import type {
   ApplyCandidateBody,
   ApplyCandidateResponse,
   CancelScoreRunResponse,
@@ -100,6 +112,60 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+/**
+ * Typed refusal of the workflow debug routes (workflow-debug-mode design
+ * §7.2, §12). The debug API answers the simple envelope
+ * `{error, error_code, remedy?, ...detail keys}`, which `request` turns into
+ * an `ApiError` whose `details` is the whole body; the debug methods re-throw
+ * it as this class so callers can branch on `errorCode` (for example
+ * `registry_enforcement_required`), show the `remedy`, and honour
+ * `retryAfterMs` of a 429 `log_read_throttled`. The client never retries a
+ * 429 by itself: the tail backs off and the download pauses (design §8).
+ */
+export class DebugApiError extends Error {
+  readonly status: number | undefined;
+  readonly errorCode: string | undefined;
+  readonly remedy: string | undefined;
+  readonly retryAfterMs: number | undefined;
+  readonly body: Partial<DebugErrorBody>;
+
+  constructor(message: string, status: number | undefined, body: Partial<DebugErrorBody>) {
+    super(message);
+    this.name = 'DebugApiError';
+    this.status = status;
+    this.body = body;
+    this.errorCode = typeof body.error_code === 'string' ? body.error_code : undefined;
+    this.remedy = typeof body.remedy === 'string' ? body.remedy : undefined;
+    this.retryAfterMs =
+      typeof body.retry_after_ms === 'number' && Number.isFinite(body.retry_after_ms)
+        ? body.retry_after_ms
+        : undefined;
+  }
+
+  /** True for a 429 `log_read_throttled` (design §10.1). */
+  get isRateLimited(): boolean {
+    return this.status === 429;
+  }
+
+  /**
+   * Wraps the error `request` threw for a debug route. An `ApiError` carries
+   * the parsed body in `details`; any other error is returned unchanged.
+   */
+  static from(err: unknown): unknown {
+    if (err instanceof DebugApiError) return err;
+    if (err instanceof ApiError) {
+      const body = (err.details ?? {}) as Partial<DebugErrorBody>;
+      return new DebugApiError(err.message, err.status, body);
+    }
+    return err;
+  }
+}
+
+/** Type guard for the debug routes' typed refusal. */
+export function isDebugApiError(err: unknown): err is DebugApiError {
+  return err instanceof DebugApiError;
 }
 
 // Use-case bucket configuration API types (spec:
@@ -5442,6 +5508,136 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // Workflow debug mode (workflow-debug-mode design §7.2; workflow_debug_api.py).
+  // Every route carries the Cognito authorizer and resolves the use case
+  // (from the path or the stored session) before `has_permission`:
+  // MANAGE_DEVICES to start and stop, VIEW_DEVICE_LOGS to read, PortalAdmin
+  // for the console link. Refusals arrive as `DebugApiError` (the simple
+  // `{error, error_code, remedy?}` envelope); a 429 is not retried here.
+
+  /** The debug routes' `request`: the same path, the typed refusal. */
+  private async debugRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    try {
+      return await this.request<T>(endpoint, options);
+    } catch (err) {
+      throw DebugApiError.from(err);
+    }
+  }
+
+  /**
+   * Start a session for one device or every registered device of the
+   * workflow (`POST /debug/usecases/{usecase_id}/sessions`, 201). Refusals:
+   * 400 `invalid_session` | `device_not_recorded` | `no_target_devices`,
+   * 409 `debug_session_limit` | `debug_session_exists` |
+   * `registry_enforcement_required` | `debug_images_unavailable`,
+   * 502 `debug_sink_unavailable`; each carries a `remedy` where one exists.
+   */
+  async createDebugSession(
+    usecaseId: string,
+    body: CreateDebugSessionBody
+  ): Promise<CreateDebugSessionResponse> {
+    return this.debugRequest<CreateDebugSessionResponse>(
+      `/debug/usecases/${encodeURIComponent(usecaseId)}/sessions`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * The use case's sessions, newest `expiresAt` first, 50 per page
+   * (`GET /debug/usecases/{usecase_id}/sessions?state=&next=`). The state
+   * filter applies to the page, so a filtered page may be short.
+   */
+  async listDebugSessions(
+    usecaseId: string,
+    params: { state?: 'pending' | 'active' | 'stopped' | 'expired'; next?: string } = {}
+  ): Promise<ListDebugSessionsResponse> {
+    const query = new URLSearchParams();
+    if (params.state) query.set('state', params.state);
+    if (params.next) query.set('next', params.next);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return this.debugRequest<ListDebugSessionsResponse>(
+      `/debug/usecases/${encodeURIComponent(usecaseId)}/sessions${suffix}`
+    );
+  }
+
+  /** One session with each device's `reported` state (`GET /debug/sessions/{id}`). */
+  async getDebugSession(sessionId: string): Promise<DebugSession> {
+    return this.debugRequest<DebugSession>(`/debug/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  /**
+   * Stop a live session (`DELETE /debug/sessions/{id}`): the shadow entry is
+   * removed on every device, the session becomes `stopped`. 409
+   * `debug_session_not_live` when it is not pending or active.
+   */
+  async stopDebugSession(sessionId: string): Promise<StopDebugSessionResponse> {
+    return this.debugRequest<StopDebugSessionResponse>(
+      `/debug/sessions/${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * One page of the Pair's debug log (`GET /debug/usecases/{usecase_id}/log`).
+   * Every query parameter of design §7.2 is serialized when given;
+   * `from`/`to` bound the write time and `next` is only valid within the same
+   * window. A 429 `log_read_throttled` surfaces as a `DebugApiError` carrying
+   * `retryAfterMs`; a 400 `invalid_token` means "repeat the window without a
+   * token" (design §8 step 4).
+   */
+  async getDebugLog(usecaseId: string, query: DebugLogQuery): Promise<DebugLogResponse> {
+    const params = new URLSearchParams();
+    params.set('device_id', query.device_id);
+    params.set('workflow_id', query.workflow_id);
+    const numeric: Array<keyof DebugLogQuery> = ['from', 'to', 'limit', 'ts_from', 'ts_to'];
+    for (const key of numeric) {
+      const value = query[key];
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        params.set(key, String(Math.trunc(value)));
+      }
+    }
+    const textual: Array<keyof DebugLogQuery> = ['next', 'execution_id', 'node_id', 'level', 'type'];
+    for (const key of textual) {
+      const value = query[key];
+      if (typeof value === 'string' && value !== '') {
+        params.set(key, value);
+      }
+    }
+    return this.debugRequest<DebugLogResponse>(
+      `/debug/usecases/${encodeURIComponent(usecaseId)}/log?${params.toString()}`
+    );
+  }
+
+  /**
+   * A 120 s presigned GET of a run's image
+   * (`GET /debug/sessions/{id}/images/{execution_id}?device_id=`). 409
+   * `registry_enforcement_required` while registry enforcement is off, 404
+   * `image_not_found` when the device uploaded none. `deviceId` is optional
+   * for a single-device session.
+   */
+  async getDebugImageUrl(
+    sessionId: string,
+    executionId: string,
+    deviceId?: string
+  ): Promise<DebugImageUrlResponse> {
+    const suffix = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : '';
+    return this.debugRequest<DebugImageUrlResponse>(
+      `/debug/sessions/${encodeURIComponent(sessionId)}/images/${encodeURIComponent(executionId)}${suffix}`
+    );
+  }
+
+  /**
+   * The CloudWatch console deep link of a device's stream
+   * (`GET /debug/sessions/{id}/console-link?device_id=`), PortalAdmin only
+   * (403 `INSUFFICIENT_PERMISSIONS` otherwise).
+   */
+  async getDebugConsoleLink(sessionId: string, deviceId?: string): Promise<DebugConsoleLinkResponse> {
+    const suffix = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : '';
+    return this.debugRequest<DebugConsoleLinkResponse>(
+      `/debug/sessions/${encodeURIComponent(sessionId)}/console-link${suffix}`
+    );
   }
 }
 

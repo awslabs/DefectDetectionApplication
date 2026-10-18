@@ -34,6 +34,7 @@ import {
 import LogsDiagnosticsTab from '../components/LogsDiagnosticsTab';
 import RemoteAccessTab from '../components/RemoteAccessTab';
 import ResultsTab from '../components/ResultsTab';
+import DeviceDebugTab from '../components/debug/DeviceDebugTab';
 import RemoveDevicesModal, {
   RemoveDevicesResult,
   removalNotice,
@@ -1064,6 +1065,16 @@ export default function DeviceDetail() {
             label: 'Remote Access',
             content: (
               <RemoteAccessTab deviceId={device.device_id} usecaseId={usecaseId || ''} />
+            ),
+          },
+          {
+            // Workflow debug sessions covering this device, with "Start
+            // debug" for MANAGE_DEVICES roles (workflow-debug-mode design §8).
+            // The use case is the device record's.
+            id: 'debug',
+            label: 'Debug',
+            content: (
+              <DeviceDebugTab device={device} usecaseId={device.usecase_id || usecaseId || ''} />
             ),
           },
         ]}

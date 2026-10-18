@@ -19,6 +19,7 @@ import { UserRole } from '../types';
 import { getConfig, getBuildInfo } from '../config';
 import { canAccessBuilds } from '../utils/buildsAccess';
 import { canAccessSyntheticData } from '../utils/syntheticAccess';
+import { canViewDebugLog } from '../utils/debugAccess';
 import { canAccessWorkflowTuning } from '../utils/workflowTuningAccess';
 import { clearAttemptedLocation } from '../services/sessionRedirect';
 
@@ -163,6 +164,12 @@ export function buildNavigationItems(
       : []),
     { type: 'link' as const, text: 'Deployments', href: '/deployments' },
     { type: 'link' as const, text: 'Devices', href: '/devices' },
+    // The workflow debug log (sessions and viewer) is readable by every
+    // role holding VIEW_DEVICE_LOGS, i.e. every role but DataLabeler, which
+    // returned above (workflow-debug-mode Requirements 2.6, 3.1).
+    ...(canViewDebugLog(role)
+      ? [{ type: 'link' as const, text: 'Debug log', href: '/debug' }]
+      : []),
   ];
 
   // Admin-only items (PortalAdmin only)

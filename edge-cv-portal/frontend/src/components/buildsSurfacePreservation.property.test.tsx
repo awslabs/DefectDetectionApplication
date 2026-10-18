@@ -152,6 +152,9 @@ function PRE_FIX_NAV_ORACLE(role: UserRole | undefined): NavItem[] {
  *   group between "Workflows" and "Node Designer", role-gated to
  *   DataScientist/UseCaseAdmin/PortalAdmin; covered by its own
  *   `pages/workflow-tuning/entryPoints.property.test.tsx`).
+ * - "Debug log" (workflow-debug-mode Req 2.6, 3.1, the entry after "Devices"
+ *   for every role holding VIEW_DEVICE_LOGS; covered by
+ *   `Layout.navigationItems.test.tsx`).
  */
 function withoutBuildsEntry(items: readonly NavItem[]): NavItem[] {
   return items.filter(
@@ -160,7 +163,8 @@ function withoutBuildsEntry(items: readonly NavItem[]): NavItem[] {
         item.type === 'link' &&
         (item.text === 'Builds' ||
           item.text === 'Synthetic Data' ||
-          item.text === 'Workflow Tuning')
+          item.text === 'Workflow Tuning' ||
+          item.text === 'Debug log')
       )
   );
 }

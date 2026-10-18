@@ -70,7 +70,29 @@ describe('buildNavigationItems — Viewer', () => {
       'Components',
       'Deployments',
       'Devices',
+      'Debug log',
     ]);
+  });
+});
+
+describe('buildNavigationItems — the "Debug log" entry (workflow-debug-mode Req 2.6, 3.1)', () => {
+  it.each<UserRole>(['Viewer', 'Operator', 'DataScientist', 'UseCaseAdmin', 'PortalAdmin'])(
+    'is present for %s, pointing at /debug, right after Devices',
+    (role) => {
+      const items = buildNavigationItems(role);
+      const texts = linkTexts(items);
+      expect(texts).toContain('Debug log');
+      expect(hrefFor(items, 'Debug log')).toBe('/debug');
+      expect(texts.indexOf('Debug log')).toBe(texts.indexOf('Devices') + 1);
+    }
+  );
+
+  it('is absent for DataLabeler, whose navigation is the labeler workspace only', () => {
+    expect(linkTexts(buildNavigationItems('DataLabeler'))).toEqual(['My Labeling Tasks']);
+  });
+
+  it('is absent for a missing role (loading state)', () => {
+    expect(linkTexts(buildNavigationItems(undefined))).not.toContain('Debug log');
   });
 });
 

@@ -3,6 +3,7 @@
   "userPoolId": "us-east-1_XXXXXXXXX",
   "userPoolClientId": "xxxxxxxxxxxxxxxxxxxxxxxxxx",
   "region": "us-east-1",
+  "registryEnforced": false,
   "branding": {
     "applicationName": "Defect Detection Application Portal",
     "companyName": "Your Company Name",

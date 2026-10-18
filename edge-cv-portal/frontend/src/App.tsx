@@ -44,6 +44,8 @@ import BuildsPage from './pages/builds/BuildsPage';
 import BuildDetail from './pages/builds/BuildDetail';
 import SyntheticData from './pages/synthetic/SyntheticData';
 import SyntheticSessionDetail from './pages/synthetic/SyntheticSessionDetail';
+import DebugSessions from './pages/debug/DebugSessions';
+import DebugViewer from './pages/debug/DebugViewer';
 import WorkflowTuningLanding from './pages/workflow-tuning/WorkflowTuningLanding';
 import AnomalyTuningOverview from './pages/workflow-tuning/AnomalyTuningOverview';
 import AnomalyTuningSession from './pages/workflow-tuning/AnomalyTuningSession';
@@ -60,6 +62,7 @@ import GlobalLoadingBar from './components/GlobalLoadingBar';
 import { BUILDS_ACCESS_ROLES } from './utils/buildsAccess';
 import { SYNTHETIC_ACCESS_ROLES } from './utils/syntheticAccess';
 import { WORKFLOW_TUNING_ACCESS_ROLES } from './utils/workflowTuningAccess';
+import { DEBUG_VIEW_ROLES } from './utils/debugAccess';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -224,6 +227,36 @@ function App() {
                   element={
                     <RequireRole roles={WORKFLOW_TUNING_ACCESS_ROLES}>
                       <AnomalyTuningSession />
+                    </RequireRole>
+                  }
+                />
+                {/* Workflow debug mode (workflow-debug-mode design §7.2, §8):
+                    the sessions page and the log viewer are limited to the
+                    roles holding VIEW_DEVICE_LOGS (every role but DataLabeler);
+                    every /debug/** API route independently checks
+                    has_permission and audits denials. /debug without a use
+                    case continues at the saved or first use case. */}
+                <Route
+                  path="debug"
+                  element={
+                    <RequireRole roles={DEBUG_VIEW_ROLES}>
+                      <DebugSessions />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="debug/:usecaseId"
+                  element={
+                    <RequireRole roles={DEBUG_VIEW_ROLES}>
+                      <DebugSessions />
+                    </RequireRole>
+                  }
+                />
+                <Route
+                  path="debug/:usecaseId/:workflowId/:deviceId"
+                  element={
+                    <RequireRole roles={DEBUG_VIEW_ROLES}>
+                      <DebugViewer />
                     </RequireRole>
                   }
                 />
