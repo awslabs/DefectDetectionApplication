@@ -126,6 +126,15 @@ SYNTH_STACKS = {
         "iam_baseline_DDAPortalUseCaseAccountStack.unfixed.template.json",
         "npx ts-node --prefer-ts-exts bin/usecase-account-app.ts",
     ),
+    # workflow-debug-mode (tasks.md 4.3): a stack that did not exist at the
+    # I1-I4 rewrite joins the gate with EMPTY pre-feature baselines, so every
+    # statement it synthesizes must be listed in
+    # iam_post_fix_approved_additions.json under its attribution.
+    "EdgeCVPortalWorkflowDebugStack": (
+        "iam_baseline_EdgeCVPortalWorkflowDebugStack.template.json",
+        "iam_baseline_EdgeCVPortalWorkflowDebugStack.unfixed.template.json",
+        None,
+    ),
 }
 
 

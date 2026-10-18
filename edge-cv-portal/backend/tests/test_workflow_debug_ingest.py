@@ -481,7 +481,11 @@ class TestIdentityErrors:
         assert world.run()["reason"] == "identity_unavailable"
         assert len(world.iot.calls) == 1
         out = capsys.readouterr().out
-        assert any(json.loads(l).get("Reason") == "identity_unavailable" for l in out.splitlines() if l.startswith("{"))
+        lines = [json.loads(l) for l in out.splitlines() if l.startswith("{")]
+        assert any(l.get("Reason") == "identity_unavailable" for l in lines)
+        alarm_lines = [l for l in lines if l.get("IdentityUnavailable") == 1]
+        assert len(alarm_lines) == 2, "one dimensionless IdentityUnavailable sample per terminal refusal"
+        assert alarm_lines[0]["_aws"]["CloudWatchMetrics"][0]["Dimensions"] == [[]]
 
 
 class TestNoPayloadInLogs:

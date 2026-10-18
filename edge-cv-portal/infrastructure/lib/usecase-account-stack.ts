@@ -3,7 +3,67 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iot from 'aws-cdk-lib/aws-iot';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
+
+/**
+ * The SQL of the workflow debug ingest rules (workflow-debug-mode design
+ * §6.1): the device payload base64-encoded, the topic, the publishing
+ * identity and the delivery stamps. The Portal-account copy in
+ * workflow-debug-stack.ts uses the identical text.
+ */
+const DEBUG_RULE_SQL =
+  "SELECT encode(*, 'base64') AS p, topic() AS t, principal() AS pr, clientid() AS c, timestamp() AS r, newuuid() AS m FROM 'dda/debug/+/+/+'";
+
+/** Sids of the statements addTelemetrySharedStatements adds exactly once. */
+export const TELEMETRY_MEDIA_RETENTION_READ_SID = 'TelemetryMediaRetentionRead';
+export const TELEMETRY_CONVENTION_RULE_READ_SID = 'TelemetryConventionRuleRead';
+
+/**
+ * The read-only statements the telemetry and debug Portal functions need on
+ * DDAPortalAccessRole in every topology (workflow-telemetry-dashboards design
+ * §14.2; workflow-debug-mode design §9), written identically by both
+ * specifications: `TelemetryMediaRetentionRead` (s3:GetLifecycleConfiguration
+ * and s3:GetBucketVersioning on the default Results_Bucket, which
+ * InferenceResultsAccess does not grant and the tag-conditioned S3BucketAccess
+ * grants only on tagged buckets) and `TelemetryConventionRuleRead`
+ * (iot:GetTopicRule on the two convention rules). Idempotent: whichever
+ * specification lands first adds the statements, the second finds them
+ * present by Sid and adds nothing, so calling it twice is safe.
+ */
+export function addTelemetrySharedStatements(role: iam.Role, account: string): void {
+  const existing = new Set<string>();
+  const defaultPolicy = role.node.tryFindChild('DefaultPolicy') as iam.Policy | undefined;
+  if (defaultPolicy) {
+    const document = defaultPolicy.document.toJSON() as { Statement?: Array<{ Sid?: string }> };
+    for (const statement of document?.Statement ?? []) {
+      if (statement.Sid) existing.add(statement.Sid);
+    }
+  }
+  if (!existing.has(TELEMETRY_MEDIA_RETENTION_READ_SID)) {
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: TELEMETRY_MEDIA_RETENTION_READ_SID,
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:GetLifecycleConfiguration', 's3:GetBucketVersioning'],
+        resources: [`arn:aws:s3:::dda-inference-results-${account}`],
+      })
+    );
+  }
+  if (!existing.has(TELEMETRY_CONVENTION_RULE_READ_SID)) {
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: TELEMETRY_CONVENTION_RULE_READ_SID,
+        effect: iam.Effect.ALLOW,
+        actions: ['iot:GetTopicRule'],
+        resources: [
+          `arn:aws:iot:*:${account}:rule/dda_tel_ingest`,
+          `arn:aws:iot:*:${account}:rule/dda_dbg_ingest`,
+        ],
+      })
+    );
+  }
+}
 
 /**
  * Stack version - increment when making changes
@@ -952,6 +1012,93 @@ export class UseCaseAccountStack extends cdk.Stack {
       value: cameraShadowReportQueueArn,
       description: 'Portal SQS queue receiving dda-camera-registry shadow documents events',
     });
+
+    // Workflow debug mode (workflow-debug-mode design §6.1, §9): the
+    // cross-account copy of the debug ingest rule. Devices of a use case in
+    // this account publish their debug records on dda/debug/+/+/+; the rule
+    // invokes the Portal account's ingest function through the alias named
+    // after this account (acct-<this account>), which the Portal's resource
+    // policy authorizes for iot.amazonaws.com of this account. The Lambda
+    // action carries no role (it is authorized by that alias policy); the
+    // only role is the error action's, writing rule errors to a log group in
+    // this account. Deploy-time condition like the camera-shadow block: in
+    // the single-account topology the Portal's WorkflowDebugStack provisions
+    // the equivalent rule (dda_dbg_ingest_portal) and these fixed-name copies
+    // would collide; the synthesized IAM statements stay identical for the
+    // security preservation baselines.
+    const debugCrossAccountCondition = new cdk.CfnCondition(
+      this, 'DebugCrossAccountCondition', {
+        expression: cdk.Fn.conditionNot(
+          cdk.Fn.conditionEquals(portalAccountId, cdk.Aws.ACCOUNT_ID)
+        ),
+      }
+    );
+
+    const debugRuleErrorLogGroup = new logs.LogGroup(this, 'DebugRuleErrorLogGroup', {
+      logGroupName: '/dda/workflow-debug/rule-errors',
+      retention: logs.RetentionDays.TWO_WEEKS,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    const debugRuleErrorRole = new iam.Role(this, 'DebugRuleErrorRole', {
+      roleName: 'DDADebugRuleErrorRole',
+      description: 'Error-action role of the dda_dbg_ingest IoT topic rule (writes rule errors to CloudWatch Logs in this account)',
+      assumedBy: new iam.ServicePrincipal('iot.amazonaws.com', {
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': this.account },
+          ArnLike: { 'aws:SourceArn': `arn:aws:iot:${region}:${this.account}:rule/dda_dbg_*` },
+        },
+      }),
+    });
+
+    debugRuleErrorRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'WriteDebugRuleErrors',
+        effect: iam.Effect.ALLOW,
+        actions: ['logs:CreateLogStream', 'logs:DescribeLogStreams', 'logs:PutLogEvents'],
+        resources: [`arn:aws:logs:${region}:${this.account}:log-group:/dda/workflow-debug/rule-errors:*`],
+      })
+    );
+
+    const debugIngestRule = new iot.CfnTopicRule(this, 'DebugIngestRule', {
+      ruleName: 'dda_dbg_ingest',
+      topicRulePayload: {
+        sql: DEBUG_RULE_SQL,
+        awsIotSqlVersion: '2016-03-23',
+        ruleDisabled: false,
+        description: 'Deliver dda/debug records of this account\'s devices to the DDA Portal workflow debug ingest alias',
+        actions: [
+          {
+            lambda: {
+              functionArn: `arn:aws:lambda:${region}:${portalAccountId}:function:dda-portal-workflow-debug-ingest:acct-${this.account}`,
+            },
+          },
+        ],
+        errorAction: {
+          cloudwatchLogs: {
+            logGroupName: debugRuleErrorLogGroup.logGroupName,
+            roleArn: debugRuleErrorRole.roleArn,
+          },
+        },
+      },
+    });
+
+    // Attach the cross-account condition to exactly the four fixed-name
+    // debug resources.
+    (debugRuleErrorRole.node.defaultChild as iam.CfnRole)
+      .cfnOptions.condition = debugCrossAccountCondition;
+    (debugRuleErrorRole.node.findChild('DefaultPolicy').node.defaultChild as iam.CfnPolicy)
+      .cfnOptions.condition = debugCrossAccountCondition;
+    (debugRuleErrorLogGroup.node.defaultChild as logs.CfnLogGroup)
+      .cfnOptions.condition = debugCrossAccountCondition;
+    debugIngestRule.cfnOptions.condition = debugCrossAccountCondition;
+
+    // The read-only statements the telemetry and debug Portal functions need
+    // on this role in every topology (workflow-telemetry-dashboards design
+    // §14.2; workflow-debug-mode §9): the images readiness check reads the
+    // default Results_Bucket's lifecycle configuration and versioning, and
+    // the readiness checklist reads the two convention rules.
+    addTelemetrySharedStatements(this.role, this.account);
 
     // Cross-Account EventBridge Forwarding
     // Forward SageMaker events to Portal Account for real-time status updates

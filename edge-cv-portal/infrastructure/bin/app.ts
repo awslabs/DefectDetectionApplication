@@ -9,6 +9,7 @@ import { TestRunnerStack } from '../lib/test-runner-stack';
 import { NodeDesignerStack } from '../lib/node-designer-stack';
 import { BuildFleetStack } from '../lib/build-fleet-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
+import { WorkflowDebugStack } from '../lib/workflow-debug-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { detectorExportImageDefault, normalizeCloudFrontDomain } from '../lib/context-helpers';
 
@@ -244,6 +245,36 @@ const syntheticDataStack = new SyntheticDataStack(app, 'EdgeCVPortalSyntheticDat
   trustedUseCaseAccountIds,
   dataBucketAllowlist,
   userPool: authStack.userPool,
+  restApiId: computeStack.api.restApiId,
+  restApiRootResourceId: computeStack.api.restApiRootResourceId,
+  // Must match ApiGatewayStack deployOptions.stageName.
+  apiStageName: 'v1',
+});
+
+// Workflow Debug Stack (workflow-debug-mode: the debug sessions table, the
+// ingest/API/maintenance Lambdas with their own shared/JWT/workflow_core
+// layers, the per-account ingest aliases with their on-failure queue, the
+// Portal-account dda_dbg_ingest_portal rule, the 5-minute maintenance
+// schedule, the alarms, and the /debug/... routes registered against the
+// ComputeStack API). Deployment values: -c debugLogRetentionDays,
+// debugMaxSessionsPerUsecase, debugMaxDevicesPerSession,
+// debugMaxMessagesPerSecond, debugMaxBytesPerSecond, debugIngestConcurrency,
+// debugGetLogEventsPerSecond, debugFilterLogEventsPerSecond.
+const workflowDebugStack = new WorkflowDebugStack(app, 'EdgeCVPortalWorkflowDebugStack', {
+  env,
+  description: 'Workflow debug mode infrastructure (debug sessions, ingest, log API, maintenance) for Edge CV Portal',
+  useCasesTable: storageStack.useCasesTable,
+  userRolesTable: storageStack.userRolesTable,
+  devicesTable: storageStack.devicesTable,
+  deploymentsTable: storageStack.deploymentsTable,
+  auditLogTable: storageStack.auditLogTable,
+  settingsTable: storageStack.settingsTable,
+  workflowsTable: storageStack.workflowsTable,
+  workflowVersionsTable: storageStack.workflowVersionsTable,
+  portalArtifactsBucket: storageStack.portalArtifactsBucket,
+  userPool: authStack.userPool,
+  trustedUseCaseAccountIds,
+  dataBucketAllowlist,
   restApiId: computeStack.api.restApiId,
   restApiRootResourceId: computeStack.api.restApiRootResourceId,
   // Must match ApiGatewayStack deployOptions.stageName.

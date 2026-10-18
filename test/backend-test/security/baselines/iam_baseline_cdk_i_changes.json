@@ -35,5 +35,9 @@
    "{\"Action\": [\"s3:GetObject\", \"s3:PutObject\", \"s3:ListBucket\", \"s3:ListAllMyBuckets\", \"s3:CreateBucket\", \"s3:GetBucketLocation\", \"s3:GetBucketTagging\"], \"Effect\": \"Allow\", \"Resource\": \"*\"}",
    "{\"Action\": [\"sagemaker:CreateTrainingJob\", \"sagemaker:DescribeTrainingJob\", \"sagemaker:ListTrainingJobs\", \"sagemaker:CreateCompilationJob\", \"sagemaker:DescribeCompilationJob\", \"sagemaker:ListCompilationJobs\", \"sagemaker:CreateLabelingJob\", \"sagemaker:DescribeLabelingJob\", \"sagemaker:ListLabelingJobs\", \"sagemaker:StopLabelingJob\", \"sagemaker:ListWorkteams\", \"sagemaker:DescribeWorkteam\", \"sagemaker:AddTags\", \"greengrass:CreateComponentVersion\", \"greengrass:DescribeComponent\", \"greengrass:GetComponent\", \"greengrass:ListComponents\", \"greengrass:ListComponentVersions\", \"greengrass:ListCoreDevices\", \"greengrass:GetCoreDevice\", \"greengrass:ListInstalledComponents\", \"greengrass:ListEffectiveDeployments\", \"greengrass:ListTagsForResource\", \"greengrass:TagResource\", \"greengrass:ListDeployments\", \"greengrass:GetDeployment\", \"greengrass:CreateDeployment\", \"greengrass:CancelDeployment\", \"iot:DescribeThing\", \"iot:DescribeEndpoint\", \"iot:DescribeThingGroup\", \"iot:GetThingType\", \"iot:ListThings\", \"iot:ListThingsInThingGroup\", \"iot:ListThingGroups\", \"iot:CreateThingGroup\", \"iot:AddThingToThingGroup\", \"iot:RemoveThingFromThingGroup\", \"iot:CreateJob\", \"iot:DescribeJob\", \"iot:UpdateJob\", \"iot:GetJobDocument\", \"iot:ListJobs\", \"iot:CancelJob\", \"iot:GetThingShadow\", \"iot:UpdateThingShadow\", \"iot:DeleteThingShadow\", \"logs:GetLogEvents\", \"logs:DescribeLogStreams\", \"logs:DescribeLogGroups\", \"logs:FilterLogEvents\", \"sts:AssumeRole\", \"execute-api:Invoke\", \"s3:GetBucketCors\", \"s3:PutBucketCors\"], \"Effect\": \"Allow\", \"Resource\": \"*\"}"
   ]
+ },
+ "EdgeCVPortalWorkflowDebugStack": {
+  "added": [],
+  "removed": []
  }
 }

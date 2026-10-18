@@ -380,6 +380,9 @@ def _reject(reason: str, detail: str, account: str, usecase_id: str, now_ms: int
     if usecase_id:
         dimensions["UseCaseId"] = usecase_id
     _emit_metrics({"Received": 1, "Rejected": 1}, dimensions, now_ms)
+    if reason == "identity_unavailable":
+        # The dimensionless copy the stack's IdentityUnavailable alarm watches.
+        _emit_metrics({"IdentityUnavailable": 1}, {}, now_ms)
     logger.info("debug message rejected: reason=%s detail=%s account=%s usecase=%s",
                 reason, detail or "-", account or "-", usecase_id or "-")
     return {"result": RESULT_REJECTED, "reason": reason}
