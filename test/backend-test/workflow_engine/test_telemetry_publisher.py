@@ -218,10 +218,12 @@ class TestFailures:
                 line = errors[0].getMessage()
                 assert line.startswith(
                     "publish to dda/debug/u/w/record denied by Greengrass IPC: this "
-                    "LocalServer variant's recipe lacks mqttproxy:2 "
-                    "(aws.greengrass#PublishToIoTCore on *); known for "
-                    "recipe-amd64-nvidia.yaml (A10/Q8). Original diagnosis: "
+                    "LocalServer's deployed recipe lacks mqttproxy:2 "
+                    "(aws.greengrass#PublishToIoTCore on *). Original diagnosis: "
                 )
+                # No variant is named: every current recipe carries the
+                # statement (the amd64Nvidia exception was resolved upstream).
+                assert "amd64" not in line
                 assert "aws.greengrass.ipc.mqttproxy accessControl" in line
                 assert pub.publish_failures == 3
                 assert pub.failures_by_reason["denied"] == 3

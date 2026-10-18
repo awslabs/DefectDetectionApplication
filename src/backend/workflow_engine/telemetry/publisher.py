@@ -51,11 +51,13 @@ __all__ = ["IpcPublisher"]
 #: Rate limit of the failure lines, per (topic, reason), in seconds.
 _LOG_INTERVAL_S = 60.0
 
-#: The fixed denial line (dashboards R5.4; debug design §5.6).
+#: The fixed denial line (dashboards R5.4; debug design §5.6). Every current
+#: LocalServer recipe carries the statement, so a denial points at the
+#: deployed component's recipe rather than at a variant.
 _DENIAL_LINE = (
-    "publish to %s denied by Greengrass IPC: this LocalServer variant's "
-    "recipe lacks mqttproxy:2 (aws.greengrass#PublishToIoTCore on *); known "
-    "for recipe-amd64-nvidia.yaml (A10/Q8). Original diagnosis: %s"
+    "publish to %s denied by Greengrass IPC: this LocalServer's deployed "
+    "recipe lacks mqttproxy:2 (aws.greengrass#PublishToIoTCore on *). "
+    "Original diagnosis: %s"
 )
 
 _SPOOL_FULL_LINE = (
