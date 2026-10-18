@@ -135,14 +135,64 @@ class TestSessionPolicies:
         # The use case may be given as its id.
         assert sp.build("image-read", usecase=UC, bucket="results-bucket")["Statement"] == statements
 
+    # The dashboards' three purposes (workflow-telemetry-dashboards tasks.md 2.2, design §14.4).
+    def test_api_control(self, common):
+        from edge_telemetry_common import session_policies as sp
+        assert sp.PURPOSES == ("ingest", "media-retention-read", "debug-control", "image-read",
+                               "api-control", "media-read", "live-expiry")
+        statements = sp.build("api-control")["Statement"]
+        assert statements == [
+            {"Effect": "Allow", "Action": ["iot:UpdateThingShadow", "iot:GetThingShadow"],
+             "Resource": "arn:aws:iot:*:*:thing/*"},
+            {"Effect": "Allow",
+             "Action": ["greengrass:GetCoreDevice", "greengrass:ListCoreDevices", "greengrass:ListTagsForResource"],
+             "Resource": "*"},
+            {"Effect": "Allow", "Action": "iot:GetTopicRule",
+             "Resource": ["arn:aws:iot:*:*:rule/dda_tel_ingest", "arn:aws:iot:*:*:rule/dda_dbg_ingest"]},
+        ]
+        # No argument is needed; given ones are ignored.
+        assert sp.build("api-control", usecase={"usecase_id": UC}, bucket="results-bucket")["Statement"] == statements
+
+    def test_media_read(self, common):
+        from edge_telemetry_common import session_policies as sp
+        statements = sp.build("media-read", usecase={"usecase_id": UC}, bucket="results-bucket")["Statement"]
+        assert statements == [
+            {"Effect": "Allow", "Action": "s3:GetObject",
+             "Resource": "arn:aws:s3:::results-bucket/dda-telemetry/*/{0}/*".format(UC)},
+            {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::results-bucket",
+             "Condition": {"StringLike": {"s3:prefix": "dda-telemetry/*/{0}/*".format(UC)}}},
+        ]
+        assert sp.build("media-read", usecase=UC, bucket="results-bucket")["Statement"] == statements
+        # No write action, nothing under another use case's prefix.
+        text = sp.policy_text(sp.build("media-read", usecase=UC, bucket="results-bucket"))
+        assert "Put" not in text and "Delete" not in text
+
+    def test_live_expiry(self, common):
+        from edge_telemetry_common import session_policies as sp
+        statements = sp.build("live-expiry", usecase={"usecase_id": UC}, bucket="results-bucket")["Statement"]
+        assert statements == [
+            {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::results-bucket",
+             "Condition": {"StringLike": {"s3:prefix": "dda-telemetry/live/{0}/*".format(UC)}}},
+            {"Effect": "Allow", "Action": "s3:DeleteObject",
+             "Resource": "arn:aws:s3:::results-bucket/dda-telemetry/live/{0}/*".format(UC)},
+        ]
+        text = sp.policy_text(sp.build("live-expiry", usecase=UC, bucket="results-bucket"))
+        assert "GetObject" not in text and "clips" not in text and "debug" not in text
+
+    def test_the_three_new_policies_stay_under_a_thousand_characters_with_the_longest_arguments(self, common):
+        from edge_telemetry_common import session_policies as sp
+        for purpose in ("api-control", "media-read", "live-expiry"):
+            policy = sp.build(purpose, usecase={"usecase_id": self.LONG_USECASE}, bucket=self.LONG_BUCKET)
+            assert len(sp.policy_text(policy)) < 1000, purpose
+
     def test_unknown_purpose_raises(self, common):
         from edge_telemetry_common import session_policies as sp
         with pytest.raises(sp.UnknownPurpose):
-            sp.build("api-control")
+            sp.build("clip-write")
         with pytest.raises(ValueError):
             sp.build("nope")
 
-    @pytest.mark.parametrize("purpose", ["media-retention-read", "image-read"])
+    @pytest.mark.parametrize("purpose", ["media-retention-read", "image-read", "media-read", "live-expiry"])
     def test_missing_or_malformed_bucket_raises(self, common, purpose):
         from edge_telemetry_common import session_policies as sp
         with pytest.raises(ValueError):
@@ -150,12 +200,13 @@ class TestSessionPolicies:
         with pytest.raises(ValueError):
             sp.build(purpose, usecase={"usecase_id": UC}, bucket="Bad*Name")
 
-    def test_image_read_needs_a_valid_usecase_id(self, common):
+    @pytest.mark.parametrize("purpose", ["image-read", "media-read", "live-expiry"])
+    def test_prefixed_purposes_need_a_valid_usecase_id(self, common, purpose):
         from edge_telemetry_common import session_policies as sp
         with pytest.raises(ValueError):
-            sp.build("image-read", bucket="results-bucket")
+            sp.build(purpose, bucket="results-bucket")
         with pytest.raises(ValueError):
-            sp.build("image-read", usecase={"usecase_id": "a/*"}, bucket="results-bucket")
+            sp.build(purpose, usecase={"usecase_id": "a/*"}, bucket="results-bucket")
 
 
 # --------------------------------------------------------------------------- credentials
@@ -271,10 +322,23 @@ class TestCredentialsClient:
     def test_unknown_purpose_raises_in_both_topologies(self, stubbed_clients):
         from edge_telemetry_common import credentials, session_policies as sp
         with pytest.raises(sp.UnknownPurpose):
-            credentials.client("iot", cross_usecase(), "api-control")
+            credentials.client("iot", cross_usecase(), "clip-write")
         with pytest.raises(sp.UnknownPurpose):
-            credentials.client("iot", portal_usecase(), "api-control")
+            credentials.client("iot", portal_usecase(), "clip-write")
         assert stubbed_clients.sts.calls == []
+
+    def test_the_dashboards_purposes_assume_the_role_with_their_policies(self, stubbed_clients):
+        from edge_telemetry_common import credentials, session_policies as sp
+        credentials.client("iot-data", cross_usecase(), "api-control")
+        credentials.client("s3", cross_usecase(), "media-read", bucket="results-bucket")
+        credentials.client("s3", cross_usecase(), "live-expiry", bucket="results-bucket")
+        assert [c["RoleSessionName"] for c in stubbed_clients.sts.calls] == [
+            "dda-telemetry-api-control", "dda-telemetry-media-read", "dda-telemetry-live-expiry"]
+        assert json.loads(stubbed_clients.sts.calls[0]["Policy"]) == sp.build("api-control")
+        assert json.loads(stubbed_clients.sts.calls[1]["Policy"]) == sp.build(
+            "media-read", usecase=cross_usecase(), bucket="results-bucket")
+        assert json.loads(stubbed_clients.sts.calls[2]["Policy"]) == sp.build(
+            "live-expiry", usecase=cross_usecase(), bucket="results-bucket")
 
     def test_root_marker_in_cross_topology_uses_default_credentials(self, stubbed_clients):
         from edge_telemetry_common import credentials

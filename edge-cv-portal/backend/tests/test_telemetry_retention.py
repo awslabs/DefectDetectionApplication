@@ -2,7 +2,10 @@
 workflow-telemetry-dashboards design §12.4): foreign rules kept verbatim, the
 three ids replaced in place, absent ones appended, idempotent, a bucket
 already carrying the other two ids gets the third appended and the others
-replaced, and ``debug_images_rule_present``.
+replaced, ``debug_images_rule_present``, and the dashboards' "Media retention"
+readiness ``media_retention_ready`` (dashboards tasks.md 2.2: missing rules,
+``Enabled``/``Suspended``/never-enabled versioning, a clip-days mismatch is
+reported but ready, the debug id is ignored).
 """
 import copy
 
@@ -151,3 +154,60 @@ class TestDebugImagesRulePresent:
         rule = {"ID": "DDATelemetryDebugImages", "Filter": {"And": {"Prefix": "dda-telemetry/debug/", "Tags": []}},
                 "Status": "Enabled", "Expiration": {"Days": 7}}
         assert retention.debug_images_rule_present([rule]) is True
+
+
+class TestMediaRetentionReady:
+    def test_ready_with_both_rules_and_no_versioning(self):
+        rules = retention.telemetry_rules(clip_days=90)
+        assert retention.media_retention_ready(rules, None) == (True, None)
+        assert retention.media_retention_ready(rules, "") == (True, None)
+        assert retention.media_retention_ready(rules, "Suspended") == (True, None)
+        assert retention.media_retention_ready(rules[:2], None) == (True, None)
+
+    def test_missing_rules(self):
+        rules = retention.telemetry_rules()
+        assert retention.media_retention_ready([], None) == (False, "media_retention_unset")
+        assert retention.media_retention_ready(None, None) == (False, "media_retention_unset")
+        assert retention.media_retention_ready([rules[0]], None) == (False, "media_retention_unset")
+        assert retention.media_retention_ready([rules[1]], None) == (False, "media_retention_unset")
+        assert retention.media_retention_ready([FOREIGN_TUNING, rules[2]], None) == (False, "media_retention_unset")
+
+    def test_enabled_versioning_refuses_even_with_the_rules(self):
+        rules = retention.telemetry_rules()
+        assert retention.media_retention_ready(rules, "Enabled") == (False, "media_versioned")
+        # The rules are checked first: an unset bucket with versioning reports the rules.
+        assert retention.media_retention_ready([], "Enabled") == (False, "media_retention_unset")
+
+    def test_disabled_or_misprefixed_rules_do_not_count(self):
+        rules = retention.telemetry_rules()
+        clips = copy.deepcopy(rules[0])
+        clips["Status"] = "Disabled"
+        assert retention.media_retention_ready([clips, rules[1]], None) == (False, "media_retention_unset")
+        live = copy.deepcopy(rules[1])
+        live["Filter"] = {"Prefix": "dda-telemetry/clips/"}
+        assert retention.media_retention_ready([rules[0], live], None) == (False, "media_retention_unset")
+        live = copy.deepcopy(rules[1])
+        del live["Expiration"]
+        assert retention.media_retention_ready([rules[0], live], None) == (False, "media_retention_unset")
+
+    def test_clip_days_mismatch_is_reported_but_ready(self):
+        rules = retention.telemetry_rules(clip_days=30)
+        assert retention.media_retention_ready(rules, None, clip_days=90) == (True, None)
+        assert retention.clip_rule_days(rules) == 30
+        assert retention.clip_rule_days(retention.telemetry_rules(clip_days=90)) == 90
+        assert retention.clip_rule_days([]) is None
+        assert retention.clip_rule_days(None) is None
+
+    def test_the_debug_id_is_ignored(self):
+        rules = retention.telemetry_rules()
+        debug = copy.deepcopy(rules[2])
+        debug["Status"] = "Disabled"
+        assert retention.media_retention_ready([rules[0], rules[1], debug], None) == (True, None)
+        assert retention.media_retention_ready([rules[0], rules[1]], "Suspended") == (True, None)
+
+    def test_legacy_prefix_shapes_count(self):
+        clips = {"ID": "DDATelemetryClips", "Prefix": "dda-telemetry/clips/", "Status": "Enabled",
+                 "Expiration": {"Days": 90}}
+        live = {"ID": "DDATelemetryLive", "Filter": {"And": {"Prefix": "dda-telemetry/live/", "Tags": []}},
+                "Status": "Enabled", "Expiration": {"Days": 1}}
+        assert retention.media_retention_ready([clips, live], None) == (True, None)

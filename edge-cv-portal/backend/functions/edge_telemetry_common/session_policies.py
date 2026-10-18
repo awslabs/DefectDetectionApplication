@@ -6,7 +6,8 @@ debug code carries one of these policies, so the session holds only what its
 purpose needs however broad the role is. The debug mode created this module
 with the four purposes it uses (``ingest`` and ``media-retention-read`` as the
 dashboards design defines them, plus ``debug-control`` and ``image-read``);
-the dashboards add ``api-control``, ``media-read`` and ``live-expiry``.
+the dashboards added ``api-control``, ``media-read`` and ``live-expiry``
+(tasks.md 2.2).
 
 Each policy is well under the 2,048-character limit of a session policy
 (the unit test serializes every purpose with the longest arguments and
@@ -22,6 +23,9 @@ __all__ = [
     "MEDIA_RETENTION_READ",
     "DEBUG_CONTROL",
     "IMAGE_READ",
+    "API_CONTROL",
+    "MEDIA_READ",
+    "LIVE_EXPIRY",
     "UnknownPurpose",
     "build",
     "policy_text",
@@ -31,8 +35,13 @@ INGEST = "ingest"
 MEDIA_RETENTION_READ = "media-retention-read"
 DEBUG_CONTROL = "debug-control"
 IMAGE_READ = "image-read"
+# The dashboards' purposes (workflow-telemetry-dashboards design §14.4,
+# tasks.md 2.2).
+API_CONTROL = "api-control"
+MEDIA_READ = "media-read"
+LIVE_EXPIRY = "live-expiry"
 
-PURPOSES = (INGEST, MEDIA_RETENTION_READ, DEBUG_CONTROL, IMAGE_READ)
+PURPOSES = (INGEST, MEDIA_RETENTION_READ, DEBUG_CONTROL, IMAGE_READ, API_CONTROL, MEDIA_READ, LIVE_EXPIRY)
 
 #: The S3 bucket-name grammar (lower-case letters, digits, dots and hyphens,
 #: 3-63 characters), so a name can never carry a policy wildcard.
@@ -42,6 +51,9 @@ _USECASE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 #: The debug images' prefix on a Results_Bucket (workflow-debug-mode §1.3).
 DEBUG_IMAGE_PREFIX = "dda-telemetry/debug/"
+#: The telemetry media root and the live-frame prefix (dashboards §12.1).
+TELEMETRY_PREFIX = "dda-telemetry/"
+LIVE_PREFIX = "dda-telemetry/live/"
 
 
 class UnknownPurpose(ValueError):
@@ -75,7 +87,17 @@ def build(purpose: str, usecase: Any = None, bucket: Optional[str] = None) -> Di
       ``thing/*``; ``iot:GetTopicRule`` on ``rule/dda_dbg_ingest``;
     - ``image-read`` (needs ``bucket`` and ``usecase``): ``s3:GetObject`` on
       ``<bucket>/dda-telemetry/debug/<usecase>/*`` and ``s3:ListBucket`` on the
-      bucket with ``s3:prefix`` like ``dda-telemetry/debug/<usecase>/*``.
+      bucket with ``s3:prefix`` like ``dda-telemetry/debug/<usecase>/*``;
+    - ``api-control``: ``iot:UpdateThingShadow`` and ``iot:GetThingShadow`` on
+      ``thing/*``; ``greengrass:GetCoreDevice``, ``greengrass:ListCoreDevices``
+      and ``greengrass:ListTagsForResource`` on ``*``; ``iot:GetTopicRule`` on
+      ``rule/dda_tel_ingest`` and ``rule/dda_dbg_ingest``;
+    - ``media-read`` (needs ``bucket`` and ``usecase``): ``s3:GetObject`` on
+      ``<bucket>/dda-telemetry/*/<usecase>/*`` and ``s3:ListBucket`` with
+      ``s3:prefix`` like ``dda-telemetry/*/<usecase>/*``;
+    - ``live-expiry`` (needs ``bucket`` and ``usecase``): ``s3:ListBucket`` with
+      ``s3:prefix`` like ``dda-telemetry/live/<usecase>/*`` and
+      ``s3:DeleteObject`` on ``<bucket>/dda-telemetry/live/<usecase>/*``.
 
     Raises :class:`UnknownPurpose` for any other purpose and ``ValueError``
     when a required argument is missing or malformed.
@@ -119,6 +141,57 @@ def build(purpose: str, usecase: Any = None, bucket: Optional[str] = None) -> Di
                 "Action": "s3:ListBucket",
                 "Resource": "arn:aws:s3:::{0}".format(name),
                 "Condition": {"StringLike": {"s3:prefix": prefix}},
+            },
+        )
+    if purpose == API_CONTROL:
+        return _document(
+            {
+                "Effect": "Allow",
+                "Action": ["iot:UpdateThingShadow", "iot:GetThingShadow"],
+                "Resource": "arn:aws:iot:*:*:thing/*",
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["greengrass:GetCoreDevice", "greengrass:ListCoreDevices",
+                           "greengrass:ListTagsForResource"],
+                "Resource": "*",
+            },
+            {
+                "Effect": "Allow",
+                "Action": "iot:GetTopicRule",
+                "Resource": ["arn:aws:iot:*:*:rule/dda_tel_ingest", "arn:aws:iot:*:*:rule/dda_dbg_ingest"],
+            },
+        )
+    if purpose == MEDIA_READ:
+        name = _bucket(bucket)
+        prefix = TELEMETRY_PREFIX + "*/" + _usecase_id(usecase) + "/*"
+        return _document(
+            {
+                "Effect": "Allow",
+                "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::{0}/{1}".format(name, prefix),
+            },
+            {
+                "Effect": "Allow",
+                "Action": "s3:ListBucket",
+                "Resource": "arn:aws:s3:::{0}".format(name),
+                "Condition": {"StringLike": {"s3:prefix": prefix}},
+            },
+        )
+    if purpose == LIVE_EXPIRY:
+        name = _bucket(bucket)
+        prefix = LIVE_PREFIX + _usecase_id(usecase) + "/*"
+        return _document(
+            {
+                "Effect": "Allow",
+                "Action": "s3:ListBucket",
+                "Resource": "arn:aws:s3:::{0}".format(name),
+                "Condition": {"StringLike": {"s3:prefix": prefix}},
+            },
+            {
+                "Effect": "Allow",
+                "Action": "s3:DeleteObject",
+                "Resource": "arn:aws:s3:::{0}/{1}".format(name, prefix),
             },
         )
     raise UnknownPurpose("unknown session policy purpose: {0!r}".format(purpose))

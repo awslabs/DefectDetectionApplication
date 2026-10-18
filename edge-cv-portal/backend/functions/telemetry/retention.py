@@ -11,7 +11,8 @@ three ids in place, appends those absent and keeps every other rule verbatim,
 exactly as ``tuning_settings.merge_lifecycle_rules`` treats its own ids, so a
 bucket carrying the workflow-tuning rules or an operator's rules is never
 disturbed. ``debug_images_rule_present`` is the debug mode's images readiness
-check; the dashboards' "Media retention" item reads the first two ids only.
+check; the dashboards' "Media retention" item (``media_retention_ready``,
+dashboards tasks.md 2.2) requires the first two ids and ignores the third.
 """
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -28,7 +29,16 @@ __all__ = [
     "telemetry_rules",
     "merge_telemetry_rules",
     "debug_images_rule_present",
+    "media_retention_ready",
+    "MEDIA_RETENTION_UNSET",
+    "MEDIA_VERSIONED",
+    "clip_rule_days",
 ]
+
+#: The reasons ``media_retention_ready`` reports (the live-lease refusal
+#: ``live_unavailable`` carries one of them, dashboards design §9.3).
+MEDIA_RETENTION_UNSET = "media_retention_unset"
+MEDIA_VERSIONED = "media_versioned"
 
 CLIPS_RULE_ID = "DDATelemetryClips"
 LIVE_RULE_ID = "DDATelemetryLive"
@@ -133,3 +143,53 @@ def debug_images_rule_present(rules: Optional[Iterable[Any]]) -> bool:
         expiration = rule.get("Expiration")
         return isinstance(expiration, dict) and isinstance(expiration.get("Days"), int) and expiration["Days"] >= 1
     return False
+
+
+def _enabled_rule_on_prefix(rules: Iterable[Any], rule_id: str, prefix: str) -> bool:
+    for rule in rules or []:
+        if not isinstance(rule, dict) or rule.get("ID") != rule_id:
+            continue
+        if str(rule.get("Status") or "") != "Enabled":
+            return False
+        if _rule_prefix(rule) != prefix:
+            return False
+        expiration = rule.get("Expiration")
+        return isinstance(expiration, dict) and isinstance(expiration.get("Days"), int) and expiration["Days"] >= 1
+    return False
+
+
+def media_retention_ready(rules: Optional[Iterable[Any]], versioning_status: Any,
+                          *, clip_days: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+    """``(ready, reason)`` of the dashboards' "Media retention" readiness item
+    (design §10.1, §12.4): the bucket must carry enabled ``DDATelemetryClips``
+    and ``DDATelemetryLive`` rules on their prefixes with an expiration in
+    days (``media_retention_unset`` otherwise), and its versioning must not be
+    ``Enabled`` (``media_versioned``: the hourly sweep would leave noncurrent
+    frames behind). ``Suspended`` and never-enabled (``None`` or an empty
+    string) versioning are both acceptable. The third id,
+    ``DDATelemetryDebugImages``, is the debug mode's and is ignored here.
+
+    ``clip_days`` is informational: when given and the clips rule expires on
+    another number of days the item is still ready and the reason is
+    ``None``; callers that want to show the mismatch compare
+    ``clip_rule_days(rules)`` themselves."""
+    rule_list = list(rules or [])
+    if not (_enabled_rule_on_prefix(rule_list, CLIPS_RULE_ID, CLIPS_PREFIX)
+            and _enabled_rule_on_prefix(rule_list, LIVE_RULE_ID, LIVE_PREFIX)):
+        return False, MEDIA_RETENTION_UNSET
+    if str(versioning_status or "") == "Enabled":
+        return False, MEDIA_VERSIONED
+    return True, None
+
+
+def clip_rule_days(rules: Optional[Iterable[Any]]) -> Optional[int]:
+    """The ``Expiration.Days`` of the bucket's ``DDATelemetryClips`` rule, or
+    ``None`` when the rule is absent (the checklist reports a mismatch with
+    ``telemetryClipRetentionDays`` as information, never as not-ready)."""
+    for rule in rules or []:
+        if isinstance(rule, dict) and rule.get("ID") == CLIPS_RULE_ID:
+            expiration = rule.get("Expiration")
+            if isinstance(expiration, dict) and isinstance(expiration.get("Days"), int):
+                return expiration["Days"]
+            return None
+    return None
