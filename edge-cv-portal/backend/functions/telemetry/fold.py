@@ -21,6 +21,7 @@ design §7.3, §8.1; tasks.md 3.2).
   minute over the whole ±5-minute window (out-of-order arrivals never count).
 """
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from telemetry import schemas
@@ -158,9 +159,11 @@ def dedupe(summaries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _to_number(value: Any) -> Optional[float]:
+    """Numbers (including the ``Decimal``s DynamoDB items carry) as floats;
+    booleans as 0/1; anything else ``None``."""
     if isinstance(value, bool):
         return 1.0 if value else 0.0
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float, Decimal)):
         return float(value)
     return None
 

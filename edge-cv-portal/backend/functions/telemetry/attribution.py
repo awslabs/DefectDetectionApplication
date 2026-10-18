@@ -119,11 +119,11 @@ def _reject(reason: str, detail: str, usecase_id: str, account: str) -> Decision
     return Decision(False, reason, detail, None, usecase_id or None, account)
 
 
-def _region_of(usecase: Dict[str, Any]) -> str:
-    region = usecase.get("region")
-    if not region and isinstance(usecase.get("regions"), list) and usecase["regions"]:
-        region = usecase["regions"][0]
-    return str(region or "")
+def _region_of(usecase: Dict[str, Any], portal_region: str) -> str:
+    """The use case's region as ``shared_utils.get_usecase_region`` reads it:
+    the record's ``region``, else the Portal's (a record without one is a
+    Portal-region use case by the Portal's own convention)."""
+    return str(usecase.get("region") or portal_region)
 
 
 def decide(message: Dict[str, Any], lookups: Lookups, *, account: str, portal_region: str, now_ms: int,
@@ -136,7 +136,13 @@ def decide(message: Dict[str, Any], lookups: Lookups, *, account: str, portal_re
         try:
             parsed = parse_convention_topic(message.get("t"))
         except TopicError as error:
-            raise Rejected("schema_unknown" if error.reason == "unknown_kind" else "attribution_mismatch", "topic")
+            if error.reason == "unknown_kind":
+                # The topic's use case level parsed: count the rejection under it.
+                levels = str(message.get("t") or "").split("/")
+                if len(levels) == 5 and _UUID_RE.match(levels[2]):
+                    usecase_id = levels[2].lower()
+                raise Rejected("schema_unknown", "topic kind")
+            raise Rejected("attribution_mismatch", "topic")
         if parsed.root != TELEMETRY_ROOT:
             raise Rejected("attribution_mismatch", "topic root")
         if not _UUID_RE.match(parsed.usecase_id) or not _UUID_RE.match(parsed.workflow_id):
@@ -146,7 +152,7 @@ def decide(message: Dict[str, Any], lookups: Lookups, *, account: str, portal_re
         usecase = lookups.usecase(usecase_id)
         if not usecase or str(usecase.get("account_id") or "") != str(account):
             raise Rejected("attribution_mismatch", "use case")
-        if _region_of(usecase) != portal_region:
+        if _region_of(usecase, portal_region) != portal_region:
             raise Rejected("attribution_mismatch", "region")
         if not lookups.telemetry_enabled(usecase):
             raise Rejected("usecase_disabled")
