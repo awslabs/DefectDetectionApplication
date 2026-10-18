@@ -1,0 +1,57 @@
+{
+  "id": "anomaly",
+  "version": 1,
+  "label": "Anomaly detection",
+  "description": "Runs, the anomalous share, latency and the model state of an anomaly workflow.",
+  "requires": {
+    "blocks": [
+      "runs",
+      "outcomes"
+    ],
+    "extensions": []
+  },
+  "panels": [
+    {
+      "id": "runs",
+      "title": "Runs per minute",
+      "chart": "area",
+      "measures": [
+        "runs_completed",
+        "runs_failed",
+        "runs_dropped"
+      ]
+    },
+    {
+      "id": "anomalous-share",
+      "title": "Anomalous share",
+      "chart": "pie-and-line",
+      "measures": [
+        "anomalous",
+        "normal"
+      ]
+    },
+    {
+      "id": "latency",
+      "title": "Latency",
+      "chart": "line",
+      "measures": [
+        "latency_p50_ms",
+        "latency_p95_ms"
+      ]
+    },
+    {
+      "id": "model-state",
+      "title": "Model state",
+      "chart": "stacked-bar-states",
+      "measures": [
+        "model_state_worst"
+      ],
+      "note": "one series per state; each bucket contributes 1 to the series of its model_state_worst; NONE is not drawn"
+    }
+  ],
+  "tiles": [
+    "now",
+    "health",
+    "live"
+  ]
+}
