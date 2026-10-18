@@ -157,11 +157,12 @@ class TestElementChains:
     def test_chain_elements_tagged_with_node_id(self):
         document = _compile_ok(_valid_graph())
         # folder_source's x86_64 chain: filesrc ! emexifextract ! jpegparse
-        # ! jpegdec ! videoconvert ! videoflip.
+        # ! jpegdec ! capsfilter ! videoconvert ! videoflip (the capsfilter
+        # pins jpegdec to its native formats on the Ubuntu 22.04 targets).
         source_elements = _elements_of(document, "src")
         assert [e["factory"] for e in source_elements] == [
             "filesrc", "emexifextract", "jpegparse", "jpegdec",
-            "videoconvert", "videoflip",
+            "capsfilter", "videoconvert", "videoflip",
         ]
 
     def test_node_parameters_resolved_into_args(self):

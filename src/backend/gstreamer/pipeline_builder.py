@@ -143,6 +143,17 @@ class GstPipelineBuilder:
         self.pipeline_config.add_plugin(PluginDefinition("jpegdec",
                                                             [PluginArg("idct-method", 2)
                                                             ]))
+        # GStreamer 1.20 jpegdec decodes straight to an RGB-family format when
+        # the first format downstream offers is one (an RGB request, or an
+        # unconstrained videoconvert), and that libjpeg-turbo path fails
+        # ("Improper call to JPEG library in state 205"). Pin it to its native
+        # formats on the Ubuntu 22.04 targets; videoconvert converts.
+        from workflow_engine.environment import device_arch
+        from workflow_engine.vendor.workflow_core.catalog.nodes import (
+            JPEGDEC_NATIVE_CAPS, JPEGDEC_NATIVE_CAPS_ARCHS)
+        if device_arch() in JPEGDEC_NATIVE_CAPS_ARCHS:
+            self.pipeline_config.add_plugin(PluginDefinition(
+                "capsfilter", [PluginArg("caps", f'"{JPEGDEC_NATIVE_CAPS}"')]))
         self.pipeline_config.add_plugin(PluginDefinition("videoconvert"))
         self.pipeline_config.add_plugin(PluginDefinition("videoflip",
                                                             [PluginArg("method", "automatic")

@@ -1527,7 +1527,8 @@ def is_cross_account_setup(usecase: Dict) -> bool:
     )
 
 
-def get_usecase_client(service_name: str, usecase: Dict, session_name: str = None, region: str = None) -> Any:
+def get_usecase_client(service_name: str, usecase: Dict, session_name: str = None, region: str = None,
+                       config: Any = None) -> Any:
     """
     Get a boto3 client for accessing use case resources.
     
@@ -1540,6 +1541,8 @@ def get_usecase_client(service_name: str, usecase: Dict, session_name: str = Non
         usecase: Use case details dict from DynamoDB
         session_name: Optional session name for role assumption (auto-generated if not provided)
         region: Optional AWS region
+        config: Optional botocore.config.Config passed to boto3.client; when None
+            the client is created exactly as before (no config argument)
     
     Returns:
         boto3 client for the specified service
@@ -1559,14 +1562,17 @@ def get_usecase_client(service_name: str, usecase: Dict, session_name: str = Non
             usecase.get('external_id'),
             session_name
         )
+        if config is not None:
+            return create_boto3_client(service_name, credentials, region, config=config)
         return create_boto3_client(service_name, credentials, region)
     else:
         # Single-account: use Lambda's own credentials
         logger.info(f"Single-account setup detected: using Lambda execution role for {service_name}")
+        extra = {'config': config} if config is not None else {}
         if region:
-            return boto3.client(service_name, region_name=region)
+            return boto3.client(service_name, region_name=region, **extra)
         else:
-            return boto3.client(service_name)
+            return boto3.client(service_name, **extra)
 
 
 def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
@@ -1630,7 +1636,7 @@ def assume_cross_account_role(role_arn: str, external_id: str, session_name: str
     return assume_usecase_role(role_arn, external_id, session_name)
 
 
-def create_boto3_client(service_name: str, credentials: Dict, region: str = None) -> Any:
+def create_boto3_client(service_name: str, credentials: Dict, region: str = None, config: Any = None) -> Any:
     """
     Create a boto3 client with the given credentials.
     
@@ -1641,17 +1647,20 @@ def create_boto3_client(service_name: str, credentials: Dict, region: str = None
         service_name: AWS service name (e.g., 's3', 'sagemaker', 'iot')
         credentials: Credentials dict from assume_usecase_role
         region: AWS region (optional)
+        config: Optional botocore.config.Config passed to boto3.client; when None
+            the client is created exactly as before (no config argument)
     
     Returns:
         boto3 client for the specified service
     """
+    extra = {'config': config} if config is not None else {}
     # Check if this is the special marker for default credentials
     if credentials.get('is_default_credentials'):
         # Use default credentials (Lambda execution role)
         if region:
-            return boto3.client(service_name, region_name=region)
+            return boto3.client(service_name, region_name=region, **extra)
         else:
-            return boto3.client(service_name)
+            return boto3.client(service_name, **extra)
     
     # Use the provided credentials
     client_params = {
@@ -1665,7 +1674,7 @@ def create_boto3_client(service_name: str, credentials: Dict, region: str = None
     if region:
         client_params['region_name'] = region
     
-    return boto3.client(service_name, **client_params)
+    return boto3.client(service_name, **client_params, **extra)
 
 
 def cors_headers() -> Dict[str, str]:

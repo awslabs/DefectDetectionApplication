@@ -131,10 +131,16 @@ def cp_model_conversion_files():
         destination_folder_dda_triton = DDA_TRITON_FOLDER
         destination_folder_aws_dda = DDA_ROOT_FOLDER
         source_folder = "/dda_triton/"
+        # model_locks.py, model_status_records.py and repo_entries.py are the
+        # host-shared helpers of triton-model-cleanup-wedge: the model
+        # components' Startup and Shutdown scripts import them from here.
         files_to_copy_to_dda_triton = [
             "constants.py",
             "model_config_pb2.py",
             "model_autostart_utils.py",
+            "model_locks.py",
+            "model_status_records.py",
+            "repo_entries.py",
         ]
 
         # NOTE: The subsequent-setup path used to re-copy a hand-maintained

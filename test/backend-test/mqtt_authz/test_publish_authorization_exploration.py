@@ -61,13 +61,16 @@ from hypothesis import strategies as st
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
 
-#: All four LocalServer recipe variants (source of truth; `recipe.yaml` is a
-#: generated build artifact and is deliberately NOT parsed here).
+#: The LocalServer recipe variants under test (source of truth; `recipe.yaml`
+#: is a generated build artifact and is deliberately NOT parsed here).
+#: `recipe-amd64-nvidia.yaml` was added when its missing `mqttproxy:2` entry
+#: was found: the amd64Nvidia variant had never been exercised on hardware.
 RECIPE_VARIANTS = (
     "recipe-arm64-jp6.yaml",
     "recipe-arm64-jp5.yaml",
     "recipe-arm64.yaml",
     "recipe-amd64.yaml",
+    "recipe-amd64-nvidia.yaml",
 )
 
 PUBLISH_OPERATION = "aws.greengrass#PublishToIoTCore"

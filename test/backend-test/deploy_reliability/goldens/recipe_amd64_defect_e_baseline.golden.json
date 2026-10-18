@@ -3,6 +3,7 @@
     "DefaultConfiguration": {
       "AppRunnerShadowName": "appRunnerShadow",
       "LocalLoginEnabled": "false",
+      "ModelLoadSelfHealEnabled": "true",
       "StreamShadowName": "streamConfigurationShadow",
       "accessControl": {
         "aws.greengrass.Cli": {
@@ -76,6 +77,7 @@
   },
   "ComponentDependencies": {
     "aws.greengrass.Cli": {
+      "DependencyType": "SOFT",
       "VersionRequirement": ">=2.6.0"
     },
     "aws.greengrass.Nucleus": {

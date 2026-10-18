@@ -34,6 +34,13 @@
                 "nodeId": "src"
               },
               {
+                "args": {
+                  "caps": "video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB"
+                },
+                "factory": "capsfilter",
+                "nodeId": "src"
+              },
+              {
                 "args": {},
                 "factory": "videoconvert",
                 "nodeId": "src"
@@ -311,6 +318,13 @@
                 "nodeId": "src"
               },
               {
+                "args": {
+                  "caps": "video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB"
+                },
+                "factory": "capsfilter",
+                "nodeId": "src"
+              },
+              {
                 "args": {},
                 "factory": "videoconvert",
                 "nodeId": "src"
@@ -382,6 +396,13 @@
                   "idct-method": 2
                 },
                 "factory": "jpegdec",
+                "nodeId": "src"
+              },
+              {
+                "args": {
+                  "caps": "video/x-raw,format=I420;video/x-raw,format=Y42B;video/x-raw,format=Y444;video/x-raw,format=GRAY8;video/x-raw,format=RGB"
+                },
+                "factory": "capsfilter",
                 "nodeId": "src"
               },
               {

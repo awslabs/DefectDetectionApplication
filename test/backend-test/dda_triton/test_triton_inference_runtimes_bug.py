@@ -82,7 +82,15 @@ ALLOWLIST_RESOURCE_FILES = [
     "marshal_for_capture_template.py",
 ]
 
-SRC_AUX_DDA_TRITON = ["constants.py", "model_config_pb2.py", "model_autostart_utils.py"]
+SRC_AUX_DDA_TRITON = [
+    "constants.py",
+    "model_config_pb2.py",
+    "model_autostart_utils.py",
+    # Added additively by triton-model-cleanup-wedge (task 3.6).
+    "model_locks.py",
+    "model_status_records.py",
+    "repo_entries.py",
+]
 SRC_AUX_AWS_DDA = [
     "model_convertor.py",
     "convert_model_cleanup.py",

@@ -48,6 +48,7 @@ imports cleanly host-side without the device-only ``awsiot`` stack.
 import json
 import logging
 import os
+import re
 import threading
 import time
 
@@ -74,6 +75,38 @@ _last_write_monotonic = None
 _write_in_flight = False
 #: Last spawned writer thread (tests join it to await the write).
 _write_thread = None
+#: Set when ShadowManager rejected a write for its size; read and cleared
+#: by :func:`take_size_rejection`.
+_size_rejected = False
+
+#: ShadowManager's (and the service's) size-rejection error code, as a
+#: standalone number. A private copy of ``camera_sync/agent.py``'s test,
+#: which cannot be imported here: that module pulls FastAPI, marshmallow
+#: and the camera-discovery stack, and this one imports only the stdlib.
+_SIZE_REJECTION_CODE = re.compile(r"(?<![0-9a-z])413(?![0-9a-z])")
+
+
+def _is_size_rejection(error):
+    """Whether a failed shadow update was rejected for its size (the same
+    test as ``camera_sync/agent.py::_is_size_rejection``)."""
+    parts = [type(error).__name__, str(error)]
+    message = getattr(error, "message", None)
+    if isinstance(message, str):
+        parts.append(message)
+    text = " ".join(parts).lower()
+    if _SIZE_REJECTION_CODE.search(text):
+        return True
+    return any(marker in text for marker in (
+        "too large", "toolarge", "exceeds the maximum", "size limit"))
+
+
+def take_size_rejection():
+    """Whether a write was rejected for its size since the last call;
+    clears the flag."""
+    global _size_rejected
+    with _lock:
+        rejected, _size_rejected = _size_rejected, False
+    return rejected
 
 
 def _get_accessor():
@@ -91,6 +124,12 @@ def report(snapshot):
     """Report ``snapshot`` (the ``device_gpu_status`` shape) into the
     ``dda-model-status`` shadow — debounced, change-gated, asynchronous,
     and failure-isolated. Never raises.
+
+    Returns ``"scheduled"`` (a write was started), ``"unchanged"``
+    (identical to the last written snapshot) or ``"dropped"`` (a write in
+    flight, inside the debounce window, no thing name, or an error), so the
+    Triton model-load watchdog can retry a dropped transition on its next
+    tick (triton-model-cleanup-wedge D8). The endpoints ignore the result.
     """
     global _last_written_canonical, _last_write_monotonic, \
         _write_in_flight, _write_thread
@@ -104,19 +143,19 @@ def report(snapshot):
                 "model-status shadow report skipped: AWS_IOT_THING_NAME "
                 "is not set"
             )
-            return
+            return "dropped"
         canonical = json.dumps(
             snapshot, sort_keys=True, separators=(",", ":"), default=str
         )
         with _lock:
             if _write_in_flight:
-                return  # single in-flight write (Decision 5)
+                return "dropped"  # single in-flight write (Decision 5)
             if canonical == _last_written_canonical:
-                return  # unchanged since the last written snapshot
+                return "unchanged"  # unchanged since the last written snapshot
             now = _clock()
             if (_last_write_monotonic is not None
                     and now - _last_write_monotonic < DEBOUNCE_SECONDS):
-                return  # within the debounce window
+                return "dropped"  # within the debounce window
             _write_in_flight = True
             _last_write_monotonic = now
             _last_written_canonical = canonical
@@ -128,17 +167,19 @@ def report(snapshot):
             )
             _write_thread = thread
         thread.start()
+        return "scheduled"
     except Exception as e:  # never let a shadow problem touch the response
         log.warning(f"model-status shadow report failed: {e}")
         with _lock:
             _write_in_flight = False
+        return "dropped"
 
 
 def _write_shadow(thing_name, snapshot, canonical):
     """Worker: one shadow update through the accessor. Every exception is
     logged and swallowed; a failed write un-pins the last-written snapshot
     so a later (post-debounce) report retries."""
-    global _last_written_canonical, _write_in_flight
+    global _last_written_canonical, _write_in_flight, _size_rejected
     try:
         accessor = _get_accessor()
         # REAL accessor convention (dao/iotshadow/IoTShadowAccessor.py):
@@ -156,6 +197,10 @@ def _write_shadow(thing_name, snapshot, canonical):
         with _lock:
             if _last_written_canonical == canonical:
                 _last_written_canonical = None
+            if _is_size_rejection(e):
+                # The watchdog's next tick retires stale GPU-fallback
+                # entries (triton-model-cleanup-wedge D8).
+                _size_rejected = True
     finally:
         with _lock:
             _write_in_flight = False
@@ -164,8 +209,9 @@ def _write_shadow(thing_name, snapshot, canonical):
 def _reset_state():
     """Test seam: clear the debounce/change-detection state."""
     global _last_written_canonical, _last_write_monotonic, \
-        _write_in_flight, _write_thread
+        _write_in_flight, _write_thread, _size_rejected
     with _lock:
+        _size_rejected = False
         _last_written_canonical = None
         _last_write_monotonic = None
         _write_in_flight = False

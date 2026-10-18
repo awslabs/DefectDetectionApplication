@@ -41,6 +41,7 @@ from starlette.status import HTTP_400_BAD_REQUEST
 
 # Custom Modules
 from utils import inference_results_utils
+from utils import run_activity
 from utils.constants import ANOMALY, FRAME_CAPTURE_TIMESTAMP, MAX_IMAGE_CAPTURE_COUNT, MAX_IMAGE_CAPTURE_TIME_INTERVAL, MIN_IMAGE_CAPTURE_COUNT, MIN_IMAGE_CAPTURE_TIME_INTERVAL, NORMAL, TRIGGER_TIMESTAMP, INFERENCE_RECEIVED_TIMESTAMP, CAPTURE, INFERENCE
 from utils.server_setup import workflow_accessor, latency_time_accessor, gst_pipeline_executor, inference_result_accessor, image_source_accessor, capture_task_manager
 from data_models.common import ImageSourceIdModel, WorkflowModel, RunWorkflowModel
@@ -69,6 +70,19 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def _configured_model_names(workflow):
+    """The workflow's configured ``modelName`` as a tuple (empty without
+    one), for its run-activity ticket."""
+    try:
+        configurations = workflow.get("featureConfigurations")
+        if not configurations:
+            return ()
+        model_name = (configurations[0] or {}).get("modelName")
+        return (model_name,) if model_name else ()
+    except Exception:  # noqa: BLE001 - instrumentation never fails a run
+        return ()
 
 
 def validate_model_readiness(workflow):
@@ -242,84 +256,100 @@ async def run_inference_for_stream(
 
     workflow = workflow_accessor.get_workflow_by_id(workflow_id, db)
     validate_workflow_requirements(workflow)
+    # Register the run for its whole life, before its readiness gate and its
+    # image capture, so a Triton self-heal never restarts the backend under it
+    # (triton-model-cleanup-wedge D7). Never waits; refused only while the
+    # backend is restarting.
+    ticket = run_activity.start_run(
+        "pipeline", workflow_id, models=_configured_model_names(workflow), workflow=workflow_id)
+    try:
+        if ticket.refused is not None:
+            raise HTTPException(status_code=503, detail=ticket.refused)
 
-    # Triton readiness gate (cold-model-first-run-failure Requirements 2.1,
-    # 2.2, 2.3). Runs BEFORE the pipeline is built, which is what fixes both
-    # reported harms on this path: the operator gets an error naming the
-    # model and its state instead of the generic "Pipeline failed to change
-    # state to PLAYING", and because the run never reaches
-    # `execute_workflow_pipeline`'s catch-all, a folder-source image is no
-    # longer moved to failed/ by a transient not-ready condition
-    # (design.md Decision 7 — fixed by ordering, not by a special case).
-    validate_model_readiness(workflow)
+        # Triton readiness gate (cold-model-first-run-failure Requirements 2.1,
+        # 2.2, 2.3). Runs BEFORE the pipeline is built, which is what fixes both
+        # reported harms on this path: the operator gets an error naming the
+        # model and its state instead of the generic "Pipeline failed to change
+        # state to PLAYING", and because the run never reaches
+        # `execute_workflow_pipeline`'s catch-all, a folder-source image is no
+        # longer moved to failed/ by a transient not-ready condition
+        # (design.md Decision 7 — fixed by ordering, not by a special case).
+        validate_model_readiness(workflow)
+        # A run that leaves its gate after a self-heal commit stops here, before
+        # its pipeline (triton-model-cleanup-wedge D7).
+        refused = run_activity.after_gate(ticket)
+        if refused is not None:
+            raise HTTPException(status_code=503, detail=refused)
 
-    # Run inference if workflow configures a model
-    if workflow.get("featureConfigurations"):
-        with Timer(metric_name="WorkflowTotalTime"):
-            capture_id, parsed_tags_dict = configure_image_source_and_run_pipeline(workflow, db, latency_metrics)
-            if not data.get('returnPartialResultsEarly'):
-                result = read_inference_result(workflow, capture_id)
+        # Run inference if workflow configures a model
+        if workflow.get("featureConfigurations"):
+            with Timer(metric_name="WorkflowTotalTime"):
+                capture_id, parsed_tags_dict = configure_image_source_and_run_pipeline(workflow, db, latency_metrics)
+                if not data.get('returnPartialResultsEarly'):
+                    result = read_inference_result(workflow, capture_id)
 
-        if data.get('returnPartialResultsEarly'):
-            background_tasks.add_task(read_full_results_and_save, workflow, db, trigger_timestamp, capture_id, latency_metrics)
-            return { "captureId": capture_id, "inferenceResult": { "confidence": parsed_tags_dict["confidence"], "inference_result": ANOMALY if parsed_tags_dict["is_anomalous"] else NORMAL } }
-        else:
-            latency_metrics.commit_timestamps(db, result["captureId"])
-            total_processing_time = (latency_metrics.get_timestamp(INFERENCE_RECEIVED_TIMESTAMP) - trigger_timestamp) * 1000
-            result["processingTime"] = total_processing_time
+            if data.get('returnPartialResultsEarly'):
+                background_tasks.add_task(read_full_results_and_save, workflow, db, trigger_timestamp, capture_id, latency_metrics)
+                return { "captureId": capture_id, "inferenceResult": { "confidence": parsed_tags_dict["confidence"], "inference_result": ANOMALY if parsed_tags_dict["is_anomalous"] else NORMAL } }
+            else:
+                latency_metrics.commit_timestamps(db, result["captureId"])
+                total_processing_time = (latency_metrics.get_timestamp(INFERENCE_RECEIVED_TIMESTAMP) - trigger_timestamp) * 1000
+                result["processingTime"] = total_processing_time
 
-            # Background tasks to be run after returning response
-            background_tasks.add_task(save_full_inference_result, result, workflow)
+                # Background tasks to be run after returning response
+                background_tasks.add_task(save_full_inference_result, result, workflow)
 
-            # Delete image base64 string if request not to return it
-            if not data.get("returnImageString", True):
-                del result["image"]
+                # Delete image base64 string if request not to return it
+                if not data.get("returnImageString", True):
+                    del result["image"]
         
-            return result
-    # Capture if workflow doesn't have a model
-    else:
-        # One workflow can only have one running capture task
-        tasks = capture_task_manager.get_tasks()
-        for task in tasks:
-            if task.get("workflowId") == workflow_id:
+                return result
+        # Capture if workflow doesn't have a model
+        else:
+            # One workflow can only have one running capture task
+            tasks = capture_task_manager.get_tasks()
+            for task in tasks:
+                if task.get("workflowId") == workflow_id:
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail=f"Server cannot start capture task. Error: 'This workflow already has capture task running'. Please wait for existing capture task to complete",
+                    )
+
+            image_source_id = workflow.get("imageSources")[0].imageSourceId
+            image_source = image_source_accessor.get_image_source(image_source_id, db)
+            image_source_dict = utils.convert_sqlalchemy_object_to_dict(image_source)
+            capture_task_id = utils.generate_capture_id(workflow.get('workflowId'))
+
+            if image_source_dict.get("type") == ImageSourceType.FOLDER:
                 raise HTTPException(
                     status_code=HTTP_400_BAD_REQUEST,
-                    detail=f"Server cannot start capture task. Error: 'This workflow already has capture task running'. Please wait for existing capture task to complete",
+                    detail=f"Server cannot start capture task for folder type image source",
                 )
+            if is_stream_source_type(image_source_dict.get("type")):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=CLASSIC_PIPELINE_REJECTION)
 
-        image_source_id = workflow.get("imageSources")[0].imageSourceId
-        image_source = image_source_accessor.get_image_source(image_source_id, db)
-        image_source_dict = utils.convert_sqlalchemy_object_to_dict(image_source)
-        capture_task_id = utils.generate_capture_id(workflow.get('workflowId'))
-
-        if image_source_dict.get("type") == ImageSourceType.FOLDER:
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST,
-                detail=f"Server cannot start capture task for folder type image source",
-            )
-        if is_stream_source_type(image_source_dict.get("type")):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=CLASSIC_PIPELINE_REJECTION)
-
-        # Add capture task
-        image_count = data.get("captureImageCount")
-        time_interval = data.get("captureTimeInterval") if image_count and image_count > 1 else 0.01
-        if image_count and time_interval:
-            capture_task_parameter = CaptureTaskParameters(
-                capture_task_id=capture_task_id,
-                interval=time_interval,
-                count=image_count,
-                workflow_id=workflow_id,
-                workflow_output_path=workflow.get("workflowOutputPath"),
-                image_source_dict=image_source_dict,
-                capture_prefix=data.get("capturePrefix")
-            )
-            capture_task_manager.add_task(capture_task_parameter)
-            return {"captureTaskId": capture_task_id}
-        else:
-            raise HTTPException(
-                    status_code=HTTP_400_BAD_REQUEST,
-                    detail=f"Please provide captureImageCount and captureTimeInterval to start capture task",
+            # Add capture task
+            image_count = data.get("captureImageCount")
+            time_interval = data.get("captureTimeInterval") if image_count and image_count > 1 else 0.01
+            if image_count and time_interval:
+                capture_task_parameter = CaptureTaskParameters(
+                    capture_task_id=capture_task_id,
+                    interval=time_interval,
+                    count=image_count,
+                    workflow_id=workflow_id,
+                    workflow_output_path=workflow.get("workflowOutputPath"),
+                    image_source_dict=image_source_dict,
+                    capture_prefix=data.get("capturePrefix")
                 )
+                capture_task_manager.add_task(capture_task_parameter)
+                return {"captureTaskId": capture_task_id}
+            else:
+                raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail=f"Please provide captureImageCount and captureTimeInterval to start capture task",
+                    )
+    finally:
+        run_activity.finish_run(ticket)
 
 def read_inference_result(workflow, inference_capture_id):
     for _ in range(20):

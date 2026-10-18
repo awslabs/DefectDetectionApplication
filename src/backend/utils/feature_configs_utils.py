@@ -36,6 +36,8 @@ from data_models.common import (
     ListFeatureConfigurationAPIModel
 )
 from dda_triton.constants import TRITON_MODEL_DIR
+from dda_triton import model_locks
+from dda_triton.load_tracker import ModelReleaseInProgress
 from dda_triton.provider_visibility import (
     execution_provider_info,
     read_active_provider_record,
@@ -58,10 +60,14 @@ def triton_repo_has_models(model_repo_dir: str = TRITON_MODEL_DIR) -> bool:
     this cheap filesystem check to skip server creation entirely when no
     models are deployed and return an empty (or vLLM-only) feature list
     instead. A missing/unreadable repo directory means no models are deployed.
+    Hidden directories (a publish's ``.staging-*``, a removal's ``.trash-*``)
+    are not models, so leftovers can never make an empty repository look
+    populated.
     """
     try:
         return any(
-            os.path.isdir(os.path.join(model_repo_dir, entry))
+            not entry.startswith(".")
+            and os.path.isdir(os.path.join(model_repo_dir, entry))
             for entry in os.listdir(model_repo_dir)
         )
     except OSError:
@@ -221,6 +227,8 @@ def get_features_triton(triton_server=None):
             model_id = model.get("model_component")
             if model_id.startswith("base_") or model_id.startswith("marshal_"):
                 continue
+            if model_id.startswith("."):
+                continue  # a hidden staging or trash directory, never a model
             default_configs_dict = get_default_configs_lfv(model_id)
             # Additive GPU-fallback visibility merge (requirement 2.2, design
             # File 3; the vLLM failureReason precedent): expose the stub's
@@ -246,6 +254,18 @@ def get_features_triton(triton_server=None):
             if model.get("status") == "UNAVAILABLE" and model.get("reason"):
                 default_configs_dict = dict(default_configs_dict)
                 default_configs_dict["failureReason"] = model["reason"]
+            # Load outcome, load health and the last self-heal attempt
+            # (triton-model-cleanup-wedge D8): additive, each field only when
+            # it applies, and a failure means no field, never a 500. Copy
+            # first: get_default_configs_lfv is lru_cached.
+            try:
+                from dda_triton import load_watchdog
+                annotations = load_watchdog.model_annotations(model_id, model.get("status"))
+                if annotations:
+                    default_configs_dict = dict(default_configs_dict)
+                    default_configs_dict.update(annotations)
+            except Exception as e:
+                logger.warning(f"Load status merge skipped for {model_id}: {e}")
             results.append(
                 ListFeatureConfigurationAPIModel(
                     type="TritonModel",
@@ -254,6 +274,29 @@ def get_features_triton(triton_server=None):
                     defaultConfiguration=default_configs_dict
                 )
             )
+        # Models edgemlsdk does not list (published after the backend started
+        # and never loaded since) whose Startup recorded a load outcome
+        # (triton-model-cleanup-wedge D8): one UNKNOWN entry each, so the
+        # outcome is never hidden.
+        try:
+            from dda_triton import load_watchdog, model_status_records
+            listed = [m.get("model_component") for m in triton_models]
+            repo_dir = getattr(triton_server, "model_dir", None) or TRITON_MODEL_DIR
+            for model_id, _record in model_status_records.unlisted_recorded_models(
+                    listed, repo_dir, records_dir=load_watchdog.records_dir()):
+                default_configs_dict = dict(get_default_configs_lfv(model_id))
+                default_configs_dict.update(
+                    load_watchdog.model_annotations(model_id, "UNKNOWN"))
+                results.append(
+                    ListFeatureConfigurationAPIModel(
+                        type="TritonModel",
+                        modelName=model_id,
+                        status="UNKNOWN",
+                        defaultConfiguration=default_configs_dict
+                    )
+                )
+        except Exception as e:
+            logger.warning(f"Record-backed model entries skipped: {e}")
         results.extend(get_features_vllm())
     else:
         logger.info("Triton server instance is not provided")
@@ -285,7 +328,20 @@ def start_model_triton(triton_server=None, model_name=None):
             status_code=403,
             detail=f"Error while attempting to start model {model_name}. Model current state is {__status}. Can only attempt to start UNKNOWN or UNAVAILABLE models.",
             )
-        response = triton_server.start_triton_model(model_name)
+        try:
+            model_locks.lock_key(model_name)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The server can't process this request. Error: Invalid model name '{model_name}'. Check the model name and try again.",
+            )
+        try:
+            response = triton_server.start_triton_model(model_name)
+        except ModelReleaseInProgress:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Error while attempting to start model {model_name}. Its repository entries are being removed or replaced (component shutdown or update in progress). Start it again once its component is running.",
+            )
         return FeatureConfigurationAPIModel(
             type="TritonModel",
             modelName=model_name,
