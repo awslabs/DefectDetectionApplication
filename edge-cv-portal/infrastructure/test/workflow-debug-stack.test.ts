@@ -7,7 +7,10 @@
  * are staged at synth time), locate resources via template.findResources and
  * assert on raw CloudFormation properties. A second synth with
  * portalRegistryEnforced on covers the environment flag, a third with a
- * deployment value out of range covers the synth-time guard.
+ * deployment value out of range covers the synth-time guard, and synths
+ * without the `sharedAuthorizerId` context cover the authorizer guard (the
+ * stack attaches its routes to the portal API's existing Cognito authorizer
+ * and creates none of its own).
  */
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
@@ -26,12 +29,18 @@ const TRUSTED_B = '333333333333';
 const INGEST_FUNCTION_NAME = 'dda-portal-workflow-debug-ingest';
 const API_FUNCTION_NAME = 'dda-portal-workflow-debug-api';
 const MAINTENANCE_FUNCTION_NAME = 'dda-portal-workflow-debug-maintenance';
+/** The existing portal API authorizer the deploy passes as `-c sharedAuthorizerId` (a fixture id). */
+const SHARED_AUTHORIZER_ID = 'fixture0';
 
 let template: Template;
 let enforcedTemplate: Template;
 
+/**
+ * Synthesize the stack with the shared authorizer id in context, as every
+ * deploy passes it; a test overrides the key to exercise the synth guard.
+ */
 function buildStack(context?: { [key: string]: unknown }): Template {
-  const app = new cdk.App({ context });
+  const app = new cdk.App({ context: { sharedAuthorizerId: SHARED_AUTHORIZER_ID, ...context } });
   const storage = new StorageStack(app, 'Storage');
   const deps = new cdk.Stack(app, 'Deps');
   const props: WorkflowDebugStackProps = {
@@ -517,14 +526,14 @@ describe('the sessions table', () => {
 });
 
 describe('the routes', () => {
-  test('the six resources carry the expected methods; non-OPTIONS methods use the Cognito authorizer, OPTIONS are MOCK', () => {
+  test('the six resources carry the expected methods; non-OPTIONS methods use the shared Cognito authorizer, OPTIONS are MOCK', () => {
     const methods = Object.values(template.findResources('AWS::ApiGateway::Method')) as any[];
     const nonOptions = methods.filter((m) => m.Properties.HttpMethod !== 'OPTIONS');
     const options = methods.filter((m) => m.Properties.HttpMethod === 'OPTIONS');
     expect(nonOptions).toHaveLength(7);
     for (const method of nonOptions) {
       expect(method.Properties.AuthorizationType).toBe('COGNITO_USER_POOLS');
-      expect(method.Properties.AuthorizerId).toBeDefined();
+      expect(method.Properties.AuthorizerId).toBe(SHARED_AUTHORIZER_ID);
       expect(method.Properties.Integration.Type).toBe('AWS_PROXY');
     }
     expect(options.length).toBeGreaterThanOrEqual(1);
@@ -538,13 +547,28 @@ describe('the routes', () => {
       '{execution_id}', '{session_id}', '{usecase_id}'].sort());
     const byMethod = nonOptions.map((m) => m.Properties.HttpMethod).sort();
     expect(byMethod).toEqual(['DELETE', 'GET', 'GET', 'GET', 'GET', 'GET', 'POST']);
-    const authorizers = Object.values(template.findResources('AWS::ApiGateway::Authorizer')) as any[];
-    expect(authorizers).toHaveLength(1);
-    expect(authorizers[0].Properties.Type).toBe('COGNITO_USER_POOLS');
-    expect(authorizers[0].Properties.IdentitySource).toBe('method.request.header.Authorization');
   });
 
-  test('the route-salted deployment is retained and depends on the authorizer', () => {
+  test('the stack creates no authorizer: the API already has 10, the per-REST-API quota', () => {
+    expect(Object.keys(template.findResources('AWS::ApiGateway::Authorizer'))).toHaveLength(0);
+    expect(Object.keys(enforcedTemplate.findResources('AWS::ApiGateway::Authorizer'))).toHaveLength(0);
+  });
+
+  test('a missing, blank or malformed sharedAuthorizerId stops the synth', () => {
+    expect(() => buildStack({ sharedAuthorizerId: undefined })).toThrow(/WorkflowDebugStack requires sharedAuthorizerId/);
+    expect(() => buildStack({ sharedAuthorizerId: '' })).toThrow(/sharedAuthorizerId/);
+    expect(() => buildStack({ sharedAuthorizerId: '  ' })).toThrow(/sharedAuthorizerId/);
+    expect(() => buildStack({ sharedAuthorizerId: 'Fixture-0' })).toThrow(/lowercase letters and digits/);
+    expect(() => buildStack({ sharedAuthorizerId: 'abc123\tdef456' })).toThrow(/lowercase letters and digits/);
+    // A padded id is trimmed, not refused.
+    const padded = buildStack({ sharedAuthorizerId: ' fixture1 ' });
+    const methods = Object.values(padded.findResources('AWS::ApiGateway::Method')) as any[];
+    for (const method of methods.filter((m) => m.Properties.HttpMethod !== 'OPTIONS')) {
+      expect(method.Properties.AuthorizerId).toBe('fixture1');
+    }
+  }, 300_000);
+
+  test('the route-salted deployment is retained and depends on every method of the route table', () => {
     const deployments = Object.entries(template.findResources('AWS::ApiGateway::Deployment')) as [string, any][];
     expect(deployments).toHaveLength(1);
     const [logicalId, deployment] = deployments[0];
@@ -552,8 +576,9 @@ describe('the routes', () => {
     expect(deployment.DeletionPolicy).toBe('Retain');
     expect(deployment.UpdateReplacePolicy).toBe('Retain');
     expect(deployment.Properties.StageName).toBe('v1');
-    const authorizerIds = Object.keys(template.findResources('AWS::ApiGateway::Authorizer'));
-    expect(deployment.DependsOn).toEqual(expect.arrayContaining(authorizerIds));
+    const methodIds = Object.keys(template.findResources('AWS::ApiGateway::Method'));
+    expect(methodIds.length).toBeGreaterThanOrEqual(8);
+    expect(deployment.DependsOn).toEqual(expect.arrayContaining(methodIds));
   });
 });
 

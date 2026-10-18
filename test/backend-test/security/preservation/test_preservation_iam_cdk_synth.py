@@ -30,7 +30,8 @@ flavors per synthesizable stack:
 Both stacks ARE wired into synthesizable CDK app entrypoints. When the CDK
 toolchain is available, the test re-synths each with the canonical fixture
 context (``portalAccountId=111111111111``, ``externalId=fixture-eid``,
-``trustedUseCaseAccountIds=222222222222,333333333333``, region ``us-east-1``)
+``trustedUseCaseAccountIds=222222222222,333333333333``,
+``sharedAuthorizerId=fixture0``, region ``us-east-1``)
 and asserts the emitted IAM grants equal the committed FIXED baseline (an
 identity guard against future live-tree drift). The live comparison is at
 grant-atom granularity (one effect/action/resource/condition tuple per
@@ -112,6 +113,11 @@ FIXTURE_CONTEXT = [
     "--context", "portalAccountId=111111111111",
     "--context", "externalId=fixture-eid",
     "--context", "trustedUseCaseAccountIds=222222222222,333333333333",
+    # The telemetry and workflow-debug stacks attach their routes to the
+    # portal API's existing Cognito authorizer and refuse to synth without
+    # its id (lib/context-helpers.ts sharedAuthorizerId); a fixture id keeps
+    # the synth hermetic. The value reaches no IAM statement.
+    "--context", "sharedAuthorizerId=fixture0",
 ]
 
 # stack -> (fixed baseline, unfixed baseline, optional --app override)

@@ -15,7 +15,7 @@ import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
 import * as contextHelpers from './context-helpers';
-import { portalRegistryEnforced } from './context-helpers';
+import { SHARED_AUTHORIZER_CONTEXT_KEY, portalRegistryEnforced, sharedAuthorizerId } from './context-helpers';
 import * as crypto from 'crypto';
 import * as path from 'path';
 
@@ -47,7 +47,7 @@ export interface TelemetryStackProps extends cdk.StackProps {
   workflowsTable: dynamodb.Table;
   workflowVersionsTable: dynamodb.Table;
   portalArtifactsBucket: s3.Bucket;
-  /** Portal Cognito user pool (route authorizer). */
+  /** Portal Cognito user pool (USER_POOL_ID in the function environment). */
   userPool: cognito.IUserPool;
   /**
    * Trusted UseCase account ids: one ingest alias per account (plus the
@@ -132,10 +132,14 @@ export const TELEMETRY_API_RESOURCE_COUNT = 18;
  * JWT and workflow_core layers, the per-account ingest aliases with their async
  * invoke configuration and on-failure queue, the Portal-account IoT rule, the
  * maintenance schedule, the alarms, and registers the `/telemetry/*` routes on
- * the imported portal Rest API with its own Cognito authorizer, CORS preflight
- * and a route-salted CfnDeployment (RETAIN). The only shared-file edit is the
- * additive instantiation in bin/app.ts. It joins the IAM synth gate with empty
- * pre-feature baselines.
+ * the imported portal Rest API with CORS preflight and a route-salted
+ * CfnDeployment (RETAIN). The routes attach to the portal API's existing
+ * Cognito authorizer, whose id arrives as the CDK context value
+ * `sharedAuthorizerId` (context-helpers.sharedAuthorizerId): API Gateway
+ * allows 10 authorizers per REST API and the portal API carries one per
+ * route-registering stack already, so this stack creates none. The only
+ * shared-file edit is the additive instantiation in bin/app.ts. It joins the
+ * IAM synth gate with empty pre-feature baselines.
  */
 export class TelemetryStack extends cdk.Stack {
   public readonly summariesTable: dynamodb.Table;
@@ -151,6 +155,8 @@ export class TelemetryStack extends cdk.Stack {
   public readonly deploymentValues: { [env: string]: number } = {};
   public readonly dataPlaneGrantWired: boolean;
   public readonly apiResourceCount: number;
+  /** The existing portal API authorizer every `/telemetry/*` method uses (`-c sharedAuthorizerId`). */
+  public readonly sharedAuthorizerId: string;
 
   constructor(scope: Construct, id: string, props: TelemetryStackProps) {
     super(scope, id, props);
@@ -162,6 +168,13 @@ export class TelemetryStack extends cdk.Stack {
           'sts:AssumeRole grant on a wildcard account.',
       );
     }
+
+    // The existing authorizer the routes attach to; absent or malformed
+    // values stop the synth here, before any asset is staged.
+    this.sharedAuthorizerId = sharedAuthorizerId(
+      this.node.tryGetContext(SHARED_AUTHORIZER_CONTEXT_KEY),
+      'TelemetryStack',
+    );
 
     const region = cdk.Aws.REGION;
     const account = cdk.Aws.ACCOUNT_ID;
@@ -894,11 +907,17 @@ export class TelemetryStack extends cdk.Stack {
       rootResourceId: props.restApiRootResourceId,
     });
 
-    const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'TelemetryAuthorizer', {
-      cognitoUserPools: [props.userPool],
-      authorizerName: 'EdgeCVPortalTelemetryAuthorizer',
-      identitySource: 'method.request.header.Authorization',
-    });
+    // The portal API's existing Cognito authorizer, by id (resolved above).
+    // No AWS::ApiGateway::Authorizer is created here: the API carries one per
+    // route-registering stack already and the quota is 10 per REST API, a
+    // limit only AWS Support raises (the 2026-10-18 first deploy rolled back
+    // on it). The existing authorizer validates the same user pool's tokens
+    // from the same Authorization header, so the handlers read the same
+    // claims as before.
+    const authorizer: apigateway.IAuthorizer = {
+      authorizerId: this.sharedAuthorizerId,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    };
 
     const corsOptions: apigateway.CorsOptions = {
       allowOrigins: apigateway.Cors.ALL_ORIGINS,
@@ -993,7 +1012,7 @@ export class TelemetryStack extends cdk.Stack {
     });
     deployment.overrideLogicalId(`TelemetryDeployment${routeSalt}`);
     deployment.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
-    deployment.node.addDependency(authorizer);
+    // The /telemetry subtree holds every resource and method of the route table.
     deployment.node.addDependency(telemetryResource);
 
     new cdk.CfnOutput(this, 'TelemetryLakeBucketName', {

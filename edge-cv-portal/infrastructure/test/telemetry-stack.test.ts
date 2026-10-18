@@ -8,7 +8,9 @@
  * assert on raw CloudFormation properties. A second synth with
  * portalRegistryEnforced on covers the environment flag; a third with an
  * injected dataPlaneGrant covers the wired branch; out-of-range deployment
- * values throw at synth.
+ * values throw at synth, and so does a synth without the `sharedAuthorizerId`
+ * context (the stack attaches its routes to the portal API's existing Cognito
+ * authorizer and creates none of its own).
  */
 import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
@@ -32,6 +34,8 @@ const ROLLUP = 'dda-portal-telemetry-rollup';
 const API = 'dda-portal-telemetry-api';
 const MAINTENANCE = 'dda-portal-telemetry-maintenance';
 const FUNCTION_NAMES = [INGEST, ROLLUP, API, MAINTENANCE];
+/** The existing portal API authorizer the deploy passes as `-c sharedAuthorizerId` (a fixture id). */
+const SHARED_AUTHORIZER_ID = 'fixture0';
 
 const helpersExportDataPlaneGrant =
   typeof (contextHelpers as unknown as { dataPlaneGrant?: unknown }).dataPlaneGrant === 'function';
@@ -51,8 +55,12 @@ let enforcedTemplate: Template;
 let wiredTemplate: Template;
 let wiredStack: TelemetryStack;
 
+/**
+ * Synthesize the stack with the shared authorizer id in context, as every
+ * deploy passes it; a test overrides the key to exercise the synth guard.
+ */
 function build(context?: { [key: string]: unknown }, override?: Partial<TelemetryStackProps>): TelemetryStack {
-  const app = new cdk.App({ context });
+  const app = new cdk.App({ context: { sharedAuthorizerId: SHARED_AUTHORIZER_ID, ...context } });
   const storage = new StorageStack(app, 'Storage');
   const deps = new cdk.Stack(app, 'Deps');
   const props: TelemetryStackProps = {
@@ -712,7 +720,7 @@ describe('the dataPlaneGrant branch', () => {
 // routes, deployment, alarms, deployment values
 // ---------------------------------------------------------------------------
 describe('the routes', () => {
-  test('18 resources (decision Q5), 18 methods; non-OPTIONS methods use the Cognito authorizer, OPTIONS are MOCK', () => {
+  test('18 resources (decision Q5), 18 methods; non-OPTIONS methods use the shared Cognito authorizer, OPTIONS are MOCK', () => {
     const resources = Object.values(template.findResources('AWS::ApiGateway::Resource')) as any[];
     expect(resources).toHaveLength(TELEMETRY_API_RESOURCE_COUNT);
     expect(TELEMETRY_API_RESOURCE_COUNT).toBe(18);
@@ -730,7 +738,7 @@ describe('the routes', () => {
     );
     for (const method of nonOptions) {
       expect(method.Properties.AuthorizationType).toBe('COGNITO_USER_POOLS');
-      expect(method.Properties.AuthorizerId).toBeDefined();
+      expect(method.Properties.AuthorizerId).toBe(SHARED_AUTHORIZER_ID);
       expect(method.Properties.Integration.Type).toBe('AWS_PROXY');
     }
     expect(options.length).toBeGreaterThanOrEqual(1);
@@ -738,12 +746,26 @@ describe('the routes', () => {
       expect(method.Properties.Integration.Type).toBe('MOCK');
       expect(method.Properties.AuthorizationType).toBe('NONE');
     }
-    const authorizers = Object.values(template.findResources('AWS::ApiGateway::Authorizer')) as any[];
-    expect(authorizers).toHaveLength(1);
-    expect(authorizers[0].Properties.Type).toBe('COGNITO_USER_POOLS');
   });
 
-  test('the route-salted deployment is retained and depends on the authorizer', () => {
+  test('the stack creates no authorizer: the API already has 10, the per-REST-API quota', () => {
+    for (const tpl of [template, enforcedTemplate, wiredTemplate]) {
+      expect(Object.keys(tpl.findResources('AWS::ApiGateway::Authorizer'))).toHaveLength(0);
+    }
+    expect(wiredStack.sharedAuthorizerId).toBe(SHARED_AUTHORIZER_ID);
+  });
+
+  test('a missing, blank or malformed sharedAuthorizerId stops the synth', () => {
+    expect(() => build({ sharedAuthorizerId: undefined })).toThrow(/TelemetryStack requires sharedAuthorizerId/);
+    expect(() => build({ sharedAuthorizerId: '' })).toThrow(/sharedAuthorizerId/);
+    expect(() => build({ sharedAuthorizerId: '  ' })).toThrow(/sharedAuthorizerId/);
+    expect(() => build({ sharedAuthorizerId: 'Fixture-0' })).toThrow(/lowercase letters and digits/);
+    expect(() => build({ sharedAuthorizerId: 'abc123\tdef456' })).toThrow(/lowercase letters and digits/);
+    // A padded id is trimmed, not refused.
+    expect(build({ sharedAuthorizerId: ' fixture1 ' }).sharedAuthorizerId).toBe('fixture1');
+  }, 300_000);
+
+  test('the route-salted deployment is retained and depends on every method of the route table', () => {
     const deployments = Object.entries(template.findResources('AWS::ApiGateway::Deployment')) as [string, any][];
     expect(deployments).toHaveLength(1);
     const [logicalId, deployment] = deployments[0];
@@ -751,7 +773,9 @@ describe('the routes', () => {
     expect(deployment.DeletionPolicy).toBe('Retain');
     expect(deployment.UpdateReplacePolicy).toBe('Retain');
     expect(deployment.Properties.StageName).toBe('v1');
-    expect(deployment.DependsOn).toEqual(expect.arrayContaining(Object.keys(template.findResources('AWS::ApiGateway::Authorizer'))));
+    const methodIds = Object.keys(template.findResources('AWS::ApiGateway::Method'));
+    expect(methodIds.length).toBeGreaterThanOrEqual(19);
+    expect(deployment.DependsOn).toEqual(expect.arrayContaining(methodIds));
   });
 });
 

@@ -85,6 +85,45 @@ if [ "$ENFORCED_ON" != "true" ]; then
   echo "⚠️  Portal_Identity enforcement is OFF for this deploy. Production deployments must run PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh after backfill_portal_registry.py has been run." >&2
 fi
 
+# Shared Cognito authorizer for the stacks that register routes without an
+# authorizer of their own (EdgeCVPortalWorkflowDebugStack,
+# EdgeCVPortalTelemetryStack). API Gateway allows 10 authorizers per REST API,
+# a quota only AWS Support raises, and the portal API already carries one per
+# route-registering stack, so the first deploy of a stack that created its
+# own rolled back on 2026-10-18. Those stacks attach their methods to the
+# ApiGatewayStack's authorizer (name EdgeCVPortalAuthorizer) and refuse to
+# synth without its id (lib/context-helpers.ts sharedAuthorizerId). Resolve
+# it from the deployed API and pass it as CDK context:
+#
+#   SHARED_AUTHORIZER_ID=<id> ./deploy-infrastructure.sh   # skip the lookup
+#
+# When nothing resolves (a fresh install has no API yet, or the lookup is
+# denied) no value is passed; the CDK app then stops at synth with that
+# instruction and nothing is deployed. The lookup itself never stops the
+# deploy: both reads run under `|| true`.
+resolve_shared_authorizer_id() {
+  local api_id
+  if [ -n "${SHARED_AUTHORIZER_ID:-}" ]; then
+    printf '%s\n' "$SHARED_AUTHORIZER_ID"
+    return 0
+  fi
+  api_id=$(aws cloudformation describe-stacks --stack-name EdgeCVPortalComputeStack \
+    --query 'Stacks[0].Outputs[?OutputKey==`ApiId`].OutputValue' --output text 2>/dev/null || true)
+  if [ -z "$api_id" ] || [ "$api_id" = "None" ]; then
+    return 0
+  fi
+  aws apigateway get-authorizers --rest-api-id "$api_id" \
+    --query "items[?name=='EdgeCVPortalAuthorizer'].id" --output text 2>/dev/null \
+    | awk 'NF { print $1; exit }' || true
+}
+SHARED_AUTHORIZER=$(resolve_shared_authorizer_id || true)
+if [ -n "$SHARED_AUTHORIZER" ] && [ "$SHARED_AUTHORIZER" != "None" ]; then
+  echo "🔑 Shared API authorizer (EdgeCVPortalAuthorizer): $SHARED_AUTHORIZER"
+  CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c sharedAuthorizerId=$SHARED_AUTHORIZER"
+else
+  echo "⚠️  No EdgeCVPortalAuthorizer found on the deployed portal API (is EdgeCVPortalComputeStack deployed?). The workflow debug and telemetry stacks need its id and the CDK app stops at synth without it; set SHARED_AUTHORIZER_ID=<id> to pass one by hand." >&2
+fi
+
 # Trusted UseCase account list, for visibility only. bin/app.ts synthesizes the
 # portal stacks with the first of CDK context trustedUseCaseAccountIds,
 # TRUSTED_USECASE_ACCOUNT_IDS and SSM /dda-portal/trusted-usecase-account-ids;

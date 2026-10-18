@@ -260,7 +260,12 @@ const syntheticDataStack = new SyntheticDataStack(app, 'EdgeCVPortalSyntheticDat
 // ComputeStack API). Deployment values: -c debugLogRetentionDays,
 // debugMaxSessionsPerUsecase, debugMaxDevicesPerSession,
 // debugMaxMessagesPerSecond, debugMaxBytesPerSecond, debugIngestConcurrency,
-// debugGetLogEventsPerSecond, debugFilterLogEventsPerSecond.
+// debugGetLogEventsPerSecond, debugFilterLogEventsPerSecond. The routes
+// attach to the portal API's existing Cognito authorizer: the stack creates
+// none (API Gateway allows 10 per REST API and the API carries one per
+// route-registering stack already) and refuses to synth without
+// -c sharedAuthorizerId=<id>, which deploy-infrastructure.sh resolves from
+// the live API (lib/context-helpers.ts sharedAuthorizerId).
 const workflowDebugStack = new WorkflowDebugStack(app, 'EdgeCVPortalWorkflowDebugStack', {
   env,
   description: 'Workflow debug mode infrastructure (debug sessions, ingest, log API, maintenance) for Edge CV Portal',
@@ -290,7 +295,9 @@ const workflowDebugStack = new WorkflowDebugStack(app, 'EdgeCVPortalWorkflowDebu
 // maintenance schedule, the alarms, and the /telemetry/... routes registered
 // against the ComputeStack API). Deployment values: -c telemetryNowPollSeconds,
 // telemetryLiveMaxLeases, telemetryLiveMaxViewMinutes, telemetryClipRetentionDays,
-// telemetryLakeRetentionDays, telemetryIngestConcurrency.
+// telemetryLakeRetentionDays, telemetryIngestConcurrency. Like the debug
+// stack, the routes attach to the existing authorizer named by
+// -c sharedAuthorizerId=<id> and the stack creates none.
 const telemetryStack = new TelemetryStack(app, 'EdgeCVPortalTelemetryStack', {
   env,
   description: 'Workflow telemetry dashboards infrastructure (summaries, events, aggregates, lake, dashboards API) for Edge CV Portal',

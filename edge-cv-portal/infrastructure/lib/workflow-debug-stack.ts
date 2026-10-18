@@ -12,7 +12,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
-import { portalRegistryEnforced } from './context-helpers';
+import { SHARED_AUTHORIZER_CONTEXT_KEY, portalRegistryEnforced, sharedAuthorizerId } from './context-helpers';
 import * as crypto from 'crypto';
 import * as path from 'path';
 
@@ -27,7 +27,7 @@ export interface WorkflowDebugStackProps extends cdk.StackProps {
   workflowsTable: dynamodb.Table;
   workflowVersionsTable: dynamodb.Table;
   portalArtifactsBucket: s3.Bucket;
-  /** Portal Cognito user pool (route authorizer). */
+  /** Portal Cognito user pool (USER_POOL_ID in the function environment). */
   userPool: cognito.IUserPool;
   /**
    * Trusted UseCase account ids: one ingest alias per account (plus the
@@ -103,10 +103,14 @@ export const DEBUG_PORTAL_RULE_NAME = 'dda_dbg_ingest_portal';
  * workflow_core layers, the per-account ingest aliases with their async
  * invoke configuration and on-failure queue, the Portal-account IoT rule,
  * the maintenance schedule, the alarms, and registers the `/debug/*` routes
- * on the imported portal Rest API with its own Cognito authorizer, CORS
- * preflight and a route-salted CfnDeployment (RETAIN). The only shared-file
- * edit is the additive instantiation in bin/app.ts. It joins the IAM synth
- * gate with empty pre-feature baselines.
+ * on the imported portal Rest API with CORS preflight and a route-salted
+ * CfnDeployment (RETAIN). The routes attach to the portal API's existing
+ * Cognito authorizer, whose id arrives as the CDK context value
+ * `sharedAuthorizerId` (context-helpers.sharedAuthorizerId): API Gateway
+ * allows 10 authorizers per REST API and the portal API carries one per
+ * route-registering stack already, so this stack creates none. The only
+ * shared-file edit is the additive instantiation in bin/app.ts. It joins
+ * the IAM synth gate with empty pre-feature baselines.
  */
 export class WorkflowDebugStack extends cdk.Stack {
   public readonly sessionsTable: dynamodb.Table;
@@ -115,6 +119,8 @@ export class WorkflowDebugStack extends cdk.Stack {
   public readonly maintenanceFunction: lambda.Function;
   public readonly failureQueue: sqs.Queue;
   public readonly deploymentValues: { [env: string]: number } = {};
+  /** The existing portal API authorizer every `/debug/*` method uses (`-c sharedAuthorizerId`). */
+  public readonly sharedAuthorizerId: string;
 
   constructor(scope: Construct, id: string, props: WorkflowDebugStackProps) {
     super(scope, id, props);
@@ -128,6 +134,13 @@ export class WorkflowDebugStack extends cdk.Stack {
           'sts:AssumeRole grant on a wildcard account.',
       );
     }
+
+    // The existing authorizer the routes attach to; absent or malformed
+    // values stop the synth here, before any asset is staged.
+    this.sharedAuthorizerId = sharedAuthorizerId(
+      this.node.tryGetContext(SHARED_AUTHORIZER_CONTEXT_KEY),
+      'WorkflowDebugStack',
+    );
 
     const region = cdk.Aws.REGION;
     const account = cdk.Aws.ACCOUNT_ID;
@@ -656,11 +669,17 @@ export class WorkflowDebugStack extends cdk.Stack {
       rootResourceId: props.restApiRootResourceId,
     });
 
-    const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'WorkflowDebugAuthorizer', {
-      cognitoUserPools: [props.userPool],
-      authorizerName: 'EdgeCVPortalWorkflowDebugAuthorizer',
-      identitySource: 'method.request.header.Authorization',
-    });
+    // The portal API's existing Cognito authorizer, by id (resolved above).
+    // No AWS::ApiGateway::Authorizer is created here: the API carries one per
+    // route-registering stack already and the quota is 10 per REST API, a
+    // limit only AWS Support raises (the 2026-10-18 first deploy rolled back
+    // on it). The existing authorizer validates the same user pool's tokens
+    // from the same Authorization header, so the handlers read the same
+    // claims as before.
+    const authorizer: apigateway.IAuthorizer = {
+      authorizerId: this.sharedAuthorizerId,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    };
 
     const corsOptions: apigateway.CorsOptions = {
       allowOrigins: apigateway.Cors.ALL_ORIGINS,
@@ -731,7 +750,7 @@ export class WorkflowDebugStack extends cdk.Stack {
     });
     deployment.overrideLogicalId(`WorkflowDebugDeployment${routeSalt}`);
     deployment.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
-    deployment.node.addDependency(authorizer);
+    // The /debug subtree holds every resource and method of the route table.
     deployment.node.addDependency(debugResource);
 
     new cdk.CfnOutput(this, 'WorkflowDebugSessionsTableName', {
