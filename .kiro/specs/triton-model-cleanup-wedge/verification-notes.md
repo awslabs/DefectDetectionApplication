@@ -405,6 +405,7 @@ repository. All connections used `StrictHostKeyChecking=yes`.
 7. **Native abort during vLLM start-up on the Thor's pre-state build.** The
    absl `forkable.cc` check failed once, and Docker restarted the container.
    This predates this change; see the `run-detection-visibility` notes.
+8. **Intermittent host test (fixed at integration, 2026-10-18).** `test_self_heal_surfaces.py::test_a_failed_read_retires_nothing` ran its two ticks back to back, so the second tick could take the size-rejection flag before the asynchronous shadow writer had set it; the test now joins the writer between the ticks (test-only; 50 single runs and 5 full-suite runs green).
 
 ## Not verified
 

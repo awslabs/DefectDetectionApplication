@@ -478,7 +478,12 @@ def test_a_failed_read_retires_nothing(make, shadow, caplog):
     s = make(reporter=mss.report, size_rejection=mss.take_size_rejection,
              shadow_reader=shadow.get_thing_shadow_state_request)
     s.index.states = {"model-live-0": ("READY", None)}
-    s.ticks(2)
+    # The first tick schedules the report; the writer thread records the size
+    # rejection. Join it before the second tick, which takes the flag and
+    # attempts the read (as test_a_size_rejection_retires_stale_entries does).
+    s.ticks(1)
+    join_write()
+    s.ticks(1)
     join_write()
     assert ("dda-model-status: ShadowManager rejected a report for its size, but no stale "
             "GPU-fallback entries could be retired (the reported document could not be read "
