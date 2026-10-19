@@ -4,10 +4,10 @@
  *
  *   npm run build && npx ts-node scripts/generate-route-auth.ts
  *
- * Constructs the four stacks of API_STACK_INVENTORY directly with fixture
+ * Constructs the six stacks of API_STACK_INVENTORY directly with fixture
  * props (the way the infra tests construct NodeDesignerStack and
- * BuildFleetStack: fixture strings for the imported REST API id and root
- * resource id), synthesizes them in memory, collects every
+ * BuildFleetStack: fixture strings for the imported REST API id, root
+ * resource id and shared authorizer id), synthesizes them in memory, collects every
  * AWS::ApiGateway::Method of each stack and its nested stacks, partitions out
  * CORS preflight and renders the inventory. No AWS call, no context lookup,
  * nothing written besides ROUTE_AUTH.md (the synthesized assembly goes to a
@@ -32,6 +32,8 @@ import {
 } from '../lib/route-auth-inventory';
 import { StorageStack } from '../lib/storage-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
+import { TelemetryStack } from '../lib/telemetry-stack';
+import { WorkflowDebugStack } from '../lib/workflow-debug-stack';
 
 /** Path of the committed inventory document. */
 export const ROUTE_AUTH_PATH = path.join(__dirname, '..', 'ROUTE_AUTH.md');
@@ -41,6 +43,8 @@ const FIXTURE_TRUSTED_ACCOUNTS = ['1'.repeat(12)];
 const FIXTURE_REST_API_ID = 'fixture-rest-api-id';
 const FIXTURE_ROOT_RESOURCE_ID = 'fixture-root-resource-id';
 const FIXTURE_STAGE_NAME = 'v1';
+/** The portal API's existing Cognito authorizer the two gated stacks attach to (bin/app.ts `sharedAuthorizerId`). */
+const FIXTURE_SHARED_AUTHORIZER_ID = 'fixture0';
 
 export interface InventoryStacks {
   readonly app: cdk.App;
@@ -50,7 +54,7 @@ export interface InventoryStacks {
   readonly dispose: () => void;
 }
 
-/** Construct the four inventory stacks (and the storage/fixture stacks they need) in one app. */
+/** Construct the six inventory stacks (and the storage/fixture stacks they need) in one app. */
 export function buildInventoryStacks(): InventoryStacks {
   const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'route-auth-'));
   const app = new cdk.App({ outdir });
@@ -120,11 +124,46 @@ export function buildInventoryStacks(): InventoryStacks {
     restApiRootResourceId: FIXTURE_ROOT_RESOURCE_ID,
     apiStageName: FIXTURE_STAGE_NAME,
   });
+  const workflowDebug = new WorkflowDebugStack(app, 'EdgeCVPortalWorkflowDebugStack', {
+    useCasesTable: storage.useCasesTable,
+    userRolesTable: storage.userRolesTable,
+    devicesTable: storage.devicesTable,
+    deploymentsTable: storage.deploymentsTable,
+    auditLogTable: storage.auditLogTable,
+    settingsTable: storage.settingsTable,
+    workflowsTable: storage.workflowsTable,
+    workflowVersionsTable: storage.workflowVersionsTable,
+    portalArtifactsBucket: storage.portalArtifactsBucket,
+    userPool,
+    trustedUseCaseAccountIds: FIXTURE_TRUSTED_ACCOUNTS,
+    restApiId: FIXTURE_REST_API_ID,
+    restApiRootResourceId: FIXTURE_ROOT_RESOURCE_ID,
+    apiStageName: FIXTURE_STAGE_NAME,
+    sharedAuthorizerId: FIXTURE_SHARED_AUTHORIZER_ID,
+  });
+  const telemetry = new TelemetryStack(app, 'EdgeCVPortalTelemetryStack', {
+    useCasesTable: storage.useCasesTable,
+    userRolesTable: storage.userRolesTable,
+    devicesTable: storage.devicesTable,
+    auditLogTable: storage.auditLogTable,
+    settingsTable: storage.settingsTable,
+    workflowsTable: storage.workflowsTable,
+    workflowVersionsTable: storage.workflowVersionsTable,
+    portalArtifactsBucket: storage.portalArtifactsBucket,
+    userPool,
+    trustedUseCaseAccountIds: FIXTURE_TRUSTED_ACCOUNTS,
+    restApiId: FIXTURE_REST_API_ID,
+    restApiRootResourceId: FIXTURE_ROOT_RESOURCE_ID,
+    apiStageName: FIXTURE_STAGE_NAME,
+    sharedAuthorizerId: FIXTURE_SHARED_AUTHORIZER_ID,
+  });
   const stacks: Record<string, cdk.Stack> = {
     EdgeCVPortalComputeStack: compute,
     EdgeCVPortalNodeDesignerStack: nodeDesigner,
     EdgeCVPortalBuildFleetStack: buildFleet,
     EdgeCVPortalSyntheticDataStack: syntheticData,
+    EdgeCVPortalWorkflowDebugStack: workflowDebug,
+    EdgeCVPortalTelemetryStack: telemetry,
   };
   for (const entry of API_STACK_INVENTORY) {
     if (!stacks[entry.stackName]) {

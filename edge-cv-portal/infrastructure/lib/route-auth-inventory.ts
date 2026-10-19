@@ -5,7 +5,7 @@
  * One committed statement of where the portal registers API Gateway methods
  * and which of them run without the Cognito authorizer:
  *
- *   - API_STACK_INVENTORY: the four top-level stacks that register methods
+ *   - API_STACK_INVENTORY: the six top-level stacks that register methods
  *     on the portal REST API, with the nested API stacks (by construct id)
  *     and the lib/ files whose code registers the methods;
  *   - COMMITTED_NONE_METHODS: the methods that are deliberately
@@ -74,6 +74,19 @@ export const API_STACK_INVENTORY: ReadonlyArray<InventoryStack> = [
     stackName: 'EdgeCVPortalSyntheticDataStack',
     registration: 'direct',
     sources: [{ nestedStackId: null, file: 'synthetic-data-stack.ts' }],
+  },
+  // The two stacks bin/app.ts instantiates only when the sharedAuthorizerId
+  // context is given (workflow-debug-mode, workflow-telemetry-dashboards);
+  // their methods attach to the portal API's existing Cognito authorizer by id.
+  {
+    stackName: 'EdgeCVPortalWorkflowDebugStack',
+    registration: 'direct',
+    sources: [{ nestedStackId: null, file: 'workflow-debug-stack.ts' }],
+  },
+  {
+    stackName: 'EdgeCVPortalTelemetryStack',
+    registration: 'direct',
+    sources: [{ nestedStackId: null, file: 'telemetry-stack.ts' }],
   },
 ];
 

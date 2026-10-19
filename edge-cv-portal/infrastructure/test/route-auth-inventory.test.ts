@@ -2,7 +2,7 @@
  * Route_Auth_Inventory (portal-authorization-and-iam-scoping, design I3
  * "Route inventory"; task 3.3; Requirements 5.4, 5.5).
  *
- * Synthesizes the four stacks of API_STACK_INVENTORY with the generator's
+ * Synthesizes the six stacks of API_STACK_INVENTORY with the generator's
  * fixture props and asserts over every synthesized AWS::ApiGateway::Method:
  *
  *   (1) every non-preflight method is COGNITO_USER_POOLS except the
