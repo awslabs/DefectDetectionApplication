@@ -57,6 +57,7 @@ from workflow_engine.discovery import (
     WORKFLOW_FILE,
 )
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
+from workflow_engine.trigger_runtime import redact_signed_query, redacted_run_view
 from workflow_engine.watcher import new_execution_id
 
 logger = logging.getLogger(__name__)
@@ -511,9 +512,12 @@ def get_workflow_execution_log(
     ``200`` — the frontend shows an explanatory empty state rather than an
     error (R6.4). Reading is best-effort (see
     ``run_artifacts.read_run_log``): a read failure yields an empty body,
-    never a 500. 404 only for an unknown execution (R4.6)."""
+    never a 500. 404 only for an unknown execution (R4.6). The served text has
+    any signed query values masked (Item 5 Layer A), so an earlier run's
+    ``tags:`` line is served masked; every other byte is unchanged."""
     execution = _get_execution_or_404(execution_id, db)
-    return PlainTextResponse(run_artifacts.read_run_log(execution.log_path))
+    return PlainTextResponse(
+        redact_signed_query(run_artifacts.read_run_log(execution.log_path)))
 
 
 @router.get("/workflows/registrations/{registration_id}/graph")
@@ -574,8 +578,11 @@ def get_workflow_execution_metadata(
     ``output_dir``/``capture_id``, a missing/unreadable file, malformed
     JSON, or a non-object top level yields ``{}`` with a 200, never a 500
     (R4.2). 404 only for an unknown execution (R4.3). Additive route: no
-    existing route or response shape changes (R5.3)."""
+    existing route or response shape changes (R5.3). The ``trigger`` section is
+    served with its signed query values masked (Item 5 Layer A), so a run
+    recorded before the upgrade is also served masked; every other field is
+    unchanged."""
     execution = _get_execution_or_404(execution_id, db)
-    return run_artifacts.read_run_metadata(
+    return redacted_run_view(run_artifacts.read_run_metadata(
         execution.output_dir, execution.capture_id
-    )
+    ))

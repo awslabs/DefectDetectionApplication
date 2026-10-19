@@ -422,8 +422,10 @@ def is_transient_error(error: BaseException) -> bool:
 
 def _failure_reason(error: BaseException) -> str:
     """The backend failure reason of a generate error (Requirement 5.7)."""
-    reason = getattr(error, "reason", None)
-    return reason if reason else str(error)
+    if isinstance(error, GenerationError) and error.reason:
+        return error.reason
+    logger.error("Unexpected text generation failure", exc_info=error)
+    return "internal error; see the LocalServer log"
 
 
 def _model_max_len(runtime: Any, model_name: str) -> int:

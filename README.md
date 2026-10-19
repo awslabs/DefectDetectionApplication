@@ -6,9 +6,12 @@
 
 The Defect Detection Application (DDA) is an edge-deployed computer vision solution for quality assurance in discrete manufacturing environments. Originally developed by the AWS EdgeML service team, DDA is now available as an open-source project under the stewardship of the AWS Manufacturing TFC and Auto/Manufacturing IBU.
 
+> **New to DDA?** Watch the [overview video](https://youtu.be/lTLSIMHLy7Y), then follow the [video tutorial series](#video-tutorials).
+
 ## Table of Contents
 
 - [Overview](#overview)
+- [Video Tutorials](#video-tutorials)
 - [Deployment](#deployment)
   - [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account)
   - [Step 2: Redeploy the Frontend (Optional)](#step-2-redeploy-the-frontend-optional)
@@ -66,6 +69,27 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 | **Inference Uploader** | Automatically upload inference results from edge devices to S3 |
 | **Devices** | Register devices with a one-line setup command (Add Device) and monitor IoT Greengrass devices |
 | **Settings** | Portal configuration, Data Accounts, and Build Infrastructure settings (PortalAdmin only) |
+
+## Video Tutorials
+
+The DDA video tutorial series on YouTube has an overview video and one video per module, and where this README covers the same topic, the last column links to that section.
+
+| Module | Video | Related README section |
+|--------|-------|------------------------|
+| Overview | [Overview](https://youtu.be/lTLSIMHLy7Y) | [Overview](#overview) |
+| Module 0 | [Portal Setup](https://youtu.be/HtH_4zT23Fo) | [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account) |
+| Module 1 | [Device Setup](https://youtu.be/PFdFycCQXA0) | [Step 7: Set Up Edge Devices (Add Device)](#step-7-set-up-edge-devices-add-device) |
+| Module 2 | [Labeling](https://youtu.be/pxSoAIOLp18) | [Labeling](#labeling) |
+| Module 3 | [Workflows](https://youtu.be/vpL62wIT218) | - |
+| Module 4 | [Custom Node Designer](https://youtu.be/si5gOzzPhn0) | - |
+| Module 5 | [Synthetic Data](https://youtu.be/n-egAmfZiJw) | - |
+| Module 6 | [Build Servers](https://youtu.be/ZNJBk94Ucjo) | [Step 4: Build the DDA LocalServer Component (Build Fleet)](#step-4-build-the-dda-localserver-component-build-fleet) |
+| Module 7 | [Deployments](https://youtu.be/FTYq8aql-CU) | [Deploy DDA Application to Edge Device](#deploy-dda-application-to-edge-device) |
+| Module 8 | [Devices](https://youtu.be/r8nz33LQPoc) | [Devices](#devices) |
+| Module 9 | [Training Models](https://youtu.be/azKIaPPlhZM) | [Training](#training) |
+| Module 10 | [Prompt Tuning](https://youtu.be/ZnxGwMxCB1M) | - |
+| Module 11 | [User Access](https://youtu.be/_HDKtKvft3c) | [3.2 Create Portal Admin User](#32-create-portal-admin-user) |
+| Module 12 | [Edge Software](https://youtu.be/pInKqoADn2c) | [Edge Device Management](#edge-device-management) |
 
 ## Deployment
 
@@ -129,6 +153,8 @@ Portal Account          UseCase Account         Data Account (Optional)
 > For multi-account setups, the subscription must be in the UseCase Account (where SageMaker runs), not the Portal Account or Data Account.
 
 ### Step 1: Deploy Portal Infrastructure (Portal Account)
+
+> **Video:** [Module 0: Portal Setup](https://youtu.be/HtH_4zT23Fo)
 
 #### 1.1 Configure CloudWatch Logs for API Gateway
 
@@ -223,6 +249,8 @@ These are automatically shared when you create a UseCase in the portal. The UseC
 
 #### 3.2 Create Portal Admin User
 
+> **Video:** [Module 11: User Access](https://youtu.be/_HDKtKvft3c)
+
 Self sign-up is off, so you create the first PortalAdmin by hand with the AWS CLI, using credentials for the portal account. Two things make it a working admin:
 
 - **Its global row in the Portal_Identity registry**, the DynamoDB table `dda-portal-user-roles`. This row is what grants PortalAdmin, whether `PORTAL_REGISTRY_ENFORCED` is off (the fresh-install default) or on.
@@ -300,6 +328,8 @@ Authorization reads only `user_id` (the account's Cognito `sub`), `usecase_id` (
 Sign in at the portal URL that `./deploy-frontend.sh` printed in Step 2 (the `FrontendUrl` output of `EdgeCVPortalFrontendStack`) with username `admin` and the password you set. Open the user menu (top right) and choose **User Manager**: the **Accounts** table lists the pool's accounts, including `admin`. Create every other account there with **Create user**, which writes both the Cognito account and its registry row.
 
 ### Step 4: Build the DDA LocalServer Component (Build Fleet)
+
+> **Video:** [Module 6: Build Servers](https://youtu.be/ZNJBk94Ucjo)
 
 The DDA application runs on each edge device as the LocalServer Greengrass component, `aws.edgeml.dda.LocalServer.<variant>`, with one variant per device architecture. Build it from the portal's **Builds** page: the portal provisions build compute, builds the component from a GitHub repository, and publishes it to AWS IoT Greengrass in the portal account. This is the LocalServer component that [3.1 Shared Components](#31-shared-components) shares with UseCase accounts, so build every variant your devices need before you create the UseCase in [Step 6](#step-6-create-usecase).
 
@@ -469,6 +499,8 @@ This provisions Greengrass components, creates `DDAPortalComponentAccessPolicy`,
 
 ### Step 7: Set Up Edge Devices (Add Device)
 
+> **Video:** [Module 1: Device Setup](https://youtu.be/PFdFycCQXA0)
+
 Register each edge device with **Add Device** on the **Devices** page. The portal generates a one-line setup command that contains a single-use setup token. Running the command on the device installs AWS IoT Greengrass and the DDA host dependencies, provisions the device in the UseCase account, and registers it with the portal. The device needs no repository checkout, AWS login, IAM user, or access keys. Create the UseCase first ([Step 6](#step-6-create-usecase)): every device is registered under a UseCase.
 
 #### 7.1 Device Prerequisites
@@ -550,6 +582,8 @@ For details of the setup flow, see [station_install/quick_setup/README.md](stati
 
 ## Deploy DDA Application to Edge Device
 
+> **Video:** [Module 7: Deployments](https://youtu.be/FTYq8aql-CU)
+
 Every device needs the LocalServer variant that matches its **Target Architecture (DDA)** (see the table in [4.2 Start a Build](#42-start-a-build)) before models or workflows can run on it. All deployments are created and revised in the portal.
 
 ### Create the First Deployment
@@ -614,6 +648,8 @@ A packaged workflow is offered only to devices whose recorded architecture is am
 
 ## Devices
 
+> **Video:** [Module 8: Devices](https://youtu.be/r8nz33LQPoc)
+
 ### Device Management (via Portal)
 
 - **Devices** page shows all registered devices with status, platform, architecture, last seen
@@ -642,6 +678,8 @@ A packaged workflow is offered only to devices whose recorded architecture is am
 
 ### Labeling
 
+> **Video:** [Module 2: Labeling](https://youtu.be/pxSoAIOLp18)
+
 - Create Ground Truth labeling jobs (classification & segmentation)
 - Status auto-syncs from SageMaker
 - Supports pre-drawn masks for segmentation guidance
@@ -657,6 +695,8 @@ Ground Truth creates manifests with job-specific attribute names. The portal aut
 - `{job-name}-ref` → `anomaly-mask-ref` (segmentation)
 
 ### Training
+
+> **Video:** [Module 9: Training Models](https://youtu.be/azKIaPPlhZM)
 
 - Select Ground Truth job or pre-labeled dataset
 - Auto-detect and transform manifests
@@ -1013,6 +1053,8 @@ The **Inference Uploader** component enables edge devices to automatically uploa
 See [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) for detailed configuration.
 
 ## Edge Device Management
+
+> **Video:** [Module 12: Edge Software](https://youtu.be/pInKqoADn2c)
 
 Devices are provisioned from the portal with **Add Device** (see [Step 7](#step-7-set-up-edge-devices-add-device)). The commands below inspect and troubleshoot a provisioned device and need a shell on it: a local console, SSH, or [Remote Device Access](#remote-device-access-ssh). A device set up with Add Device has no AWS CLI credentials configured, so run the `aws` commands from a workstation with credentials for the UseCase account.
 
@@ -1524,6 +1566,7 @@ defect-detection-application/
 | [edge-cv-portal/ADMIN_GUIDE.md](edge-cv-portal/ADMIN_GUIDE.md) | Portal administration guide |
 | [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) | Inference Uploader setup |
 | [datasets/README.md](datasets/README.md) | Sample datasets guide |
+| [Video Tutorials](#video-tutorials) | Video tutorial series: an overview and Modules 0-12 |
 
 ## Contributing
 

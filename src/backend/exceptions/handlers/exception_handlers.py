@@ -77,7 +77,12 @@ async def request_validation_exception_handler(request: Request, exc: RequestVal
     errors = exc.errors()
     safe_errors = [dict(error, input=_body_for_log(error["input"])) if "input" in error else error
                    for error in errors]
-    detail = {"errors": safe_errors, "body": _body_for_log(exc.body), "query_params": query_params}
+    # A query string naming a sensitive key is withheld from the log; any other
+    # query keeps its exact QueryParams(...) text.
+    query_text = str(query_params)
+    logged_query = _body_for_log(query_text)
+    detail = {"errors": safe_errors, "body": _body_for_log(exc.body),
+              "query_params": query_params if logged_query == query_text else logged_query}
     logger.error(detail)
     # An error whose input carries a credential would echo it in str(exc);
     # only then is the message rebuilt from the masked errors, so every
@@ -100,11 +105,10 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     Unhandled exceptions are all exceptions that are not HTTPExceptions, RequestValidationErrors or custom Exceptions.
     """
     exception_type, exception_value, exception_traceback = sys.exc_info()
-    exception_name = getattr(exception_type, "__name__", None)
 
     logger.error("Uncaught Exception", exc_info=(exception_type, exception_value, exception_traceback))
 
-    return JSONResponse({'message': f"Internal Server Error. Error: '{exception_name}: {exception_value}.'", 'request_id': get_request_id()}, status_code=500)
+    return JSONResponse({'message': "Internal Server Error.", 'request_id': get_request_id()}, status_code=500)
 
 def api_exception_logger(request: Request, exc):
     url = f"{request.url.path}?{request.query_params}" if request.query_params else request.url.path
