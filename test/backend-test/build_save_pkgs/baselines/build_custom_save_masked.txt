@@ -81,7 +81,22 @@ derive_build_target "$COMPONENT_NAME"
 # target stays on 20.04, and its plugin build image
 # (dda-plugin-build:arm64_cpu) and platform record are 22.04 / GStreamer
 # 1.20.
-if [ "$ARCHITECTURE" = "aarch64" ] && [ "$IS_JP5$IS_JP6$IS_JP7" = "000" ]; then
+#
+# The x86 NVIDIA target (IS_X86_NVIDIA=1) is pinned to 22.04 for the SAME
+# reason: its backend base (src/backend/Dockerfile.x86_64_nvidia) is
+# hard-pinned to nvidia/cuda:...-ubuntu22.04 whatever the build host, so the
+# edgemlsdk/panorama GStreamer plugins MUST be compiled on 22.04 too — then
+# they link the base's OpenSSL 3 (libcrypto.so.3 / libssl.so.3), which the
+# base ships. Building them on a <22.04 host (such as an Ubuntu 20.04 host)
+# instead links them to libcrypto.so.1.1 / libssl.so.1.1, which the 22.04
+# base lacks (jammy has no libssl1.1), so every /usr/lib/panoramagst plugin
+# (emexifextract, emlfilesrc, emlcapture, genicamsrc, ...) fails to load with
+# "libcrypto.so.1.1: cannot open shared object file" and no jpeg/camera
+# GStreamer pipeline can be constructed. Pinning here keeps the invariant
+# "edgemlsdk build OS == backend base OS" host-independently — the same
+# mechanism the generic aarch64 target above uses, and for the same
+# base-is-always-22.04 reason.
+if { [ "$ARCHITECTURE" = "aarch64" ] && [ "$IS_JP5$IS_JP6$IS_JP7" = "000" ]; } || [ "$IS_X86_NVIDIA" = "1" ]; then
   IMAGE_VER=22.04
   export IMAGE_VER
 fi

@@ -64,6 +64,7 @@ import heapq
 import json
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import CancelledError
@@ -502,6 +503,53 @@ def serialize_trigger_context(context: Optional[Dict[str, Any]]) -> str:
     import json
 
     return json.dumps(context or {}, default=str)
+
+
+#: Signed object-store query parameters. A value runs up to the shared
+#: redactor's terminators (``& ; , ) ] }`` or a quote or whitespace) plus
+#: ``#``, so every other byte of the surrounding text is preserved.
+_SIGV4_PARAM_RE = re.compile(
+    r"(?i)(X-Amz-(?:Algorithm|Credential|Date|Expires|SignedHeaders|Signature|Security-Token))"
+    r"(=)([^&;,)\]}#\"'\s]+)"
+)
+_MASK = "***"
+
+
+def redact_signed_query(value):
+    """Return ``value`` with the value of every signed query parameter in the
+    literal ``name=value`` form replaced by ``***``, every other byte
+    preserved. Total: a non-string (or empty string) is returned unchanged. A
+    fixed point: a second pass re-matches and writes the same mask."""
+    if not isinstance(value, str) or not value:
+        return value
+    return _SIGV4_PARAM_RE.sub(lambda match: match.group(1) + match.group(2) + _MASK, value)
+
+
+def _redact_leaves(value):
+    """A copy of ``value`` with ``redact_signed_query`` applied to every string
+    leaf of nested dicts, lists and tuples. A tuple stays a tuple (so a repr is
+    unchanged) and a non-string, non-container leaf is returned unchanged."""
+    if isinstance(value, str):
+        return redact_signed_query(value)
+    if isinstance(value, dict):
+        return {key: _redact_leaves(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_leaves(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_leaves(item) for item in value)
+    return value
+
+
+def redacted_run_view(tag_values):
+    """A copy of ``tag_values`` whose ``trigger`` section has every signed
+    query value masked. Never mutates ``tag_values``: its ``trigger`` entry is
+    the run's live Trigger_Context, seeded by reference. A mapping without a
+    ``trigger`` key (or a non-mapping) is returned unchanged."""
+    if not isinstance(tag_values, dict) or "trigger" not in tag_values:
+        return tag_values
+    view = dict(tag_values)
+    view["trigger"] = _redact_leaves(tag_values["trigger"])
+    return view
 
 
 def default_run_starter(

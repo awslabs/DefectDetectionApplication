@@ -24,16 +24,20 @@ handler. It never raises, and never writes a record it could not redact.
 The request validation handler logs and answers without echoing a
 credential.
 """
+import ast
 import asyncio
 import io
 import json
 import logging
 import os
+import pathlib
 import sys
 
 import pytest
 import structlog
 from fastapi.exceptions import RequestValidationError
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 from starlette.requests import Request
 
 from dda_logging import custom_logging, redaction
@@ -46,6 +50,11 @@ from dda_logging.redaction import (
 from exceptions.handlers import exception_handlers
 from stream_ingest import credentials as credentials_module
 from workflow_engine.run_log import RunLogCapture
+
+_DOWNLOAD_FILE = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "src" / "backend" / "endpoints" / "download_file.py"
+)
 
 SECRET = "s3cr3t-LOG-4f1a"
 USER = "admin-LOG-81c2"
@@ -467,3 +476,255 @@ class TestRequestBodies:
 
         assert status == 400
         assert payload["message"] == str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Item 1 (uncaught-500 body) and Item 3b (rejected-query log), authored on the
+# unfixed tree (localserver-input-handling-hardening tasks 1 and 2). The task-1
+# cases assert the fixed behavior and FAIL here; the task-2 cases PASS here and
+# stay frozen. The handler reads sys.exc_info(), so every uncaught case raises
+# and handles the exception inside an ``except`` block, as a real request does.
+# ---------------------------------------------------------------------------
+
+_UNCAUGHT_TYPES = [KeyError, ValueError, RuntimeError, OSError, TypeError, AttributeError]
+
+
+class _CollectingHandler(logging.Handler):
+    """Collects a logger's records so a property test needs no caplog
+    (function-scoped fixtures are not reset between @given examples)."""
+
+    def __init__(self):
+        super().__init__(level=logging.DEBUG)
+        self.records = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+    @property
+    def text(self):
+        return "\n".join(self.format(r) for r in self.records)
+
+
+class _collect:
+    """Attach a _CollectingHandler to ``logger`` for the duration."""
+
+    def __init__(self, logger):
+        self._logger = logger
+        self.handler = _CollectingHandler()
+
+    def __enter__(self):
+        self._logger.addHandler(self.handler)
+        return self.handler
+
+    def __exit__(self, *exc):
+        self._logger.removeHandler(self.handler)
+        return False
+
+
+def _request(method="GET", path="/x", query_string=b""):
+    return Request({"type": "http", "method": method, "path": path,
+                    "query_string": query_string, "headers": []})
+
+
+def _run_uncaught(exc):
+    """Raise ``exc`` and handle it through the uncaught handler inside the
+    ``except`` block, returning the parsed 500 body."""
+    request = _request()
+    try:
+        raise exc
+    except type(exc):
+        response = asyncio.run(
+            exception_handlers.unhandled_exception_handler(request, exc))
+    return response.status_code, json.loads(response.body)
+
+
+class TestUncaughtExceptionBody:
+    """Item 1: the uncaught-500 body is a fixed message plus request_id."""
+
+    def test_the_body_message_is_the_fixed_text(self):
+        # task 1 (Property 1 example): FAILS unfixed — the message embeds
+        # the class name and str(value).
+        status, body = _run_uncaught(KeyError("source-ref"))
+        assert status == 500
+        assert body["message"] == "Internal Server Error."
+        assert "request_id" in body
+
+    @settings(max_examples=50, deadline=None)
+    @given(kind=st.sampled_from(_UNCAUGHT_TYPES), text=st.text())
+    @example(kind=KeyError, text="source-ref")
+    def test_property_1_fixed_body_over_exceptions(self, kind, text):
+        # task 1 (Property 1): the fixed message and request_id hold for every
+        # raised-and-handled exception. FAILS unfixed.
+        status, body = _run_uncaught(kind(text))
+        assert status == 500
+        assert body["message"] == "Internal Server Error."
+        assert "request_id" in body
+
+    def test_the_traceback_is_logged_with_exc_info(self, caplog):
+        # task 2 (Property 2, kept behavior AC2): the handler still logs the
+        # raised exception with exc_info. PASSES unfixed and after the fix.
+        with caplog.at_level(logging.ERROR, logger=exception_handlers.__name__):
+            _run_uncaught(KeyError("source-ref"))
+        records = [r for r in caplog.records if r.message == "Uncaught Exception"]
+        assert records
+        assert records[-1].exc_info[0] is KeyError
+
+
+_HTTP_STATUSES = [400, 401, 403, 404, 409, 422, 442, 500, 502]
+
+
+class TestHandlerBodiesPreserved:
+    """Item 1 preservation (Property 2): the two handlers' response bodies are
+    byte-identical to the unfixed tree. Oracle = the unfixed expressions."""
+
+    @settings(max_examples=50, deadline=None)
+    @given(status=st.sampled_from(_HTTP_STATUSES), detail=st.text())
+    def test_property_2_http_exception_body(self, status, detail):
+        from fastapi.exceptions import HTTPException
+        request = _request()
+        exc = HTTPException(status_code=status, detail=detail)
+        response = asyncio.run(
+            exception_handlers.http_exception_handler(request, exc))
+        expected = {"message": str(exc.detail),
+                    "request_id": exception_handlers.get_request_id()}
+        assert response.status_code == status
+        assert json.loads(response.body) == expected
+
+    @settings(max_examples=50, deadline=None)
+    @given(
+        errors=st.lists(
+            st.fixed_dictionaries({
+                "type": st.sampled_from(["missing", "string_pattern_mismatch",
+                                         "int_parsing", "value_error"]),
+                "loc": st.lists(st.one_of(st.text(min_size=1, max_size=6),
+                                          st.integers(min_value=0, max_value=5)),
+                                min_size=1, max_size=3).map(tuple),
+                "msg": st.text(max_size=20),
+                "input": st.one_of(
+                    st.text(max_size=12), st.integers(),
+                    st.dictionaries(st.sampled_from(["token", "credentials", "name", "x"]),
+                                    st.text(max_size=12), max_size=3)),
+            }),
+            min_size=1, max_size=4),
+    )
+    def test_property_2_validation_body(self, errors):
+        exc = RequestValidationError(errors, body=None)
+        request = _request()
+        response = asyncio.run(
+            exception_handlers.request_validation_exception_handler(request, exc))
+        safe_errors = [dict(e, input=exception_handlers._body_for_log(e["input"]))
+                       if "input" in e else e for e in exc.errors()]
+        expected_message = (str(exc) if safe_errors == exc.errors()
+                            else "{} validation error(s): {}".format(
+                                len(safe_errors), safe_errors))
+        expected = {"message": expected_message,
+                    "request_id": exception_handlers.get_request_id()}
+        assert response.status_code == 400
+        assert json.loads(response.body) == expected
+
+
+# A mis-joined export link sends captureIdPath=<path>token=<credential> (no
+# "&"), so the dummy credential is a substring of the single captureIdPath
+# value. Dummy values only: no AKIA/ASIA prefix, no real host.
+_DUMMY_TOKEN = "LOCALSESSIONTOKENdummy1234"
+_MISJOINED_QUERY = (
+    "captureIdPath=/aws_dda/system/capture-id-path-2025-01-01-00-00-00"
+    "token=" + _DUMMY_TOKEN
+).encode("utf-8")
+_MISJOINED_INPUT = (
+    "/aws_dda/system/capture-id-path-2025-01-01-00-00-00token=" + _DUMMY_TOKEN
+)
+
+
+class TestRejectedQueryLog:
+    """Item 3b: a credential inside a rejected query value is not logged."""
+
+    def test_a_misjoined_credential_is_withheld_from_the_log_and_body(self, caplog):
+        # task 1 (Property 9 fix half): FAILS unfixed on the log assertion.
+        errors = [{"type": "string_pattern_mismatch",
+                   "loc": ("query", "captureIdPath"), "msg": "String should match pattern",
+                   "input": _MISJOINED_INPUT}]
+        request = _request(query_string=_MISJOINED_QUERY)
+        exc = RequestValidationError(errors, body=None)
+        with caplog.at_level(logging.ERROR, logger=exception_handlers.__name__):
+            response = asyncio.run(
+                exception_handlers.request_validation_exception_handler(request, exc))
+        assert _DUMMY_TOKEN not in caplog.text
+        assert _DUMMY_TOKEN not in response.body.decode("utf-8")
+
+    @settings(max_examples=50, deadline=None)
+    @given(credential=st.text(alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-",
+                              min_size=8, max_size=40))
+    def test_property_9_fix_half_credential_withheld(self, credential):
+        # task 1 (Property 9 fix half): a mis-joined dummy credential is in
+        # neither the log nor the body. FAILS unfixed.
+        raw = ("captureIdPath=/aws_dda/system/capture-id-path-2025-01-01-00-00-00"
+               "token=" + credential)
+        errors = [{"type": "string_pattern_mismatch",
+                   "loc": ("query", "captureIdPath"), "msg": "String should match pattern",
+                   "input": "/aws_dda/system/capture-id-path-2025-01-01-00-00-00token=" + credential}]
+        request = _request(query_string=raw.encode("utf-8"))
+        exc = RequestValidationError(errors, body=None)
+        with _collect(exception_handlers.logger) as handler:
+            response = asyncio.run(
+                exception_handlers.request_validation_exception_handler(request, exc))
+        assert credential not in handler.text
+        assert credential not in response.body.decode("utf-8")
+
+    @settings(max_examples=50, deadline=None)
+    @given(raw=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789=&-_./", max_size=60))
+    def test_property_9_preservation_half_secret_free_log_unchanged(self, raw):
+        # task 2 (Property 9 preservation half): a query naming no sensitive
+        # key is logged byte-identically to the unfixed expression. The filter
+        # is on the re-encoded text the handler logs. PASSES unfixed and after.
+        from starlette.datastructures import QueryParams
+        query_params = QueryParams(raw)
+        if any(key in str(query_params).lower()
+               for key in exception_handlers._SENSITIVE_BODY_KEYS):
+            return
+        errors = [{"type": "value_error", "loc": ("query", "x"),
+                   "msg": "bad", "input": raw[:10]}]
+        request = _request(query_string=raw.encode("utf-8"))
+        exc = RequestValidationError(errors, body=None)
+        safe_errors = [dict(e, input=exception_handlers._body_for_log(e["input"]))
+                       if "input" in e else e for e in exc.errors()]
+        expected = str({"errors": safe_errors,
+                        "body": exception_handlers._body_for_log(exc.body),
+                        "query_params": request.query_params})
+        with _collect(exception_handlers.logger) as handler:
+            asyncio.run(
+                exception_handlers.request_validation_exception_handler(request, exc))
+        assert expected in handler.text
+
+    def test_a_secret_free_query_logs_its_exact_queryparams_text(self, caplog):
+        # task 2 (frozen literal): one secret-free query, logged verbatim.
+        raw = "captureIdPath=not-a-capture-path&limit=5"
+        errors = [{"type": "string_pattern_mismatch", "loc": ("query", "captureIdPath"),
+                   "msg": "String should match pattern", "input": "not-a-capture-path"}]
+        request = _request(query_string=raw.encode("utf-8"))
+        exc = RequestValidationError(errors, body=None)
+        safe_errors = [dict(e, input=exception_handlers._body_for_log(e["input"]))
+                       if "input" in e else e for e in exc.errors()]
+        expected = str({"errors": safe_errors,
+                        "body": exception_handlers._body_for_log(exc.body),
+                        "query_params": request.query_params})
+        with caplog.at_level(logging.ERROR, logger=exception_handlers.__name__):
+            asyncio.run(
+                exception_handlers.request_validation_exception_handler(request, exc))
+        assert expected in caplog.text
+
+    def test_the_download_router_is_a_plain_apirouter(self):
+        # task 2 (Property 9 structural guard): the download routes stay off
+        # the access-logging route class, so the validation handler is the
+        # only backend log line for a rejected export query. Read with ast so
+        # the device-only module is never imported on the host.
+        source = _DOWNLOAD_FILE.read_text()
+        tree = ast.parse(source, filename=str(_DOWNLOAD_FILE))
+        assigns = [node for node in tree.body
+                   if isinstance(node, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "unauthenticated_router"
+                           for t in node.targets)]
+        assert assigns, "unauthenticated_router assignment not found"
+        call = assigns[0].value
+        assert isinstance(call, ast.Call) and getattr(call.func, "id", None) == "APIRouter"
+        assert call.keywords == [], "the download router must take no route_class"
