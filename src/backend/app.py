@@ -443,6 +443,14 @@ if __name__ == "__main__":  # pragma: no cover
     # unhealthy, while a started-then-dead runtime does.
     vllm_server = start_vllm_runtime()
     health.set_vllm_server(vllm_server)
+    # Start the Triton model-load watchdog (triton-model-cleanup-wedge D6):
+    # wedge detection and the default-on self-heal. Triton devices only, and
+    # contained: LocalServer starts as before if it cannot be started.
+    try:
+        from dda_triton.load_watchdog import start_model_load_watchdog
+        start_model_load_watchdog()
+    except Exception:
+        logger.exception("Triton model-load watchdog could not be started; LocalServer runs without it")
 
     # Run the server to completion. main() awaits uvicorn's serve(), which
     # returns once the SIGTERM-triggered graceful shutdown (including the

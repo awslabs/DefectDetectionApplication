@@ -630,6 +630,14 @@ class Permission(Enum):
     BUILDS_CANCEL = "builds:cancel"
     BUILDS_READ = "builds:read"
     
+    # Workflow telemetry dashboards (workflow-telemetry-dashboards design
+    # §11.1): dashboards:read views dashboards and their tiles;
+    # dashboards:manage creates, edits and deletes them; telemetry:manage
+    # enables telemetry for a use case and tunes its settings.
+    DASHBOARDS_READ = "dashboards:read"
+    DASHBOARDS_MANAGE = "dashboards:manage"
+    TELEMETRY_MANAGE = "telemetry:manage"
+    
     # System Administration
     VIEW_AUDIT_LOGS = "view_audit_logs"
     MANAGE_SETTINGS = "manage_settings"
@@ -844,6 +852,8 @@ class RBACManager:
                 # Node Designer: read-only view of Custom_Node_Types and
                 # Plugin_Records (13.3)
                 Permission.NODE_DESIGNER_READ,
+                # Workflow telemetry dashboards: read-only (§11.1)
+                Permission.DASHBOARDS_READ,
             },
             
             Role.OPERATOR: {
@@ -872,6 +882,9 @@ class RBACManager:
                 # Node Designer: read-only view of Custom_Node_Types and
                 # Plugin_Records (13.3)
                 Permission.NODE_DESIGNER_READ,
+                # Workflow telemetry dashboards: view and manage (§11.1)
+                Permission.DASHBOARDS_READ,
+                Permission.DASHBOARDS_MANAGE,
             },
             
             Role.DATA_SCIENTIST: {
@@ -912,6 +925,9 @@ class RBACManager:
                 Permission.BUILDS_SUBMIT,
                 Permission.BUILDS_CANCEL,
                 Permission.BUILDS_READ,
+                # Workflow telemetry dashboards: view and manage (§11.1)
+                Permission.DASHBOARDS_READ,
+                Permission.DASHBOARDS_MANAGE,
             },
             
             Role.USECASE_ADMIN: {
@@ -976,6 +992,11 @@ class RBACManager:
                 Permission.BUILDS_SUBMIT,
                 Permission.BUILDS_CANCEL,
                 Permission.BUILDS_READ,
+                # Workflow telemetry dashboards: view and manage dashboards,
+                # and enable and tune telemetry for the use case (§11.1)
+                Permission.DASHBOARDS_READ,
+                Permission.DASHBOARDS_MANAGE,
+                Permission.TELEMETRY_MANAGE,
                 # Add UseCaseAdmin-specific permissions
                 Permission.UPDATE_USECASES,
                 Permission.DELETE_USECASES,
@@ -1531,7 +1552,8 @@ def is_cross_account_setup(usecase: Dict) -> bool:
     )
 
 
-def get_usecase_client(service_name: str, usecase: Dict, session_name: str = None, region: str = None) -> Any:
+def get_usecase_client(service_name: str, usecase: Dict, session_name: str = None, region: str = None,
+                       config: Any = None) -> Any:
     """
     Get a boto3 client for accessing use case resources.
     
@@ -1544,6 +1566,8 @@ def get_usecase_client(service_name: str, usecase: Dict, session_name: str = Non
         usecase: Use case details dict from DynamoDB
         session_name: Optional session name for role assumption (auto-generated if not provided)
         region: Optional AWS region
+        config: Optional botocore.config.Config passed to boto3.client; when None
+            the client is created exactly as before (no config argument)
     
     Returns:
         boto3 client for the specified service
@@ -1563,17 +1587,21 @@ def get_usecase_client(service_name: str, usecase: Dict, session_name: str = Non
             usecase.get('external_id'),
             session_name
         )
+        if config is not None:
+            return create_boto3_client(service_name, credentials, region, config=config)
         return create_boto3_client(service_name, credentials, region)
     else:
         # Single-account: use Lambda's own credentials
         logger.info(f"Single-account setup detected: using Lambda execution role for {service_name}")
+        extra = {'config': config} if config is not None else {}
         if region:
-            return boto3.client(service_name, region_name=region)
+            return boto3.client(service_name, region_name=region, **extra)
         else:
-            return boto3.client(service_name)
+            return boto3.client(service_name, **extra)
 
 
-def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> Dict:
+def assume_usecase_role(role_arn: str, external_id: str, session_name: str,
+                        session_policy: Optional[Dict] = None) -> Dict:
     """Assume cross-account role for UseCase Account access
     
     For single-account setups (where role_arn is the root ARN), returns current credentials
@@ -1583,6 +1611,10 @@ def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> D
         role_arn: ARN of the role to assume
         external_id: External ID for role assumption (can be None if role doesn't require it)
         session_name: Name for the assumed role session
+        session_policy: Optional IAM policy document narrowing the assumed
+            session (workflow-telemetry-dashboards design §14.4). Sent to
+            STS as ``Policy`` only when given; without it the call is
+            byte-identical to before this keyword existed.
     
     Returns:
         Credentials dict with AccessKeyId, SecretAccessKey, SessionToken
@@ -1615,6 +1647,10 @@ def assume_usecase_role(role_arn: str, external_id: str, session_name: str) -> D
         if external_id:
             assume_params['ExternalId'] = external_id
         
+        # Only include the session policy when the caller narrows the session
+        if session_policy is not None:
+            assume_params['Policy'] = json.dumps(session_policy)
+        
         response = sts_client.assume_role(**assume_params)
         return response['Credentials']
     except ClientError as e:
@@ -1634,7 +1670,7 @@ def assume_cross_account_role(role_arn: str, external_id: str, session_name: str
     return assume_usecase_role(role_arn, external_id, session_name)
 
 
-def create_boto3_client(service_name: str, credentials: Dict, region: str = None) -> Any:
+def create_boto3_client(service_name: str, credentials: Dict, region: str = None, config: Any = None) -> Any:
     """
     Create a boto3 client with the given credentials.
     
@@ -1645,17 +1681,20 @@ def create_boto3_client(service_name: str, credentials: Dict, region: str = None
         service_name: AWS service name (e.g., 's3', 'sagemaker', 'iot')
         credentials: Credentials dict from assume_usecase_role
         region: AWS region (optional)
+        config: Optional botocore.config.Config passed to boto3.client; when None
+            the client is created exactly as before (no config argument)
     
     Returns:
         boto3 client for the specified service
     """
+    extra = {'config': config} if config is not None else {}
     # Check if this is the special marker for default credentials
     if credentials.get('is_default_credentials'):
         # Use default credentials (Lambda execution role)
         if region:
-            return boto3.client(service_name, region_name=region)
+            return boto3.client(service_name, region_name=region, **extra)
         else:
-            return boto3.client(service_name)
+            return boto3.client(service_name, **extra)
     
     # Use the provided credentials
     client_params = {
@@ -1669,7 +1708,7 @@ def create_boto3_client(service_name: str, credentials: Dict, region: str = None
     if region:
         client_params['region_name'] = region
     
-    return boto3.client(service_name, **client_params)
+    return boto3.client(service_name, **client_params, **extra)
 
 
 def cors_headers() -> Dict[str, str]:
@@ -2301,19 +2340,25 @@ def portal_owned_buckets() -> FrozenSet[str]:
     """Buckets the portal owns for all use cases; never a member of any
     allowed set, never attachable (design §1.3).
 
-    The artifacts bucket (PORTAL_ARTIFACTS_BUCKET) and the Greengrass
+    The artifacts bucket (PORTAL_ARTIFACTS_BUCKET), the Greengrass
     component bucket (COMPONENT_BUCKET, or the `{prefix}-{region}-{account}`
-    derivation of shared_components.py when PORTAL_ACCOUNT_ID is set).
-    Empty names are omitted. The component name comes from
-    `component_bucket_name()`, called only when COMPONENT_BUCKET or
-    PORTAL_ACCOUNT_ID is set, so with neither set no component bucket is
-    contributed.
+    derivation of shared_components.py when PORTAL_ACCOUNT_ID is set) and
+    the workflow telemetry lake `edgecv-portal-telemetry-{account}-{region}`
+    (workflow-telemetry-dashboards design §7.5, tasks.md decision Q6: derived
+    from the same environment, so no new key is needed). Empty names are
+    omitted. The component name comes from `component_bucket_name()`, called
+    only when COMPONENT_BUCKET or PORTAL_ACCOUNT_ID is set, so with neither
+    set no component bucket is contributed.
     """
     artifacts = os.environ.get('PORTAL_ARTIFACTS_BUCKET', '')
     component = (component_bucket_name()
                  if os.environ.get('COMPONENT_BUCKET') or os.environ.get('PORTAL_ACCOUNT_ID')
                  else '')
-    return frozenset(name for name in (artifacts, component) if name)
+    telemetry_lake = (
+        f"edgecv-portal-telemetry-{os.environ.get('PORTAL_ACCOUNT_ID', '')}-"
+        f"{os.environ.get('AWS_REGION', 'us-east-1')}"
+        if os.environ.get('PORTAL_ACCOUNT_ID') else '')
+    return frozenset(name for name in (artifacts, component, telemetry_lake) if name)
 
 
 def allowed_s3_buckets(usecase: Dict) -> FrozenSet[str]:
@@ -2414,7 +2459,8 @@ def _select_s3_role_for_bucket(usecase: Dict, bucket_name: str) -> Tuple[Optiona
     return role_arn, external_id
 
 
-def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str = 'portal-s3-access'):
+def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str = 'portal-s3-access',
+                             session_policy: Optional[Dict] = None):
     """
     Get an S3 client with the correct credentials for accessing a bucket.
     
@@ -2428,13 +2474,22 @@ def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str 
         bucket_name: S3 bucket name to access
         session_name: STS session name for role assumption (recorded as the
             `purpose` of a refusal)
+        session_policy: Optional IAM policy document forwarded to
+            `assume_usecase_role` (sent to STS only when given). Without it
+            the `assume_usecase_role` call is the pre-keyword three-argument
+            call, so every pre-existing caller and test double of that
+            function keeps working unchanged.
     
     Returns:
         boto3 S3 client with appropriate credentials
     """
     assert_bucket_allowed(usecase, bucket_name, purpose=session_name)
     role_arn, external_id = _select_s3_role_for_bucket(usecase, bucket_name)
-    credentials = assume_usecase_role(role_arn, external_id, session_name)
+    if session_policy is None:
+        credentials = assume_usecase_role(role_arn, external_id, session_name)
+    else:
+        credentials = assume_usecase_role(role_arn, external_id, session_name,
+                                          session_policy=session_policy)
     return create_boto3_client('s3', credentials)
 
 

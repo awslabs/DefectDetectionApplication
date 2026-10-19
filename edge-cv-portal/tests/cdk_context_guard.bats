@@ -116,6 +116,13 @@ setup() {
   unset PORTAL_REGISTRY_ENFORCED
   # The deploy scripts run npm ci / npm install / npm run build.
   _install_stub "$PORTAL_BIN/npm"
+  # deploy-frontend.sh, deploy_portal_fixes.sh and deploy-portal.sh stop before
+  # any step without a region and without a trusted UseCase account list
+  # (scripts/portal-trusted-accounts.sh); seed both so the enforcement context
+  # under test is what decides each outcome.
+  export AWS_REGION=us-east-1
+  trusted_param_found 123456789012
+  install_real_if_present scripts/portal-trusted-accounts.sh
 }
 teardown() { portal_harness_teardown; }
 

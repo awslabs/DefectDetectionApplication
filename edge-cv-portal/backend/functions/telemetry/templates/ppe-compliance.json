@@ -1,0 +1,115 @@
+{
+  "id": "ppe-compliance",
+  "version": 1,
+  "label": "PPE compliance",
+  "description": "The generic detector panels plus violations by reason, compliant and violating people, clips per hour and violation events.",
+  "requires": {
+    "blocks": [
+      "runs",
+      "detections"
+    ],
+    "extensions": [
+      "ppe"
+    ]
+  },
+  "panels": [
+    {
+      "id": "runs",
+      "title": "Runs per minute",
+      "chart": "area",
+      "measures": [
+        "runs_completed",
+        "runs_failed",
+        "runs_dropped"
+      ]
+    },
+    {
+      "id": "latency",
+      "title": "Latency",
+      "chart": "line",
+      "measures": [
+        "latency_p50_ms",
+        "latency_p95_ms"
+      ]
+    },
+    {
+      "id": "detections",
+      "title": "Detections per class",
+      "chart": "stacked-bar",
+      "measures": [
+        "detections_class_total"
+      ]
+    },
+    {
+      "id": "people",
+      "title": "People seen",
+      "chart": "line",
+      "measures": [
+        "people_seen_max"
+      ]
+    },
+    {
+      "id": "model-state",
+      "title": "Model state",
+      "chart": "stacked-bar-states",
+      "measures": [
+        "model_state_worst"
+      ],
+      "note": "one series per state; each bucket contributes 1 to the series of its model_state_worst; NONE is not drawn"
+    },
+    {
+      "id": "model-waits",
+      "title": "Model waits",
+      "chart": "mixed-line-bar",
+      "measures": [
+        "model_waits",
+        "model_wait_ms"
+      ],
+      "bars": [
+        "model_waits"
+      ],
+      "lines": [
+        "model_wait_ms"
+      ]
+    },
+    {
+      "id": "violations-by-reason",
+      "title": "Violations by reason",
+      "chart": "stacked-bar",
+      "measures": [
+        "ppe_reason_frames"
+      ]
+    },
+    {
+      "id": "people-compliance",
+      "title": "People compliant and violating",
+      "chart": "line",
+      "measures": [
+        "ppe_people_compliant_max",
+        "ppe_people_violating_max"
+      ]
+    },
+    {
+      "id": "clips",
+      "title": "Clips per hour",
+      "chart": "bar",
+      "measures": [
+        "events_clip_ready"
+      ]
+    },
+    {
+      "id": "violation-events",
+      "title": "Violation events",
+      "chart": "bar",
+      "measures": [
+        "events_violation_confirmed"
+      ]
+    }
+  ],
+  "tiles": [
+    "now",
+    "health",
+    "clips",
+    "live"
+  ]
+}

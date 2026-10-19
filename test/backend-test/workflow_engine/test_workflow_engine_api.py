@@ -222,3 +222,71 @@ class TestExecutorHook:
             assert done.wait(timeout=5)
         finally:
             executor.set_executor(None)
+
+
+class TestDebugField:
+    """workflow-debug-mode R2.7 (tasks.md 2.8): the additive ``debug`` field
+    of a registration payload comes from the Debug_Agent's status and is
+    absent while no agent runs, so every pre-existing key is unchanged."""
+
+    PRE_FEATURE_KEYS = {
+        "registrationId", "workflowId", "name", "version", "arch",
+        "artifactPath", "status", "registeredAt",
+    }
+
+    def test_absent_without_an_agent_and_pre_existing_keys_unchanged(self, client, session_factory):
+        from workflow_engine.telemetry.debug import agent as debug_agent
+
+        seed_registration(session_factory, "wf-a:1", "registered")
+        debug_agent.set_agent(None)
+        body = client.get("/workflows/registrations").json()
+        assert set(body[0]) == self.PRE_FEATURE_KEYS
+        detail = client.get("/workflows/registrations/wf-a:1").json()
+        assert "debug" not in detail
+
+    def test_present_and_additive_with_an_agent(self, client, session_factory):
+        from workflow_engine.telemetry.debug import agent as debug_agent
+
+        seed_registration(session_factory, "wf-a:1", "registered")
+        seed_registration(session_factory, "wf-b:2", "registered")
+
+        class FakeSessions:
+            def status(self):
+                return {"wf-a": {"active": True, "expiresAt": 1_792_078_662_000,
+                                 "state": "active", "sessionId": "s"}}
+
+        class FakeAgent:
+            sessions = FakeSessions()
+
+        debug_agent.set_agent(FakeAgent())
+        try:
+            body = client.get("/workflows/registrations").json()
+        finally:
+            debug_agent.set_agent(None)
+        by_id = {item["registrationId"]: item for item in body}
+        assert set(by_id["wf-a:1"]) == self.PRE_FEATURE_KEYS | {"debug"}
+        assert by_id["wf-a:1"]["debug"] == {"active": True, "expiresAt": 1_792_078_662_000}
+        assert by_id["wf-b:2"]["debug"] == {"active": False, "expiresAt": None}
+        for key in self.PRE_FEATURE_KEYS:
+            assert key in by_id["wf-a:1"]
+        assert by_id["wf-a:1"]["status"] == "registered"
+
+    def test_a_failing_agent_status_never_breaks_the_listing(self, client, session_factory):
+        from workflow_engine.telemetry.debug import agent as debug_agent
+
+        seed_registration(session_factory, "wf-a:1", "registered")
+
+        class BrokenSessions:
+            def status(self):
+                raise RuntimeError("boom")
+
+        class BrokenAgent:
+            sessions = BrokenSessions()
+
+        debug_agent.set_agent(BrokenAgent())
+        try:
+            response = client.get("/workflows/registrations")
+        finally:
+            debug_agent.set_agent(None)
+        assert response.status_code == 200
+        assert response.json()[0]["debug"] == {"active": False, "expiresAt": None}

@@ -295,7 +295,11 @@ def test_portal_owned_buckets_calls_the_helper_only_under_its_guard(component_en
     assert recorder.calls == []
 
     component_env.setenv("PORTAL_ACCOUNT_ID", PORTAL)
-    assert su.portal_owned_buckets() == frozenset({"arts", f"dda-component-us-east-1-{PORTAL}"})
+    # With the account set the owned set also names the workflow telemetry
+    # lake (workflow-telemetry-dashboards design §7.5), derived from the same
+    # environment; the component name still comes from the helper.
+    assert su.portal_owned_buckets() == frozenset({
+        "arts", f"dda-component-us-east-1-{PORTAL}", f"edgecv-portal-telemetry-{PORTAL}-us-east-1"})
     component_env.delenv("PORTAL_ACCOUNT_ID")
     component_env.setenv("COMPONENT_BUCKET", "comp-explicit")
     assert su.portal_owned_buckets() == frozenset({"arts", "comp-explicit"})
@@ -306,7 +310,8 @@ def test_portal_owned_buckets_names_the_helpers_result(component_env):
     component_env.setenv("PORTAL_ACCOUNT_ID", PORTAL)
     component_env.setenv("AWS_REGION", "eu-west-1")
     component_env.setenv("COMPONENT_BUCKET_PREFIX", "custom-prefix")
-    assert su.portal_owned_buckets() == frozenset({su.component_bucket_name()})
+    assert su.portal_owned_buckets() == frozenset({
+        su.component_bucket_name(), f"edgecv-portal-telemetry-{PORTAL}-eu-west-1"})
 
 
 # ---------------------------------------------------------------------------

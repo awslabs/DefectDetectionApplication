@@ -53,6 +53,43 @@ import type {
   SyntheticSessionSummary,
 } from '../pages/synthetic/types';
 import type {
+  CreateDebugSessionBody,
+  CreateDebugSessionResponse,
+  DebugConsoleLinkResponse,
+  DebugErrorBody,
+  DebugImageUrlResponse,
+  DebugLogQuery,
+  DebugLogResponse,
+  DebugSession,
+  ListDebugSessionsResponse,
+  StopDebugSessionResponse,
+} from '../pages/debug/types';
+import type {
+  ClipMediaResponse,
+  ClipsQuery,
+  CreateDashboardBody,
+  Dashboard,
+  DashboardClipsResponse,
+  DashboardEventsResponse,
+  DashboardNowResponse,
+  DashboardSeriesResponse,
+  DashboardWriteResponse,
+  DeleteDashboardResponse,
+  EventsQuery,
+  ListDashboardsResponse,
+  LiveFrameResponse,
+  LiveLeaseResponse,
+  PatchDashboardBody,
+  SeriesQuery,
+  TelemetryErrorBody,
+  TelemetryRejections,
+  TelemetrySchemasResponse,
+  TelemetrySettingsResponse,
+  TelemetrySettingsUpdate,
+  TelemetrySettingsUpdateResponse,
+  TelemetryTemplatesResponse,
+} from '../pages/telemetry/types';
+import type {
   ApplyCandidateBody,
   ApplyCandidateResponse,
   CancelScoreRunResponse,
@@ -100,6 +137,114 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+/**
+ * Typed refusal of the workflow debug routes (workflow-debug-mode design
+ * §7.2, §12). The debug API answers the simple envelope
+ * `{error, error_code, remedy?, ...detail keys}`, which `request` turns into
+ * an `ApiError` whose `details` is the whole body; the debug methods re-throw
+ * it as this class so callers can branch on `errorCode` (for example
+ * `registry_enforcement_required`), show the `remedy`, and honour
+ * `retryAfterMs` of a 429 `log_read_throttled`. The client never retries a
+ * 429 by itself: the tail backs off and the download pauses (design §8).
+ */
+export class DebugApiError extends Error {
+  readonly status: number | undefined;
+  readonly errorCode: string | undefined;
+  readonly remedy: string | undefined;
+  readonly retryAfterMs: number | undefined;
+  readonly body: Partial<DebugErrorBody>;
+
+  constructor(message: string, status: number | undefined, body: Partial<DebugErrorBody>) {
+    super(message);
+    this.name = 'DebugApiError';
+    this.status = status;
+    this.body = body;
+    this.errorCode = typeof body.error_code === 'string' ? body.error_code : undefined;
+    this.remedy = typeof body.remedy === 'string' ? body.remedy : undefined;
+    this.retryAfterMs =
+      typeof body.retry_after_ms === 'number' && Number.isFinite(body.retry_after_ms)
+        ? body.retry_after_ms
+        : undefined;
+  }
+
+  /** True for a 429 `log_read_throttled` (design §10.1). */
+  get isRateLimited(): boolean {
+    return this.status === 429;
+  }
+
+  /**
+   * Wraps the error `request` threw for a debug route. An `ApiError` carries
+   * the parsed body in `details`; any other error is returned unchanged.
+   */
+  static from(err: unknown): unknown {
+    if (err instanceof DebugApiError) return err;
+    if (err instanceof ApiError) {
+      const body = (err.details ?? {}) as Partial<DebugErrorBody>;
+      return new DebugApiError(err.message, err.status, body);
+    }
+    return err;
+  }
+}
+
+/** Type guard for the debug routes' typed refusal. */
+export function isDebugApiError(err: unknown): err is DebugApiError {
+  return err instanceof DebugApiError;
+}
+
+/**
+ * Typed refusal of the workflow telemetry routes
+ * (workflow-telemetry-dashboards design §11.2, §17). The telemetry API answers
+ * the simple envelope `{error, error_code, remedy?, field?, ...detail keys}`
+ * with lowercase codes (the Portal-wide 403 `INSUFFICIENT_PERMISSIONS` is the
+ * one upper-case exception); `request` turns it into an `ApiError` whose
+ * `details` is the whole body, and the telemetry methods re-throw it as this
+ * class so the tiles can branch on `errorCode` (`registry_enforcement_required`,
+ * `telemetry_disabled`, `live_viewing_limit`, `live_capacity_reached`,
+ * `range_too_long`, `device_not_recorded`, …) and show the `remedy`.
+ */
+export class TelemetryApiError extends Error {
+  readonly status: number | undefined;
+  readonly errorCode: string | undefined;
+  readonly remedy: string | undefined;
+  readonly field: string | undefined;
+  readonly reason: string | undefined;
+  readonly body: Partial<TelemetryErrorBody>;
+
+  constructor(message: string, status: number | undefined, body: Partial<TelemetryErrorBody>) {
+    super(message);
+    this.name = 'TelemetryApiError';
+    this.status = status;
+    this.body = body;
+    this.errorCode = typeof body.error_code === 'string' ? body.error_code : undefined;
+    this.remedy = typeof body.remedy === 'string' ? body.remedy : undefined;
+    this.field = typeof body.field === 'string' ? body.field : undefined;
+    this.reason = typeof body.reason === 'string' ? body.reason : undefined;
+  }
+
+  /** True for a 409 `registry_enforcement_required` (design §11.3). */
+  get isEnforcementRequired(): boolean {
+    return this.errorCode === 'registry_enforcement_required';
+  }
+
+  /**
+   * Wraps the error `request` threw for a telemetry route. An `ApiError`
+   * carries the parsed body in `details`; any other error is returned unchanged.
+   */
+  static from(err: unknown): unknown {
+    if (err instanceof TelemetryApiError) return err;
+    if (err instanceof ApiError) {
+      const body = (err.details ?? {}) as Partial<TelemetryErrorBody>;
+      return new TelemetryApiError(err.message, err.status, body);
+    }
+    return err;
+  }
+}
+
+/** Type guard for the telemetry routes' typed refusal. */
+export function isTelemetryApiError(err: unknown): err is TelemetryApiError {
+  return err instanceof TelemetryApiError;
 }
 
 // Use-case bucket configuration API types (spec:
@@ -1461,7 +1606,12 @@ class ApiService {
 
   private async request<T>(
     endpoint: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    // Observes the HTTP status of a successful answer before the body is
+    // parsed, for the one route whose status carries meaning beyond "ok"
+    // (the telemetry settings PUT answers 202 when the device shadows are
+    // written later, workflow-telemetry-dashboards design §10.2).
+    onStatus?: (status: number) => void
   ): Promise<T> {
     const token = localStorage.getItem('idToken');
     
@@ -1525,6 +1675,7 @@ class ApiService {
         );
       }
 
+      if (onStatus) onStatus(response.status);
       return response.json();
     } catch (err: any) {
       // Structured API errors carry code/details; re-throw untouched.
@@ -5479,6 +5630,376 @@ class ApiService {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // Workflow debug mode (workflow-debug-mode design §7.2; workflow_debug_api.py).
+  // Every route carries the Cognito authorizer and resolves the use case
+  // (from the path or the stored session) before `has_permission`:
+  // MANAGE_DEVICES to start and stop, VIEW_DEVICE_LOGS to read, PortalAdmin
+  // for the console link. Refusals arrive as `DebugApiError` (the simple
+  // `{error, error_code, remedy?}` envelope); a 429 is not retried here.
+
+  /** The debug routes' `request`: the same path, the typed refusal. */
+  private async debugRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    try {
+      return await this.request<T>(endpoint, options);
+    } catch (err) {
+      throw DebugApiError.from(err);
+    }
+  }
+
+  /**
+   * Start a session for one device or every registered device of the
+   * workflow (`POST /debug/usecases/{usecase_id}/sessions`, 201). Refusals:
+   * 400 `invalid_session` | `device_not_recorded` | `no_target_devices`,
+   * 409 `debug_session_limit` | `debug_session_exists` |
+   * `registry_enforcement_required` | `debug_images_unavailable`,
+   * 502 `debug_sink_unavailable`; each carries a `remedy` where one exists.
+   */
+  async createDebugSession(
+    usecaseId: string,
+    body: CreateDebugSessionBody
+  ): Promise<CreateDebugSessionResponse> {
+    return this.debugRequest<CreateDebugSessionResponse>(
+      `/debug/usecases/${encodeURIComponent(usecaseId)}/sessions`,
+      { method: 'POST', body: JSON.stringify(body) }
+    );
+  }
+
+  /**
+   * The use case's sessions, newest `expiresAt` first, 50 per page
+   * (`GET /debug/usecases/{usecase_id}/sessions?state=&next=`). The state
+   * filter applies to the page, so a filtered page may be short.
+   */
+  async listDebugSessions(
+    usecaseId: string,
+    params: { state?: 'pending' | 'active' | 'stopped' | 'expired'; next?: string } = {}
+  ): Promise<ListDebugSessionsResponse> {
+    const query = new URLSearchParams();
+    if (params.state) query.set('state', params.state);
+    if (params.next) query.set('next', params.next);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return this.debugRequest<ListDebugSessionsResponse>(
+      `/debug/usecases/${encodeURIComponent(usecaseId)}/sessions${suffix}`
+    );
+  }
+
+  /** One session with each device's `reported` state (`GET /debug/sessions/{id}`). */
+  async getDebugSession(sessionId: string): Promise<DebugSession> {
+    return this.debugRequest<DebugSession>(`/debug/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  /**
+   * Stop a live session (`DELETE /debug/sessions/{id}`): the shadow entry is
+   * removed on every device, the session becomes `stopped`. 409
+   * `debug_session_not_live` when it is not pending or active.
+   */
+  async stopDebugSession(sessionId: string): Promise<StopDebugSessionResponse> {
+    return this.debugRequest<StopDebugSessionResponse>(
+      `/debug/sessions/${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  /**
+   * One page of the Pair's debug log (`GET /debug/usecases/{usecase_id}/log`).
+   * Every query parameter of design §7.2 is serialized when given;
+   * `from`/`to` bound the write time and `next` is only valid within the same
+   * window. A 429 `log_read_throttled` surfaces as a `DebugApiError` carrying
+   * `retryAfterMs`; a 400 `invalid_token` means "repeat the window without a
+   * token" (design §8 step 4).
+   */
+  async getDebugLog(usecaseId: string, query: DebugLogQuery): Promise<DebugLogResponse> {
+    const params = new URLSearchParams();
+    params.set('device_id', query.device_id);
+    params.set('workflow_id', query.workflow_id);
+    const numeric: Array<keyof DebugLogQuery> = ['from', 'to', 'limit', 'ts_from', 'ts_to'];
+    for (const key of numeric) {
+      const value = query[key];
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        params.set(key, String(Math.trunc(value)));
+      }
+    }
+    const textual: Array<keyof DebugLogQuery> = ['next', 'execution_id', 'node_id', 'level', 'type'];
+    for (const key of textual) {
+      const value = query[key];
+      if (typeof value === 'string' && value !== '') {
+        params.set(key, value);
+      }
+    }
+    return this.debugRequest<DebugLogResponse>(
+      `/debug/usecases/${encodeURIComponent(usecaseId)}/log?${params.toString()}`
+    );
+  }
+
+  /**
+   * A 120 s presigned GET of a run's image
+   * (`GET /debug/sessions/{id}/images/{execution_id}?device_id=`). 409
+   * `registry_enforcement_required` while registry enforcement is off, 404
+   * `image_not_found` when the device uploaded none. `deviceId` is optional
+   * for a single-device session.
+   */
+  async getDebugImageUrl(
+    sessionId: string,
+    executionId: string,
+    deviceId?: string
+  ): Promise<DebugImageUrlResponse> {
+    const suffix = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : '';
+    return this.debugRequest<DebugImageUrlResponse>(
+      `/debug/sessions/${encodeURIComponent(sessionId)}/images/${encodeURIComponent(executionId)}${suffix}`
+    );
+  }
+
+  /**
+   * The CloudWatch console deep link of a device's stream
+   * (`GET /debug/sessions/{id}/console-link?device_id=`), PortalAdmin only
+   * (403 `INSUFFICIENT_PERMISSIONS` otherwise).
+   */
+  async getDebugConsoleLink(sessionId: string, deviceId?: string): Promise<DebugConsoleLinkResponse> {
+    const suffix = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : '';
+    return this.debugRequest<DebugConsoleLinkResponse>(
+      `/debug/sessions/${encodeURIComponent(sessionId)}/console-link${suffix}`
+    );
+  }
+
+  // Workflow telemetry dashboards (workflow-telemetry-dashboards design
+  // §8.3, §8.4, §9, §10.1, §11.2; telemetry_api.py). Every route carries the
+  // Cognito authorizer and resolves the use case (path, query, body or the
+  // stored Dashboard) before `has_permission`: dashboards:read to read,
+  // dashboards:manage to create and change, telemetry:manage for the
+  // settings and rejections, PortalAdmin for the account-wide rejections.
+  // Refusals arrive as `TelemetryApiError` (the simple `{error, error_code,
+  // remedy?}` envelope). Epoch milliseconds everywhere a time is sent.
+
+  /** The telemetry routes' `request`: the same path, the typed refusal. */
+  private async telemetryRequest<T>(
+    endpoint: string,
+    options: RequestInit = {},
+    onStatus?: (status: number) => void
+  ): Promise<T> {
+    try {
+      return await this.request<T>(endpoint, options, onStatus);
+    } catch (err) {
+      throw TelemetryApiError.from(err);
+    }
+  }
+
+  private telemetryDashboardPath(dashboardId: string, suffix = ''): string {
+    return `/telemetry/dashboards/${encodeURIComponent(dashboardId)}${suffix}`;
+  }
+
+  /** Serializes the given query parameters; integers truncated, empties dropped. */
+  private static telemetryQuery(params: Record<string, string | number | string[] | undefined | null>): string {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null) continue;
+      if (Array.isArray(value)) {
+        const joined = value.filter((v) => typeof v === 'string' && v !== '').join(',');
+        if (joined) query.set(key, joined);
+      } else if (typeof value === 'number') {
+        if (Number.isFinite(value)) query.set(key, String(Math.trunc(value)));
+      } else if (value !== '') {
+        query.set(key, value);
+      }
+    }
+    const text = query.toString();
+    return text ? `?${text}` : '';
+  }
+
+  /**
+   * The schema registry, the measure catalog, the three templates, the Now
+   * poll period and the cadence table (`GET /telemetry/schemas`; any
+   * authenticated user, design §8.1, §15.2 decision Q4).
+   */
+  async getTelemetrySchemas(): Promise<TelemetrySchemasResponse> {
+    return this.telemetryRequest<TelemetrySchemasResponse>('/telemetry/schemas');
+  }
+
+  /** The use case's settings and readiness checklist (`GET …/settings`; telemetry:manage, design §10.1). */
+  async getTelemetrySettings(usecaseId: string): Promise<TelemetrySettingsResponse> {
+    return this.telemetryRequest<TelemetrySettingsResponse>(
+      `/telemetry/usecases/${encodeURIComponent(usecaseId)}/settings`
+    );
+  }
+
+  /**
+   * Write the settings and the devices' control shadows (`PUT …/settings`).
+   * Answers 200 with the per-device shadow results, or 202 (`status: 202`,
+   * `pending_devices`, `message`) above 40 devices, when the maintenance
+   * function finishes the shadow writes within 5 minutes (design §10.2).
+   * Refusals: 400 `invalid_settings` (`field`), `region_not_supported`,
+   * `usecase_role_invalid`, `media_location_not_writable`, `bucket_not_allowed`.
+   */
+  async putTelemetrySettings(
+    usecaseId: string,
+    body: TelemetrySettingsUpdate
+  ): Promise<TelemetrySettingsUpdateResponse> {
+    let status = 200;
+    const answer = await this.telemetryRequest<TelemetrySettingsUpdateResponse>(
+      `/telemetry/usecases/${encodeURIComponent(usecaseId)}/settings`,
+      { method: 'PUT', body: JSON.stringify(body) },
+      (s) => {
+        status = s;
+      }
+    );
+    return { ...answer, status };
+  }
+
+  /**
+   * The templates with their availability for a workflow on devices
+   * (`GET …/templates?workflow_id=&device_ids=`; dashboards:manage, design §8.2).
+   */
+  async getTelemetryTemplates(
+    usecaseId: string,
+    params: { workflow_id?: string; device_ids?: string[] } = {}
+  ): Promise<TelemetryTemplatesResponse> {
+    const query = ApiService.telemetryQuery({ workflow_id: params.workflow_id, device_ids: params.device_ids });
+    return this.telemetryRequest<TelemetryTemplatesResponse>(
+      `/telemetry/usecases/${encodeURIComponent(usecaseId)}/templates${query}`
+    );
+  }
+
+  /**
+   * The rejection counters and samples of the last hour: the use case's
+   * (`GET /telemetry/usecases/{id}/rejections`; telemetry:manage) or, with
+   * `accountId`, the account-wide ones (`GET /telemetry/rejections?account_id=`;
+   * PortalAdmin only, design §9.1).
+   */
+  async getTelemetryRejections(scope: { usecaseId: string } | { accountId: string }): Promise<TelemetryRejections> {
+    if ('usecaseId' in scope) {
+      return this.telemetryRequest<TelemetryRejections>(
+        `/telemetry/usecases/${encodeURIComponent(scope.usecaseId)}/rejections`
+      );
+    }
+    return this.telemetryRequest<TelemetryRejections>(
+      `/telemetry/rejections${ApiService.telemetryQuery({ account_id: scope.accountId })}`
+    );
+  }
+
+  /** The use case's dashboards, newest first (`GET /telemetry/dashboards?usecase_id=`; dashboards:read). */
+  async listDashboards(usecaseId: string): Promise<ListDashboardsResponse> {
+    return this.telemetryRequest<ListDashboardsResponse>(
+      `/telemetry/dashboards${ApiService.telemetryQuery({ usecase_id: usecaseId })}`
+    );
+  }
+
+  /**
+   * Create a dashboard (`POST /telemetry/dashboards`, 201 `{dashboard, devices}`;
+   * dashboards:manage). Refusals: 400 `invalid_dashboard` (`field`),
+   * `device_not_recorded` (with the Device_Record_Remedy), 409
+   * `dashboard_name_taken`, `dashboard_limit_reached`, `dashboard_conflict`.
+   */
+  async createDashboard(body: CreateDashboardBody): Promise<DashboardWriteResponse> {
+    return this.telemetryRequest<DashboardWriteResponse>('/telemetry/dashboards', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** One dashboard (`GET /telemetry/dashboards/{id}`; dashboards:read). */
+  async getDashboard(dashboardId: string): Promise<Dashboard> {
+    return this.telemetryRequest<Dashboard>(this.telemetryDashboardPath(dashboardId));
+  }
+
+  /** Rename or re-device a dashboard (`PATCH /telemetry/dashboards/{id}`; dashboards:manage). */
+  async patchDashboard(dashboardId: string, body: PatchDashboardBody): Promise<DashboardWriteResponse> {
+    return this.telemetryRequest<DashboardWriteResponse>(this.telemetryDashboardPath(dashboardId), {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Delete a dashboard (`DELETE /telemetry/dashboards/{id}`; dashboards:manage). */
+  async deleteDashboard(dashboardId: string): Promise<DeleteDashboardResponse> {
+    return this.telemetryRequest<DeleteDashboardResponse>(this.telemetryDashboardPath(dashboardId), {
+      method: 'DELETE',
+    });
+  }
+
+  /** The Now and Health answer (`GET …/{id}/now`; dashboards:read, design §9.1). */
+  async getDashboardNow(dashboardId: string): Promise<DashboardNowResponse> {
+    return this.telemetryRequest<DashboardNowResponse>(this.telemetryDashboardPath(dashboardId, '/now'));
+  }
+
+  /**
+   * The chart series (`GET …/{id}/series?from=&to=[&device_id=][&measures=]`,
+   * design §8.3). `from` and `to` are epoch milliseconds; `device_id` and
+   * `measures` are the per-Device drill-down and test parameters: the pages
+   * make exactly one request per Dashboard per refresh with neither.
+   * Refusals: 400 `invalid_range`, `range_too_long` (400 days),
+   * `invalid_device`, `invalid_measure`.
+   */
+  async getDashboardSeries(dashboardId: string, query: SeriesQuery): Promise<DashboardSeriesResponse> {
+    const params = ApiService.telemetryQuery({
+      from: query.from,
+      to: query.to,
+      device_id: query.device_id,
+      measures: query.measures,
+    });
+    return this.telemetryRequest<DashboardSeriesResponse>(this.telemetryDashboardPath(dashboardId, `/series${params}`));
+  }
+
+  /**
+   * The Events list, newest first, 50 per page (`GET …/{id}/events`, design
+   * §8.4); `from`/`to` default to the last 24 hours (at most 30 days).
+   */
+  async getDashboardEvents(dashboardId: string, query: EventsQuery = {}): Promise<DashboardEventsResponse> {
+    const params = ApiService.telemetryQuery({
+      from: query.from,
+      to: query.to,
+      type: query.type,
+      device_id: query.device_id,
+      cursor: query.cursor,
+    });
+    return this.telemetryRequest<DashboardEventsResponse>(this.telemetryDashboardPath(dashboardId, `/events${params}`));
+  }
+
+  /** The clip gallery page, newest first, 25 per page (`GET …/{id}/clips`, design §9.2). */
+  async getDashboardClips(dashboardId: string, query: ClipsQuery = {}): Promise<DashboardClipsResponse> {
+    const params = ApiService.telemetryQuery({
+      from: query.from,
+      to: query.to,
+      reason: query.reason,
+      device_id: query.device_id,
+      cursor: query.cursor,
+    });
+    return this.telemetryRequest<DashboardClipsResponse>(this.telemetryDashboardPath(dashboardId, `/clips${params}`));
+  }
+
+  /**
+   * Three presigned URLs of a clip, valid 15 minutes (`GET …/clips/{clip_ref}/media`;
+   * dashboards:read and the registry-enforcement guard). 409
+   * `registry_enforcement_required` while enforcement is off, 409
+   * `clip_media_unavailable`, 404 `clip_not_found`.
+   */
+  async getClipMedia(dashboardId: string, clipRef: string): Promise<ClipMediaResponse> {
+    return this.telemetryRequest<ClipMediaResponse>(
+      this.telemetryDashboardPath(dashboardId, `/clips/${encodeURIComponent(clipRef)}/media`)
+    );
+  }
+
+  /**
+   * Take or renew the viewer's live slot for a device (`POST …/{id}/live-lease
+   * {device_id}`, design §9.3). 409 `telemetry_disabled` | `live_unavailable`
+   * | `live_viewing_limit` | `registry_enforcement_required`, 429
+   * `live_capacity_reached` (`reason` usecase_slots | device_live_limit),
+   * 502 `live_lease_failed`.
+   */
+  async acquireLiveLease(dashboardId: string, deviceId: string): Promise<LiveLeaseResponse> {
+    return this.telemetryRequest<LiveLeaseResponse>(this.telemetryDashboardPath(dashboardId, '/live-lease'), {
+      method: 'POST',
+      body: JSON.stringify({ device_id: deviceId }),
+    });
+  }
+
+  /**
+   * The newest live frame (`GET …/{id}/live?device_id=&have=`, design §9.3).
+   * `have` is the previous answer's `frame_token`; the answer is `frame: null`
+   * with the echoed token when nothing newer exists, so the tile keeps its image.
+   */
+  async getLiveFrame(dashboardId: string, deviceId: string, have?: string | null): Promise<LiveFrameResponse> {
+    const params = ApiService.telemetryQuery({ device_id: deviceId, have: have ?? undefined });
+    return this.telemetryRequest<LiveFrameResponse>(this.telemetryDashboardPath(dashboardId, `/live${params}`));
   }
 }
 

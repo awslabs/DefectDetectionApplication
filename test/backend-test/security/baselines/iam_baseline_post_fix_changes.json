@@ -191,6 +191,16 @@
       ],
       "refreshed_resources": [],
       "unfixed_snapshot_sha256": "385907f3aac00207e45ad851cc3fa7a11da0c61c8d72e2afd8a86991f19b9be2"
+    },
+    "EdgeCVPortalWorkflowDebugStack": {
+      "rescopes": [],
+      "refreshed_resources": [],
+      "unfixed_snapshot_sha256": "ee7e956dd3f27d402afd61c7a9781b1847c38317112eb294d12a0aac596cfce8"
+    },
+    "EdgeCVPortalTelemetryStack": {
+      "rescopes": [],
+      "refreshed_resources": [],
+      "unfixed_snapshot_sha256": "ee7e956dd3f27d402afd61c7a9781b1847c38317112eb294d12a0aac596cfce8"
     }
   }
 }

@@ -463,6 +463,7 @@ with open(src) as f:
 recipe['ComponentVersion'] = version
 
 deps = recipe.setdefault('ComponentDependencies', {})
+deps.setdefault('aws.greengrass.Cli', {'VersionRequirement': '>=2.6.0'})['DependencyType'] = 'SOFT'
 deps['aws.greengrass.DockerApplicationManager'] = {'VersionRequirement': '~2.0.0'}
 deps['aws.greengrass.TokenExchangeService'] = {'VersionRequirement': '~2.0.0'}
 

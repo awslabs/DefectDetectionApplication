@@ -48,7 +48,7 @@ from data_models.common import (
     ListFeatureConfigurationAPIModel
 )
 from endpoints.route.access_log_router import get_api_router
-from dda_triton import provider_visibility
+from dda_triton import load_watchdog, provider_visibility
 from dda_triton.triton_edge_client import TritonEdgeClient
 from utils import model_status_shadow
 from utils.constants import TRUE_VALUES
@@ -142,8 +142,10 @@ def get_gpu_status() -> dict:
         snapshot = __gpu_status_snapshot(statuses)
     else:
         # No Triton / empty repo: no models, never degraded (and the
-        # aggregator keeps the transition-logging state consistent).
-        snapshot = provider_visibility.device_gpu_status({}, {})
+        # aggregator keeps the transition-logging state consistent). The
+        # model-readiness and self-heal keys are reported too, with empty
+        # arrays (triton-model-cleanup-wedge D8).
+        snapshot = load_watchdog.build_model_status_snapshot({})
     try:
         model_status_shadow.report(snapshot)
     except Exception as e:
@@ -154,12 +156,10 @@ def get_gpu_status() -> dict:
 def __gpu_status_snapshot(statuses):
     """The ``device_gpu_status`` snapshot for ``statuses`` (model name ->
     Triton status): read each model's Active_Provider_Record (absence-
-    tolerant, Decision 6) and aggregate."""
-    records = {
-        name: provider_visibility.read_active_provider_record(name)
-        for name in statuses
-    }
-    return provider_visibility.device_gpu_status(records, statuses)
+    tolerant, Decision 6) and aggregate, plus the model-readiness and
+    self-heal keys (``load_watchdog.build_model_status_snapshot``, shared
+    with the Triton model-load watchdog; triton-model-cleanup-wedge D8)."""
+    return load_watchdog.build_model_status_snapshot(statuses)
 
 
 @router.get("/feature-configurations/models/{modelName}/start")

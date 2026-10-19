@@ -30,6 +30,7 @@ from utils import utils
 from utils.constants import INFERENCE_RECEIVED_TIMESTAMP
 from exceptions.api.gst_pipeline_exception import PipelineExecutionException, PipelineSyntaxException
 from dda_triton.native_calls import TRITON_NATIVE_LOCK
+from utils import run_activity
 from gstreamer.frame_stride import reconcile_to_caps_stride
 from resources.accessors.latency_time_accessor import LatencyTimeAccessor
 
@@ -214,6 +215,16 @@ class GstPipelineManager:
             if message.type != Gst.MessageType.TAG:
                 logger.info("Quitting loop")
                 loop.quit()
+
+        # Register the pipeline as a run in flight for the Triton self-heal
+        # (triton-model-cleanup-wedge D7). Nested inside an engine execution,
+        # a classic run, a capture task or a digital-input run this is a
+        # no-op; on its own it covers the operator's image-source previews.
+        ticket = run_activity.start_run(
+            "pipeline", "image-source-pipeline",
+            models=run_activity.models_from_launch(pipeline_str))
+        if ticket.refused is not None:
+            raise PipelineExecutionException(ticket.refused, status_code=503)
         try:
             Gst.init(None)
             # Create a GStreamer pipeline from the pipeline string
@@ -308,6 +319,7 @@ class GstPipelineManager:
                 pipeline.set_state(Gst.State.NULL)
                 logger.info("Pipeline set to NULL state")
             release_bus_watch(watched_bus, bus_handler_id)
+            run_activity.finish_run(ticket)
         return parsed_tag_values
 
     def parse_msg(self, msg, latency_metrics = None) -> dict:

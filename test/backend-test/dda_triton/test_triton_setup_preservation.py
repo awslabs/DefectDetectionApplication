@@ -52,6 +52,11 @@ EXPECTED_DDA_TRITON_COPIES = {
     (SOURCE_FOLDER + "constants.py", DEST_DDA_TRITON),
     (SOURCE_FOLDER + "model_config_pb2.py", DEST_DDA_TRITON),
     (SOURCE_FOLDER + "model_autostart_utils.py", DEST_DDA_TRITON),
+    # Added additively by triton-model-cleanup-wedge (task 3.6): the
+    # host-shared lock, record and repository-entry helpers.
+    (SOURCE_FOLDER + "model_locks.py", DEST_DDA_TRITON),
+    (SOURCE_FOLDER + "model_status_records.py", DEST_DDA_TRITON),
+    (SOURCE_FOLDER + "repo_entries.py", DEST_DDA_TRITON),
 }
 
 # Files copied to the aws_dda destination (Req 3.2).

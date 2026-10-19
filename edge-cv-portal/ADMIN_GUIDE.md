@@ -89,24 +89,36 @@ The portal uses two different scoping models depending on where data is stored:
 
 ### Prerequisites
 
-- AWS CLI configured with admin credentials
+- AWS CLI configured with admin credentials, with a region: a default region (`aws configure`) or `AWS_REGION` (`deploy-portal.sh` also takes `--region <region>`)
 - Node.js 18+, Python 3.11+
 - AWS CDK: `npm install -g aws-cdk`
+- Docker (the compute stack builds a Lambda container image during `cdk deploy`)
 
-### Deploy Portal Infrastructure
+### Deploy the Portal (One Command)
+
+Run the orchestrator from the `edge-cv-portal` directory with the Portal Account's credentials:
 
 ```bash
-cd edge-cv-portal/infrastructure
-npm install
-cdk bootstrap  # First time only
-cdk deploy --all --require-approval never
+cd edge-cv-portal
+./deploy-portal.sh single-account
 ```
 
-**Outputs to save:**
-- `ApiUrl` - Backend API endpoint
-- `UserPoolId` - Cognito User Pool ID
-- `UserPoolClientId` - Cognito Client ID
-- `DistributionDomainName` - CloudFront URL
+It checks the prerequisites (AWS CLI, credentials, region, Node.js, CDK), bootstraps CDK if needed, and then runs the existing scripts in order:
+
+1. `./deploy-account-role.sh single-account` — IAM roles and policies
+2. `infrastructure/deploy-auth.sh` — the Cognito `EdgeCVPortalAuthStack`
+3. `./deploy-infrastructure.sh` — the main CDK stacks (`cdk deploy --all`)
+4. `./deploy-frontend.sh` — generates `frontend/public/config.json` from the stack outputs, builds and publishes the frontend, and redeploys the compute stack with the CloudFront domain
+
+All output goes to the terminal and to `edge-cv-portal/deploy-portal-<UTC-timestamp>.log` (`--log-file <path>` to override). If a step fails, the command stops, prints the failed step and the log path, and rolls nothing back; fix the cause and re-run the same command. On success it prints a Deployment Summary with the Portal URL, the created role ARNs and each step's outcome.
+
+Options: `--profile <name>`, `--region <region>`, `--sso` (SSO on the auth stack; export the `SSO_*` variables first, see [SSO_SETUP.md](infrastructure/SSO_SETUP.md)) and `--non-interactive` (CI). `./deploy-portal.sh --help` lists them all.
+
+**Outputs you need below:** the `EdgeCVPortalAuthStack` outputs (`UserPoolId`, `UserPoolClientId`, `AuthConfig`) are printed by the auth step and recorded in the log; the Portal URL (`DistributionDomainName`) is in the Deployment Summary.
+
+**Trusted UseCase accounts.** The portal may assume `DDAPortalAccessRole` only in the accounts on its trusted UseCase account list, which also bounds the detector-export image pull and the accounts that may send to the portal's device queues. On a first deploy with no list configured, `deploy-portal.sh single-account` uses the Portal Account ID and stores it in the SSM parameter `/dda-portal/trusted-usecase-account-ids` (it never overwrites an existing parameter). Every run resolves the list once, before any step: the CDK context value `trustedUseCaseAccountIds` (`infrastructure/cdk.json`, `infrastructure/cdk.context.json`, `~/.cdk.json`), else `TRUSTED_USECASE_ACCOUNT_IDS`, else the SSM parameter, else the list the deployed portal stacks grant; on a deployed portal it never falls back to the Portal Account ID, and it stops before any step when the list cannot be determined. The list and its source are printed (with a `⚠️  <stack>: removes <ids>` line when the deploy drops an account the deployed stacks trust, and a `⚠️  <stack>: adds <ids> (the portal may then assume their DDAPortalAccessRole)` line when it trusts a new one), logged, and shown in the Deployment Summary. Keep a multi-account list in the SSM parameter: [UseCase Account Setup](#usecase-account-setup). Anyone who can write the parameter decides, at the next deploy, which accounts' `DDAPortalAccessRole` the portal may assume, so restrict `ssm:PutParameter` on it to the administrators who deploy the portal.
+
+**Manual path.** The same four scripts can be run by hand, in that order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`). On an account/region that is not bootstrapped yet, bootstrap it first from `edge-cv-portal/`, which has no `cdk.json`, so nothing is synthesized: `cdk bootstrap aws://<ACCOUNT_ID>/<REGION>` (from `infrastructure/` the CLI would synthesize the portal app first, which fails until `npm ci` has run there and the trusted list is set). `deploy-auth.sh` and `deploy-infrastructure.sh` synthesize the whole portal app, so the trusted list must be set before you run them: the SSM parameter above (a first `./deploy-portal.sh single-account` creates it), `TRUSTED_USECASE_ACCOUNT_IDS` (that run only), or the CDK context value; otherwise they stop with `ComputeStack requires a non-empty trustedUseCaseAccountIds list`. `deploy-frontend.sh` resolves the list like `deploy-portal.sh` and, with none configured, uses the list the deployed stacks grant. `deploy-infrastructure.sh` has no such fallback: it deploys the list the CDK app reads (the CDK context value, `TRUSTED_USECASE_ACCOUNT_IDS`, then the SSM parameter) and prints it first, with the same `⚠️` lines for each account the deploy removes or adds. This is useful to repeat a single step, for example `./deploy-frontend.sh` after a frontend change. Run on their own, the scripts use `AWS_REGION` (or `AWS_DEFAULT_REGION`) when set, otherwise the CLI's default region; `deploy-auth.sh` also takes `--region`.
 
 ### Bucket compliance before deploying
 
@@ -163,26 +175,6 @@ bucket choose one remedy:
 listing is bounded by a list resolved at deploy time, so a bucket registered
 after the deploy reports the remedy "redeploy the portal to browse this bucket";
 run `./deploy-infrastructure.sh` again to include it.
-
-### Configure Frontend
-
-```bash
-cd ../frontend
-npm install
-
-# Create config with CDK outputs
-cat > public/config.json << EOF
-{
-  "apiUrl": "<API_URL>",
-  "userPoolId": "<USER_POOL_ID>",
-  "userPoolClientId": "<CLIENT_ID>",
-  "region": "us-east-1"
-}
-EOF
-
-npm run build
-./deploy-frontend.sh
-```
 
 ### Create Admin User
 
@@ -241,35 +233,70 @@ aws dynamodb put-item \
 
 ### UseCase Account Setup
 
-Run in the **UseCase Account** (where ML workloads will run):
+**Single-account setup:** nothing to do here. `./deploy-portal.sh single-account` ([Deploy the Portal](#deploy-the-portal-one-command)) already created the `DDASageMakerExecutionRole`, and its first deploy put the Portal Account ID on the trusted UseCase account list. Continue with [Tag S3 Buckets](#tag-s3-buckets).
+
+**Multi-account setup:** run the orchestrator with the `usecase` topology in the **UseCase Account** (where ML workloads will run), with that account's credentials:
 
 ```bash
 cd edge-cv-portal
-./deploy-account-role.sh
+./deploy-portal.sh usecase
 ```
 
-Select option `1` for UseCase Account Role.
+It runs only the account-role step and prompts for the Portal Account ID and the External ID (leave the External ID blank to generate one). Non-interactive (CI):
+
+```bash
+./deploy-portal.sh usecase --non-interactive \
+    --portal-account-id 123456789012 --external-id abc-123
+```
 
 **What gets created:**
 - `DDAPortalAccessRole` - Cross-account access role
-- `DDASageMakerExecutionRole` - For training jobs
-- `DDAGroundTruthExecutionRole` - For labeling jobs
+- `DDASageMakerExecutionRole` - For training, compilation and labeling jobs
+- `DDAPortalComponentAccessPolicy` - For Greengrass devices to download component artifacts
 
 **Save these outputs:**
 - Role ARN
-- External ID (generated automatically)
+- External ID
 - SageMaker Execution Role ARN
+
+The Deployment Summary prints the Role ARN and the External ID. All three are saved in the generated `usecase-account-*-config.txt` file (written to `edge-cv-portal/`); you'll upload it when creating the UseCase.
+
+**Then trust the account in the Portal Account (before creating the UseCase).** The portal can assume `DDAPortalAccessRole` only in accounts on its trusted list ([Deploy the Portal](#deploy-the-portal-one-command)). With the Portal Account's credentials, add the UseCase Account ID to the list and redeploy the portal:
+
+```bash
+# In the Portal Account, in the portal's region
+# 1. The list the portal trusts now:
+aws ssm get-parameter --name /dda-portal/trusted-usecase-account-ids \
+    --query Parameter.Value --output text --region <region>
+#    ParameterNotFound? Then it is the list the deployed portal stacks grant:
+aws cloudformation get-template --stack-name EdgeCVPortalComputeStack --region <region> \
+    --query TemplateBody --output json | grep -oE ':iam::[0-9]{12}:role/DDAPortalAccessRole"' | cut -d: -f4 | sort -u
+# 2. Store it with the UseCase Account ID added:
+aws ssm put-parameter --name /dda-portal/trusted-usecase-account-ids --type String --overwrite \
+    --value "<current-ids>,<usecase-account-id>" --region <region>
+# 3. Redeploy the portal with it:
+cd edge-cv-portal
+./deploy-portal.sh single-account --region <region>
+```
+
+- The value is a comma-separated list of 12-digit account IDs. Keep the IDs already on it; the Portal Account ID needs to stay only if use cases also run in the Portal Account. Removing an account is the same edit. Before its first step the deploy prints `⚠️  <stack>: adds <id> (the portal may then assume their DDAPortalAccessRole)` for each account it adds and `⚠️  <stack>: removes <id>` for each one it drops; `./deploy-infrastructure.sh`, `./deploy-frontend.sh` and `infrastructure/deploy_portal_fixes.sh` print the same lines, and a `cdk deploy` you run yourself prints neither.
+- Deploy the UseCase Account stack (above) before you redeploy: the list also names each account's `DDASageMakerExecutionRole` in the portal's detector-export repository policy.
+- Keep a multi-account list in the SSM parameter. `export TRUSTED_USECASE_ACCOUNT_IDS=<ids>` overrides it for one run only: a later run without the variable, including `./deploy-infrastructure.sh` on its own or a `cdk deploy` you run in `infrastructure/`, deploys the parameter's list again and drops every account only the variable added. With no parameter, only `./deploy-portal.sh single-account`, `./deploy-frontend.sh` and `infrastructure/deploy_portal_fixes.sh` fall back to the list the deployed stacks grant; `deploy-auth.sh`, `deploy-infrastructure.sh` and `cdk` stop with `ComputeStack requires a non-empty trustedUseCaseAccountIds list`. A `trustedUseCaseAccountIds` CDK context value in `infrastructure/cdk.json`, `infrastructure/cdk.context.json` or `~/.cdk.json` overrides both.
+- Restrict `ssm:PutParameter` on `/dda-portal/trusted-usecase-account-ids` to the administrators who deploy the portal: whoever can write it decides, at the next deploy, which accounts' `DDAPortalAccessRole` the portal may assume.
+- Until the redeploy has finished, the onboarding wizard's **Verify Role** fails with `AccessDenied: ` followed by STS's message that the portal's role is not authorized to perform `sts:AssumeRole` on the UseCase Account's `DDAPortalAccessRole`, and creating the use case answers `400 bucket_not_eligible`, shown as "The portal could not assume the role configured for this bucket". A wrong External ID gives the same errors.
+
+> `./deploy-account-role.sh` can still be run directly from `edge-cv-portal/` (menu option `1` = single-account, `2` = UseCase Account, `3` = Data Account); it is the script `deploy-portal.sh` runs for you.
 
 ### Data Account Setup (Optional)
 
-If storing training data in a separate account:
+If storing training data in a separate account, run the `data` topology in the **Data Account**:
 
 ```bash
 cd edge-cv-portal
-./deploy-account-role.sh
+./deploy-portal.sh data
 ```
 
-Select option `2` for Data Account Role.
+It prompts for the Portal Account ID, the External ID and, optionally, the data bucket names. For CI add `--non-interactive --portal-account-id <id> --external-id <id>`, and optionally `--data-buckets <bucket1,bucket2>`.
 
 **What gets created:**
 - `DDAPortalDataAccessRole` - For Portal to browse data and update bucket policies
@@ -278,6 +305,8 @@ Select option `2` for Data Account Role.
 **Save these outputs:**
 - Portal Access Role ARN
 - External ID
+
+Both are printed in the Deployment Summary and saved in the generated `data-account-*-config.txt` file (written to `edge-cv-portal/`). To register the account, upload that file under **Settings** → **Data Accounts** → **Add Data Account** to auto-fill the fields.
 
 **Note**: The bucket policy for SageMaker access is **automatically configured** when you onboard the UseCase in the portal. The Portal assumes the Data Account role and adds the necessary bucket policy statements.
 
@@ -408,6 +437,8 @@ aws sagemaker list-algorithms --name-contains "computer-vision-defect-detection"
 │  1. Deploy UseCaseAccountStack (in UseCase Account)                     │
 │     └─> Creates: DDAPortalAccessRole, DDASageMakerExecutionRole,        │
 │                  DDAPortalComponentAccessPolicy                          │
+│     └─> Then, in the Portal Account: add its ID to the trusted          │
+│         UseCase account list, re-run deploy-portal.sh single-account    │
 │                                                                          │
 │  2. (Optional) Deploy DataAccountStack (in Data Account)                │
 │     └─> Creates: DDAPortalDataAccessRole                                │
@@ -465,13 +496,15 @@ aws cognito-idp admin-create-user \
 
 ### Step 2: Deploy UseCase Account Role
 
-Have the customer run in their AWS account:
+Have the customer run in their AWS account (details in [UseCase Account Setup](#usecase-account-setup)):
 
 ```bash
-./deploy-account-role.sh
-# Select option 1 (UseCase Account)
-# Enter Portal Account ID when prompted
+cd edge-cv-portal
+./deploy-portal.sh usecase
+# Enter the Portal Account ID and External ID when prompted
 ```
+
+Then, in the Portal Account, add the customer's UseCase Account ID to the trusted UseCase account list and redeploy the portal (`./deploy-portal.sh single-account`), as described in [UseCase Account Setup](#usecase-account-setup). Until then the portal cannot assume the customer's `DDAPortalAccessRole`.
 
 ### Step 3: Tag the Customer's S3 Buckets and Enable ABAC
 
@@ -950,7 +983,11 @@ permission denial.
 
 ### "Access Denied" on Cross-Account Operations
 
-**Cause**: External ID mismatch between IAM role and DynamoDB.
+**Cause 1**: the UseCase Account is not on the portal's trusted UseCase account list, so the portal's roles may not assume its `DDAPortalAccessRole`. **Verify Role** in the onboarding wizard shows `AccessDenied: ` followed by STS's message that the portal's role is not authorized to perform `sts:AssumeRole` on that role, and creating the use case answers `400 bucket_not_eligible` ("The portal could not assume the role configured for this bucket").
+
+**Fix**: add the account ID to the list and redeploy the portal, as in [UseCase Account Setup](#usecase-account-setup). The `Trusted UseCase accounts:` line that `./deploy-portal.sh single-account` prints before its first step shows the list it deploys.
+
+**Cause 2**: External ID mismatch between IAM role and DynamoDB.
 
 **Fix**:
 ```bash

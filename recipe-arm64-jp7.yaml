@@ -11,6 +11,12 @@ ComponentDependencies:
     VersionRequirement: ">=2.2.0"
   aws.greengrass.Cli:
     VersionRequirement: ">=2.6.0"
+    # SOFT (triton-model-cleanup-wedge): the CLI restarts whenever a
+    # deployment merges configuration. A HARD dependency made each restart
+    # restart LocalServer and, through their HARD dependency on it, every
+    # model component. LocalServer needs only the CLI's IPC operations
+    # (restart, list, component details) at call time.
+    DependencyType: SOFT
   # The backend fetches Portal-managed stream credentials with the device's
   # TES credentials (rtsp-rtmp-stream-cameras 17.1, finding 25). The ECR
   # publish path adds the same dependency.
@@ -23,6 +29,8 @@ ComponentConfiguration:
     StationName: "DDA_Station_ARM64_JP7"
     ComponentName: "aws.edgeml.dda.LocalServer.arm64JP7"
     LocalLoginEnabled: "false"
+    # Self-heal is on by default; merge "false" to opt a device out (triton-model-cleanup-wedge).
+    ModelLoadSelfHealEnabled: "true"
     accessControl:
       aws.greengrass.ShadowManager:
         'aws.edgeml.dda.LocalServer.arm64JP7:shadow:1':

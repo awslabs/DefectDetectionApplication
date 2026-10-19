@@ -19,6 +19,18 @@ export interface AppConfig {
   userPoolClientId: string;
   region: string;
   branding: BrandingConfig;
+  /**
+   * Mirror of the Portal handlers' PORTAL_REGISTRY_ENFORCED (a CDK context
+   * value, default off). The frontend has no route that reports it, so the
+   * deployed config.json carries it; absent means off, the same default the
+   * backend applies. The workflow debug pages read it (workflow-debug-mode
+   * design §7.2 "two switches"): while it is off they show the warning
+   * "Registry enforcement is off" and leave the images control disabled,
+   * which is what the API enforces with 409 registry_enforcement_required.
+   * The server stays authoritative: a wrong value here only changes the
+   * banner, never what the API accepts.
+   */
+  registryEnforced?: boolean;
 }
 
 // Default configuration for development
@@ -52,6 +64,8 @@ export const loadConfig = async (): Promise<AppConfig> => {
 };
 
 export const getConfig = (): AppConfig => config;
+/** True only when the deployed config says registry enforcement is on. */
+export const isRegistryEnforced = (): boolean => config.registryEnforced === true;
 
 /**
  * Build metadata baked in at build time (see vite.config.ts `define`).

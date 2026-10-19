@@ -60,10 +60,13 @@ the window is short (design.md Decision 1 defers it, mirroring
 window harmless; a reconciler would only make it shorter, and the INFO wait
 logging below is the evidence that decides whether it is ever worth building.
 """
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
+
+from dda_triton.constants import TRITON_MODEL_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +92,11 @@ POLL_INTERVAL_S = 3.0
 #: small times out on a load that is progressing perfectly well, which is the
 #: failure mode this gate exists to remove.
 READY_TIMEOUT_S = 600.0
+
+#: How long an UNKNOWN model's repository entry must have been unchanged
+#: before the gate requests its load (triton-model-cleanup-wedge D4); the
+#: same value as ``workflow_engine.model_gate.QUIET_PERIOD_S``.
+ENTRY_QUIET_PERIOD_S = 10.0
 
 
 @dataclass(frozen=True)
@@ -130,6 +138,50 @@ def _repo_has_models() -> bool:
     return bool(triton_repo_has_models())
 
 
+def _inspect_entry(target: str):
+    """The repository entry of ``target`` in :data:`TRITON_MODEL_DIR`
+    (read at call time), judged exactly as the continuous ModelGate judges
+    it (``dda_triton.repo_entries.inspect_entry``)."""
+    from dda_triton import repo_entries
+
+    return repo_entries.inspect_entry(
+        TRITON_MODEL_DIR, target, wall=time.time, quiet_period_s=ENTRY_QUIET_PERIOD_S
+    )
+
+
+def _stall_for(target: str):
+    """The watchdog's stall of ``target`` (``load_watchdog.stall_for``), or
+    None; contained, so a missing watchdog means today's wait."""
+    try:
+        from dda_triton import load_watchdog
+    except Exception:  # noqa: BLE001 - no watchdog, no stall to report
+        return None
+    return load_watchdog.stall_for(target)
+
+
+def _gate_wait(target: str):
+    """``run_activity.gate_wait(target)``, or a no-op context when the
+    registry cannot be imported (the gate never depends on it)."""
+    try:
+        from utils import run_activity
+    except Exception:  # noqa: BLE001
+        return contextlib.nullcontext(None)
+    return run_activity.gate_wait(target)
+
+
+def _is_release_in_progress(exc: BaseException) -> bool:
+    try:
+        from dda_triton.load_tracker import ModelReleaseInProgress
+    except Exception:  # noqa: BLE001 - no tracker, no refusal to recognize
+        return False
+    return isinstance(exc, ModelReleaseInProgress)
+
+
+#: Blockers that name a path that is missing or unreadable: an entry that
+#: stays like this needs its model component's Startup to republish it.
+_REMEDY_BLOCKER_SUFFIXES = (" is missing", " is unreadable")
+
+
 def ensure_model_ready(
     model_name: str,
     resolved_name: Optional[str] = None,
@@ -138,6 +190,8 @@ def ensure_model_ready(
     clock=time.monotonic,
     timeout_s: Optional[float] = None,
     poll_interval_s: Optional[float] = None,
+    entry_inspector: Optional[Callable[[str], object]] = None,
+    stall_lookup: Optional[Callable[[str], object]] = None,
 ) -> ReadinessOutcome:
     """Wait, bounded, for ``resolved_name`` to reach READY in Triton.
 
@@ -152,7 +206,21 @@ def ensure_model_ready(
     previously working run stops working — the pipeline then fails exactly as
     it does today, which is the pre-gate behaviour.
 
-    ``client``, ``sleep`` and ``clock`` are injectable for tests.
+    ``client``, ``sleep`` and ``clock`` are injectable for tests, and so is
+    ``entry_inspector(target)``, which judges an UNKNOWN model's repository
+    entry before a load is requested (None means the real one, on
+    :data:`TRITON_MODEL_DIR`). A load is requested only for an absent entry
+    or one that is complete and unchanged for :data:`ENTRY_QUIET_PERIOD_S`
+    (triton-model-cleanup-wedge D4).
+
+    ``stall_lookup(target)`` (None means ``load_watchdog.stall_for``)
+    answers whether a LOADING model is stalled; a stalled model fails at
+    once with the stall and its recovery action instead of waiting out the
+    budget. From the first read that is not READY until it returns, the
+    call holds ``run_activity.gate_wait(target)``, so a self-heal decision
+    counts the run as blocked by the wedge while it waits here; a gate wait
+    refused because the backend is restarting returns not-ready at once
+    with the refusal text.
 
     ``timeout_s`` / ``poll_interval_s`` default to :data:`READY_TIMEOUT_S` /
     :data:`POLL_INTERVAL_S`, resolved HERE rather than as default argument
@@ -179,8 +247,24 @@ def ensure_model_ready(
         )
         return ReadinessOutcome(ready=True, state=STATE_UNKNOWN)
 
+    inspector = entry_inspector if entry_inspector is not None else _inspect_entry
+    lookup = stall_lookup if stall_lookup is not None else _stall_for
+    with contextlib.ExitStack() as gate:
+        return _wait_until_ready(model_name, target, triton, sleep, clock, timeout_s,
+                                 poll_interval_s, inspector, lookup, gate)
+
+
+def _wait_until_ready(model_name, target, triton, sleep, clock, timeout_s, poll_interval_s,
+                      inspector, lookup, gate) -> ReadinessOutcome:
+    """The polling loop of :func:`ensure_model_ready`; ``gate`` is the
+    ``ExitStack`` that holds the run-activity gate wait."""
     started = clock()
     kicked = False
+    #: The entry's blocker at the latest UNKNOWN poll that requested nothing.
+    blocker: Optional[str] = None
+    blocker_logged = False
+    refusal_logged = False
+    in_gate = False
 
     while True:
         try:
@@ -195,6 +279,18 @@ def ensure_model_ready(
         state = str(state or STATE_UNKNOWN).strip().upper()
         waited = max(0.0, clock() - started)
 
+        if state != STATE_READY and not in_gate:
+            in_gate = True
+            try:
+                ticket = gate.enter_context(_gate_wait(target))
+            except Exception:  # noqa: BLE001 - the gate never depends on it
+                logger.debug("Could not register the gate wait of %s", target, exc_info=True)
+                ticket = None
+            refused = getattr(ticket, "refused", None)
+            if refused:
+                return ReadinessOutcome(ready=False, state=state, message=refused,
+                                        waited_seconds=waited)
+
         if state == STATE_READY:
             if waited >= poll_interval_s:
                 # The data that decides whether design.md Decision 1's
@@ -206,6 +302,20 @@ def ensure_model_ready(
             return ReadinessOutcome(
                 ready=True, state=state, waited_seconds=waited
             )
+
+        if state == STATE_LOADING:
+            try:
+                stall = lookup(target)
+            except Exception:  # noqa: BLE001 - no stall known: keep waiting
+                logger.debug("Could not ask the watchdog about %s", target, exc_info=True)
+                stall = None
+            if stall is not None:
+                return ReadinessOutcome(
+                    ready=False,
+                    state=state,
+                    message=_stall_message(model_name, target, stall, clock),
+                    waited_seconds=waited,
+                )
 
         if state in (STATE_UNAVAILABLE, STATE_UNLOADING):
             return ReadinessOutcome(
@@ -220,24 +330,67 @@ def ensure_model_ready(
             # This process has never been asked to load the model — the
             # state a restarted backend sees. Waiting alone never converges,
             # so kick exactly one load, through the same route the model
-            # component's Startup uses.
-            kicked = True
-            logger.info(
-                "Triton model %s is UNKNOWN; requesting a load before "
-                "waiting (workflow model %s)", target, model_name
-            )
+            # component's Startup uses — but only for an absent entry or one
+            # that is complete and stable: a load of an entry that is still
+            # being written or removed is the load that wedges Triton.
             try:
-                triton.start_triton_model(target)
-            except Exception:  # noqa: BLE001 - a refused kick is not fatal
-                # The route refuses (403) unless the state is
-                # UNKNOWN/UNAVAILABLE, so a race with another loader lands
-                # here; keep waiting, the other loader is making progress.
-                logger.warning(
-                    "Load request for Triton model %s was refused; "
-                    "continuing to wait", target, exc_info=True
+                inspection = inspector(target)
+                present = bool(getattr(inspection, "present", False))
+                blocker = getattr(inspection, "blocker", None) if present else None
+            except Exception:  # noqa: BLE001 - fail open: treat as absent
+                logger.debug("Could not inspect the repository entry of %s; "
+                             "treating it as absent", target, exc_info=True)
+                blocker = None
+            if blocker is not None:
+                if not blocker_logged:
+                    blocker_logged = True
+                    logger.info(
+                        "Triton model %s is UNKNOWN but its repository entry is not "
+                        "ready (%s); waiting before requesting a load (workflow "
+                        "model %s)", target, blocker, model_name
+                    )
+            else:
+                kicked = True
+                logger.info(
+                    "Triton model %s is UNKNOWN; requesting a load before "
+                    "waiting (workflow model %s)", target, model_name
                 )
+                try:
+                    triton.start_triton_model(target)
+                except Exception as exc:  # noqa: BLE001 - a refused kick is not fatal
+                    if _is_release_in_progress(exc):
+                        # A removal or a replacement holds the model's lock:
+                        # inspect the entry again at the next poll and ask
+                        # again, so a removed entry fails fast and a replaced
+                        # one is loaded.
+                        kicked = False
+                        if not refusal_logged:
+                            refusal_logged = True
+                            logger.info(
+                                "Load request for Triton model %s was refused: its "
+                                "repository entries are being removed or replaced; "
+                                "checking the entry again before the next request "
+                                "(workflow model %s)", target, model_name
+                            )
+                    else:
+                        # The route refuses (403) unless the state is
+                        # UNKNOWN/UNAVAILABLE, so a race with another loader
+                        # lands here; keep waiting, the other loader is making
+                        # progress.
+                        logger.warning(
+                            "Load request for Triton model %s was refused; "
+                            "continuing to wait", target, exc_info=True
+                        )
 
         if waited >= timeout_s:
+            if state == STATE_UNKNOWN and not kicked and blocker is not None:
+                return ReadinessOutcome(
+                    ready=False,
+                    state=state,
+                    message=_entry_not_ready_message(model_name, target, blocker,
+                                                     waited),
+                    waited_seconds=waited,
+                )
             return ReadinessOutcome(
                 ready=False,
                 state=state,
@@ -289,5 +442,46 @@ def _message(model_name, target, state, waited, reason) -> str:
             ". Waited {0:.0f}s for it to become READY. A first load can "
             "take minutes while the runtime builds its engine; retry once "
             "the model reports READY.".format(waited)
+        )
+    return detail
+
+
+def _stall_message(model_name, target, stall, clock) -> str:
+    """The run-gate error for a stalled model (design D8)."""
+    try:
+        from dda_triton.load_watchdog import fmt_dur
+    except Exception:  # noqa: BLE001
+        def fmt_dur(seconds):
+            return "{0:.0f}s".format(seconds)
+    loading_for = getattr(stall, "loading_for_s", None)
+    no_progress = getattr(stall, "no_progress_s", None)
+    try:
+        now = clock()
+        loading_for = loading_for(now) if callable(loading_for) else loading_for
+        no_progress = no_progress(now) if callable(no_progress) else no_progress
+    except Exception:  # noqa: BLE001
+        loading_for, no_progress = None, None
+    evidence = tuple(getattr(stall, "evidence", ()) or ())
+    return (
+        "Model '{0}' (Triton model '{1}') is not ready for inference: it is stalled, "
+        "LOADING for {2} with no load progress for {3} ({4}). {5}".format(
+            model_name, target, fmt_dur(loading_for or 0), fmt_dur(no_progress or 0),
+            evidence[0] if evidence else "no evidence recorded",
+            getattr(stall, "recovery_action", None) or "Restart the LocalServer backend.")
+    )
+
+
+def _entry_not_ready_message(model_name, target, blocker, waited) -> str:
+    """The failure of a run whose model's repository entry never became
+    complete and stable, so no load was requested (design D4)."""
+    detail = (
+        "Model '{0}' (Triton model '{1}') is not ready for inference: state "
+        "UNKNOWN; its repository entry is not ready ({2}). Waited {3:.0f}s; no "
+        "load was requested.".format(model_name, target, blocker, waited)
+    )
+    if str(blocker).endswith(_REMEDY_BLOCKER_SUFFIXES):
+        detail += (
+            " If the entry stays incomplete, restart or redeploy the model "
+            "component {0} so that its Startup republishes it.".format(target)
         )
     return detail

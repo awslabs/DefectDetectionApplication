@@ -8,8 +8,11 @@
 #      them as static and does not try to "refresh" them into an expired state).
 #   2. trustedUseCaseAccountIds: the ComputeStack constructor REJECTS an empty
 #      list at synth time (the IAM least-privilege fix removed the wildcard-account
-#      trust fallback), so a value must be supplied. Defaults to the deploying
-#      account (single-account setup); override for cross-account.
+#      trust fallback), so a value must be supplied. It is resolved like
+#      deploy-portal.sh does (../scripts/portal-trusted-accounts.sh): CDK context >
+#      TRUSTED_USECASE_ACCOUNT_IDS > SSM /dda-portal/trusted-usecase-account-ids >
+#      the list the deployed portal stacks grant. Only a fresh install (none of
+#      these, no EdgeCVPortalComputeStack) uses the deploying account.
 #
 # Portal_Identity enforcement is kept at its deployed value unless
 # PORTAL_REGISTRY_ENFORCED=true|false says otherwise (see
@@ -42,9 +45,23 @@ export CDK_DEFAULT_ACCOUNT="$ACCOUNT"
 export CDK_DEFAULT_REGION="$REGION"
 export AWS_REGION="$REGION"
 
-# Trusted UseCase account IDs for the portal's cross-account role assumption.
-# Default to the deploying account (single-account setup).
-TRUSTED="${TRUSTED_USECASE_ACCOUNT_IDS:-$ACCOUNT}"
+# Trusted UseCase account IDs for the portal's cross-account role assumption
+# (see the header): never the deploying account on an existing portal.
+. "$SCRIPT_DIR/../scripts/portal-trusted-accounts.sh"
+if ! TRUSTED_RESOLVED=$(portal_trusted_accounts_resolve "$REGION"); then
+  exit 1
+fi
+if [ "$TRUSTED_RESOLVED" = "none" ]; then
+  TRUSTED_SOURCE="fresh-default"
+  TRUSTED="$ACCOUNT"
+else
+  TRUSTED_SOURCE="${TRUSTED_RESOLVED%% *}"
+  TRUSTED="${TRUSTED_RESOLVED#* }"
+fi
+echo "Trusted UseCase accounts: $TRUSTED ($(portal_trusted_accounts_label "$TRUSTED_SOURCE"))"
+if [ "$TRUSTED_SOURCE" != "deployed" ] && [ "$TRUSTED_SOURCE" != "fresh-default" ]; then
+  portal_trusted_accounts_compare "$REGION" "$TRUSTED"
+fi
 
 # Which stacks to deploy (default: all).
 CDK_STACKS="${CDK_STACKS:---all}"

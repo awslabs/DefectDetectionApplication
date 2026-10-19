@@ -196,6 +196,7 @@ npx_args() { stub_args_of npx; }
 @test "deploy-frontend.sh's ComputeStack redeploy keeps the deployed value" {
   install_real deploy-frontend.sh
   install_real "$HELPER_REL"
+  install_real scripts/portal-trusted-accounts.sh
   set_cfn_output EdgeCVPortalFrontendStack FrontendBucketName portal-frontend-bucket
   set_cfn_output EdgeCVPortalFrontendStack DistributionId EDISTRIBUTION1
   set_cfn_output EdgeCVPortalFrontendStack DistributionDomainName d1.cloudfront.net
@@ -203,10 +204,14 @@ npx_args() { stub_args_of npx; }
     '{"userPoolId":"us-east-1_pool","userPoolWebClientId":"client1","region":"us-east-1"}'
   set_cfn_output EdgeCVPortalComputeStack ApiUrl https://api.example.invalid/v1/
   # `aws configure export-credentials` must fail so its output is not eval'd.
+  # The stub then has no configured region either, so the region comes from
+  # AWS_REGION (deploy-frontend.sh no longer falls back to us-east-1).
   set_region ""
   set_deployed_enforcement true
 
-  run bash -c 'cd "$PORTAL_TREE" && ./deploy-frontend.sh'
+  # The trusted UseCase account list no longer defaults to the deploying
+  # account; set it, as the aws stub answers every ssm read with "21".
+  run bash -c 'cd "$PORTAL_TREE" && AWS_REGION=us-east-1 TRUSTED_USECASE_ACCOUNT_IDS=123456789012 ./deploy-frontend.sh'
   [ "$status" -eq 0 ]
 
   run npx_args
@@ -219,10 +224,13 @@ npx_args() { stub_args_of npx; }
 @test "deploy_portal_fixes.sh passes an explicit PORTAL_REGISTRY_ENFORCED" {
   install_real infrastructure/deploy_portal_fixes.sh
   install_real "$HELPER_REL"
+  install_real scripts/portal-trusted-accounts.sh
   set_region ""
   set_deployed_enforcement true
 
-  run bash -c 'cd "$PORTAL_TREE/infrastructure" && PORTAL_REGISTRY_ENFORCED=false ./deploy_portal_fixes.sh'
+  # The trusted UseCase account list no longer defaults to the deploying
+  # account; set it, as the aws stub answers every ssm read with "21".
+  run bash -c 'cd "$PORTAL_TREE/infrastructure" && PORTAL_REGISTRY_ENFORCED=false TRUSTED_USECASE_ACCOUNT_IDS=123456789012 ./deploy_portal_fixes.sh'
   [ "$status" -eq 0 ]
   [[ "$output" == *"portalRegistryEnforced=false"* ]]
   run npx_args

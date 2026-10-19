@@ -32,6 +32,7 @@ from typing import List, Dict, Any
 
 from dao.sqlite_db.sqlite_db_operations import SessionLocal
 from utils.captured_images_utils import convert_captured_data_to_db, run_image_capture_pipeline
+from utils import run_activity
 
 
 class CaptureTaskStatus(Enum):
@@ -68,6 +69,16 @@ class CaptureTaskManager:
         self.gst_pipeline_executor = gst_pipeline_executor
 
     async def capture_image_in_time_interval(self, capture_task: CaptureTaskParameters):
+        # The capture task counts as in flight for its whole duration,
+        # including the sleeps between its images, so a Triton self-heal
+        # never restarts the backend under it (triton-model-cleanup-wedge
+        # D7). Never waits; refused (with an INFO line) only while the
+        # backend is restarting, and then the task ends before its first
+        # image.
+        ticket = run_activity.start_run(
+            "capture", capture_task.capture_task_id, workflow=capture_task.workflow_id)
+        if ticket.refused is not None:
+            return
         try:
             for num in range(capture_task.count):
                 logging.info(f"Capture task order[{num}] for total {capture_task.count}...")
@@ -90,6 +101,8 @@ class CaptureTaskManager:
         except Exception as e:
             logging.error(f"Exception in capture image: {e}")
             raise
+        finally:
+            run_activity.finish_run(ticket)
 
     async def add_tasks_continuously(self):
         while self.running:

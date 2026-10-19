@@ -25,6 +25,19 @@ from panorama import buffer
 import numpy as np
 import json
 import time
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _remove_model_locks_dir():
+    """Publishing into the in-tree test repository creates the model lock
+    directory next to it (triton-model-cleanup-wedge, dda_triton.model_locks);
+    remove it with the repository."""
+    yield
+    shutil.rmtree(
+        os.path.join(os.path.dirname(os.path.realpath(__file__)), "locks"), ignore_errors=True
+    )
+
 
 
 def test_model_convertor():

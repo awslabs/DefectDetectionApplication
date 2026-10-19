@@ -4,6 +4,7 @@
       "AppRunnerShadowName": "appRunnerShadow",
       "ComponentName": "aws.edgeml.dda.LocalServer.arm64JP5",
       "LocalLoginEnabled": "false",
+      "ModelLoadSelfHealEnabled": "true",
       "StationName": "DDA_Station_ARM64_JP5",
       "StreamShadowName": "streamConfigurationShadow",
       "accessControl": {
@@ -78,6 +79,7 @@
   },
   "ComponentDependencies": {
     "aws.greengrass.Cli": {
+      "DependencyType": "SOFT",
       "VersionRequirement": ">=2.6.0"
     },
     "aws.greengrass.Nucleus": {

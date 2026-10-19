@@ -74,6 +74,7 @@ failed and nothing propagates (Requirement 13.7).
 """
 
 import copy
+import functools
 import inspect
 import json
 import logging
@@ -82,6 +83,7 @@ import re
 import shutil
 import tempfile
 import time
+import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -127,6 +129,17 @@ from workflow_engine.gst_plugins import workflow_plugin_path
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
 from workflow_engine.node_status import NodeStatusCollector, format_duration_ms
 from workflow_engine.run_log import RunLogCapture
+# Standard library only there (stream_feed), so importable at module level.
+from workflow_engine.run_retention import is_continuous_context
+from workflow_engine.telemetry import hooks as telemetry_hooks
+from workflow_engine.telemetry.hooks import RunRecord
+from workflow_engine.vendor.workflow_core.catalog.nodes import (
+    JPEGDEC_NATIVE_CAPS,
+    JPEGDEC_NATIVE_CAPS_ARCHS,
+)
+# Workflow runs in flight, for the Triton self-heal (triton-model-cleanup-
+# wedge D7); standard library only.
+from utils import run_activity
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +325,12 @@ _CAPTURE_META_PLACEHOLDER = "{capture_meta}"
 #: downstream needs the frame. Found on hardware (rtsp-rtmp-stream-cameras
 #: task 25.3): every such run failed with GST_FLOW_NOT_LINKED.
 _SRC_PAD_TERMINAL_FACTORIES = ("emlcapture", "emltriton")
+
+
+def _factory(element):
+    """An element's ``factory``, or None for anything that is not a dict
+    (the run-time rewrites never trust a document's shape)."""
+    return element.get("factory") if isinstance(element, dict) else None
 
 
 class FrameSourceError(Exception):
@@ -645,6 +664,18 @@ EXECUTION_STATUS_PENDING = "pending"
 EXECUTION_STATUS_RUNNING = "running"
 EXECUTION_STATUS_COMPLETED = "completed"
 EXECUTION_STATUS_FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class _RegistrationIdentity:
+    """The three registration fields a run's telemetry ``RunRecord`` needs,
+    copied when the registration row is loaded so the ``finally`` block
+    never reads them through the run's (possibly broken) session."""
+
+    id: str
+    workflow_id: str
+    version: str
+
 
 #: Post-run handler signature: (registration, compiled_document,
 #: tag_values) -> None. Task 12.4 registers the executor-binding
@@ -1158,6 +1189,81 @@ class WorkflowExecutor:
                 )
 
     @staticmethod
+    def _constrain_jpegdec_output(document, arch) -> int:
+        """Insert capsfilter caps=JPEGDEC_NATIVE_CAPS between jpegdec and
+        videoconvert in every catalog JPEG sequence (jpegparse, jpegdec,
+        videoconvert) of a document compiled before the fix, on the arches
+        in JPEGDEC_NATIVE_CAPS_ARCHS. Returns the number inserted. Never
+        raises on JSON-shaped input; anything else is left untouched."""
+        if not isinstance(document, dict) or arch not in JPEGDEC_NATIVE_CAPS_ARCHS:
+            return 0
+        segments = document.get("segments")
+        if not isinstance(segments, list):
+            return 0
+        inserted = 0
+        for segment in segments:
+            elements = segment.get("elements") if isinstance(segment, dict) else None
+            if not isinstance(elements, list):
+                continue
+            index = 1
+            while index < len(elements) - 1:
+                before, current, after = elements[index - 1:index + 2]
+                if (_factory(before) == "jpegparse" and _factory(current) == "jpegdec"
+                        and _factory(after) == "videoconvert"):
+                    elements.insert(index + 1, {
+                        "factory": "capsfilter",
+                        "nodeId": current.get("nodeId"),
+                        "args": {"caps": JPEGDEC_NATIVE_CAPS},
+                    })
+                    inserted += 1
+                    index += 2
+                else:
+                    index += 1
+        if inserted:
+            logger.info("Pinned jpegdec to its native output formats in %d JPEG "
+                        "file chain(s) compiled before the fix (arch %s)",
+                        inserted, arch)
+        return inserted
+
+    @staticmethod
+    def _feed_segment_first(document, arch) -> bool:
+        """Move the segment headed by the fed appsrc to index 0.
+
+        GstPipelineManager.create_buffer and python_bridge._fed_frame_caps
+        read the launch string's FIRST caps= clause as the fed appsrc's
+        caps. On the arches in JPEGDEC_NATIVE_CAPS_ARCHS a JPEG file chain
+        renders a capsfilter caps= of its own, so a file source rendered
+        first would hand the appsrc that capsfilter's quoted caps, which
+        Gst.Caps.from_string rejects. A tee branch (a segment with "from")
+        never moves; the forward funnel reference the move can create
+        (... ! f0. ahead of funnel name=f0) parses on GStreamer 1.16 to
+        1.24. The other segments keep their order. Returns True when it
+        moved a segment. Never raises on JSON-shaped input."""
+        if not isinstance(document, dict) or arch not in JPEGDEC_NATIVE_CAPS_ARCHS:
+            return False
+        segments = document.get("segments")
+        if not isinstance(segments, list):
+            return False
+        for index, segment in enumerate(segments):
+            if not isinstance(segment, dict) or segment.get("from"):
+                continue
+            elements = segment.get("elements")
+            if not isinstance(elements, list) or not elements:
+                continue
+            head = elements[0]
+            args = head.get("args") if isinstance(head, dict) else None
+            if (_factory(head) == "appsrc" and isinstance(args, dict)
+                    and args.get("name") == "appsrc"):
+                if index == 0:
+                    return False
+                segments.insert(0, segments.pop(index))
+                logger.info("Moved the Frame_Feed segment of node %s ahead of "
+                            "%d segment(s) so its appsrc caps come first "
+                            "(arch %s)", head.get("nodeId"), index, arch)
+                return True
+        return False
+
+    @staticmethod
     def _ensure_writable_inference_branch(document: dict) -> int:
         """Give an ``emltriton`` branch its own buffer when the frame tee
         fans out, and return the number of branches fixed.
@@ -1466,7 +1572,25 @@ class WorkflowExecutor:
                     )
 
     @staticmethod
-    def _await_model_readiness(document: dict) -> Optional[str]:
+    def _document_models(document: dict) -> List[str]:
+        """The distinct ``emltriton`` models of a document, in order."""
+        models = []
+        for segment in document.get("segments", []):
+            for element in segment.get("elements", []):
+                if element.get("factory") != "emltriton":
+                    continue
+                args = element.get("args")
+                if not isinstance(args, dict):
+                    continue
+                model = args.get("model")
+                if model and model not in models:
+                    models.append(model)
+        return models
+
+    @staticmethod
+    def _await_model_readiness(
+        document: dict, on_outcome: Optional[Callable] = None
+    ) -> Optional[str]:
         """Wait, bounded, for every Triton model this document uses to be
         READY. Returns an operator-facing failure reason, or None to proceed.
 
@@ -1479,18 +1603,14 @@ class WorkflowExecutor:
         pipeline, which then behaves exactly as it did before the gate
         existed. The gate may make a cold run honest; it must never be the
         sole reason a previously working run stops working.
+
+        ``on_outcome(model, outcome)``, when given, is called for every
+        model's ``ReadinessOutcome`` inside the same containment (the
+        telemetry hooks report the state and the wait per model,
+        workflow-telemetry-dashboards design §5.2); the return value and
+        every existing caller are unchanged.
         """
-        models = []
-        for segment in document.get("segments", []):
-            for element in segment.get("elements", []):
-                if element.get("factory") != "emltriton":
-                    continue
-                args = element.get("args")
-                if not isinstance(args, dict):
-                    continue
-                model = args.get("model")
-                if model and model not in models:
-                    models.append(model)
+        models = WorkflowExecutor._document_models(document)
         if not models:
             return None
 
@@ -1505,6 +1625,14 @@ class WorkflowExecutor:
         for model in models:
             try:
                 outcome = ensure_model_ready(model, model)
+                if on_outcome is not None:
+                    try:
+                        on_outcome(model, outcome)
+                    except Exception:  # noqa: BLE001 - a hook never changes the decision
+                        logger.debug(
+                            "Readiness outcome hook raised for model %s",
+                            model, exc_info=True,
+                        )
             except Exception:  # noqa: BLE001 - see docstring
                 logger.exception(
                     "Triton readiness check raised for model %s; continuing "
@@ -1536,6 +1664,18 @@ class WorkflowExecutor:
         # reference the collector safely on every terminal path
         # (node-execution-timing R4.1); reassigned by _begin_node_status.
         collector: Optional[NodeStatusCollector] = None
+        # This run's run-activity ticket (triton-model-cleanup-wedge D7).
+        ticket = None
+        # Telemetry hook state (workflow-telemetry-dashboards design §5.2):
+        # bound before the ``try`` so the ``finally`` can build the run's
+        # RunRecord on every terminal path, including the early exits.
+        execution = registration = tag_values = None
+        trigger_context: Dict[str, Any] = {}
+        enqueued_at_s = accepted_ms = run_started_ms = None
+        readiness_wait_ms = 0
+        failure_traceback: Optional[str] = None
+        ctx_token = None
+        registration_snapshot = None
         try:
             execution = session.get(WorkflowExecution, execution_id)
             if execution is None:
@@ -1551,6 +1691,11 @@ class WorkflowExecutor:
                     execution.status,
                 )
                 return
+            # The enqueue time, still intact (the RUNNING transition below
+            # overwrites ``started_at``), and the moment this executor
+            # picked the run up (R2.2 of the dashboards).
+            enqueued_at_s = execution.started_at
+            accepted_ms = int(time.time() * 1000)
 
             # The run's Trigger_Context (custom-python-source Requirements
             # 2.1-2.4): read back what the Trigger_Runtime persisted for
@@ -1560,9 +1705,39 @@ class WorkflowExecutor:
                 getattr(execution, "trigger_context_json", None)
             )
 
+            # Register the run for its whole life before anything is
+            # captured or prepared, so a Triton self-heal never restarts the
+            # backend under it (triton-model-cleanup-wedge D7). Never waits:
+            # during a quiesce the run is accepted and counts as in flight;
+            # only after the self-heal commit is it refused. Triggered and
+            # manual runs register the callback that marks the row failed if
+            # the restart cuts them off; continuous runs are reconciled at
+            # the next start instead.
+            continuous = is_continuous_context(trigger_context)
+            on_interrupt = None if continuous else functools.partial(
+                self._mark_failed_best_effort, execution_id)
+            ticket = run_activity.start_run(
+                "execution", execution_id, workflow=execution.registration_id,
+                continuous=continuous, on_interrupt=on_interrupt)
+            if ticket.refused is not None:
+                self._finish_failed(session, execution, error=ticket.refused)
+                return
+
             registration = session.get(
                 WorkflowRegistration, execution.registration_id
             )
+            if registration is not None:
+                run_activity.set_details(ticket, workflow_label="{0} v{1}".format(
+                    registration.workflow_id, registration.version))
+                # The identity the RunRecord needs, copied now so the
+                # ``finally`` never has to touch the run's session for it.
+                registration_snapshot = _RegistrationIdentity(
+                    registration.id, registration.workflow_id,
+                    registration.version,
+                )
+                ctx_token = telemetry_hooks.CURRENT_EXECUTION.set(
+                    (registration.id, registration.workflow_id, execution_id)
+                )
             failure = self._preflight(registration)
             if failure is not None:
                 self._finish_failed(session, execution, error=failure)
@@ -1612,6 +1787,7 @@ class WorkflowExecutor:
                     session, document, resolution
                 )
             except AravisFeedError as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 logger.error(
                     "Workflow execution %s failed in the Aravis frame feed "
                     "(node %s): %s",
@@ -1645,6 +1821,7 @@ class WorkflowExecutor:
             except (
                 PythonSourceError, python_bridge.CustomPythonNodeError
             ) as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 failing_node_id = getattr(e, "node_id", None)
                 logger.error(
                     "Workflow execution %s failed in the Custom Python "
@@ -1681,6 +1858,7 @@ class WorkflowExecutor:
                     )
                 )
             except StreamFeedError as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 logger.error(
                     "Workflow execution %s failed in the stream camera feed "
                     "(node %s): %s",
@@ -1763,6 +1941,7 @@ class WorkflowExecutor:
             try:
                 self._prepare_csi_captures(capture_plan, registration.arch)
             except FrameSourceError as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 logger.error(
                     "Workflow execution %s failed preparing its CSI capture "
                     "(node %s): %s",
@@ -1787,6 +1966,7 @@ class WorkflowExecutor:
             try:
                 folder_frames = self._stage_frame_sources(document)
             except FrameSourceError as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 logger.error(
                     "Workflow execution %s failed resolving its image source "
                     "(node %s): %s",
@@ -1822,6 +2002,7 @@ class WorkflowExecutor:
             # pipeline asks Triton for a model it doesn't have and never
             # reaches PLAYING.
             self._resolve_model_names(document)
+            run_activity.set_details(ticket, models=self._document_models(document))
 
             # Triton readiness gate (cold-model-first-run-failure
             # Requirements 2.11-2.13, design.md Decisions 1-7). Runs HERE —
@@ -1840,10 +2021,33 @@ class WorkflowExecutor:
             # reaches the failure handler that relocates folder-source
             # frames to failed/ — Requirement 2.2 is satisfied by ordering
             # rather than by a special case (design.md Decision 7).
-            readiness_failure = self._await_model_readiness(document)
+            def _on_readiness_outcome(model, outcome):
+                # Telemetry (dashboards design §5.2): report each model's
+                # state and add its wait to this run's total, so the
+                # RunRecord's latency sample can exclude it.
+                nonlocal readiness_wait_ms
+                waited_ms = int(
+                    (getattr(outcome, "waited_seconds", 0.0) or 0.0) * 1000
+                )
+                readiness_wait_ms += waited_ms
+                telemetry_hooks.notify_model_readiness(
+                    registration.id, execution_id, model,
+                    getattr(outcome, "state", None), waited_ms,
+                    bool(getattr(outcome, "ready", False)),
+                )
+
+            readiness_failure = self._await_model_readiness(
+                document, on_outcome=_on_readiness_outcome
+            )
             if readiness_failure is not None:
                 self._finish_failed(session, execution,
                                     error=readiness_failure)
+                return
+            # A run that leaves its gate after a self-heal commit stops here,
+            # before its pipeline (triton-model-cleanup-wedge D7).
+            refused = run_activity.after_gate(ticket)
+            if refused is not None:
+                self._finish_failed(session, execution, error=refused)
                 return
 
             # The per-run artifact location: unique per execution so runs of
@@ -1912,6 +2116,14 @@ class WorkflowExecutor:
                     execution_id,
                 )
 
+            # Packages compiled before the jpegdec native-caps fix: pin each
+            # catalog JPEG chain to jpegdec's native formats on the Ubuntu
+            # 22.04 targets, then keep the fed appsrc's caps= the launch
+            # string's first, which both Frame_Feed consumers read
+            # (jpeg-folder-source-decode-ubuntu2204, design C3 and C3b).
+            self._constrain_jpegdec_output(document, registration.arch)
+            self._feed_segment_first(document, registration.arch)
+
             # Terminate a bare capture branch with a sink; a trailing
             # emltriton/emlcapture src pad left unlinked fails the run with
             # GST_FLOW_NOT_LINKED right after inference.
@@ -1944,6 +2156,10 @@ class WorkflowExecutor:
             # (collector = None).
             collector = self._begin_node_status(name_map, document)
 
+            # The RUNNING transition: the pipeline time of the run starts
+            # here (telemetry ``run_started_ms``; the row's ``started_at``
+            # keeps its one-second resolution and semantics).
+            run_started_ms = int(time.time() * 1000)
             execution.status = EXECUTION_STATUS_RUNNING
             execution.started_at = int(time.time())
             session.commit()
@@ -2055,6 +2271,7 @@ class WorkflowExecutor:
                             status_sink=self._status_sink(collector),
                         )
             except Exception as e:  # noqa: BLE001 - contained per 13.7
+                failure_traceback = traceback.format_exc()[-8192:]
                 # A failed pipeline run relocates every directory-resolved
                 # source image to failed/ so the folder still drains,
                 # mirroring the legacy except branch
@@ -2228,6 +2445,7 @@ class WorkflowExecutor:
                         ),
                     )
                 except Exception as e:  # noqa: BLE001 - contained per 13.7
+                    failure_traceback = traceback.format_exc()[-8192:]
                     failing_node_id = getattr(e, "node_id", None)
                     logger.error(
                         "Workflow execution %s failed in Bedrock inference "
@@ -2323,6 +2541,7 @@ class WorkflowExecutor:
                     session, execution, collector
                 )
             except OutputBindingError as e:
+                failure_traceback = traceback.format_exc()[-8192:]
                 failing_node_id = getattr(e, "node_id", None)
                 logger.error(
                     "Workflow execution %s failed in an output binding "
@@ -2374,6 +2593,7 @@ class WorkflowExecutor:
                 tag_values,
             )
         except Exception:  # noqa: BLE001 - contained per 13.7
+            failure_traceback = traceback.format_exc()[-8192:]
             logger.exception(
                 "Workflow execution %s failed unexpectedly", execution_id
             )
@@ -2386,11 +2606,86 @@ class WorkflowExecutor:
             # once on every terminal path (node-execution-timing R4.1,
             # R4.3). Contained: a timing-log failure never affects the run.
             self._emit_timing_logs(collector)
+            # Telemetry (dashboards design §5.2): hand the finished run to
+            # the observers, then leave the run's context. Only when a
+            # registration was loaded (the early exits above have nothing
+            # to report); contained, never raises.
+            if registration is not None and registration_snapshot is not None:
+                self._notify_run_finished(
+                    execution_id, execution, registration_snapshot, collector,
+                    tag_values, trigger_context, enqueued_at_s, accepted_ms,
+                    run_started_ms, readiness_wait_ms, failure_traceback,
+                )
+            if ctx_token is not None:
+                try:
+                    telemetry_hooks.CURRENT_EXECUTION.reset(ctx_token)
+                except Exception:  # noqa: BLE001 - never fails the run
+                    telemetry_hooks.CURRENT_EXECUTION.set(None)
             if log_capture is not None:
                 log_capture.stop()
             if work_dir is not None:
                 shutil.rmtree(work_dir, ignore_errors=True)
             session.close()
+            run_activity.finish_run(ticket)
+
+    def _notify_run_finished(
+        self,
+        execution_id: str,
+        execution: Optional[WorkflowExecution],
+        registration: "_RegistrationIdentity",
+        collector: Optional[NodeStatusCollector],
+        tag_values: Optional[dict],
+        trigger_context: Dict[str, Any],
+        enqueued_at_s: Optional[int],
+        accepted_ms: Optional[int],
+        run_started_ms: Optional[int],
+        readiness_wait_ms: int,
+        failure_traceback: Optional[str],
+    ) -> None:
+        """Build the run's :class:`RunRecord` and call
+        ``telemetry_hooks.notify_run_finished`` (dashboards design §5.2).
+
+        The terminal row is read through a **fresh** session: on the
+        unexpected-failure path the run's own session may be the thing
+        that broke, which is why ``_mark_failed_best_effort`` already uses
+        one, and the fresh read sees the terminal ``status``, ``error``,
+        ``failing_node_id``, ``capture_id``, ``output_dir`` and
+        ``log_path`` that path wrote. Falls back to the in-memory row when
+        the read fails. Contained: never raises into the run."""
+        try:
+            terminal_row = None
+            try:
+                fresh = self._session_factory()
+                try:
+                    terminal_row = fresh.get(WorkflowExecution, execution_id)
+                    if terminal_row is not None:
+                        # Detach a plain snapshot before the session closes.
+                        fresh.expunge(terminal_row)
+                finally:
+                    fresh.close()
+            except Exception:  # noqa: BLE001 - fall back to the in-memory row
+                logger.debug(
+                    "Telemetry: fresh read of execution %s failed; using the "
+                    "in-memory row", execution_id, exc_info=True,
+                )
+                terminal_row = None
+            if terminal_row is None:
+                terminal_row = execution
+            if terminal_row is None:
+                return
+            telemetry_hooks.notify_run_finished(
+                RunRecord.from_execution(
+                    terminal_row, registration, collector, tag_values,
+                    trigger_context, enqueued_at_s, accepted_ms,
+                    run_started_ms, int(time.time() * 1000),
+                    readiness_wait_ms, failure_traceback,
+                )
+            )
+        except Exception:  # noqa: BLE001 - telemetry never fails a run
+            logger.debug(
+                "Telemetry: could not report execution %s", execution_id,
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Helpers

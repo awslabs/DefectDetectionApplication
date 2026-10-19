@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 import boto3
+import botocore.config
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from shared_utils import (
@@ -130,6 +131,18 @@ CAMERA_BINDINGS_SHADOW_NAME = 'dda-camera-bindings'
 # single-device GET in devices.py reads it on demand. Must be in the
 # ShadowManager `synchronize` list below or it never mirrors to IoT Core.
 MODEL_STATUS_SHADOW_NAME = 'dda-model-status'
+
+# The latest deployment's model readiness summary (spec
+# triton-model-cleanup-wedge, D11): get_deployment reads the
+# dda-model-status shadow of the target's devices with bounded reads.
+# total_max_attempts counts the first request, so 1 means no retry; one
+# read takes at most about 4 s, and the whole summary stops once the
+# budget (time.monotonic, checked before each read) is used up.
+SHADOW_READ_CONFIG = botocore.config.Config(
+    connect_timeout=2, read_timeout=2, retries={'total_max_attempts': 1})
+MODEL_READINESS_MAX_DEVICES = 20
+MODEL_READINESS_BUDGET_S = 5
+MODEL_READINESS_STRING_MAX = 200
 
 # Minimum LocalServer component version a Workflow_Component requires
 # (Requirement 8.4). The Component_Packager writes this same value into each
@@ -984,6 +997,153 @@ def list_deployments(user, query_params):
         return create_response(500, {'error': 'Failed to list deployments'})
 
 
+def _cut(value):
+    """The value when it is a string, cut to MODEL_READINESS_STRING_MAX; else None."""
+    if isinstance(value, str):
+        return value[:MODEL_READINESS_STRING_MAX]
+    return None
+
+
+def _read_model_status_shadow(iot_data, thing_name):
+    """The device's dda-model-status shadow reported document, or None.
+
+    Mirrors devices.get_model_status: ResourceNotFoundException (no shadow)
+    or ANY other error, including a connect or read timeout, returns None;
+    every error other than "not found" logs a warning. Never raises.
+    """
+    try:
+        response = iot_data.get_thing_shadow(
+            thingName=thing_name, shadowName=MODEL_STATUS_SHADOW_NAME)
+        payload = json.loads(response['payload'].read())
+        return (payload.get('state') or {}).get('reported')
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'ResourceNotFoundException':
+            logger.warning(
+                f"Could not read {MODEL_STATUS_SHADOW_NAME} shadow for "
+                f"{thing_name}: {e}")
+        return None
+    except Exception as e:
+        logger.warning(
+            f"Could not read {MODEL_STATUS_SHADOW_NAME} shadow for "
+            f"{thing_name}: {e}")
+        return None
+
+
+def _not_ready_items(model_readiness, component_names):
+    """The well-formed modelReadiness.notReady items for this deployment's models."""
+    not_ready = model_readiness.get('notReady')
+    if not isinstance(not_ready, list):
+        return []
+    items = []
+    for entry in not_ready:
+        if not isinstance(entry, dict) or not isinstance(entry.get('model'), str):
+            continue
+        if entry['model'] not in component_names:
+            continue
+        item = {'model': _cut(entry['model'])}
+        for key in ('status', 'since', 'reason'):
+            text = _cut(entry.get(key))
+            if text is not None:
+                item[key] = text
+        if isinstance(entry.get('stalled'), bool):
+            item['stalled'] = entry['stalled']
+        items.append(item)
+    return items
+
+
+def _self_heal_item(self_heal):
+    """The selfHeal summary when its state is not idle or its last is set; else None."""
+    if not isinstance(self_heal, dict):
+        return None
+    state = self_heal.get('state')
+    last = self_heal.get('last')
+    if not isinstance(state, str):
+        state = None
+    if not isinstance(last, dict):
+        last = None
+    if state in (None, 'idle') and last is None:
+        return None
+    item = {'state': _cut(state)}
+    if isinstance(self_heal.get('enabled'), bool):
+        item['enabled'] = self_heal['enabled']
+    attempts = self_heal.get('attemptsIn24h')
+    if isinstance(attempts, int) and not isinstance(attempts, bool):
+        item['attempts_in_24h'] = attempts
+    item['last_requested_at'] = _cut(last.get('requestedAt')) if last is not None else None
+    item['rearms_at'] = _cut(self_heal.get('rearmsAt'))
+    return item
+
+
+def _model_readiness_summary(usecase, region, session_name, component_names, effective_deployments):
+    """Current device state of this deployment's model components (D11), or None.
+
+    The caller runs it only for the latest deployment of its target. It
+    returns None unless the deployment includes model-* components. It reads
+    the dda-model-status shadow of at most MODEL_READINESS_MAX_DEVICES
+    devices whose deployment SUCCEEDED or COMPLETED, through ONE iot-data
+    client with SHADOW_READ_CONFIG, and stops once MODEL_READINESS_BUDGET_S
+    (time.monotonic, checked before each read) is used up. Either limit sets
+    truncated: true. Returns None when no device reports anything to show.
+    """
+    model_components = {name for name in component_names
+                        if isinstance(name, str) and name.startswith('model-')}
+    if not model_components:
+        return None
+    eligible = [eff for eff in effective_deployments
+                if eff.get('deployment_status') in ('SUCCEEDED', 'COMPLETED')
+                and isinstance(eff.get('core_device'), str) and eff.get('core_device')]
+    if not eligible:
+        return None
+
+    truncated = len(eligible) > MODEL_READINESS_MAX_DEVICES
+    eligible = eligible[:MODEL_READINESS_MAX_DEVICES]
+
+    started = time.monotonic()
+    iot_data = get_usecase_client('iot-data', usecase, session_name=session_name,
+                                  region=region, config=SHADOW_READ_CONFIG)
+    devices = []
+    checked = 0
+    for eff in eligible:
+        if time.monotonic() - started >= MODEL_READINESS_BUDGET_S:
+            truncated = True
+            break
+        thing_name = eff['core_device']
+        checked += 1
+        reported = _read_model_status_shadow(iot_data, thing_name)
+        if not isinstance(reported, dict):
+            continue
+        model_readiness = reported.get('modelReadiness')
+        if not isinstance(model_readiness, dict):
+            model_readiness = {}
+        not_ready = _not_ready_items(model_readiness, model_components)
+        self_heal = _self_heal_item(reported.get('selfHeal'))
+        if not not_ready and self_heal is None:
+            continue
+        device = {
+            'core_device': _cut(thing_name),
+            'shadow_updated_at': _cut(model_readiness.get('updatedAt')),
+            'not_ready': not_ready,
+        }
+        if self_heal is not None:
+            device['self_heal'] = self_heal
+        devices.append(device)
+
+    if not devices:
+        return None
+    models = {item['model'] for device in devices for item in device['not_ready']}
+    with_models = sum(1 for device in devices if device['not_ready'])
+    warning = (f"Current device state: {len(models)} model(s) of this deployment "
+               f"are not READY on {with_models} device(s)")
+    if not models:
+        warning += f"; self-heal activity on {len(devices)} device(s)"
+    return {
+        'warning': warning,
+        'devices': devices,
+        'checked_devices': checked,
+        'truncated': truncated,
+    }
+
+
 def get_deployment(deployment_id, user, query_params):
     """Get detailed information about a deployment"""
     try:
@@ -1131,6 +1291,23 @@ def get_deployment(deployment_id, user, query_params):
                 error_messages.append(error_info)
         
         deployment['error_messages'] = error_messages
+        
+        # Additive current device state (spec triton-model-cleanup-wedge,
+        # D11): the deployment's model components that devices report as
+        # not READY in their dda-model-status shadow. Only for the latest
+        # deployment of its target (the shadow describes the device now),
+        # only when non-empty, and any error means no field (3.8).
+        if deployment['is_latest_for_target']:
+            try:
+                readiness = _model_readiness_summary(
+                    usecase, region,
+                    f"shadow-get-{user['user_id'][:20]}-{int(datetime.utcnow().timestamp())}"[:64],
+                    [c['component_name'] for c in component_list],
+                    effective_deployments)
+                if readiness:
+                    deployment['model_readiness'] = readiness
+            except Exception as e:
+                logger.warning(f"Could not build the model readiness summary: {e}")
         
         log_audit_event(
             user['user_id'], 'get_deployment', 'deployment', deployment_id, 'success'

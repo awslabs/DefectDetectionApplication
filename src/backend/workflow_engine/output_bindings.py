@@ -743,7 +743,32 @@ def _default_greengrass_publisher(
     timeout or any other error is final too, with no reconnect and no
     retry: it says nothing about the connection, and a reconnect moves
     every IPC user. A publish in flight when the connection drops fails
-    with ``StreamClosedError`` and is not retried."""
+    with ``StreamClosedError`` and is not retried.
+
+    The whole IPC body lives in :func:`publish_via_ipc` (shared with the
+    telemetry agents' ``IpcPublisher``, workflow-telemetry-dashboards
+    design §5.2); this function is the ``str``-payload delegate the
+    ``mqtt_publish`` node is wired to."""
+    publish_via_ipc(topic, payload.encode("utf-8"), qos, retain=retain)
+
+
+def publish_via_ipc(
+    topic: str, payload: bytes, qos: int, *, retain: bool = False
+) -> None:
+    """Publish one ``bytes`` payload through the Greengrass IPC
+    ``PublishToIoTCore`` operation on the shared IPC client.
+
+    The one IPC publish path of the LocalServer: the ``mqtt_publish``
+    node's :func:`_default_greengrass_publisher` delegates here with its
+    payload encoded, and the telemetry agents' ``IpcPublisher`` threads
+    call it directly with their serialized messages (always with the
+    default ``retain=False``). The QoS mapping, the ``retain`` assignment
+    behind its SDK-field check, the ``call_with_ipc_retry`` call and the
+    ``UnauthorizedError`` diagnosis (with its ``iot:RetainPublish``
+    sentence for a retained publish) are exactly the ones
+    :func:`_default_greengrass_publisher` documents; a nucleus denial is
+    re-raised as a ``RuntimeError`` whose ``__cause__`` is the
+    ``UnauthorizedError``, the shape the publisher threads recognise."""
     import awsiot.greengrasscoreipc.model as model
 
     from utils import ipc_client as shared_ipc
@@ -752,7 +777,7 @@ def _default_greengrass_publisher(
         else model.QOS.AT_MOST_ONCE
     request = model.PublishToIoTCoreRequest()
     request.topic_name = topic
-    request.payload = payload.encode("utf-8")
+    request.payload = payload
     request.qos = qos_value
     if retain:
         if not hasattr(request, "retain"):

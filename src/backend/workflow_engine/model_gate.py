@@ -45,13 +45,11 @@ never be the sole reason a previously working workflow stops running.
 because ``dda_triton.triton_edge_client`` imports the on-device
 ``panorama`` module at module level.
 """
-import glob
 import logging
 import os
-import re
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -96,14 +94,6 @@ UNAVAILABLE_RETRY_INTERVAL_S = 300.0
 #: restart for a slightly slower but normal deployment.
 STALL_AFTER_S = 600.0
 
-#: A Triton ``config.pbtxt`` ensemble step: ``model_name: "base_model-x"``.
-#: pbtxt has no nesting problem here — only ensemble steps use the key.
-_STEP_MODEL_PATTERN = re.compile(r'model_name:\s*"([^"]+)"')
-#: A model config served by the python backend, whose version directory
-#: must therefore carry ``model.py`` before Triton can preinitialize it.
-_PYTHON_BACKEND_PATTERN = re.compile(r'backend:\s*"python"')
-#: ``model_convertor._atomic_publish_model_dir``'s staging sibling.
-_STAGING_PREFIX = ".staging-"
 
 
 @dataclass(frozen=True)
@@ -185,6 +175,8 @@ class ModelGate:
         self._load_requested = set()
         self._unavailable_since: Dict[str, float] = {}
         self._unavailable_attempts: Dict[str, int] = {}
+        #: Models whose latest load request was refused (one INFO per streak).
+        self._load_refused = set()
         self._failed_open = False
 
     @property
@@ -285,52 +277,19 @@ class ModelGate:
     def _file_state(self, triton_model: str) -> Optional[str]:
         """None when the model's repository files are complete and have been
         unchanged for :data:`QUIET_PERIOD_S`; otherwise the reason, naming
-        the missing or changing path (Requirement 11.12)."""
-        model_dir = os.path.join(self._repo, triton_model)
-        config = os.path.join(model_dir, "config.pbtxt")
-        if not os.path.isfile(config):
-            return "{0} is missing".format(config)
-        paths: List[str] = [model_dir, config]
-        text = _read(config)
-        if text is None:
-            return "{0} is unreadable".format(config)
-        steps = [step for step in dict.fromkeys(_STEP_MODEL_PATTERN.findall(text))
-                 if step != triton_model]
-        for step in steps:
-            step_dir = os.path.join(self._repo, step)
-            step_config = os.path.join(step_dir, "config.pbtxt")
-            if not os.path.isfile(step_config):
-                return "{0} is missing".format(step_config)
-            paths.extend((step_dir, step_config))
-            step_text = _read(step_config)
-            if step_text is None:
-                return "{0} is unreadable".format(step_config)
-            if not _PYTHON_BACKEND_PATTERN.search(step_text):
-                continue
-            versions = _version_dirs(step_dir)
-            if not versions:
-                return "{0} is missing".format(os.path.join(step_dir, "<version>", "model.py"))
-            for version in versions:
-                model_py = os.path.join(step_dir, version, "model.py")
-                if not os.path.isfile(model_py):
-                    return "{0} is missing".format(model_py)
-                paths.append(model_py)
-        for name in [triton_model] + steps:
-            staging = sorted(glob.glob(os.path.join(self._repo, _STAGING_PREFIX + name + "-*")))
-            if staging:
-                return "{0} is being published".format(staging[0])
-        newest_path, newest = None, None
-        for path in paths:
-            mtime = _mtime(path)
-            if mtime is None:
-                return "{0} is missing".format(path)
-            if newest is None or mtime > newest:
-                newest_path, newest = path, mtime
-        if newest is not None:
-            age = self._wall() - newest
-            if age < QUIET_PERIOD_S:
-                return "{0} changed {1:.1f} s ago".format(newest_path, max(0.0, age))
-        return None
+        the missing or changing path (Requirement 11.12).
+
+        The checks live in ``dda_triton.repo_entries.inspect_entry`` (moved
+        there verbatim by triton-model-cleanup-wedge), so the per-run gate
+        and the watchdog judge an entry exactly as this gate does.
+        :data:`QUIET_PERIOD_S` is read at call time, so a patched value
+        applies.
+        """
+        from dda_triton import repo_entries
+
+        return repo_entries.inspect_entry(
+            self._repo, triton_model, wall=self._wall, quiet_period_s=QUIET_PERIOD_S
+        ).blocker
 
     # -- Triton ----------------------------------------------------------------
 
@@ -381,7 +340,10 @@ class ModelGate:
         if not fresh and self._wall() - self._engine_started_at < UNKNOWN_LOAD_GRACE_S:
             return
         self._load_requested.add(model)
-        self._load(triton_model)
+        if not self._load(triton_model):
+            # Refused while a removal or a replacement holds the model's
+            # lock: ask again after the next check re-runs the file checks.
+            self._load_requested.discard(model)
 
     def _maybe_reload_unavailable(self, model: str, triton_model: str) -> None:
         now = self._clock()
@@ -392,13 +354,30 @@ class ModelGate:
         self._unavailable_attempts[model] = attempts + 1
         self._load(triton_model)
 
-    def _load(self, triton_model: str) -> None:
+    def _load(self, triton_model: str) -> bool:
+        """Request a load. False only when it was refused because the
+        model's repository entries are being removed or replaced
+        (``ModelReleaseInProgress``); True otherwise."""
+        try:
+            from dda_triton.load_tracker import ModelReleaseInProgress
+        except Exception:  # noqa: BLE001 - no tracker, no refusal to recognize
+            ModelReleaseInProgress = None
         try:
             self._client_provider().start_triton_model(triton_model)
             logger.info("Requested a Triton load of model %s", triton_model)
-        except Exception:  # noqa: BLE001 - the next poll reports the state
+        except Exception as exc:  # noqa: BLE001 - the next poll reports the state
+            if ModelReleaseInProgress is not None and isinstance(exc, ModelReleaseInProgress):
+                if triton_model not in self._load_refused:
+                    self._load_refused.add(triton_model)
+                    logger.info(
+                        "The load request for Triton model %s was refused: its repository "
+                        "entries are being removed or replaced; re-checking its files before "
+                        "requesting again", triton_model)
+                return False
             logger.warning("Could not request a Triton load of model %s", triton_model,
                            exc_info=True)
+        self._load_refused.discard(triton_model)
+        return True
 
 
 def _backoff_at(attempts: int) -> float:
@@ -410,26 +389,8 @@ def _backoff_at(attempts: int) -> float:
     return UNAVAILABLE_BACKOFF_S[-1] + UNAVAILABLE_RETRY_INTERVAL_S * extra
 
 
-def _read(path: str) -> Optional[str]:
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
-
-
 def _mtime(path: str) -> Optional[float]:
     try:
         return os.path.getmtime(path)
     except OSError:
         return None
-
-
-def _version_dirs(model_dir: str) -> List[str]:
-    """Triton's numeric version directories, oldest name first."""
-    try:
-        entries = sorted(os.listdir(model_dir))
-    except OSError:
-        return []
-    return [entry for entry in entries
-            if entry.isdigit() and os.path.isdir(os.path.join(model_dir, entry))]

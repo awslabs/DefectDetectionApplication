@@ -30,7 +30,8 @@ flavors per synthesizable stack:
 Both stacks ARE wired into synthesizable CDK app entrypoints. When the CDK
 toolchain is available, the test re-synths each with the canonical fixture
 context (``portalAccountId=111111111111``, ``externalId=fixture-eid``,
-``trustedUseCaseAccountIds=222222222222,333333333333``, region ``us-east-1``)
+``trustedUseCaseAccountIds=222222222222,333333333333``,
+``sharedAuthorizerId=fixture0``, region ``us-east-1``)
 and asserts the emitted IAM grants equal the committed FIXED baseline (an
 identity guard against future live-tree drift). The live comparison is at
 grant-atom granularity (one effect/action/resource/condition tuple per
@@ -126,6 +127,12 @@ FIXTURE_CONTEXT = [
     "--context", "externalId=fixture-eid",
     "--context", "trustedUseCaseAccountIds=222222222222,333333333333",
     "--context", "portalRegistryEnforced=false",
+    # The telemetry and workflow-debug stacks attach their routes to the
+    # portal API's existing Cognito authorizer; bin/app.ts instantiates them
+    # only when its id is present (lib/context-helpers.ts
+    # sharedAuthorizerIdIfGiven), so a fixture id keeps both in the synth
+    # and hermetic. The value reaches no IAM statement.
+    "--context", "sharedAuthorizerId=fixture0",
 ]
 
 # stack -> (fixed baseline, unfixed baseline, optional --app override)
@@ -139,6 +146,23 @@ SYNTH_STACKS = {
         "iam_baseline_DDAPortalUseCaseAccountStack.template.json",
         "iam_baseline_DDAPortalUseCaseAccountStack.unfixed.template.json",
         "npx ts-node --prefer-ts-exts bin/usecase-account-app.ts",
+    ),
+    # workflow-debug-mode (tasks.md 4.3): a stack that did not exist at the
+    # I1-I4 rewrite joins the gate with EMPTY pre-feature baselines, so every
+    # statement it synthesizes must be listed in
+    # iam_post_fix_approved_additions.json under its attribution.
+    "EdgeCVPortalWorkflowDebugStack": (
+        "iam_baseline_EdgeCVPortalWorkflowDebugStack.template.json",
+        "iam_baseline_EdgeCVPortalWorkflowDebugStack.unfixed.template.json",
+        None,
+    ),
+    # workflow-telemetry-dashboards (tasks.md 4.3): the same pattern, EMPTY
+    # pre-feature baselines and every synthesized statement listed in
+    # iam_post_fix_approved_additions.json under its attribution.
+    "EdgeCVPortalTelemetryStack": (
+        "iam_baseline_EdgeCVPortalTelemetryStack.template.json",
+        "iam_baseline_EdgeCVPortalTelemetryStack.unfixed.template.json",
+        None,
     ),
 }
 

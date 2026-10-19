@@ -589,3 +589,13 @@ container, trigger the workflow once, observe the failure; today that is
   `docs/detection-training-gap.md` §"On-device verification (2026-09-22)".
   Still requirements-only: no design.md and no tasks.md exist, so **nothing in
   this spec is implemented**.
+- **2026-10-15** — `.kiro/specs/triton-model-cleanup-wedge/` satisfies
+  requirement 2.5 and, on the device side, 2.6: the Startup outcome record and
+  the stall detection. It partially satisfies 2.8 on the device side: the
+  `dda-model-status` shadow's per-model readiness list
+  (`modelReadiness.models`, with the not-ready details in
+  `modelReadiness.notReady`) distinguishes not loaded, loading, READY and
+  failed, but a conversion in progress reports as not loaded until its load
+  is requested, so the converting-in-progress state of 2.8 remains open
+  here. 2.9 is extended there with the stall reason. 2.7 stays deferred to
+  the Triton boot-time reconciler follow-up.
