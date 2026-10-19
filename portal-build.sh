@@ -214,6 +214,18 @@ case $ARCH in
         ;;
 esac
 
+# Arch suffix for the packaged artifact (the zip basename and its S3 key). This
+# is the HARDWARE architecture — exactly what build-custom.sh embeds via
+# $(uname -m) and what every recipe's decompressedPath references use
+# (aws.edgeml.dda.LocalServer.<variant>-<hwarch>). The NVIDIA distinction is
+# carried by COMPONENT_NAME, not the zip suffix, so x86_64_nvidia must package
+# as ...-x86_64.zip exactly like the amd64 CPU variant. Stripping the logical
+# _nvidia qualifier keeps the published artifact name aligned with the recipe
+# (recipe-amd64-nvidia.yaml references ...amd64Nvidia-x86_64); a mismatch makes
+# every decompressedPath reference point at a nonexistent dir and the component
+# deploys BROKEN.
+ARTIFACT_ARCH="${ARCH%_nvidia}"
+
 print_step "Detecting architecture and preparing configuration"
 echo "Architecture: $ARCH"
 echo "Target: ${JETPACK:-n/a}"
@@ -437,11 +449,11 @@ if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ]; then
         exit 1
     fi
     rm -f "${STAGE_DIR}/flask-app.tar" "${STAGE_DIR}/react-webapp.tar" "${STAGE_DIR}"/.tmp-* 2>/dev/null || true
-    APP_ZIP="custom-build/${COMPONENT_NAME}-${ARCH}.zip"
+    APP_ZIP="custom-build/${COMPONENT_NAME}-${ARTIFACT_ARCH}.zip"
     rm -f "$APP_ZIP"
     zip -r -X "$APP_ZIP" "custom-build/${COMPONENT_NAME}" -x '*/.tmp-*'
 
-    S3_KEY="${COMPONENT_NAME}/${COMPONENT_VERSION}/${COMPONENT_NAME}-${ARCH}.zip"
+    S3_KEY="${COMPONENT_NAME}/${COMPONENT_VERSION}/${COMPONENT_NAME}-${ARTIFACT_ARCH}.zip"
     S3_URI="s3://${S3_BUCKET}/${S3_KEY}"
     echo "Uploading scripts artifact to ${S3_URI} ($(numfmt --to=iec "$(stat --format=%s "$APP_ZIP")" 2>/dev/null || echo "?"))..."
     aws s3 cp "$APP_ZIP" "$S3_URI" --region "$PUB_REGION"

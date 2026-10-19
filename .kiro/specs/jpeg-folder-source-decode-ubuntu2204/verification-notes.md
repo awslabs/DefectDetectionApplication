@@ -1890,6 +1890,15 @@ goldens and this spec directory) and both commit messages.
   bare `git push` (code review 1, NIT 9). Nothing was merged into or
   pushed to `remediation`, `integration/all-specs` or `main`, and no build
   was dispatched.
+- **Build source changed (owner memo D3 of the
+  localserver-input-handling-hardening spec, 2026-10-15).** The owner
+  answered "yes" to batching this round with that spec. Task 7's builds
+  therefore run from the combined ref `build/jpeg-and-input-handling`, not
+  from `spec/jpeg-folder-source-decode` at `3a30a1d3`. The architectures
+  are amd64, amd64Nvidia, arm64, arm64JP5, arm64JP6 and arm64JP7, one
+  variant at a time; arm64JP7 is this spec's thor1 verification build. The
+  combined ref reaches the trunk only after this spec's lab Dell (amd64)
+  and thor1 passes and that spec's device pass (its task 10).
 
 ### Raised with the owner by this run
 
@@ -1901,6 +1910,85 @@ goldens and this spec directory) and both commit messages.
 - For information: `test_all_success_output_bindings_finalize_completed`
   misses its 200 ms Hypothesis deadline on a cold or busy host, on 48841a0
   as on the fix (Task 5).
+
+### Task 7, combined round: local part (2026-10-15)
+
+Local part only: no push, build, deploy, device or AWS action. The trunk
+`integration/all-specs` was `795ce528`.
+- **Merge-up.** `spec/jpeg-folder-source-decode` `3a30a1d3` → `be5da984`,
+  a merge commit of the trunk (parents `3a30a1d3`, `795ce528`), with no
+  conflict. The trunk delta touches none of this spec's files, and the
+  merged tree differs from the trunk by this spec's 87 files only. Then
+  `fbcb56bb` docs(spec) appended the folder-source non-regression check
+  under "Owner-gated (tasks 7 to 12)". Not pushed.
+- **Combined ref.** `build/jpeg-and-input-handling`, from `795ce528`:
+  `a0904083` merges this branch, `16d6378f` merges
+  `spec/localserver-input-handling` (`f73bb81a`). `pipeline_executor.py`
+  auto-merged. The CSI golden conflict was resolved by `sha256sum` of each
+  merged file, never one branch's side:
+  - `pipeline_builder.py` `4b27ee43…` and `catalog/nodes.py` `2b0d9b8c…`:
+    this spec's values (only this spec changes those files);
+  - `csi_capture.py` `193cdfcd…`: unchanged;
+  - `pipeline_executor.py`: `103bc023…` here and `8edf43bf…` on the other
+    branch, now `d475fd476a3ebe52c66c41d69437e0d6aadce0063fdea9c84ae05ea8755d48c5`
+    (both edits).
+
+  The other spec's notes ("Task 7") hold the full before/after table. The
+  CSI surface suite passes (20 passed).
+- **This spec's task-5 suites** (the Overview commands; the JP5 container
+  runs pinned task 5's versions, pytest 9.1.1, hypothesis 6.169.1, sarge
+  0.1.8 and testfixtures 12.4.0, from the package index rather than the
+  wheelhouse). No new failing id against Task 5 on either tree.
+
+  | Suite | Task 5 | Merge-up `fbcb56bb` | Combined `16d6378f` |
+  |---|---|---|---|
+  | workflow_core | 2 failed, 1288 passed, 1 skipped | 1 failed, 1289 passed, 1 skipped | 1 failed, 1289 passed, 1 skipped |
+  | `workflow_engine/` (quiet host) | 2 failed, 2214 passed, 10 skipped, 5 errors | the same | 2 failed, 2240 passed, 14 skipped, 5 errors |
+  | `static_image_camera/` | 17 failed, 23 passed, 6 errors | the same | the same |
+  | `stream_ingest/` | 231 passed, 23 skipped, 2 errors | the same (quiet re-run) | 241 passed, 23 skipped, 2 errors |
+  | `output_bindings_fixes/` | 25 passed, 7 errors | the same | the same |
+  | `api-endpoints/` | 33 passed, 78 errors | the same | the same |
+  | `utils/` | 64 passed, 1 skipped, 118 errors | the same | the same |
+  | `resources/` | 69 errors | the same | the same |
+  | `csi_nvargus_optional/` | 66 passed, 13 skipped | the same | the same |
+  | JP5 `gstreamer/` | 36 failed, 81 passed | the same 36 ids | the same 36 ids |
+  | JP5 `test_pipeline_builder.py` alone | 16 passed | 16 passed | 16 passed |
+  | Portal named files | 352 passed, 4 skipped | the same | the same |
+  | steering guard suites | 4 passed, 3 skipped | the same | the same |
+  | `test/python_version_audit.py` | 0 counterexamples | 0 | 0 |
+
+  - workflow_core's one failure is the known
+    `TestCatalogMirrorEquality::test_portal_and_vendor_catalog_init_are_byte_identical`.
+    The redaction seed case (Task 5) passed on this run's random draw.
+  - `workflow_engine/`: the first runs, on a busy host, also failed
+    `test_all_success_output_bindings_finalize_completed` (the 200 ms
+    deadline, Task 5). The quiet-host re-runs of the whole directory passed
+    it, with failing ids equal to Task 5's quiet re-run on both trees. The
+    combined tree's extra tests are the other spec's.
+  - `stream_ingest/` on the merge-up tree: the first, busy run also failed
+    `TestProperty18BackoffSchedule::test_the_session_retries_exactly_on_schedule`,
+    a timing case outside this spec's files. The quiet re-run passed it, and
+    its ids equal Task 5's.
+  - The single-file builder run loaded `gstreamer.pipeline_builder` from
+    `/w/repo/src/backend/gstreamer/pipeline_builder.py` on both trees.
+  - `git diff --stat -- test/backend-test/security/baselines/` is empty on
+    both trees.
+- **Gate body** (derived copy, writable `git archive` copy, JP5 image by
+  ID) on both trees: `scratch OK`, `derived copy OK`, `tree copy OK`; every
+  pytest count line and failing id equal Task 5's; the six audit gates pass;
+  the only traps are `line=9` and `line=24`, the two expected image-content
+  blocks.
+- **Hygiene.** The other spec's gate and wording checklist (task 7) passed
+  on the merge-up's new commits and on this spec directory's change in this
+  step, the appended check (pass/fail only; the other spec's notes hold
+  the full record). This directory's pre-existing loopback and wildcard
+  addresses and version strings, already on the pushed branch, are
+  unchanged.
+- **Pending (owner):** the pushes, then the six builds; per build, the
+  offline built-image check (task 7) on amd64, amd64Nvidia, arm64 and
+  arm64JP7, the Ubuntu 22.04 / GStreamer 1.20.3 confirmation from the
+  amd64 build log, and the first amd64/amd64Nvidia/arm64 versions that
+  contain C3 and C3b (for task 10).
 
 ## Owner-gated (tasks 7 to 12): pending, not executed in this run
 

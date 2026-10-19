@@ -88,10 +88,15 @@ RUN if [ "$ONNXRUNTIME_GPU" = "1" ]; then \
 RUN ./edge_ml1_p_camera_management/install_aravis.sh
 RUN python3.11 -m grpc_tools.protoc --proto_path=./edgeagent --python_out=. --grpc_python_out=. edgeagent/edge-agent.proto
 RUN apt update -y
-# Ubuntu 22.04 ships OpenSSL 3 (libssl3, pulled in by the base); the plain x86
-# image's libssl1.1 install does not apply on this base (the package does not
-# exist in jammy). Components needing OpenSSL 1.1 get it from the edgemlsdk
-# openssl.deb installed by install_edgemlsdk.sh below.
+# Ubuntu 22.04 ships OpenSSL 3 (libssl3 / libcrypto.so.3, pulled in by the
+# base); jammy has no libssl1.1 package, so the plain x86 image's focal-only
+# libssl1.1 install does not apply here. This image needs NO OpenSSL 1.1 at
+# all: build-custom.sh pins IMAGE_VER=22.04 for the x86 NVIDIA target, so the
+# edgemlsdk/panorama GStreamer plugins are compiled on 22.04 and link the
+# base's OpenSSL 3 (libcrypto.so.3 / libssl.so.3), which the base already
+# provides. (The edgemlsdk openssl.deb is a 3.x checkinstall build staged
+# under /usr/local/ssl — not a loader-path 1.1 runtime — so it never satisfied
+# a libcrypto.so.1.1 soname; nothing in this image depends on 1.1 anymore.)
 RUN apt update -y
 RUN apt install libexif12 libcurl4 libarchive13 gstreamer1.0-tools gstreamer1.0-libav ffmpeg -y
 
