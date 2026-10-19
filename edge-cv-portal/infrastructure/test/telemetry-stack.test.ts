@@ -7,7 +7,7 @@
  * staged at synth time), locate resources via template.findResources and
  * assert on raw CloudFormation properties. A second synth with
  * portalRegistryEnforced on covers the environment flag; a third with an
- * injected dataPlaneGrant covers the wired branch; out-of-range deployment
+ * explicit dataPlaneGrant prop covers the wired branch; out-of-range deployment
  * values throw at synth, and so does a synth without a usable
  * `sharedAuthorizerId` prop (the stack attaches its routes to the portal API's
  * existing Cognito authorizer, whose id bin/app.ts passes from the CDK
@@ -38,6 +38,15 @@ const FUNCTION_NAMES = [INGEST, ROLLUP, API, MAINTENANCE];
 /** The existing portal API authorizer the deploy passes as `-c sharedAuthorizerId` and bin/app.ts hands the stack (a fixture id). */
 const SHARED_AUTHORIZER_ID = 'fixture0';
 
+/**
+ * lib/context-helpers exports a `dataPlaneGrant` helper (portal-authorization-
+ * and-iam-scoping) with a contract of its own. The stack must stay `absent`
+ * unless a grant is passed explicitly: an earlier revision probed the module
+ * for that name and, once the helper existed, fed its incompatible shape to
+ * iam.PolicyStatement, which broke `cdk synth` of the whole app whenever
+ * sharedAuthorizerId was given. The assertions below hold regardless of what
+ * the module exports; this constant only documents that the trap is live.
+ */
 const helpersExportDataPlaneGrant =
   typeof (contextHelpers as unknown as { dataPlaneGrant?: unknown }).dataPlaneGrant === 'function';
 
@@ -89,7 +98,7 @@ function build(context?: { [key: string]: unknown }, override?: Partial<Telemetr
 beforeAll(() => {
   template = Template.fromStack(build());
   enforcedTemplate = Template.fromStack(build({ portalRegistryEnforced: 'true' }));
-  wiredStack = build(undefined, { dataPlaneGrantOverride: fakeGrant });
+  wiredStack = build(undefined, { dataPlaneGrant: fakeGrant });
   wiredTemplate = Template.fromStack(wiredStack);
 }, 300_000);
 
@@ -322,7 +331,8 @@ describe('the four functions', () => {
       expect(env.TELEMETRY_FIREHOSE_SUMMARIES).toBe('dda-portal-telemetry-summaries');
       expect(env.TELEMETRY_FIREHOSE_EVENTS).toBe('dda-portal-telemetry-events');
       expect(env.TELEMETRY_PORTAL_RULE_NAME).toBe('dda_tel_ingest_portal');
-      expect(env.TELEMETRY_DATA_PLANE_GRANT).toBe(helpersExportDataPlaneGrant ? 'tag' : 'absent');
+      // Absent unless a grant is passed explicitly (none is, here or in bin/app.ts).
+      expect(env.TELEMETRY_DATA_PLANE_GRANT).toBe('absent');
       expect(flat(env.TELEMETRY_SUMMARIES_TABLE)).toContain('TelemetrySummariesTable');
       expect(flat(env.TELEMETRY_CONFIG_TABLE)).toContain('TelemetryConfigTable');
       expect(flat(env.TELEMETRY_LAKE_BUCKET)).toContain('TelemetryLakeBucket');
@@ -677,8 +687,9 @@ describe('every role', () => {
 // the data-plane grant branch (design §12.3)
 // ---------------------------------------------------------------------------
 describe('the dataPlaneGrant branch', () => {
-  test('without lib/context-helpers exporting dataPlaneGrant: absent, and no statement beyond the by-ARN ones', () => {
-    expect(helpersExportDataPlaneGrant).toBe(false);
+  test('without an explicit dataPlaneGrant prop: absent, whatever lib/context-helpers exports, and no statement beyond the by-ARN ones', () => {
+    // The sibling helper exists today; the stack must not consume it on its own.
+    expect(helpersExportDataPlaneGrant).toBe(true);
     const stack = build();
     expect(stack.dataPlaneGrantWired).toBe(false);
     const tpl = Template.fromStack(stack);
@@ -697,7 +708,7 @@ describe('the dataPlaneGrant branch', () => {
     expect(outputs.TelemetryDataPlaneGrant.Value).toBe('absent');
   });
 
-  test('with a dataPlaneGrant: the tag-conditioned statements and TELEMETRY_DATA_PLANE_GRANT=tag', () => {
+  test('with an explicit dataPlaneGrant prop: the tag-conditioned statements and TELEMETRY_DATA_PLANE_GRANT=tag', () => {
     expect(wiredStack.dataPlaneGrantWired).toBe(true);
     const apiRole = roleLogicalIdOf(API, wiredTemplate);
     const read = sid(apiRole, 'TelemetryDataPlaneObjectRead', wiredTemplate);

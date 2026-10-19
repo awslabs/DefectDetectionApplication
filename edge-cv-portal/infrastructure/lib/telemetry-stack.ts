@@ -14,17 +14,22 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
-import * as contextHelpers from './context-helpers';
 import { portalRegistryEnforced, sharedAuthorizerId } from './context-helpers';
 import * as crypto from 'crypto';
 import * as path from 'path';
 
 /**
- * The shape of the data-plane grant helper the authorization specification
- * adds to lib/context-helpers (workflow-telemetry-dashboards design §12.3,
- * N15). While `lib/context-helpers` does not export `dataPlaneGrant`, the
- * stack grants nothing on use-case buckets beyond the by-ARN statements on
- * the default Results_Bucket and sets TELEMETRY_DATA_PLANE_GRANT=absent.
+ * The shape of the data-plane grant this stack can wire (workflow-telemetry-
+ * dashboards design §12.3, N15). It is given explicitly through the
+ * `dataPlaneGrant` prop and is absent by default: without it the stack grants
+ * nothing on use-case buckets beyond the by-ARN statements on the default
+ * Results_Bucket and sets TELEMETRY_DATA_PLANE_GRANT=absent. The stack never
+ * discovers a grant on its own. lib/context-helpers exports a `dataPlaneGrant`
+ * helper (portal-authorization-and-iam-scoping) whose contract differs from
+ * this one (`{ actions, resources, conditions }` per statement and a
+ * `tagDiscovery` statement, no `condition` field); adapting it, and the four
+ * statements that wiring adds to the deployed telemetry roles, is a reviewed
+ * follow-up, not an import.
  */
 export interface DataPlaneGrant {
   /** Object-level resources (`arn:aws:s3:::<bucket>/*`) the tag condition applies to. */
@@ -54,7 +59,7 @@ export interface TelemetryStackProps extends cdk.StackProps {
    * Portal account) and the sts:AssumeRole targets. Non-empty at synth time.
    */
   trustedUseCaseAccountIds: string[];
-  /** The data-bucket allowlist the SyntheticDataStack takes (N15); used only once dataPlaneGrant exists. */
+  /** The data-bucket allowlist the SyntheticDataStack takes (N15); used only when a dataPlaneGrant is given. */
   dataBucketAllowlist?: string[];
   /** Rest API id of the existing portal API (ComputeStack.api). */
   restApiId: string;
@@ -70,8 +75,13 @@ export interface TelemetryStackProps extends cdk.StackProps {
    * authorizer of its own.
    */
   sharedAuthorizerId: string;
-  /** Test seam: the data-plane grant to wire instead of the lib/context-helpers export. */
-  dataPlaneGrantOverride?: ((allowlist: string[]) => DataPlaneGrant) | null;
+  /**
+   * The data-plane grant to wire (design §12.3), built from the allowlist.
+   * Opt-in: absent by default, and bin/app.ts passes none today, so the
+   * telemetry roles carry no statement beyond the ones the IAM synth gate
+   * approves (TELEMETRY_DATA_PLANE_GRANT=absent).
+   */
+  dataPlaneGrant?: (allowlist: string[]) => DataPlaneGrant;
 }
 
 /** A deployment value of design §15.2: its context key, environment name, default and inclusive range. */
@@ -194,13 +204,11 @@ export class TelemetryStack extends cdk.Stack {
     }
 
     // ------------------------------------------------------------------
-    // The data-plane grant (design §12.3): wired only when lib/context-helpers
-    // exports dataPlaneGrant (or a test injects one).
+    // The data-plane grant (design §12.3): wired only when the caller passes
+    // one. A stack must not change its IAM because a sibling module happens
+    // to export a name, so there is no discovery here.
     // ------------------------------------------------------------------
-    const helperGrant = (contextHelpers as unknown as { dataPlaneGrant?: (allowlist: string[]) => DataPlaneGrant }).dataPlaneGrant;
-    const grantFactory =
-      props.dataPlaneGrantOverride === undefined ? helperGrant : props.dataPlaneGrantOverride ?? undefined;
-    const dataPlaneGrant = typeof grantFactory === 'function' ? grantFactory(props.dataBucketAllowlist ?? []) : undefined;
+    const dataPlaneGrant = props.dataPlaneGrant?.(props.dataBucketAllowlist ?? []);
     this.dataPlaneGrantWired = dataPlaneGrant !== undefined;
 
     // ------------------------------------------------------------------
