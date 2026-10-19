@@ -41,11 +41,16 @@ const INFRA_DIR = path.join(__dirname, '..');
 const APP_SOURCE = path.join(INFRA_DIR, 'bin', 'app.ts');
 /** The stacks bin/app.ts instantiates only with the context value present. */
 const CONTEXT_GATED_STACKS = ['WorkflowDebugStack', 'TelemetryStack'];
-/** The canonical fixture context of the IAM synth gate, minus `sharedAuthorizerId`. */
+/**
+ * The canonical fixture context of the IAM synth gate, minus `sharedAuthorizerId`.
+ * `portalRegistryEnforced` must be stated: bin/app.ts refuses to synthesize
+ * without it (portal-authorization-and-iam-scoping, design I7 D7-A).
+ */
 const FIXTURE_CONTEXT = [
   '--context', 'portalAccountId=111111111111',
   '--context', 'externalId=fixture-eid',
   '--context', 'trustedUseCaseAccountIds=222222222222,333333333333',
+  '--context', 'portalRegistryEnforced=false',
 ];
 
 let outdir: string;
