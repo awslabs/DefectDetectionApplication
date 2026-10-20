@@ -281,7 +281,11 @@ def test_portal_owned_buckets_both_set(monkeypatch):
     monkeypatch.setenv("PORTAL_ARTIFACTS_BUCKET", "arts")
     monkeypatch.setenv("COMPONENT_BUCKET", "comp-explicit")
     monkeypatch.setenv("PORTAL_ACCOUNT_ID", "acct-portal")
-    assert su.portal_owned_buckets() == frozenset({"arts", "comp-explicit"})
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    # The workflow telemetry lake is derived from the same environment
+    # (workflow-telemetry-dashboards tasks.md Q6) whenever the account id is set.
+    assert su.portal_owned_buckets() == frozenset(
+        {"arts", "comp-explicit", "edgecv-portal-telemetry-acct-portal-us-east-1"})
 
 
 def test_portal_owned_buckets_prefix_derivation(monkeypatch):
@@ -290,10 +294,14 @@ def test_portal_owned_buckets_prefix_derivation(monkeypatch):
     monkeypatch.setenv("PORTAL_ACCOUNT_ID", "acct-portal")
     monkeypatch.setenv("COMPONENT_BUCKET_PREFIX", "custom-prefix")
     monkeypatch.setenv("AWS_REGION", "eu-west-1")
-    assert su.portal_owned_buckets() == frozenset({"arts", "custom-prefix-eu-west-1-acct-portal"})
+    assert su.portal_owned_buckets() == frozenset(
+        {"arts", "custom-prefix-eu-west-1-acct-portal",
+         "edgecv-portal-telemetry-acct-portal-eu-west-1"})
     monkeypatch.delenv("COMPONENT_BUCKET_PREFIX")
     monkeypatch.delenv("AWS_REGION")
-    assert su.portal_owned_buckets() == frozenset({"arts", "dda-component-us-east-1-acct-portal"})
+    assert su.portal_owned_buckets() == frozenset(
+        {"arts", "dda-component-us-east-1-acct-portal",
+         "edgecv-portal-telemetry-acct-portal-us-east-1"})
 
 
 def test_portal_owned_buckets_without_account_id_is_artifacts_only(monkeypatch):
@@ -572,10 +580,14 @@ def test_get_s3_client_for_bucket_non_member_name_is_invalid_bucket_name(portal_
 
 
 def test_get_s3_client_for_bucket_signature_unchanged_and_binds_first():
+    # The three original parameters are unchanged; the optional trailing
+    # `session_policy` keyword (workflow-debug-mode tasks.md 3.1) defaults to
+    # None, so every pre-existing call site binds exactly as before.
     import inspect
     sig = inspect.signature(su.get_s3_client_for_bucket)
-    assert list(sig.parameters) == ["usecase", "bucket_name", "session_name"]
+    assert list(sig.parameters) == ["usecase", "bucket_name", "session_name", "session_policy"]
     assert sig.parameters["session_name"].default == "portal-s3-access"
+    assert sig.parameters["session_policy"].default is None
     tree = ast.parse(inspect.getsource(su.get_s3_client_for_bucket))
     func = tree.body[0]
     body = [node for node in func.body if not (isinstance(node, ast.Expr)

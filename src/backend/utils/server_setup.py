@@ -247,6 +247,106 @@ except Exception:  # noqa: BLE001 - even thread creation must not break startup
     logger.exception("Could not start the camera registry sync thread")
 
 
+# --- workflow debug mode (workflow-debug-mode design §5.1 agent.py, R10.3) --
+#
+# The Debug_Agent follows the camera-registry-sync wiring above: it starts on
+# a daemon thread behind exception guards, so a failure is logged and leaves
+# the rest of LocalServer startup untouched (the fail-safe state is simply
+# "no debug mode"; the device run API then reports ``debug: {active: false}``).
+
+workflow_debug_agent = None
+
+
+def start_workflow_debug():
+    """Construct and start the workflow Debug_Agent.
+
+    Imports are deferred so this module section stays importable without the
+    agent's optional runtime pieces; the agent itself imports ``awsiot``
+    lazily inside its shadow subscription. Returns the agent; raises on any
+    construction or start failure — the caller isolates that from startup.
+    """
+    from workflow_engine.telemetry.debug import agent as debug_agent
+
+    agent = debug_agent.DebugAgent()
+    agent.start()
+    debug_agent.set_agent(agent)
+    return agent
+
+
+def _start_workflow_debug_isolated():
+    """Daemon-thread entry point: any construction or start failure is
+    logged and swallowed so LocalServer startup proceeds untouched."""
+    global workflow_debug_agent
+    try:
+        workflow_debug_agent = start_workflow_debug()
+        logger.info("Workflow debug agent started")
+    except Exception:  # noqa: BLE001 - top-level failure isolation
+        logger.exception(
+            "Workflow debug agent failed to start; continuing LocalServer "
+            "startup without the debug mode"
+        )
+
+
+try:
+    threading.Thread(
+        target=_start_workflow_debug_isolated,
+        name="workflow-debug-startup",
+        daemon=True,
+    ).start()
+except Exception:  # noqa: BLE001 - even thread creation must not break startup
+    logger.exception("Could not start the workflow debug agent thread")
+
+
+# --- workflow telemetry (workflow-telemetry-dashboards design §5.2 agent.py, R5.8) --
+#
+# The Telemetry_Agent follows the same wiring: it starts on a daemon thread
+# behind exception guards, so a failure is logged and leaves the rest of
+# LocalServer startup untouched (the fail-safe state is "no telemetry"; the
+# agent publishes nothing until the dda-workflow-telemetry shadow enables it).
+
+workflow_telemetry_agent = None
+
+
+def start_workflow_telemetry():
+    """Construct and start the workflow Telemetry_Agent.
+
+    Imports are deferred so this module section stays importable without the
+    agent's optional runtime pieces; the agent itself imports ``awsiot``
+    lazily inside its shadow subscription. Returns the agent; raises on any
+    construction or start failure — the caller isolates that from startup.
+    """
+    from workflow_engine.telemetry import agent as telemetry_agent
+
+    agent = telemetry_agent.TelemetryAgent()
+    agent.start()
+    telemetry_agent.set_agent(agent)
+    return agent
+
+
+def _start_workflow_telemetry_isolated():
+    """Daemon-thread entry point: any construction or start failure is
+    logged and swallowed so LocalServer startup proceeds untouched."""
+    global workflow_telemetry_agent
+    try:
+        workflow_telemetry_agent = start_workflow_telemetry()
+        logger.info("Workflow telemetry agent started")
+    except Exception:  # noqa: BLE001 - top-level failure isolation
+        logger.exception(
+            "Workflow telemetry agent failed to start; continuing LocalServer "
+            "startup without telemetry"
+        )
+
+
+try:
+    threading.Thread(
+        target=_start_workflow_telemetry_isolated,
+        name="workflow-telemetry-startup",
+        daemon=True,
+    ).start()
+except Exception:  # noqa: BLE001 - even thread creation must not break startup
+    logger.exception("Could not start the workflow telemetry agent thread")
+
+
 # --- user accounts sync + local login config (portal-user-manager, task 10.3) --
 #
 # The Account_Sync_Service edge agent and the Local_Login_Configuration

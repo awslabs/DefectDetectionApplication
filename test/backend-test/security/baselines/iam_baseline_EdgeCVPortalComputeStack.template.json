@@ -1071,26 +1071,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -1112,8 +1092,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -1124,6 +1116,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -2762,26 +2759,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -2803,8 +2780,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -2815,6 +2804,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -3901,26 +3895,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -3942,8 +3916,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -3954,6 +3940,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -5002,26 +4993,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -5043,8 +5014,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -5055,6 +5038,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -6074,26 +6062,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -6115,8 +6083,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -6127,6 +6107,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -7146,26 +7131,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -7187,8 +7152,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -7199,6 +7176,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -8349,26 +8331,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -8449,8 +8411,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -8461,6 +8435,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -9432,26 +9411,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -9473,8 +9432,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -9485,6 +9456,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -10504,26 +10480,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -10545,8 +10501,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -10557,6 +10525,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -11510,26 +11483,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -11551,8 +11504,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -11563,6 +11528,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -12581,26 +12551,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -12622,8 +12572,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -12634,6 +12596,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -13652,26 +13619,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -13693,8 +13640,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -13705,6 +13664,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -14723,26 +14687,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -14764,8 +14708,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -14776,6 +14732,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -15824,26 +15785,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -15865,8 +15806,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -15877,6 +15830,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -16895,26 +16853,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -16936,8 +16874,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -16948,6 +16898,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -17967,26 +17922,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -18008,8 +17943,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -18020,6 +17967,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -19042,26 +18994,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -19083,8 +19015,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -19095,6 +19039,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -20150,26 +20099,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -20191,8 +20120,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -20203,6 +20144,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -21221,26 +21167,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -21262,8 +21188,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -21274,6 +21212,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -22369,26 +22312,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -22410,8 +22333,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -22422,6 +22357,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -23440,26 +23380,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -23481,8 +23401,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -23493,6 +23425,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -24594,26 +24531,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -24635,8 +24552,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -24647,6 +24576,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -25676,26 +25610,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -25717,8 +25631,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -25729,6 +25655,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -26781,26 +26712,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -26822,8 +26733,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -26834,6 +26757,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -27886,26 +27814,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -27927,8 +27835,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -27939,6 +27859,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -28958,26 +28883,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -28999,8 +28904,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -29011,6 +28928,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -30192,26 +30114,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -30233,8 +30135,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -30245,6 +30159,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -31400,26 +31319,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -31441,8 +31340,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -31453,6 +31364,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -32801,26 +32717,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -32842,8 +32738,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -32854,6 +32762,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -33998,26 +33911,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -34039,8 +33932,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -34051,6 +33956,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -35337,26 +35247,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -35378,8 +35268,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -35390,6 +35292,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -36463,26 +36370,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -36504,8 +36391,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -36516,6 +36415,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -37574,26 +37478,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -37615,8 +37499,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -37627,6 +37523,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -38705,26 +38606,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -38746,8 +38627,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -38758,6 +38651,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -39857,26 +39755,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -39898,8 +39776,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -39910,6 +39800,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -41009,26 +40904,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -41050,8 +40925,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -41062,6 +40949,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -42209,26 +42101,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -42250,8 +42122,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -42262,6 +42146,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -43418,26 +43307,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -43459,8 +43328,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -43471,6 +43352,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -44564,26 +44450,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -44605,8 +44471,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -44617,6 +44495,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -45674,26 +45557,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -45715,8 +45578,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -45727,6 +45602,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -47298,26 +47178,6 @@
        ]
       },
       {
-       "Action": "execute-api:Invoke",
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::Join": [
-         "",
-         [
-          "arn:aws:execute-api:",
-          {
-           "Ref": "AWS::Region"
-          },
-          ":",
-          {
-           "Ref": "AWS::AccountId"
-          },
-          ":*/*"
-         ]
-        ]
-       }
-      },
-      {
        "Action": [
         "s3:GetBucketCors",
         "s3:PutBucketCors"
@@ -47339,8 +47199,20 @@
       },
       {
        "Action": [
-        "s3:ListBucket",
         "s3:GetBucketLocation",
+        "s3:ListBucket"
+       ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "arn:aws:s3:::*"
+      },
+      {
+       "Action": [
+        "s3:GetBucketABAC",
         "s3:GetBucketTagging"
        ],
        "Effect": "Allow",
@@ -47351,6 +47223,11 @@
         "s3:GetObject",
         "s3:PutObject"
        ],
+       "Condition": {
+        "StringEquals": {
+         "aws:ResourceTag/dda-portal:managed": "true"
+        }
+       },
        "Effect": "Allow",
        "Resource": "arn:aws:s3:::*/*"
       },
@@ -47697,126 +47574,6 @@
     "aws:cdk:path": "EdgeCVPortalComputeStack/WorkflowManagerGapsApi.NestedStack/WorkflowManagerGapsApi.NestedStackResource",
     "aws:asset:path": "EdgeCVPortalComputeStackWorkflowManagerGapsApi021B1045.nested.template.json",
     "aws:asset:property": "TemplateURL"
-   }
-  },
-  "UpdateLambdaEnvServiceRole5C231C14": {
-   "Type": "AWS::IAM::Role",
-   "Properties": {
-    "AssumeRolePolicyDocument": {
-     "Statement": [
-      {
-       "Action": "sts:AssumeRole",
-       "Effect": "Allow",
-       "Principal": {
-        "Service": "lambda.amazonaws.com"
-       }
-      }
-     ],
-     "Version": "2012-10-17"
-    },
-    "ManagedPolicyArns": [
-     {
-      "Fn::Join": [
-       "",
-       [
-        "arn:",
-        {
-         "Ref": "AWS::Partition"
-        },
-        ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-       ]
-      ]
-     }
-    ]
-   },
-   "Metadata": {
-    "aws:cdk:path": "EdgeCVPortalComputeStack/UpdateLambdaEnv/ServiceRole/Resource"
-   }
-  },
-  "UpdateLambdaEnvServiceRoleDefaultPolicyAA319DDF": {
-   "Type": "AWS::IAM::Policy",
-   "Properties": {
-    "PolicyDocument": {
-     "Statement": [
-      {
-       "Action": [
-        "lambda:GetFunctionConfiguration",
-        "lambda:UpdateFunctionConfiguration"
-       ],
-       "Effect": "Allow",
-       "Resource": {
-        "Fn::GetAtt": [
-         "UseCasesHandler9D45DC90",
-         "Arn"
-        ]
-       }
-      }
-     ],
-     "Version": "2012-10-17"
-    },
-    "PolicyName": "UpdateLambdaEnvServiceRoleDefaultPolicyAA319DDF",
-    "Roles": [
-     {
-      "Ref": "UpdateLambdaEnvServiceRole5C231C14"
-     }
-    ]
-   },
-   "Metadata": {
-    "aws:cdk:path": "EdgeCVPortalComputeStack/UpdateLambdaEnv/ServiceRole/DefaultPolicy/Resource"
-   }
-  },
-  "UpdateLambdaEnvF46AE299": {
-   "Type": "AWS::Lambda::Function",
-   "Properties": {
-    "Code": {
-     "ZipFile": "\nimport json\nimport boto3\nimport cfnresponse\n\nlambda_client = boto3.client('lambda')\n\ndef handler(event, context):\n    try:\n        if event['RequestType'] in ['Create', 'Update']:\n            function_name = event['ResourceProperties']['FunctionName']\n            api_gateway_id = event['ResourceProperties']['ApiGatewayId']\n            \n            # Get current environment variables\n            response = lambda_client.get_function_configuration(FunctionName=function_name)\n            env_vars = response.get('Environment', {}).get('Variables', {})\n            \n            # Add API_GATEWAY_ID\n            env_vars['API_GATEWAY_ID'] = api_gateway_id\n            \n            # Update Lambda environment\n            lambda_client.update_function_configuration(\n                FunctionName=function_name,\n                Environment={'Variables': env_vars}\n            )\n            \n            print(f\"Updated {function_name} with API_GATEWAY_ID={api_gateway_id}\")\n            cfnresponse.send(event, context, cfnresponse.SUCCESS, {\n                'Message': f'Updated Lambda environment'\n            })\n        else:\n            cfnresponse.send(event, context, cfnresponse.SUCCESS, {})\n    except Exception as e:\n        print(f\"Error: {str(e)}\")\n        cfnresponse.send(event, context, cfnresponse.FAILED, {\n            'Message': str(e)\n        })\n      "
-    },
-    "Handler": "index.handler",
-    "Role": {
-     "Fn::GetAtt": [
-      "UpdateLambdaEnvServiceRole5C231C14",
-      "Arn"
-     ]
-    },
-    "Runtime": "python3.11",
-    "Timeout": 60
-   },
-   "DependsOn": [
-    "UpdateLambdaEnvServiceRoleDefaultPolicyAA319DDF",
-    "UpdateLambdaEnvServiceRole5C231C14"
-   ],
-   "Metadata": {
-    "aws:cdk:path": "EdgeCVPortalComputeStack/UpdateLambdaEnv/Resource"
-   }
-  },
-  "LambdaEnvUpdater": {
-   "Type": "AWS::CloudFormation::CustomResource",
-   "Properties": {
-    "ServiceToken": {
-     "Fn::GetAtt": [
-      "UpdateLambdaEnvF46AE299",
-      "Arn"
-     ]
-    },
-    "FunctionName": {
-     "Ref": "UseCasesHandler9D45DC90"
-    },
-    "ApiGatewayId": {
-     "Fn::GetAtt": [
-      "ApiGatewayNestedStackApiGatewayNestedStackResource85A55C6F",
-      "Outputs.EdgeCVPortalComputeStackApiGatewayEdgeCVPortalAPI899B3E89Ref"
-     ]
-    },
-    "Timestamp": "1787421990566"
-   },
-   "DependsOn": [
-    "ApiGatewayNestedStackApiGatewayNestedStackResource85A55C6F",
-    "UseCasesHandler9D45DC90"
-   ],
-   "UpdateReplacePolicy": "Delete",
-   "DeletionPolicy": "Delete",
-   "Metadata": {
-    "aws:cdk:path": "EdgeCVPortalComputeStack/LambdaEnvUpdater/Default"
    }
   },
   "CDKMetadata": {

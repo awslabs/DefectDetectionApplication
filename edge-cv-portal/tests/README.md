@@ -6,7 +6,7 @@ Offline `bats` test harness for the one-command portal deploy orchestrator
 ## Prerequisites
 
 [Bats](https://github.com/bats-core/bats-core) (Bash Automated Testing System),
-version 1.5+ (`registry_enforcement.bats` and the trusted-account, region and usecase/data files call `bats_require_minimum_version 1.5.0` and use `run --separate-stderr`; `harness.bats` still runs on 1.2). Distribution packages can be older; check `bats --version` and install from source if it is below 1.5.
+version 1.5+ (`registry_enforcement.bats` and the trusted-account, region and usecase/data files call `bats_require_minimum_version 1.5.0` and use `run --separate-stderr`; `harness.bats` and `cdk_context_guard.bats` still run on 1.2). Distribution packages can be older; check `bats --version` and install from source if it is below 1.5.
 
 ```bash
 # macOS
@@ -41,7 +41,8 @@ No CI workflow runs this suite yet; run it locally before changing a deploy scri
 | `region_profile.bats` | One region for every call of each deploy script (an exported region before the configured one, a hint when there is none) and `deploy-portal.sh`'s profile and region order. |
 | `usecase_data_setup.bats` | UseCase/Data account setup: `npm ci` before the first `npx` call, a bootstrap through that account's own CDK app, and one region throughout. |
 | `harness.bats` | Self-tests proving the harness works offline. |
-| `registry_enforcement.bats` | `scripts/portal-registry-enforcement.sh` and the three deploy scripts that use it: an unset `PORTAL_REGISTRY_ENFORCED` keeps the deployed value, an explicit one wins, a fresh install passes nothing, and a failed lookup stops the deploy. |
+| `registry_enforcement.bats` | `scripts/portal-registry-enforcement.sh` and the three deploy scripts that use it: an unset `PORTAL_REGISTRY_ENFORCED` keeps the deployed value, an explicit one wins, a fresh install passes no enforcement value, and a failed lookup stops the deploy. |
+| `cdk_context_guard.bats` | Every script that synthesizes the portal app passes the enforcement context: the pinned set of four scripts, every `cdk bootstrap` naming an app with `-a` or carrying the context itself, `deploy-auth.sh`'s bootstrap and deploy context on a fresh install, a deployed value and a failed lookup, and the provenance and `Data-plane scoping:` lines of the deploy scripts. |
 
 ## Using the harness in a test
 

@@ -38,6 +38,11 @@ npm ci
 echo "🔨 Building TypeScript..."
 npm run build
 
+# The S3 data-plane scoping this build gives every portal handler
+# (DATA_PLANE_SCOPING; portal-authorization-and-iam-scoping, design I5), read
+# from the built lib/context-helpers.js, the source the CDK synthesizes from.
+echo "Data-plane scoping: $(node -e "console.log(require('./lib/context-helpers').DATA_PLANE_SCOPING)")"
+
 echo "🧹 Clearing CDK cache to force layer update..."
 rm -rf cdk.out
 
@@ -71,8 +76,20 @@ fi
 if ! ENFORCED=$(portal_registry_enforced_for_deploy "$AWS_REGION"); then
   exit 1
 fi
+# bin/app.ts refuses to synthesize without a recognized portalRegistryEnforced
+# unless allowLegacyRoles=true acknowledges a fresh install (no portal handler
+# deployed yet, so the CDK default, off, applies); the effective value and its
+# provenance go to the deploy log (portal-authorization-and-iam-scoping, D7-A).
 if [ -n "$ENFORCED" ]; then
   CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c portalRegistryEnforced=$ENFORCED"
+  if [ -n "${PORTAL_REGISTRY_ENFORCED:-}" ]; then
+    echo "Portal_Identity enforcement: $ENFORCED (requested)"
+  else
+    echo "Portal_Identity enforcement: $ENFORCED (kept from deployed)"
+  fi
+else
+  CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c allowLegacyRoles=true"
+  echo "Portal_Identity enforcement: CDK default (off), acknowledged (fresh install)"
 fi
 # Production posture (ADMIN_GUIDE "The enforcement flag"): a deploy that leaves
 # enforcement off must never be silent. The resolved value is passed through
@@ -83,6 +100,50 @@ ENFORCED_ON=false
 _portal_registry_value_is_on "$ENFORCED" && ENFORCED_ON=true
 if [ "$ENFORCED_ON" != "true" ]; then
   echo "⚠️  Portal_Identity enforcement is OFF for this deploy. Production deployments must run PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh after backfill_portal_registry.py has been run." >&2
+fi
+
+# Shared Cognito authorizer for the stacks that register routes without an
+# authorizer of their own (EdgeCVPortalWorkflowDebugStack,
+# EdgeCVPortalTelemetryStack). API Gateway allows 10 authorizers per REST API,
+# a quota only AWS Support raises, and the portal API already carries one per
+# route-registering stack, so the first deploy of a stack that created its
+# own rolled back on 2026-10-18. Those stacks attach their methods to the
+# ApiGatewayStack's authorizer (name EdgeCVPortalAuthorizer); bin/app.ts
+# instantiates them only when its id is present as CDK context
+# (lib/context-helpers.ts sharedAuthorizerIdIfGiven). Resolve it from the
+# deployed API and pass it as CDK context:
+#
+#   SHARED_AUTHORIZER_ID=<id> ./deploy-infrastructure.sh   # skip the lookup
+#
+# When nothing resolves (a fresh install has no API yet, or the lookup is
+# denied) no value is passed; the CDK app then warns, skips those two stacks
+# and deploys every other stack as before. On a fresh install that is the
+# first pass: run this script again once EdgeCVPortalComputeStack exists and
+# the lookup succeeds. The lookup itself never stops the deploy: both reads
+# run under `|| true`.
+resolve_shared_authorizer_id() {
+  local api_id
+  if [ -n "${SHARED_AUTHORIZER_ID:-}" ]; then
+    printf '%s\n' "$SHARED_AUTHORIZER_ID"
+    return 0
+  fi
+  api_id=$(aws cloudformation describe-stacks --stack-name EdgeCVPortalComputeStack \
+    --query 'Stacks[0].Outputs[?OutputKey==`ApiId`].OutputValue' --output text 2>/dev/null || true)
+  if [ -z "$api_id" ] || [ "$api_id" = "None" ]; then
+    return 0
+  fi
+  # Only a Cognito authorizer of that name qualifies: the methods are deployed
+  # with AuthorizationType COGNITO_USER_POOLS.
+  aws apigateway get-authorizers --rest-api-id "$api_id" \
+    --query "items[?name=='EdgeCVPortalAuthorizer' && type=='COGNITO_USER_POOLS'].id" --output text 2>/dev/null \
+    | awk 'NF { print $1; exit }' || true
+}
+SHARED_AUTHORIZER=$(resolve_shared_authorizer_id || true)
+if [ -n "$SHARED_AUTHORIZER" ] && [ "$SHARED_AUTHORIZER" != "None" ]; then
+  echo "🔑 Shared API authorizer (EdgeCVPortalAuthorizer): $SHARED_AUTHORIZER"
+  CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c sharedAuthorizerId=$SHARED_AUTHORIZER"
+else
+  echo "⚠️  No EdgeCVPortalAuthorizer found on the deployed portal API (is EdgeCVPortalComputeStack deployed?). The workflow debug and telemetry stacks need its id: the CDK app skips those two stacks (and deploys every other stack) without it. Run this script again once EdgeCVPortalComputeStack exists, or set SHARED_AUTHORIZER_ID=<id> to pass one by hand." >&2
 fi
 
 # Trusted UseCase account list, for visibility only. bin/app.ts synthesizes the

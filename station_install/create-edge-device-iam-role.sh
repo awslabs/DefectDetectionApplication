@@ -109,6 +109,13 @@ fi
 # action-scoping (the enumerated edge-device action subset below) is the primary
 # defense; the service-wildcard actions (greengrass:*, greengrassv2:*) have been
 # removed in favor of only the actions the edge device actually exercises.
+# S3: the statement set of DDAPortalComponentAccessPolicy
+# (edge-cv-portal/infrastructure/lib/usecase-account-stack.ts): component bucket
+# read (Sid S3Permissions), the bucket-pattern read limited to dda-* (the
+# *-dda-* substring pattern is left to the attached managed policy, as in
+# deploy-account-role.sh) and the inference-results upload; use-case buckets
+# outside the dda-* / *-dda-* patterns are granted by the portal-written
+# DDAUseCaseDeviceAccess policy (station_install/README.md).
 INLINE_POLICY=$(cat <<'EOF'
 {
   "Version": "2012-10-17",
@@ -173,15 +180,36 @@ INLINE_POLICY=$(cat <<'EOF'
       "Effect": "Allow",
       "Action": [
         "s3:GetObject",
-        "s3:PutObject",
-        "s3:ListBucket",
-        "s3:GetBucketLocation",
-        "s3:GetBucketVersioning",
-        "s3:ListBucketVersions"
+        "s3:GetBucketLocation"
       ],
       "Resource": [
         "arn:aws:s3:::dda-component-*",
-        "arn:aws:s3:::dda-component-*/*",
+        "arn:aws:s3:::dda-component-*/*"
+      ]
+    },
+    {
+      "Sid": "AllowDDABucketPatternAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetBucketLocation",
+        "s3:HeadObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::dda-*",
+        "arn:aws:s3:::dda-*/*"
+      ]
+    },
+    {
+      "Sid": "AllowInferenceResultsUpload",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectTagging",
+        "s3:GetObject",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
         "arn:aws:s3:::dda-inference-results-*",
         "arn:aws:s3:::dda-inference-results-*/*"
       ]

@@ -9,8 +9,18 @@ import { TestRunnerStack } from '../lib/test-runner-stack';
 import { NodeDesignerStack } from '../lib/node-designer-stack';
 import { BuildFleetStack } from '../lib/build-fleet-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
+import { WorkflowDebugStack } from '../lib/workflow-debug-stack';
+import { TelemetryStack } from '../lib/telemetry-stack';
 import { FrontendStack } from '../lib/frontend-stack';
-import { detectorExportImageDefault, normalizeCloudFrontDomain } from '../lib/context-helpers';
+import {
+  PORTAL_API_AUTHORIZER_NAME,
+  SHARED_AUTHORIZER_CONTEXT_KEY,
+  detectorExportImageDefault,
+  enforcementRefusalMessage,
+  legacyRolesAcknowledged,
+  normalizeCloudFrontDomain,
+  sharedAuthorizerIdIfGiven,
+} from '../lib/context-helpers';
 
 // One SSM String parameter, read synchronously via the AWS CLI (the same
 // mechanism as the trusted-account fallback below). Throws on any failure;
@@ -40,6 +50,19 @@ const app = new cdk.App(
     ? { context: { detectorExportImage: detectorExportImageFallback } }
     : undefined,
 );
+
+// Portal_Identity enforcement must be stated, never defaulted by omission
+// (portal-authorization-and-iam-scoping, design I7 D7-A): an absent or
+// unrecognized `portalRegistryEnforced` resolves to off, so without the
+// fresh-install acknowledgement `allowLegacyRoles` the app refuses to
+// synthesize, before any stack exists. The CLI synthesizes the whole app even
+// when it deploys one named stack, so this covers every deploy path; the
+// deploy scripts pass the deployed value or, on a fresh install, the
+// acknowledgement.
+const registryEnforcedContext = app.node.tryGetContext('portalRegistryEnforced');
+if (!legacyRolesAcknowledged(registryEnforcedContext, app.node.tryGetContext('allowLegacyRoles'))) {
+  throw new Error(enforcementRefusalMessage(registryEnforcedContext));
+}
 
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
@@ -138,10 +161,14 @@ const trustedUseCaseAccountIds: string[] = resolveTrustedUseCaseAccountIds()
   .split(',')
   .map((id: string) => id.trim())
   .filter((id: string) => id.length > 0);
-// Optional allowlist of data buckets the portal Lambda roles may access on the
-// S3 data plane. Comma-separated bucket names or ARNs via CDK context
-// (`-c dataBucketAllowlist=bucket-a,bucket-b`). Empty/unset => all buckets
-// (arn:aws:s3:::*) on the data plane (default; control-plane never granted).
+// Optional allowlist of data buckets for the portal Lambda roles' S3 data
+// plane. Comma-separated bucket names or ARNs via CDK context
+// (`-c dataBucketAllowlist=bucket-a,bucket-b`). Read only under the
+// 'tag-objects-only' and 'allowlist' data-plane scopings (dataPlaneGrant in
+// lib/context-helpers.ts); the deployed 'tag' scoping conditions the data
+// plane on the bucket's dda-portal:managed tag and ignores it. Every stack
+// whose roles carry the data plane (compute, node designer, synthetic data)
+// receives it, because the other two scopings throw on an empty list.
 const dataBucketAllowlist: string[] = (app.node.tryGetContext('dataBucketAllowlist') || '')
   .split(',')
   .map((b: string) => b.trim())
@@ -202,6 +229,7 @@ const nodeDesignerStack = new NodeDesignerStack(app, 'EdgeCVPortalNodeDesignerSt
   workflowVersionsTable: storageStack.workflowVersionsTable,
   testDatasetsTable: storageStack.testDatasetsTable,
   trustedUseCaseAccountIds,
+  dataBucketAllowlist,
   userPool: authStack.userPool,
   restApiId: computeStack.api.restApiId,
   restApiRootResourceId: computeStack.api.restApiRootResourceId,
@@ -249,6 +277,98 @@ const syntheticDataStack = new SyntheticDataStack(app, 'EdgeCVPortalSyntheticDat
   // Must match ApiGatewayStack deployOptions.stageName.
   apiStageName: 'v1',
 });
+
+// The workflow debug and telemetry stacks below register their routes on the
+// ComputeStack API without a Cognito authorizer of their own: API Gateway
+// allows 10 authorizers per REST API (a quota only AWS Support raises), the
+// API already carries one per route-registering stack, and the first deploy
+// of a stack that created its own rolled back on that limit. Every one of
+// their methods attaches to the API's existing authorizer instead, whose id
+// is the CDK context value `sharedAuthorizerId` (deploy-infrastructure.sh
+// resolves it from the deployed API; an --exclusively deploy passes it by
+// hand). The value is read ONCE here and the two stacks are instantiated
+// only when it is present, so every other stack synthesizes and deploys
+// exactly as before without it: deploy-auth.sh, deploy-frontend.sh and
+// deploy_portal_fixes.sh pass no such context, and a fresh install has no
+// API to look the id up on until the ComputeStack exists. A present but
+// blank or malformed value is still refused by the two stack constructors.
+const sharedAuthorizerId = sharedAuthorizerIdIfGiven(
+  app.node.tryGetContext(SHARED_AUTHORIZER_CONTEXT_KEY),
+);
+if (sharedAuthorizerId === undefined) {
+  console.warn(
+    `⚠  CDK context ${SHARED_AUTHORIZER_CONTEXT_KEY} is not set: skipping ` +
+      'EdgeCVPortalWorkflowDebugStack and EdgeCVPortalTelemetryStack (their routes attach to ' +
+      `the portal API's existing Cognito authorizer ${PORTAL_API_AUTHORIZER_NAME} by id; the API ` +
+      'Gateway quota of 10 authorizers per REST API leaves no room for one of their own). Every ' +
+      'other stack synthesizes as usual. To include them, run ./deploy-infrastructure.sh (it ' +
+      'resolves the id from the deployed API) or deploy them alone with ' +
+      '`npx cdk deploy EdgeCVPortalWorkflowDebugStack EdgeCVPortalTelemetryStack --exclusively ' +
+      `-c ${SHARED_AUTHORIZER_CONTEXT_KEY}=<id>\`, where <id> is ` +
+      `\`aws apigateway get-authorizers --rest-api-id <ApiId> --query "items[?name=='${PORTAL_API_AUTHORIZER_NAME}'].id" --output text\`.`,
+  );
+} else {
+  // Workflow Debug Stack (workflow-debug-mode: the debug sessions table, the
+  // ingest/API/maintenance Lambdas with their own shared/JWT/workflow_core
+  // layers, the per-account ingest aliases with their on-failure queue, the
+  // Portal-account dda_dbg_ingest_portal rule, the 5-minute maintenance
+  // schedule, the alarms, and the /debug/... routes registered against the
+  // ComputeStack API). Deployment values: -c debugLogRetentionDays,
+  // debugMaxSessionsPerUsecase, debugMaxDevicesPerSession,
+  // debugMaxMessagesPerSecond, debugMaxBytesPerSecond, debugIngestConcurrency,
+  // debugGetLogEventsPerSecond, debugFilterLogEventsPerSecond.
+  new WorkflowDebugStack(app, 'EdgeCVPortalWorkflowDebugStack', {
+    env,
+    description: 'Workflow debug mode infrastructure (debug sessions, ingest, log API, maintenance) for Edge CV Portal',
+    useCasesTable: storageStack.useCasesTable,
+    userRolesTable: storageStack.userRolesTable,
+    devicesTable: storageStack.devicesTable,
+    deploymentsTable: storageStack.deploymentsTable,
+    auditLogTable: storageStack.auditLogTable,
+    settingsTable: storageStack.settingsTable,
+    workflowsTable: storageStack.workflowsTable,
+    workflowVersionsTable: storageStack.workflowVersionsTable,
+    portalArtifactsBucket: storageStack.portalArtifactsBucket,
+    userPool: authStack.userPool,
+    trustedUseCaseAccountIds,
+    dataBucketAllowlist,
+    restApiId: computeStack.api.restApiId,
+    restApiRootResourceId: computeStack.api.restApiRootResourceId,
+    // Must match ApiGatewayStack deployOptions.stageName.
+    apiStageName: 'v1',
+    sharedAuthorizerId,
+  });
+
+  // Workflow telemetry dashboards (workflow-telemetry-dashboards design §2.2):
+  // a self-contained stack (the four telemetry tables, the lake bucket and its
+  // two Firehose streams, the ingest/roll-up/API/maintenance functions with
+  // their own layers, the per-account ingest aliases with their on-failure
+  // queue, the Portal-account dda_tel_ingest_portal rule, the 5-minute
+  // maintenance schedule, the alarms, and the /telemetry/... routes registered
+  // against the ComputeStack API). Deployment values: -c telemetryNowPollSeconds,
+  // telemetryLiveMaxLeases, telemetryLiveMaxViewMinutes, telemetryClipRetentionDays,
+  // telemetryLakeRetentionDays, telemetryIngestConcurrency.
+  new TelemetryStack(app, 'EdgeCVPortalTelemetryStack', {
+    env,
+    description: 'Workflow telemetry dashboards infrastructure (summaries, events, aggregates, lake, dashboards API) for Edge CV Portal',
+    useCasesTable: storageStack.useCasesTable,
+    userRolesTable: storageStack.userRolesTable,
+    devicesTable: storageStack.devicesTable,
+    auditLogTable: storageStack.auditLogTable,
+    settingsTable: storageStack.settingsTable,
+    workflowsTable: storageStack.workflowsTable,
+    workflowVersionsTable: storageStack.workflowVersionsTable,
+    portalArtifactsBucket: storageStack.portalArtifactsBucket,
+    userPool: authStack.userPool,
+    trustedUseCaseAccountIds,
+    dataBucketAllowlist,
+    restApiId: computeStack.api.restApiId,
+    restApiRootResourceId: computeStack.api.restApiRootResourceId,
+    // Must match ApiGatewayStack deployOptions.stageName.
+    apiStageName: 'v1',
+    sharedAuthorizerId,
+  });
+}
 
 // Frontend Stack (CloudFront, S3)
 const frontendStack = new FrontendStack(app, 'EdgeCVPortalFrontendStack', {

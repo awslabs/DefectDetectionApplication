@@ -264,6 +264,20 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
     // key; the assertion is otherwise unchanged and still forbids any other
     // addition or removal. SUPERSEDED expectation, recorded verbatim: the
     // list below without 'PORTAL_REGISTRY_ENFORCED'.
+    //
+    // REPOINTED (portal-authorization-and-iam-scoping task 3.1): the shared
+    // lambdaEnvironment gained TRUSTED_USECASE_ACCOUNT_IDS, the
+    // Trusted_Account_List the use-case handlers check before any STS call
+    // (design I1), carried on every handler like PORTAL_REGISTRY_ENFORCED.
+    // The oracle gains that one key and still forbids any other change.
+    // SUPERSEDED expectation, recorded verbatim: the list below without
+    // 'TRUSTED_USECASE_ACCOUNT_IDS'.
+    //
+    // REPOINTED (portal-authorization-and-iam-scoping task 5.4): the shared
+    // lambdaEnvironment gained DATA_PLANE_SCOPING, the Data_Plane_Scoping the
+    // S3 grants were synthesized with (design I5), carried on every handler
+    // like the two keys above. SUPERSEDED expectation, recorded verbatim: the
+    // list below without 'DATA_PLANE_SCOPING'.
     expect(Object.keys(env).sort()).toEqual(
       [
         'AUDIT_LOG_TABLE',
@@ -271,6 +285,7 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
         'CODE_VERSION',
         'COMPONENTS_TABLE',
         'COMPONENT_BUCKET_PREFIX',
+        'DATA_PLANE_SCOPING',
         'DDA_LOCAL_SERVER_VERSION',
         'DEPLOYMENTS_TABLE',
         'DEVICES_TABLE',
@@ -290,6 +305,7 @@ describe('DdaAutolabelWorker keeps its pre-feature configuration (Requirement 5.
         'TEST_DATASETS_TABLE',
         'TEST_RUNS_TABLE',
         'TRAINING_JOBS_TABLE',
+        'TRUSTED_USECASE_ACCOUNT_IDS',
         'USECASES_TABLE',
         'USER_POOL_ID',
         'USER_ROLES_TABLE',

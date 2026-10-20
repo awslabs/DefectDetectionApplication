@@ -30,6 +30,9 @@ import { DdaLabelingApiStack } from './dda-labeling-api-stack';
 import { WorkflowManagerGapsApiStack } from './workflow-manager-gaps-api-stack';
 import { WorkflowTuningApiStack } from './workflow-tuning-api-stack';
 import {
+  DATA_PLANE_SCOPING,
+  DataPlaneScoping,
+  dataPlaneGrant,
   detectorExportImage as resolveDetectorExportImage,
   groundedSamWorkerEnabled,
   portalRegistryEnforced,
@@ -100,22 +103,25 @@ export interface ComputeStackProps extends cdk.StackProps {
    */
   trustedUseCaseAccountIds: string[];
   /**
-   * Optional allowlist of data buckets the portal Lambda roles may access on
-   * the S3 DATA PLANE (s3:ListBucket "see", plus s3:GetObject/PutObject
-   * "access"). Each entry may be a bare bucket name (`my-data-bucket`) or a
+   * Optional allowlist of data buckets for the S3 DATA PLANE of the portal
+   * Lambda roles. Each entry may be a bare bucket name (`my-data-bucket`) or a
    * full bucket ARN (`arn:aws:s3:::my-data-bucket`). Sourced from CDK context
    * `-c dataBucketAllowlist=bucket-a,bucket-b`.
    *
-   * Default (empty/unset): all buckets (`arn:aws:s3:::*`) on the data plane —
-   * required for browsing arbitrary user-named data buckets, since data buckets
-   * are resolved at runtime and cannot be scoped by ARN at synth time, and S3
-   * does not honor aws:ResourceTag for s3:ListBucket. Control-plane actions
-   * (bucket policy/ACL/delete/tagging) are never granted here regardless.
-   *
-   * When non-empty, the data-plane grant is restricted to exactly these buckets
-   * (the portal artifacts bucket is always accessible via its own grant).
+   * Read through `dataPlaneGrant` (lib/context-helpers.ts): under the default
+   * Data_Plane_Scoping 'tag' it is ignored (the grant is bounded by the
+   * dda-portal:managed tag condition instead); under 'tag-objects-only' it
+   * names the buckets of the bucket-level statement, and under 'allowlist'
+   * those of the whole data-plane grant. Control-plane actions (bucket
+   * policy/ACL/delete/tagging) are never granted by the data-plane grant.
    */
   dataBucketAllowlist?: string[];
+  /**
+   * The Data_Plane_Scoping to synthesize; defaults to DATA_PLANE_SCOPING.
+   * bin/app.ts never passes it (the constant is the one setting); the jest
+   * suites pass 'tag-objects-only' to check that shape too.
+   */
+  dataPlaneScoping?: DataPlaneScoping;
 }
 
 export class ComputeStack extends cdk.Stack {
@@ -323,22 +329,14 @@ export class ComputeStack extends cdk.Stack {
     // quickSetupBundleDeployment is referenced below via addDependency so the
     // QuickSetup Lambda is only reachable after the bundle is uploaded.
 
-    // Data-plane S3 bucket scope shared by the base Lambda role's object grant
-    // (createLambdaRole below) and the per-feature object grants that must
-    // stay inside that same bucket set (the workflow-tuning prefix grant).
-    // Resolve it from the optional allowlist: each entry may be a bare bucket
-    // name or a full `arn:aws:s3:::name` ARN; normalize to the canonical
-    // bucket ARN. Empty/unset -> all buckets (see the data-plane rationale in
-    // createLambdaRole).
-    const dataBucketAllowlist = (props.dataBucketAllowlist ?? []).filter((b) => b.length > 0);
-    const dataBucketArns: string[] =
-      dataBucketAllowlist.length > 0
-        ? dataBucketAllowlist.map((b) =>
-            b.startsWith('arn:aws:s3:::')
-              ? b.replace(/\/\*?$/, '')
-              : `arn:aws:s3:::${b}`
-          )
-        : ['arn:aws:s3:::*'];
+    // The S3 data-plane statements shared by the base Lambda role
+    // (createLambdaRole below) and the per-feature object grant that must stay
+    // inside the same bucket set (the workflow-tuning prefix grant), built by
+    // the one helper the synthetic-data and node-designer stacks use too
+    // (dataPlaneGrant, lib/context-helpers.ts; design I5 D5-B). The same
+    // scoping reaches every handler as DATA_PLANE_SCOPING (lambdaEnvironment).
+    const dataPlaneScoping = props.dataPlaneScoping ?? DATA_PLANE_SCOPING;
+    const dataPlane = dataPlaneGrant(props.dataBucketAllowlist, dataPlaneScoping);
 
     // Base IAM Role for Lambda functions
     const createLambdaRole = (name: string) => {
@@ -552,16 +550,6 @@ export class ComputeStack extends cdk.Stack {
         ),
       }));
 
-      // execute-api: scope Invoke to this portal account's API Gateway. The
-      // portal REST API is created after this role in the same stack, so the
-      // concrete API id is not resolvable at createLambdaRole time; fall back to
-      // a portal-account-scoped ARN rather than a global '*'.
-      role.addToPolicy(new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ['execute-api:Invoke'],
-        resources: [`arn:aws:execute-api:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:*/*`],
-      }));
-
       // S3 CORS on the portal artifacts bucket. Cross-account CORS on Data
       // Account buckets is separately granted via the assumed role (unchanged).
       role.addToPolicy(new iam.PolicyStatement({
@@ -602,10 +590,13 @@ export class ComputeStack extends cdk.Stack {
       }
 
       // Grant S3 permissions for model artifact processing (I2).
-      // Access is now enforced at BOTH ends: this portal-account grant is
-      // scoped to the portal artifacts bucket (below) plus dda-portal:managed
-      // tagged buckets; cross-account S3 access still goes through the assumed
-      // DDAPortalAccessRole in the UseCase Account.
+      // Access is enforced at BOTH ends: this portal-account grant is scoped
+      // to the portal artifacts bucket; the data-plane scope for use-case
+      // buckets is the dda-portal:managed tag condition, evaluated on
+      // ABAC-enabled buckets (dataPlaneGrant, below); tag discovery stays
+      // unconditioned because it runs before ABAC is on. Cross-account S3
+      // access still goes through the assumed DDAPortalAccessRole in the
+      // UseCase Account.
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
@@ -639,27 +630,36 @@ export class ComputeStack extends cdk.Stack {
       // ACLs, DeleteBucket, PutBucketTagging, etc.) are granted here, and
       // cross-account data access is still gated by the assumed
       // DDAPortalAccessRole in the UseCase account.
-      // The data-plane bucket scope (dataBucketArns) is resolved once at stack
-      // scope from the optional allowlist; empty/unset -> all buckets.
-      const bucketLevelResources = dataBucketArns;
-      const objectLevelResources = dataBucketArns.map((arn) => `${arn}/*`);
-
+      // Per-bucket ABAC is now the prerequisite the portal maintains, so the
+      // condition is evaluated and comes back (portal-authorization-and-iam-
+      // scoping, design I5): the portal enables ABAC on every tagged bucket it
+      // creates or attaches to a use case (create_s3_bucket and the
+      // Attach_Step), and the bucket ABAC audit's backfill covers the buckets
+      // registered before, ahead of the deploy that conditions this grant.
+      // The statements below come from dataPlaneGrant (stack scope): the
+      // conditioned bucket-level and object-level statements, and between them
+      // the unconditioned tag-discovery statement.
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: [
-          's3:ListBucket',
-          's3:GetBucketLocation',
-          's3:GetBucketTagging',
-        ],
-        resources: bucketLevelResources,
+        actions: dataPlane.bucketLevel.actions,
+        resources: dataPlane.bucketLevel.resources,
+        conditions: dataPlane.bucketLevel.conditions,
+      }));
+      // Tag discovery on every bucket, unconditioned: GetBucketTagging (the
+      // attach validator's eligibility read) and GetBucketABAC (the
+      // Attach_Step's status read) run on a tagged bucket while its ABAC is
+      // still off, where the tag condition cannot match; neither read returns
+      // object data or a listing.
+      role.addToPolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: dataPlane.tagDiscovery.actions,
+        resources: dataPlane.tagDiscovery.resources,
       }));
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: [
-          's3:GetObject',
-          's3:PutObject',
-        ],
-        resources: objectLevelResources,
+        actions: dataPlane.objectLevel.actions,
+        resources: dataPlane.objectLevel.resources,
+        conditions: dataPlane.objectLevel.conditions,
       }));
 
       // s3:ListAllMyBuckets does not support resource-level permissions per the
@@ -704,6 +704,11 @@ export class ComputeStack extends cdk.Stack {
       USECASES_TABLE: props.useCasesTable.tableName,
       USER_ROLES_TABLE: props.userRolesTable.tableName,
       PORTAL_REGISTRY_ENFORCED: registryEnforced,
+      // The Data_Plane_Scoping the grants above were synthesized with, the
+      // same "one value, every handler" pattern: the shared layer reads it
+      // through data_plane_scoping() for the registration remedies
+      // (portal-authorization-and-iam-scoping, design I5).
+      DATA_PLANE_SCOPING: dataPlaneScoping,
       DEVICES_TABLE: props.devicesTable.tableName,
       AUDIT_LOG_TABLE: props.auditLogTable.tableName,
       TRAINING_JOBS_TABLE: props.trainingJobsTable.tableName,
@@ -728,6 +733,10 @@ export class ComputeStack extends cdk.Stack {
       // workflows/{usecase_id}/... prefixes.
       WORKFLOWS_S3_PREFIX: 'workflows',
       PORTAL_ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
+      // The Trusted_Account_List (the accounts the factory's sts:AssumeRole
+      // statement names), checked by the use-case handlers before any STS
+      // call (portal-authorization-and-iam-scoping, design I1).
+      TRUSTED_USECASE_ACCOUNT_IDS: props.trustedUseCaseAccountIds.join(','),
       USER_POOL_ID: props.userPool.userPoolId,
       // Shared component configuration - update DDA_LOCAL_SERVER_VERSION when publishing new component versions
       DDA_LOCAL_SERVER_VERSION: '1.0.63',
@@ -1087,6 +1096,16 @@ export class ComputeStack extends cdk.Stack {
       // created.
       resources: ['arn:aws:s3:::*'],
     }));
+    // PUT /usecases/{id} (a change of the buckets devices read) and DELETE
+    // /usecases/{id} keep the Device_Access_Document on the devices'
+    // token-exchange role in this account in step with the use case
+    // (single-account use cases run the IAM write on this role).
+    usecasesRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'DeviceRoleInlinePolicyGrants',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:GetRolePolicy', 'iam:PutRolePolicy'],
+      resources: [`arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/GreengrassV2TokenExchangeRole`],
+    }));
     const useCasesHandler = new lambda.Function(this, 'UseCasesHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'usecases.handler',
@@ -1243,11 +1262,13 @@ export class ComputeStack extends cdk.Stack {
     });
 
     // Deployments Lambda Handler
+    // Held in a local so the device-role grant below lands on this role only.
+    const deploymentsRole = createLambdaRole('Deployments');
     const deploymentsHandler = new lambda.Function(this, 'DeploymentsHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'deployments.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
-      role: createLambdaRole('Deployments'),
+      role: deploymentsRole,
       environment: {
         ...lambdaEnvironment,
         ...streamCameraFeatureFloorEnvironment,
@@ -1260,6 +1281,18 @@ export class ComputeStack extends cdk.Stack {
       layers: [sharedLayer, workflowCoreLayer],
       timeout: cdk.Duration.seconds(60),
     });
+    // The portal-written inline policies on the devices' token-exchange role
+    // in this account (single-account use cases; the use-case account stack
+    // grants DDAPortalAccessRole the same for the others): the
+    // Device_Access_Document written before each deployment is submitted and
+    // DDAWorkflowTuningSampleAccess. Read-compare-write on that one role
+    // only: no attach, create, delete or PassRole.
+    deploymentsRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'DeviceRoleInlinePolicyGrants',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:GetRolePolicy', 'iam:PutRolePolicy'],
+      resources: [`arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/GreengrassV2TokenExchangeRole`],
+    }));
 
     // Component store limit auto-remediation sweep: detects devices whose
     // latest deployment failed with the Nucleus "Component store size limit
@@ -1341,15 +1374,36 @@ export class ComputeStack extends cdk.Stack {
     // mask, and the results `.jsonl` Capture_Metadata) to the frontend,
     // mirroring the presigned-URL / cross-account-assume-role pattern used by
     // the Datasets handler (see backend/functions/captures.py).
+    // Held in a local so the inference-results grants below land on this
+    // role only (portal-authorization-and-iam-scoping, design I5).
+    const capturesRole = createLambdaRole('Captures');
     const capturesHandler = new lambda.Function(this, 'CapturesHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'captures.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
-      role: createLambdaRole('Captures'),
+      role: capturesRole,
       environment: lambdaEnvironment,
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(60),
     });
+    // captures.py lists and reads the default inference-results bucket
+    // (list_objects_v2, get_object and a presigned get_object URL signed with
+    // these credentials). That bucket is a portal-owned bucket the portal
+    // never tags, so the tag-conditioned data-plane grant does not reach it:
+    // explicit statements on its name instead. A results-bucket override is
+    // tagged like every other use-case bucket and reached through the
+    // conditioned grant.
+    const capturesResultsBucketArn = `arn:aws:s3:::dda-inference-results-${cdk.Aws.ACCOUNT_ID}`;
+    capturesRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:ListBucket'],
+      resources: [capturesResultsBucketArn],
+    }));
+    capturesRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject'],
+      resources: [`${capturesResultsBucketArn}/*`],
+    }));
 
     // Pre-Labeled Datasets Lambda Handler
     const preLabeledDatasetsHandler = new lambda.Function(this, 'PreLabeledDatasetsHandler', {
@@ -1543,12 +1597,31 @@ export class ComputeStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(60), // 1 minute for component discovery and management
     });
 
-    // Data Management Lambda Handler for S3 bucket/folder management
+    // Data Management Lambda Handler for S3 bucket/folder management. Held in
+    // a local so the ABAC grant below lands on this role only.
+    const dataManagementRole = createLambdaRole('DataManagement');
+    // POST /usecases/{id}/data/configure attaches a data bucket and, for a
+    // tagged bucket in the portal account, enables ABAC on it through the
+    // Attach_Step on this function's own role (portal-authorization-and-iam-
+    // scoping, design I5 "Control-plane grants"); every enable attempt is
+    // audited (bucket_abac_enabled). The bucket is chosen at request time.
+    // The UseCases role holds the same action for its own writers; no other
+    // role does. One action only: portal-authz-scoping-infra.test.ts pins
+    // this statement.
+    dataManagementRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:PutBucketABAC'],
+      // nosec: iam-resource-wildcard. S3 evaluates bucket-tag condition keys
+      // only once ABAC is on, so the call that turns it on cannot be
+      // tag-conditioned; it is made only on a bucket that has just passed the
+      // attach validator's eligibility rule and carries dda-portal:managed=true.
+      resources: ['arn:aws:s3:::*'],
+    }));
     const dataManagementHandler = new lambda.Function(this, 'DataManagementHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'data_management.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
-      role: createLambdaRole('DataManagement'),
+      role: dataManagementRole,
       environment: lambdaEnvironment,
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(60),
@@ -1567,6 +1640,12 @@ export class ComputeStack extends cdk.Stack {
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(120), // 2 minutes for cross-account component creation
     });
+
+    // Use-case creation starts the shared-components provisioning with a
+    // direct asynchronous invoke (an Internal_Invocation), the pattern the
+    // compile / package / publish chain uses.
+    sharedComponentsHandler.grantInvoke(useCasesHandler);
+    useCasesHandler.addEnvironment('SHARED_COMPONENTS_FUNCTION_NAME', sharedComponentsHandler.functionName);
 
     // Data Accounts Lambda Handler for managing registered Data Accounts
     const dataAccountsHandler = new lambda.Function(this, 'DataAccountsHandler', {
@@ -3314,7 +3393,7 @@ export class ComputeStack extends cdk.Stack {
     // streams the model artifact zip from the use-case data bucket into the
     // portal artifacts bucket for the sandbox. All of that is covered by the
     // shared createLambdaRole grants (Greengrass components:* read, the
-    // S3 data-plane grant — bounded by dataBucketAllowlist when configured —
+    // S3 data-plane grant — bounded by the dda-portal:managed tag condition —
     // and the models table), so NO additional IAM grant is added; the
     // sandbox task role stays portal-artifacts-only (Requirement 12.9).
     // The artifact copy (models can be >100 MB) is why this handler gets a
@@ -3466,13 +3545,16 @@ export class ComputeStack extends cdk.Stack {
     // Sample_Store objects (Req 9.4): sample bytes and job manifests are
     // read, job manifests and outcome batches written, and a deleted
     // session's run objects removed — all strictly inside the
-    // `workflow-tuning/` prefix of the Use_Case's bucket, which is what
-    // bounds this function's object access (cross-account access still
-    // goes through the assumed DDAPortalAccessRole in the UseCase account).
-    // The base Lambda role's data-plane grant covers Get/PutObject on the
-    // configured buckets; DeleteObject is granted here and ONLY under the
-    // tuning prefix, on the same allowlist-scoped bucket set as that base
-    // grant (dataBucketArns) — never on a bare bucket-name wildcard.
+    // `workflow-tuning/` prefix, which is what bounds this function's object
+    // access (cross-account access still goes through the assumed
+    // DDAPortalAccessRole in the UseCase account). The base Lambda role's
+    // data-plane grant covers Get/PutObject on the tagged buckets;
+    // DeleteObject is granted here and ONLY under the tuning prefix, with the
+    // same scope and tag condition as that base grant
+    // (dataPlane.objectPrefix) — never on a bare bucket-name wildcard. This
+    // reaches a results-bucket override, which is tagged like every other
+    // use-case bucket.
+    const tuningPrefixScope = dataPlane.objectPrefix('workflow-tuning');
     workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
@@ -3480,7 +3562,29 @@ export class ComputeStack extends cdk.Stack {
         's3:PutObject',
         's3:DeleteObject',
       ],
-      resources: dataBucketArns.map((arn) => `${arn}/workflow-tuning/*`),
+      resources: tuningPrefixScope.resources,
+      conditions: tuningPrefixScope.conditions,
+    }));
+    // The default Sample_Store is the inference-results bucket
+    // (tuning_settings.sample_store_bucket), a portal-owned bucket the portal
+    // never tags, so the tag-conditioned grants above do not reach it:
+    // explicit statements on its name, the listing on the bucket and the
+    // object access under the tuning prefix only (portal-authorization-and-
+    // iam-scoping, design I5).
+    const tuningResultsBucketArn = `arn:aws:s3:::dda-inference-results-${cdk.Aws.ACCOUNT_ID}`;
+    workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:ListBucket'],
+      resources: [tuningResultsBucketArn],
+    }));
+    workflowTuningHandler.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        's3:GetObject',
+        's3:PutObject',
+        's3:DeleteObject',
+      ],
+      resources: [`${tuningResultsBucketArn}/workflow-tuning/*`],
     }));
 
     // Sample_Store retention (Req 2.9): deployments.py applies this
@@ -3976,77 +4080,6 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
     workflowTuningApiStack.addDependency(quickSetupApiStack);
     workflowTuningApiStack.addDependency(ddaLabelingApiStack);
     workflowTuningApiStack.addDependency(workflowManagerGapsApiStack);
-
-    // Custom Resource to update UseCases Lambda environment variable with API Gateway ID
-    // This avoids circular dependency by updating the Lambda AFTER both resources are created
-    const updateLambdaEnv = new lambda.Function(this, 'UpdateLambdaEnv', {
-      runtime: lambda.Runtime.PYTHON_3_11,
-      handler: 'index.handler',
-      code: lambda.Code.fromInline(`
-import json
-import boto3
-import cfnresponse
-
-lambda_client = boto3.client('lambda')
-
-def handler(event, context):
-    try:
-        if event['RequestType'] in ['Create', 'Update']:
-            function_name = event['ResourceProperties']['FunctionName']
-            api_gateway_id = event['ResourceProperties']['ApiGatewayId']
-            
-            # Get current environment variables
-            response = lambda_client.get_function_configuration(FunctionName=function_name)
-            env_vars = response.get('Environment', {}).get('Variables', {})
-            
-            # Add API_GATEWAY_ID
-            env_vars['API_GATEWAY_ID'] = api_gateway_id
-            
-            # Update Lambda environment
-            lambda_client.update_function_configuration(
-                FunctionName=function_name,
-                Environment={'Variables': env_vars}
-            )
-            
-            print(f"Updated {function_name} with API_GATEWAY_ID={api_gateway_id}")
-            cfnresponse.send(event, context, cfnresponse.SUCCESS, {
-                'Message': f'Updated Lambda environment'
-            })
-        else:
-            cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        cfnresponse.send(event, context, cfnresponse.FAILED, {
-            'Message': str(e)
-        })
-      `),
-      timeout: cdk.Duration.seconds(60),
-    });
-
-    // Grant permissions to update Lambda configuration
-    updateLambdaEnv.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'lambda:GetFunctionConfiguration',
-        'lambda:UpdateFunctionConfiguration',
-      ],
-      resources: [useCasesHandler.functionArn],
-    }));
-
-    // Create custom resource
-    const lambdaEnvUpdater = new cdk.CustomResource(this, 'LambdaEnvUpdater', {
-      serviceToken: updateLambdaEnv.functionArn,
-      properties: {
-        FunctionName: useCasesHandler.functionName,
-        ApiGatewayId: apiGatewayStack.api.restApiId,
-        // Force update when API changes
-        Timestamp: Date.now().toString(),
-      },
-    });
-
-    // Ensure custom resource runs after both Lambda and API Gateway are created
-    lambdaEnvUpdater.node.addDependency(useCasesHandler);
-    lambdaEnvUpdater.node.addDependency(apiGatewayStack);
 
     // Outputs
     new cdk.CfnOutput(this, 'ApiUrl', {

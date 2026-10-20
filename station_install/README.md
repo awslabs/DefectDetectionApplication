@@ -50,6 +50,73 @@ Configuration for AWS Edge Manager Agent. Copied to device during setup.
 ### edge-device-iam-policy.json
 IAM policy document defining permissions for edge devices.
 
+## Device S3 Access
+
+Every device uses the account's `GreengrassV2TokenExchangeRole`. Its S3 grants
+come from three places:
+
+- **The device role templates.** `setup_station.sh` (inline
+  `GreengrassComponentS3Access`), `create-edge-device-iam-role.sh` (inline
+  `dda-edge-device-policy`) and `edge-device-iam-policy.json` (attached as the
+  `DDAEdgeDevicePolicy` policy) write the S3 statement set of the
+  `DDAPortalComponentAccessPolicy` managed policy of the use-case account stack
+  (`edge-cv-portal/infrastructure/lib/usecase-account-stack.ts`), and nothing
+  broader:
+  - `s3:GetObject`, `s3:GetBucketLocation` on the component bucket
+    (`dda-component-*`);
+  - `s3:GetObject`, `s3:GetBucketLocation` (and `s3:HeadObject`) on buckets
+    named `dda-*`;
+  - `s3:PutObject`, `s3:PutObjectTagging`, `s3:GetObject`,
+    `s3:GetBucketLocation` on `dda-inference-results-*`.
+
+  `edge-device-iam-policy.json` additionally keeps its
+  `s3:GetObject` / `s3:GetObjectVersion` read of the Greengrass public
+  component artifacts (`greengrass-component-artifacts-*`).
+
+  The managed policy also reads buckets named `*-dda-*` (`dda` anywhere in the
+  name). The station templates do not carry that substring pattern — the
+  repository's IAM audit refuses it in the installers, as it already does in
+  `deploy-account-role.sh` — so such a bucket is device-readable only where
+  `DDAPortalComponentAccessPolicy` is attached: `setup_station.sh` attaches it
+  when the account stack is deployed; `create-edge-device-iam-role.sh` and
+  `edge-device-iam-policy.json` attach nothing, and those devices could not
+  read a `*-dda-*` bucket before this change either. Prefer `dda-*` names, or
+  bucket names outside both patterns (the portal then writes
+  `DDAUseCaseDeviceAccess`, below).
+- **`DDAUseCaseDeviceAccess`** — an inline policy the portal writes on the role
+  (one statement per use case) for the use case's buckets outside the
+  `dda-*` / `*-dda-*` pattern (`s3:GetObject`, `s3:GetObjectVersion`,
+  `s3:GetBucketLocation`) and for a results-bucket override outside
+  `dda-inference-results-*` (`s3:PutObject`, `s3:PutObjectTagging`,
+  `s3:GetObject`, `s3:GetBucketLocation`). It is written before each
+  deployment and when a use case's bucket or allowed buckets change, and
+  removed when the use case is deleted.
+- **`DDAWorkflowTuningSampleAccess`** — an inline policy the portal writes when
+  workflow-tuning sample export is enabled (`s3:PutObject`, `s3:GetObject` under
+  `workflow-tuning/` in the inference-results bucket or the override).
+
+What devices read and write, and which grant covers it:
+
+| Device access | Bucket | Covered by |
+|---|---|---|
+| Component artifacts of portal-shared components (LocalServer and others) | Component bucket | Templates |
+| Model, workflow and plugin component artifacts | The use case's `s3_bucket` | Templates when the name matches `dda-*` (`*-dda-*`: the attached `DDAPortalComponentAccessPolicy`); otherwise `DDAUseCaseDeviceAccess` |
+| An imported LLM's weights archive (a second recipe artifact) | The bucket the model was imported from — one of the use case's allowed buckets | As above, by bucket name |
+| Pin images (static camera images) | Component bucket | Templates |
+| Inference-result uploads | `dda-inference-results-<account>`, or the use case's results-bucket override | Templates; an override outside the pattern by `DDAUseCaseDeviceAccess` |
+| Workflow-tuning samples and score-job objects (`workflow-tuning/*`) | The inference-results bucket or the override | Templates and `DDAWorkflowTuningSampleAccess` |
+| Workflow and trigger payload references (`s3://` URIs a workflow names) | The use case's `s3_bucket` and its allowed buckets in the use case's own account | Templates or `DDAUseCaseDeviceAccess`, by bucket name |
+
+**Not readable from devices:** the training-data bucket (`data_s3_bucket`) and
+allowed buckets in another account (that account's bucket policy would have to
+admit this role, which the portal does not write). Keep payload references to
+them out of workflows, or publish the objects from the use case's bucket.
+
+The role is one per account, so a bucket allowed for one use case is readable
+by the devices of every use case in that account. Check a role against these
+templates with `edge-cv-portal/scripts/portal-role-drift-check.py --role-name
+GreengrassV2TokenExchangeRole` (read-only).
+
 ## Directory Structure on Device
 
 After setup, the device will have:

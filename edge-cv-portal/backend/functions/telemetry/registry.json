@@ -1,0 +1,283 @@
+{
+  "version": 1,
+  "description": "The schema registry of the workflow telemetry (workflow-telemetry-dashboards design §4): one entry per schema with every declared field, its type and limits; the block owners; the extensions. schemas.py builds its adapters from this file and tests/test_telemetry_schemas.py asserts they are equal.",
+  "kinds": {
+    "summary": "dda.summary.v1",
+    "event": "dda.event.v1",
+    "live": "dda.live.v1"
+  },
+  "limits": {
+    "payloadMaxBytes": 131072,
+    "messageMaxBytes": 16384,
+    "stringMaxLength": 256,
+    "countMapMaxEntries": 64,
+    "maxDepth": 8
+  },
+  "modelStates": ["NONE", "READY", "LOADING", "UNLOADING", "UNAVAILABLE", "UNKNOWN", "NOT_DEPLOYED", "INCOMPLETE"],
+  "modelStateOrder": ["NONE", "READY", "UNLOADING", "LOADING", "INCOMPLETE", "NOT_DEPLOYED", "UNKNOWN", "UNAVAILABLE"],
+  "blocks": {
+    "runs": "engine",
+    "latency": "engine",
+    "detections": "engine",
+    "outcomes": "engine",
+    "people": "engine",
+    "model": "engine",
+    "continuous": "engine"
+  },
+  "extensions": {
+    "ppe": {"owner": "ppe-clipper", "allowed": ["engine"]}
+  },
+  "schemas": {
+    "dda.summary.v1": {
+      "kind": "summary",
+      "maxBytes": 16384,
+      "fields": {
+        "schema": {"type": "const", "value": "dda.summary.v1", "required": true},
+        "intervalStart": {"type": "int", "required": true, "min": 0},
+        "intervalEnd": {"type": "int", "required": true, "min": 0},
+        "emittedAt": {"type": "int", "required": true, "min": 0},
+        "deviceId": {"type": "string", "required": true, "pattern": "^[A-Za-z0-9:_-]{1,128}$"},
+        "workflowId": {"type": "uuid", "required": true},
+        "workflowVersion": {"type": "string", "required": true, "minLength": 0, "maxLength": 64, "acceptInt": true},
+        "producer": {
+          "type": "object", "required": true,
+          "fields": {
+            "name": {"type": "string", "required": true, "pattern": "^[a-z0-9-]{1,32}$"},
+            "version": {"type": "string", "required": true, "minLength": 0, "maxLength": 32, "acceptInt": true},
+            "instance": {"type": "uuid", "required": true}
+          }
+        },
+        "seq": {"type": "int", "required": true, "min": 1},
+        "intervalS": {"type": "int", "required": true, "min": 5, "max": 300},
+        "idle": {"type": "bool", "required": true},
+        "runs": {
+          "type": "object", "required": false, "block": true, "summaryOnly": true,
+          "fields": {
+            "completed": {"type": "int", "required": true, "min": 0, "max": 10000000},
+            "failed": {"type": "int", "required": true, "min": 0, "max": 10000000},
+            "dropped": {"type": "int", "required": true, "min": 0, "max": 10000000}
+          }
+        },
+        "latency": {
+          "type": "object", "required": false, "block": true, "summaryOnly": true,
+          "fields": {
+            "p50Ms": {"type": "int", "required": true, "min": 0},
+            "p95Ms": {"type": "int", "required": true, "min": 0},
+            "maxMs": {"type": "int", "required": true, "min": 0},
+            "n": {"type": "int", "required": true, "min": 0}
+          }
+        },
+        "detections": {
+          "type": "object", "required": false, "block": true, "summaryOnly": true,
+          "fields": {
+            "runsWithDetections": {"type": "int", "required": true, "min": 0},
+            "total": {"type": "int", "required": true, "min": 0},
+            "perClass": {
+              "type": "objectmap", "required": true, "maxEntries": 64, "keyMaxLength": 64,
+              "fields": {
+                "total": {"type": "int", "required": true, "min": 0},
+                "max": {"type": "int", "required": true, "min": 0}
+              }
+            },
+            "truncated": {"type": "bool", "required": false}
+          }
+        },
+        "outcomes": {
+          "type": "object", "required": false, "block": true, "summaryOnly": true,
+          "fields": {
+            "anomalous": {"type": "int", "required": true, "min": 0},
+            "normal": {"type": "int", "required": true, "min": 0}
+          }
+        },
+        "people": {
+          "type": "object", "required": false, "block": true, "summaryOnly": true,
+          "fields": {
+            "seen": {"type": "int", "required": true, "min": 0}
+          }
+        },
+        "model": {
+          "type": "object", "required": false, "block": true, "summaryOnly": true,
+          "fields": {
+            "state": {"type": "modelState", "required": true},
+            "models": {"type": "enummap", "required": false, "maxEntries": 16, "keyMaxLength": 64, "values": "modelState"},
+            "waits": {"type": "int", "required": true, "min": 0},
+            "waitedMs": {"type": "int", "required": true, "min": 0}
+          }
+        },
+        "continuous": {
+          "type": "object", "required": false, "block": true, "summaryOnly": true,
+          "fields": {
+            "skippedNoNewFrame": {"type": "int", "required": true, "min": 0},
+            "paused": {"type": "bool", "required": true},
+            "effectiveFps": {"type": "number", "required": true, "min": 0}
+          }
+        },
+        "ext": {
+          "type": "extensions", "required": false, "summaryOnly": true,
+          "maxEntries": 8, "maxBytes": 8192, "keyPattern": "^[a-z0-9-]{1,32}$",
+          "known": {
+            "ppe": {
+              "type": "object",
+              "fields": {
+                "people": {
+                  "type": "object", "required": true,
+                  "fields": {
+                    "seen": {"type": "int", "required": true, "min": 0},
+                    "compliant": {"type": "int", "required": true, "min": 0},
+                    "violating": {"type": "int", "required": true, "min": 0}
+                  }
+                },
+                "violations": {
+                  "type": "object", "required": true,
+                  "fields": {
+                    "frames": {"type": "int", "required": true, "min": 0},
+                    "byReason": {
+                      "type": "objectmap", "required": true, "maxEntries": 16, "keyMaxLength": 64,
+                      "fields": {
+                        "frames": {"type": "int", "required": true, "min": 0},
+                        "objects": {"type": "int", "required": true, "min": 0}
+                      }
+                    }
+                  }
+                },
+                "clipsOpened": {"type": "int", "required": true, "min": 0},
+                "frames": {"type": "int", "required": true, "min": 0}
+              }
+            }
+          }
+        },
+        "telemetry": {
+          "type": "object", "required": true,
+          "fields": {
+            "queueDrops": {"type": "int", "required": true, "min": 0},
+            "publishFailures": {"type": "int", "required": true, "min": 0},
+            "eventsDropped": {"type": "int", "required": true, "min": 0}
+          }
+        }
+      },
+      "rules": {
+        "lengthRule": "1000 <= intervalEnd - intervalStart <= intervalS * 1000 + 1000",
+        "intervalSByKind": {"summary": [5, 60], "heartbeat": [30, 300]},
+        "emittedAtNotBeforeIntervalEnd": true,
+        "engineRequiresWhenNotIdle": ["runs", "model"],
+        "ppeCompliantPlusViolatingAtMostSeen": true
+      }
+    },
+    "dda.event.v1": {
+      "kind": "event",
+      "maxBytes": 16384,
+      "fields": {
+        "schema": {"type": "const", "value": "dda.event.v1", "required": true},
+        "type": {"type": "enum", "required": true, "values": ["violation_confirmed", "clip_ready", "run_error"]},
+        "eventId": {"type": "uuid", "required": true},
+        "ts": {"type": "int", "required": true, "min": 0},
+        "deviceId": {"type": "string", "required": true, "pattern": "^[A-Za-z0-9:_-]{1,128}$"},
+        "workflowId": {"type": "uuid", "required": true},
+        "workflowVersion": {"type": "string", "required": true, "minLength": 0, "maxLength": 64, "acceptInt": true},
+        "producer": {
+          "type": "object", "required": true,
+          "fields": {
+            "name": {"type": "string", "required": true, "pattern": "^[a-z0-9-]{1,32}$"},
+            "version": {"type": "string", "required": true, "minLength": 0, "maxLength": 32, "acceptInt": true},
+            "instance": {"type": "uuid", "required": true}
+          }
+        },
+        "executionId": {"type": "string", "required": false, "maxLength": 128},
+        "severity": {"type": "enum", "required": false, "values": ["info", "warning", "error"]},
+        "data": {"type": "eventData", "required": true}
+      },
+      "severityDefaults": {"clip_ready": "info", "violation_confirmed": "warning", "run_error": "error"},
+      "data": {
+        "run_error": {
+          "error": {"type": "string", "required": true, "minLength": 0, "maxLength": 1024, "redact": true},
+          "failingNodeId": {"type": "string", "required": false, "maxLength": 128},
+          "count": {"type": "int", "required": false, "min": 1},
+          "firstTs": {"type": "int", "required": false, "min": 0},
+          "lastTs": {"type": "int", "required": false, "min": 0}
+        },
+        "clip_ready": {
+          "clipId": {"type": "string", "required": true, "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+          "revision": {"type": "int", "required": true, "min": 1},
+          "startTs": {"type": "int", "required": true, "min": 0},
+          "endTs": {"type": "int", "required": true, "min": 0},
+          "durationS": {"type": "number", "required": false, "min": 0},
+          "reasons": {
+            "type": "objectmap", "required": false, "maxEntries": 64, "keyMaxLength": 64,
+            "fields": {
+              "frames": {"type": "int", "required": false, "min": 0},
+              "objects": {"type": "int", "required": false, "min": 0}
+            }
+          },
+          "totals": {
+            "type": "object", "required": false,
+            "fields": {
+              "perClass": {"type": "countmap", "required": false, "maxEntries": 64, "keyMaxLength": 64},
+              "violationFrames": {"type": "int", "required": false, "min": 0},
+              "violationObjects": {"type": "int", "required": false, "min": 0}
+            }
+          },
+          "file": {
+            "type": "object", "required": false,
+            "fields": {
+              "name": {"type": "string", "required": false, "maxLength": 255},
+              "bytes": {"type": "int", "required": false, "min": 0},
+              "sha256": {"type": "string", "required": false, "pattern": "^[0-9a-fA-F]{64}$"},
+              "width": {"type": "int", "required": false, "min": 0, "max": 7680},
+              "height": {"type": "int", "required": false, "min": 0, "max": 4320},
+              "codec": {"type": "string", "required": false, "maxLength": 32}
+            }
+          },
+          "s3": {
+            "type": "object", "required": false, "nullable": true,
+            "fields": {
+              "bucket": {"type": "string", "required": true, "maxLength": 63},
+              "key": {"type": "string", "required": true, "maxLength": 1024},
+              "sidecarKey": {"type": "string", "required": false, "maxLength": 1024}
+            }
+          },
+          "s3Error": {"type": "string", "required": false, "nullable": true, "maxLength": 200, "redact": true}
+        },
+        "violation_confirmed": {
+          "reasons": {"type": "countmap", "required": true, "maxEntries": 64, "keyMaxLength": 64},
+          "people": {"type": "int", "required": false, "min": 0},
+          "violatingPeople": {"type": "int", "required": false, "min": 0},
+          "clipId": {"type": "string", "required": false, "nullable": true, "pattern": "^[A-Za-z0-9._:-]{1,128}$"}
+        }
+      },
+      "rules": {
+        "clipEndNotBeforeStart": true,
+        "clipMaxSpanMs": 3600000
+      }
+    },
+    "dda.live.v1": {
+      "kind": "live",
+      "maxBytes": 131072,
+      "fields": {
+        "schema": {"type": "const", "value": "dda.live.v1", "required": true},
+        "ts": {"type": "int", "required": true, "min": 0},
+        "instance": {"type": "uuid", "required": true},
+        "seq": {"type": "int", "required": true, "min": 0},
+        "deviceId": {"type": "string", "required": true, "pattern": "^[A-Za-z0-9:_-]{1,128}$"},
+        "workflowId": {"type": "uuid", "required": true},
+        "workflowVersion": {"type": "string", "required": false, "minLength": 0, "maxLength": 64, "acceptInt": true},
+        "frame": {
+          "type": "object", "required": true,
+          "fields": {
+            "bucket": {"type": "string", "required": true, "maxLength": 63},
+            "key": {"type": "string", "required": true, "maxLength": 1024},
+            "width": {"type": "int", "required": true, "min": 1, "max": 1280},
+            "height": {"type": "int", "required": true, "min": 1, "max": 720},
+            "bytes": {"type": "int", "required": true, "min": 1, "max": 307200}
+          }
+        },
+        "perClass": {"type": "countmap", "required": false, "maxEntries": 64, "keyMaxLength": 64},
+        "people": {"type": "int", "required": false, "min": 0},
+        "violation": {"type": "bool", "required": false},
+        "reasons": {"type": "countmap", "required": false, "maxEntries": 64, "keyMaxLength": 64}
+      },
+      "rules": {
+        "keyRule": "dda-telemetry/live/<usecase_id>/<deviceId>/<workflowId>/<seq mod 16>.jpg"
+      }
+    }
+  }
+}

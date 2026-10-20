@@ -658,7 +658,9 @@ elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
         cd infrastructure
         # Bootstrap through this account's own app: a bare `cdk bootstrap`
         # here synthesizes the portal app in cdk.json, which refuses to synth
-        # without trustedUseCaseAccountIds (never set in a UseCase account).
+        # without trustedUseCaseAccountIds (never set in a UseCase account)
+        # and without the enforcement context. This names the app deployed
+        # below, with the same context, and the account/region explicitly.
         npx cdk bootstrap "aws://${CURRENT_ACCOUNT}/${CURRENT_REGION}" \
             -a "npx ts-node bin/usecase-account-app.ts" \
             $CDK_CONTEXT
@@ -863,7 +865,9 @@ elif [ "$DEPLOYMENT_TYPE" = "data" ]; then
         # Bootstrap through this account's own app (the data app exits 1
         # without its context): a bare `cdk bootstrap` here synthesizes the
         # portal app in cdk.json, which refuses to synth without
-        # trustedUseCaseAccountIds (never set in a Data account).
+        # trustedUseCaseAccountIds (never set in a Data account) and without
+        # the enforcement context. This names the app deployed below, with
+        # the same context, and the account/region explicitly.
         npx cdk bootstrap "aws://${CURRENT_ACCOUNT}/${CURRENT_REGION}" \
             -a "npx ts-node bin/data-account-app.ts" \
             $CDK_CONTEXT

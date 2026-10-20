@@ -30,7 +30,8 @@ flavors per synthesizable stack:
 Both stacks ARE wired into synthesizable CDK app entrypoints. When the CDK
 toolchain is available, the test re-synths each with the canonical fixture
 context (``portalAccountId=111111111111``, ``externalId=fixture-eid``,
-``trustedUseCaseAccountIds=222222222222,333333333333``, region ``us-east-1``)
+``trustedUseCaseAccountIds=222222222222,333333333333``,
+``sharedAuthorizerId=fixture0``, region ``us-east-1``)
 and asserts the emitted IAM grants equal the committed FIXED baseline (an
 identity guard against future live-tree drift). The live comparison is at
 grant-atom granularity (one effect/action/resource/condition tuple per
@@ -54,6 +55,18 @@ the rescopes before its I1–I4 comparison, so the Unfixed_Snapshots never
 change; ``test_post_fix_rescopes_only_narrow``,
 ``test_refreshed_resources_match_synth`` and ``test_unfixed_snapshots_unchanged``
 check the record itself.
+
+Two more kinds (portal-authorization-and-iam-scoping, design I5 "IAM-baseline
+golden update") describe changes to statements the ``createLambdaRole``
+factory emits once per role: each ``conditioned`` entry narrows a statement
+with a tag condition (plus, at most, an unconditioned ``carve_out`` on the same
+resources whose extra actions are the ABAC status read), each ``retired`` entry
+removes one with a reason naming its replacement, and both carry ``count``, the
+statement's copies in the fixed baseline before the edit. They are applied to
+the fixed baseline by a scripted edit, reversed by ``count`` before the I1–I4
+comparison, and checked by ``test_post_fix_conditioned_only_narrow``,
+``test_post_fix_retired_statements``, ``test_factory_role_count_matches_record``
+and ``test_approved_additions_object_wildcards_conditioned``.
 
     NOTE on the statement MULTISET view: the I1 fix splits one broad
     ``PolicyStatement`` into several narrow ones. Once a role's inline policy
@@ -86,6 +99,7 @@ Run:
         -p no:cacheprovider --noconftest -v
 """
 import collections
+import fnmatch
 import hashlib
 import json
 import os
@@ -112,6 +126,13 @@ FIXTURE_CONTEXT = [
     "--context", "portalAccountId=111111111111",
     "--context", "externalId=fixture-eid",
     "--context", "trustedUseCaseAccountIds=222222222222,333333333333",
+    "--context", "portalRegistryEnforced=false",
+    # The telemetry and workflow-debug stacks attach their routes to the
+    # portal API's existing Cognito authorizer; bin/app.ts instantiates them
+    # only when its id is present (lib/context-helpers.ts
+    # sharedAuthorizerIdIfGiven), so a fixture id keeps both in the synth
+    # and hermetic. The value reaches no IAM statement.
+    "--context", "sharedAuthorizerId=fixture0",
 ]
 
 # stack -> (fixed baseline, unfixed baseline, optional --app override)
@@ -125,6 +146,23 @@ SYNTH_STACKS = {
         "iam_baseline_DDAPortalUseCaseAccountStack.template.json",
         "iam_baseline_DDAPortalUseCaseAccountStack.unfixed.template.json",
         "npx ts-node --prefer-ts-exts bin/usecase-account-app.ts",
+    ),
+    # workflow-debug-mode (tasks.md 4.3): a stack that did not exist at the
+    # I1-I4 rewrite joins the gate with EMPTY pre-feature baselines, so every
+    # statement it synthesizes must be listed in
+    # iam_post_fix_approved_additions.json under its attribution.
+    "EdgeCVPortalWorkflowDebugStack": (
+        "iam_baseline_EdgeCVPortalWorkflowDebugStack.template.json",
+        "iam_baseline_EdgeCVPortalWorkflowDebugStack.unfixed.template.json",
+        None,
+    ),
+    # workflow-telemetry-dashboards (tasks.md 4.3): the same pattern, EMPTY
+    # pre-feature baselines and every synthesized statement listed in
+    # iam_post_fix_approved_additions.json under its attribution.
+    "EdgeCVPortalTelemetryStack": (
+        "iam_baseline_EdgeCVPortalTelemetryStack.template.json",
+        "iam_baseline_EdgeCVPortalTelemetryStack.unfixed.template.json",
+        None,
     ),
 }
 
@@ -245,10 +283,15 @@ def _post_fix_entry(stack):
 
 def _reverse_rescopes(stack, fixed_ms):
     """Return the FIXED baseline's statement multiset with every recorded
-    rescope undone: each ``added`` statement taken out, each ``removed`` one
-    put back. Every recorded ``added`` statement must be in the baseline."""
+    post-fix change undone: each rescope's ``added`` statement taken out and
+    its ``removed`` one put back; each ``conditioned`` entry's ``added`` and
+    ``carve_out`` statements taken out ``count`` times and its ``removed``
+    one put back ``count`` times; each ``retired`` entry's ``removed``
+    statement put back ``count`` times. Every recorded statement taken out
+    must be in the baseline that many times."""
     ms = collections.Counter(fixed_ms)
-    for rescope in _post_fix_entry(stack).get("rescopes") or []:
+    entry = _post_fix_entry(stack)
+    for rescope in entry.get("rescopes") or []:
         for stmt in rescope["added"]:
             assert ms[stmt] > 0, (
                 f"{stack}: recorded rescope statement missing from the fixed "
@@ -257,7 +300,34 @@ def _reverse_rescopes(stack, fixed_ms):
             ms[stmt] -= 1
         for stmt in rescope["removed"]:
             ms[stmt] += 1
+    for conditioned in entry.get("conditioned") or []:
+        count = conditioned["count"]
+        taken = list(conditioned["added"])
+        if conditioned.get("carve_out"):
+            taken.append(conditioned["carve_out"])
+        for stmt in taken:
+            assert ms[stmt] >= count, (
+                f"{stack}: recorded conditioned statement has fewer than {count} "
+                f"copies in the fixed baseline ({conditioned['carrier']}): {stmt}"
+            )
+            ms[stmt] -= count
+        for stmt in conditioned["removed"]:
+            ms[stmt] += count
+    for retired in entry.get("retired") or []:
+        for stmt in retired["removed"]:
+            ms[stmt] += retired["count"]
     return +ms
+
+
+def _retired_atoms(stack):
+    """The grant atoms of the statements the post-fix record retires, each
+    counted once per carrier it left (``count``)."""
+    atoms = collections.Counter()
+    for retired in _post_fix_entry(stack).get("retired") or []:
+        for stmt in retired["removed"]:
+            for atom in statement_grant_atoms(json.loads(stmt)):
+                atoms[atom] += retired["count"]
+    return atoms
 
 
 _SYNTH_CACHE = {}
@@ -299,7 +369,9 @@ def test_synth_iam_statements_match_fixed_baseline(stack):
 
     # Removals are never acceptable: a statement disappearing means a grant the
     # baseline recorded is gone, which the allowlist must not be able to excuse.
-    removed = baseline_ms - fresh_ms
+    # The one exception is a statement the post-fix record retires (with the
+    # replacement its reason names), and only that.
+    removed = (baseline_ms - fresh_ms) - _retired_atoms(stack)
     assert not removed, (
         f"{stack}: statements recorded in the fixed baseline (F'(X)) are NO LONGER "
         f"synthesized. This is a regression, not growth, and cannot be approved "
@@ -459,6 +531,188 @@ def test_unfixed_snapshots_unchanged(stack):
     with open(os.path.join(BASELINES, SYNTH_STACKS[stack][1]), "rb") as fh:
         assert hashlib.sha256(fh.read()).hexdigest() == expected, (
             f"{stack}: {SYNTH_STACKS[stack][1]} changed; the Unfixed_Snapshots are never edited")
+
+
+# --------------------------------------------------------------------------- #
+# Post-fix record: conditioned and retired factory statements
+# (portal-authorization-and-iam-scoping, design I5 "IAM-baseline golden update")
+# --------------------------------------------------------------------------- #
+# The tag condition the conditioned data-plane statements carry
+# (PORTAL_MANAGED_TAG_CONDITION, edge-cv-portal/infrastructure/lib/context-helpers.ts).
+PORTAL_MANAGED_TAG_CONDITION = {"StringEquals": {"aws:ResourceTag/dda-portal:managed": "true"}}
+# The only action a carve-out may add to the actions of the statement it was
+# split from: the ABAC status read, as the landed statements spell it.
+CARVE_OUT_EXTRA_ACTIONS = {"s3:GetBucketABAC"}
+S3_OBJECT_ACTIONS = ("s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:GetObjectVersion",
+                     "s3:PutObjectTagging")
+FACTORY_CARRIER_PREFIX = "createLambdaRole"
+
+
+def _resources(stmt):
+    """A statement's resources as canonical JSON strings (string ARNs and
+    intrinsic-function values alike)."""
+    value = stmt.get("Resource", [])
+    return {json.dumps(r, sort_keys=True) for r in (value if isinstance(value, list) else [value])}
+
+
+def _strings(value):
+    """Every string inside a JSON value."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [s for item in value for s in _strings(item)]
+    if isinstance(value, dict):
+        return [s for item in value.values() for s in _strings(item)]
+    return []
+
+
+def _approved_additions_list(stack):
+    with open(os.path.join(BASELINES, "iam_post_fix_approved_additions.json"), encoding="utf-8") as fh:
+        data = json.load(fh)
+    return ((data.get("stacks") or {}).get(stack) or {}).get("approved_additions") or []
+
+
+@pytest.mark.parametrize("stack", list(SYNTH_STACKS))
+# Validates: portal-authorization-and-iam-scoping Requirement 7.10 — a
+# conditioned entry only narrows, and the fixed baseline carries it exactly
+# `count` times.
+def test_post_fix_conditioned_only_narrow(stack):
+    fixed_ms = iam_statements_multiset(_load_baseline_template(SYNTH_STACKS[stack][0]))
+    for entry in _post_fix_entry(stack).get("conditioned") or []:
+        where = f"{stack} {entry['site']}"
+        count = entry["count"]
+        assert isinstance(count, int) and count > 0, f"{where}: count must be a positive integer"
+        assert entry["added_condition"], f"{where}: a conditioned entry adds a non-empty condition"
+        assert len(entry["removed"]) == 1 and len(entry["added"]) == 1, (
+            f"{where}: one removed and one added statement per entry")
+        removed, added = json.loads(entry["removed"][0]), json.loads(entry["added"][0])
+        for stmt in (removed, added):
+            assert not {"NotAction", "NotResource", "NotPrincipal"} & set(stmt), (
+                f"{where}: conditioned entries support Action/Resource statements only: {stmt}")
+        assert added["Effect"] == removed["Effect"], f"{where}: the effect changed"
+        assert "Condition" not in removed, f"{where}: a condition would be removed"
+        assert added.get("Condition") == entry["added_condition"], (
+            f"{where}: the added statement's condition is not the recorded added_condition")
+        assert _resources(added) <= _resources(removed), f"{where}: the resources widened"
+        removed_actions, added_actions = _actions(removed), _actions(added)
+        assert added_actions <= removed_actions, (
+            f"{where}: the conditioned statement gained {sorted(added_actions - removed_actions)}")
+        carve_out = entry.get("carve_out")
+        if carve_out is None:
+            assert added_actions == removed_actions, (
+                f"{where}: lost {sorted(removed_actions - added_actions)} without a carve-out")
+        else:
+            carved = json.loads(carve_out)
+            assert carved["Effect"] == removed["Effect"], f"{where}: the carve-out's effect differs"
+            assert "Condition" not in carved, f"{where}: the carve-out must be unconditioned"
+            assert not {"NotAction", "NotResource", "NotPrincipal"} & set(carved)
+            assert _resources(carved) == _resources(removed), (
+                f"{where}: the carve-out is not on the removed statement's resources")
+            assert added_actions | _actions(carved) >= removed_actions, (
+                f"{where}: lost {sorted(removed_actions - added_actions - _actions(carved))}")
+            assert _actions(carved) - removed_actions <= CARVE_OUT_EXTRA_ACTIONS, (
+                f"{where}: the carve-out adds {sorted(_actions(carved) - removed_actions)}")
+            assert fixed_ms[carve_out] == count, (
+                f"{where}: the carve-out has {fixed_ms[carve_out]} copies in the fixed baseline, not {count}")
+        # The change is applied: the removed statement is gone, the added one
+        # (and the carve-out, above) present once per carrier.
+        assert fixed_ms[entry["removed"][0]] == 0, f"{where}: removed statement still in the fixed baseline"
+        assert fixed_ms[entry["added"][0]] == count, (
+            f"{where}: the added statement has {fixed_ms[entry['added'][0]]} copies in the fixed "
+            f"baseline, not {count}")
+
+
+@pytest.mark.parametrize("stack", list(SYNTH_STACKS))
+# Validates: portal-authorization-and-iam-scoping Requirement 7.10 — a
+# retired statement is gone from the fixed baseline, its reason names the
+# replacement, and its count is the number of copies the drift test puts back.
+def test_post_fix_retired_statements(stack):
+    fixed_ms = iam_statements_multiset(_load_baseline_template(SYNTH_STACKS[stack][0]))
+    unfixed_ms = iam_statements_multiset(_load_baseline_template(SYNTH_STACKS[stack][1]))
+    i_added = set(_i_changes()[stack]["added"])
+    entry = _post_fix_entry(stack)
+    approved_actions = set()
+    for canonical in _approved_additions_list(stack):
+        approved_actions |= _actions(json.loads(canonical))
+    factory_counts = {fixed_ms[c["added"][0]] for c in entry.get("conditioned") or []}
+    for retired in entry.get("retired") or []:
+        where = f"{stack} {retired['site']}"
+        count = retired["count"]
+        assert isinstance(count, int) and count > 0, f"{where}: count must be a positive integer"
+        assert len(retired["removed"]) == 1, f"{where}: one removed statement per entry"
+        stmt = retired["removed"][0]
+        assert fixed_ms[stmt] == 0, f"{where}: retired statement still in the fixed baseline"
+        reason = retired.get("reason") or ""
+        named = set(re.findall(r"\b[a-z0-9-]+:[A-Z][A-Za-z]+\b", reason))
+        assert reason.strip() and named & approved_actions, (
+            f"{where}: the reason must name the replacement grant (an action the approved "
+            f"additions carry): {reason!r}")
+        if stmt in i_added:
+            # A factory statement the I1-I4 rewrite added: one copy per factory
+            # carrier, read as the conditioned entries' added statement's copies.
+            assert len(factory_counts) == 1, f"{where}: no single factory carrier count to compare"
+            assert count == next(iter(factory_counts)), (
+                f"{where}: count {count} is not the factory carrier count {sorted(factory_counts)}")
+        else:
+            # It predates the rewrite: the drift test puts back exactly the
+            # copies the Unfixed_Snapshot holds.
+            assert count == unfixed_ms[stmt], (
+                f"{where}: count {count} != {unfixed_ms[stmt]} copies in the unfixed baseline")
+
+
+@pytest.mark.parametrize("stack", list(SYNTH_STACKS))
+# Validates: portal-authorization-and-iam-scoping Requirement 7.10 — the
+# factory's role count is the record's: the fixture synth's principals
+# holding each conditioned statement equal its copies in the fixed baseline
+# plus its copies in the approved additions, and every factory entry carries
+# the same count.
+def test_factory_role_count_matches_record(stack):
+    entry = _post_fix_entry(stack)
+    factory = [e for e in (entry.get("conditioned") or []) + (entry.get("retired") or [])
+               if e["carrier"].startswith(FACTORY_CARRIER_PREFIX)]
+    if not factory:
+        return
+    assert len({e["count"] for e in factory}) == 1, (
+        f"{stack}: the factory entries disagree on count: {[(e['site'], e['count']) for e in factory]}")
+    if not _cdk_available():
+        pytest.skip(
+            "CDK toolchain unavailable (or IAM_SKIP_CDK_SYNTH set); the principal count "
+            "is read from a fresh synth on the host.")
+    fresh = _fresh_synth(stack)
+    if fresh is None:
+        pytest.skip(f"cdk synth for {stack} did not produce a template in this environment.")
+    fresh_atoms = iam_grant_atoms(fresh)
+    fixed_ms = iam_statements_multiset(_load_baseline_template(SYNTH_STACKS[stack][0]))
+    approved = collections.Counter(_approved_additions_list(stack))
+    for conditioned in entry.get("conditioned") or []:
+        statements = list(conditioned["added"])
+        if conditioned.get("carve_out"):
+            statements.append(conditioned["carve_out"])
+        for stmt in statements:
+            principals = {fresh_atoms[atom] for atom in statement_grant_atoms(json.loads(stmt))}
+            assert principals == {fixed_ms[stmt] + approved[stmt]}, (
+                f"{stack}: {sorted(principals)} principals hold {stmt} in the synth, the record "
+                f"accounts for {fixed_ms[stmt]} (fixed baseline) + {approved[stmt]} (approved additions)")
+
+
+# Validates: portal-authorization-and-iam-scoping Requirement 7.10 — no
+# approved addition of the compute stack grants an S3 object action on the
+# objects of every bucket without the tag condition.
+def test_approved_additions_object_wildcards_conditioned():
+    for entry in _post_fix_entry("EdgeCVPortalComputeStack").get("conditioned") or []:
+        assert entry["added_condition"] == PORTAL_MANAGED_TAG_CONDITION
+    for canonical in _approved_additions_list("EdgeCVPortalComputeStack"):
+        stmt = json.loads(canonical)
+        actions = stmt.get("Action", stmt.get("NotAction", []))
+        actions = actions if isinstance(actions, list) else [actions]
+        grants_objects = "NotAction" in stmt or any(
+            fnmatch.fnmatchcase(object_action, action) for action in actions for object_action in S3_OBJECT_ACTIONS)
+        on_every_bucket = any(re.match(r"^arn:aws:s3:::\*/", s)
+                              for s in _strings(stmt.get("Resource", stmt.get("NotResource"))))
+        if grants_objects and on_every_bucket:
+            assert stmt.get("Condition") == PORTAL_MANAGED_TAG_CONDITION, (
+                f"approved addition grants S3 object actions on every bucket without the tag "
+                f"condition: {canonical}")
 
 
 # Validates: Requirements 3.3, 3.4 — the I3/I4 fix wires the tag Condition; the

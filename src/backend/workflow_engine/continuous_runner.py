@@ -70,6 +70,7 @@ from dda_logging.run_context import continuous_run
 # wedge D7); standard library only.
 from utils import run_activity
 from workflow_engine.model_gate import STALL_AFTER_S, ModelGate, ModelWait
+from workflow_engine.telemetry import hooks as telemetry_hooks
 from workflow_engine.stream_feed import (
     CONTINUOUS_SOURCE,
     FRAME_HANDOFF,
@@ -317,6 +318,9 @@ class ContinuousRunner:
     def _count(self, key: str, amount: int = 1) -> None:
         with self._lock:
             self._counters[key] += amount
+        # Telemetry (dashboards design §5.2): every counter increment is
+        # observable; the observers pick the keys they fold.
+        telemetry_hooks.notify_continuous_tick(self.registration_id, key, amount)
 
     def _health(self) -> Dict[str, Any]:
         try:
@@ -417,6 +421,11 @@ class ContinuousRunner:
         line per poll (Requirement 11.11)."""
         with self._lock:
             previous, self._model_wait = self._model_wait, wait
+        # Telemetry (dashboards design §5.2): the current wait document, or
+        # None once the models are ready; fires on every poll while waiting.
+        telemetry_hooks.notify_model_wait(
+            self.registration_id, wait.as_document() if wait is not None else None
+        )
         if wait is not None:
             if previous is None:
                 self._count("modelUnavailable")

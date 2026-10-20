@@ -15,11 +15,13 @@
  * The action calls PUT /usecases/{id} {additional_s3_buckets_add: [bucket]}:
  * a 400 `bucket_not_eligible` answer switches the notice to that reason's
  * branch, a 403 renders "A UseCaseAdmin can allow buckets for this use case",
- * success calls `onAllowed()` so the caller can retry what it was doing.
+ * success calls `onAllowed(response)` so the caller can retry what it was
+ * doing and show the answer's Registration_Report remedy.
  */
 import { useEffect, useState } from 'react';
 import { Alert, Box, Button, SpaceBetween } from '@cloudscape-design/components';
 import { ApiError, apiService } from '../services/api';
+import type { UsecaseBucketUpdateResponse } from '../services/api';
 import { useUsecasePermissions } from '../hooks/useUsecasePermissions';
 import {
   BucketErrorCode,
@@ -102,8 +104,11 @@ interface BucketNotAllowedNoticeProps {
   err: unknown;
   /** The use case the operation ran for; the action needs it. */
   usecaseId?: string | null;
-  /** Called after the bucket was allowed so the caller can retry. */
-  onAllowed?: () => void;
+  /**
+   * Called after the bucket was allowed so the caller can retry; receives the
+   * server's answer, whose `registration` may carry a remedy for the bucket.
+   */
+  onAllowed?: (response: UsecaseBucketUpdateResponse) => void;
 }
 
 export default function BucketNotAllowedNotice({
@@ -132,8 +137,8 @@ export default function BucketNotAllowedNotice({
     setAllowing(true);
     setActionError(null);
     try {
-      await apiService.allowBucketForUsecase(usecaseId, bucket);
-      onAllowed?.();
+      const response = await apiService.allowBucketForUsecase(usecaseId, bucket);
+      onAllowed?.(response);
     } catch (e) {
       if (e instanceof ApiError && e.status === 403) {
         setActionError(USECASE_ADMIN_REQUIRED_MESSAGE);

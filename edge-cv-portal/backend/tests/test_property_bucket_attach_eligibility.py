@@ -215,6 +215,9 @@ class Example:
 
     # ------------------------------------------------------------ steps
     def step_create_usecase(self, s3_bucket, data_s3_bucket, additional):
+        """The actor is not a PortalAdmin, so POST /usecases is refused 403
+        before anything is written (portal-authorization-and-iam-scoping D1:
+        creation requires CREATE_USECASES)."""
         body = {"name": f"p9 {uuid.uuid4().hex[:6]}", "s3_bucket": s3_bucket,
                 "provision_shared_components": False}
         if data_s3_bucket is not False:
@@ -223,10 +226,10 @@ class Example:
             body["additional_s3_buckets"] = additional
         response = self.h.uc.handler(self.event("POST", "/usecases", body=body), None)
         event(f"create_usecase -> {response['statusCode']}")
-        if response["statusCode"] == 201:
-            self.created.append(json.loads(response["body"])["usecase"]["usecase_id"])
-        else:
-            assert response["statusCode"] == 400, response["body"]
+        assert response["statusCode"] == 403, response["body"]
+        assert json.loads(response["body"])["error_code"] == "INSUFFICIENT_PERMISSIONS"
+        assert not [item for item in self.tables.usecases.scan()["Items"]
+                    if item.get("name") == body["name"]]
 
     def step_update(self, target, body):
         response = self.h.uc.handler(self.event("PUT", f"/usecases/{target}", target, body), None)

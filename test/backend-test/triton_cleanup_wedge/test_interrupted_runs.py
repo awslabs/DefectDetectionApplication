@@ -323,8 +323,10 @@ def test_an_execution_whose_gate_returns_after_the_commit_fails_at_after_gate(db
     original = wfe._await_model_readiness
     statuses = []
 
-    def gate_then_commit(document):
-        result = original(document)
+    def gate_then_commit(document, **kwargs):
+        # ``on_outcome`` is the telemetry hooks' optional per-model observer
+        # (workflow-telemetry-dashboards design §5.2); forwarded unchanged.
+        result = original(document, **kwargs)
         assert activity.begin_quiesce()
         assert activity.commit_restart(lambda info: True, REFUSAL) == "committed"
         statuses.append(row(factory, "exec-1")[0])
@@ -338,7 +340,12 @@ def test_an_execution_whose_gate_returns_after_the_commit_fails_at_after_gate(db
 
 
 def test_await_model_readiness_keeps_its_signature_and_behavior(gate):
-    assert list(inspect.signature(WorkflowExecutor._await_model_readiness).parameters) == ["document"]
+    # ``document`` plus the telemetry hooks' optional ``on_outcome`` observer
+    # (default None; workflow-telemetry-dashboards design §5.2). The
+    # one-argument calls below are the gate's behaviour without it.
+    assert list(inspect.signature(WorkflowExecutor._await_model_readiness).parameters) == [
+        "document", "on_outcome"]
+    assert inspect.signature(WorkflowExecutor._await_model_readiness).parameters["on_outcome"].default is None
     assert WorkflowExecutor._await_model_readiness(document(with_model=False)) is None
     assert WorkflowExecutor._await_model_readiness(document()) is None
     gate.push_statuses(["UNAVAILABLE"])

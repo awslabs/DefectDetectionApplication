@@ -1,0 +1,3 @@
+2026-10-17 11:00:00,000 INFO workflow_engine.pipeline_executor: Workflow execution exec-4 (wf-1 v3) starting pipeline: videotestsrc ! fakesink
+2026-10-17 11:00:00,250 ERROR gstreamer: Pipeline failed to change state to PLAYING, check logs above this.
+2026-10-17 11:00:00,251 ERROR workflow_engine.pipeline_executor: Workflow execution exec-4 failed (node n2): Pipeline failed to change state to PLAYING

@@ -5,6 +5,9 @@
 
 set -e
 
+# This script's directory (infrastructure/), for the enforcement helper below.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Default values
 SSO_ENABLED=false
 AWS_PROFILE="${AWS_PROFILE:-}"
@@ -117,18 +120,45 @@ npm install
 echo "Building CDK project..."
 npm run build
 
+# Portal_Identity enforcement (portal-authorization-and-iam-scoping, D7-A).
+# The Auth stack never reads portalRegistryEnforced: the context is passed only
+# so the app synthesizes, because the CDK CLI synthesizes the whole app
+# (bin/app.ts) even for this one stack, and so does `cdk bootstrap` run from
+# this directory (it reads the app's environments). The app refuses without a
+# recognized value or, on a fresh install (no portal handler deployed yet), the
+# allowLegacyRoles=true acknowledgement. The value is resolved like the other
+# deploy scripts do (scripts/portal-registry-enforcement.sh): unset keeps the
+# deployed value, PORTAL_REGISTRY_ENFORCED=true|false is passed as requested,
+# and a failed lookup stops the deploy. The bootstrap and the deploy below
+# both pass this one ENFORCEMENT_CONTEXT.
+. "$SCRIPT_DIR/../scripts/portal-registry-enforcement.sh"
+if ! ENFORCED=$(portal_registry_enforced_for_deploy "$REGION"); then
+  exit 1
+fi
+if [[ -n "$ENFORCED" ]]; then
+  ENFORCEMENT_CONTEXT=(-c "portalRegistryEnforced=$ENFORCED")
+  if [[ -n "${PORTAL_REGISTRY_ENFORCED:-}" ]]; then
+    echo "Portal_Identity enforcement: $ENFORCED (requested)"
+  else
+    echo "Portal_Identity enforcement: $ENFORCED (kept from deployed)"
+  fi
+else
+  ENFORCEMENT_CONTEXT=(-c "allowLegacyRoles=true")
+  echo "Portal_Identity enforcement: CDK default (off), acknowledged (fresh install)"
+fi
+
 # Bootstrap CDK if needed (only for first-time deployment)
 echo "Checking CDK bootstrap status..."
 if ! aws cloudformation describe-stacks --stack-name CDKToolkit --region "$REGION" &>/dev/null; then
   echo "CDK not bootstrapped in this region. Bootstrapping..."
-  npx cdk bootstrap --region "$REGION"
+  npx cdk bootstrap --region "$REGION" "${ENFORCEMENT_CONTEXT[@]}"
 else
   echo "CDK already bootstrapped in this region"
 fi
 
 # Deploy the auth stack
 echo "Deploying EdgeCVPortalAuthStack..."
-npx cdk deploy EdgeCVPortalAuthStack --require-approval never
+npx cdk deploy EdgeCVPortalAuthStack --require-approval never "${ENFORCEMENT_CONTEXT[@]}"
 
 # Display outputs
 echo ""

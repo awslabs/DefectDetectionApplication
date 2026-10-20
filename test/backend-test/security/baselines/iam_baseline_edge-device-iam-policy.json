@@ -8,10 +8,48 @@
         ],
         "Effect": "Allow",
         "Resource": [
-          "arn:aws:s3:::dda-component-*/*",
           "arn:aws:s3:::greengrass-component-artifacts-*/*"
         ],
         "Sid": "GreengrassComponentDownload"
+      },
+      {
+        "Action": [
+          "s3:GetObject",
+          "s3:GetBucketLocation"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::dda-component-*",
+          "arn:aws:s3:::dda-component-*/*"
+        ],
+        "Sid": "AllowPortalComponentBucketAccess"
+      },
+      {
+        "Action": [
+          "s3:GetObject",
+          "s3:GetBucketLocation",
+          "s3:HeadObject"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::dda-*",
+          "arn:aws:s3:::dda-*/*"
+        ],
+        "Sid": "AllowDDABucketPatternAccess"
+      },
+      {
+        "Action": [
+          "s3:PutObject",
+          "s3:PutObjectTagging",
+          "s3:GetObject",
+          "s3:GetBucketLocation"
+        ],
+        "Effect": "Allow",
+        "Resource": [
+          "arn:aws:s3:::dda-inference-results-*",
+          "arn:aws:s3:::dda-inference-results-*/*"
+        ],
+        "Sid": "AllowInferenceResultsUpload"
       },
       {
         "Action": [
@@ -53,6 +91,7 @@
     ],
     "Version": "2012-10-17"
   },
+  "note": "portal-authorization-and-iam-scoping task 6.2 (Requirement 8.3): the S3 statements converge on the DDAPortalComponentAccessPolicy statement set of usecase-account-stack.ts (component bucket read, bucket-pattern read, inference-results upload) with the pattern read limited to dda-* (the *-dda-* substring pattern is not written here, as in deploy-account-role.sh; recorded deviation from 8.3), plus the existing greengrass-component-artifacts-* read; GreengrassComponentDownload keeps only that read (the component bucket moves to AllowPortalComponentBucketAccess). full records these S3 statements with the unfixed IoTDataPlane statement unchanged; sha256 stays the unfixed-tree hash.",
   "preserved_sids": {
     "AssumeDataAccountRole": {
       "Action": "sts:AssumeRole",
@@ -78,7 +117,6 @@
       ],
       "Effect": "Allow",
       "Resource": [
-        "arn:aws:s3:::dda-component-*/*",
         "arn:aws:s3:::greengrass-component-artifacts-*/*"
       ],
       "Sid": "GreengrassComponentDownload"

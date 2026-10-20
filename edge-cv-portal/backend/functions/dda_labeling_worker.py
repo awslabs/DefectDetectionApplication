@@ -73,8 +73,9 @@ verification Admin_Review finalize (task 11.3):
 4. Serialize with dda_manifest.serialize_manifest and run the emitted
    lines through the existing validation path — the shared-layer
    manifest_transformer.detect_ground_truth_attributes plus the
-   manifest_validator-style checks for the job's task type. A
-   validation failure is a generation failure (Req 10.6).
+   per-line checks for the job's task type (JSON parsing, source-ref,
+   mask-key timestamp colons). A validation failure is a generation
+   failure (Req 10.6).
 5. Success: write the manifest to s3://{output_bucket}/labeled/
    {job_id}/output.manifest, record output_manifest_s3_uri (the same
    field GT jobs use, Req 10.8), set status='Completed' + completed_at
@@ -224,7 +225,7 @@ GT_TASK_TYPES = {
     'Segmentation': 'segmentation',
     'ObjectDetection': 'object-detection',
 }
-# The known GT timestamp bug manifest_validator.py flags: colons in
+# The known GT timestamp bug the manifest checks flag: colons in
 # mask object keys (Req 10.4 — DDA mask keys never contain colons).
 TIMESTAMP_COLON_PATTERN = re.compile(r'T\d{2}:\d{2}:\d{2}\.')
 
@@ -1305,12 +1306,12 @@ def _mask_object_key(mask_prefix: str, task: Dict,
 def _validate_manifest_lines(lines: List[str],
                              modality: str) -> List[str]:
     """The existing validation path over the emitted JSON Lines
-    (Req 10.6): the manifest_validator.py checks (per-line JSON
-    parsing, non-empty manifest, mask-key timestamp colons) plus the
+    (Req 10.6): the per-line checks (JSON parsing, non-empty manifest,
+    a string source-ref, mask-key timestamp colons) plus the
     training.py required-attribute checks for the task type, and the
-    shared-layer detect_ground_truth_attributes gate — the manifest
-    must already be in DDA form, needing no transformation. Returns a
-    list of issues; empty means valid."""
+    shared-layer manifest_transformer.detect_ground_truth_attributes
+    gate — the manifest must already be in DDA form, needing no
+    transformation. Returns a list of issues; empty means valid."""
     issues: List[str] = []
     entries: List[Dict] = []
     for index, line in enumerate(lines):
@@ -1376,16 +1377,17 @@ def _validate_manifest_lines(lines: List[str],
     if issues:
         return issues
 
-    # detect_ground_truth_attributes gate on the first entry — exactly
-    # how manifest_validator.py / training.py invoke it, with the
-    # lowercase GT task-type identifier.
+    # manifest_transformer.detect_ground_truth_attributes gate on the
+    # first entry — exactly how training.py and the shared
+    # transform_manifest_lines invoke it, with the lowercase GT
+    # task-type identifier.
     detected = detect_ground_truth_attributes(
         entries[0], GT_TASK_TYPES[modality])
     if modality in ('Classification', 'Segmentation'):
         # The manifest must already carry the canonical DDA attributes:
         # any detected foreign attribute pair means a Ground Truth
-        # manifest needing transformation (manifest_validator's
-        # needs_transformation condition), which the Manifest_Generator
+        # manifest needing transformation (what the shared
+        # manifest_transformer rewrites), which the Manifest_Generator
         # must never emit (Req 10.6).
         if detected and (detected.get('segmentation_only')
                          or detected.get('label_attr') != 'anomaly-label'):

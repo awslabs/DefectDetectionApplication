@@ -19,6 +19,8 @@ import { UserRole } from '../types';
 import { getConfig, getBuildInfo } from '../config';
 import { canAccessBuilds } from '../utils/buildsAccess';
 import { canAccessSyntheticData } from '../utils/syntheticAccess';
+import { canViewDebugLog } from '../utils/debugAccess';
+import { canReadDashboards } from '../utils/telemetryPermissions';
 import { canAccessWorkflowTuning } from '../utils/workflowTuningAccess';
 import { clearAttemptedLocation } from '../services/sessionRedirect';
 
@@ -162,7 +164,19 @@ export function buildNavigationItems(
       ? [{ type: 'link' as const, text: 'Builds', href: '/builds' }]
       : []),
     { type: 'link' as const, text: 'Deployments', href: '/deployments' },
+    // The workflow telemetry dashboards are readable by every role holding
+    // dashboards:read, i.e. every role but DataLabeler, which returned above
+    // (workflow-telemetry-dashboards design §11.1, §11.4).
+    ...(canReadDashboards(role)
+      ? [{ type: 'link' as const, text: 'Workflow dashboards', href: '/workflow-dashboards' }]
+      : []),
     { type: 'link' as const, text: 'Devices', href: '/devices' },
+    // The workflow debug log (sessions and viewer) is readable by every
+    // role holding VIEW_DEVICE_LOGS, i.e. every role but DataLabeler, which
+    // returned above (workflow-debug-mode Requirements 2.6, 3.1).
+    ...(canViewDebugLog(role)
+      ? [{ type: 'link' as const, text: 'Debug log', href: '/debug' }]
+      : []),
   ];
 
   // Admin-only items (PortalAdmin only)
