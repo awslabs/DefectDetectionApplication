@@ -507,6 +507,59 @@ def test_a_role_without_the_portal_prefix_is_not_a_portal_lambda_role():
     assert lines[0].endswith("portal Lambda role")
 
 
+def _trust_role(*statements, name=LAMBDA_ROLE, encoded=False):
+    document = doc(*statements)
+    return {"RoleName": name, "AssumeRolePolicyDocument": quote(json.dumps(document)) if encoded else document}
+
+
+def _trust(service, effect="Allow", **extra):
+    statement = {"Effect": effect, "Action": "sts:AssumeRole", "Principal": {"Service": service}}
+    statement.update(extra)
+    return statement
+
+
+def test_lambda_service_principal_constant():
+    assert drift.LAMBDA_SERVICE_PRINCIPAL == "lambda.amazonaws.com"
+
+
+@pytest.mark.parametrize("role, expected", [
+    # Service as a string, as a list, URL-encoded like the raw API
+    (_trust_role(_trust("lambda.amazonaws.com")), True),
+    (_trust_role(_trust(["edgelambda.amazonaws.com", "lambda.amazonaws.com"])), True),
+    (_trust_role(_trust("lambda.amazonaws.com"), encoded=True), True),
+    # another service only, including look-alike names
+    (_trust_role(_trust("credentials.iot.amazonaws.com")), False),
+    (_trust_role(_trust(["edgelambda.amazonaws.com", "states.amazonaws.com"])), False),
+    (_trust_role(_trust("lambda.amazonaws.com.example")), False),
+    # the name only inside a Condition or a Sid
+    (_trust_role(_trust("states.amazonaws.com",
+                        Condition={"StringEquals": {"aws:SourceService": "lambda.amazonaws.com"}})), False),
+    (_trust_role(_trust("states.amazonaws.com", Sid="lambda.amazonaws.com")), False),
+    # the name in an AWS principal rather than Service
+    (_trust_role({"Effect": "Allow", "Action": "sts:AssumeRole",
+                  "Principal": {"AWS": "lambda.amazonaws.com"}}), False),
+    # a Deny statement, alone or beside an Allow of another service
+    (_trust_role(_trust("lambda.amazonaws.com", effect="Deny")), False),
+    (_trust_role(_trust("lambda.amazonaws.com", effect="Deny"), _trust("states.amazonaws.com")), False),
+    # a Deny does not hide a separate Allow of the Lambda service
+    (_trust_role(_trust("states.amazonaws.com", effect="Deny"), _trust("lambda.amazonaws.com")), True),
+    # no or malformed trust document
+    ({"RoleName": LAMBDA_ROLE}, False),
+    (_trust_role({"Effect": "Allow", "Action": "sts:AssumeRole", "Principal": "*"}), False),
+])
+def test_is_portal_lambda_role_matches_the_service_principal_exactly(role, expected):
+    assert drift.is_portal_lambda_role(role) is expected
+
+
+def test_is_portal_lambda_role_requires_the_role_name_prefix():
+    trust = _trust("lambda.amazonaws.com")
+    assert drift.is_portal_lambda_role(_trust_role(trust, name="EdgeCVPortalStack-Role")) is True
+    assert drift.is_portal_lambda_role(_trust_role(trust, name="OtherServiceRole")) is False
+    assert drift.is_portal_lambda_role(_trust_role(trust, name="MyEdgeCVPortalRole")) is False
+    assert drift.is_portal_lambda_role(_trust_role(trust, name="OtherServiceRole"), role_prefix="Other") is True
+    assert drift.is_portal_lambda_role({"AssumeRolePolicyDocument": doc(trust)}) is False
+
+
 # ------------------------------------------------------------- read path
 
 def test_read_role_uses_only_iam_read_calls_and_pages():

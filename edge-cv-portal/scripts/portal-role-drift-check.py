@@ -118,6 +118,7 @@ LEGACY_DEVICE_ROLE_S3_STATEMENTS = (
 
 # Portal Lambda roles: CloudFormation-created roles of the portal stacks.
 PORTAL_ROLE_PREFIX = 'EdgeCVPortal'
+LAMBDA_SERVICE_PRINCIPAL = 'lambda.amazonaws.com'
 PORTAL_AWS_MANAGED_POLICIES = ('AWSLambdaBasicExecutionRole', 'AmazonEventBridgeFullAccess',
                                'AmazonSSMManagedInstanceCore')
 # CDK names an iam.Policy / default policy after its construct path plus an
@@ -272,9 +273,23 @@ def classify_policy(name: str, document: Dict[str, Any], *, kind: str, portal_la
     return HAND_ATTACHED
 
 
+def _service_principals(statement: Dict[str, Any]) -> List[str]:
+    """The Principal.Service values of one trust statement (string or list)."""
+    principal = statement.get('Principal')
+    if not isinstance(principal, dict):
+        return []
+    return [str(value) for value in _as_list(principal.get('Service'))]
+
+
 def is_portal_lambda_role(role: Dict[str, Any], role_prefix: str = PORTAL_ROLE_PREFIX) -> bool:
-    trust = json.dumps(policy_document(role.get('AssumeRolePolicyDocument')))
-    return str(role.get('RoleName', '')).startswith(role_prefix) and 'lambda.amazonaws.com' in trust
+    """The role name has the portal prefix and an Allow trust statement names
+    the Lambda service principal exactly."""
+    if not str(role.get('RoleName', '')).startswith(role_prefix):
+        return False
+    trust = policy_document(role.get('AssumeRolePolicyDocument'))
+    return any(value == LAMBDA_SERVICE_PRINCIPAL
+               for statement in statements(trust) if statement.get('Effect') == 'Allow'
+               for value in _service_principals(statement))
 
 
 def statement_kinds(statement: Dict[str, Any]) -> Tuple[bool, bool]:
