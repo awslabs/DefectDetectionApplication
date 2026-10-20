@@ -315,8 +315,24 @@ describe('dashboards CRUD and the tile reads', () => {
     expect((caught as TelemetryApiError).remedy).toContain('Target architecture');
   });
 
+  it('getDashboard unwraps the {dashboard} answer of GET /telemetry/dashboards/{id}', async () => {
+    const record = {
+      dashboard_id: 'dash-1', usecase_id: 'uc-1', workflow_id: 'wf-1', device_ids: ['thing-a'], template_id: 'ppe-compliance',
+      template_version: 1, name: 'Line 1', createdAt: 1000, updatedAt: 1000, actor: 'user@example.com',
+    };
+    stubFetch(200, { dashboard: record });
+
+    await expect(apiService.getDashboard('dash-1')).resolves.toEqual(record);
+  });
+
+  it('getDashboard refuses an answer without the dashboard record', async () => {
+    stubFetch(200, { dashboard_id: 'dash-1', device_ids: ['thing-a'] });
+
+    await expect(apiService.getDashboard('dash-1')).rejects.toThrow('The dashboard answer carries no dashboard record');
+  });
+
   it('get, patch and delete address /telemetry/dashboards/{id}', async () => {
-    const fetchMock = stubFetch(200, { dashboard_id: 'dash-1', deleted: true });
+    const fetchMock = stubFetch(200, { dashboard: { dashboard_id: 'dash-1' }, dashboard_id: 'dash-1', deleted: true });
 
     await apiService.getDashboard('dash-1');
     await apiService.patchDashboard('dash-1', { name: 'Renamed' });

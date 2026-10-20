@@ -76,6 +76,7 @@ import type {
   DashboardWriteResponse,
   DeleteDashboardResponse,
   EventsQuery,
+  GetDashboardResponse,
   ListDashboardsResponse,
   LiveFrameResponse,
   LiveLeaseResponse,
@@ -5896,9 +5897,18 @@ class ApiService {
     });
   }
 
-  /** One dashboard (`GET /telemetry/dashboards/{id}`; dashboards:read). */
+  /**
+   * One dashboard (`GET /telemetry/dashboards/{id}`; dashboards:read). The
+   * route answers `{dashboard}`, the wrapper of the create and patch answers;
+   * the record is returned unwrapped, and an answer without it is an error
+   * the page shows instead of a record it cannot render.
+   */
   async getDashboard(dashboardId: string): Promise<Dashboard> {
-    return this.telemetryRequest<Dashboard>(this.telemetryDashboardPath(dashboardId));
+    const answer = await this.telemetryRequest<GetDashboardResponse>(this.telemetryDashboardPath(dashboardId));
+    if (!answer || typeof answer !== 'object' || !answer.dashboard || typeof answer.dashboard !== 'object') {
+      throw new Error('The dashboard answer carries no dashboard record');
+    }
+    return answer.dashboard;
   }
 
   /** Rename or re-device a dashboard (`PATCH /telemetry/dashboards/{id}`; dashboards:manage). */
