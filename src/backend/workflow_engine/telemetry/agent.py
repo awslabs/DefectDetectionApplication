@@ -72,8 +72,13 @@ SUMMARY_QOS = 0
 TICK_S = 0.25
 REPORT_CHECK_S = 1.0
 #: ``reported`` keys that ride along without triggering a shadow write
-#: (``ShadowControlAgent.report`` strips them for its change detection).
-REPORT_COUNTER_KEYS = ("counters", "lastPublishAt", "lastSeq", "framesTooLarge")
+#: (``ShadowControlAgent.report`` strips them, at any depth, for its change
+#: detection). ``appliedVersion``, ``appliedDocuments`` and
+#: ``ignoredDocuments`` change merely because a document was applied; every
+#: ``reported`` write comes back as a newer shadow version, so counting them
+#: as a change would make each write cause the next one.
+REPORT_COUNTER_KEYS = ("counters", "lastPublishAt", "lastSeq", "framesTooLarge", "appliedVersion",
+                       "appliedDocuments", "ignoredDocuments")
 ERROR_INBOX_MAXLEN = 2000
 
 

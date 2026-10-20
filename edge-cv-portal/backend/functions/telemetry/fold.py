@@ -12,7 +12,8 @@ design §7.3, §8.1; tasks.md 3.2).
   Summary_Store items of a Pair and its Events, driven by the catalog's
   folds (sum, max, mean, p50mean, p95max, worst, last, count; ``perKey``
   measures per map key; the owner-filtered ``ext.ppe`` measures), with
-  in-memory de-duplication on (producer, instance, seq);
+  in-memory de-duplication on (producer, instance, seq) within the Pair
+  (the device counts ``seq`` per workflow within an instance);
 - ``fold_items(items)``: the hour item from minute items and the day item
   from hour items, by the same rule (sums and maxima are exact at every
   level; means are weighted by the folded counts; ``last`` follows the
@@ -140,9 +141,11 @@ def _is_idle(item: Dict[str, Any]) -> bool:
 
 
 def dedupe(summaries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """One item per (producer, instance, seq): a device retransmission or an
-    IoT double delivery is stored twice and folded once. The copy with the
-    earliest ``receivedMs`` is kept; items without a seq are all kept."""
+    """One item per (producer, instance, seq) of ONE Pair's items (the device
+    counts ``seq`` per workflow within an instance, so the key is unique only
+    within a Pair): a device retransmission or an IoT double delivery is
+    stored twice and folded once. The copy with the earliest ``receivedMs``
+    is kept; items without a seq are all kept."""
     kept: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
     unkeyed: List[Dict[str, Any]] = []
     for item in summaries:
@@ -401,7 +404,8 @@ def fold_items(items: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def count_gaps(window_items: Iterable[Dict[str, Any]], minute: int) -> int:
-    """The authoritative ``gaps`` of ``minute`` (its start, epoch ms): for each
+    """The authoritative ``gaps`` of ``minute`` (its start, epoch ms) over ONE
+    Pair's window items (``seq`` counts per workflow within an instance): for each
     (producer, instance) sort the distinct stored ``seq`` values of the whole
     window and, for each consecutive pair whose later member's ``eventMs``
     falls in the minute, add ``later.seq - earlier.seq - 1``. Messages that

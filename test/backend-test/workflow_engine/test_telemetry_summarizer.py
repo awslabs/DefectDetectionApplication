@@ -23,7 +23,7 @@ window and nothing after; a mid-Interval version change yields two
 Summaries with consecutive ``seq``; a late observation for a dropped id
 emits once; the 64-label cap and ``__other__``; maxima; ``total`` from
 ``detection_count`` with ``truncated`` for a 1,200-detection run; Heartbeats
-after 5 idle minutes; ``seq`` continuity across Summaries and Heartbeats;
+after 5 idle minutes; ``seq`` continuity per workflow across Summaries and Heartbeats;
 the size cap; ``model.waits == 1`` for one continuous wait polled three
 times; ``waitedMs`` summed from gate outcomes; no latency sample for
 ``run_started_ms is None``; a refused run counts in ``runs.failed``;
@@ -340,7 +340,7 @@ class TestAlignmentAndWindows:
         assert out[0]["intervalStart"] == BASE_MS + 40_000 and out[0]["intervalEnd"] == BASE_MS + 50_000
         assert out[0]["runs"]["completed"] == 1
 
-    def test_seq_is_one_counter_across_summaries_and_heartbeats(self):
+    def test_seq_is_one_counter_per_workflow_across_summaries_and_heartbeats(self):
         clock = FakeClock(BASE)
         view = FakeView(rows={REG_A: RegistrationInfo(WF_A, "3", (), False),
                               REG_B: RegistrationInfo(WF_B, "1", (), False)})
@@ -349,10 +349,17 @@ class TestAlignmentAndWindows:
         s.observe_run(run_record(finished_at=BASE + 1))
         seqs = []
         for boundary in (10, 20, 30, 40, 50, 60):
-            seqs.extend(p["seq"] for p in payloads(tick_at(s, clock, BASE + boundary + 0.2)))
-        # six Summaries for A (active) and one Heartbeat for B at 60
-        assert seqs == list(range(1, 8))
+            seqs.extend((p["workflowId"], p["idle"], p["seq"])
+                        for p in payloads(tick_at(s, clock, BASE + boundary + 0.2)))
+        # six Summaries for A (active) and one Heartbeat for B at 60, each workflow counting from 1
+        assert sorted(seqs) == sorted([(WF_A, False, n) for n in range(1, 7)] + [(WF_B, True, 1)])
+        # the instance's emission count
         assert s.seq == 7
+        clock.set(BASE + 61)
+        s.observe_run(run_record(registration_id=REG_B, workflow_id=WF_B, version="1", finished_at=BASE + 61))
+        out = payloads(tick_at(s, clock, BASE + 70.2))
+        assert sorted((p["workflowId"], p["idle"], p["seq"]) for p in out) == sorted(
+            [(WF_A, False, 7), (WF_B, False, 2)])
 
     def test_boundaries_in_one_tick_are_processed_in_order_with_observations_split_by_time(self):
         clock = FakeClock(BASE)

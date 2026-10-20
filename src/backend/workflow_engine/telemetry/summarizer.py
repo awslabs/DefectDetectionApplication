@@ -37,8 +37,13 @@ observation for an id that is gone and emits once), and runs the ticker:
 at every wall-clock multiple of ``summaryIntervalS`` plus at most 1 s it
 emits one ``dda.summary.v1`` per registration that had a run in the last 5
 minutes, and at every multiple of ``idleHeartbeatS`` a Heartbeat for every
-other registration (``idle: true``, ``intervalS = idleHeartbeatS``). One
-``seq`` per ``instance`` is shared by Summaries and Heartbeats. A first
+other registration (``idle: true``, ``intervalS = idleHeartbeatS``). ``seq``
+counts per ``workflowId`` within the ``instance`` (the Portal's Pair key),
+starting at 1, shared by the workflow's Summaries and Heartbeats and by all
+its registrations and versions, and kept when an accumulator is dropped,
+recreated or transient; consecutive messages of a Pair differ by exactly 1.
+The ``seq`` property and the status' ``seq`` count every emission of the
+instance. A first
 window shorter than 1 s is folded into the next boundary; a longer first
 window is declared with the configured ``intervalS`` (the schema's + 1 s
 allowance accepts it). While ``enabled`` is false every observation is
@@ -457,7 +462,11 @@ class IntervalSummarizer:
         self._next_summary_ms: Optional[int] = None
         self._next_heartbeat_ms: Optional[int] = None
         self._last_counters: Dict[str, int] = {}
+        #: Every emission of this instance (the status ``seq``).
         self._seq = 0
+        #: The last ``seq`` per workflowId (the Portal's Pair key); kept
+        #: when an accumulator is dropped, recreated or transient.
+        self._seq_by_workflow: Dict[str, int] = {}
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -493,6 +502,8 @@ class IntervalSummarizer:
 
     @property
     def seq(self) -> int:
+        """The number of Summaries and Heartbeats this instance emitted (the
+        sum of the per-workflow ``seq`` counters)."""
         return self._seq
 
     def configure(self, settings: SummarizerSettings) -> None:
@@ -818,7 +829,9 @@ class IntervalSummarizer:
     def _finish(self, acc: PairAccumulator, payload: Dict[str, Any], end_ms: int,
                 emissions: List[Emission]) -> None:
         self._seq += 1
-        payload["seq"] = self._seq
+        workflow_seq = self._seq_by_workflow.get(acc.workflow_id, 0) + 1
+        self._seq_by_workflow[acc.workflow_id] = workflow_seq
+        payload["seq"] = workflow_seq
         self._fit_to_cap(payload)
         acc.reset_window(end_ms)
         self.last_emission_ms = int(end_ms)
