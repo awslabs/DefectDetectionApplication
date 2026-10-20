@@ -272,6 +272,11 @@ export interface PatchDashboardBody {
   device_ids?: string[];
 }
 
+/** `GET /telemetry/dashboards/{id}` (200): the record in the same wrapper as the write answers. */
+export interface GetDashboardResponse {
+  dashboard: Dashboard;
+}
+
 /** `POST /telemetry/dashboards` (201) and `PATCH …/{id}` (200). */
 export interface DashboardWriteResponse {
   dashboard: Dashboard;
