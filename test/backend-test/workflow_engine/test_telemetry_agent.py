@@ -208,7 +208,8 @@ class TestStartAndWiring:
         assert shadow.publisher is publisher and shadow.started
         assert shadow.on_desired == agent._on_desired
         assert shadow.kwargs == {"counter_keys": REPORT_COUNTER_KEYS}
-        assert set(REPORT_COUNTER_KEYS) == {"counters", "lastPublishAt", "lastSeq", "framesTooLarge"}
+        assert set(REPORT_COUNTER_KEYS) == {"counters", "lastPublishAt", "lastSeq", "framesTooLarge",
+                                            "appliedVersion", "appliedDocuments", "ignoredDocuments"}
         assert agent._on_registrations in view.listeners
         assert agent._on_run_finished in hooks._run_observers
         assert agent._on_trigger_dropped in hooks._drop_observers

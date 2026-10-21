@@ -37,13 +37,23 @@ document the ``ShadowControlAgent`` delivers, in version order, and keeps:
   latest ``expiresAt`` (ties by workflow id), one WARNING per version names
   the dropped ids and ``live.dropped`` lists them in ``reported``.
 
+A newer version whose ``desired`` equals the last applied document (every
+``reported`` write of the agent comes back as ``update/documents`` with an
+unchanged ``desired`` and a higher version) is recorded in ``last_version``
+and logged at DEBUG only: nothing is re-configured and ``appliedVersion``
+stays the version of the last document actually applied. A lease that
+lapsed since the last apply makes the document count as changed, so the
+full apply drops it.
+
 :meth:`TelemetryDesiredState.reported` builds the ``reported`` document
 ``{v, agentVersion, usecaseId, enabled, summaryIntervalS, idleHeartbeatS,
 personClasses, appliedVersion, lastPublishAt, counters, live}``; the agent
 hands it to ``ShadowControlAgent.report``, which writes it on a non-counter
-change and otherwise at most once per 5 minutes.
+change and otherwise at most once per 5 minutes (``appliedVersion`` is one
+of the agent's counter keys: it rides along without causing a write).
 """
 
+import copy
 import logging
 import re
 import threading
@@ -207,20 +217,39 @@ class TelemetryDesiredState:
         self.dropped_live: List[str] = []
         self.rejected_live: Dict[str, str] = {}
         self.applied_version: Optional[int] = None
+        #: The newest version seen, applied or unchanged (bookkeeping only).
+        self.last_version: Optional[int] = None
         self.ignored_documents = 0
         self.applied_documents = 0
+        self.unchanged_documents = 0
         self._ignored_versions: set = set()
+        self._last_document: Optional[dict] = None
 
     # -- apply ----------------------------------------------------------------------
 
     def apply(self, desired: Any, version: Any) -> bool:
         """Apply one complete ``desired`` document; returns whether it was
-        applied (false for an unsupported ``v`` or a missing use case id)."""
+        applied (false for an unsupported ``v`` or a missing use case id).
+
+        A newer version whose ``desired`` equals the last applied one (the
+        echo of the agent's own ``reported`` write) only records the
+        version: nothing is re-configured and ``on_change`` is not called."""
         now_ms = int(self._wall() * 1000)
         document = desired if isinstance(desired, dict) else {}
         if document.get("v") != SHADOW_VERSION or not _is_uuid(document.get("usecaseId")):
             self._ignore(version, document)
             return False
+        with self._lock:
+            # a lease that lapsed since is dropped by a full apply, as before
+            unchanged = (self._last_document is not None and document == self._last_document
+                         and all(lease.expires_at_ms > now_ms for lease in self.leases.values()))
+            if unchanged:
+                self.last_version = version if _is_int(version) else self.last_version
+                self.unchanged_documents += 1
+        if unchanged:
+            logger.debug("Telemetry shadow version %s: desired unchanged since version %s; nothing re-applied",
+                         version, self.applied_version)
+            return True
         usecase_id = document["usecaseId"]
         enabled = document.get("enabled", False)
         enabled = enabled if isinstance(enabled, bool) else False
@@ -241,7 +270,9 @@ class TelemetryDesiredState:
             self.dropped_live = dropped
             self.rejected_live = rejected
             self.applied_version = version if _is_int(version) else self.applied_version
+            self.last_version = version if _is_int(version) else self.last_version
             self.applied_documents += 1
+            self._last_document = copy.deepcopy(document)
         logger.info("Telemetry shadow version %s applied: enabled=%s usecase=%s interval=%ds heartbeat=%ds "
                     "live=%d", version, enabled, usecase_id, summary_interval, idle_heartbeat, len(leases))
         if self._on_change is not None:
@@ -364,7 +395,9 @@ class TelemetryDesiredState:
                 "idleHeartbeatS": self.idle_heartbeat_s,
                 "personClasses": list(self.person_classes),
                 "appliedVersion": self.applied_version,
+                "lastVersion": self.last_version,
                 "appliedDocuments": self.applied_documents,
+                "unchangedDocuments": self.unchanged_documents,
                 "ignoredDocuments": self.ignored_documents,
                 "leases": sorted(self.leases),
                 "droppedLive": list(self.dropped_live),

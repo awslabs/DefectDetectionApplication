@@ -44,7 +44,8 @@ Portal-native charts because the per-message path would have cost about forty
 times more at fleet scale and because the Quick Sight edition change cannot be
 reversed. The lake keeps that door open: a later add-on can define Glue tables
 over `raw/summaries/` and `raw/events/` with partition projection by day, two
-de-duplicating views (the lake is at-least-once), an Athena workgroup with a
+de-duplicating views (the lake is at-least-once; a Summary is unique by
+producer, agent instance, workflow and `seq`), an Athena workgroup with a
 scan cap, and either Standard-edition analyses for the account's existing
 Quick Sight administrators or, with the Enterprise edition, embedded
 dashboards with row-level security per use case. None of it is built or paid
@@ -162,7 +163,7 @@ hours, 24 hours, 7 days and 30 days, and absolute ranges up to 400 days.
 |---|---|---|---|
 | Charts | the panels above at minute detail up to 6 hours, hourly up to 60 days, daily beyond | every 60 s at minute detail, 300 s at hourly, 900 s at daily, while the page is visible; a manual refresh at most once per 10 s | one summary interval plus one refresh |
 | Now | per device: flow (`flowing`, `idle`, `silent`), "last summary" and "last run" ages ("no run in 48 h" when there was none), the heartbeat age, the newest values (runs, detections per class, people, latency, model), the live-frame age, the 20 newest events of the last 15 minutes | every 5 s while visible (`telemetryNowPollSeconds`) | about 10 s typically, 17 s at the 95th percentile |
-| Health | per device: flow, sequence gaps and the telemetry counters of the last hour, failed and dropped runs, the model state with its readiness waits, the Greengrass core-device status, the variant hint (below); for `telemetry:manage` holders the use case's rejection counts of the last hour | with Now (one request feeds both panels) | as Now |
+| Health | per device: flow, sequence gaps (Summaries or Heartbeats of the workflow that never arrived; the device numbers each workflow's messages from 1 at every agent start) and the telemetry counters of the last hour, failed and dropped runs, the model state with its readiness waits, the Greengrass core-device status, the variant hint (below); for `telemetry:manage` holders the use case's rejection counts of the last hour | with Now (one request feeds both panels) | as Now |
 | Clips (PPE template) | 25 clips per page, newest first, with a device filter; each clip is `playable`, "upload failed on the device" (with the device's error text), "expired or missing", "not allowed" (its reference is outside the use case's media layout) or "unavailable"; Play opens a `<video>` on a 15-minute URL minted on demand, with a download link | every 15 s while visible | a clip is listed within 30 s of its event |
 | Live | one selected device: the newest frame with its per-class counts, people and PPE state; `starting` ("the device is not sending" after 15 s), `live` (at most 10 s old), `stale`, `paused`, `unavailable` with the reason, or "no live source" | the lease is renewed every 20 s and the frame polled every 2 s while visible and unpaused | about 3.5 s from capture to screen |
 | Events | the dashboard's events newest first, 50 per page, with device and type filters | every 15 s while visible | within a few seconds of the event |
