@@ -34,7 +34,7 @@ class Rollup:
         self.tables = telemetry_tables.tables()
 
     def put_summary(self, seq, *, event_ms, received_ms=None, runs=(1, 0, 0), instance=INSTANCE, idle=False,
-                    expires_at=None, message_id=None):
+                    expires_at=None, message_id=None, latency=None, per_class=None):
         received_ms = received_ms if received_ms is not None else event_ms + 400
         fields = {"schema": "dda.summary.v1", "intervalStart": event_ms - 10_000, "intervalEnd": event_ms,
                   "emittedAt": event_ms + 50, "deviceId": self.device, "workflowId": WF, "workflowVersion": "1",
@@ -43,8 +43,11 @@ class Rollup:
         if not idle:
             fields["runs"] = {"completed": runs[0], "failed": runs[1], "dropped": runs[2]}
             fields["model"] = {"state": "READY", "models": {}, "waits": 0, "waitedMs": 0}
-            fields["detections"] = {"runsWithDetections": 1, "total": seq, "perClass": {"k": {"total": seq, "max": seq}},
+            fields["detections"] = {"runsWithDetections": 1, "total": seq,
+                                    "perClass": per_class if per_class is not None else {"k": {"total": seq, "max": seq}},
                                     "truncated": False}
+            if latency is not None:
+                fields["latency"] = latency
         item = {"pk": self.pk, "sk": records.summary_sk(received_ms, message_id or str(uuid.uuid4())), "summary": fields,
                 "receivedMs": received_ms, "eventMs": event_ms, "tsSource": "device", "producer": "engine",
                 "instance": instance, "seq": seq, "gap": 0, "idle": idle,
@@ -185,6 +188,28 @@ class TestMinute:
         m = measures(rollup.aggregate("M#" + fold.minute_key(MINUTE)))
         assert m["summaries"] == 1 and m["telemetry_publish_failures"] == 3 and m["runs_completed"] == 1
 
+    def test_a_minute_with_a_non_integral_mean_is_stored_at_all_three_levels(self, rollup):
+        # n-weighted p50 mean (100 * 1 + 150 * 2) / 3 = 133.333...: the fold yields a float, which the
+        # DynamoDB resource refuses unless the roll-up converts it; a per-key max of 2.5 covers the nested maps.
+        first = rollup.put_summary(1, event_ms=MINUTE + 10_000, runs=(1, 0, 0),
+                                   latency={"p50Ms": 100, "p95Ms": 180, "maxMs": 200, "n": 1},
+                                   per_class={"k": {"total": 1, "max": Decimal("2.5")}})
+        rollup.put_summary(2, event_ms=MINUTE + 20_000, runs=(2, 0, 0),
+                           latency={"p50Ms": 150, "p95Ms": 190, "maxMs": 210, "n": 2})
+        result = rollup.run([rollup.stream_record(first)])
+        assert result["batchItemFailures"] == []
+        expected = (100 * 1 + 150 * 2) / 3
+        for sk in ("M#" + fold.minute_key(MINUTE), "H#" + fold.hour_key(MINUTE), "D#" + fold.day_key(MINUTE)):
+            item = rollup.aggregate(sk)
+            assert item is not None, sk
+            stored = item["measures"]["latency_p50_ms"]
+            assert isinstance(stored, Decimal), sk
+            assert abs(float(stored) - expected) < 1e-6, sk
+            assert item["measures"]["detections_class_max"] == {"k": Decimal("2.5")}, sk
+            assert item["measures"]["latency_p95_ms"] == 190 and item["measures"]["latency_max_ms"] == 210, sk
+            assert item["weights"]["latency_p50_ms"] == 3, sk
+            assert measures(item)["runs_completed"] == 3 and item["summariesFolded"] == 2, sk
+
 
 class TestHourAndDay:
     def test_hour_and_day_items_are_recomputed_and_idempotent_across_a_retried_batch(self, rollup):
@@ -236,3 +261,20 @@ class TestHourAndDay:
         assert result["batchItemFailures"] == [{"itemIdentifier": "22"}, {"itemIdentifier": "23"}]
         assert rollup.aggregate("M#" + fold.minute_key(MINUTE)) is not None
         assert rollup.module.handler({"Records": [rollup.stream_record(good)]}, None) == {"batchItemFailures": []}
+
+    def test_a_write_that_raises_reports_the_pair_and_leaves_no_partial_levels(self, rollup, monkeypatch):
+        good = rollup.put_summary(1, event_ms=MINUTE + 10_000)
+        other = Rollup(rollup.module)
+        bad = other.put_summary(1, event_ms=MINUTE + 10_000)
+        original = rollup.module._put
+
+        def failing_put(pk, sk, folded, ttl_seconds, now_s, computed_ms):
+            if pk == other.pk:
+                raise TypeError("Float types are not supported. Use Decimal types instead.")
+            return original(pk, sk, folded, ttl_seconds, now_s, computed_ms)
+
+        monkeypatch.setattr(rollup.module, "_put", failing_put)
+        result = rollup.run([rollup.stream_record(good, sequence="31"), rollup.stream_record(bad, sequence="32")])
+        assert result["batchItemFailures"] == [{"itemIdentifier": "32"}]
+        assert len(result["recomputed"]) == 1 and result["recomputed"][0]["summariesFolded"] == 1
+        assert len(rollup.aggregates()) == 3 and other.aggregates() == []

@@ -28,6 +28,7 @@ import logging
 import os
 import threading
 import time
+from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import boto3
@@ -151,9 +152,23 @@ def _aggregate_range(pk: str, low: str, high: str, now_s: float) -> List[Dict[st
 
 
 # --------------------------------------------------------------------------- the three levels
+def _dynamo(value: Any) -> Any:
+    """Floats to Decimals (the DynamoDB resource refuses floats), recursively;
+    ints and bools unchanged."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, dict):
+        return {k: _dynamo(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_dynamo(v) for v in value]
+    return value
+
+
 def _put(pk: str, sk: str, folded: Dict[str, Any], ttl_seconds: int, now_s: float, computed_ms: int) -> Dict[str, Any]:
-    item = {"pk": pk, "sk": sk, "measures": folded["measures"], "weights": folded.get("weights") or {},
-            "events": folded["events"], "summariesFolded": int(folded["summariesFolded"]), "gaps": int(folded["gaps"]),
+    item = {"pk": pk, "sk": sk, "measures": _dynamo(folded["measures"]), "weights": _dynamo(folded.get("weights") or {}),
+            "events": _dynamo(folded["events"]), "summariesFolded": int(folded["summariesFolded"]), "gaps": int(folded["gaps"]),
             "computedAt": int(computed_ms), "expires_at": int(now_s) + int(ttl_seconds)}
     _aggregates().put_item(Item=item)
     return item
