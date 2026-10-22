@@ -421,13 +421,13 @@ class TestDownloadFileQueryParamTokenPath:
 
     def test_valid_local_session_token_in_query_param_is_accepted(self):
         with configured(local_login_enabled=True, existing_auth=True):
-            assert authorize_credential(make_local_token()) is None
+            result = authorize_credential(make_local_token()); assert isinstance(result, auth_module.AuthDecision) and result.source == 'local_session' and result.username == 'operator1' and result.role is not None
 
     def test_valid_existing_bearer_in_query_param_is_accepted(self):
         with configured(
             local_login_enabled=True, existing_auth=True, active_bearers=[VALID_BEARER]
         ):
-            assert authorize_credential(VALID_BEARER) is None
+            result = authorize_credential(VALID_BEARER); assert isinstance(result, auth_module.AuthDecision) and result.source == 'existing_token_auth'
 
     def test_invalid_query_token_is_rejected_with_401_bearer_challenge(self):
         from fastapi import HTTPException
