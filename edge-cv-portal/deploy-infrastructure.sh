@@ -192,6 +192,15 @@ show_trusted_accounts() {
 }
 show_trusted_accounts || true
 
+# Portal_MCP_Server opt-out (mcp-servers design D33): DEPLOY_MCP_SERVER=false
+# omits EdgeCVPortalMcpStack, refused while that stack is still deployed
+# (remove it first with `npx cdk destroy EdgeCVPortalMcpStack --force`).
+# See scripts/portal-mcp-stack.sh.
+. "$SCRIPT_DIR/scripts/portal-mcp-stack.sh"
+if ! portal_mcp_optout_guard "$AWS_REGION" "${DEPLOY_MCP_SERVER:-}"; then
+  exit 1
+fi
+
 # The project-local CLI (devDependency aws-cdk, installed by `npm ci` above):
 # aws-cdk-lib emits a cloud-assembly schema that an older global `cdk` on
 # PATH cannot read ("Cloud assembly schema version mismatch").

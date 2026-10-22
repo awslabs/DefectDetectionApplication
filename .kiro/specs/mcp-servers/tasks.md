@@ -495,7 +495,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_guardrails.py -q`
     - _Requirements: 5.3, 5.4, 16.5_
 
-- [ ] 8. Implement the portal infrastructure (`EdgeCVPortalMcpStack`) and the opt-out guard
+- [x] 8. Implement the portal infrastructure (`EdgeCVPortalMcpStack`) and the opt-out guard
   - [x] 8.1 Add the context helpers and the two additive members of existing stacks
     - `mcpServerEnabled(contextValue)` (default on; only a trimmed, lower-cased `false` is off) and `mcpMutatingToolsEnabled(contextValue)` (default `'false'`) in `context-helpers.ts`; `ComputeStack.mcpBackendHandlers` (the 32 keys) and `ApiGatewayStack.componentConfigurationHandler`; no public layer member
     - Files: `edge-cv-portal/infrastructure/lib/context-helpers.ts`, `edge-cv-portal/infrastructure/lib/compute-stack.ts`, `edge-cv-portal/infrastructure/lib/api-gateway-stack.ts`; extend `edge-cv-portal/infrastructure/test/context-helpers.property.test.ts` (fast-check over arbitrary context strings)
@@ -508,19 +508,19 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `cd edge-cv-portal/infrastructure && npm run build && npx cdk synth EdgeCVPortalMcpStack` with the deploy context succeeds; `npx cdk synth -c deployMcpServer=false` emits no MCP stack
     - _Requirements: 2.4, 5.4, 6.1, 6.3, 6.5, 7.3, 2.3_
 
-  - [ ] 8.3 Write the CDK stack assertions
+  - [x] 8.3 Write the CDK stack assertions
     - `mcp-stack.test.ts`: every assertion of the design's "Portal infrastructure" section (exact ten route keys, no `$default` route, `AuthorizationType: NONE` + one integration, no authorizer resource, throttles, environment keys and < 3,000 bytes worst-case, SSM parameter with 43 imports, six-statement role with no `*` and < 9,000 characters, two layers and no imported layer, timeout 29, log group/metric filter/alarm and no `Custom::LogRetention`, `ExplicitAuthFlows: ['ALLOW_REFRESH_TOKEN_AUTH']` and the not-SRP assertion, callback URL pattern, client and resource server in this stack, `deployMcpServer=false`, the `mcpMutatingToolsEnabled` property test) plus the `mcpBackendHandlers`/`componentConfigurationHandler` snapshot and the export-is-a-function-ARN assertion
     - Files: new `edge-cv-portal/infrastructure/test/mcp-stack.test.ts`
     - Verify: `CDK_TEST test/mcp-stack.test.ts`
     - _Requirements: 16.6, 6.1, 6.5, 2.3, 5.4_
 
-  - [ ] 8.4 Write the jest half of the catalog-route registration test
+  - [x] 8.4 Write the jest half of the catalog-route registration test
     - Synthesizes `ComputeStack` and its nested API stacks by construct id plus `NodeDesignerApi`, `BuildFleetStack`, `SyntheticDataStack`; generalized walker with the imported-parent prefix table; every `catalog_routes.json` entry is a registered method; account-lifecycle routes absent
     - Files: new `edge-cv-portal/infrastructure/test/mcp-catalog-routes.test.ts`
     - Verify: `CDK_TEST test/mcp-catalog-routes.test.ts`
     - _Requirements: 1.3, 16.6, 3.1_
 
-  - [ ] 8.5 Add the two-step opt-out guard
+  - [x] 8.5 Add the two-step opt-out guard
     - `portal_mcp_optout_guard "$AWS_REGION" "$DEPLOY_MCP_SERVER"` (off iff trimmed lower-cased `false`; aborts with the `npx cdk destroy EdgeCVPortalMcpStack --force` instruction while the stack exists; aborts on any other `describe-stacks` failure; appends `-c deployMcpServer=false` only when off), sourced from `deploy-infrastructure.sh` directly before the `cdk deploy` line; `deploy-portal.sh` unchanged (D33)
     - Files: new `edge-cv-portal/scripts/portal-mcp-stack.sh`; `edge-cv-portal/deploy-infrastructure.sh`; new `edge-cv-portal/tests/mcp_stack_optout.bats` (cases 1–5 of the design)
     - Verify: `cd edge-cv-portal/tests && bats mcp_stack_optout.bats && bats .`

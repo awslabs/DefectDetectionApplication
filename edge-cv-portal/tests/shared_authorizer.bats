@@ -19,6 +19,7 @@ setup() {
   # The deploy scripts run npm ci / npm run build; stub npm like the other tools.
   _install_stub "$PORTAL_BIN/npm"
   install_real deploy-infrastructure.sh
+  install_real scripts/portal-mcp-stack.sh
   install_real scripts/portal-registry-enforcement.sh
   set_deployed_enforcement true
 }

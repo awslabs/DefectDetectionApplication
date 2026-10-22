@@ -144,6 +144,29 @@ export function validateMcpRedirectUris(uris: string[]): string[] {
   return uris;
 }
 
+/**
+ * Validates the allowed `Origin` values of the MCP endpoints: each must be a
+ * bare origin, `http(s)://host[:port]` with no path (not even `/`), query or
+ * fragment, because the transport security settings compare the `Origin`
+ * header byte for byte.
+ */
+export function validateMcpAllowedOrigins(origins: string[]): string[] {
+  for (const origin of origins) {
+    let parsed: URL | undefined;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      parsed = undefined;
+    }
+    if (!parsed || !['http:', 'https:'].includes(parsed.protocol) || parsed.origin !== origin) {
+      throw new Error(
+        `mcpAllowedOrigins: '${origin}' must be an origin, http(s)://host[:port] with no path`,
+      );
+    }
+  }
+  return origins;
+}
+
 export interface McpStackProps extends cdk.StackProps {
   readonly userPool: cognito.IUserPool;
   /** The hosted-UI domain (AuthStack.userPoolDomain). */
@@ -177,6 +200,7 @@ export class McpStack extends cdk.Stack {
       throw new Error(`McpStack backendHandlers is missing ${missing.join(', ')}`);
     }
     const redirectUris = validateMcpRedirectUris(props.mcpRedirectUris);
+    const allowedOrigins = validateMcpAllowedOrigins(props.mcpAllowedOrigins ?? []);
     const region = cdk.Stack.of(this).region;
 
     // ---------------------------------------------------------------- API
@@ -388,7 +412,7 @@ export class McpStack extends cdk.Stack {
         MCP_CLIENT_ID: userPoolClient.userPoolClientId,
         MCP_REQUIRED_SCOPE: requiredScope,
         MCP_MUTATING_TOOLS_ENABLED: props.mcpMutatingToolsEnabled,
-        MCP_ALLOWED_ORIGINS: (props.mcpAllowedOrigins ?? []).join(','),
+        MCP_ALLOWED_ORIGINS: allowedOrigins.join(','),
         // The parameter name only; the map is never an environment variable.
         MCP_BACKEND_FUNCTIONS_PARAMETER: MCP_BACKEND_FUNCTIONS_PARAMETER_NAME,
         MCP_BUILD_SHA: props.mcpBuildSha,

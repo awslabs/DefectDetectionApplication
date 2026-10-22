@@ -33,7 +33,8 @@ install_all_real() {
   local rel
   for rel in deploy-portal.sh deploy-account-role.sh deploy-infrastructure.sh deploy-frontend.sh \
              infrastructure/deploy-auth.sh infrastructure/deploy_portal_fixes.sh \
-             scripts/portal-trusted-accounts.sh scripts/portal-registry-enforcement.sh; do
+             scripts/portal-trusted-accounts.sh scripts/portal-registry-enforcement.sh \
+             scripts/portal-mcp-stack.sh; do
     install_real_if_present "$rel"
   done
 }
