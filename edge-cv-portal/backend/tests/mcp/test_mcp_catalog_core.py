@@ -282,6 +282,20 @@ def test_path_pattern_on_every_path_argument():
     assert validator.is_valid({"usecase_id": "uc/with-slash", "device_id": "d-1"})
 
 
+def test_narrower_authored_path_pattern_is_kept():
+    narrowed = spec(input_schema=schema(
+        {"usecase_id": identifier(),
+         "device_id": {"type": "string", "pattern": cat.THING_NAME_PATTERN}},
+        required=("usecase_id", "device_id")))
+    prop = narrowed.input_schema["properties"]["device_id"]
+    assert prop["pattern"] == cat.PATH_PARAM_PATTERN
+    assert prop["allOf"] == [{"pattern": cat.THING_NAME_PATTERN}]
+    validator = jsonschema.Draft202012Validator(narrowed.input_schema)
+    assert validator.is_valid({"usecase_id": "uc", "device_id": "thing-1"})
+    # '@' passes the path pattern but not the thing-name pattern.
+    assert not validator.is_valid({"usecase_id": "uc", "device_id": "a@b"})
+
+
 # --------------------------------------------------- bare-identifier rule
 
 def test_own_name_and_camel_case():

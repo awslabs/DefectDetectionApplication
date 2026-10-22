@@ -338,7 +338,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_catalog_core.py tests/mcp/test_property_mcp_tool_list.py -q`; the `admin` view lists exactly the table's Phase-1 tools
     - _Requirements: 1.1, 3.1, 3.7, 5.5, 5.6_
 
-  - [ ] 5.2 Author the `devices` view rows
+  - [x] 5.2 Author the `devices` view rows
     - Rows from `devices.py`, `device_logs.py`, `device_logs_analyzer.py`, `camera_registry.py`, `camera_video_pin.py` (static-video specs name `camera_registry` functions with backend `cameraVideoPin`), `deployments.py`, `components.py`, `component_configuration.py`, `shared_components.py`, `device_registrations.py`; component create/discover/configure and the static pins absent (Backlog 21–23)
     - Carries [review-9 M1] `(→ query usecase_id)` on `portal_devices_list`, `_get`, `_deployments_list`, `_shared_components_list`; [review-9 N4] `offset` on `portal_devices_list`, `_deployments_list`; [review-9 N7] `portal_devices_deployment_create` `confirm_target = 'target_thing_group' | 'target_devices[0]'`, with `target_devices` declared `minItems: 1, maxItems: 1` and `target_thing_group` carrying `THING_NAME_PATTERN` (revision 11's extension) [review-10 N5]; [review-10 N2] `camera_source_id? (→ body camera_source_id)` on `portal_devices_camera_add`
     - Files: `edge-cv-portal/backend/functions/mcp_portal/catalog.py`

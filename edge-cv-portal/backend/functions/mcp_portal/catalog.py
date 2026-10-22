@@ -38,6 +38,10 @@ TOOL_NAME_RE = re.compile(r'^[a-z][a-z0-9_]{0,63}$')
 IDENTIFIER_PATTERN = r'^[A-Za-z0-9._:/-]{1,256}$'
 PATH_PARAM_PATTERN = r'^(?!\.{1,2}$)[A-Za-z0-9._:@+=-]{1,256}$'
 
+# IoT thing / thing-group names as the devices routes accept them
+# (`devices.py` THING_NAME_PATTERN).
+THING_NAME_PATTERN = r'^[a-zA-Z0-9:_-]{1,128}$'
+
 LIMIT_MAX = 200
 LIMIT_DEFAULT = 50
 NEXT_TOKEN_MAX_LENGTH = 2048
@@ -294,8 +298,15 @@ class ToolSpec:
         self._generate_pagination(properties)
         for argument, target in param_map.items():
             if target in self.path_parameters and argument in properties:
-                properties[argument] = dict(properties[argument], type='string',
-                                            pattern=PATH_PARAM_PATTERN)
+                prop = dict(properties[argument], type='string',
+                            pattern=PATH_PARAM_PATTERN)
+                authored = properties[argument].get('pattern')
+                if authored and authored not in (IDENTIFIER_PATTERN,
+                                                 PATH_PARAM_PATTERN):
+                    # A narrower authored pattern (THING_NAME_PATTERN) is
+                    # kept alongside the path-parameter pattern.
+                    prop['allOf'] = [{'pattern': authored}]
+                properties[argument] = prop
         set_(self, 'input_schema', input_schema)
         set_(self, 'param_map', param_map)
         set_(self, 'param_in', dict(self.param_in))
@@ -736,7 +747,496 @@ ADMIN: Tuple[ToolSpec, ...] = (
         status_tool='portal_admin_edge_sync_devices_list'),
 )
 
-CATALOG: Tuple[ToolSpec, ...] = ADMIN
+# ---------------------------------------------------------- devices view
+# Handlers: devices.py, device_logs.py, device_logs_analyzer.py,
+# camera_registry.py (static-video specs: backend cameraVideoPin, the
+# camera_video_pin shim's target functions), deployments.py, components.py,
+# component_configuration.py, shared_components.py, device_registrations.py.
+
+def thing_name(description: Optional[str] = None) -> dict:
+    prop = {'type': 'string', 'pattern': THING_NAME_PATTERN}
+    if description:
+        prop['description'] = description
+    return prop
+
+
+DEVICE_ID = identifier('The device (IoT thing name).')
+UC_QUERY = {'usecase_id': 'usecase_id'}
+CAMERA_SOURCE_ID_PATTERN = r'^[A-Za-z0-9_.@+=-]{1,128}$'
+TARGET_ARCHITECTURES = ('x86_64', 'x86_64_nvidia', 'arm64_cpu', 'arm64_jp5',
+                        'arm64_jp6', 'arm64_jp7')
+
+DEVICES: Tuple[ToolSpec, ...] = (
+    ToolSpec(
+        name='portal_devices_list', domain='devices', title='List devices',
+        description='Lists the Greengrass core devices of a Use_Case with their status.',
+        resource_type='device', input_schema=uc_schema(PAGE_ARGS),
+        backend='devices', handler_module='devices', handler_function='list_devices',
+        method='GET', resource='/devices', param_map=UC_QUERY,
+        permissions=('view_devices',), result_shape='collection',
+        collection_key='devices', handler_audits=True),
+    ToolSpec(
+        name='portal_devices_get', domain='devices', title='Get a device',
+        description='Returns one device: thing details, Greengrass status and portal flags.',
+        resource_type='device',
+        input_schema=uc_schema({'device_id': DEVICE_ID}, required=['device_id']),
+        backend='devices', handler_module='devices', handler_function='get_device',
+        method='GET', resource='/devices/{id}', param_map=UC_QUERY,
+        permissions=('view_devices',), handler_audits=True),
+    ToolSpec(
+        name='portal_devices_flags_update', domain='devices', title='Update device flags',
+        description="Sets a device's test-device flag or target architecture.",
+        resource_type='device',
+        input_schema=uc_schema({
+            'device_id': thing_name('The device (IoT thing name).'),
+            'test_device': boolean(),
+            'target_architecture': {'type': ['string', 'null'],
+                                    'enum': [*TARGET_ARCHITECTURES, None]},
+        }, required=['device_id'],
+            any_of=[['test_device'], ['target_architecture']]),
+        backend='devices', handler_module='devices',
+        handler_function='update_device_flags', method='PUT', resource='/devices/{id}',
+        param_map=UC_QUERY, param_in={'usecase_id': 'body'},
+        permissions=('node-designer:manage',), classification=MUTATING, phase=3,
+        handler_audits=True, handler_audits_denials=True,
+        status_tool='portal_devices_get'),
+    ToolSpec(
+        name='portal_devices_delete', domain='devices', title='Delete a device',
+        description=("Removes a device's Greengrass core device and portal records; "
+                     'the IoT thing and its certificates are kept.'),
+        resource_type='device',
+        input_schema=uc_schema({
+            'device_id': thing_name('The device (IoT thing name).'),
+            'confirm': confirm_arg('Repeat device_id.'),
+        }, required=['device_id']),
+        backend='devices', handler_module='devices', handler_function='delete_device',
+        method='DELETE', resource='/devices/{id}', param_map=UC_QUERY,
+        permissions=('manage_devices',), classification=MUTATING,
+        destructive=True, confirm_target='device_id', phase=3,
+        handler_audits=True, status_tool='portal_devices_list'),
+    ToolSpec(
+        name='portal_devices_logs_list', domain='devices', title='List device log groups',
+        description="Lists the CloudWatch log groups of a device's components.",
+        resource_type='log_group',
+        input_schema=uc_schema({'device_id': DEVICE_ID, **PAGE_ARGS},
+                               required=['device_id']),
+        backend='deviceLogs', handler_module='device_logs',
+        handler_function='list_log_groups', method='GET',
+        resource='/devices/{id}/logs', param_map=UC_QUERY,
+        permissions=('view_device_logs',), result_shape='collection',
+        collection_key='log_groups', handler_audits=True),
+    ToolSpec(
+        name='portal_devices_logs_get', domain='devices', title='Get component logs',
+        description=("Returns one page of a device component's log events; pass back "
+                     'start_time and end_time to page a fixed window.'),
+        resource_type='log_event',
+        input_schema=uc_schema({
+            'device_id': DEVICE_ID,
+            'component': identifier('The component name.'),
+            'limit': LIMIT,
+            'next_token': NEXT_TOKEN,
+            'start_time': integer(minimum=0, description='Epoch milliseconds.'),
+            'end_time': integer(minimum=0, description='Epoch milliseconds.'),
+            'filter_pattern': text(1024, 'A CloudWatch Logs filter pattern.'),
+        }, required=['device_id', 'component']),
+        backend='deviceLogs', handler_module='device_logs',
+        handler_function='get_component_logs', method='GET',
+        resource='/devices/{id}/logs/{component}',
+        param_map={'usecase_id': 'usecase_id', 'component': 'component',
+                   'limit': 'limit', 'next_token': 'next_token',
+                   'start_time': 'start_time', 'end_time': 'end_time',
+                   'filter_pattern': 'filter_pattern'},
+        permissions=('view_device_logs',), result_shape='collection',
+        collection_key='logs', handler_audits=True),
+    ToolSpec(
+        name='portal_devices_logs_analyze', domain='devices', title='Analyze device logs',
+        description=("Scans a device's recent log events for known error patterns "
+                     'and summarizes them.'),
+        resource_type='device',
+        input_schema=uc_schema({
+            'device_id': DEVICE_ID,
+            'hours': integer(1, 168, 'Look-back window in hours (default 1).'),
+        }, required=['device_id']),
+        backend='deviceLogsAnalyzer', handler_module='device_logs_analyzer',
+        handler_function='analyze_device_logs', method='POST',
+        resource='/devices/{id}/logs/analyze',
+        param_map={'usecase_id': 'usecase_id', 'hours': 'hours'},
+        param_in={'usecase_id': 'query', 'hours': 'query'},
+        permissions=('view_device_logs',), phase=2),
+    ToolSpec(
+        name='portal_devices_cameras_list', domain='devices', title='List device cameras',
+        description=("Lists a device's registered cameras and their synchronization "
+                     'state; usecase_id must name the device\'s Use_Case.'),
+        resource_type='camera',
+        input_schema=uc_schema({'device_id': DEVICE_ID, **PAGE_ARGS},
+                               required=['device_id']),
+        backend='cameraRegistry', handler_module='camera_registry',
+        handler_function='get_cameras', method='GET',
+        resource='/devices/{id}/cameras', param_map=UC_QUERY,
+        permissions=('view_devices',), handler_audits_denials=True,
+        result_shape='collection', collection_key='cameras'),
+    ToolSpec(
+        name='portal_devices_cameras_conflicts_get', domain='devices',
+        title='List camera conflicts',
+        description='Lists the camera synchronization conflicts of a device, newest first.',
+        resource_type='camera_conflict',
+        input_schema=uc_schema({'device_id': DEVICE_ID, **PAGE_ARGS},
+                               required=['device_id']),
+        backend='cameraRegistry', handler_module='camera_registry',
+        handler_function='get_conflicts', method='GET',
+        resource='/devices/{id}/cameras/conflicts', param_map=UC_QUERY,
+        permissions=('view_devices',), handler_audits_denials=True,
+        result_shape='collection', collection_key='conflicts'),
+    ToolSpec(
+        name='portal_devices_camera_add', domain='devices', title='Add a camera',
+        description=('Registers a camera on a device; stream credentials are not '
+                     'accepted through this tool.'),
+        resource_type='camera',
+        input_schema=uc_schema({
+            'device_id': DEVICE_ID,
+            'name': text(256),
+            'type': text(64, 'Camera type, e.g. USB, CSI, RTSP, RTMP.'),
+            'params': json_object('Type-specific parameters; RTSP/RTMP need params.url.'),
+            'camera_source_id': {'type': 'string', 'pattern': CAMERA_SOURCE_ID_PATTERN},
+        }, required=['device_id', 'name', 'type']),
+        backend='cameraRegistry', handler_module='camera_registry',
+        handler_function='create_camera', method='POST',
+        resource='/devices/{id}/cameras',
+        param_map={'usecase_id': 'usecase_id', 'camera_source_id': 'camera_source_id'},
+        permissions=('manage_devices',), classification=MUTATING, phase=2,
+        idempotent=False, handler_audits=True, handler_audits_denials=True,
+        resource_id_path='camera_source_id',
+        status_tool='portal_devices_cameras_list'),
+    ToolSpec(
+        name='portal_devices_camera_update', domain='devices', title='Update a camera',
+        description="Replaces a camera's name, type and parameters.",
+        resource_type='camera',
+        input_schema=uc_schema({
+            'device_id': DEVICE_ID,
+            'camera_id': identifier('The camera source id.'),
+            'name': text(256),
+            'type': text(64),
+            'params': json_object('Replaces the stored parameters wholesale.'),
+        }, required=['device_id', 'camera_id', 'name', 'type', 'params']),
+        backend='cameraRegistry', handler_module='camera_registry',
+        handler_function='update_camera', method='PUT',
+        resource='/devices/{id}/cameras/{csid}',
+        param_map={'usecase_id': 'usecase_id', 'camera_id': 'csid'},
+        param_in={'usecase_id': 'query'},
+        permissions=('manage_devices',), classification=MUTATING, phase=2,
+        handler_audits=True, handler_audits_denials=True,
+        status_tool='portal_devices_cameras_list'),
+    ToolSpec(
+        name='portal_devices_camera_delete', domain='devices', title='Delete a camera',
+        description='Removes a camera from a device.',
+        resource_type='camera',
+        input_schema=uc_schema({
+            'device_id': DEVICE_ID,
+            'camera_id': identifier('The camera source id.'),
+            'confirm': confirm_arg('Repeat camera_id.'),
+        }, required=['device_id', 'camera_id']),
+        backend='cameraRegistry', handler_module='camera_registry',
+        handler_function='delete_camera', method='DELETE',
+        resource='/devices/{id}/cameras/{csid}',
+        param_map={'usecase_id': 'usecase_id', 'camera_id': 'csid'},
+        permissions=('manage_devices',), classification=MUTATING,
+        destructive=True, confirm_target='camera_id', phase=3,
+        handler_audits=True, handler_audits_denials=True,
+        status_tool='portal_devices_cameras_list'),
+    ToolSpec(
+        name='portal_devices_cameras_refresh', domain='devices', title='Refresh cameras',
+        description="Re-reads a device's camera report from its shadow into the registry.",
+        resource_type='camera',
+        input_schema=uc_schema({'device_id': DEVICE_ID}, required=['device_id']),
+        backend='cameraRegistry', handler_module='camera_registry',
+        handler_function='refresh_cameras', method='POST',
+        resource='/devices/{id}/cameras/refresh', param_map=UC_QUERY,
+        param_in={'usecase_id': 'query'},
+        permissions=('manage_devices',), classification=MUTATING, phase=2,
+        handler_audits_denials=True, status_tool='portal_devices_cameras_list'),
+    ToolSpec(
+        name='portal_devices_static_image_get', domain='devices',
+        title='Get the static-image pin',
+        description="Returns the status of a device's static-image camera pin.",
+        resource_type='camera_pin',
+        input_schema=uc_schema({'device_id': DEVICE_ID}, required=['device_id']),
+        backend='cameraRegistry', handler_module='camera_registry',
+        handler_function='get_static_image_status', method='GET',
+        resource='/devices/{id}/cameras/static-image',
+        permissions=('view_devices',), handler_audits_denials=True),
+    ToolSpec(
+        name='portal_devices_static_video_get', domain='devices',
+        title='Get the static-video pin',
+        description="Returns the status of a device's static-video camera pin.",
+        resource_type='camera_pin',
+        input_schema=uc_schema({'device_id': DEVICE_ID}, required=['device_id']),
+        backend='cameraVideoPin', handler_module='camera_registry',
+        handler_function='get_static_video_status', method='GET',
+        resource='/devices/{id}/cameras/static-video',
+        permissions=('view_devices',), handler_audits_denials=True),
+    ToolSpec(
+        name='portal_devices_static_image_unpin', domain='devices',
+        title='Remove the static-image pin',
+        description="Removes a device's static-image camera pin.",
+        resource_type='camera_pin',
+        input_schema=uc_schema({'device_id': DEVICE_ID,
+                                'confirm': confirm_arg('Repeat device_id.')},
+                               required=['device_id']),
+        backend='cameraRegistry', handler_module='camera_registry',
+        handler_function='remove_static_image_pin', method='DELETE',
+        resource='/devices/{id}/cameras/static-image/pin',
+        permissions=('manage_devices',), classification=MUTATING,
+        destructive=True, confirm_target='device_id', phase=2,
+        handler_audits=True, handler_audits_denials=True,
+        status_tool='portal_devices_static_image_get'),
+    ToolSpec(
+        name='portal_devices_static_video_unpin', domain='devices',
+        title='Remove the static-video pin',
+        description="Removes a device's static-video camera pin.",
+        resource_type='camera_pin',
+        input_schema=uc_schema({'device_id': DEVICE_ID,
+                                'confirm': confirm_arg('Repeat device_id.')},
+                               required=['device_id']),
+        backend='cameraVideoPin', handler_module='camera_registry',
+        handler_function='remove_static_video_pin', method='DELETE',
+        resource='/devices/{id}/cameras/static-video/pin',
+        permissions=('manage_devices',), classification=MUTATING,
+        destructive=True, confirm_target='device_id', phase=2,
+        handler_audits=True, handler_audits_denials=True,
+        status_tool='portal_devices_static_video_get'),
+    ToolSpec(
+        name='portal_devices_deployments_list', domain='devices',
+        title='List deployments',
+        description='Lists the Greengrass deployments of a Use_Case.',
+        resource_type='deployment', input_schema=uc_schema(PAGE_ARGS),
+        backend='deployments', handler_module='deployments',
+        handler_function='list_deployments', method='GET', resource='/deployments',
+        param_map=UC_QUERY, permissions=('view_deployments',),
+        result_shape='collection', collection_key='deployments'),
+    ToolSpec(
+        name='portal_devices_deployment_get', domain='devices', title='Get a deployment',
+        description='Returns one deployment with its components and per-device status.',
+        resource_type='deployment',
+        input_schema=uc_schema({'deployment_id': identifier()},
+                               required=['deployment_id']),
+        backend='deployments', handler_module='deployments',
+        handler_function='get_deployment', method='GET', resource='/deployments/{id}',
+        param_map={'usecase_id': 'usecase_id', 'deployment_id': 'id'},
+        permissions=('view_deployments',), handler_audits=True),
+    ToolSpec(
+        name='portal_devices_deployment_for_target_get', domain='devices',
+        title='Get the deployment of a target',
+        description=('Returns the current deployment of one device or one thing '
+                     'group (exactly one of the two).'),
+        resource_type='deployment',
+        input_schema=uc_schema({
+            'target_device': identifier('A device (thing name).'),
+            'target_thing_group': identifier('A thing group name.'),
+        }, one_of=[['target_device'], ['target_thing_group']]),
+        backend='deployments', handler_module='deployments',
+        handler_function='get_target_deployment', method='GET',
+        resource='/deployments',
+        param_map={'usecase_id': 'usecase_id', 'target_device': 'target_device',
+                   'target_thing_group': 'target_thing_group'},
+        permissions=('view_deployments',)),
+    ToolSpec(
+        name='portal_devices_deployment_create', domain='devices',
+        title='Create a deployment',
+        description=("Deploys components to one thing group or one device, superseding "
+                     "the target's current deployment."),
+        resource_type='deployment',
+        input_schema=uc_schema({
+            'components': array({
+                'type': 'object',
+                'properties': {'component_name': identifier(),
+                               'component_version': identifier()},
+                'required': ['component_name'],
+                'additionalProperties': False,
+            }, min_items=1),
+            'target_thing_group': thing_name('A thing group name.'),
+            'target_devices': array(thing_name(), min_items=1, max_items=1,
+                                    description='Exactly one device.'),
+            'deployment_name': text(256),
+            'rollout_config': {
+                'type': 'object',
+                'properties': {'auto_rollback': boolean(),
+                               'timeout_seconds': integer(minimum=1)},
+                'additionalProperties': False,
+            },
+            'acknowledged_retained_components': array(identifier()),
+            'confirm': confirm_arg('Repeat target_thing_group, or target_devices[0].'),
+        }, required=['components'],
+            one_of=[['target_thing_group'], ['target_devices']]),
+        backend='deployments', handler_module='deployments',
+        handler_function='create_deployment', method='POST', resource='/deployments',
+        param_map=UC_QUERY, param_in={'usecase_id': 'body'},
+        permissions=('create_deployments',), classification=MUTATING,
+        destructive=True, confirm_target=('target_thing_group', 'target_devices[0]'),
+        phase=3, idempotent=False, handler_audits=True,
+        status_tool='portal_devices_deployment_for_target_get'),
+    ToolSpec(
+        name='portal_devices_deployment_cancel', domain='devices',
+        title='Cancel a deployment',
+        description='Cancels a Greengrass deployment.',
+        resource_type='deployment',
+        input_schema=uc_schema({'deployment_id': identifier(),
+                                'confirm': confirm_arg('Repeat deployment_id.')},
+                               required=['deployment_id']),
+        backend='deployments', handler_module='deployments',
+        handler_function='cancel_deployment', method='DELETE',
+        resource='/deployments/{id}',
+        param_map={'usecase_id': 'usecase_id', 'deployment_id': 'id'},
+        permissions=('manage_deployments',), classification=MUTATING,
+        destructive=True, confirm_target='deployment_id', phase=3,
+        handler_audits=True, status_tool='portal_devices_deployments_list'),
+    ToolSpec(
+        name='portal_devices_components_list', domain='devices',
+        title='List components',
+        description='Lists the Greengrass components visible to a Use_Case.',
+        resource_type='component',
+        input_schema=uc_schema({
+            'component_scope': enum('PRIVATE', 'PUBLIC',
+                                    description='PRIVATE (default) or PUBLIC.'),
+            'search': text(256),
+            **PAGE_ARGS,
+        }),
+        backend='components', handler_module='components',
+        handler_function='list_components', method='GET', resource='/components',
+        param_map={'usecase_id': 'usecase_id', 'component_scope': 'scope',
+                   'search': 'search'},
+        permissions=('view_deployments',), result_shape='collection',
+        collection_key='components'),
+    ToolSpec(
+        name='portal_devices_components_get', domain='devices', title='Get a component',
+        description='Returns one component with its recipe and first 50 versions.',
+        resource_type='component',
+        input_schema=uc_schema({'component_arn': identifier(
+            "The component ARN (a components_list item's arn).")},
+            required=['component_arn']),
+        backend='components', handler_module='components',
+        handler_function='get_component_details', method='GET',
+        resource='/components/{id}',
+        param_map={'usecase_id': 'usecase_id', 'component_arn': 'id'},
+        permissions=('view_deployments',)),
+    ToolSpec(
+        name='portal_devices_components_schema_get', domain='devices',
+        title='Get a component configuration schema',
+        description="Returns a component's configuration schema.",
+        resource_type='component',
+        input_schema=uc_schema({'component_name': identifier()},
+                               required=['component_name']),
+        backend='componentConfiguration', handler_module='component_configuration',
+        handler_function='get_configuration_schema', method='GET',
+        resource='/components/schema', param_map={'component_name': 'component_name'},
+        permissions=('view_deployments',)),
+    ToolSpec(
+        name='portal_devices_component_delete', domain='devices',
+        title='Delete a component',
+        description='Deletes a Greengrass component version that is not deployed.',
+        resource_type='component',
+        input_schema=uc_schema({
+            'component_arn': identifier("The component ARN (a components_list item's arn)."),
+            'confirm': confirm_arg('Repeat component_arn.'),
+        }, required=['component_arn']),
+        backend='components', handler_module='components',
+        handler_function='delete_component', method='DELETE',
+        resource='/components/{id}',
+        param_map={'usecase_id': 'usecase_id', 'component_arn': 'id'},
+        permissions=('update_usecases',), classification=MUTATING,
+        destructive=True, confirm_target='component_arn', phase=3,
+        status_tool='portal_devices_components_list'),
+    ToolSpec(
+        name='portal_devices_shared_components_list', domain='devices',
+        title='List shared components',
+        description='Lists the shared components provisioned in a Use_Case.',
+        resource_type='component', input_schema=uc_schema(PAGE_ARGS),
+        backend='sharedComponents', handler_module='shared_components',
+        handler_function='list_shared_components', method='GET',
+        resource='/shared-components', param_map=UC_QUERY,
+        permissions=('view_deployments',), result_shape='collection',
+        collection_key='components'),
+    ToolSpec(
+        name='portal_devices_shared_components_available_list', domain='devices',
+        title='List available shared components',
+        description='Lists the shared components the portal can provision.',
+        resource_type='component', input_schema=schema(PAGE_ARGS),
+        backend='sharedComponents', handler_module='shared_components',
+        handler_function='list_available_components', method='GET',
+        resource='/shared-components/available',
+        permissions=('view_deployments',), scope='global',
+        result_shape='collection', collection_key='components'),
+    ToolSpec(
+        name='portal_devices_shared_components_status_get', domain='devices',
+        title='Get shared-component update status',
+        description='Returns, per Use_Case, whether its shared components need an update.',
+        resource_type='component', input_schema=schema(),
+        backend='sharedComponents', handler_module='shared_components',
+        handler_function='get_update_status', method='GET',
+        resource='/shared-components/status',
+        permissions=('system_admin',), scope='global'),
+    ToolSpec(
+        name='portal_devices_shared_components_provision', domain='devices',
+        title='Provision shared components',
+        description='Provisions the shared components into a Use_Case (runs in the background).',
+        resource_type='component', input_schema=uc_schema(),
+        backend='sharedComponents', handler_module='shared_components',
+        handler_function='provision_components', method='POST',
+        resource='/shared-components/provision',
+        param_map=UC_QUERY, param_in={'usecase_id': 'body'},
+        permissions=('update_usecases',), classification=MUTATING, phase=3,
+        handler_audits_denials=True,
+        status_tool='portal_devices_shared_components_list'),
+    ToolSpec(
+        name='portal_devices_shared_components_update_all', domain='devices',
+        title='Update shared components everywhere',
+        description=('Re-provisions the shared components in the named Use_Cases, '
+                     'or in every Use_Case; usually outlasts one call.'),
+        resource_type='component',
+        input_schema=schema({'usecase_ids': array(identifier(), min_items=1)}),
+        backend='sharedComponents', handler_module='shared_components',
+        handler_function='update_all_usecases', method='POST',
+        resource='/shared-components/update-all',
+        param_map={'usecase_ids': 'usecase_ids'},
+        permissions=('system_admin',), scope='global', classification=MUTATING,
+        phase=3, handler_audits=True,
+        status_tool='portal_devices_shared_components_status_get'),
+    ToolSpec(
+        name='portal_devices_registrations_list', domain='devices',
+        title='List device registrations',
+        description='Lists the device registrations of a Use_Case.',
+        resource_type='device_registration', input_schema=uc_schema(PAGE_ARGS),
+        backend='deviceRegistrations', handler_module='device_registrations',
+        handler_function='list_registrations', method='GET',
+        resource='/device-registrations', param_map=UC_QUERY,
+        permissions=('manage_devices',), result_shape='collection',
+        collection_key='registrations'),
+    ToolSpec(
+        name='portal_devices_thing_groups_list', domain='devices',
+        title='List thing groups',
+        description='Lists the IoT thing groups of the Use_Case account.',
+        resource_type='thing_group', input_schema=uc_schema(PAGE_ARGS),
+        backend='deviceRegistrations', handler_module='device_registrations',
+        handler_function='list_thing_groups', method='GET',
+        resource='/device-registrations/thing-groups', param_map=UC_QUERY,
+        permissions=('manage_devices',), result_shape='collection',
+        collection_key='thing_groups'),
+    ToolSpec(
+        name='portal_devices_registration_delete', domain='devices',
+        title='Delete a device registration',
+        description='Deletes a device registration that has not completed.',
+        resource_type='device_registration',
+        input_schema=uc_schema({'registration_id': identifier(),
+                                'confirm': confirm_arg('Repeat registration_id.')},
+                               required=['registration_id']),
+        backend='deviceRegistrations', handler_module='device_registrations',
+        handler_function='delete_registration', method='DELETE',
+        resource='/device-registrations/{id}', param_map={'registration_id': 'id'},
+        permissions=('manage_devices',), classification=MUTATING,
+        destructive=True, confirm_target='registration_id', phase=3,
+        status_tool='portal_devices_registrations_list'),
+)
+
+CATALOG: Tuple[ToolSpec, ...] = ADMIN + DEVICES
 
 
 def main(argv: Sequence[str]) -> int:
