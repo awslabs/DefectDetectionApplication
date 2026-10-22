@@ -277,7 +277,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `cd edge-cv-portal/frontend && npx vitest run src/pages/AuditLogs.channelFilter.test.tsx && npm run build`
     - _Requirements: 4.6_
 
-- [ ] 3. Create the portal MCP package foundation, discovery and token validation
+- [x] 3. Create the portal MCP package foundation, discovery and token validation
   - [x] 3.1 Add the MCP Lambda layer, the package skeleton and the test-time pins
     - `edge-cv-portal/backend/layers/mcp/requirements.txt` = `mcp==2.3.0`, `mangum==0.22.0`; `edge-cv-portal/backend/layers/mcp/build.sh` following `layers/jwt/build.sh`, installing with `pip install --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.11 --implementation cp -r requirements.txt -t python/` (D19)
     - `edge-cv-portal/backend/functions/mcp_portal/__init__.py`: `__version__`, `DELIVERED_PHASES = (1,)`, `PROTOCOL_REVISIONS = ('2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26')`, `VIEWS = ('data', 'models', 'devices', 'workflows', 'admin')`
@@ -291,7 +291,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_discovery.py -q`
     - _Requirements: 2.4, 7.5_
 
-  - [ ] 3.3 Write property test for discovery document consistency
+  - [x] 3.3 Write property test for discovery document consistency
     - **Feature: mcp-servers, Property 17: Discovery document consistency**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_discovery.py`; Hypothesis, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_discovery.py -q`
@@ -303,13 +303,13 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_token_verifier.py -q`
     - _Requirements: 2.1, 2.2, 2.3, 2.6, 2.7, 2.8, 16.2_
 
-  - [ ] 3.5 Write property test for access-token acceptance
+  - [x] 3.5 Write property test for access-token acceptance
     - **Feature: mcp-servers, Property 1: Access-token acceptance**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_token.py`; Hypothesis, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_token.py -q`
     - **Validates: Requirements 2.1, 2.2, 2.4, 4.7**
 
-  - [ ] 3.6 Implement `AuthFailureAuditMiddleware`
+  - [x] 3.6 Implement `AuthFailureAuditMiddleware`
     - Pure ASGI: resets `CURRENT_AUTH_FAILURE`, runs the request, on a 401 with a recorded `sub` writes one marked `authentication_failed` entry (Data Models) from `scope['aws.event']`; swallows and logs audit-write failures
     - Files: `edge-cv-portal/backend/functions/mcp_portal/auth_audit.py`; unit cases on a minimal Starlette app in `edge-cv-portal/backend/tests/mcp/test_mcp_auth_failure_audit.py` (the ASGI-transport and middleware-order cases are added in task 7.2)
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_auth_failure_audit.py -q`

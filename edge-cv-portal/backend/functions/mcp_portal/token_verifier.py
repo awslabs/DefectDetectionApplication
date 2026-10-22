@@ -40,6 +40,7 @@ class AuthFailure:
     sub: str
     reason: str
     client_id: Optional[str] = None
+    token_use: Optional[str] = None
 
 
 # Request-scoped: reset by AuthFailureAuditMiddleware at the start of each
@@ -112,11 +113,13 @@ class CognitoAccessTokenVerifier(TokenVerifier):
 
         sub = str(payload.get('sub'))
         client_id = payload.get('client_id')
+        token_use = payload.get('token_use')
         reason = self._claim_failure(payload)
         if reason is not None:
             CURRENT_AUTH_FAILURE.set(AuthFailure(
                 sub=sub, reason=reason,
-                client_id=client_id if isinstance(client_id, str) else None))
+                client_id=client_id if isinstance(client_id, str) else None,
+                token_use=token_use if isinstance(token_use, str) else None))
             logger.info('MCP access token rejected for sub %s: %s', sub, reason)
             return None
 

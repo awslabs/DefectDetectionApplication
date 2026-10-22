@@ -182,7 +182,8 @@ def test_claim_failure_recorded_with_sub(verifier, overrides, reason):
     assert verify(verifier, sign(payload)) is None
     failure = tv.CURRENT_AUTH_FAILURE.get()
     assert failure == tv.AuthFailure(sub=payload["sub"], reason=reason,
-                                     client_id=payload["client_id"])
+                                     client_id=payload["client_id"],
+                                     token_use=payload["token_use"])
 
 
 class UnreachableJwksClient:
