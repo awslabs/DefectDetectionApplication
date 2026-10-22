@@ -76,6 +76,14 @@ export class ApiGatewayStack extends cdk.NestedStack {
    */
   public readonly workflowResourceId: string;
 
+  /**
+   * The ComponentConfigurationHandler created in this nested stack. Exposed
+   * so ComputeStack can list it in `mcpBackendHandlers` (mcp-servers design
+   * §1, "Additive members"); assigned from the existing construct, so it adds
+   * no resource.
+   */
+  public readonly componentConfigurationHandler: lambda.Function;
+
   constructor(scope: Construct, id: string, props: ApiGatewayStackProps) {
     super(scope, id, props);
 
@@ -717,6 +725,7 @@ export class ApiGatewayStack extends cdk.NestedStack {
       layers: [props.sharedLayer],
       timeout: cdk.Duration.seconds(60),
     });
+    this.componentConfigurationHandler = componentConfigurationHandler;
 
     const componentConfigurationIntegration = lambdaIntegration('ComponentConfiguration', componentConfigurationHandler);
 
