@@ -648,7 +648,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_property_child_shaping.py -q`
     - **Validates: Requirements 8.5, 1.6**
 
-  - [ ] 11.11 Implement the child server and its protocol, guardrail, legacy and import-boundary tests
+  - [x] 11.11 Implement the child server and its protocol, guardrail, legacy and import-boundary tests
     - `child/server.py`: `Server(name='dda-edge-mcp', version=args.server_version, cache_hints ttl 60 000 private)`, `streamable_http_app(streamable_http_path='/mcp', json_response=True, stateless_http=True, host='127.0.0.1', transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=['127.0.0.1:5790', 'localhost:5790'], allowed_origins=args.allowed_origins), max_request_body_size=1 MiB, /healthz)`, the §7 pipeline (whoami → lookup/alias → validate → phase/switch/feature gate → `decide` → dispatch → `emit` → shape), `not_available_on_device` and list omission without `--features vllm`
     - Tests per the Testing Strategy: `test_child_protocol.py` (every listed case incl. the review-6/7/8/revision-9 cases, `test_child_rejects_origin_and_foreign_host` with the `transport_security=None` control case, and `test_credential_in_query_never_logged` with its `basicConfig(force=True)` sibling), `test_child_guardrails.py`, `test_child_legacy_client.py`, `test_child_import_boundary.py` (child imports with `utils`/`local_auth`/`dao` stubbed to raise; `app.py`/supervisor never import `mcp`)
     - Files: new `src/backend/mcp_edge/child/server.py`; new `test/backend-test/mcp_edge/test_child_protocol.py`, `test_child_guardrails.py`, `test_child_legacy_client.py`, `test_child_import_boundary.py`

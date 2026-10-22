@@ -1114,8 +1114,10 @@ CATALOG: Tuple[ToolSpec, ...] = (
                      'the static image camera; larger images are pinned in the HMI.'),
         resource_type='static_pin',
         input_schema=schema({
-            'image_base64': {'type': 'string', 'maxLength': BASE64_MAX_LENGTH,
-                             'pattern': r'^[A-Za-z0-9+/]*={0,2}$'},
+            # No pattern: the child decodes with validate=True before any
+            # request, so a schema-valid value that is not base64 is
+            # invalid_input "image_base64 is not valid base64" (review-7 N3).
+            'image_base64': {'type': 'string', 'maxLength': BASE64_MAX_LENGTH},
             'file_name': {'type': 'string', 'pattern': r'^[A-Za-z0-9._-]{1,128}$'},
         }, required=['image_base64', 'file_name']),
         handler_module='endpoints.static_image_camera',
