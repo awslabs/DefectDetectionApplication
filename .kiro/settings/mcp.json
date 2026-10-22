@@ -42,6 +42,35 @@
         "generate_diagram",
         "get_diagram_examples"
       ]
+    },
+    "dda-portal": {
+      "url": "https://<api-id>.execute-api.<region>.amazonaws.com/mcp",
+      "oauth": {
+        "clientId": "<McpUserPoolClientId output of EdgeCVPortalMcpStack>",
+        "redirectUri": "http://localhost:7899/oauth/callback",
+        "oauthScopes": [
+          "https://<api-id>.execute-api.<region>.amazonaws.com/mcp/portal.tools"
+        ]
+      },
+      "disabled": true,
+      "autoApprove": [
+        "portal_admin_whoami",
+        "portal_devices_list",
+        "portal_devices_get"
+      ],
+      "disabledTools": []
+    },
+    "dda-edge-example": {
+      "url": "https://<device-lan-address>:5443/mcp",
+      "headers": {
+        "Authorization": "Bearer ${DDA_EDGE_TOKEN}"
+      },
+      "disabled": true,
+      "autoApprove": [
+        "edge_whoami",
+        "edge_system_health_get",
+        "edge_registrations_list"
+      ]
     }
   }
 }

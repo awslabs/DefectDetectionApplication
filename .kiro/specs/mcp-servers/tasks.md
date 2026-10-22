@@ -717,13 +717,13 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
   - _Requirements: 9.3, 9.6, 2.7_
 
 - [ ] 16. Cross-server conventions, client configuration and documentation
-  - [ ] 16.1 Write property test for the naming and identifier convention
+  - [x] 16.1 Write property test for the naming and identifier convention
     - **Feature: mcp-servers, Property 15: Naming and identifier convention**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_naming.py`, loading `src/backend/mcp_edge/child/catalog.py` by path next to the portal `CATALOG`; Hypothesis over tool pairs sharing a concept argument, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_naming.py -q`
     - **Validates: Requirements 14.1, 14.3**
 
-  - [ ] 16.2 Add the Kiro client configuration entries
+  - [x] 16.2 Add the Kiro client configuration entries
     - Two additive entries in `.kiro/settings/mcp.json`: `dda-portal` (`url`, `oauth.clientId`, `redirectUri` `http://localhost:7899/oauth/callback`, `oauthScopes`) and `dda-edge-example` (`url`, `headers.Authorization: "Bearer ${DDA_EDGE_TOKEN}"`), both `disabled: true` with placeholder values and no literal secret; the three existing servers untouched
     - Files: `.kiro/settings/mcp.json`
     - Verify: `python3 -c "import json; d=json.load(open('.kiro/settings/mcp.json'))['mcpServers']; assert d['dda-portal']['disabled'] and d['dda-edge-example']['disabled']; assert {'awslabs.aws-documentation-mcp-server','awslabs.cdk-mcp-server','aws-diagrams'} <= set(d)"`
