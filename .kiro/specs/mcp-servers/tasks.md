@@ -250,7 +250,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
 
 #### Portal
 
-- [ ] 2. Mark audit entries and expose the channel filter (shared layer, `audit_logs.py`, audit UI)
+- [x] 2. Mark audit entries and expose the channel filter (shared layer, `audit_logs.py`, audit UI)
   - [x] 2.1 Add the MCP_Audit_Marker and the request audit context to `shared_utils`
     - New `MCP_MARKER_FIELDS = ('channel', 'mcp_tool', 'mcp_server', 'mcp_client', 'mcp_request_id')`; `ATTRIBUTION_FIELDS` unchanged (five fields)
     - `attribution_from(event, user, usecase_id, identity_source)`: with a dict `event['mcp']` it adds the five marker fields (`channel='mcp'`, `'unknown'` for absent values), falls back to `event['mcp']['principal_email']` for `email`, and uses the block's `identity_source` without a registry read; byte-identical output for events without the block
@@ -271,7 +271,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_audit_logs_channel_filter.py -q`; `PORTAL_PYTEST tests -q -k audit --ignore=tests/mcp` passes
     - _Requirements: 4.6_
 
-  - [ ] 2.4 Add the channel selector to the audit-log page
+  - [x] 2.4 Add the channel selector to the audit-log page
     - A Cloudscape `Select` (All / Web & API / MCP) passing `channel`, and `mcp_tool` shown in the details column
     - Files: `edge-cv-portal/frontend/src/pages/AuditLogs.tsx`; new `edge-cv-portal/frontend/src/pages/AuditLogs.channelFilter.test.tsx`
     - Verify: `cd edge-cv-portal/frontend && npx vitest run src/pages/AuditLogs.channelFilter.test.tsx && npm run build`
