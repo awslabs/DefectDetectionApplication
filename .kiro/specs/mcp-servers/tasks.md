@@ -502,7 +502,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `CDK_TEST test/context-helpers.property.test.ts`; `python3 -m pytest test/backend-test/security/preservation/test_preservation_iam_cdk_synth.py -p no:cacheprovider --noconftest -q` (ComputeStack IAM grants unchanged)
     - _Requirements: 6.4, 6.5, 5.4_
 
-  - [ ] 8.2 Implement `mcp-stack.ts` and wire it in `bin/app.ts`
+  - [x] 8.2 Implement `mcp-stack.ts` and wire it in `bin/app.ts`
     - Every construct of design §1: `McpHttpApi`, `McpDefaultStage` (20/40; per-route 10/20 override), `McpResourceServer` and `McpUserPoolClient` in this stack's scope (`authFlows: { userSrp: false }`, code grant only, callback `http://localhost:7899/oauth/callback` + validated `mcpRedirectUris`), `McpSharedLayer` (own copy, D31), `McpLayer`, the Advanced-tier SSM parameter (D30), `McpPortalRole` with exactly six inline statements, `McpPortalHandler` (29 s, 512 MB), log group + `"Task timed out"` metric filter + alarm, the ten routes with `HttpNoneAuthorizer`, the Lambda environment (no `MCP_BACKEND_FUNCTIONS`, `MCP_ALLOWED_ORIGINS` empty by default), and the seven outputs; `bin/app.ts` instantiates it after the four producing stacks behind `mcpServerEnabled`, passing `authStack.userPoolDomain!` with the comment
     - Files: new `edge-cv-portal/infrastructure/lib/mcp-stack.ts`; `edge-cv-portal/infrastructure/bin/app.ts`
     - Verify: `cd edge-cv-portal/infrastructure && npm run build && npx cdk synth EdgeCVPortalMcpStack` with the deploy context succeeds; `npx cdk synth -c deployMcpServer=false` emits no MCP stack

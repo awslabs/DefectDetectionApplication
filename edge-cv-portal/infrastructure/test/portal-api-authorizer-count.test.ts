@@ -22,7 +22,8 @@
  * is checked against the bin/app.ts source: every `new <Stack>(app, ...)` it
  * contains must be constructed here, so a stack added to the app without a
  * line in this file fails the test instead of escaping the count. This is
- * the app WITH the context value, so all ten stacks are present; the real
+ * the app WITH the context value, so all eleven stacks are present (the MCP
+ * stack's HTTP API has no authorizer at all, design §1); the real
  * app without it (the two stacks skipped, every other stack synthesizing)
  * is portal-app-without-shared-authorizer.test.ts.
  *
@@ -42,6 +43,7 @@ import { ComputeStack } from '../lib/compute-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { NodeDesignerStack } from '../lib/node-designer-stack';
 import { StorageStack } from '../lib/storage-stack';
+import { McpStack, mcpBackendHandlers } from '../lib/mcp-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
 import { TelemetryStack } from '../lib/telemetry-stack';
 import { TestRunnerStack } from '../lib/test-runner-stack';
@@ -63,6 +65,7 @@ const MIRRORED_STACKS = [
   'NodeDesignerStack',
   'BuildFleetStack',
   'SyntheticDataStack',
+  'McpStack',
   'WorkflowDebugStack',
   'TelemetryStack',
   'FrontendStack',
@@ -122,7 +125,7 @@ beforeAll(() => {
     restApiRootResourceId: computeStack.api.restApiRootResourceId,
     apiStageName: 'v1',
   };
-  new NodeDesignerStack(app, 'EdgeCVPortalNodeDesignerStack', {
+  const nodeDesignerStack = new NodeDesignerStack(app, 'EdgeCVPortalNodeDesignerStack', {
     portalArtifactsBucket: storageStack.portalArtifactsBucket,
     useCasesTable: storageStack.useCasesTable,
     userRolesTable: storageStack.userRolesTable,
@@ -135,14 +138,14 @@ beforeAll(() => {
     userPool: authStack.userPool,
     ...api,
   });
-  new BuildFleetStack(app, 'EdgeCVPortalBuildFleetStack', {
+  const buildFleetStack = new BuildFleetStack(app, 'EdgeCVPortalBuildFleetStack', {
     userRolesTable: storageStack.userRolesTable,
     auditLogTable: storageStack.auditLogTable,
     settingsTable: storageStack.settingsTable,
     userPool: authStack.userPool,
     ...api,
   });
-  new SyntheticDataStack(app, 'EdgeCVPortalSyntheticDataStack', {
+  const syntheticDataStack = new SyntheticDataStack(app, 'EdgeCVPortalSyntheticDataStack', {
     useCasesTable: storageStack.useCasesTable,
     userRolesTable: storageStack.userRolesTable,
     auditLogTable: storageStack.auditLogTable,
@@ -152,6 +155,23 @@ beforeAll(() => {
     dataBucketAllowlist: [],
     userPool: authStack.userPool,
     ...api,
+  });
+  new McpStack(app, 'EdgeCVPortalMcpStack', {
+    userPool: authStack.userPool,
+    userPoolDomain: authStack.userPoolDomain!,
+    userRolesTable: storageStack.userRolesTable,
+    auditLogTable: storageStack.auditLogTable,
+    usecasesTable: storageStack.useCasesTable,
+    backendHandlers: mcpBackendHandlers({
+      computeHandlers: computeStack.mcpBackendHandlers,
+      nodeDesigner: nodeDesignerStack,
+      buildFleet: buildFleetStack,
+      syntheticData: syntheticDataStack,
+    }),
+    mcpMutatingToolsEnabled: 'false',
+    mcpRedirectUris: [],
+    mcpAllowedOrigins: [],
+    mcpBuildSha: 'fixture',
   });
   new WorkflowDebugStack(app, 'EdgeCVPortalWorkflowDebugStack', {
     useCasesTable: storageStack.useCasesTable,
