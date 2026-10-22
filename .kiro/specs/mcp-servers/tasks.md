@@ -315,7 +315,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_auth_failure_audit.py -q`
     - _Requirements: 4.7, 2.7_
 
-- [ ] 4. Implement the portal catalog machinery
+- [x] 4. Implement the portal catalog machinery
   - [x] 4.1 Implement `ToolSpec`, rendering, listing and the route export in `catalog.py`
     - Every §2 `ToolSpec` field, plus the revision-10 corrections: `accepted_writes` as `(module.function, call, receiver source text, count)` tuples with `STATUS_SYNC_NOTE` (eleven entries at `c3bf88c1`) [review-9 N2], `bind_usecase_path` [review-9 N5], `confirm_target` naming `oneOf` branches [review-9 N7]; and the revision-11 corrections: `usecase_not_forwarded: Literal['stored_record', 'injected', 'dead_filter'] | None` [review-10 N1], and a definition-time error when two bare identifiers would claim one path parameter [review-10 N2]
     - `SERVER_CONSUMED_ARGS = ('confirm', 'usecase_id', 'limit', 'offset')` with the rule "forwarded iff `param_map` names it"; schema generation for `limit` (`limit_max`/`limit_default`), `offset`, `page`, `next_token`, and the path-parameter identifier pattern `^(?!\.{1,2}$)[A-Za-z0-9._:@+=-]{1,256}$` on every argument mapped to a path parameter
@@ -324,14 +324,14 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_catalog_core.py -q`
     - _Requirements: 1.2, 1.7, 3.8, 5.1, 5.3, 5.4, 14.1, 14.2, 14.4, 17.3_
 
-  - [ ] 4.2 Write property test for tool list determinism and filtering
+  - [x] 4.2 Write property test for tool list determinism and filtering
     - **Feature: mcp-servers, Property 3: Tool list determinism and filtering**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_tool_list.py`; Hypothesis over views, delivered-phase sets and switch values, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_tool_list.py -q`
     - **Validates: Requirements 1.7, 5.4, 10.7, 14.4, 17.3**
 
 - [ ] 5. Author every portal catalog row and the catalog honesty suites (revision-11 tables, all phases; only Phase 1 delivered)
-  - [ ] 5.1 Author the `admin` view rows
+  - [x] 5.1 Author the `admin` view rows
     - All admin rows from `usecases.py`, `user_management.py`, `user_admin.py`, `audit_logs.py` plus `portal_admin_whoami` (`server.whoami`, the self-identity exception); `'global'` refused on the two role rows; account-lifecycle tools absent (Backlog 2); credential-handling routes excluded (5.5)
     - Carries [review-9 M1] `portal_admin_users_list` `usecase_id? (→ query usecase_id)` and `portal_admin_usecase_delete` `(→ path id)`; [review-9 M2] `portal_admin_audit_logs_query` `limit (→ query limit)`; [review-9 N4] `offset` on `portal_admin_usecases_list`; [review-10 N1] `usecase_not_forwarded='dead_filter'` on `portal_admin_audit_logs_query`
     - Files: `edge-cv-portal/backend/functions/mcp_portal/catalog.py`

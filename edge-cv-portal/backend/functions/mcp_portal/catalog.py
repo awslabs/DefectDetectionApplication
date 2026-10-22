@@ -93,6 +93,99 @@ def text(max_length: int = FREE_TEXT_MAX_LENGTH,
     return prop
 
 
+def enum(*values, description: Optional[str] = None) -> dict:
+    prop = {'type': 'string', 'enum': list(values)}
+    if description:
+        prop['description'] = description
+    return prop
+
+
+def boolean(description: Optional[str] = None) -> dict:
+    prop = {'type': 'boolean'}
+    if description:
+        prop['description'] = description
+    return prop
+
+
+def integer(minimum: Optional[int] = None, maximum: Optional[int] = None,
+            description: Optional[str] = None) -> dict:
+    prop = {'type': 'integer'}
+    if minimum is not None:
+        prop['minimum'] = minimum
+    if maximum is not None:
+        prop['maximum'] = maximum
+    if description:
+        prop['description'] = description
+    return prop
+
+
+def number(minimum: Optional[float] = None, maximum: Optional[float] = None,
+           description: Optional[str] = None) -> dict:
+    prop = {'type': 'number'}
+    if minimum is not None:
+        prop['minimum'] = minimum
+    if maximum is not None:
+        prop['maximum'] = maximum
+    if description:
+        prop['description'] = description
+    return prop
+
+
+def array(items: dict, min_items: Optional[int] = None,
+          max_items: Optional[int] = None,
+          description: Optional[str] = None) -> dict:
+    prop = {'type': 'array', 'items': items}
+    if min_items is not None:
+        prop['minItems'] = min_items
+    if max_items is not None:
+        prop['maxItems'] = max_items
+    if description:
+        prop['description'] = description
+    return prop
+
+
+def string_map(description: Optional[str] = None) -> dict:
+    """An object of string values (tags, labels)."""
+    prop = {'type': 'object',
+            'additionalProperties': {'type': 'string', 'maxLength': 256}}
+    if description:
+        prop['description'] = description
+    return prop
+
+
+def json_object(description: Optional[str] = None) -> dict:
+    """A free-form JSON object the route validates itself (mutating specs only)."""
+    prop = {'type': 'object'}
+    if description:
+        prop['description'] = description
+    return prop
+
+
+def confirm_arg(description: Optional[str] = None) -> dict:
+    """The `confirm` argument of an `M!` spec. Not listed in `required`: a
+    missing value is `confirmation_required`, not `invalid_input`."""
+    prop = {'type': 'string', 'maxLength': 256}
+    if description:
+        prop['description'] = description
+    return prop
+
+
+USECASE_ID = {'type': 'string', 'pattern': IDENTIFIER_PATTERN,
+              'description': 'The Use_Case the call acts in.'}
+# A Use_Case argument that may not name the account-level 'global' row
+# (Requirement 5.7; the two role rows of the admin view).
+USECASE_ID_NOT_GLOBAL = dict(USECASE_ID, **{'not': {'const': 'global'}})
+
+
+def uc_schema(properties: Optional[Mapping[str, dict]] = None,
+              required: Sequence[str] = (),
+              usecase: Optional[dict] = None, **groups) -> dict:
+    """`schema()` with the required `usecase_id` of a Use_Case-scoped spec."""
+    props = {'usecase_id': dict(usecase or USECASE_ID)}
+    props.update(properties or {})
+    return schema(props, ['usecase_id', *required], **groups)
+
+
 # Placeholders for the generated pagination properties: `ToolSpec` replaces
 # each with its canonical schema (a `description` given here is kept).
 LIMIT = {'type': 'integer'}
@@ -411,8 +504,239 @@ def export(routes_file: str = ROUTES_FILE, tools_file: str = TOOLS_FILE,
 
 # ----------------------------------------------------------------- rows
 
-# Transcribed from design.md "Tool catalogs", one view at a time.
-CATALOG: Tuple[ToolSpec, ...] = ()
+# Transcribed from design.md "Tool catalogs", one view at a time. Line
+# numbers in comments are documentation only; the honesty suites (tasks
+# 5.6-5.11) hold every row to the handler source.
+
+PAGE_ARGS = {'limit': LIMIT, 'offset': OFFSET}
+
+# ------------------------------------------------------------ admin view
+# Handlers: usecases.py, user_management.py, user_admin.py, audit_logs.py.
+
+ADMIN: Tuple[ToolSpec, ...] = (
+    ToolSpec(
+        name='portal_admin_whoami', domain='admin', title='Who am I',
+        description=('Returns the calling principal: user id, username, email, '
+                     'effective global role and the Use_Cases it can access.'),
+        resource_type='principal', input_schema=schema(),
+        backend=None, handler_module='server', handler_function='whoami',
+        method=None, resource=None, permissions=(), scope='global'),
+    ToolSpec(
+        name='portal_admin_usecases_list', domain='admin', title='List use cases',
+        description='Lists the Use_Cases the caller can access.',
+        resource_type='usecase', input_schema=schema(PAGE_ARGS),
+        backend='useCases', handler_module='usecases',
+        handler_function='list_usecases', method='GET', resource='/usecases',
+        permissions=('view_usecases',), scope='global',
+        result_shape='collection', collection_key='usecases',
+        handler_audits=True),
+    ToolSpec(
+        name='portal_admin_usecase_get', domain='admin', title='Get a use case',
+        description='Returns one Use_Case record.',
+        resource_type='usecase', input_schema=uc_schema(),
+        backend='useCases', handler_module='usecases',
+        handler_function='get_usecase', method='GET', resource='/usecases/{id}',
+        param_map={'usecase_id': 'id'}, permissions=('view_usecases',),
+        handler_audits=True),
+    ToolSpec(
+        name='portal_admin_usecase_create', domain='admin', title='Create a use case',
+        description=('Creates a single-account Use_Case; the caller becomes its '
+                     'UseCaseAdmin.'),
+        resource_type='usecase',
+        input_schema=schema({
+            'name': text(256, 'Display name of the Use_Case.'),
+            's3_bucket': identifier('The Use_Case bucket.'),
+            'description': text(2000),
+            'region': identifier(),
+            'owner': text(256),
+            'cost_center': text(256),
+            'default_device_group': identifier(),
+            'tags': string_map(),
+            'additional_s3_buckets': array(identifier(), max_items=10),
+            'tuning_sample_export': boolean(),
+            'tuning_sample_retention_days': integer(minimum=1),
+            'provision_shared_components': boolean(),
+        }, required=['name', 's3_bucket']),
+        backend='useCases', handler_module='usecases',
+        handler_function='create_usecase', method='POST', resource='/usecases',
+        permissions=('create_usecases',), scope='global',
+        classification=MUTATING, phase=3, idempotent=False,
+        handler_audits=True, handler_audits_denials=True,
+        resource_id_path='usecase.usecase_id',
+        status_tool='portal_admin_usecases_list'),
+    ToolSpec(
+        name='portal_admin_usecase_update', domain='admin', title='Update a use case',
+        description='Updates the settings and bucket list of a Use_Case.',
+        resource_type='usecase',
+        input_schema=uc_schema({
+            'name': text(256),
+            'description': text(2000),
+            's3_bucket': identifier('Cannot be cleared.'),
+            'data_s3_bucket': {'type': ['string', 'null'], 'maxLength': 256,
+                               'description': "null or '' clears it."},
+            'region': identifier(),
+            'owner': text(256),
+            'default_device_group': identifier(),
+            'tuning_sample_export': boolean(),
+            'tuning_sample_retention_days': integer(minimum=1),
+            'additional_s3_buckets_add': array(identifier(), max_items=10),
+            'additional_s3_buckets_remove': array(identifier(), max_items=10),
+        }),
+        backend='useCases', handler_module='usecases',
+        handler_function='update_usecase', method='PUT', resource='/usecases/{id}',
+        param_map={'usecase_id': 'id'}, permissions=('update_usecases',),
+        classification=MUTATING, phase=3, handler_audits=True,
+        status_tool='portal_admin_usecase_get'),
+    ToolSpec(
+        name='portal_admin_usecase_delete', domain='admin', title='Delete a use case',
+        description='Deletes a Use_Case record and removes its account grants.',
+        resource_type='usecase',
+        input_schema=uc_schema({'confirm': confirm_arg('Repeat usecase_id.')}),
+        backend='useCases', handler_module='usecases',
+        handler_function='delete_usecase', method='DELETE', resource='/usecases/{id}',
+        param_map={'usecase_id': 'id'}, permissions=('delete_usecases',),
+        classification=MUTATING, destructive=True, confirm_target='usecase_id',
+        phase=3, handler_audits=True, status_tool='portal_admin_usecases_list'),
+    ToolSpec(
+        name='portal_admin_users_list', domain='admin', title='List users',
+        description=('Lists the users with a role assignment, optionally filtered '
+                     'to one Use_Case.'),
+        resource_type='user',
+        input_schema=schema({'usecase_id': identifier(
+            'Filter: only assignments in this Use_Case (not the RBAC scope).'),
+            **PAGE_ARGS}),
+        backend='userManagement', handler_module='user_management',
+        handler_function='list_users', method='GET', resource='/users',
+        param_map={'usecase_id': 'usecase_id'}, param_in={'usecase_id': 'query'},
+        permissions=('manage_users',), scope='global',
+        result_shape='collection', collection_key='users'),
+    ToolSpec(
+        name='portal_admin_user_permissions_get', domain='admin',
+        title='Get user permissions',
+        description="Returns a user's role and permissions in one Use_Case or globally.",
+        resource_type='user',
+        input_schema=schema({
+            'user_id': identifier('The user (Cognito sub).'),
+            'usecase_id': identifier("Filter (not the RBAC scope); absent means 'global'."),
+        }, required=['user_id']),
+        backend='userManagement', handler_module='user_management',
+        handler_function='get_user_permissions', method='GET',
+        resource='/users/{user_id}/permissions',
+        param_map={'user_id': 'user_id', 'usecase_id': 'usecase_id'},
+        param_in={'usecase_id': 'query'},
+        permissions=('manage_users',), scope='global'),
+    ToolSpec(
+        name='portal_admin_role_assign', domain='admin', title='Assign a role',
+        description='Assigns a role to a user in one Use_Case.',
+        resource_type='user_role',
+        input_schema=uc_schema({
+            'user_id': identifier('The user (Cognito sub).'),
+            'role': enum('Viewer', 'Operator', 'DataScientist', 'UseCaseAdmin',
+                         'PortalAdmin', 'DataLabeler'),
+        }, required=['user_id', 'role'], usecase=USECASE_ID_NOT_GLOBAL),
+        backend='userManagement', handler_module='user_management',
+        handler_function='assign_user_role', method='POST',
+        resource='/users/assign-role', param_map={'usecase_id': 'usecase_id'},
+        permissions=('manage_users',), classification=MUTATING, phase=3,
+        handler_audits_denials=True,
+        status_tool='portal_admin_user_permissions_get'),
+    ToolSpec(
+        name='portal_admin_role_remove', domain='admin', title='Remove a role',
+        description="Removes a user's role assignment in one Use_Case.",
+        resource_type='user_role',
+        input_schema=uc_schema({
+            'user_id': identifier('The user (Cognito sub).'),
+            'confirm': confirm_arg('Repeat user_id.'),
+        }, required=['user_id'], usecase=USECASE_ID_NOT_GLOBAL),
+        backend='userManagement', handler_module='user_management',
+        handler_function='remove_user_role', method='DELETE',
+        resource='/users/{user_id}/roles/{usecase_id}',
+        param_map={'usecase_id': 'usecase_id'}, permissions=('manage_users',),
+        classification=MUTATING, destructive=True, confirm_target='user_id',
+        phase=3, handler_audits_denials=True,
+        status_tool='portal_admin_users_list'),
+    ToolSpec(
+        name='portal_admin_audit_logs_query', domain='admin', title='Query audit logs',
+        description=('Returns one page of audit log entries, newest first within '
+                     'the page; a page can be empty and still carry next_token.'),
+        resource_type='audit_log',
+        input_schema=schema({
+            'action': identifier(),
+            'user_id': identifier('Filter: entries written for this user id.'),
+            'channel': enum('api', 'mcp'),
+            'mcp_tool': identifier(),
+            'start_time': integer(minimum=0, description='Epoch milliseconds.'),
+            'end_time': integer(minimum=0, description='Epoch milliseconds.'),
+            'limit': LIMIT,
+            'next_token': NEXT_TOKEN,
+        }),
+        backend='auditLogs', handler_module='audit_logs',
+        handler_function='get_audit_logs', method='GET', resource='/audit-logs',
+        param_map={'limit': 'limit', 'next_token': 'next_token'},
+        permissions=('system_admin',), scope='global',
+        usecase_not_forwarded='dead_filter',
+        result_shape='collection', collection_key='logs'),
+    ToolSpec(
+        name='portal_admin_accounts_list', domain='admin', title='List portal accounts',
+        description='Lists the portal user accounts and their account-level roles.',
+        resource_type='account', input_schema=schema(PAGE_ARGS),
+        backend='userAdmin', handler_module='user_admin',
+        handler_function='list_accounts', method='GET', resource='/admin/users',
+        permissions=('manage_users',), scope='global',
+        handler_audits_denials=True,
+        result_shape='collection', collection_key='users'),
+    ToolSpec(
+        name='portal_admin_account_role_change', domain='admin',
+        title='Change an account role',
+        description="Changes a portal account's account-level role.",
+        resource_type='account',
+        input_schema=schema({
+            'account_username': identifier('The account username.'),
+            'role': enum('PortalAdmin', 'UseCaseAdmin', 'DataScientist',
+                         'Operator', 'Viewer', 'DataLabeler'),
+        }, required=['account_username', 'role']),
+        backend='userAdmin', handler_module='user_admin',
+        handler_function='change_role', method='PUT',
+        resource='/admin/users/{username}/role',
+        param_map={'account_username': 'username'},
+        permissions=('manage_users',), scope='global',
+        classification=MUTATING, phase=3,
+        handler_audits=True, handler_audits_denials=True,
+        status_tool='portal_admin_accounts_list'),
+    ToolSpec(
+        name='portal_admin_edge_sync_devices_list', domain='admin',
+        title='List edge account-sync devices',
+        description='Lists the devices that receive portal accounts and their sync status.',
+        resource_type='device', input_schema=schema(PAGE_ARGS),
+        backend='userAdmin', handler_module='user_admin',
+        handler_function='list_sync_devices', method='GET',
+        resource='/admin/edge-sync/devices',
+        permissions=('manage_users',), scope='global',
+        handler_audits_denials=True,
+        result_shape='collection', collection_key='devices'),
+    ToolSpec(
+        name='portal_admin_edge_sync_device_sync', domain='admin',
+        title='Sync accounts to a device',
+        description=('Sends the complete account set to one device; accounts '
+                     'omitted lose local login at the next sync.'),
+        resource_type='device',
+        input_schema=schema({
+            'device_id': identifier('The device (thing name).'),
+            'usernames': array(identifier(), min_items=1,
+                               description="The device's complete account set."),
+            'confirm': confirm_arg('Repeat device_id.'),
+        }, required=['device_id', 'usernames']),
+        backend='userAdmin', handler_module='user_admin',
+        handler_function='sync_device', method='POST',
+        resource='/admin/edge-sync/devices/{deviceId}',
+        param_map={'device_id': 'deviceId'},
+        permissions=('manage_users',), scope='global',
+        classification=MUTATING, destructive=True, confirm_target='device_id',
+        phase=3, handler_audits_denials=True,
+        status_tool='portal_admin_edge_sync_devices_list'),
+)
+
+CATALOG: Tuple[ToolSpec, ...] = ADMIN
 
 
 def main(argv: Sequence[str]) -> int:
