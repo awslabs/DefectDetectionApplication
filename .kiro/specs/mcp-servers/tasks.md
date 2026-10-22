@@ -402,7 +402,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_catalog_permissions.py -q`
     - _Requirements: 1.3, 3.1, 3.5, 3.7, 3.9_
 
-- [ ] 6. Implement the portal request pipeline
+- [x] 6. Implement the portal request pipeline
   - [x] 6.1 Implement `principal.py` and `authz.py`
     - `principal_from_access_token` (email via per-container LRU over `AdminGetUser`, reading only `email` — D29 option (A)); `authorize(spec, principal, usecase_id)` through `shared_utils.rbac_manager.has_permission` per declared permission with the resolved scope, returning `identity_source`; marked `unauthorized_access` / `authorization_unavailable` entries with `rbac_check`'s details plus `mcp_tool`
     - Files: `edge-cv-portal/backend/functions/mcp_portal/principal.py`, `edge-cv-portal/backend/functions/mcp_portal/authz.py`; `edge-cv-portal/backend/tests/mcp/test_mcp_authz.py`
@@ -451,13 +451,13 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_audit_envelope.py -q`
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 6.3, 16.4_
 
-  - [ ] 6.9 Write property test for marked audit entries per completion
+  - [x] 6.9 Write property test for marked audit entries per completion
     - **Feature: mcp-servers, Property 6: Marked audit entries per completion**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_audit.py`; Hypothesis over outcomes (incl. the D36 refusal, total `k + 1` [review-10 N4]), flags and `k ∈ {0, 1, 2}`, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_audit.py -q`
     - **Validates: Requirements 4.1, 4.2, 4.3, 4.5, 16.4**
 
-  - [ ] 6.10 Implement `server.py` and `handler.py` (per-invocation ASGI composition)
+  - [x] 6.10 Implement `server.py` and `handler.py` (per-invocation ASGI composition)
     - `build_server(view)` (low-level `Server`, `cache_hints` `ttl_ms=300_000`, `scope='private'`, the nine-step `on_call_tool` pipeline of §4 (step 9 shapes every status < 300 unless step 7 refused the body [review-10 N4]) incl. `client_label(ctx)`, alias lookup, phase gate → `-32602`, switch gate → `mutating_tools_disabled`); `handler.build_asgi_app()` with six fresh `StreamableHTTPSessionManager`s (`json_response=True`, `stateless=True`, explicit `TransportSecuritySettings` with `MCP_ALLOWED_ORIGINS`), six exact `POST` routes under `RequireAuthMiddleware`, `discovery.routes()`, middleware order `[AuthFailureAuditMiddleware, AuthenticationMiddleware, AuthContextMiddleware]`, `AsyncExitStack` lifespan; `handler(event, context)` sets `dispatch.LAMBDA_CONTEXT` and runs `Mangum(..., lifespan='auto')`
     - Files: `edge-cv-portal/backend/functions/mcp_portal/server.py`, `edge-cv-portal/backend/functions/mcp_portal/handler.py`; `edge-cv-portal/backend/tests/mcp/test_mcp_lambda_handler.py` (three invocations in one process, no `RuntimeError`, module objects reused)
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_lambda_handler.py -q`
