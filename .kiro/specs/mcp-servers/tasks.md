@@ -670,7 +670,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - **Validates: Requirements 8.2, 8.3, 8.5, 10.1, 10.7, 14.1, 14.2, 14.4, 17.3**
 
 - [ ] 12. Ship the child in the image, add the configuration keys, and update the build gates
-  - [ ] 12.1 Add the venv and the package copy to the five backend Dockerfiles and the keys to the seven recipes
+  - [x] 12.1 Add the venv and the package copy to the five backend Dockerfiles and the keys to the seven recipes
     - (a) after the backend-requirements step of each file — `Dockerfile.jp5:114`, `Dockerfile.jp6:163`, `Dockerfile.jp7:245`, `Dockerfile:44`, `Dockerfile.x86_64_nvidia:60` — `COPY mcp_edge/requirements.lock.txt ./mcp_edge/requirements.lock.txt` and the `python3 -m venv /opt/dda/mcp-venv && … --only-binary :all: -r … && … -c "import mcp, mcp.server; print('mcp venv OK')"` step; (b) `COPY mcp_edge ./mcp_edge` after `COPY user_accounts_sync ./user_accounts_sync` (`Dockerfile:122`, `.jp5:230`, `.jp6:442`, `.jp7:586`, `.x86_64_nvidia:144`); re-confirm the anchors at the then-current HEAD
     - `DefaultConfiguration` gains `McpServerEnabled: "false"` and `McpMutatingToolsEnabled: "false"` beside `LocalLoginEnabled: "false"`, with a comment naming the keys, in `recipe.yaml`, `recipe-arm64.yaml`, `recipe-arm64-jp5.yaml`, `recipe-arm64-jp6.yaml`, `recipe-arm64-jp7.yaml`, `recipe-amd64.yaml`, `recipe-amd64-nvidia.yaml`
     - `src/docker-compose.yaml` and `src/backend/requirements.txt` stay byte-identical (port 5790 is loopback-only)
