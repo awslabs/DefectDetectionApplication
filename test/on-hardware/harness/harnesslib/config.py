@@ -26,7 +26,7 @@ import yaml
 KNOWN_ARCHITECTURES = frozenset(
     {"x86_64", "arm64_cpu", "arm64_jp5", "arm64_jp6", "arm64_jp7"})
 KNOWN_CAPABILITIES = frozenset(
-    {"vllm", "dlr_models", "onnx_models", "workflows", "auth_enabled", "stream_cameras"}
+    {"vllm", "dlr_models", "onnx_models", "workflows", "auth_enabled", "stream_cameras", "mcp"}
 )
 
 #: Stream URL schemes and the Image_Source type each one maps to (device:
@@ -89,6 +89,13 @@ ENV_BASE_URL = "DDA_HARNESS_BASE_URL"
 ENV_ARCHITECTURE = "DDA_HARNESS_ARCHITECTURE"
 ENV_CAPABILITIES = "DDA_HARNESS_CAPABILITIES"
 ENV_CREDENTIALS = "DDA_HARNESS_CREDENTIALS"
+#: "true" when the harness runs on the device itself (SSH-driven profile); the
+#: MCP stage's direct-loopback checks run only then.
+ENV_ON_DEVICE = "DDA_HARNESS_ON_DEVICE"
+
+#: Boolean Device_Profile flags of the MCP stage (default false). Parsed now;
+#: the stage uses them from Phase 2 (mutating tools; the snapshot tool).
+PROFILE_FLAGS = ("mcp_mutating", "mcp_snapshot")
 
 _HARNESS_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = _HARNESS_DIR / "devices.yaml"
@@ -207,6 +214,10 @@ class DeviceProfile:
 
     architecture: str
     capabilities: frozenset = frozenset()
+    #: MCP stage: call the mutating tools (with restoration).
+    mcp_mutating: bool = False
+    #: MCP stage: also call the snapshot tool (deletes earlier archives).
+    mcp_snapshot: bool = False
 
     def grants(self, capability: str) -> bool:
         return capability in self.capabilities
@@ -223,6 +234,9 @@ class Timeouts:
     run_budget_s: float = 2400.0
     #: How long the stream stage samples a continuous workflow's counters.
     continuous_window_s: float = 30.0
+    #: Sustained window over which the MCP stage asserts /health stays healthy
+    #: and the container restart count is unchanged.
+    mcp_soak_s: float = 600.0
 
 
 @dataclass(frozen=True)
@@ -260,6 +274,8 @@ class DeviceTarget:
     credentials_ref: Optional[CredentialRef] = None
     expected: ExpectedComponents = field(default_factory=ExpectedComponents)
     timeouts: Timeouts = field(default_factory=Timeouts)
+    #: The harness runs on the device (``DDA_HARNESS_ON_DEVICE``).
+    on_device: bool = False
 
 
 def _require_mapping(value, context: str) -> Dict:
@@ -312,6 +328,37 @@ def _validate_capabilities(capabilities, device_name: str) -> frozenset:
             f"known: {', '.join(sorted(KNOWN_CAPABILITIES))}"
         )
     return frozenset(caps)
+
+
+def _parse_profile_flag(raw: Dict, key: str, device_name: str) -> bool:
+    """A boolean Device_Profile flag: absent means false; anything but a
+    YAML boolean is rejected (fail closed)."""
+    value = raw.get(key)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise HarnessConfigError(
+            f"Device {device_name!r}: profile.{key} must be true or false, got {value!r}"
+        )
+    return value
+
+
+_ON_DEVICE_TRUE = frozenset({"true", "1", "yes"})
+_ON_DEVICE_FALSE = frozenset({"false", "0", "no", ""})
+
+
+def _parse_on_device(environ: Mapping[str, str]) -> bool:
+    """``DDA_HARNESS_ON_DEVICE``: unset or a false spelling means remote; an
+    unrecognized value is rejected so a typo cannot skip the on-device checks."""
+    raw = environ.get(ENV_ON_DEVICE)
+    if raw is None:
+        return False
+    value = raw.strip().lower()
+    if value in _ON_DEVICE_TRUE:
+        return True
+    if value in _ON_DEVICE_FALSE:
+        return False
+    raise HarnessConfigError(f"{ENV_ON_DEVICE} must be true or false, got {raw!r}")
 
 
 def _parse_timeouts(raw: Dict, environ: Mapping[str, str], device_name: str) -> Timeouts:
@@ -580,6 +627,7 @@ def load_config(
 
     capabilities_raw = env.get(ENV_CAPABILITIES, profile_raw.get("capabilities", []))
     capabilities = _validate_capabilities(capabilities_raw, name)
+    profile_flags = {key: _parse_profile_flag(profile_raw, key, name) for key in PROFILE_FLAGS}
 
     credentials_raw = env.get(ENV_CREDENTIALS, entry.get("credentials"))
     credentials_ref = (
@@ -600,8 +648,11 @@ def load_config(
     return DeviceTarget(
         name=name,
         base_url=base_url,
-        profile=DeviceProfile(architecture=architecture, capabilities=capabilities),
+        profile=DeviceProfile(
+            architecture=architecture, capabilities=capabilities, **profile_flags
+        ),
         credentials_ref=credentials_ref,
         expected=expected,
         timeouts=timeouts,
+        on_device=_parse_on_device(env),
     )

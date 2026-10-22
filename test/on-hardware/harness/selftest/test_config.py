@@ -246,6 +246,7 @@ class TestTimeoutDefaults:
             workflow_output_s=180.0,
             run_budget_s=2400.0,
             continuous_window_s=30.0,
+            mcp_soak_s=600.0,
         )
 
     def test_continuous_window_from_file_and_env(self, tmp_path):
@@ -592,3 +593,74 @@ class TestStreamCredentials:
     def test_unresolvable_reference_names_the_variable(self):
         with pytest.raises(HarnessConfigError, match="S_UNSET"):
             resolve_stream_credentials(CredentialRef("env", "S_UNSET"), environ={})
+
+
+def mcp_config(tmp_path, profile_yaml: str):
+    path = tmp_path / "devices.yaml"
+    path.write_text(
+        "devices:\n"
+        "  d:\n"
+        "    base_url: http://h:5000\n"
+        f"    profile: {profile_yaml}\n"
+    )
+    return path
+
+
+class TestMcpStageConfig:
+    """The MCP stage's capability and flags (mcp-servers task 14.1)."""
+
+    def test_mcp_is_a_known_capability(self, tmp_path):
+        path = mcp_config(tmp_path, "{architecture: arm64_jp5, capabilities: [mcp, auth_enabled]}")
+        target = load(path, {})
+        assert "mcp" in KNOWN_CAPABILITIES
+        assert target.profile.grants("mcp")
+        env = {"DDA_HARNESS_CAPABILITIES": "mcp"}
+        assert load(path, env).profile.capabilities == frozenset({"mcp"})
+
+    def test_profile_flags_default_false(self, config_file):
+        target = load(config_file, {"DDA_HARNESS_DEVICE": "jp5-xavier"})
+        assert target.profile.mcp_mutating is False
+        assert target.profile.mcp_snapshot is False
+        assert target.on_device is False
+
+    def test_profile_flags_parsed_from_file(self, tmp_path):
+        path = mcp_config(
+            tmp_path,
+            "{architecture: arm64_jp6, capabilities: [mcp], mcp_mutating: true, mcp_snapshot: false}",
+        )
+        profile = load(path, {}).profile
+        assert profile.mcp_mutating is True
+        assert profile.mcp_snapshot is False
+
+    @pytest.mark.parametrize("value", ["'true'", "1", "yes-please", "[true]"])
+    def test_non_boolean_profile_flag_rejected(self, tmp_path, value):
+        path = mcp_config(tmp_path, f"{{architecture: arm64_jp6, mcp_snapshot: {value}}}")
+        with pytest.raises(HarnessConfigError, match="profile.mcp_snapshot must be true or false"):
+            load(path, {})
+
+    def test_soak_window_default_file_and_env(self, tmp_path, config_file):
+        assert load(config_file, {"DDA_HARNESS_DEVICE": "jp5-xavier"}).timeouts.mcp_soak_s == 600.0
+        path = tmp_path / "soak.yaml"
+        path.write_text(
+            "devices:\n"
+            "  d:\n"
+            "    base_url: http://h:5000\n"
+            "    profile: {architecture: arm64_jp5}\n"
+            "    timeouts: {mcp_soak_s: 120}\n"
+        )
+        assert load(path, {}).timeouts.mcp_soak_s == 120.0
+        assert load(path, {"DDA_HARNESS_MCP_SOAK_S": "30"}).timeouts.mcp_soak_s == 30.0
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [("true", True), (" TRUE ", True), ("1", True), ("yes", True),
+         ("false", False), ("0", False), ("no", False), ("", False)],
+    )
+    def test_on_device_from_env(self, config_file, raw, expected):
+        env = {"DDA_HARNESS_DEVICE": "jp5-xavier", "DDA_HARNESS_ON_DEVICE": raw}
+        assert load(config_file, env).on_device is expected
+
+    def test_unrecognized_on_device_value_rejected(self, config_file):
+        env = {"DDA_HARNESS_DEVICE": "jp5-xavier", "DDA_HARNESS_ON_DEVICE": "ture"}
+        with pytest.raises(HarnessConfigError, match="DDA_HARNESS_ON_DEVICE"):
+            load(config_file, env)

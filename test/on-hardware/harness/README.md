@@ -85,6 +85,7 @@ devices:
       workflow_output_s: 180
       run_budget_s: 2400
       continuous_window_s: 30  # stream stage: continuous workflow sampling window
+      mcp_soak_s: 600          # MCP stage: sustained health window
 ```
 
 Field reference:
@@ -93,7 +94,8 @@ Field reference:
 | --- | --- |
 | `base_url` | The device Backend_API root, e.g. `http://192.168.1.42:5000` or a tunnel-forwarded `http://localhost:5000`. Required. |
 | `profile.architecture` | One of `x86_64`, `arm64_cpu`, `arm64_jp5`, `arm64_jp6`, `arm64_jp7`. Unknown values are rejected (fail closed). Required. |
-| `profile.capabilities` | Any of `vllm`, `dlr_models`, `onnx_models`, `workflows`, `auth_enabled`, `stream_cameras`. Unknown names are rejected. Stages gate on these (see below). |
+| `profile.capabilities` | Any of `vllm`, `dlr_models`, `onnx_models`, `workflows`, `auth_enabled`, `stream_cameras`, `mcp`. Unknown names are rejected. Stages gate on these (see below). |
+| `profile.mcp_mutating`, `profile.mcp_snapshot` | Booleans of the MCP stage, default `false`; any other value is rejected. `mcp_mutating: true` lets the stage call the mutating tools (each with restoration); `mcp_snapshot: true` also allows the snapshot tool, which deletes earlier archives, so set it only on devices that keep no operator archive. Parsed now; the stage uses them once mutating tools are delivered (Phase 2). |
 | `credentials` | A credential **reference** (never a value) — see [Credentials](#credentials). Required only with `auth_enabled`. |
 | `expected.vision_models` | Vision model names the device must report (asserted present). Empty list = enumerate-only. |
 | `expected.vllm_models` | vLLM model names the device must report and bring to READY. Empty list = exercise whatever `VllmModel` entries the device reports. |
@@ -111,6 +113,7 @@ Capability → stage gating:
 | `stream_cameras` | RTSP/RTMP stream camera stage (`test_35`). Grant on devices whose LocalServer has the stream camera feature; a granted device answering 404 on `/streams/capabilities` fails the stage with `CapabilityMismatchError`. |
 | `auth_enabled` | The login handshake at session start and the authenticated-surface check in `test_00`. |
 | `onnx_models` | Declarative profile information (ONNX-backed vision expectations). |
+| `mcp` | Edge MCP server stage (`test_50`). Grant on devices whose LocalServer ships the MCP server with `McpServerEnabled: "true"`. See [MCP stage](#mcp-stage). |
 
 ### Environment overrides
 
@@ -125,7 +128,8 @@ Every field can be overridden per run — highest precedence wins
 | `DDA_HARNESS_ARCHITECTURE` | `profile.architecture` |
 | `DDA_HARNESS_CAPABILITIES` | `profile.capabilities` (comma-separated) |
 | `DDA_HARNESS_CREDENTIALS` | `credentials` reference |
-| `DDA_HARNESS_MODEL_READY_S`, `DDA_HARNESS_VLLM_READY_S`, `DDA_HARNESS_GENERATE_S`, `DDA_HARNESS_WORKFLOW_OUTPUT_S`, `DDA_HARNESS_RUN_BUDGET_S`, `DDA_HARNESS_CONTINUOUS_WINDOW_S` | The matching `timeouts.*` entry |
+| `DDA_HARNESS_MODEL_READY_S`, `DDA_HARNESS_VLLM_READY_S`, `DDA_HARNESS_GENERATE_S`, `DDA_HARNESS_WORKFLOW_OUTPUT_S`, `DDA_HARNESS_RUN_BUDGET_S`, `DDA_HARNESS_CONTINUOUS_WINDOW_S`, `DDA_HARNESS_MCP_SOAK_S` | The matching `timeouts.*` entry (`mcp_soak_s` defaults to 600) |
+| `DDA_HARNESS_ON_DEVICE` | `true` when the harness runs on the device itself (SSH-driven); enables the MCP stage's direct-loopback checks. Unset or `false` means remote; an unrecognized value is rejected. |
 | `DDA_HARNESS_EXPECTED_VISION_MODELS`, `DDA_HARNESS_EXPECTED_VLLM_MODELS`, `DDA_HARNESS_EXPECTED_WORKFLOWS`, `DDA_HARNESS_EXPECTED_STREAM_URLS` | The matching `expected.*` list (comma-separated) |
 | `DDA_HARNESS_EXPECTED_STREAM_SECURE_URL`, `DDA_HARNESS_EXPECTED_STREAM_CREDENTIALS`, `DDA_HARNESS_EXPECTED_STREAM_WORKFLOW`, `DDA_HARNESS_EXPECTED_CONTINUOUS_WORKFLOW` | The matching single-valued `expected.*` entry (an empty value unsets it) |
 
@@ -197,6 +201,7 @@ The stages, in run order (module naming keeps health first):
 | `test_30_workflows.py` | `workflows` | `workflows` | expected workflows present, run → observable output, `llm_inference` metadata |
 | `test_35_stream_cameras.py` | `stream_cameras` | `stream_cameras` (+ each check skips when its `expected.*` input is unset) | stream capabilities, RTSP/RTMP connection test + preview + health, credentials, failure categories, triggered and continuous stream workflows |
 | `test_40_coexistence.py` | `coexistence` | `vllm` | vision + vLLM READY simultaneously through a completed generate |
+| `test_50_mcp.py` | `mcp` | `mcp` (+ skips when the `mcp` package is not importable) | `/mcp/status`, the read-only tools through `/mcp`, health and restart count across `timeouts.mcp_soak_s`, 401/403 negatives, on-device loopback checks with `DDA_HARNESS_ON_DEVICE=true` |
 
 Selection uses standard pytest mechanisms — no test-code edits:
 
@@ -218,6 +223,24 @@ Registered markers (see `pytest.ini`): `capability(name)` — the test requires
 that Capability_Flag; `stage(name)` — results-bundle grouping. Note pytest's
 `-m` expressions match marker *names*, not arguments — use module paths or
 `-k` to select an individual stage.
+
+## MCP stage
+
+`test_50_mcp.py` drives the device's Edge MCP server with the official `mcp`
+client SDK, which needs Python 3.10 or later. The other stages run under the
+host's Python as before; without the `mcp` package the MCP stage skips with a
+recorded reason. Run it under Python 3.11 with the pinned SDK:
+
+```bash
+DDA_HARNESS_DEVICE=jp5-xavier uv run --python 3.11 \
+  --with pytest --with requests --with pyyaml --with mcp==2.3.0 \
+  -m pytest test/on-hardware/harness/stages/test_50_mcp.py
+```
+
+The stage logs in through the harness client with the configured credential
+reference and passes the session token as a bearer header; the token is never
+logged. `profile.mcp_mutating`, `profile.mcp_snapshot`, `timeouts.mcp_soak_s`
+and `DDA_HARNESS_ON_DEVICE` are described above.
 
 ## Results bundle
 
