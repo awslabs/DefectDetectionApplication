@@ -616,7 +616,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_child_principal.py -q`
     - _Requirements: 9.1, 9.4, 9.5, 10.2, 10.3, 10.4, 10.5, 10.6, 16.2_
 
-  - [ ] 11.6 Write property test for the edge role-gate decision
+  - [x] 11.6 Write property test for the edge role-gate decision
     - **Feature: mcp-servers, Property 10: Edge role-gate decision**
     - File `test/backend-test/mcp_edge/test_authz.py`; Hypothesis, min 100 examples
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_authz.py -q`
@@ -628,7 +628,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_property_child_dispatch.py test/backend-test/mcp_edge/test_property_child_errors.py -q` (task 11.8)
     - _Requirements: 8.3, 8.6, 9.1, 9.7, 11.3_
 
-  - [ ] 11.8 Write property tests for edge credential forwarding and status mapping
+  - [x] 11.8 Write property tests for edge credential forwarding and status mapping
     - **Feature: mcp-servers, Property 16: Edge credential forwarding** — file `test/backend-test/mcp_edge/test_property_child_dispatch.py`
     - **Feature: mcp-servers, Property 8: Backend status mapping and scrubbing** (edge clause) — file `test/backend-test/mcp_edge/test_property_child_errors.py`
     - Hypothesis, min 100 examples each
@@ -641,7 +641,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_property_child_shaping.py -q` (task 11.10)
     - _Requirements: 8.5, 8.6_
 
-  - [ ] 11.10 Write property tests for edge result bounding and path hygiene
+  - [x] 11.10 Write property tests for edge result bounding and path hygiene
     - **Feature: mcp-servers, Property 9: Result bounding** (edge clauses, incl. the (a)–(f) fixed cases)
     - **Feature: mcp-servers, Property 19: Edge result path hygiene** (incl. its fixed cases and idempotence)
     - File `test/backend-test/mcp_edge/test_property_child_shaping.py`; Hypothesis, min 100 examples per property
