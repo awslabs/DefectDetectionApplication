@@ -259,13 +259,13 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_PYTEST tests/test_portal_registry_units.py tests/test_property_audit_attribution.py -q` passes unmodified; `PORTAL_MCP_PYTEST tests/mcp/test_mcp_request_audit_context.py -q` passes
     - _Requirements: 4.1, 4.2, 4.3, 4.5, 6.4_
 
-  - [ ] 2.2 Write property test for marker attribution and context binding
+  - [x] 2.2 Write property test for marker attribution and context binding
     - **Feature: mcp-servers, Property 7: Marker attribution round trip and context binding**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_attribution.py`; Hypothesis, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_attribution.py -q`
     - **Validates: Requirements 4.1, 4.2, 4.3**
 
-  - [ ] 2.3 Add `channel` and `mcp_tool` filters to `GET /audit-logs`
+  - [x] 2.3 Add `channel` and `mcp_tool` filters to `GET /audit-logs`
     - `get_audit_logs` appends `(attribute_not_exists(#channel) OR #channel = :channel)` for `channel=api`, `#channel = :channel` for `channel=mcp`, `#mcp_tool = :mcp_tool` for `mcp_tool=<name>` to the existing `filter_expressions` (`audit_logs.py:122–170`); `get_available_actions()` gains `mcp_tool_call`, `authentication_failed`, `authorization_unavailable`. No table or GSI change (F5)
     - Files: `edge-cv-portal/backend/functions/audit_logs.py`; new `edge-cv-portal/backend/tests/mcp/test_audit_logs_channel_filter.py` (moto table with pre-upgrade entries lacking `channel` visible under `api`)
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_audit_logs_channel_filter.py -q`; `PORTAL_PYTEST tests -q -k audit --ignore=tests/mcp` passes
@@ -285,7 +285,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `bash edge-cv-portal/backend/layers/mcp/build.sh` completes and `python/` contains `mcp-2.3.0` and `mangum-0.22.0` cp311 manylinux metadata; `git diff --exit-code edge-cv-portal/backend/functions/requirements.txt edge-cv-portal/backend/layers/jwt/requirements.txt`
     - _Requirements: 7.1, 15.3_
 
-  - [ ] 3.2 Implement `discovery.py` (root and path-suffixed PRM, RFC 8414 facade)
+  - [x] 3.2 Implement `discovery.py` (root and path-suffixed PRM, RFC 8414 facade)
     - Pure `prm_document(resource_url)`, `authorization_server_document()`, `routes()` (eight `GET` routes, `Cache-Control: public, max-age=3600`), environment strings end to end, import-time validation of `MCP_AS_ISSUER` (https, no path/query/fragment/trailing slash, same origin as `MCP_CANONICAL_URL`) (D27)
     - Files: `edge-cv-portal/backend/functions/mcp_portal/discovery.py`; `edge-cv-portal/backend/tests/mcp/test_mcp_discovery.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_discovery.py -q`
@@ -297,7 +297,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_discovery.py -q`
     - **Validates: Requirements 2.4, 7.5**
 
-  - [ ] 3.4 Implement `CognitoAccessTokenVerifier`
+  - [x] 3.4 Implement `CognitoAccessTokenVerifier`
     - `PyJWKClient` on the pool JWKS (`cache_keys=True`), RS256, `iss == COGNITO_ISSUER`, required claims, `token_use == 'access'`, `client_id == MCP_CLIENT_ID`, required scope, `aud` absent or ∩ `MCP_ALLOWED_AUDIENCES`; returns `AccessToken(... claims=<verified payload>)` or `None`; sets `CURRENT_AUTH_FAILURE` with `sub` only when signature and issuer verified and a later check failed; never logs the token
     - Files: `edge-cv-portal/backend/functions/mcp_portal/token_verifier.py`; `edge-cv-portal/backend/tests/mcp/test_mcp_token_verifier.py` (the `test_jwt_authorizer_verification.py` pattern: no token, expired, bad signature, wrong issuer, wrong `aud`, wrong `client_id`, `token_use=id`, missing scope, `?access_token=` ignored)
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_token_verifier.py -q`
@@ -316,7 +316,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - _Requirements: 4.7, 2.7_
 
 - [ ] 4. Implement the portal catalog machinery
-  - [ ] 4.1 Implement `ToolSpec`, rendering, listing and the route export in `catalog.py`
+  - [x] 4.1 Implement `ToolSpec`, rendering, listing and the route export in `catalog.py`
     - Every §2 `ToolSpec` field, plus the revision-10 corrections: `accepted_writes` as `(module.function, call, receiver source text, count)` tuples with `STATUS_SYNC_NOTE` (eleven entries at `c3bf88c1`) [review-9 N2], `bind_usecase_path` [review-9 N5], `confirm_target` naming `oneOf` branches [review-9 N7]; and the revision-11 corrections: `usecase_not_forwarded: Literal['stored_record', 'injected', 'dead_filter'] | None` [review-10 N1], and a definition-time error when two bare identifiers would claim one path parameter [review-10 N2]
     - `SERVER_CONSUMED_ARGS = ('confirm', 'usecase_id', 'limit', 'offset')` with the rule "forwarded iff `param_map` names it"; schema generation for `limit` (`limit_max`/`limit_default`), `offset`, `page`, `next_token`, and the path-parameter identifier pattern `^(?!\.{1,2}$)[A-Za-z0-9._:@+=-]{1,256}$` on every argument mapped to a path parameter
     - `render_description`/`classification_text` (D35), `to_mcp_tool` with annotations (`open_world_hint=False`), `tools_for_view(view, delivered_phases, mutating_enabled)` sorted by `(domain, name)` with alias entries (D35, D8 — not filtered by principal), `catalog_routes()`, and `python -m mcp_portal.catalog --export-routes` writing `catalog_routes.json` and `catalog_tools.json`
@@ -547,19 +547,19 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CONTAINER_PYTEST test/backend-test/api-endpoints/test_authorize_request.py test/backend-test/utils/test_auth.py test/backend-test/security/preservation/test_preservation_secrets_auth_suite.py`; `git diff --exit-code test/backend-test/utils/test_auth.py`
     - _Requirements: 9.1, 9.8, 12.7_
 
-  - [ ] 10.3 Write property test for the unchanged decision matrix
+  - [x] 10.3 Write property test for the unchanged decision matrix
     - **Feature: mcp-servers, Property 14: Unchanged matrix after `AuthDecision`**
     - File `test/backend-test/mcp_edge/test_auth_decision.py` (the `configured(...)` pattern of `test_authorize_request.py`); Hypothesis, min 100 examples
     - Verify: `EDGE_CONTAINER_PYTEST test/backend-test/mcp_edge/test_auth_decision.py`
     - **Validates: Requirements 9.1, 12.7**
 
-  - [ ] 10.4 Add `GET /local-auth/whoami` on a new authenticated router
+  - [x] 10.4 Add `GET /local-auth/whoami` on a new authenticated router
     - `authenticated_router = get_api_router()` in `endpoints/local_auth.py` returning `{username, role, source, expiresAt?}` from `request.state.auth_decision`; `/local-auth/login` and `/local-auth/status` stay on the unauthenticated router unchanged (F8)
     - Files: `src/backend/endpoints/local_auth.py`; new `test/backend-test/mcp_edge/test_whoami_route.py` (each matrix row, `expiresAt`, Existing_Token_Auth username from a faked introspection)
     - Verify: `EDGE_CONTAINER_PYTEST test/backend-test/mcp_edge/test_whoami_route.py test/backend-test/local_auth/test_local_auth_endpoints.py`
     - _Requirements: 9.1, 9.3, 10.4, 12.7_
 
-  - [ ] 10.5 Implement the backend-side `mcp_edge` modules
+  - [x] 10.5 Implement the backend-side `mcp_edge` modules
     - `mcp_edge/__init__.py` (`__version__`, `DELIVERED_PHASES = (1,)`, `VENV_PYTHON`, `CHILD_PORT = 5790`); `config.py` (`McpConfig`: `McpServerEnabled`, `McpMutatingToolsEnabled` via `parse_local_login_enabled`, optional `McpAllowedOrigins` CSV, 30 s poller, read failure ⇒ both disabled, `on_change`); `supervisor.py` (spawn argv/env/cwd of §5 incl. `--server-version <catalog>+<component>`, readiness on `/healthz` within 20 s, backoff 1→60 s, restart on mutating/origins/features change, `stop()` SIGTERM→SIGKILL, never raises); `log_relay.py` (stdout JSON → `mcp.access`, stderr → `mcp.child` WARNING with the `token=` line drop, exceptions swallowed); `status.py` (`build_status`)
     - Files: new `src/backend/mcp_edge/__init__.py`, `src/backend/mcp_edge/config.py`, `src/backend/mcp_edge/supervisor.py`, `src/backend/mcp_edge/log_relay.py`, `src/backend/mcp_edge/status.py`; new `test/backend-test/mcp_edge/test_supervisor.py`, `test/backend-test/mcp_edge/test_log_relay.py`
     - Verify: `EDGE_CONTAINER_PYTEST test/backend-test/mcp_edge/test_supervisor.py test/backend-test/mcp_edge/test_log_relay.py`
@@ -592,7 +592,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `uv pip install --dry-run --only-binary :all: --python-version 3.11 --python-platform aarch64-manylinux_2_31 -r src/backend/mcp_edge/requirements.lock.txt` (and the 3.10 aarch64 and 3.11 x86_64 variants) succeed
     - _Requirements: 13.2, 13.5_
 
-  - [ ] 11.2 Implement the child's logging configuration and record builder
+  - [x] 11.2 Implement the child's logging configuration and record builder
     - `child/__main__.py`: argparse (`--port`, `--backend-url`, `--server-version`, `--allowed-origins`, `--features`, `--mutating-enabled`, `--help`, `--version`) → `configure_logging()` (root, `httpx2`, `httpcore2`, `uvicorn*`, `mcp` at WARNING; `CredentialScrubFilter` dropping records containing `token=`, `Authorization`, `Bearer `; root handler on stderr, stdout reserved for records) → `uvicorn.run(..., host='127.0.0.1', log_config=None, access_log=False)`; `child/logging.py:emit` with a whitelisting record builder
     - Files: new `src/backend/mcp_edge/child/__init__.py`, `src/backend/mcp_edge/child/__main__.py`, `src/backend/mcp_edge/child/logging.py`
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_child_logging.py -q` (task 11.3) and `PYTHONPATH=src/backend uv run --python 3.11 --with-requirements src/backend/mcp_edge/requirements.lock.txt -m mcp_edge.child --version`
