@@ -358,7 +358,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: as 5.1 for the `data` view
     - _Requirements: 1.1, 1.6, 3.1, 3.3, 3.6, 5.6_
 
-  - [ ] 5.5 Author the `workflows` view rows
+  - [x] 5.5 Author the `workflows` view rows
     - Rows from `workflows.py`, `workflow_validation.py` (`portal_workflows_validate` is `M`, Phase 2), `workflow_packaging.py`, `workflow_testing.py`, `workflow_generator.py`, the node-designer handlers, `build_jobs.py`, `build_fleet.py`, `build_config.py`; `portal_workflows_test_dataset_create` absent (presigned multipart)
     - Carries [review-9 M1] `(→ query usecase_id)` on `portal_workflows_node_catalog_get` and `(→ body usecase_id)` on `portal_workflows_generate`; [review-9 M2] `limit (→ query limit)` on `portal_workflows_builds_list` and `_build_logs_get`; `portal_workflows_build_server_stop` and `_delete` are `M!` (the class label task 1.21 rewrites as `_stop`/`_delete` [review-11 N4])
     - Files: `edge-cv-portal/backend/functions/mcp_portal/catalog.py`
