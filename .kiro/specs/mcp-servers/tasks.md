@@ -409,7 +409,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_authz.py -q`
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.9, 4.7_
 
-  - [ ] 6.2 Write property test for the portal authorization decision
+  - [x] 6.2 Write property test for the portal authorization decision
     - **Feature: mcp-servers, Property 4: Portal authorization decision**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_authz.py`; moto registry, real resolver as oracle, enforcement on/off, the D29 denials recorded; Hypothesis, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_authz.py -q`
@@ -421,7 +421,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_dispatch.py -q`
     - _Requirements: 1.3, 1.4, 3.9, 6.2, 2.7_
 
-  - [ ] 6.4 Write property test for dispatch event faithfulness
+  - [x] 6.4 Write property test for dispatch event faithfulness
     - **Feature: mcp-servers, Property 5: Dispatch event faithfulness**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_dispatch_event.py`; Hypothesis over specs and schema-valid arguments, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_dispatch_event.py -q`
@@ -433,19 +433,19 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_shaping.py -q`
     - _Requirements: 1.4, 1.5, 1.6, 3.3, 2.7_
 
-  - [ ] 6.6 Write property test for backend status mapping (portal)
+  - [x] 6.6 Write property test for backend status mapping (portal)
     - **Feature: mcp-servers, Property 8: Backend status mapping and scrubbing**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_errors.py`; incl. the `bind_usecase_path` clause: a backend 404 and the D36 refusal give the same whole `CallToolResult` (`content` and `structured_content`) except `request_id` [review-10 N3; review-11 N2, task 1.14]; Hypothesis, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_errors.py -q`
     - **Validates: Requirements 1.5, 2.7**
 
-  - [ ] 6.7 Write property test for result bounding (portal clauses)
+  - [x] 6.7 Write property test for result bounding (portal clauses)
     - **Feature: mcp-servers, Property 9: Result bounding**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_result_bounding.py`: collection, `limit`/`offset`, contiguous slice, `MAX_RESULT_BYTES`, `truncated` iff dropped; Hypothesis, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_result_bounding.py -q`
     - **Validates: Requirements 1.6**
 
-  - [ ] 6.8 Implement the audit envelope and the per-invocation log line
+  - [x] 6.8 Implement the audit envelope and the per-invocation log line
     - `audit.write_envelope` with the D6/N8 rules and the `max(k, 1)` count contract, the `PINNED_AUDIT_FLAGS` exception, and the [review-9 N5] `result='denied'`, `details.reason='usecase_binding'` envelope, written even when `handler_audits` is True [review-10 N4]; the 16.4 test asserts that the missing-id and other-Use_Case results of `portal_data_labeling_job_get` are identical [review-10 N3], comparing the whole `CallToolResult` except `request_id`, not only category and message [review-11 N2, task 1.14]; `telemetry.log_tool_completion` — exactly one JSON line per completion, no arguments, token or email
     - Files: `edge-cv-portal/backend/functions/mcp_portal/audit.py`, `edge-cv-portal/backend/functions/mcp_portal/telemetry.py`; `edge-cv-portal/backend/tests/mcp/test_mcp_audit_envelope.py` (real `get_user_from_event`/`log_audit_event` in a fake handler under `_X_AMZN_TRACE_ID`; `record_audit_event_strict` failure aborts the effect → `backend_failure`)
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_audit_envelope.py -q`
