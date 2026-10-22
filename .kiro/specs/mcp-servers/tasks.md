@@ -710,7 +710,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `python3 -m pytest test/on-hardware/harness/selftest -q`; the stage runs on hardware in task 17
     - _Requirements: 16.7, 13.3, 8.5, 12.3_
 
-- [ ] 15. Ship the edge login helper
+- [x] 15. Ship the edge login helper
   - `scripts/dda-edge-mcp-login.sh <base-url>`: prompts for the username, reads the password with `read -s` (never argv/env), POSTs `/local-auth/login`, prints exactly one `export DDA_EDGE_TOKEN=<token>` line on stdout and everything else on stderr, writes no file, and ends stderr with the shell-history reminder (`HISTCONTROL=ignorespace`, `history -d`)
   - Files: new `scripts/dda-edge-mcp-login.sh`
   - Verify: `bash -n scripts/dda-edge-mcp-login.sh`; on the JP5 device in task 17, `eval "$(scripts/dda-edge-mcp-login.sh https://<device>:5443)"` yields a token that `GET /local-auth/whoami` accepts, and a wrong password yields the uniform 401 message with no token printed
