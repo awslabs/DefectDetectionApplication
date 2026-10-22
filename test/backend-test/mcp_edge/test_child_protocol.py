@@ -411,6 +411,14 @@ def test_static_image_pin_refusals(backend):
     assert undecodable.structured_content == {
         'category': 'invalid_input', 'message': 'image_base64 is not valid base64',
         'request_id': undecodable.structured_content['request_id'], 'status': None}
+    # The Input-validation pattern ^[A-Za-z0-9+/=]+$ refuses these at the
+    # schema, before any decode or request.
+    for value in ('', 'QUJD\nRA==', 'QUJD-_=='):
+        refused = call('edge_static_image_pin', {'image_base64': value,
+                                                 'file_name': 'x.jpg'}, MUTATING)
+        assert refused.structured_content['category'] == 'invalid_input'
+        assert 'image_base64' in refused.structured_content['message']
+        assert refused.structured_content['message'] != 'image_base64 is not valid base64'
     assert backend.requests == []
 
 

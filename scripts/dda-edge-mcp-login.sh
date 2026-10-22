@@ -12,9 +12,12 @@
 #
 #   export DDA_EDGE_TOKEN=<token>
 #
-# Everything else goes to stderr. Nothing is written to a file. Under
-# `eval "$(...)"` the token never appears on a typed command line, so the
-# shell history does not record it.
+# Everything else goes to stderr. Nothing is written to a file: the login
+# response stays in a shell variable. The token is printed only when it
+# consists of RFC 6750 b64token characters (a Local_Session_Token is
+# base64url "." base64url), so the line holds nothing the shell would
+# interpret. Under `eval "$(...)"` the token never appears on a typed
+# command line, so the shell history does not record it.
 #
 # TLS: the certificate is verified. A station whose certificate is
 # self-signed is reached with DDA_EDGE_CA_CERT=<the station's certificate
@@ -60,10 +63,10 @@ fi
 
 # The JSON body is built from stdin (printf is a shell builtin, so neither
 # value appears in any process's argument list) and sent with --data-binary @-.
-response_file=$(mktemp)
-trap 'rm -f "$response_file"' EXIT
+# The response body and, on its own last line, the HTTP status are captured
+# in memory; nothing goes to disk.
 set +e
-status=$(printf '%s\0%s' "$username" "$password" \
+response=$(printf '%s\0%s' "$username" "$password" \
   | python3 -c 'import json, sys
 username, password = sys.stdin.buffer.read().decode("utf-8").split("\0", 1)
 sys.stdout.write(json.dumps({"username": username, "password": password}))' \
@@ -71,7 +74,7 @@ sys.stdout.write(json.dumps({"username": username, "password": password}))' \
       --request POST "$base_url/local-auth/login" \
       --header 'Content-Type: application/json' \
       --data-binary @- \
-      --output "$response_file" --write-out '%{http_code}')
+      --write-out '\n%{http_code}')
 curl_rc=$?
 set -e
 unset password
@@ -80,25 +83,34 @@ if [ "$curl_rc" -ne 0 ]; then
   say "error: could not reach $base_url (curl exit $curl_rc)"
   exit 1
 fi
+status=${response##*$'\n'}
+body=${response%$'\n'*}
+unset response
 if [ "$status" != "200" ]; then
-  detail=$(python3 -c 'import json, sys
+  detail=$(printf '%s' "$body" | python3 -c 'import json, sys
 try:
-    body = json.load(open(sys.argv[1]))
+    body = json.load(sys.stdin)
     print(body.get("detail") if isinstance(body, dict) else "")
 except Exception:
-    print("")' "$response_file")
+    print("")')
   say "error: login failed (HTTP $status)${detail:+: $detail}"
   exit 1
 fi
 
-token=$(python3 -c 'import json, sys
-body = json.load(open(sys.argv[1]))
-token = body.get("token") if isinstance(body, dict) else None
-if not isinstance(token, str) or not token or any(c.isspace() or c in "\x27\"\\$`" for c in token):
+# Allowlist: RFC 6750 b64token, the character set of a Local_Session_Token.
+# Anything else (whitespace, quotes, ; | & > < ( ) { } $ ` and so on) is
+# refused with nothing on stdout.
+token=$(printf '%s' "$body" | python3 -c 'import json, re, sys
+try:
+    body = json.load(sys.stdin)
+except Exception:
     sys.exit(1)
-print(token)' "$response_file") || { say "error: the login response carried no usable token"; exit 1; }
-rm -f "$response_file"
+token = body.get("token") if isinstance(body, dict) else None
+if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token):
+    sys.exit(1)
+print(token)') || { say "error: the login response carried no usable token"; exit 1; }
+unset body
 
-printf 'export DDA_EDGE_TOKEN=%s\n' "$token"
+printf 'export DDA_EDGE_TOKEN=%q\n' "$token"
 say "Signed in as $username; DDA_EDGE_TOKEN is set for this shell."
 say "Reminder: use this script only under eval \"\$(...)\". Pasting the export line by hand records the token in ~/.bash_history; prefix the command with a space under HISTCONTROL=ignorespace, or remove the entry with history -d."
