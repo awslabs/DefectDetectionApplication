@@ -168,13 +168,14 @@ def test_hs256_token_rejected(verifier):
 
 @pytest.mark.parametrize("overrides,reason", [
     ({"exp": int(time.time()) - 1}, "expired"),
+    ({"exp": "not-a-number"}, "expired"),
     ({"token_use": "id"}, "token_use"),
     ({"client_id": "another-client"}, "client_id"),
     ({"scope": "openid profile"}, "scope"),
     ({"scope": f"{SCOPE}x"}, "scope"),
-    ({"aud": "https://elsewhere.example.com/mcp"}, "aud"),
-    ({"aud": ["https://elsewhere.example.com/mcp"]}, "aud"),
-    ({"aud": []}, "aud"),
+    ({"aud": "https://elsewhere.example.com/mcp"}, "audience"),
+    ({"aud": ["https://elsewhere.example.com/mcp"]}, "audience"),
+    ({"aud": []}, "audience"),
 ])
 def test_claim_failure_recorded_with_sub(verifier, overrides, reason):
     payload = claims(**overrides)
@@ -182,6 +183,39 @@ def test_claim_failure_recorded_with_sub(verifier, overrides, reason):
     failure = tv.CURRENT_AUTH_FAILURE.get()
     assert failure == tv.AuthFailure(sub=payload["sub"], reason=reason,
                                      client_id=payload["client_id"])
+
+
+class UnreachableJwksClient:
+    """`PyJWKClient` stand-in whose key-set fetch fails, as `fetch_data` does
+    on a URL error, a timeout or an HTTP exception."""
+
+    def get_signing_key_from_jwt(self, token):
+        raise jwt.PyJWKClientConnectionError(
+            "Fail to fetch data from the url, err: timed out")
+
+
+def test_jwks_fetch_failure_logged_at_error_with_kid(caplog):
+    tv.CURRENT_AUTH_FAILURE.set(None)
+    unreachable = tv.CognitoAccessTokenVerifier(
+        issuer=ISSUER, client_id=CLIENT_ID, required_scope=SCOPE,
+        allowed_audiences=AUDIENCES, jwks_client=UnreachableJwksClient())
+    caplog.set_level(logging.DEBUG, logger=tv.logger.name)
+    token = sign(claims())
+    assert verify(unreachable, token) is None
+    assert tv.CURRENT_AUTH_FAILURE.get() is None
+    records = [r for r in caplog.records if r.name == tv.logger.name]
+    assert [r.levelno for r in records] == [logging.ERROR]
+    assert KID in records[0].getMessage()
+    assert token not in caplog.text
+    for segment in token.split("."):
+        assert segment not in caplog.text
+
+
+def test_unknown_kid_stays_at_info(verifier, caplog):
+    caplog.set_level(logging.DEBUG, logger=tv.logger.name)
+    assert verify(verifier, sign(claims(), kid="unknown-kid")) is None
+    records = [r for r in caplog.records if r.name == tv.logger.name]
+    assert [r.levelno for r in records] == [logging.INFO]
 
 
 def test_token_never_logged(verifier, caplog):

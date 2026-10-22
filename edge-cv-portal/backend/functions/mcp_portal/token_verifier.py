@@ -15,7 +15,8 @@ the failure is recorded in `CURRENT_AUTH_FAILURE` with the token's `sub`, so
 audit entry (Requirement 4.7). Tokens that are unsigned, unparseable or from
 another issuer record nothing: they name no verifiable principal.
 
-The token itself is never logged; only `sub` and the failure class are.
+The token itself is never logged; only `sub`, the failure class and (when
+the pool's key set cannot be fetched) the header's `kid` are.
 """
 import contextvars
 import logging
@@ -49,6 +50,15 @@ CURRENT_AUTH_FAILURE: contextvars.ContextVar = contextvars.ContextVar(
 
 def _csv(value: Optional[str]) -> tuple:
     return tuple(part.strip() for part in (value or '').split(',') if part.strip())
+
+
+def _unverified_kid(token: str) -> Optional[str]:
+    """The `kid` of the token's header, or None when the header is unreadable."""
+    try:
+        kid = jwt.get_unverified_header(token).get('kid')
+    except Exception:  # noqa: BLE001 - only used for the log line
+        return None
+    return kid if isinstance(kid, str) else None
 
 
 class CognitoAccessTokenVerifier(TokenVerifier):
@@ -88,6 +98,13 @@ class CognitoAccessTokenVerifier(TokenVerifier):
                 issuer=self.issuer,
                 options={'verify_aud': False, 'verify_exp': False,
                          'require': REQUIRED_CLAIMS})
+        except jwt.PyJWKClientConnectionError:
+            # The pool's key set could not be fetched (transient): every
+            # token is a 401 until it can, so this is logged at ERROR with
+            # the header's kid. Nothing is recorded for the audit entry.
+            logger.error('MCP access token rejected: JWKS fetch failed '
+                         'for kid %s', _unverified_kid(token))
+            return None
         except Exception as error:  # noqa: BLE001 - any decode failure is a 401
             logger.info('MCP access token rejected before claim checks: %s',
                         type(error).__name__)
@@ -114,7 +131,7 @@ class CognitoAccessTokenVerifier(TokenVerifier):
         try:
             expired = int(payload['exp']) <= int(time.time())
         except (TypeError, ValueError):
-            return 'exp'
+            return 'expired'
         if expired:
             return 'expired'
         if payload.get('token_use') != 'access':
@@ -125,7 +142,7 @@ class CognitoAccessTokenVerifier(TokenVerifier):
         if not isinstance(scope, str) or self.required_scope not in scope.split():
             return 'scope'
         if 'aud' in payload and self._matching_audience(payload['aud']) is None:
-            return 'aud'
+            return 'audience'
         return None
 
     def _matching_audience(self, aud) -> Optional[str]:
