@@ -37,21 +37,32 @@ logged inside ``credential_cache.verify_credentials``.
 Both routes must be exempt from the ``authorize_request`` authorization
 dependency; that exemption is wired where the routers are assembled
 (task 9.4). This router intentionally carries no auth dependency itself.
+
+``GET /local-auth/whoami`` (mcp-servers design §6, F8) lives on the separate
+``authenticated_router``, which carries ``authorize_request``: it reports the
+decision that admitted the request, ``{username, role, source, expiresAt?}``,
+from ``request.state.auth_decision``. The Edge MCP child resolves its
+principal through it.
 """
 import logging
 import time
+from typing import Any, Dict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_403_FORBIDDEN
 
-from endpoints.route.access_log_router import AccessLogRoute
+from endpoints.route.access_log_router import AccessLogRoute, get_api_router
 from local_auth import config as local_login_config
 from local_auth import credential_cache, lockout, session_tokens
+from utils.auth import ANONYMOUS_DECISION
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(route_class=AccessLogRoute)
+
+#: Routes that require the per-request authorization decision.
+authenticated_router = get_api_router()
 
 #: The single 401 detail used for every login failure — wrong password,
 #: unknown username, disabled account, and lockout all produce a response
@@ -137,3 +148,20 @@ def local_login(request: LocalLoginRequest) -> LocalLoginResponse:
         role=account.role,
         username=account.username,
     )
+
+
+@authenticated_router.get("/local-auth/whoami")
+def local_auth_whoami(request: Request) -> Dict[str, Any]:
+    """Who this request was authorized as (mcp-servers design, Data Models
+    "``AuthDecision`` and ``GET /local-auth/whoami``"). ``expiresAt`` is
+    present for a credential (null when the introspection names none) and
+    absent in the open-access row."""
+    decision = getattr(request.state, "auth_decision", None) or ANONYMOUS_DECISION
+    body: Dict[str, Any] = {
+        "username": decision.username,
+        "role": decision.role,
+        "source": decision.source,
+    }
+    if decision.source != ANONYMOUS_DECISION.source:
+        body["expiresAt"] = decision.expires_at
+    return body
