@@ -108,7 +108,7 @@ def mcp_proxy(request: Request, body: bytes = Depends(_mcp_body)):
 
 
 @router.get("/mcp/status")
-def mcp_status():
+def get_mcp_status():
     supervisor, config = _current()
     return status.build_status(
         config, supervisor, MCP_EDGE_VERSION,
