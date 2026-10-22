@@ -584,7 +584,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CONTAINER_PYTEST test/backend-test/mcp_edge/test_property_proxy_exposure.py`
     - **Validates: Requirements 12.4, 12.5**
 
-- [ ] 11. Implement the edge MCP child (venv side)
+- [x] 11. Implement the edge MCP child (venv side)
   - [x] 11.1 Resolve and pin the venv lock
     - `src/backend/mcp_edge/requirements.lock.txt` (D20): resolve with `uv pip compile --python-version 3.10 --python-platform aarch64-manylinux_2_35`; pins include `mcp==2.3.0`, `mcp-types==2.3.0`, `rpds-py==0.30.0`, `starlette==1.7.0`, and `exceptiongroup==1.3.1; python_version < "3.11"` as the only marker line
     - Prove wheel availability for every image: install the lock with `--only-binary :all:` for cp310 aarch64 (JP6, Ubuntu 22.04), cp311 aarch64 (JP5 Ubuntu 20.04 and JP7 Ubuntu 24.04) and cp311 x86_64 (amd64, x86_64_nvidia), and additionally check every wheel's manylinux tag is ≤ `manylinux_2_31` for the JP5 base (glibc 2.31 — the design's `manylinux_2_35` resolve target is above it); record the wheel file names of `rpds-py`, `pydantic-core`, `cryptography`, `cffi` in the task evidence (13.5)
@@ -655,13 +655,13 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_child_protocol.py test/backend-test/mcp_edge/test_child_guardrails.py test/backend-test/mcp_edge/test_child_legacy_client.py test/backend-test/mcp_edge/test_child_import_boundary.py -q`
     - _Requirements: 8.1, 8.2, 8.4, 8.5, 9.2, 9.7, 10.7, 10.8, 12.5, 15.3, 16.1, 16.5, 16.9_
 
-  - [ ] 11.12 Write property test for child transport security
+  - [x] 11.12 Write property test for child transport security
     - **Feature: mcp-servers, Property 18: Edge child transport security**
     - File `test/backend-test/mcp_edge/test_property_child_transport_security.py` (the real Starlette app over `httpx2.ASGITransport`); Hypothesis, min 100 examples
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_property_child_transport_security.py -q`
     - **Validates: Requirements 12.5, 9.1**
 
-  - [ ] 11.13 Write the edge catalog honesty suites and the edge catalog properties
+  - [x] 11.13 Write the edge catalog honesty suites and the edge catalog properties
     - `test_child_catalog_classification.py` with [review-9 N1]: the **transitive** walk over `src/backend` (portal resolution rules plus `self.f`/`cls.f` in the class and its first-party bases, `C.f`, constructor calls `C(...)` → `C.__init__`, methods of typed objects, and function references, per the Testing Strategy row), failing on any effect not listed in the spec's `accepted_effects` and on any listed entry it no longer finds; the effect list of revision 11 includes PIL `Image.save` on a Pillow value (`Image.open`/`Image.new`/`Image.fromarray`/`ImageOps.*`, a method of such a value, or a name bound from one, `with` targets included), `os.replace`/`os.rename`, every `shutil` function except `disk_usage`/`which`/`get_terminal_size`, the file-creating `tempfile` functions, `Path.write_*` and `open` with `w`/`a`/`x`/`+`, with the JP6 `.dda_decoded.png` staging as a fixed case and six accepted effects on eight tools [review-10 N7] (eight since revision 12); plus, since task 1.20 (revision 12), the one Pillow definition (incl. the chained `ImageOps.exif_transpose(Image.open(p)).save(q)` case), entries matched on the effect-list name, and the `pathlib` twins and `os` mutators [review-11 N3]; fixed cases of the Testing Strategy row (`system.get_snapshot` and `save_capture_ids_for_inference_results_download` not `RO`; the GET-but-mutating rows; the accepted readings) — the deeper effects now discovered, not hand-listed
     - `test_child_catalog_arguments.py`: FastAPI signature / request-model / `Depends()` fields, `body_fields` literal check, `limit` maximum against route bounds, every fixed case of the Testing Strategy row incl. revisions 9, 10 and 11, and [review-10 M1] no `RO` edge spec has an `object`-typed property, `edge_image_source_preview` offers no `image_source_configuration`, and a call carrying `processingPipeline` is `invalid_input`; [review-11 N1, task 1.19] the fixed case `edge_model_start.param_map['model_name'] == 'modelName'`; [review-11 N5, task 1.22] every `string` property of an `RO` edge spec has a `pattern` or `enum` or is in `RO_FREE_TEXT_ARGS`
     - **Feature: mcp-servers, Property 2: Catalog well-formedness** (edge clauses) and **Feature: mcp-servers, Property 3: Tool list determinism and filtering** (edge list) — file `test_property_child_catalog.py`; Hypothesis, min 100 examples per property
