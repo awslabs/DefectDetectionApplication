@@ -610,7 +610,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_property_child_catalog.py -q` (task 11.13) after this task; a direct import lists 47 Phase-1 tools with `--features vllm`
     - _Requirements: 8.1, 8.2, 8.4, 10.1, 10.6, 10.8, 14.1, 14.2_
 
-  - [ ] 11.5 Implement principal resolution and the role gate
+  - [x] 11.5 Implement principal resolution and the role gate
     - `child/principal.py:resolve_principal` via `GET {backend}/local-auth/whoami` with the caller's `Authorization` and `X-Request-ID` (401 → `not_authenticated`); `child/authz.py:decide` (read-only for every principal incl. `anonymous`; mutating requires the switch, `source == local_session`, role ∈ {Operator, UseCaseAdmin, PortalAdmin}; destructive requires `confirm`, incl. `confirm_literal`)
     - Files: new `src/backend/mcp_edge/child/principal.py`, `src/backend/mcp_edge/child/authz.py`; new `test/backend-test/mcp_edge/test_child_principal.py` (expired token, disabled account → `not_authenticated` on the next call; role taken only from `whoami`)
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_child_principal.py -q`
@@ -622,7 +622,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_authz.py -q`
     - **Validates: Requirements 10.2, 10.3, 10.4, 10.5, 10.6, 9.1, 16.3**
 
-  - [ ] 11.7 Implement the child's backend dispatch
+  - [x] 11.7 Implement the child's backend dispatch
     - `child/dispatch.py:call_backend` with `make_client(backend_url)` (`httpx2`, `verify=False` on `https://127.0.0.1:5443` only with the `nosec` note, `HTTPTransport(retries=0)`), per-spec `timeout_s`, path segments `quote(value, safe='')` after schema refusal of `/`, `.`, `..`, query parameters for GET routes, `{**resolve_constants(body_constants), **mapped_args}` bodies, the multipart `edge_static_image_pin` body with `base64.b64decode(..., validate=True)` before any request, `credential_in_query` placement, `X-Request-ID` always, `_safe_error`, the "operation may have been applied; call `<status_tool>`" message for `M`/`M!`, and the backend-status → category mapping shared with the portal vocabulary
     - Files: new `src/backend/mcp_edge/child/dispatch.py`
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_property_child_dispatch.py test/backend-test/mcp_edge/test_property_child_errors.py -q` (task 11.8)
@@ -635,7 +635,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_property_child_dispatch.py test/backend-test/mcp_edge/test_property_child_errors.py -q`
     - **Validates: Requirements 9.1, 9.7, 11.3, 8.6**
 
-  - [ ] 11.9 Implement the child's result shaping
+  - [x] 11.9 Implement the child's result shaping
     - `child/shaping.py` in the single order of D34/§5/§7: `drop_fields` → `extract_image` → `result_constant` merge → `drop_oversized_images` (≥ 16 KiB image base64) → `scrub_paths` (`PATH_KEY_RE` and the single-token device-root value rule; `{"text": …}` exempt) → dispatcher slicing → `MAX_RESULT_BYTES`; `image/*` bodies → `ImageContent` ≤ 2 MiB (`image/jpg` → `image/jpeg`); `text/plain` tail by encoded size (binary search, `MAX_RESULT_BYTES − 1 000`, `truncated`/`total_chars`); `resource_id` keys and `resource_id_from_body`
     - Files: new `src/backend/mcp_edge/child/shaping.py`
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_property_child_shaping.py -q` (task 11.10)
