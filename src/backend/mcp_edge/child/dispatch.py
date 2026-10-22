@@ -66,8 +66,10 @@ MULTIPART_SPECS = {'edge_static_image_pin': ('image_base64', 'file_name')}
 
 _TOKEN_RE = re.compile(r'token=[^&\s]*', re.IGNORECASE)
 _TRACEBACK_RE = re.compile(r'Traceback|File "')
-_BEARER_RE = re.compile(r'Bearer\s+[A-Za-z0-9._~+/=-]+', re.IGNORECASE)
-_JWT_RE = re.compile(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*')
+# A credential ends where the next one starts ("Bearer", or a JWT's "eyJ"), so
+# two adjacent ones are both removed.
+_BEARER_RE = re.compile(r'Bearer\s+(?:(?!Bearer)[A-Za-z0-9._~+/=-])+', re.IGNORECASE)
+_JWT_RE = re.compile(r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.(?:(?!eyJ)[A-Za-z0-9_-])*')
 MAX_MESSAGE_CHARS = 1000
 
 

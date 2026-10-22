@@ -80,9 +80,12 @@ def test_status_mapping_and_scrubbing(data, status, token):
     else:
         assert failure.category in errors.CATEGORIES
     assert failure.status == status
+    payload, signature = token.split('.')[1:]
     for text in (failure.message, failure.text):
         assert 'Traceback' not in text and 'File "' not in text
         assert token not in text
+        # Two adjacent tokens are both removed, not only the first.
+        assert f'{payload}.{signature}' not in text
     rendered = json.dumps(failure.to_result('req').model_dump(mode='json'))
     assert token not in rendered and 'Traceback' not in rendered
 
