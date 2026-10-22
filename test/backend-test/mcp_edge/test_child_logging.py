@@ -321,6 +321,8 @@ def test_property_edge_log_record_hygiene(case):
     record = json.loads(line)
 
     assert record["event"] == "mcp tool" and record["channel"] == "mcp"
+    assert record["mcp_server"] == kwargs["mcp_server"]
+    assert record["mcp_client"] == _cut(kwargs["mcp_client"])
     assert record["tool"] == kwargs["tool"]
     assert record["outcome"] == kwargs["outcome"]
     assert record["request_id"] == _cut(kwargs["request_id"])
