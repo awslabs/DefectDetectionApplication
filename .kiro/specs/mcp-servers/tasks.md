@@ -533,7 +533,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
 
 #### Edge
 
-- [ ] 10. Implement the Backend_API changes (backend process; no `mcp` import)
+- [x] 10. Implement the Backend_API changes (backend process; no `mcp` import)
   - [x] 10.1 Share one IPC component-configuration reader
     - New public `local_auth.config.read_component_config_via_ipc() -> dict` (today's `_read_local_login_enabled_via_ipc` body up to `get_component_config`, guarded by a module-level `threading.Lock`, `{}` for non-dict results); `_read_local_login_enabled_via_ipc` delegates to it (behaviour-preserving); one `DefectDetectionConfig` instance and one IPC connection per process (M4)
     - Files: `src/backend/local_auth/config.py`; new `test/backend-test/mcp_edge/test_shared_ipc_reader.py`
@@ -578,7 +578,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CONTAINER_PYTEST test/backend-test/mcp_edge/test_proxy_route.py test/backend-test/security/preservation/test_preservation_secrets_app_and_components.py` (the `uvicorn.Config(...)` bind calls are unchanged)
     - _Requirements: 9.1, 9.4, 9.5, 11.3, 12.3, 12.4, 12.5, 12.7, 12.8, 16.2_
 
-  - [ ] 10.8 Write property test for the proxy exposure rule
+  - [x] 10.8 Write property test for the proxy exposure rule
     - **Feature: mcp-servers, Property 12: Proxy exposure rule**
     - File `test/backend-test/mcp_edge/test_property_proxy_exposure.py` (the pure decision function of `endpoints/mcp_proxy.py`); Hypothesis, min 100 examples
     - Verify: `EDGE_CONTAINER_PYTEST test/backend-test/mcp_edge/test_property_proxy_exposure.py`
