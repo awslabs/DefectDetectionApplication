@@ -345,7 +345,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: as 5.1 for the `devices` view
     - _Requirements: 1.1, 1.4, 3.1, 5.2, 5.5, 5.6, 5.7_
 
-  - [ ] 5.3 Author the `models` view rows
+  - [x] 5.3 Author the `models` view rows
     - Rows from `models.py`, `model_import.py`, `model_converter.py`, `training.py`, `compilation.py`, `packaging.py`, `greengrass_publish.py`; `portal_models_delete` **absent** while `models.py:522` checks `'Admin'` (Backlog 1); `portal_models_compilation_create` schema without `auto_triggered` (Backlog 20); the status-sync `accepted_writes` of `_get`, `_training_get`, `_compilation_get` in the [review-9 N2] form
     - Files: `edge-cv-portal/backend/functions/mcp_portal/catalog.py`
     - Verify: as 5.1 for the `models` view

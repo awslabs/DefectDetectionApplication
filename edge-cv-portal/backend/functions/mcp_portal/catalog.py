@@ -1236,7 +1236,330 @@ DEVICES: Tuple[ToolSpec, ...] = (
         status_tool='portal_devices_registrations_list'),
 )
 
-CATALOG: Tuple[ToolSpec, ...] = ADMIN + DEVICES
+# ----------------------------------------------------------- models view
+# Handlers: models.py, model_import.py, model_converter.py, training.py,
+# compilation.py, packaging.py, greengrass_publish.py. portal_models_delete
+# is absent while models.py checks the role 'Admin', which no principal
+# holds (Backlog 1).
+
+def s3_uri(description: Optional[str] = None) -> dict:
+    prop = {'type': 'string', 'pattern': r'^s3://\S+$', 'maxLength': 2048}
+    if description:
+        prop['description'] = description
+    return prop
+
+
+MODEL_ID = identifier('The model (training record) id.')
+JOB_ID = identifier('The training job (training record) id.')
+COMPILATION_TARGETS = ('jetson-xavier-jp5', 'jetson-xavier-jp6', 'x86_64-cpu',
+                       'x86_64-cuda', 'arm64-cpu', 'onnx')
+ENGINE_CONFIGURATION_KEYS = ('dtype', 'gpu_memory_utilization', 'max_model_len',
+                             'tensor_parallel_size', 'enforce_eager',
+                             'limit_mm_per_prompt')
+MODEL_STAGES = ('candidate', 'staging', 'production')
+
+
+def engine_configuration(min_properties: Optional[int] = None) -> dict:
+    prop = {'type': 'object',
+            'properties': {key: {} for key in ENGINE_CONFIGURATION_KEYS},
+            'additionalProperties': False,
+            'description': 'vLLM engine settings (keys of ENGINE_DEFAULTS).'}
+    if min_properties is not None:
+        prop['minProperties'] = min_properties
+    return prop
+
+
+def _status_sync(*writes: AcceptedWrite) -> dict:
+    return {'accepted_writes': writes, 'accepted_writes_note': STATUS_SYNC_NOTE}
+
+
+MODELS: Tuple[ToolSpec, ...] = (
+    ToolSpec(
+        name='portal_models_list', domain='models', title='List models',
+        description='Lists the models of a Use_Case, optionally filtered by stage.',
+        resource_type='model',
+        input_schema=uc_schema({'stage': enum(*MODEL_STAGES), **PAGE_ARGS}),
+        backend='models', handler_module='models', handler_function='list_models',
+        method='GET', resource='/models', param_map=UC_QUERY,
+        permissions=('view_models',), result_shape='collection',
+        collection_key='models'),
+    ToolSpec(
+        name='portal_models_get', domain='models', title='Get a model',
+        description=('Returns one model record; refreshes its compilation status '
+                     'from SageMaker as the model page does.'),
+        resource_type='model',
+        input_schema=uc_schema({'model_id': MODEL_ID}, required=['model_id']),
+        backend='models', handler_module='models', handler_function='get_model',
+        method='GET', resource='/models/{id}', param_map={'model_id': 'id'},
+        permissions=('view_models',),
+        **_status_sync(AcceptedWrite('models.get_model', 'update_item',
+                                     'training_table', 1))),
+    ToolSpec(
+        name='portal_models_stage_set', domain='models', title='Set a model stage',
+        description='Moves a model to the candidate, staging or production stage.',
+        resource_type='model',
+        input_schema=uc_schema({'model_id': MODEL_ID, 'stage': enum(*MODEL_STAGES)},
+                               required=['model_id', 'stage']),
+        backend='models', handler_module='models',
+        handler_function='update_model_stage', method='PUT',
+        resource='/models/{id}/stage', param_map={'model_id': 'id'},
+        permissions=('promote_models',), classification=MUTATING, phase=2,
+        handler_audits=True, status_tool='portal_models_get'),
+    ToolSpec(
+        name='portal_models_format_spec_get', domain='models',
+        title='Get the model format specification',
+        description='Returns the model artifact format the portal imports.',
+        resource_type='model_format', input_schema=schema(),
+        backend='modelImport', handler_module='model_import',
+        handler_function='get_model_format_spec', method='GET',
+        resource='/models/format-spec', permissions=('view_models',),
+        scope='global'),
+    ToolSpec(
+        name='portal_models_types_get', domain='models', title='Get the model types',
+        description='Returns the model types, dimensions and frameworks the converter supports.',
+        resource_type='model_format', input_schema=schema(),
+        backend='modelConverter', handler_module='model_converter',
+        handler_function='get_supported_types', method='GET',
+        resource='/models/types', permissions=('view_models',), scope='global'),
+    ToolSpec(
+        name='portal_models_vllm_engine_spec_get', domain='models',
+        title='Get the vLLM engine specification',
+        description='Returns the vLLM engine settings a model can carry, with their defaults.',
+        resource_type='model_format', input_schema=schema(),
+        backend='modelImport', handler_module='model_import',
+        handler_function='get_vllm_engine_spec', method='GET',
+        resource='/models/vllm/engine-spec', permissions=('view_models',),
+        scope='global'),
+    ToolSpec(
+        name='portal_models_validate', domain='models', title='Validate a model artifact',
+        description='Checks that an s3:// .tar.gz model artifact has the importable format.',
+        resource_type='model',
+        input_schema=uc_schema({'model_s3_uri': s3_uri('An s3:// URI of a .tar.gz.')},
+                               required=['model_s3_uri']),
+        backend='modelImport', handler_module='model_import',
+        handler_function='validate_model', method='POST', resource='/models/validate',
+        param_map=UC_QUERY, permissions=('promote_models',)),
+    ToolSpec(
+        name='portal_models_inspect', domain='models', title='Inspect a model checkpoint',
+        description='Inspects a .pt, .pth or .onnx object in a trusted bucket.',
+        resource_type='model',
+        input_schema=uc_schema({'model_s3_uri': s3_uri()}, required=['model_s3_uri']),
+        backend='modelConverter', handler_module='model_converter',
+        handler_function='inspect_model_endpoint', method='POST',
+        resource='/models/inspect', param_map=UC_QUERY,
+        permissions=('promote_models',)),
+    ToolSpec(
+        name='portal_models_import', domain='models', title='Import a model',
+        description='Imports a .tar.gz model artifact as a new model record.',
+        resource_type='model',
+        input_schema=uc_schema({
+            'model_name': text(256), 'model_version': text(64),
+            'model_s3_uri': s3_uri('An s3:// URI of a .tar.gz in an allowed bucket.'),
+            'description': text(2000), 'auto_compile': boolean(),
+            'compilation_targets': array(enum(*COMPILATION_TARGETS)),
+        }, required=['model_name', 'model_version', 'model_s3_uri']),
+        backend='modelImport', handler_module='model_import',
+        handler_function='import_model', method='POST', resource='/models/import',
+        param_map=UC_QUERY, permissions=('promote_models',),
+        classification=MUTATING, phase=2, idempotent=False, handler_audits=True,
+        status_tool='portal_models_get'),
+    ToolSpec(
+        name='portal_models_vllm_import', domain='models', title='Register a vLLM model',
+        description=('Registers a vLLM model from a Hugging Face id or an S3 artifact '
+                     '(exactly one of the two).'),
+        resource_type='model',
+        input_schema=uc_schema({
+            'model_name': text(256), 'model_version': text(64),
+            'huggingface_model_id': text(256),
+            's3_model_artifact': s3_uri(),
+            'engine_configuration': engine_configuration(),
+            'description': text(2000),
+        }, required=['model_name', 'model_version'],
+            one_of=[['huggingface_model_id'], ['s3_model_artifact']]),
+        backend='modelImport', handler_module='model_import',
+        handler_function='register_vllm_model', method='POST', resource='/models/vllm',
+        param_map=UC_QUERY, permissions=('promote_models',),
+        classification=MUTATING, phase=2, idempotent=False, handler_audits=True,
+        status_tool='portal_models_get'),
+    ToolSpec(
+        name='portal_models_vllm_engine_configuration_set', domain='models',
+        title='Set a vLLM engine configuration',
+        description="Updates a vLLM model's engine settings.",
+        resource_type='model',
+        input_schema=uc_schema({'model_id': MODEL_ID,
+                                'engine_configuration': engine_configuration(1)},
+                               required=['model_id', 'engine_configuration']),
+        backend='modelImport', handler_module='model_import',
+        handler_function='update_vllm_engine_configuration', method='PUT',
+        resource='/models/vllm/{training_id}/engine-configuration',
+        param_map={'model_id': 'training_id'}, permissions=('promote_models',),
+        classification=MUTATING, phase=2, handler_audits=True,
+        status_tool='portal_models_get'),
+    ToolSpec(
+        name='portal_models_convert', domain='models', title='Convert a model',
+        description=('Converts a checkpoint to an importable artifact, or starts a '
+                     'conversion job for a .pt/.pth exported to ONNX.'),
+        resource_type='model',
+        input_schema=uc_schema({
+            'model_s3_uri': s3_uri(), 'model_name': text(256),
+            'model_type': enum('classification', 'object_detection',
+                               'segmentation', 'anomaly_detection'),
+            'image_width': integer(minimum=1), 'image_height': integer(minimum=1),
+            'num_classes': integer(minimum=1),
+            'class_names': array(text(256)),
+            'export_format': enum('pytorch', 'onnx'),
+            'detection_arch': enum('yolo', 'rf_detr'),
+            'score_threshold': number(0, 1), 'iou_threshold': number(0, 1),
+            'preserve_aspect': boolean(), 'auto_import': boolean(),
+            'model_version': text(64),
+        }, required=['model_s3_uri', 'model_name', 'model_type', 'image_width',
+                     'image_height']),
+        backend='modelConverter', handler_module='model_converter',
+        handler_function='convert_model', method='POST', resource='/models/convert',
+        param_map=UC_QUERY, permissions=('promote_models',),
+        classification=MUTATING, phase=2, idempotent=False, handler_audits=True,
+        status_tool='portal_models_get'),
+    ToolSpec(
+        name='portal_models_training_list', domain='models', title='List training jobs',
+        description='Lists the training records of a Use_Case.',
+        resource_type='training_job',
+        input_schema=uc_schema(PAGE_ARGS),
+        backend='training', handler_module='training',
+        handler_function='list_training_jobs', method='GET', resource='/training',
+        param_map=UC_QUERY, permissions=('view_training_jobs',),
+        result_shape='collection', collection_key='jobs', limit_default=20),
+    ToolSpec(
+        name='portal_models_training_get', domain='models', title='Get a training job',
+        description=('Returns one training record; refreshes its status from '
+                     'SageMaker as the training page does.'),
+        resource_type='training_job',
+        input_schema=uc_schema({'job_id': JOB_ID}, required=['job_id']),
+        backend='training', handler_module='training',
+        handler_function='get_training_job', method='GET', resource='/training/{id}',
+        param_map={'job_id': 'id'}, permissions=('view_training_jobs',),
+        **_status_sync(
+            AcceptedWrite('training.get_training_job', 'update_item', 'table', 2),
+            AcceptedWrite('training.sync_conversion_record',
+                          'reconcile_conversion', '', 1))),
+    ToolSpec(
+        name='portal_models_training_logs_get', domain='models',
+        title='Get training logs',
+        description=('Returns one page of a training job\'s log events, oldest first; '
+                     'the token repeats at the end of the stream.'),
+        resource_type='log_event',
+        input_schema=uc_schema({'job_id': JOB_ID, 'limit': LIMIT,
+                                'next_token': NEXT_TOKEN}, required=['job_id']),
+        backend='training', handler_module='training',
+        handler_function='get_training_logs', method='GET',
+        resource='/training/{id}/logs',
+        param_map={'job_id': 'id', 'limit': 'limit',
+                   'next_token': 'nextForwardToken'},
+        permissions=('view_training_jobs',), result_shape='collection',
+        collection_key='logs'),
+    ToolSpec(
+        name='portal_models_training_create', domain='models',
+        title='Create a training job',
+        description='Starts a SageMaker training job on a dataset manifest.',
+        resource_type='training_job',
+        input_schema=uc_schema({
+            'model_name': text(256), 'model_version': text(64),
+            'model_type': enum('classification', 'segmentation',
+                               'classification-robust', 'segmentation-robust',
+                               'object_detection'),
+            'dataset_manifest_s3': s3_uri('An s3:// manifest in an allowed bucket.'),
+            'hyperparameters': json_object(),
+            'instance_type': identifier(),
+            'max_runtime_seconds': integer(minimum=1),
+            'auto_compile': boolean(),
+            'compilation_targets': array(enum(*COMPILATION_TARGETS)),
+            'detection_arch': enum('yolo', 'rf_detr'),
+            'base_model': {'type': 'object',
+                           'properties': {'kind': identifier(), 'ref': text(1024)},
+                           'additionalProperties': False},
+            'class_names': array(text(256)),
+        }, required=['model_name', 'model_version', 'model_type',
+                     'dataset_manifest_s3']),
+        backend='training', handler_module='training',
+        handler_function='create_training_job', method='POST', resource='/training',
+        param_map=UC_QUERY, permissions=('create_training_jobs',),
+        classification=MUTATING, phase=2, idempotent=False, handler_audits=True,
+        status_tool='portal_models_training_get'),
+    ToolSpec(
+        name='portal_models_manifest_transform', domain='models',
+        title='Transform a manifest',
+        description=('Converts a labeling manifest to the training format, writing '
+                     '<source-base>-dda.manifest next to it.'),
+        resource_type='manifest',
+        input_schema=uc_schema({
+            'source_manifest_uri': s3_uri(),
+            'task_type': enum('classification', 'segmentation'),
+        }, required=['source_manifest_uri']),
+        backend='training', handler_module='training',
+        handler_function='transform_manifest', method='POST',
+        resource='/training/transform-manifest', param_map=UC_QUERY,
+        permissions=('create_training_jobs',), classification=MUTATING, phase=2,
+        handler_audits=True, status_tool='portal_models_training_list'),
+    ToolSpec(
+        name='portal_models_compilation_get', domain='models',
+        title='Get compilation status',
+        description=("Returns a model's compilation jobs; refreshes their status "
+                     'from SageMaker as the compilation tab does.'),
+        resource_type='compilation_job',
+        input_schema=uc_schema({'job_id': JOB_ID}, required=['job_id']),
+        backend='compilation', handler_module='compilation',
+        handler_function='get_compilation_status', method='GET',
+        resource='/training/{id}/compile', param_map={'job_id': 'id'},
+        permissions=('view_training_jobs',),
+        **_status_sync(AcceptedWrite('compilation.get_compilation_status',
+                                     'update_item', 'table', 1))),
+    ToolSpec(
+        name='portal_models_compilation_create', domain='models',
+        title='Start a compilation',
+        description='Starts SageMaker Neo compilation jobs for a trained model.',
+        resource_type='compilation_job',
+        input_schema=uc_schema({
+            'job_id': JOB_ID,
+            'targets': array(enum(*COMPILATION_TARGETS), min_items=1),
+        }, required=['job_id']),
+        backend='compilation', handler_module='compilation',
+        handler_function='start_compilation_job', method='POST',
+        resource='/training/{id}/compile', param_map={'job_id': 'id'},
+        permissions=('create_training_jobs',), classification=MUTATING, phase=2,
+        idempotent=False, handler_audits=True,
+        status_tool='portal_models_compilation_get'),
+    ToolSpec(
+        name='portal_models_package', domain='models', title='Package a model',
+        description='Packages compiled model artifacts as Greengrass component packages.',
+        resource_type='model',
+        input_schema=uc_schema({'job_id': JOB_ID,
+                                'targets': array(identifier(), min_items=1)},
+                               required=['job_id']),
+        backend='packaging', handler_module='packaging',
+        handler_function='package_components', method='POST',
+        resource='/training/{id}/package',
+        param_map={'job_id': 'id', 'targets': 'targets'},
+        permissions=('promote_models',), classification=MUTATING, phase=3,
+        idempotent=False, handler_audits=True, status_tool='portal_models_get'),
+    ToolSpec(
+        name='portal_models_publish', domain='models', title='Publish a model component',
+        description='Publishes a packaged model as a Greengrass component version.',
+        resource_type='model',
+        input_schema=uc_schema({
+            'job_id': JOB_ID,
+            'component_name': {'type': 'string', 'pattern': r'^model-[A-Za-z0-9._-]{1,120}$'},
+            'component_version': {'type': 'string', 'pattern': r'^[0-9]{1,9}\.0\.0$'},
+            'friendly_name': text(256),
+            'targets': array(identifier(), min_items=1),
+            'skip_fit_check': boolean('vLLM records only.'),
+        }, required=['job_id', 'component_name', 'component_version']),
+        backend='greengrassPublish', handler_module='greengrass_publish',
+        handler_function='publish_component', method='POST',
+        resource='/training/{id}/publish', param_map={'job_id': 'id'},
+        permissions=('promote_models',), classification=MUTATING, phase=3,
+        idempotent=False, handler_audits=True, status_tool='portal_models_get'),
+)
+
+CATALOG: Tuple[ToolSpec, ...] = ADMIN + DEVICES + MODELS
 
 
 def main(argv: Sequence[str]) -> int:
