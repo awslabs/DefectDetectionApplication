@@ -403,7 +403,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - _Requirements: 1.3, 3.1, 3.5, 3.7, 3.9_
 
 - [ ] 6. Implement the portal request pipeline
-  - [ ] 6.1 Implement `principal.py` and `authz.py`
+  - [x] 6.1 Implement `principal.py` and `authz.py`
     - `principal_from_access_token` (email via per-container LRU over `AdminGetUser`, reading only `email` — D29 option (A)); `authorize(spec, principal, usecase_id)` through `shared_utils.rbac_manager.has_permission` per declared permission with the resolved scope, returning `identity_source`; marked `unauthorized_access` / `authorization_unavailable` entries with `rbac_check`'s details plus `mcp_tool`
     - Files: `edge-cv-portal/backend/functions/mcp_portal/principal.py`, `edge-cv-portal/backend/functions/mcp_portal/authz.py`; `edge-cv-portal/backend/tests/mcp/test_mcp_authz.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_authz.py -q`
@@ -415,7 +415,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_authz.py -q`
     - **Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 4.7, 16.3**
 
-  - [ ] 6.3 Implement `dispatch.py`
+  - [x] 6.3 Implement `dispatch.py`
     - `build_backend_event` (REST proxy v1 shape, `claims` = the verified payload object, `event['mcp']` block, percent-safe path parameters), `invoke` with `LAMBDA` (`connect_timeout=2`, `read_timeout=20`, `total_max_attempts=1`), the `MIN_DISPATCH_BUDGET_MS = 24_000` guard on `LAMBDA_CONTEXT`, lazy SSM dispatch map with the single `ResourceNotFoundException` refresh (D30, D32)
     - Files: `edge-cv-portal/backend/functions/mcp_portal/dispatch.py`; `edge-cv-portal/backend/tests/mcp/test_mcp_dispatch.py` (every case of the Testing Strategy row)
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_dispatch.py -q`
@@ -427,7 +427,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_dispatch_event.py -q`
     - **Validates: Requirements 1.3, 2.7, 3.9, 4.2**
 
-  - [ ] 6.5 Implement `errors.py` and `shaping.py`
+  - [x] 6.5 Implement `errors.py` and `shaping.py`
     - `ToolFailure`, `effect_unknown_message` (names `status_tool`), `map_backend_status` with the traceback/bearer scrub; collection shaping with dispatcher `limit`/`offset` slicing [review-9 N4], forwarded pagination never cut (`result_too_large` naming a smaller `limit`), `MAX_RESULT_BYTES = 200_000`, `resource_id` / `resource_id_path` extraction, and the [review-9 N5] `bind_usecase_path` check (mismatch or absent value → body dropped, `not_found`); [review-10 N3] a backend 404 on a `bind_usecase_path` spec maps to the same `ToolFailure('not_found', 'no such object in the named Use_Case')`, both outcomes with `status=404` and the real backend status only in the `mcp_tool` line and `details.status` [review-11 N2, task 1.14]
     - Files: `edge-cv-portal/backend/functions/mcp_portal/errors.py`, `edge-cv-portal/backend/functions/mcp_portal/shaping.py`; `edge-cv-portal/backend/tests/mcp/test_mcp_shaping.py` (incl. the `usecase_binding` mismatch and absent-value cases on `portal_data_labeling_job_get`, and its backend-404 case)
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_shaping.py -q`
