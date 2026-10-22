@@ -351,7 +351,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: as 5.1 for the `models` view
     - _Requirements: 1.1, 1.4, 3.1, 5.2, 5.6, 6.2_
 
-  - [ ] 5.4 Author the `data` view rows
+  - [x] 5.4 Author the `data` view rows
     - Rows from `datasets.py`, `pre_labeled_datasets.py`, `data_management.py`, `captures.py`, `labeling.py`, `dda_labeling.py`, `synthetic_data.py`; `setdefault`-scoped job/team/rerun specs keep `usecase_id` RBAC-only (Backlog 27); `portal_data_bucket_attach` absent (Backlog 24)
     - Carries [review-9 M1] `(→ query usecase_id)` on `portal_data_datasets_list`, `_datasets_preview_get`, `_prelabeled_list` and `(→ body usecase_id)` on `_datasets_count`, `_manifest_validate`; [review-9 M2] `limit (→ query limit)` on `_datasets_preview_get` and `_captures_list`, `offset (→ query offset)` on `_datasets_preview_get`; [review-9 N5] `bind_usecase_path='job.usecase_id'` on `portal_data_labeling_job_get` (the full name, [review-10 N6]) and **no** `portal_data_labeling_manifest_get` spec; [review-10 N1] `usecase_not_forwarded='injected'` on the ten `setdefault`-scoped specs and `'stored_record'` on `portal_data_synthetic_session_retrain`
     - Files: `edge-cv-portal/backend/functions/mcp_portal/catalog.py`
