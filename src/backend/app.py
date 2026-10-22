@@ -114,6 +114,7 @@ from endpoints import (
     streams,
     local_auth,
     health,
+    mcp_proxy,
     static_image_camera,
     static_video_camera
 )
@@ -185,6 +186,10 @@ app.include_router(streams.router)
 # dependency — /local-auth/login and /local-auth/status must be reachable
 # without credentials (exempt from authorize_request, task 9.4).
 app.include_router(local_auth.router)
+# Edge_MCP_Server (mcp-servers): GET /local-auth/whoami, POST /mcp and
+# GET /mcp/status, behind authorize_request like every other API route.
+app.include_router(local_auth.authenticated_router)
+app.include_router(mcp_proxy.router)
 # Health endpoint (edge-deploy-reliability, Defect B): unauthenticated like
 # local_auth's router (exempt from authorize_request) — the docker healthcheck
 # (healthcheck.py) probes GET /health without credentials, and the Greengrass
@@ -452,6 +457,21 @@ if __name__ == "__main__":  # pragma: no cover
     except Exception:
         logger.exception("Triton model-load watchdog could not be started; LocalServer runs without it")
 
+    # Start the Edge_MCP_Server supervisor (mcp-servers): it runs the MCP
+    # child when McpServerEnabled is true. Contained like the watchdog
+    # above: LocalServer starts as before if it cannot be started.
+    mcp_supervisor = None
+    try:
+        import mcp_edge
+        mcp_supervisor = mcp_edge.start_supervisor(
+            backend_base_url=("https://127.0.0.1:5443"
+                              if utils.is_authorization_enabled_on_station()
+                              else "http://127.0.0.1:5000"),
+            features={"vllm"} if VLLM_AVAILABLE else set(),
+            component_version=system.get_local_server_component_version())
+    except Exception:
+        logger.exception("MCP supervisor could not be started; LocalServer runs without it")
+
     # Run the server to completion. main() awaits uvicorn's serve(), which
     # returns once the SIGTERM-triggered graceful shutdown (including the
     # bounded shutdown_event cleanup) has finished — no run_forever(): the
@@ -471,6 +491,12 @@ if __name__ == "__main__":  # pragma: no cover
         if vllm_server is not None:
             try:
                 vllm_server.stop()
+            except Exception:
+                logger.error(traceback.format_exc())
+        # Stop the MCP child (SIGTERM, then SIGKILL after 10 s).
+        if mcp_supervisor is not None:
+            try:
+                mcp_supervisor.stop()
             except Exception:
                 logger.error(traceback.format_exc())
         # Close loop to prevent the resource leak.

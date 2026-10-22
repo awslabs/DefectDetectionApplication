@@ -21,7 +21,8 @@ packages. The supervised child process runs ``mcp_edge.child`` from the
 in-image virtualenv, the only place the ``mcp`` SDK is installed. Nothing
 under ``mcp_edge/child/`` is imported by the Backend_API process.
 
-This module is imported by both, so it holds constants only.
+This module is imported by both, so it holds constants and one entry point,
+``start_supervisor``, whose import of the backend-side modules is lazy.
 """
 
 # Semver of the edge catalog; serverInfo.version is "<this>+<component>".
@@ -36,3 +37,12 @@ VENV_PYTHON = "/opt/dda/mcp-venv/bin/python"
 
 # The loopback port the child listens on.
 CHILD_PORT = 5790
+
+
+def start_supervisor(backend_base_url, features=(), component_version="unknown"):
+    """Start the Edge MCP supervisor of the Backend_API process (app.py).
+    Backend process only; see ``mcp_edge.supervisor.start_supervisor``."""
+    from mcp_edge import supervisor  # noqa: WPS433 — lazy: the child never needs it
+
+    return supervisor.start_supervisor(backend_base_url, features=features,
+                                       component_version=component_version)

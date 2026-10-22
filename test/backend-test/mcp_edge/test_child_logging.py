@@ -19,6 +19,10 @@ rows, Data Models "Edge access-log record", Input validation "Child CLI
 arguments"; tasks.md 11.2). Requirements 9.7, 11.1, 11.2.
 
 Child-side suite (EDGE_CHILD_PYTEST, the venv's interpreter).
+
+The property test at the end (task 11.3):
+**Feature: mcp-servers, Property 13: Edge log record hygiene**
+Validates: Requirements 11.1, 11.2, 9.7.
 """
 import io
 import json
@@ -26,6 +30,8 @@ import logging
 import sys
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from mcp_edge.child import __main__ as child_main
 from mcp_edge.child import logging as child_logging
@@ -251,3 +257,86 @@ def test_version_and_help_exit_0(capsys):
         child_main.parse_args(["--help"])
     assert exited.value.code == 0
     assert "--backend-url" in capsys.readouterr().out
+
+
+# ------------------------------------------------ Property 13 (task 11.3)
+# **Feature: mcp-servers, Property 13: Edge log record hygiene**
+# For any completion record built from arbitrary principal, headers,
+# arguments, query strings and outcome, the serialized line carries the
+# marker fields, principal, role, outcome, duration and request id, and never
+# the Authorization value, the token query value, a credential-named
+# argument's value, or a body larger than 1 KiB.
+
+_PLAIN = st.text(alphabet=st.characters(min_codepoint=0x20, max_codepoint=0x7e,
+                                        blacklist_characters="\\\""),
+                 min_size=1, max_size=300).filter(lambda s: "SECRET-" not in s)
+_SECRET = st.from_regex(r"\ASECRET-[0-9a-f]{16}\Z", fullmatch=True)
+_CREDENTIAL_ARGS = ("password", "token", "secret", "urlSecret")
+_OUTCOMES = st.sampled_from(["success", "failure", "denied", "not_authenticated",
+                             "invalid_input", "timeout"])
+
+
+@st.composite
+def completions(draw):
+    principal = draw(st.one_of(
+        st.none(),
+        st.fixed_dictionaries({"username": _PLAIN,
+                               "role": st.one_of(st.none(), _PLAIN),
+                               "source": st.sampled_from(
+                                   ["local_session", "existing_token_auth",
+                                    "anonymous"])})))
+    authorization = draw(_SECRET)
+    query_token = draw(_SECRET)
+    credentials = {name: draw(_SECRET) for name in _CREDENTIAL_ARGS
+                   if draw(st.booleans())}
+    body = "B" * draw(st.integers(1025, 4096))
+    arguments = dict(credentials, body=body,
+                     **draw(st.dictionaries(st.sampled_from(["name", "limit", "id"]),
+                                            _PLAIN, max_size=3)))
+    return dict(
+        tool=draw(st.from_regex(r"\Aedge_[a-z_]{1,40}\Z", fullmatch=True)),
+        outcome=draw(_OUTCOMES), principal=principal,
+        request_id=draw(_PLAIN), mcp_server="dda-edge-mcp@1.0.0+1.0.130",
+        mcp_client=draw(_PLAIN), status=draw(st.one_of(st.none(),
+                                                       st.integers(100, 599))),
+        duration_ms=draw(st.floats(0, 1e6, allow_nan=False)),
+        headers={"Authorization": f"Bearer {authorization}",
+                 "Cookie": f"session={authorization}"},
+        arguments=arguments, query={"token": query_token},
+    ), [authorization, query_token, *credentials.values()], body
+
+
+def _cut(value):
+    return value[:child_logging.MAX_FIELD_CHARS]
+
+
+@settings(max_examples=100, deadline=None)
+@given(case=completions())
+def test_property_edge_log_record_hygiene(case):
+    kwargs, secrets, body = case
+    stream = io.StringIO()
+    child_logging.emit(child_logging.build_record(**kwargs), stream=stream)
+    line = stream.getvalue()
+    assert line.endswith("\n") and line.count("\n") == 1
+    record = json.loads(line)
+
+    assert record["event"] == "mcp tool" and record["channel"] == "mcp"
+    assert record["tool"] == kwargs["tool"]
+    assert record["outcome"] == kwargs["outcome"]
+    assert record["request_id"] == _cut(kwargs["request_id"])
+    assert record["duration_ms"] == int(kwargs["duration_ms"])
+    principal = kwargs["principal"]
+    if principal is None:
+        assert record["principal"] == "anonymous" and record["role"] is None
+    else:
+        assert record["principal"] == _cut(principal["username"])
+        assert record["role"] == (None if principal["role"] is None
+                                  else _cut(principal["role"]))
+    assert record["level"] == ("warning" if kwargs["outcome"] in
+                               ("denied", "not_authenticated") else "info")
+
+    for secret in secrets:
+        assert secret not in line
+    assert "SECRET-" not in line
+    assert body not in line and "B" * 1025 not in line
+    assert "Authorization" not in line and "Cookie" not in line

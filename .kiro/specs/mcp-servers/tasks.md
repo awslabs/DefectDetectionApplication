@@ -565,13 +565,13 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CONTAINER_PYTEST test/backend-test/mcp_edge/test_supervisor.py test/backend-test/mcp_edge/test_log_relay.py`
     - _Requirements: 10.7, 11.4, 12.1, 12.2, 12.3, 12.8, 15.3_
 
-  - [ ] 10.6 Write property test for edge configuration parsing and transitions
+  - [x] 10.6 Write property test for edge configuration parsing and transitions
     - **Feature: mcp-servers, Property 11: Edge configuration parsing and transitions**
     - File `test/backend-test/mcp_edge/test_config.py`; injected `read_component_config_via_ipc`; Hypothesis, min 100 examples
     - Verify: `EDGE_CONTAINER_PYTEST test/backend-test/mcp_edge/test_config.py`
     - **Validates: Requirements 12.1, 12.2, 10.7**
 
-  - [ ] 10.7 Implement the `/mcp` proxy route and wire the supervisor into `app.py`
+  - [x] 10.7 Implement the `/mcp` proxy route and wire the supervisor into `app.py`
     - `mcp_edge/proxy.py` (`forward`: header allowlist without `Origin`, `X-Request-ID` injection, `httpx` 0.24.1 `Client` with `HTTPTransport(retries=0)`, `stream=True` send, buffered relay ≤ 4 MiB → `502 mcp_bad_upstream`, read timeout → `504 mcp_timeout`, refused → `503 mcp_unavailable`, `MCP_PROXY_UPSTREAM_READ_S = 150.0`); `endpoints/mcp_proxy.py` on `get_api_router()` (sync `POST /mcp` with the async `_mcp_body` dependency and 1 MiB 413, Origin rule, D14 exposure rule, 503 when disabled/not ready; `GET /mcp/status`)
     - `app.py`: include `mcp_proxy.router` and `local_auth.authenticated_router`; start the supervisor after `health.set_vllm_server(vllm_server)` in its own try/except with `component_version=system.get_local_server_component_version()` and `features={'vllm'}` only when `VLLM_AVAILABLE`; `mcp_supervisor.stop()` in `finally`. No change to ports, TLS selection, CORS or other routers
     - Files: new `src/backend/mcp_edge/proxy.py`, `src/backend/endpoints/mcp_proxy.py`; `src/backend/app.py`; new `test/backend-test/mcp_edge/test_proxy_route.py` (real `authorize_request` per matrix row incl. disabled account and `?token=` at `/mcp` → 401; `Origin` → 403 never forwarded; non-loopback on plaintext → 403; stalled upstream → 504; > 4 MiB → 502)
@@ -598,7 +598,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_child_logging.py -q` (task 11.3) and `PYTHONPATH=src/backend uv run --python 3.11 --with-requirements src/backend/mcp_edge/requirements.lock.txt -m mcp_edge.child --version`
     - _Requirements: 9.7, 11.1, 11.2_
 
-  - [ ] 11.3 Write property test for edge log record hygiene
+  - [x] 11.3 Write property test for edge log record hygiene
     - **Feature: mcp-servers, Property 13: Edge log record hygiene**
     - File `test/backend-test/mcp_edge/test_child_logging.py`; Hypothesis, min 100 examples
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_child_logging.py -q`

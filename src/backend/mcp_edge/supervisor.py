@@ -38,6 +38,7 @@ propagates to the Backend_API (Requirement 12.3).
 """
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -46,7 +47,7 @@ from typing import Callable, Iterable, List, Optional
 
 import mcp_edge
 from mcp_edge import CHILD_PORT, VENV_PYTHON, __version__, log_relay
-from mcp_edge.config import McpState
+from mcp_edge.config import McpConfig, McpState
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,7 @@ STABLE_AFTER_S = 60.0
 LOOP_TICK_S = 1.0
 EXIT_USAGE = 2
 KNOWN_FEATURES = ("vllm",)
+COMPONENT_VERSION_RE = re.compile(r"^[A-Za-z0-9.\-]{1,64}$")
 
 
 def restart_requested(previous: McpState, current: McpState) -> bool:
@@ -71,6 +73,16 @@ def restart_requested(previous: McpState, current: McpState) -> bool:
     return (previous.server_enabled and current.server_enabled
             and (previous.mutating_enabled != current.mutating_enabled
                  or previous.allowed_origins != current.allowed_origins))
+
+
+def clean_component_version(value) -> str:
+    """The component version as the child's ``--server-version`` accepts it
+    (``[A-Za-z0-9.-]+`` after the ``+``); anything else, such as the
+    ``NOT_FOUND`` fallback of ``system.get_local_server_component_version``,
+    becomes ``unknown`` so the child is not refused its arguments. Pure."""
+    if isinstance(value, str) and COMPONENT_VERSION_RE.match(value):
+        return value
+    return "unknown"
 
 
 def _default_probe(port: int) -> bool:
@@ -105,7 +117,7 @@ class McpSupervisor:
         self.backend_base_url = backend_base_url
         self.features = tuple(sorted(f for f in set(features) if f in KNOWN_FEATURES))
         self.version = version
-        self.component_version = component_version
+        self.component_version = clean_component_version(component_version)
         self._popen = popen
         self._probe = probe or _default_probe
         self._clock = clock
@@ -243,6 +255,9 @@ class McpSupervisor:
         if child.poll() is not None:
             self._on_exit(child.returncode)
             return
+        if self._stop_event.is_set():
+            self._terminate()
+            return
         self.last_error = (f"child not ready within {READINESS_TIMEOUT_S:.0f} s")
         logger.error("MCP child not ready within %.0f s; restarting",
                      READINESS_TIMEOUT_S)
@@ -253,7 +268,8 @@ class McpSupervisor:
     def _wait_ready(self, child) -> bool:
         deadline = self._clock() + READINESS_TIMEOUT_S
         while self._clock() < deadline:
-            if child.poll() is not None:
+            # stop() must not wait out the 20 s readiness window.
+            if self._stop_event.is_set() or child.poll() is not None:
                 return False
             if self._probe(self.port):
                 return True
@@ -337,3 +353,26 @@ class McpSupervisor:
             self.config.stop()
         except Exception:  # noqa: BLE001 — never propagates (12.3)
             logger.exception("Could not stop the MCP supervisor cleanly")
+
+
+# The process's supervisor, read by the /mcp routes (endpoints/mcp_proxy.py).
+_ACTIVE: Optional[McpSupervisor] = None
+
+
+def start_supervisor(backend_base_url: str, features: Iterable[str] = (),
+                     component_version: str = "unknown",
+                     config: Optional[McpConfig] = None) -> McpSupervisor:
+    """Create the process's supervisor over a new ``McpConfig``, start it and
+    make it the active one. ``McpSupervisor.start`` never raises."""
+    global _ACTIVE
+    supervisor = McpSupervisor(config if config is not None else McpConfig(),
+                               backend_base_url, features=features,
+                               component_version=component_version)
+    supervisor.start()
+    _ACTIVE = supervisor
+    return supervisor
+
+
+def active_supervisor() -> Optional[McpSupervisor]:
+    """The supervisor ``start_supervisor`` created, or None."""
+    return _ACTIVE
