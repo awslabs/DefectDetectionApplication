@@ -251,7 +251,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
 #### Portal
 
 - [ ] 2. Mark audit entries and expose the channel filter (shared layer, `audit_logs.py`, audit UI)
-  - [ ] 2.1 Add the MCP_Audit_Marker and the request audit context to `shared_utils`
+  - [x] 2.1 Add the MCP_Audit_Marker and the request audit context to `shared_utils`
     - New `MCP_MARKER_FIELDS = ('channel', 'mcp_tool', 'mcp_server', 'mcp_client', 'mcp_request_id')`; `ATTRIBUTION_FIELDS` unchanged (five fields)
     - `attribution_from(event, user, usecase_id, identity_source)`: with a dict `event['mcp']` it adds the five marker fields (`channel='mcp'`, `'unknown'` for absent values), falls back to `event['mcp']['principal_email']` for `email`, and uses the block's `identity_source` without a registry read; byte-identical output for events without the block
     - D25: `_REQUEST_AUDIT_CONTEXT`, `_remember_request_event(event)` called first in `get_user_from_event` (kept when the stored event has an `mcp` block, the new one has none and `_X_AMZN_TRACE_ID` is unchanged — the `synthetic_data.retrain_session` case), `_current_request_mcp_event()`, and `_attribution_attributes(identity, event, usecase_id)` substituting the remembered event when both are `None`, adding `channel` on every entry and the `mcp_*` attributes only for `channel == 'mcp'`. `log_audit_event`, `record_audit_event_strict`, `finalize_audit_event` signatures unchanged
@@ -278,7 +278,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - _Requirements: 4.6_
 
 - [ ] 3. Create the portal MCP package foundation, discovery and token validation
-  - [ ] 3.1 Add the MCP Lambda layer, the package skeleton and the test-time pins
+  - [x] 3.1 Add the MCP Lambda layer, the package skeleton and the test-time pins
     - `edge-cv-portal/backend/layers/mcp/requirements.txt` = `mcp==2.3.0`, `mangum==0.22.0`; `edge-cv-portal/backend/layers/mcp/build.sh` following `layers/jwt/build.sh`, installing with `pip install --platform manylinux2014_x86_64 --only-binary=:all: --python-version 3.11 --implementation cp -r requirements.txt -t python/` (D19)
     - `edge-cv-portal/backend/functions/mcp_portal/__init__.py`: `__version__`, `DELIVERED_PHASES = (1,)`, `PROTOCOL_REVISIONS = ('2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26')`, `VIEWS = ('data', 'models', 'devices', 'workflows', 'admin')`
     - Add `mcp==2.3.0` and `mangum==0.22.0` to `edge-cv-portal/backend/requirements-dev.txt`; leave `functions/requirements.txt` and `layers/jwt/requirements.txt` byte-identical (both are gate-pinned)
@@ -496,7 +496,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - _Requirements: 5.3, 5.4, 16.5_
 
 - [ ] 8. Implement the portal infrastructure (`EdgeCVPortalMcpStack`) and the opt-out guard
-  - [ ] 8.1 Add the context helpers and the two additive members of existing stacks
+  - [x] 8.1 Add the context helpers and the two additive members of existing stacks
     - `mcpServerEnabled(contextValue)` (default on; only a trimmed, lower-cased `false` is off) and `mcpMutatingToolsEnabled(contextValue)` (default `'false'`) in `context-helpers.ts`; `ComputeStack.mcpBackendHandlers` (the 32 keys) and `ApiGatewayStack.componentConfigurationHandler`; no public layer member
     - Files: `edge-cv-portal/infrastructure/lib/context-helpers.ts`, `edge-cv-portal/infrastructure/lib/compute-stack.ts`, `edge-cv-portal/infrastructure/lib/api-gateway-stack.ts`; extend `edge-cv-portal/infrastructure/test/context-helpers.property.test.ts` (fast-check over arbitrary context strings)
     - Verify: `CDK_TEST test/context-helpers.property.test.ts`; `python3 -m pytest test/backend-test/security/preservation/test_preservation_iam_cdk_synth.py -p no:cacheprovider --noconftest -q` (ComputeStack IAM grants unchanged)
@@ -534,13 +534,13 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
 #### Edge
 
 - [ ] 10. Implement the Backend_API changes (backend process; no `mcp` import)
-  - [ ] 10.1 Share one IPC component-configuration reader
+  - [x] 10.1 Share one IPC component-configuration reader
     - New public `local_auth.config.read_component_config_via_ipc() -> dict` (today's `_read_local_login_enabled_via_ipc` body up to `get_component_config`, guarded by a module-level `threading.Lock`, `{}` for non-dict results); `_read_local_login_enabled_via_ipc` delegates to it (behaviour-preserving); one `DefectDetectionConfig` instance and one IPC connection per process (M4)
     - Files: `src/backend/local_auth/config.py`; new `test/backend-test/mcp_edge/test_shared_ipc_reader.py`
     - Verify: `EDGE_CONTAINER_PYTEST test/backend-test/mcp_edge/test_shared_ipc_reader.py test/backend-test/local_auth` passes (existing `local_auth` tests unmodified)
     - _Requirements: 12.2, 12.3_
 
-  - [ ] 10.2 Return an `AuthDecision` from the authorizer without changing the matrix
+  - [x] 10.2 Return an `AuthDecision` from the authorizer without changing the matrix
     - `AuthDecision(source, username, role, expires_at)`; `_validate_local_session_token` returns the `Account` or `None`; `_session_token_expiry`; `validate_token` keeps signature, raises and `None` return, its body moved verbatim into `_introspect_token` (returns the introspection JSON); `authorize_credential` returns `None` (open access) or an `AuthDecision`; `authorize_request` stores `request.state.auth_decision` (anonymous default)
     - Modify `test/backend-test/api-endpoints/test_authorize_request.py` lines 424/430 only (`isinstance(result, AuthDecision)`, `source`), line 420 and every raise assertion byte-identical; leave `test/backend-test/utils/test_auth.py` byte-identical (gate-listed and source-pinned by `test_preservation_secrets_auth_suite.py`)
     - Files: `src/backend/utils/auth.py`; `test/backend-test/api-endpoints/test_authorize_request.py`
@@ -585,7 +585,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - **Validates: Requirements 12.4, 12.5**
 
 - [ ] 11. Implement the edge MCP child (venv side)
-  - [ ] 11.1 Resolve and pin the venv lock
+  - [x] 11.1 Resolve and pin the venv lock
     - `src/backend/mcp_edge/requirements.lock.txt` (D20): resolve with `uv pip compile --python-version 3.10 --python-platform aarch64-manylinux_2_35`; pins include `mcp==2.3.0`, `mcp-types==2.3.0`, `rpds-py==0.30.0`, `starlette==1.7.0`, and `exceptiongroup==1.3.1; python_version < "3.11"` as the only marker line
     - Prove wheel availability for every image: install the lock with `--only-binary :all:` for cp310 aarch64 (JP6, Ubuntu 22.04), cp311 aarch64 (JP5 Ubuntu 20.04 and JP7 Ubuntu 24.04) and cp311 x86_64 (amd64, x86_64_nvidia), and additionally check every wheel's manylinux tag is ≤ `manylinux_2_31` for the JP5 base (glibc 2.31 — the design's `manylinux_2_35` resolve target is above it); record the wheel file names of `rpds-py`, `pydantic-core`, `cryptography`, `cffi` in the task evidence (13.5)
     - Files: new `src/backend/mcp_edge/requirements.lock.txt`
@@ -697,7 +697,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
   - _Requirements: 16.2, 16.3, 16.5, 16.7, 16.8_
 
 - [ ] 14. Add the on-hardware harness stage (read-only part)
-  - [ ] 14.1 Register the `mcp` capability and the MCP profile flags in the harness
+  - [x] 14.1 Register the `mcp` capability and the MCP profile flags in the harness
     - `KNOWN_CAPABILITIES` gains `mcp`; device profiles accept `mcp_mutating` and `mcp_snapshot` booleans (default false; parsed now, used from Phase 2); `DDA_HARNESS_MCP_SOAK_S` (default 600) and `DDA_HARNESS_ON_DEVICE`; `devices.yaml.example` and the README stage table document them and the stage's invocation under Python 3.11 with `mcp==2.3.0`
     - Files: `test/on-hardware/harness/harnesslib/config.py`, `test/on-hardware/harness/devices.yaml.example`, `test/on-hardware/harness/README.md`, `test/on-hardware/harness/selftest/test_config.py`
     - Verify: `python3 -m pytest test/on-hardware/harness/selftest -q`
