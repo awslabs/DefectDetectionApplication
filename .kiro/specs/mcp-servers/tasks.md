@@ -330,7 +330,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_tool_list.py -q`
     - **Validates: Requirements 1.7, 5.4, 10.7, 14.4, 17.3**
 
-- [ ] 5. Author every portal catalog row and the catalog honesty suites (revision-11 tables, all phases; only Phase 1 delivered)
+- [x] 5. Author every portal catalog row and the catalog honesty suites (revision-11 tables, all phases; only Phase 1 delivered)
   - [x] 5.1 Author the `admin` view rows
     - All admin rows from `usecases.py`, `user_management.py`, `user_admin.py`, `audit_logs.py` plus `portal_admin_whoami` (`server.whoami`, the self-identity exception); `'global'` refused on the two role rows; account-lifecycle tools absent (Backlog 2); credential-handling routes excluded (5.5)
     - Carries [review-9 M1] `portal_admin_users_list` `usecase_id? (→ query usecase_id)` and `portal_admin_usecase_delete` `(→ path id)`; [review-9 M2] `portal_admin_audit_logs_query` `limit (→ query limit)`; [review-9 N4] `offset` on `portal_admin_usecases_list`; [review-10 N1] `usecase_not_forwarded='dead_filter'` on `portal_admin_audit_logs_query`
@@ -365,38 +365,38 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: as 5.1 for the `workflows` view; the aggregate view lists 87 Phase-1 tools
     - _Requirements: 1.1, 1.4, 3.1, 3.6, 5.6, 5.7_
 
-  - [ ] 5.6 Export the catalog routes and pin them (pytest half of the route test)
+  - [x] 5.6 Export the catalog routes and pin them (pytest half of the route test)
     - Run `python -m mcp_portal.catalog --export-routes`; check in `catalog_routes.json` and `catalog_tools.json`; `test_mcp_catalog_routes_export.py` pins both byte-for-byte and adds the handler-dispatch half (entry point → `handler_function` on a branch matching method and resource, followed through shims; `deployments.handler` discriminator case; `POST /components` and `/components/discover` absent)
     - Files: `edge-cv-portal/backend/functions/mcp_portal/catalog_routes.json`, `edge-cv-portal/backend/functions/mcp_portal/catalog_tools.json`; `edge-cv-portal/backend/tests/mcp/test_mcp_catalog_routes_export.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_catalog_routes_export.py -q`
     - _Requirements: 1.1, 1.3, 3.1_
 
-  - [ ] 5.7 Write property test for portal catalog well-formedness
+  - [x] 5.7 Write property test for portal catalog well-formedness
     - **Feature: mcp-servers, Property 2: Catalog well-formedness**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_catalog.py`: every non-AST clause of Property 2 over the portal `CATALOG`, including the revision-10 clauses — cursor ⇒ forwarded `limit` [review-9 M2], dispatcher-sliced collection ⇒ `offset` [review-9 N4], `confirm_target` may name `oneOf` branches [review-9 N7], `bind_usecase_path` well-formed [review-9 N5]; and the revision-11 clauses: `usecase_not_forwarded` set only where `usecase_id` has no `param_map` entry [review-10 N1], `minItems == maxItems == 1` on any array a per-branch `confirm_target` indexes, and a `pattern` excluding `""` on every per-branch target string [review-10 N5]; Hypothesis over spec selection, min 100 examples
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_property_mcp_catalog.py -q`
     - **Validates: Requirements 1.2, 1.3, 3.1, 3.9, 5.1, 5.2, 5.6, 14.1, 14.2, 14.4, 17.1**
 
-  - [ ] 5.8 Write the portal classification honesty test
+  - [x] 5.8 Write the portal classification honesty test
     - AST walk of `test_mcp_catalog_classification.py` per the Testing Strategy, with [review-9 N2]: `accepted_writes` matched on `(module.function, call, receiver source text)` + occurrence count, and `SHARED_LAYER_WRITERS` derived from `layers/shared/python/*.py` (minus `log_audit_event`) with the containment assertion (fourteen writers at `c3bf88c1`, including the seven revision-9 named and the five `user_roles_dao` writers and `s3_cors.ensure_bucket_cors`); fixed cases (`workflow_validation.validate_workflow` not `RO`; the eight audited reads and ten status-sync tools `RO`; `camera_registry.create_response` via module object not a write)
     - Files: `edge-cv-portal/backend/tests/mcp/test_mcp_catalog_classification.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_catalog_classification.py -q`; removing one `accepted_writes` entry makes it fail naming the tool and verb
     - _Requirements: 5.1, 5.2, 1.2_
 
-  - [ ] 5.9 Write the `handler_audits` honesty test
+  - [x] 5.9 Write the `handler_audits` honesty test
     - AST classification of audit calls by `result` over the call graph, `PINNED_AUDIT_FLAGS`, and every fixed regression case of the Testing Strategy row (camera reads, `list_deployments`, `list_devices`, `get_camera_binding_context`, `_fail_conversion`, revision-9 cases)
     - Files: `edge-cv-portal/backend/tests/mcp/test_mcp_handler_audit_flags.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_handler_audit_flags.py -q`
     - _Requirements: 4.1, 4.3, 16.4_
 
-  - [ ] 5.10 Write the argument ↔ route-parameter test
+  - [x] 5.10 Write the argument ↔ route-parameter test
     - AST read collector per the Testing Strategy row (reads, `400 … required` guards without reassignment, `validate_required_fields`, `anyOf` membership, `limit` maximum), plus [review-9 N3] folding of string constants (module-level, same-module or imported; `Name` and `module.CONST`) and tuple/list/set constants (module-level or function-local) iterated against `body`/`params` in loops and comprehensions, `getattr(<module>, '<literal>')` delegation, and path-mapped targets checked against the `{name}` segments of `resource`; [review-9 M2] the cursor/`limit` rule; and [review-10 N1] the converse `usecase_id` clause skipping specs that set `usecase_not_forwarded`
     - Fixed cases: every case of the Testing Strategy row; the thirteen [review-9 M1] rows; the five [review-9 M2] rows with `build_jobs.get_build_logs` as the failing variant; the four [review-9 N3] rows plus the revision-10 additions (`update_usecase`'s `updatable_fields`, `portal_data_labeling_job_create`'s DDA branch, `usecases.handler`'s positional path argument); the three [review-9 N4] `offset` rows; `setdefault`-scoped specs have no `param_map['usecase_id']`; [review-10 N1] `portal_admin_audit_logs_query` (`dead_filter`) and `portal_data_synthetic_session_retrain` (`stored_record`)
     - Files: `edge-cv-portal/backend/tests/mcp/test_mcp_catalog_arguments.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_catalog_arguments.py -q`
     - _Requirements: 1.3, 1.6, 5.6_
 
-  - [ ] 5.11 Write the catalog ⊆ handler permission test
+  - [x] 5.11 Write the catalog ⊆ handler permission test
     - Table-driven subset check with every fixed case of the Testing Strategy row (each former permission as the failing variant; `portal_models_delete` absent)
     - Files: `edge-cv-portal/backend/tests/mcp/test_mcp_catalog_permissions.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_catalog_permissions.py -q`

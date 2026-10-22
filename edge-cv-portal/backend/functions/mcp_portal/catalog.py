@@ -1183,7 +1183,10 @@ DEVICES: Tuple[ToolSpec, ...] = (
         handler_function='provision_components', method='POST',
         resource='/shared-components/provision',
         param_map=UC_QUERY, param_in={'usecase_id': 'body'},
-        permissions=('update_usecases',), classification=MUTATING, phase=3,
+        # Branch base: the handler requires PortalAdmin on the named Use_Case
+        # (check_user_access(..., 'PortalAdmin')); `system_admin` (U) admits
+        # exactly that role.
+        permissions=('system_admin',), classification=MUTATING, phase=3,
         handler_audits_denials=True,
         status_tool='portal_devices_shared_components_list'),
     ToolSpec(
@@ -2286,7 +2289,8 @@ def _plugin_version_read(name: str, title: str, description: str, suffix: str,
                                required=['plugin_id', 'version']),
         backend=backend, handler_module=module, handler_function=function,
         method='GET', resource=f'/plugins/{{id}}/versions/{{v}}{suffix}',
-        param_map=PLUGIN_VERSION_PATH, permissions=('node-designer:read',))
+        param_map=PLUGIN_VERSION_PATH, permissions=('node-designer:read',),
+        handler_audits_denials=True)
 
 
 def _plugin_version_write(name: str, title: str, description: str, suffix: str,
@@ -2482,7 +2486,8 @@ WORKFLOWS: Tuple[ToolSpec, ...] = (
         backend='workflowTesting', handler_module='workflow_testing',
         handler_function='list_test_runs', method='GET',
         resource='/workflows/{id}/test-runs', param_map={'workflow_id': 'id'},
-        permissions=('workflow:read',), result_shape='collection',
+        permissions=('workflow:read',), handler_audits_denials=True,
+        result_shape='collection',
         collection_key='test_runs'),
     ToolSpec(
         name='portal_workflows_test_run_get', domain='workflows',
@@ -2495,6 +2500,7 @@ WORKFLOWS: Tuple[ToolSpec, ...] = (
         backend='workflowTesting', handler_module='workflow_testing',
         handler_function='get_test_run', method='GET', resource='/test-runs/{id}',
         param_map={'run_id': 'id'}, permissions=('workflow:read',),
+        handler_audits_denials=True,
         **_status_sync(AcceptedWrite('workflow_testing.sync_run_status_from_execution',
                                      'update_item', 'dynamodb.Table(TEST_RUNS_TABLE)', 1))),
     ToolSpec(
@@ -2505,7 +2511,8 @@ WORKFLOWS: Tuple[ToolSpec, ...] = (
         backend='workflowTesting', handler_module='workflow_testing',
         handler_function='list_test_datasets', method='GET',
         resource='/test-datasets', param_map=UC_QUERY,
-        permissions=('workflow:read',), result_shape='collection',
+        permissions=('workflow:read',), handler_audits_denials=True,
+        result_shape='collection',
         collection_key='datasets'),
     ToolSpec(
         name='portal_workflows_test_dataset_get', domain='workflows',
@@ -2516,7 +2523,8 @@ WORKFLOWS: Tuple[ToolSpec, ...] = (
         backend='workflowTesting', handler_module='workflow_testing',
         handler_function='get_test_dataset', method='GET',
         resource='/test-datasets/{id}', param_map={'dataset_id': 'id'},
-        permissions=('workflow:read',)),
+        permissions=('workflow:read',),
+        handler_audits_denials=True),
     ToolSpec(
         name='portal_workflows_test_run_start', domain='workflows',
         title='Start a workflow test run',
@@ -2534,7 +2542,8 @@ WORKFLOWS: Tuple[ToolSpec, ...] = (
         backend='workflowTesting', handler_module='workflow_testing',
         handler_function='start_test_run', method='POST',
         resource='/workflows/{id}/test-runs', param_map={'workflow_id': 'id'},
-        permissions=('workflow:test',), classification=MUTATING, phase=2,
+        permissions=('workflow:test',), handler_audits_denials=True,
+        classification=MUTATING, phase=2,
         idempotent=False, handler_audits=True,
         resource_id_path='test_run.test_run_id',
         status_tool='portal_workflows_test_run_get'),
@@ -2549,7 +2558,8 @@ WORKFLOWS: Tuple[ToolSpec, ...] = (
         backend='workflowTesting', handler_module='workflow_testing',
         handler_function='delete_test_dataset', method='DELETE',
         resource='/test-datasets/{id}', param_map={'dataset_id': 'id'},
-        permissions=('workflow:test',), classification=MUTATING,
+        permissions=('workflow:test',), handler_audits_denials=True,
+        classification=MUTATING,
         destructive=True, confirm_target='dataset_id', phase=3,
         handler_audits=True, status_tool='portal_workflows_test_datasets_list'),
     ToolSpec(
@@ -2571,7 +2581,8 @@ WORKFLOWS: Tuple[ToolSpec, ...] = (
         input_schema=uc_schema({'plugin_id': PLUGIN_ID}, required=['plugin_id']),
         backend='pluginRecords', handler_module='plugin_records',
         handler_function='get_plugin', method='GET', resource='/plugins/{id}',
-        param_map={'plugin_id': 'id'}, permissions=('node-designer:read',)),
+        param_map={'plugin_id': 'id'}, permissions=('node-designer:read',),
+        handler_audits_denials=True),
     _plugin_version_read('portal_workflows_plugin_version_get', 'Get a plugin version',
                          'Returns one version of a plugin record.', '',
                          'pluginRecords', 'plugin_records', 'get_version'),
@@ -2639,7 +2650,8 @@ WORKFLOWS: Tuple[ToolSpec, ...] = (
         backend='customNodeTypes', handler_module='custom_node_types',
         handler_function='get_node_type', method='GET',
         resource='/custom-node-types/{id}', param_map={'node_type_id': 'id'},
-        permissions=('node-designer:read',)),
+        permissions=('node-designer:read',),
+        handler_audits_denials=True),
     ToolSpec(
         name='portal_workflows_plugin_create', domain='workflows',
         title='Create a plugin',

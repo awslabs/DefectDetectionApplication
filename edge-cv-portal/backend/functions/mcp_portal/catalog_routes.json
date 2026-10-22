@@ -1,0 +1,907 @@
+[
+  {
+    "backend": "userAdmin",
+    "method": "GET",
+    "resource": "/admin/edge-sync/devices"
+  },
+  {
+    "backend": "userAdmin",
+    "method": "POST",
+    "resource": "/admin/edge-sync/devices/{deviceId}"
+  },
+  {
+    "backend": "userAdmin",
+    "method": "GET",
+    "resource": "/admin/users"
+  },
+  {
+    "backend": "userAdmin",
+    "method": "PUT",
+    "resource": "/admin/users/{username}/role"
+  },
+  {
+    "backend": "auditLogs",
+    "method": "GET",
+    "resource": "/audit-logs"
+  },
+  {
+    "backend": "buildJobs",
+    "method": "GET",
+    "resource": "/build-branches"
+  },
+  {
+    "backend": "buildConfig",
+    "method": "GET",
+    "resource": "/build-config"
+  },
+  {
+    "backend": "buildConfig",
+    "method": "PUT",
+    "resource": "/build-config"
+  },
+  {
+    "backend": "buildFleet",
+    "method": "GET",
+    "resource": "/build-servers"
+  },
+  {
+    "backend": "buildFleet",
+    "method": "POST",
+    "resource": "/build-servers"
+  },
+  {
+    "backend": "buildFleet",
+    "method": "DELETE",
+    "resource": "/build-servers/{id}"
+  },
+  {
+    "backend": "buildFleet",
+    "method": "POST",
+    "resource": "/build-servers/{id}/start"
+  },
+  {
+    "backend": "buildFleet",
+    "method": "POST",
+    "resource": "/build-servers/{id}/stop"
+  },
+  {
+    "backend": "buildJobs",
+    "method": "GET",
+    "resource": "/builds"
+  },
+  {
+    "backend": "buildJobs",
+    "method": "POST",
+    "resource": "/builds"
+  },
+  {
+    "backend": "buildJobs",
+    "method": "GET",
+    "resource": "/builds/{id}"
+  },
+  {
+    "backend": "buildJobs",
+    "method": "POST",
+    "resource": "/builds/{id}/cancel"
+  },
+  {
+    "backend": "buildJobs",
+    "method": "GET",
+    "resource": "/builds/{id}/logs"
+  },
+  {
+    "backend": "buildJobs",
+    "method": "POST",
+    "resource": "/builds/{id}/retry"
+  },
+  {
+    "backend": "captures",
+    "method": "GET",
+    "resource": "/captures"
+  },
+  {
+    "backend": "components",
+    "method": "GET",
+    "resource": "/components"
+  },
+  {
+    "backend": "componentConfiguration",
+    "method": "GET",
+    "resource": "/components/schema"
+  },
+  {
+    "backend": "components",
+    "method": "DELETE",
+    "resource": "/components/{id}"
+  },
+  {
+    "backend": "components",
+    "method": "GET",
+    "resource": "/components/{id}"
+  },
+  {
+    "backend": "customNodeTypes",
+    "method": "GET",
+    "resource": "/custom-node-types"
+  },
+  {
+    "backend": "customNodeTypes",
+    "method": "POST",
+    "resource": "/custom-node-types"
+  },
+  {
+    "backend": "customNodeTypes",
+    "method": "DELETE",
+    "resource": "/custom-node-types/{id}"
+  },
+  {
+    "backend": "customNodeTypes",
+    "method": "GET",
+    "resource": "/custom-node-types/{id}"
+  },
+  {
+    "backend": "customNodeTypes",
+    "method": "PUT",
+    "resource": "/custom-node-types/{id}"
+  },
+  {
+    "backend": "customNodeTypes",
+    "method": "POST",
+    "resource": "/custom-node-types/{id}/deprecate"
+  },
+  {
+    "backend": "datasets",
+    "method": "GET",
+    "resource": "/datasets"
+  },
+  {
+    "backend": "datasets",
+    "method": "POST",
+    "resource": "/datasets/count"
+  },
+  {
+    "backend": "preLabeledDatasets",
+    "method": "GET",
+    "resource": "/datasets/pre-labeled"
+  },
+  {
+    "backend": "preLabeledDatasets",
+    "method": "POST",
+    "resource": "/datasets/pre-labeled"
+  },
+  {
+    "backend": "preLabeledDatasets",
+    "method": "DELETE",
+    "resource": "/datasets/pre-labeled/{id}"
+  },
+  {
+    "backend": "preLabeledDatasets",
+    "method": "GET",
+    "resource": "/datasets/pre-labeled/{id}"
+  },
+  {
+    "backend": "datasets",
+    "method": "GET",
+    "resource": "/datasets/preview"
+  },
+  {
+    "backend": "preLabeledDatasets",
+    "method": "POST",
+    "resource": "/datasets/validate-manifest"
+  },
+  {
+    "backend": "deployments",
+    "method": "GET",
+    "resource": "/deployments"
+  },
+  {
+    "backend": "deployments",
+    "method": "POST",
+    "resource": "/deployments"
+  },
+  {
+    "backend": "deployments",
+    "method": "DELETE",
+    "resource": "/deployments/{id}"
+  },
+  {
+    "backend": "deployments",
+    "method": "GET",
+    "resource": "/deployments/{id}"
+  },
+  {
+    "backend": "deviceRegistrations",
+    "method": "GET",
+    "resource": "/device-registrations"
+  },
+  {
+    "backend": "deviceRegistrations",
+    "method": "GET",
+    "resource": "/device-registrations/thing-groups"
+  },
+  {
+    "backend": "deviceRegistrations",
+    "method": "DELETE",
+    "resource": "/device-registrations/{id}"
+  },
+  {
+    "backend": "devices",
+    "method": "GET",
+    "resource": "/devices"
+  },
+  {
+    "backend": "devices",
+    "method": "DELETE",
+    "resource": "/devices/{id}"
+  },
+  {
+    "backend": "devices",
+    "method": "GET",
+    "resource": "/devices/{id}"
+  },
+  {
+    "backend": "devices",
+    "method": "PUT",
+    "resource": "/devices/{id}"
+  },
+  {
+    "backend": "cameraRegistry",
+    "method": "GET",
+    "resource": "/devices/{id}/cameras"
+  },
+  {
+    "backend": "cameraRegistry",
+    "method": "POST",
+    "resource": "/devices/{id}/cameras"
+  },
+  {
+    "backend": "cameraRegistry",
+    "method": "GET",
+    "resource": "/devices/{id}/cameras/conflicts"
+  },
+  {
+    "backend": "cameraRegistry",
+    "method": "POST",
+    "resource": "/devices/{id}/cameras/refresh"
+  },
+  {
+    "backend": "cameraRegistry",
+    "method": "GET",
+    "resource": "/devices/{id}/cameras/static-image"
+  },
+  {
+    "backend": "cameraRegistry",
+    "method": "DELETE",
+    "resource": "/devices/{id}/cameras/static-image/pin"
+  },
+  {
+    "backend": "cameraVideoPin",
+    "method": "GET",
+    "resource": "/devices/{id}/cameras/static-video"
+  },
+  {
+    "backend": "cameraVideoPin",
+    "method": "DELETE",
+    "resource": "/devices/{id}/cameras/static-video/pin"
+  },
+  {
+    "backend": "cameraRegistry",
+    "method": "DELETE",
+    "resource": "/devices/{id}/cameras/{csid}"
+  },
+  {
+    "backend": "cameraRegistry",
+    "method": "PUT",
+    "resource": "/devices/{id}/cameras/{csid}"
+  },
+  {
+    "backend": "deviceLogs",
+    "method": "GET",
+    "resource": "/devices/{id}/logs"
+  },
+  {
+    "backend": "deviceLogsAnalyzer",
+    "method": "POST",
+    "resource": "/devices/{id}/logs/analyze"
+  },
+  {
+    "backend": "deviceLogs",
+    "method": "GET",
+    "resource": "/devices/{id}/logs/{component}"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "GET",
+    "resource": "/labeler/jobs"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "GET",
+    "resource": "/labeler/jobs/{jobId}/next"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "GET",
+    "resource": "/labeler/jobs/{jobId}/pool"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "POST",
+    "resource": "/labeler/jobs/{jobId}/steal"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "GET",
+    "resource": "/labeler/tasks/{taskId}/image-url"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "POST",
+    "resource": "/labeler/tasks/{taskId}/presentation-failure"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "POST",
+    "resource": "/labeler/tasks/{taskId}/submit"
+  },
+  {
+    "backend": "labeling",
+    "method": "GET",
+    "resource": "/labeling"
+  },
+  {
+    "backend": "labeling",
+    "method": "POST",
+    "resource": "/labeling"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "POST",
+    "resource": "/labeling-preview/runs"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "GET",
+    "resource": "/labeling-preview/runs/{runId}"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "GET",
+    "resource": "/labeling-teams"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "POST",
+    "resource": "/labeling-teams"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "DELETE",
+    "resource": "/labeling-teams/{teamId}"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "POST",
+    "resource": "/labeling-teams/{teamId}/members"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "DELETE",
+    "resource": "/labeling-teams/{teamId}/members/{userId}"
+  },
+  {
+    "backend": "labeling",
+    "method": "GET",
+    "resource": "/labeling/workteams"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "DELETE",
+    "resource": "/labeling/{id}"
+  },
+  {
+    "backend": "labeling",
+    "method": "GET",
+    "resource": "/labeling/{id}"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "POST",
+    "resource": "/labeling/{id}/rerun-prelabels"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "GET",
+    "resource": "/labeling/{id}/review"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "POST",
+    "resource": "/labeling/{id}/review/decisions"
+  },
+  {
+    "backend": "ddaLabeling",
+    "method": "POST",
+    "resource": "/labeling/{id}/review/finalize"
+  },
+  {
+    "backend": "labeling",
+    "method": "POST",
+    "resource": "/labeling/{id}/stop"
+  },
+  {
+    "backend": "models",
+    "method": "GET",
+    "resource": "/models"
+  },
+  {
+    "backend": "modelConverter",
+    "method": "POST",
+    "resource": "/models/convert"
+  },
+  {
+    "backend": "modelImport",
+    "method": "GET",
+    "resource": "/models/format-spec"
+  },
+  {
+    "backend": "modelImport",
+    "method": "POST",
+    "resource": "/models/import"
+  },
+  {
+    "backend": "modelConverter",
+    "method": "POST",
+    "resource": "/models/inspect"
+  },
+  {
+    "backend": "modelConverter",
+    "method": "GET",
+    "resource": "/models/types"
+  },
+  {
+    "backend": "modelImport",
+    "method": "POST",
+    "resource": "/models/validate"
+  },
+  {
+    "backend": "modelImport",
+    "method": "POST",
+    "resource": "/models/vllm"
+  },
+  {
+    "backend": "modelImport",
+    "method": "GET",
+    "resource": "/models/vllm/engine-spec"
+  },
+  {
+    "backend": "modelImport",
+    "method": "PUT",
+    "resource": "/models/vllm/{training_id}/engine-configuration"
+  },
+  {
+    "backend": "models",
+    "method": "GET",
+    "resource": "/models/{id}"
+  },
+  {
+    "backend": "models",
+    "method": "PUT",
+    "resource": "/models/{id}/stage"
+  },
+  {
+    "backend": "pluginImporter",
+    "method": "GET",
+    "resource": "/plugin-modules"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "GET",
+    "resource": "/plugins"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "POST",
+    "resource": "/plugins"
+  },
+  {
+    "backend": "nodeGenerator",
+    "method": "POST",
+    "resource": "/plugins/generate"
+  },
+  {
+    "backend": "nodeGenerator",
+    "method": "GET",
+    "resource": "/plugins/generate/{session}"
+  },
+  {
+    "backend": "nodeGenerator",
+    "method": "POST",
+    "resource": "/plugins/generate/{session}/message"
+  },
+  {
+    "backend": "pluginImporter",
+    "method": "POST",
+    "resource": "/plugins/import"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "DELETE",
+    "resource": "/plugins/{id}"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "GET",
+    "resource": "/plugins/{id}"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "PUT",
+    "resource": "/plugins/{id}"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "GET",
+    "resource": "/plugins/{id}/versions/{v}"
+  },
+  {
+    "backend": "pluginImporter",
+    "method": "POST",
+    "resource": "/plugins/{id}/versions/{v}/adjust-revision"
+  },
+  {
+    "backend": "pluginBuilds",
+    "method": "POST",
+    "resource": "/plugins/{id}/versions/{v}/architectures"
+  },
+  {
+    "backend": "pluginBuilds",
+    "method": "POST",
+    "resource": "/plugins/{id}/versions/{v}/build"
+  },
+  {
+    "backend": "pluginBuilds",
+    "method": "GET",
+    "resource": "/plugins/{id}/versions/{v}/builds"
+  },
+  {
+    "backend": "pluginComponents",
+    "method": "GET",
+    "resource": "/plugins/{id}/versions/{v}/component"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "POST",
+    "resource": "/plugins/{id}/versions/{v}/demote"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "GET",
+    "resource": "/plugins/{id}/versions/{v}/gst-properties"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "POST",
+    "resource": "/plugins/{id}/versions/{v}/new-version"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "POST",
+    "resource": "/plugins/{id}/versions/{v}/promote"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "POST",
+    "resource": "/plugins/{id}/versions/{v}/review"
+  },
+  {
+    "backend": "pluginImporter",
+    "method": "POST",
+    "resource": "/plugins/{id}/versions/{v}/select-plugins"
+  },
+  {
+    "backend": "pluginSimulator",
+    "method": "POST",
+    "resource": "/plugins/{id}/versions/{v}/simulate"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "GET",
+    "resource": "/plugins/{id}/versions/{v}/source"
+  },
+  {
+    "backend": "pluginRecords",
+    "method": "PUT",
+    "resource": "/plugins/{id}/versions/{v}/source"
+  },
+  {
+    "backend": "sharedComponents",
+    "method": "GET",
+    "resource": "/shared-components"
+  },
+  {
+    "backend": "sharedComponents",
+    "method": "GET",
+    "resource": "/shared-components/available"
+  },
+  {
+    "backend": "sharedComponents",
+    "method": "POST",
+    "resource": "/shared-components/provision"
+  },
+  {
+    "backend": "sharedComponents",
+    "method": "GET",
+    "resource": "/shared-components/status"
+  },
+  {
+    "backend": "sharedComponents",
+    "method": "POST",
+    "resource": "/shared-components/update-all"
+  },
+  {
+    "backend": "pluginSimulator",
+    "method": "GET",
+    "resource": "/simulations/{runId}"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "GET",
+    "resource": "/synthetic/models"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "GET",
+    "resource": "/synthetic/prompt-templates"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "PUT",
+    "resource": "/synthetic/prompt-templates"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "GET",
+    "resource": "/synthetic/sessions"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "POST",
+    "resource": "/synthetic/sessions"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "GET",
+    "resource": "/synthetic/sessions/{id}"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "PATCH",
+    "resource": "/synthetic/sessions/{id}"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "POST",
+    "resource": "/synthetic/sessions/{id}/generate"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "POST",
+    "resource": "/synthetic/sessions/{id}/integrate"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "POST",
+    "resource": "/synthetic/sessions/{id}/previews/approval"
+  },
+  {
+    "backend": "syntheticData",
+    "method": "POST",
+    "resource": "/synthetic/sessions/{id}/retrain"
+  },
+  {
+    "backend": "workflowTesting",
+    "method": "GET",
+    "resource": "/test-datasets"
+  },
+  {
+    "backend": "workflowTesting",
+    "method": "DELETE",
+    "resource": "/test-datasets/{id}"
+  },
+  {
+    "backend": "workflowTesting",
+    "method": "GET",
+    "resource": "/test-datasets/{id}"
+  },
+  {
+    "backend": "workflowTesting",
+    "method": "GET",
+    "resource": "/test-runs/{id}"
+  },
+  {
+    "backend": "training",
+    "method": "GET",
+    "resource": "/training"
+  },
+  {
+    "backend": "training",
+    "method": "POST",
+    "resource": "/training"
+  },
+  {
+    "backend": "training",
+    "method": "POST",
+    "resource": "/training/transform-manifest"
+  },
+  {
+    "backend": "training",
+    "method": "GET",
+    "resource": "/training/{id}"
+  },
+  {
+    "backend": "compilation",
+    "method": "GET",
+    "resource": "/training/{id}/compile"
+  },
+  {
+    "backend": "compilation",
+    "method": "POST",
+    "resource": "/training/{id}/compile"
+  },
+  {
+    "backend": "training",
+    "method": "GET",
+    "resource": "/training/{id}/logs"
+  },
+  {
+    "backend": "packaging",
+    "method": "POST",
+    "resource": "/training/{id}/package"
+  },
+  {
+    "backend": "greengrassPublish",
+    "method": "POST",
+    "resource": "/training/{id}/publish"
+  },
+  {
+    "backend": "useCases",
+    "method": "GET",
+    "resource": "/usecases"
+  },
+  {
+    "backend": "useCases",
+    "method": "POST",
+    "resource": "/usecases"
+  },
+  {
+    "backend": "useCases",
+    "method": "DELETE",
+    "resource": "/usecases/{id}"
+  },
+  {
+    "backend": "useCases",
+    "method": "GET",
+    "resource": "/usecases/{id}"
+  },
+  {
+    "backend": "useCases",
+    "method": "PUT",
+    "resource": "/usecases/{id}"
+  },
+  {
+    "backend": "dataManagement",
+    "method": "GET",
+    "resource": "/usecases/{id}/data/buckets"
+  },
+  {
+    "backend": "dataManagement",
+    "method": "POST",
+    "resource": "/usecases/{id}/data/configure"
+  },
+  {
+    "backend": "dataManagement",
+    "method": "GET",
+    "resource": "/usecases/{id}/data/folders"
+  },
+  {
+    "backend": "dataManagement",
+    "method": "POST",
+    "resource": "/usecases/{id}/data/folders"
+  },
+  {
+    "backend": "userManagement",
+    "method": "GET",
+    "resource": "/users"
+  },
+  {
+    "backend": "userManagement",
+    "method": "POST",
+    "resource": "/users/assign-role"
+  },
+  {
+    "backend": "userManagement",
+    "method": "GET",
+    "resource": "/users/{user_id}/permissions"
+  },
+  {
+    "backend": "userManagement",
+    "method": "DELETE",
+    "resource": "/users/{user_id}/roles/{usecase_id}"
+  },
+  {
+    "backend": "workflows",
+    "method": "GET",
+    "resource": "/workflows"
+  },
+  {
+    "backend": "workflows",
+    "method": "POST",
+    "resource": "/workflows"
+  },
+  {
+    "backend": "workflowGenerator",
+    "method": "POST",
+    "resource": "/workflows/generate"
+  },
+  {
+    "backend": "workflowGenerator",
+    "method": "GET",
+    "resource": "/workflows/generate/{job_id}"
+  },
+  {
+    "backend": "workflowValidation",
+    "method": "GET",
+    "resource": "/workflows/node-catalog"
+  },
+  {
+    "backend": "workflows",
+    "method": "DELETE",
+    "resource": "/workflows/{id}"
+  },
+  {
+    "backend": "workflows",
+    "method": "GET",
+    "resource": "/workflows/{id}"
+  },
+  {
+    "backend": "workflows",
+    "method": "PUT",
+    "resource": "/workflows/{id}"
+  },
+  {
+    "backend": "workflows",
+    "method": "POST",
+    "resource": "/workflows/{id}/duplicate"
+  },
+  {
+    "backend": "workflows",
+    "method": "PATCH",
+    "resource": "/workflows/{id}/name"
+  },
+  {
+    "backend": "workflowPackaging",
+    "method": "POST",
+    "resource": "/workflows/{id}/package"
+  },
+  {
+    "backend": "workflowTesting",
+    "method": "GET",
+    "resource": "/workflows/{id}/test-runs"
+  },
+  {
+    "backend": "workflowTesting",
+    "method": "POST",
+    "resource": "/workflows/{id}/test-runs"
+  },
+  {
+    "backend": "workflowValidation",
+    "method": "POST",
+    "resource": "/workflows/{id}/validate"
+  },
+  {
+    "backend": "workflows",
+    "method": "GET",
+    "resource": "/workflows/{id}/versions"
+  }
+]
