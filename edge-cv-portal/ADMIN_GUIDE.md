@@ -13,6 +13,7 @@ Complete guide for deploying, configuring, and managing the Defect Detection App
 7. [Troubleshooting](#troubleshooting)
 8. [User Roles and Permissions](#user-roles-and-permissions)
 9. [Portal Users and Privilege (Portal_Identity Registry)](#portal-users-and-privilege-portal_identity-registry)
+10. [MCP server (AI assistants)](#mcp-server-ai-assistants)
 
 **Related Guides:**
 - [README: Deployment](../README.md#deployment) - Portal deployment, Build Fleet builds, accounts, and device setup
@@ -1704,6 +1705,479 @@ claiming `PortalAdmin` can still reach those routes (all its other portal access
 is denied). Treat `cognito-idp:AdminUpdateUserAttributes` on the pool as
 User-Manager-equivalent privilege until that check is moved onto the registry,
 and keep the alerting above subscribed.
+
+---
+
+## MCP server (AI assistants)
+
+The portal serves a Model Context Protocol (MCP) endpoint, so an AI assistant
+such as Kiro IDE or Kiro CLI can call portal tools as the signed-in user. The
+Portal_MCP_Server is one Lambda behind its own HTTP API
+(`EdgeCVPortalMcpStack`). It signs users in through a dedicated app client on
+the portal's existing Cognito user pool, dispatches each tool call to the
+existing handler Lambda of the matching REST route, applies the same role and
+permission checks as the web UI, and writes every call to the Audit_Log.
+
+Phase 1 delivers read-only tools only: the server lists and accepts only the
+Phase-1 rows of the [tool tables](#mcp-tools). The edge devices have their own
+MCP server: [docs/edge-mcp-server.md](../docs/edge-mcp-server.md).
+
+No stdio MCP package is distributed, so the portal's only connection form is
+remote OAuth: the client connects to the HTTPS endpoint and signs the user in
+through the Cognito hosted UI.
+
+### Enabling and disabling the MCP stack
+
+`./deploy-infrastructure.sh` deploys `EdgeCVPortalMcpStack` by default; no
+setting is needed.
+
+Disabling it on a deployed portal takes **two steps, in this order**:
+
+```bash
+# 1. With the stack still in the app (no DEPLOY_MCP_SERVER=false yet):
+cd infrastructure && npx cdk destroy EdgeCVPortalMcpStack --force && cd ..
+# 2. Deploy without it:
+DEPLOY_MCP_SERVER=false ./deploy-infrastructure.sh
+```
+
+- Only the literal value `false` (trimmed, case-insensitive) turns the stack
+  off. Any other value, unset or empty included, leaves it on.
+- The order matters: the MCP stack imports handler ARNs that
+  `EdgeCVPortalComputeStack` and three other stacks export. With
+  `DEPLOY_MCP_SERVER=false` those stacks drop the exports, and CloudFormation
+  refuses to delete an export that a deployed stack still imports, so the
+  whole portal deploy would stop. `cdk deploy --all` never deletes a stack that
+  only left the app, so step 1 removes it explicitly.
+- `--force` skips `cdk destroy`'s confirmation prompt. Step 1 also deletes the
+  MCP app client, its resource server and the dispatch-map parameter.
+- **The guard message.** With `DEPLOY_MCP_SERVER=false`, the deploy script
+  first checks whether `EdgeCVPortalMcpStack` exists. If it does, the script
+  stops with `❌ DEPLOY_MCP_SERVER=false, but EdgeCVPortalMcpStack is still
+  deployed.` and prints the step-1 command. If the check itself fails
+  (credentials, region), it stops with `Could not read whether
+  EdgeCVPortalMcpStack is deployed` rather than guess. Nothing is deployed in
+  either case.
+
+To turn it back on, run `./deploy-infrastructure.sh` without the variable.
+
+### Stack outputs
+
+| Output | Value |
+|---|---|
+| `McpServerUrl` | The canonical endpoint, `https://<api-id>.execute-api.<region>.amazonaws.com/mcp` (every tool) |
+| `McpViewUrls` | The five view endpoints, `…/mcp/data`, `…/mcp/models`, `…/mcp/devices`, `…/mcp/workflows`, `…/mcp/admin` (one area's tools each) |
+| `McpUserPoolClientId` | The MCP app client id (public client, no secret) |
+| `McpOAuthScope` | The scope clients request, `<McpServerUrl>/portal.tools` |
+| `McpRedirectUri` | The registered callback, `http://localhost:7899/oauth/callback` |
+| `McpProtectedResourceMetadataUrl` | The root Protected Resource Metadata document (RFC 9728) |
+| `McpAuthorizationServerMetadataUrl` | The authorization-server metadata facade (RFC 8414) |
+
+```bash
+aws cloudformation describe-stacks --stack-name EdgeCVPortalMcpStack \
+  --query 'Stacks[0].Outputs' --output table
+```
+
+### Settings (CDK context)
+
+Set these in the `context` block of `infrastructure/cdk.json` (which
+`deploy-infrastructure.sh` picks up), then run `./deploy-infrastructure.sh`.
+
+| Context key | Default | Effect |
+|---|---|---|
+| `mcpRedirectUris` | empty | Extra OAuth callback URLs (comma-separated) beside `http://localhost:7899/oauth/callback`, for a client on another port. Each must be `http://localhost[:port]/path` or `https://…`: Cognito registers plain-HTTP callbacks for `localhost` only, and the synth refuses anything else. |
+| `mcpMutatingToolsEnabled` | `false` | Lists and accepts mutating tools. In Phase 1 no mutating tool is delivered, so this changes nothing yet. |
+| `mcpAllowedOrigins` | empty | `Origin` values (`http(s)://host[:port]`, no path) the endpoints accept. Empty by default: any request carrying an `Origin` header is refused. Set it only if the deployed-stack smoke check shows your client sending an `Origin` header. |
+
+### Timeout alarm
+
+The stack creates `McpTimeoutAlarm`: it fires when the MCP Lambda reaches its
+own 29 s timeout, which is the only trace of a tool call the Lambda could not
+answer (the client sees a bare gateway error, with no tool result and no audit
+entry). The alarm has no action; attach the portal's notification topic:
+
+```bash
+aws cloudwatch describe-alarms --alarm-name-prefix EdgeCVPortalMcpStack \
+  --query 'MetricAlarms[].AlarmName'
+# Then add the topic as the alarm action in the console, or with
+# `aws cloudwatch put-metric-alarm` repeating the alarm's settings plus --alarm-actions <topic-arn>.
+```
+
+The Lambda logs to `/dda-portal/mcp-server`: one `mcp_tool` line per tool
+completion (`sub`, `username`, `tool`, `view`, `outcome`, `category`, `status`,
+`duration_ms`, `request_id`, `client`, `server_version`; never arguments,
+tokens or email).
+
+### Roles and the registry-enforcement flag
+
+MCP resolves roles from the Portal_Identity_Registry, like the web UI
+([The enforcement flag](#the-enforcement-flag)). With
+`PORTAL_REGISTRY_ENFORCED=false`, every `global`-scoped tool resolves a
+non-PortalAdmin to **Viewer**. So these tools are usable through MCP by
+PortalAdmins only, until enforcement is on **and** the account has a `global`
+registry row naming its role (the User Manager writes it; older accounts need
+the [backfill](#backfilling-the-registry-before-enforcement)):
+
+- the labeler self-service tools, `portal_data_labeler_*`
+  (`portal_data_labeler_jobs_list`, `_pool_get`, `_task_image_url_get`,
+  `_task_next`, and the Phase-2 `_task_steal`, `_task_submit`,
+  `_task_presentation_failure`);
+- the build tools, `portal_workflows_build*`, including the build-fleet reads
+  `portal_workflows_build_servers_list` and `portal_workflows_build_config_get`.
+
+A PortalAdmin without a `global` registry row is a Viewer through MCP. MCP is
+never more permissive than the web UI in either mode.
+
+### Sign-in and authentication
+
+- **The MCP app client allows only the hosted-UI authorization-code grant
+  (with PKCE) and the refresh grant** (`ExplicitAuthFlows:
+  ALLOW_REFRESH_TOKEN_AUTH`). There is no username/password sign-in against it
+  from any script. Access tokens last 1 hour, refresh tokens 30 days.
+- **The MCP routes carry no API Gateway authorizer.** The Lambda authenticates
+  every request itself: it verifies the Cognito access token's signature,
+  expiry, issuer, `token_use`, client id, audience and scope, and answers
+  `401` otherwise. The discovery documents are unauthenticated by design
+  (RFC 9728, RFC 8414).
+- A token the pool signed that fails one of the claim checks (expired, wrong
+  `token_use`, client id, scope or audience) writes an `authentication_failed`
+  audit entry. A missing or unsigned token is answered `401` without one.
+
+### Configure Kiro IDE or CLI
+
+Copy the values from the stack outputs into `.kiro/settings/mcp.json` (the
+workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
+
+```jsonc
+{
+  "mcpServers": {
+    "dda-portal": {
+      "url": "https://<api-id>.execute-api.<region>.amazonaws.com/mcp",   // McpServerUrl, or a view: .../mcp/devices
+      "oauth": {
+        "clientId": "<McpUserPoolClientId>",
+        "redirectUri": "http://localhost:7899/oauth/callback",          // McpRedirectUri, copied unchanged
+        "oauthScopes": ["https://<api-id>.execute-api.<region>.amazonaws.com/mcp/portal.tools"]  // McpOAuthScope
+      },
+      "disabled": false,
+      "autoApprove": ["portal_admin_whoami", "portal_devices_list", "portal_devices_get"],
+      "disabledTools": []
+    }
+  }
+}
+```
+
+- The same entry works for Kiro CLI; the app client has no secret, so no
+  confidential-client fields are needed.
+- **`redirectUri` must be the literal registered value**
+  `http://localhost:7899/oauth/callback`. Kiro binds its loopback listener to
+  the configured value and Cognito matches callback URLs exactly. Kiro's
+  documentation example `http://127.0.0.1:8080/oauth/callback` does not apply:
+  Cognito registers plain-HTTP callbacks for `localhost` only. For another
+  port, register it with `mcpRedirectUris`.
+- `oauthScopes` is set so Kiro requests only the portal scope. If a client
+  build still adds default scopes and Cognito answers `invalid_scope`, use the
+  fallback `"oauthScopes": []`: Cognito then issues every scope the client
+  allows, which is exactly `portal.tools`.
+- The repository's `.kiro/settings/mcp.json` carries a disabled `dda-portal`
+  entry with placeholder values.
+
+### Discovery layout
+
+| URL | Document |
+|---|---|
+| `https://<api-id>.execute-api.<region>.amazonaws.com/.well-known/oauth-protected-resource` | Root Protected Resource Metadata: the canonical `/mcp` document, byte for byte |
+| `…/.well-known/oauth-protected-resource/mcp` | Protected Resource Metadata of `/mcp` |
+| `…/.well-known/oauth-protected-resource/mcp/<view>` | One document per view endpoint, `resource` = that view's URL |
+| `…/.well-known/oauth-authorization-server` | The authorization-server metadata facade (RFC 8414) |
+
+- Every Protected Resource Metadata document names
+  `authorization_servers: ["https://<api-id>.execute-api.<region>.amazonaws.com"]`,
+  the MCP API's own origin, and the facade at that origin carries the same
+  string as its `issuer`.
+- **Why the facade exists.** MCP clients read the authorization server's
+  RFC 8414 metadata, and Cognito serves none at the locations they try (both
+  answer 400). Cognito's OpenID Connect document also omits
+  `code_challenge_methods_supported`, which MCP clients must read as "no PKCE"
+  and refuse. The facade is a static document that points at the Cognito
+  hosted-UI `authorize`, `token` and `revoke` endpoints and the pool's
+  `jwks_uri`, and declares `S256`. It issues nothing: Cognito mints and
+  verifies every code and token (tokens still carry the Cognito issuer).
+- **Why clients use the well-known URIs.** The Lambda's `401` carries a
+  `WWW-Authenticate` challenge naming the metadata URL, but API Gateway remaps
+  that header, so the client may not see it. The MCP specification obliges
+  clients to fall back to the well-known URIs (path-suffixed first, then the
+  root), and the portal relies on that.
+- Challenge header as observed through API Gateway: recorded after the first
+  deployed-stack smoke check (not recorded yet).
+
+### Reading MCP audit entries
+
+- In the portal's **Audit Logs** page, the **Channel** filter shows All, Web &
+  API (`channel=api`) or MCP (`channel=mcp`) entries.
+- Every entry written after this change carries `channel` (`api` or `mcp`).
+  MCP entries also carry `mcp_tool`, `mcp_server`, `mcp_client` and
+  `mcp_request_id`.
+- `action = mcp_tool_call` is one tool call: `result` is `success`, `failure`
+  or `denied`; `details` holds the tool, `usecase_id`, the backend status, the
+  error category, `duration_ms` and the identifier arguments. A `denied` result
+  with `reason: usecase_binding` means the object belongs to another Use_Case
+  than the one named.
+- `action = authentication_failed` is a rejected token: `resource_type =
+  mcp_server`, `resource_id` = the endpoint URL, `details.reason` one of
+  `expired`, `token_use`, `client_id`, `scope`, `audience`, and `mcp_tool = -`.
+- `unauthorized_access` and `authorization_unavailable` entries written by the
+  MCP Lambda carry the same marker attributes, and entries the backing
+  handlers write during an MCP call carry them too.
+
+### Versions
+
+| Item | Value |
+|---|---|
+| Supported MCP protocol revisions | `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26` |
+| `mcp` Python SDK | `2.3.0` (Lambda layer, with `mangum` `0.22.0`) |
+| Portal_MCP_Server version | `1.0.0` |
+| Tested Kiro IDE and CLI versions | Recorded after the first deployed-stack smoke check (not recorded yet) |
+| Kiro and MCP documentation checked | 2026-10-18 and 2026-10-19 |
+
+### Troubleshooting MCP sign-in
+
+**"OAuth issuer mismatch".** Fetch the root Protected Resource Metadata and the
+facade, and compare `authorization_servers[0]` with `issuer` byte for byte
+(scheme, host, no trailing slash):
+
+```bash
+curl -s https://<api-id>.execute-api.<region>.amazonaws.com/.well-known/oauth-protected-resource
+curl -s https://<api-id>.execute-api.<region>.amazonaws.com/.well-known/oauth-authorization-server
+```
+
+**`invalid_scope` from Cognito.** The client requested a scope the app client
+does not allow (for example `offline_access` or `openid`). Set `oauthScopes` to
+the `McpOAuthScope` output, or to `[]`.
+
+**The client reports no `WWW-Authenticate` header.** Expected behind API
+Gateway, which remaps that header. The client must use well-known discovery,
+which the portal serves; check that both URLs above answer.
+
+**Advertising the Cognito issuer directly.** The alternative, a Protected
+Resource Metadata document naming the Cognito issuer as the authorization
+server, is not supported by Kiro's current documentation, which requires
+RFC 8414 metadata; the portal therefore serves the facade.
+
+### MCP tools
+
+Each tool's description ends with its classification. List tools take
+`limit` (50 by default, at most 200). Tools of the `usecase` scope take
+`usecase_id` and are authorized in that Use_Case; `global` tools are
+authorized at the account level. Phase 1 is delivered; Phase 2 and Phase 3
+rows are listed for reference and are neither listed nor accepted by the
+server until their release.
+
+**`admin` view** (15 tools, `…/mcp/admin`)
+
+| Tool | Phase | Classification | Permission | Scope |
+|---|---|---|---|---|
+| `portal_admin_accounts_list` | 1 | Read-only. | `manage_users` | global |
+| `portal_admin_audit_logs_query` | 1 | Read-only. | `system_admin` | global |
+| `portal_admin_edge_sync_devices_list` | 1 | Read-only. | `manage_users` | global |
+| `portal_admin_usecase_get` | 1 | Read-only. | `view_usecases` | usecase |
+| `portal_admin_usecases_list` | 1 | Read-only. | `view_usecases` | global |
+| `portal_admin_user_permissions_get` | 1 | Read-only. | `manage_users` | global |
+| `portal_admin_users_list` | 1 | Read-only. | `manage_users` | global |
+| `portal_admin_whoami` | 1 | Read-only. | - (any signed-in principal) | global |
+| `portal_admin_account_role_change` | 3 | MUTATING. | `manage_users` | global |
+| `portal_admin_edge_sync_device_sync` | 3 | MUTATING, DESTRUCTIVE — requires confirm=device_id. | `manage_users` | global |
+| `portal_admin_role_assign` | 3 | MUTATING. | `manage_users` | usecase |
+| `portal_admin_role_remove` | 3 | MUTATING, DESTRUCTIVE — requires confirm=user_id. | `manage_users` | usecase |
+| `portal_admin_usecase_create` | 3 | MUTATING. | `create_usecases` | global |
+| `portal_admin_usecase_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=usecase_id. | `delete_usecases` | usecase |
+| `portal_admin_usecase_update` | 3 | MUTATING. | `update_usecases` | usecase |
+
+**`devices` view** (34 tools, `…/mcp/devices`)
+
+| Tool | Phase | Classification | Permission | Scope |
+|---|---|---|---|---|
+| `portal_devices_cameras_conflicts_get` | 1 | Read-only. | `view_devices` | usecase |
+| `portal_devices_cameras_list` | 1 | Read-only. | `view_devices` | usecase |
+| `portal_devices_components_get` | 1 | Read-only. | `view_deployments` | usecase |
+| `portal_devices_components_list` | 1 | Read-only. | `view_deployments` | usecase |
+| `portal_devices_components_schema_get` | 1 | Read-only. | `view_deployments` | usecase |
+| `portal_devices_deployment_for_target_get` | 1 | Read-only. | `view_deployments` | usecase |
+| `portal_devices_deployment_get` | 1 | Read-only. | `view_deployments` | usecase |
+| `portal_devices_deployments_list` | 1 | Read-only. | `view_deployments` | usecase |
+| `portal_devices_get` | 1 | Read-only. | `view_devices` | usecase |
+| `portal_devices_list` | 1 | Read-only. | `view_devices` | usecase |
+| `portal_devices_logs_get` | 1 | Read-only. | `view_device_logs` | usecase |
+| `portal_devices_logs_list` | 1 | Read-only. | `view_device_logs` | usecase |
+| `portal_devices_registrations_list` | 1 | Read-only. | `manage_devices` | usecase |
+| `portal_devices_shared_components_available_list` | 1 | Read-only. | `view_deployments` | global |
+| `portal_devices_shared_components_list` | 1 | Read-only. | `view_deployments` | usecase |
+| `portal_devices_shared_components_status_get` | 1 | Read-only. | `system_admin` | global |
+| `portal_devices_static_image_get` | 1 | Read-only. | `view_devices` | usecase |
+| `portal_devices_static_video_get` | 1 | Read-only. | `view_devices` | usecase |
+| `portal_devices_thing_groups_list` | 1 | Read-only. | `manage_devices` | usecase |
+| `portal_devices_camera_add` | 2 | MUTATING. | `manage_devices` | usecase |
+| `portal_devices_camera_update` | 2 | MUTATING. | `manage_devices` | usecase |
+| `portal_devices_cameras_refresh` | 2 | MUTATING. | `manage_devices` | usecase |
+| `portal_devices_logs_analyze` | 2 | Read-only. | `view_device_logs` | usecase |
+| `portal_devices_static_image_unpin` | 2 | MUTATING, DESTRUCTIVE — requires confirm=device_id. | `manage_devices` | usecase |
+| `portal_devices_static_video_unpin` | 2 | MUTATING, DESTRUCTIVE — requires confirm=device_id. | `manage_devices` | usecase |
+| `portal_devices_camera_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=camera_id. | `manage_devices` | usecase |
+| `portal_devices_component_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=component_arn. | `update_usecases` | usecase |
+| `portal_devices_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=device_id. | `manage_devices` | usecase |
+| `portal_devices_deployment_cancel` | 3 | MUTATING, DESTRUCTIVE — requires confirm=deployment_id. | `manage_deployments` | usecase |
+| `portal_devices_deployment_create` | 3 | MUTATING, DESTRUCTIVE — requires confirm=<target_thing_group \| target_devices[0]>. | `create_deployments` | usecase |
+| `portal_devices_flags_update` | 3 | MUTATING. | `node-designer:manage` | usecase |
+| `portal_devices_registration_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=registration_id. | `manage_devices` | usecase |
+| `portal_devices_shared_components_provision` | 3 | MUTATING. | `system_admin` | usecase |
+| `portal_devices_shared_components_update_all` | 3 | MUTATING. | `system_admin` | global |
+
+**`models` view** (21 tools, `…/mcp/models`)
+
+| Tool | Phase | Classification | Permission | Scope |
+|---|---|---|---|---|
+| `portal_models_compilation_get` | 1 | Read-only. | `view_training_jobs` | usecase |
+| `portal_models_format_spec_get` | 1 | Read-only. | `view_models` | global |
+| `portal_models_get` | 1 | Read-only. | `view_models` | usecase |
+| `portal_models_inspect` | 1 | Read-only. | `promote_models` | usecase |
+| `portal_models_list` | 1 | Read-only. | `view_models` | usecase |
+| `portal_models_training_get` | 1 | Read-only. | `view_training_jobs` | usecase |
+| `portal_models_training_list` | 1 | Read-only. | `view_training_jobs` | usecase |
+| `portal_models_training_logs_get` | 1 | Read-only. | `view_training_jobs` | usecase |
+| `portal_models_types_get` | 1 | Read-only. | `view_models` | global |
+| `portal_models_validate` | 1 | Read-only. | `promote_models` | usecase |
+| `portal_models_vllm_engine_spec_get` | 1 | Read-only. | `view_models` | global |
+| `portal_models_compilation_create` | 2 | MUTATING. | `create_training_jobs` | usecase |
+| `portal_models_convert` | 2 | MUTATING. | `promote_models` | usecase |
+| `portal_models_import` | 2 | MUTATING. | `promote_models` | usecase |
+| `portal_models_manifest_transform` | 2 | MUTATING. | `create_training_jobs` | usecase |
+| `portal_models_stage_set` | 2 | MUTATING. | `promote_models` | usecase |
+| `portal_models_training_create` | 2 | MUTATING. | `create_training_jobs` | usecase |
+| `portal_models_vllm_engine_configuration_set` | 2 | MUTATING. | `promote_models` | usecase |
+| `portal_models_vllm_import` | 2 | MUTATING. | `promote_models` | usecase |
+| `portal_models_package` | 3 | MUTATING. | `promote_models` | usecase |
+| `portal_models_publish` | 3 | MUTATING. | `promote_models` | usecase |
+
+**`data` view** (48 tools, `…/mcp/data`)
+
+| Tool | Phase | Classification | Permission | Scope |
+|---|---|---|---|---|
+| `portal_data_buckets_list` | 1 | Read-only. | `view_datasets` | usecase |
+| `portal_data_captures_list` | 1 | Read-only. | `view_datasets` | usecase |
+| `portal_data_datasets_count` | 1 | Read-only. | `view_datasets` | usecase |
+| `portal_data_datasets_list` | 1 | Read-only. | `view_datasets` | usecase |
+| `portal_data_datasets_preview_get` | 1 | Read-only. | `view_datasets` | usecase |
+| `portal_data_folders_list` | 1 | Read-only. | `view_datasets` | usecase |
+| `portal_data_labeler_jobs_list` | 1 | Read-only. | `labeling:tasks-self` | global |
+| `portal_data_labeler_pool_get` | 1 | Read-only. | `labeling:tasks-self` | global |
+| `portal_data_labeler_task_image_url_get` | 1 | Read-only. | `labeling:tasks-self` | global |
+| `portal_data_labeler_task_next` | 1 | Read-only. | `labeling:tasks-self` | global |
+| `portal_data_labeling_job_get` | 1 | Read-only. | `view_labeling_jobs` | usecase |
+| `portal_data_labeling_jobs_list` | 1 | Read-only. | `view_labeling_jobs` | usecase |
+| `portal_data_labeling_preview_get` | 1 | Read-only. | `manage_labeling_jobs` | usecase |
+| `portal_data_labeling_review_get` | 1 | Read-only. | `update_usecases` | usecase |
+| `portal_data_labeling_teams_list` | 1 | Read-only. | `labeling-teams:manage` | usecase |
+| `portal_data_manifest_validate` | 1 | Read-only. | `manage_datasets` | usecase |
+| `portal_data_prelabeled_get` | 1 | Read-only. | `view_datasets` | usecase |
+| `portal_data_prelabeled_list` | 1 | Read-only. | `view_datasets` | usecase |
+| `portal_data_synthetic_models_list` | 1 | Read-only. | `manage_datasets` | usecase |
+| `portal_data_synthetic_prompt_templates_get` | 1 | Read-only. | `manage_datasets` | usecase |
+| `portal_data_synthetic_session_get` | 1 | Read-only. | `manage_datasets` | usecase |
+| `portal_data_synthetic_sessions_list` | 1 | Read-only. | `manage_datasets` | usecase |
+| `portal_data_workteams_list` | 1 | Read-only. | `view_labeling_jobs` | usecase |
+| `portal_data_folder_create` | 2 | MUTATING. | `manage_datasets` | usecase |
+| `portal_data_labeler_task_presentation_failure` | 2 | MUTATING. | `labeling:tasks-self` | global |
+| `portal_data_labeler_task_steal` | 2 | MUTATING. | `labeling:tasks-self` | global |
+| `portal_data_labeler_task_submit` | 2 | MUTATING. | `labeling:tasks-self` | global |
+| `portal_data_labeling_job_create` | 2 | MUTATING. | `create_labeling_jobs` | usecase |
+| `portal_data_labeling_prelabels_rerun` | 2 | MUTATING. | `manage_labeling_jobs` | usecase |
+| `portal_data_labeling_preview_run` | 2 | MUTATING. | `manage_labeling_jobs` | usecase |
+| `portal_data_labeling_review_decide` | 2 | MUTATING. | `update_usecases` | usecase |
+| `portal_data_prelabeled_create` | 2 | MUTATING. | `manage_datasets` | usecase |
+| `portal_data_synthetic_previews_approve` | 2 | MUTATING. | `manage_datasets` | usecase |
+| `portal_data_synthetic_prompt_templates_set` | 2 | MUTATING. | `manage_datasets` | usecase |
+| `portal_data_synthetic_session_create` | 2 | MUTATING. | `manage_datasets` | usecase |
+| `portal_data_synthetic_session_generate` | 2 | MUTATING. | `manage_datasets` | usecase |
+| `portal_data_synthetic_session_integrate` | 2 | MUTATING. | `manage_datasets` | usecase |
+| `portal_data_synthetic_session_update` | 2 | MUTATING. | `manage_datasets` | usecase |
+| `portal_data_configure` | 3 | MUTATING. | `update_usecases` | usecase |
+| `portal_data_labeling_job_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=job_id. | `manage_labeling_jobs` | usecase |
+| `portal_data_labeling_job_stop` | 3 | MUTATING, DESTRUCTIVE — requires confirm=job_id. | `manage_labeling_jobs` | usecase |
+| `portal_data_labeling_review_finalize` | 3 | MUTATING. | `update_usecases` | usecase |
+| `portal_data_labeling_team_create` | 3 | MUTATING. | `labeling-teams:manage` | usecase |
+| `portal_data_labeling_team_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=team_id. | `labeling-teams:manage` | usecase |
+| `portal_data_labeling_team_member_add` | 3 | MUTATING. | `labeling-teams:manage` | usecase |
+| `portal_data_labeling_team_member_remove` | 3 | MUTATING, DESTRUCTIVE — requires confirm=user_id. | `labeling-teams:manage` | usecase |
+| `portal_data_prelabeled_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=dataset_id. | `manage_datasets` | usecase |
+| `portal_data_synthetic_session_retrain` | 3 | MUTATING. | `create_training_jobs` | usecase |
+
+**`workflows` view** (65 tools, `…/mcp/workflows`)
+
+| Tool | Phase | Classification | Permission | Scope |
+|---|---|---|---|---|
+| `portal_workflows_build_branches_list` | 1 | Read-only. | `builds:read` | global |
+| `portal_workflows_build_config_get` | 1 | Read-only. | `builds:read` | global |
+| `portal_workflows_build_get` | 1 | Read-only. | `builds:read` | global |
+| `portal_workflows_build_logs_get` | 1 | Read-only. | `builds:read` | global |
+| `portal_workflows_build_servers_list` | 1 | Read-only. | `builds:read` | global |
+| `portal_workflows_builds_list` | 1 | Read-only. | `builds:read` | global |
+| `portal_workflows_custom_node_type_get` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_custom_node_types_list` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_generation_job_get` | 1 | Read-only. | `workflow:create` | usecase |
+| `portal_workflows_get` | 1 | Read-only. | `workflow:read` | usecase |
+| `portal_workflows_list` | 1 | Read-only. | `workflow:read` | usecase |
+| `portal_workflows_node_catalog_get` | 1 | Read-only. | `workflow:read` | usecase |
+| `portal_workflows_plugin_builds_get` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_plugin_component_get` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_plugin_get` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_plugin_gst_properties_get` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_plugin_modules_list` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_plugin_source_get` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_plugin_version_get` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_plugins_list` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_simulation_get` | 1 | Read-only. | `node-designer:read` | usecase |
+| `portal_workflows_test_dataset_get` | 1 | Read-only. | `workflow:read` | usecase |
+| `portal_workflows_test_datasets_list` | 1 | Read-only. | `workflow:read` | usecase |
+| `portal_workflows_test_run_get` | 1 | Read-only. | `workflow:read` | usecase |
+| `portal_workflows_test_runs_list` | 1 | Read-only. | `workflow:read` | usecase |
+| `portal_workflows_versions_list` | 1 | Read-only. | `workflow:read` | usecase |
+| `portal_workflows_build_retry` | 2 | MUTATING. | `builds:submit` | global |
+| `portal_workflows_build_submit` | 2 | MUTATING. | `builds:submit` | global |
+| `portal_workflows_create` | 2 | MUTATING. | `workflow:create` | usecase |
+| `portal_workflows_custom_node_type_register` | 2 | MUTATING. | `node-designer:register` | usecase |
+| `portal_workflows_custom_node_type_update` | 2 | MUTATING. | `node-designer:manage` | usecase |
+| `portal_workflows_duplicate` | 2 | MUTATING. | `workflow:create` | usecase |
+| `portal_workflows_generate` | 2 | MUTATING. | `workflow:create` | usecase |
+| `portal_workflows_plugin_adjust_revision` | 2 | MUTATING. | `node-designer:manage` | usecase |
+| `portal_workflows_plugin_architectures_set` | 2 | MUTATING. | `node-designer:manage` | usecase |
+| `portal_workflows_plugin_build` | 2 | MUTATING. | `node-designer:manage` | usecase |
+| `portal_workflows_plugin_create` | 2 | MUTATING. | `node-designer:create` | usecase |
+| `portal_workflows_plugin_generate_message` | 2 | MUTATING. | `node-designer:generate` | usecase |
+| `portal_workflows_plugin_generate_start` | 2 | MUTATING. | `node-designer:generate` | usecase |
+| `portal_workflows_plugin_generate_status_get` | 2 | Read-only. | `node-designer:generate` | usecase |
+| `portal_workflows_plugin_import` | 2 | MUTATING. | `node-designer:import` | usecase |
+| `portal_workflows_plugin_new_version` | 2 | MUTATING. | `node-designer:manage` | usecase |
+| `portal_workflows_plugin_select_plugins` | 2 | MUTATING. | `node-designer:manage` | usecase |
+| `portal_workflows_plugin_simulate` | 2 | MUTATING. | `node-designer:simulate` | usecase |
+| `portal_workflows_plugin_source_set` | 2 | MUTATING, DESTRUCTIVE — requires confirm=plugin_id. | `node-designer:manage` | usecase |
+| `portal_workflows_plugin_update` | 2 | MUTATING. | `node-designer:manage` | usecase |
+| `portal_workflows_rename` | 2 | MUTATING. | `workflow:save` | usecase |
+| `portal_workflows_test_run_start` | 2 | MUTATING. | `workflow:test` | usecase |
+| `portal_workflows_update` | 2 | MUTATING. | `workflow:save` | usecase |
+| `portal_workflows_validate` | 2 | MUTATING. | `workflow:edit` | usecase |
+| `portal_workflows_build_cancel` | 3 | MUTATING, DESTRUCTIVE — requires confirm=build_id. | `builds:cancel` | global |
+| `portal_workflows_build_config_set` | 3 | MUTATING. | `system_admin` | global |
+| `portal_workflows_build_server_create` | 3 | MUTATING. | `system_admin` | global |
+| `portal_workflows_build_server_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=server_name. | `system_admin` | global |
+| `portal_workflows_build_server_start` | 3 | MUTATING. | `system_admin` | global |
+| `portal_workflows_build_server_stop` | 3 | MUTATING, DESTRUCTIVE — requires confirm=server_id. | `system_admin` | global |
+| `portal_workflows_custom_node_type_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=node_type_id. | `node-designer:manage` | usecase |
+| `portal_workflows_custom_node_type_deprecate` | 3 | MUTATING, DESTRUCTIVE — requires confirm=node_type_id. | `node-designer:manage` | usecase |
+| `portal_workflows_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=workflow_id. | `workflow:delete` | usecase |
+| `portal_workflows_package` | 3 | MUTATING. | `workflow:package` | usecase |
+| `portal_workflows_plugin_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=plugin_id. | `node-designer:manage` | usecase |
+| `portal_workflows_plugin_demote` | 3 | MUTATING, DESTRUCTIVE — requires confirm=plugin_id. | `node-designer:promote-demote` | usecase |
+| `portal_workflows_plugin_promote` | 3 | MUTATING, DESTRUCTIVE — requires confirm=plugin_id. | `node-designer:promote-demote` | usecase |
+| `portal_workflows_plugin_review` | 3 | MUTATING, DESTRUCTIVE — requires confirm=plugin_id. | `node-designer:security-review` | usecase |
+| `portal_workflows_test_dataset_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=dataset_id. | `workflow:test` | usecase |
 
 ---
 

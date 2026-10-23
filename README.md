@@ -1595,10 +1595,20 @@ defect-detection-application/
 
 ## Documentation
 
+**MCP servers (AI assistants).** The portal and the LocalServer each serve a
+Model Context Protocol endpoint, so an assistant such as Kiro can work with
+them as the signed-in user, read-only in this release. The portal server is
+deployed with the portal and connects through Cognito sign-in (remote OAuth;
+no stdio package is distributed): see the
+[Administrator Guide: MCP server (AI assistants)](edge-cv-portal/ADMIN_GUIDE.md#mcp-server-ai-assistants).
+The edge server is off by default and enabled per device: see
+[docs/edge-mcp-server.md](docs/edge-mcp-server.md).
+
 | Document | Description |
 |----------|-------------|
 | [docs/user-guide/README.md](docs/user-guide/README.md) | User guide: one page per Portal section, the device web UI and the station HMI, with screenshots and every field explained |
 | [edge-cv-portal/ADMIN_GUIDE.md](edge-cv-portal/ADMIN_GUIDE.md) | Portal administration guide |
+| [docs/edge-mcp-server.md](docs/edge-mcp-server.md) | Edge MCP server: enabling, connecting, role gating and tools |
 | [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) | Inference Uploader setup |
 | [datasets/README.md](datasets/README.md) | Sample datasets guide |
 | [Video Tutorials](#video-tutorials) | Video tutorial series: an overview and Modules 0-12 |

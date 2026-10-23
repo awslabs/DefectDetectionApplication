@@ -716,7 +716,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
   - Verify: `bash -n scripts/dda-edge-mcp-login.sh`; on the JP5 device in task 17, `eval "$(scripts/dda-edge-mcp-login.sh https://<device>:5443)"` yields a token that `GET /local-auth/whoami` accepts, and a wrong password yields the uniform 401 message with no token printed
   - _Requirements: 9.3, 9.6, 2.7_
 
-- [ ] 16. Cross-server conventions, client configuration and documentation
+- [x] 16. Cross-server conventions, client configuration and documentation
   - [x] 16.1 Write property test for the naming and identifier convention
     - **Feature: mcp-servers, Property 15: Naming and identifier convention**
     - File `edge-cv-portal/backend/tests/mcp/test_property_mcp_naming.py`, loading `src/backend/mcp_edge/child/catalog.py` by path next to the portal `CATALOG`; Hypothesis over tool pairs sharing a concept argument, min 100 examples
@@ -729,7 +729,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `python3 -c "import json; d=json.load(open('.kiro/settings/mcp.json'))['mcpServers']; assert d['dda-portal']['disabled'] and d['dda-edge-example']['disabled']; assert {'awslabs.aws-documentation-mcp-server','awslabs.cdk-mcp-server','aws-diagrams'} <= set(d)"`
     - _Requirements: 7.4, 15.1, 15.2, 9.6, 2.5_
 
-  - [ ] 16.3 Update the administrator and device documentation
+  - [x] 16.3 Update the administrator and device documentation
     - `edge-cv-portal/ADMIN_GUIDE.md` "MCP server (AI assistants)" section with every item of the design's Documentation table (two-step disable and the guard message, outputs, `mcpRedirectUris`, `mcpMutatingToolsEnabled`, `mcpAllowedOrigins`, the `McpTimeoutAlarm` wiring, the D29 registry-enforcement limitation with the affected tool list, the refresh-only app client, no gateway authorizer, the `mcp.json` example and the literal `redirectUri` rule, the discovery layout and the observed challenge header name (filled in by task 18), reading MCP audit entries, supported revisions, tested Kiro IDE/CLI versions, `mcp` SDK version, dates, the Troubleshooting entries); `README.md` pointer paragraph; new `docs/edge-mcp-server.md` (enablement keys, LAN vs tunnel with the plaintext-5000 limitation, the login helper and history warning, Kiro example with `${DDA_EDGE_TOKEN}`, role gating, open-access residual risk, trust-boundary statement, `/mcp/status`, the component configuration keys table, the per-tool table with phase [review-9 N6], classification, shaping and limits, the 130 s text-generation note, and that the five image tools produce no `api.access` record); `docs/connect-to-device.md` "Forward the LocalServer port for MCP"
     - State in both documents that no stdio package is distributed (Backlog 4), so the portal's only connection form is remote OAuth
     - Files: `edge-cv-portal/ADMIN_GUIDE.md`, `README.md`, new `docs/edge-mcp-server.md`, `docs/connect-to-device.md`
