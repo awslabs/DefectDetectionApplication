@@ -7,8 +7,15 @@
 # producing stacks cannot drop the handler-ARN exports a deployed
 # EdgeCVPortalMcpStack still imports:
 #
-#   1. cd infrastructure && npx cdk destroy EdgeCVPortalMcpStack --force
+#   1. cd infrastructure && npx cdk destroy EdgeCVPortalMcpStack --force \
+#        -c portalRegistryEnforced=<deployed value>
 #   2. DEPLOY_MCP_SERVER=false ./deploy-infrastructure.sh
+#
+# `cdk destroy` synthesizes the whole app first, and bin/app.ts refuses to
+# synthesize without portalRegistryEnforced (or, on a fresh install,
+# allowLegacyRoles=true). The destroy deploys no template, so the value only
+# satisfies that check. The guard therefore prints step 1 with the region and
+# the CDK context this deploy already resolved (CDK_CONTEXT_ARGS).
 #
 # DEPLOY_MCP_SERVER is off iff its value, trimmed and lower-cased, is exactly
 # `false` (the mcpServerEnabled rule of lib/context-helpers.ts: default on).
@@ -36,9 +43,13 @@ portal_mcp_optout_guard() {
     ${region:+--region "$region"} --query 'Stacks[0].StackStatus' --output text 2>&1 >/dev/null)" \
     && rc=0 || rc=$?
   if [ "$rc" -eq 0 ]; then
+    # The context this deploy resolved, leading blanks trimmed (it may start
+    # with " -c portalRegistryEnforced=..." when no cloudFrontDomain is set).
+    local ctx="${CDK_CONTEXT_ARGS:-}"
+    ctx="${ctx#"${ctx%%[![:space:]]*}"}"
     echo "❌ DEPLOY_MCP_SERVER=false, but $MCP_STACK_NAME is still deployed." >&2
     echo "   Remove it first (it also deletes the MCP app client, resource server and dispatch-map parameter):" >&2
-    echo "     cd infrastructure && npx cdk destroy $MCP_STACK_NAME --force" >&2
+    echo "     cd infrastructure && ${region:+AWS_REGION=$region }npx cdk destroy $MCP_STACK_NAME --force${ctx:+ $ctx}" >&2
     echo "   then re-run: DEPLOY_MCP_SERVER=false ./deploy-infrastructure.sh" >&2
     return 1
   fi

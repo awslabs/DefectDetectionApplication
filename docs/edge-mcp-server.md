@@ -65,11 +65,12 @@ Every recipe variant carries the first three keys in its
 | Form | URL | When |
 |---|---|---|
 | LAN (TLS) | `https://<device-lan-address>:5443/mcp` | Existing_Token_Auth is configured (`authorization_settings.json` present), so the TLS listener runs. |
-| Tunnel | `http://127.0.0.1:<forwarded-port>/mcp` | Any device, and the only form on a device whose Backend_API listens on plaintext 5000 only. Forward the LocalServer port through SSH or AWS IoT Secure Tunneling: [Connect to an edge device: Forward the LocalServer port for MCP](connect-to-device.md#forward-the-localserver-port-for-mcp). |
+| Tunnel | `http://127.0.0.1:<forwarded-port>/mcp` (plaintext device, port 5000 forwarded) or `https://localhost:<forwarded-port>/mcp` (TLS device, port 5443 forwarded) | Any device, and the only form on a plaintext device. The Backend_API runs one listener: 5443 TLS when Existing_Token_Auth is configured, otherwise plaintext 5000; forward that one. Forward the LocalServer port through SSH or AWS IoT Secure Tunneling: [Connect to an edge device: Forward the LocalServer port for MCP](connect-to-device.md#forward-the-localserver-port-for-mcp). |
 
 The certificate on 5443 is the device's own certificate
 (`/aws_dda/greengrass/v2/device.pem.crt`), which no public authority issued.
-Add it to the client machine's trust store, or use the tunnel form.
+Add it to the client machine's trust store; the tunnel to a TLS device serves
+the same certificate.
 
 `/mcp` accepts `POST` only, rejects any request that carries an `Origin`
 header (`403 invalid_origin`, unless `McpAllowedOrigins` lists it), refuses

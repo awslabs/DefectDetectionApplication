@@ -1734,12 +1734,28 @@ setting is needed.
 Disabling it on a deployed portal takes **two steps, in this order**:
 
 ```bash
-# 1. With the stack still in the app (no DEPLOY_MCP_SERVER=false yet):
-cd infrastructure && npx cdk destroy EdgeCVPortalMcpStack --force && cd ..
+# 1. With the stack still in the app (no DEPLOY_MCP_SERVER=false yet), in the
+#    deploy environment, passing the enforcement value that is deployed:
+cd infrastructure && npx cdk destroy EdgeCVPortalMcpStack --force \
+  -c portalRegistryEnforced=<the deployed value> && cd ..
 # 2. Deploy without it:
 DEPLOY_MCP_SERVER=false ./deploy-infrastructure.sh
 ```
 
+- Step 1 runs in the environment a deploy uses, because `cdk destroy`
+  synthesizes the whole portal app to find the stack:
+  - `AWS_REGION` exported, set to the portal's region;
+  - the trusted UseCase account list resolvable from the CDK context value
+    `trustedUseCaseAccountIds`, `TRUSTED_USECASE_ACCOUNT_IDS` or the SSM
+    parameter `/dda-portal/trusted-usecase-account-ids`, as for
+    `deploy-infrastructure.sh`; otherwise it stops with `ComputeStack requires
+    a non-empty trustedUseCaseAccountIds list`;
+  - `-c portalRegistryEnforced=true` or `=false`. Without it the app refuses
+    to synthesize (`portalRegistryEnforced is unset`, see
+    [The enforcement flag](#the-enforcement-flag)). `cdk destroy` deploys no
+    template, so the value only satisfies that check and changes nothing.
+    Pass the deployed value anyway; the "Check what is deployed" query in that
+    section prints it.
 - Only the literal value `false` (trimmed, case-insensitive) turns the stack
   off. Any other value, unset or empty included, leaves it on.
 - The order matters: the MCP stack imports handler ARNs that
@@ -1753,7 +1769,9 @@ DEPLOY_MCP_SERVER=false ./deploy-infrastructure.sh
 - **The guard message.** With `DEPLOY_MCP_SERVER=false`, the deploy script
   first checks whether `EdgeCVPortalMcpStack` exists. If it does, the script
   stops with `❌ DEPLOY_MCP_SERVER=false, but EdgeCVPortalMcpStack is still
-  deployed.` and prints the step-1 command. If the check itself fails
+  deployed.` and prints the step-1 command, already carrying the region and
+  the CDK context the script resolved (the enforcement value included), so it
+  can be run as printed from the same shell. If the check itself fails
   (credentials, region), it stops with `Could not read whether
   EdgeCVPortalMcpStack is deployed` rather than guess. Nothing is deployed in
   either case.
@@ -1965,7 +1983,8 @@ RFC 8414 metadata; the portal therefore serves the facade.
 ### MCP tools
 
 Each tool's description ends with its classification. List tools take
-`limit` (50 by default, at most 200). Tools of the `usecase` scope take
+`limit` (50 by default, at most 200, unless the tool's schema states
+other bounds). Tools of the `usecase` scope take
 `usecase_id` and are authorized in that Use_Case; `global` tools are
 authorized at the account level. Phase 1 is delivered; Phase 2 and Phase 3
 rows are listed for reference and are neither listed nor accepted by the

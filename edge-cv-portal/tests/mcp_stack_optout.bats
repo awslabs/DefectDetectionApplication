@@ -45,7 +45,10 @@ install_real() {
   run --separate-stderr guard false
   [ "$status" -eq 1 ]
   [[ "$stderr" == *"npx cdk destroy EdgeCVPortalMcpStack --force"* ]]
+  # the printed step 1 synthesizes: the deploy's region and resolved context
+  [[ "$stderr" == *"AWS_REGION=us-east-1 npx cdk destroy EdgeCVPortalMcpStack --force -c cloudFrontDomain=d1"* ]]
   [[ "$output" != *"deployMcpServer"* ]]
+  [[ "$stderr" != *"deployMcpServer"* ]]
   stub_called aws
 }
 
@@ -100,6 +103,12 @@ install_real() {
   run bash -c 'cd "$PORTAL_TREE" && DEPLOY_MCP_SERVER=false ./deploy-infrastructure.sh'
   [ "$status" -ne 0 ]
   [[ "$output" == *"npx cdk destroy EdgeCVPortalMcpStack --force"* ]]
+  # bin/app.ts refuses to synthesize without the enforcement context
+  local destroy_line
+  destroy_line="$(printf '%s\n' "$output" | grep -F 'npx cdk destroy EdgeCVPortalMcpStack --force')"
+  [[ "$destroy_line" == *" -c portalRegistryEnforced=true"* ]]
+  [[ "$destroy_line" != *"--force  "* ]]
+  [[ "$destroy_line" != *"deployMcpServer"* ]]
   ! stub_called npx
 }
 
