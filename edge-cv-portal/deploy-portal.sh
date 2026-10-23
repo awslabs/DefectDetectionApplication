@@ -85,6 +85,10 @@ Options:
                               (env: AWS_REGION / AWS_DEFAULT_REGION)
   --log-file <path>           Deployment_Log path
                               (default: deploy-portal-<UTC-timestamp>.log)
+  --install-docker            Install Docker automatically when it is missing,
+                              instead of failing with instructions. Requires
+                              root or sudo and a recognized distribution.
+                              (env: PORTAL_DEPLOY_INSTALL_DOCKER)
   --help                      Show this help message and exit
 
 Environment passthrough (forwarded unchanged to the frontend step):
@@ -182,6 +186,7 @@ parse_args() {
     local flag_topology="" flag_non_interactive="" flag_portal_account_id=""
     local flag_external_id="" flag_data_buckets="" flag_sso=""
     local flag_profile="" flag_region="" flag_log_file=""
+    local flag_install_docker=""
     local topology_seen=0
 
     SHOW_HELP=0
@@ -197,6 +202,9 @@ parse_args() {
                 ;;
             --sso)
                 flag_sso="1"
+                ;;
+            --install-docker)
+                flag_install_docker="1"
                 ;;
             --portal-account-id)
                 flag_portal_account_id="${2:-}"; shift
@@ -282,6 +290,11 @@ parse_args() {
     SSO=0
     if [ -n "$flag_sso" ] || _is_truthy "${PORTAL_DEPLOY_SSO:-}"; then
         SSO=1
+    fi
+
+    INSTALL_DOCKER=0
+    if [ -n "$flag_install_docker" ] || _is_truthy "${PORTAL_DEPLOY_INSTALL_DOCKER:-}"; then
+        INSTALL_DOCKER=1
     fi
 
     # Forward the frontend passthrough env and the SSO env unchanged (Req 8.4, 5.6).
@@ -723,6 +736,461 @@ check_bootstrap() {
     fi
 
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# Container runtime (Docker) prerequisite
+# ---------------------------------------------------------------------------
+# The portal CDK app bundles Lambda layers and container images through Docker
+# during SYNTHESIS, not just at deploy time: EdgeCVPortalComputeStack's
+# ImagingLayer stages its asset by shelling out to `docker`. Without a usable
+# Docker the run dies inside `npx ts-node bin/app.ts` with
+#   «FailedToBundleAsset» ... Error: spawnSync docker ENOENT
+# AFTER npm install, tsc and asset staging have already burned several minutes.
+# Checking here turns that into an immediate, actionable failure (Req 3.1).
+#
+# Only gated for the steps that synthesize the PORTAL app (auth, infrastructure,
+# frontend). The usecase/data topologies run only account-role, which drives its
+# own CDK app, so they are deliberately NOT subjected to this requirement.
+
+# _os_release_field <field> -> echoes a lowercased field from /etc/os-release,
+# or nothing when the file is absent (e.g. macOS) or the field is unset.
+_os_release_field() {
+    local field="${1:-}"
+    [ -r /etc/os-release ] || return 0
+    # Read in a subshell so the sourced variables never leak into the script.
+    ( . /etc/os-release 2>/dev/null || exit 0
+      printf '%s' "${!field:-}" ) | tr '[:upper:]' '[:lower:]'
+}
+
+# _docker_family -> echoes `debian`, `rhel`, or the empty string for an
+# unrecognized/absent distro. ID is checked first, then ID_LIKE, so derivatives
+# (linuxmint -> debian, amzn -> rhel/fedora) resolve to the right recipe.
+_docker_family() {
+    local id id_like combined
+    id="$(_os_release_field ID)"
+    id_like="$(_os_release_field ID_LIKE)"
+    combined="$id $id_like"
+    case "$combined" in
+        *debian*|*ubuntu*) printf 'debian' ;;
+        *rhel*|*fedora*|*centos*|*amzn*) printf 'rhel' ;;
+        *) printf '' ;;
+    esac
+}
+
+# _docker_install_hint -> write distro-appropriate install instructions to
+# stderr. Prints the official-repo recipe for Debian/Ubuntu (it carries the
+# buildx plugin that CDK image assets want) and the package-manager one-liner
+# for the RHEL family. An unrecognized distro is pointed at upstream docs rather
+# than given a command that would not work.
+_docker_install_hint() {
+    local family
+    family="$(_docker_family)"
+
+    case "$family" in
+        debian)
+            cat >&2 <<'EOF'
+
+  Install Docker (Debian/Ubuntu, official repository — includes buildx):
+
+    sudo apt-get update
+    sudo apt-get install -y ca-certificates curl
+    sudo install -m 0755 -d /etc/apt/keyrings
+    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+      -o /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) \
+signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/ubuntu \
+$(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+      | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    sudo apt-get update
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+      docker-buildx-plugin docker-compose-plugin
+
+  The distro package `docker.io` (plus `docker-buildx`) also works. Avoid the
+  snap build: its confinement blocks bind mounts from arbitrary paths, and CDK
+  bundling bind-mounts the asset staging directory into the container.
+EOF
+            ;;
+        rhel)
+            cat >&2 <<'EOF'
+
+  Install Docker (RHEL/Fedora/Amazon Linux):
+
+    sudo dnf install -y docker     # older Amazon Linux 2: sudo yum install -y docker
+EOF
+            ;;
+        *)
+            cat >&2 <<'EOF'
+
+  This host's distribution was not recognized, so no install command is
+  offered here. Follow the official instructions:
+
+    https://docs.docker.com/engine/install/
+EOF
+            ;;
+    esac
+
+    cat >&2 <<EOF
+
+  Then enable the daemon and grant your user access:
+
+    sudo systemctl enable --now docker
+    sudo usermod -aG docker "\$USER"
+
+  Group membership only applies to a NEW login session. Start a fresh shell
+  (or run 'newgrp docker'), then verify with:
+
+    docker info
+
+  Re-run this script with --install-docker to have it perform the install
+  above automatically.
+EOF
+}
+
+# _docker_install -> perform the install for a recognized distro. Opt-in only,
+# via --install-docker: silently installing system packages during a deploy is
+# a surprise on a host the operator may not own, and it is not cleanly
+# reversible. Refuses an unrecognized distro rather than guessing.
+_docker_install() {
+    local family sudo_cmd=""
+    family="$(_docker_family)"
+
+    if [ -z "$family" ]; then
+        echo "deploy-portal.sh: --install-docker cannot run on this host — its distribution was not recognized" >&2
+        _docker_install_hint
+        return 2
+    fi
+
+    # Root runs the commands directly; a non-root user needs a usable sudo.
+    if [ "$(id -u)" -eq 0 ]; then
+        sudo_cmd=""
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo_cmd="sudo"
+    else
+        echo "deploy-portal.sh: --install-docker requires root or sudo, and neither is available" >&2
+        return 2
+    fi
+
+    echo "Installing Docker (--install-docker, distro family: $family)..."
+
+    if [ "$family" = "debian" ]; then
+        export DEBIAN_FRONTEND=noninteractive
+        local codename arch
+        codename="$(_os_release_field VERSION_CODENAME)"
+        arch="$(dpkg --print-architecture 2>/dev/null || true)"
+        if [ -z "$codename" ] || [ -z "$arch" ]; then
+            echo "deploy-portal.sh: could not determine the Debian/Ubuntu codename or architecture" >&2
+            return 2
+        fi
+        ${sudo_cmd} apt-get update || return 2
+        ${sudo_cmd} apt-get install -y ca-certificates curl || return 2
+        ${sudo_cmd} install -m 0755 -d /etc/apt/keyrings || return 2
+        ${sudo_cmd} curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            -o /etc/apt/keyrings/docker.asc || return 2
+        ${sudo_cmd} chmod a+r /etc/apt/keyrings/docker.asc || return 2
+        printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
+            "$arch" "$codename" \
+            | ${sudo_cmd} tee /etc/apt/sources.list.d/docker.list >/dev/null || return 2
+        ${sudo_cmd} apt-get update || return 2
+        ${sudo_cmd} apt-get install -y docker-ce docker-ce-cli containerd.io \
+            docker-buildx-plugin docker-compose-plugin || return 2
+    else
+        if command -v dnf >/dev/null 2>&1; then
+            ${sudo_cmd} dnf install -y docker || return 2
+        else
+            ${sudo_cmd} yum install -y docker || return 2
+        fi
+    fi
+
+    # Start the daemon. Not every environment runs systemd (containers, WSL
+    # without systemd), so a failure here is reported but not fatal on its own —
+    # the `docker info` re-verification below is the real gate.
+    if command -v systemctl >/dev/null 2>&1; then
+        ${sudo_cmd} systemctl enable --now docker \
+            || echo "deploy-portal.sh: warning — 'systemctl enable --now docker' failed; is systemd running on this host?" >&2
+    fi
+
+    # Grant the invoking user socket access for FUTURE sessions.
+    if [ "$(id -u)" -ne 0 ]; then
+        ${sudo_cmd} usermod -aG docker "$(id -un)" \
+            || echo "deploy-portal.sh: warning — could not add $(id -un) to the 'docker' group" >&2
+    fi
+
+    return 0
+}
+
+# check_container_runtime -> verify Docker is installed AND its daemon is
+# reachable before any portal CDK step runs. The two failures are reported
+# separately because they have different fixes and conflating them is what
+# sends operators down the wrong path:
+#   * binary absent          -> Docker is not installed (the ENOENT case)
+#   * binary present, info X -> daemon stopped, or the user cannot reach the
+#                               socket (group membership, or a stale login
+#                               session that predates the usermod)
+check_container_runtime() {
+    # 1. The binary must be resolvable on the PATH.
+    if ! command -v docker >/dev/null 2>&1; then
+        if [ "${INSTALL_DOCKER:-0}" -eq 1 ]; then
+            _docker_install || return $?
+        else
+            echo "deploy-portal.sh: Docker not found on PATH — the portal CDK app bundles Lambda layers and container images with Docker, so synthesis cannot run without it" >&2
+            _docker_install_hint
+            return 2
+        fi
+    fi
+
+    # 2. The daemon must be reachable by THIS user.
+    local info_err info_rc=0
+    info_err="$(docker info 2>&1)" || info_rc=$?
+    if [ "$info_rc" -eq 0 ]; then
+        return 0
+    fi
+
+    # Permission denied on the socket is the common post-install stumble: the
+    # group change does not apply to an already-running login session, and it
+    # can never apply to this already-running script's own process.
+    if printf '%s' "$info_err" | grep -qiE 'permission denied|dial unix.*permission|connect: permission'; then
+        cat >&2 <<EOF
+deploy-portal.sh: Docker is installed but this user cannot reach the daemon socket (permission denied).
+
+  Add yourself to the 'docker' group and start a NEW shell:
+
+    sudo usermod -aG docker "\$USER"
+    # then open a fresh shell, or: newgrp docker
+
+  A group change cannot apply to an already-running session, so re-running this
+  script from the same shell will fail the same way. Verify with 'docker info'
+  in the new shell, then re-run.
+EOF
+        return 2
+    fi
+
+    # Anything else: most often a stopped daemon. Surface the real error rather
+    # than guessing at a cause we have not positively identified.
+    cat >&2 <<EOF
+deploy-portal.sh: Docker is installed but its daemon is not reachable.
+
+  Try starting it:
+
+    sudo systemctl enable --now docker
+
+  The underlying error was:
+EOF
+    printf '%s\n' "$info_err" | sed 's/^/    /' >&2
+    return 2
+}
+
+# ---------------------------------------------------------------------------
+# Greengrass component artifact bucket prerequisite
+# ---------------------------------------------------------------------------
+# EdgeCVPortalComputeStack CONFIGURES, but never creates, the Greengrass
+# component artifact bucket. infrastructure/lib/compute-stack.ts derives
+#     `dda-component-${cdk.Aws.REGION}-${cdk.Aws.ACCOUNT_ID}`
+# as a bare name string and hands it to two AwsCustomResources —
+# StaticImagePinUploadCors (PutBucketCors) and StaticImagePinStagingLifecycle
+# (PutBucketLifecycleConfiguration) — and interpolates it into IAM policy ARNs.
+# Because it is only ever a NAME, CDK neither creates the bucket nor orders a
+# dependency on it.
+#
+# The bucket normally comes into existence as a side effect of GDK publishing a
+# Greengrass component (gdk-config.json's `"bucket": "dda-component"`, to which
+# GDK appends -<region>-<account>). An account that has never published a
+# component therefore has no bucket, and the deploy fails deep into
+# EdgeCVPortalComputeStack with "The specified bucket does not exist".
+#
+# Ensuring it here, rather than creating it in CDK, is deliberate: GDK owns this
+# bucket and in an established account it holds live component artifacts. Giving
+# CloudFormation ownership would either fail on the taken name or put the entire
+# component artifact store under CFN's delete lifecycle.
+
+# Must match compute-stack.ts's prefix (also surfaced to the Lambdas as the
+# COMPONENT_BUCKET_PREFIX environment variable).
+COMPONENT_BUCKET_PREFIX="dda-component"
+
+# _component_bucket_name [region] [account] -> echoes the bucket name derived
+# EXACTLY as compute-stack.ts derives it, from the run context the prerequisite
+# gate resolved and exported. Deriving it from the resolved ACCOUNT/REGION (and
+# not from an ambient AWS CLI default) is what keeps the created bucket's name
+# identical to the one the CDK app will look for.
+_component_bucket_name() {
+    local region="${1:-${REGION:-}}" account="${2:-${ACCOUNT:-}}"
+    [ -n "$region" ] && [ -n "$account" ] || return 1
+    printf '%s-%s-%s' "$COMPONENT_BUCKET_PREFIX" "$region" "$account"
+}
+
+# ensure_component_bucket -> create the component artifact bucket when absent;
+# a no-op when it already exists. Idempotent by design: an established account
+# whose bucket holds live artifacts must pass through here untouched, never
+# reconfigured.
+#
+# Only existence is ensured. The CORS and lifecycle configuration remain the
+# CDK custom resources' job and succeed once the bucket is there, so the
+# responsibility boundary stays where the IaC expects it.
+ensure_component_bucket() {
+    local region="${REGION:-}" account="${ACCOUNT:-}" bucket
+    if ! bucket="$(_component_bucket_name "$region" "$account")"; then
+        echo "deploy-portal.sh: cannot derive the component bucket name — account/region unresolved" >&2
+        return 2
+    fi
+
+    # Does it already exist and can we see it?
+    local head_err head_rc=0
+    head_err="$(aws s3api head-bucket --bucket "$bucket" --region "$region" 2>&1)" || head_rc=$?
+    if [ "$head_rc" -eq 0 ]; then
+        echo "Component bucket: s3://$bucket (already exists)"
+        return 0
+    fi
+
+    # A 403 is NOT absence: the bucket may exist under another account, or this
+    # caller may simply lack s3:ListBucket. Attempting a create here would
+    # either fail confusingly or mask a real permissions problem, so stop and
+    # say what is ambiguous.
+    if printf '%s' "$head_err" | grep -qiE '\(403\)|forbidden|accessdenied|access denied'; then
+        cat >&2 <<EOF
+deploy-portal.sh: cannot determine whether s3://$bucket exists — the HeadBucket call was denied.
+
+  Either the bucket exists and is owned by another account, or these
+  credentials lack s3:ListBucket on it. EdgeCVPortalComputeStack needs this
+  bucket, so resolve the access question before deploying. The underlying
+  error was:
+EOF
+        printf '%s\n' "$head_err" | sed 's/^/    /' >&2
+        return 2
+    fi
+
+    echo "Component bucket: s3://$bucket is absent; creating it"
+
+    # us-east-1 is the special case: CreateBucket REJECTS a LocationConstraint
+    # of us-east-1, while every other region REQUIRES one.
+    local create_err create_rc=0
+    if [ "$region" = "us-east-1" ]; then
+        create_err="$(aws s3api create-bucket --bucket "$bucket" \
+            --region "$region" 2>&1)" || create_rc=$?
+    else
+        create_err="$(aws s3api create-bucket --bucket "$bucket" \
+            --region "$region" \
+            --create-bucket-configuration "LocationConstraint=$region" 2>&1)" || create_rc=$?
+    fi
+
+    if [ "$create_rc" -eq 0 ]; then
+        echo "✓ Created s3://$bucket"
+        return 0
+    fi
+
+    # Already ours: a concurrent run or a racing GDK publish got there first.
+    # That is the desired end state, so treat it as success.
+    if printf '%s' "$create_err" | grep -qi 'BucketAlreadyOwnedByYou'; then
+        echo "Component bucket: s3://$bucket already exists (owned by this account)"
+        return 0
+    fi
+
+    # Taken by a different account. S3 bucket names are globally unique, so
+    # this is not recoverable from here.
+    if printf '%s' "$create_err" | grep -qi 'BucketAlreadyExists'; then
+        cat >&2 <<EOF
+deploy-portal.sh: the bucket name '$bucket' is already taken by another AWS account.
+
+  S3 bucket names are globally unique, and EdgeCVPortalComputeStack derives
+  this exact name from the account id and region, so it cannot be renamed from
+  here. This needs a decision about the component bucket naming before the
+  portal can deploy into this account/region.
+EOF
+        return 2
+    fi
+
+    echo "deploy-portal.sh: failed to create s3://$bucket" >&2
+    printf '%s\n' "$create_err" | sed 's/^/    /' >&2
+    return 2
+}
+
+# ---------------------------------------------------------------------------
+# Retained-resource collision detection (non-destructive)
+# ---------------------------------------------------------------------------
+# A failed FIRST create of EdgeCVPortalComputeStack rolls back and is deleted,
+# but resources whose construct type defaults to RemovalPolicy.RETAIN survive
+# that teardown. aws-cdk-lib's ecr.Repository is one: DetectorExportRepository
+# (physical name dda-detector-export) outlives the rollback and the NEXT attempt
+# then fails at changeset validation with
+#   Resource of type 'AWS::ECR::Repository' with identifier
+#   'dda-detector-export' already exists.
+# Because each attempt re-creates the repository before dying further in, every
+# rollback re-orphans it — a self-regenerating blocker.
+#
+# This check DETECTS and REPORTS only. It deliberately does not delete anything:
+# `aws ecr delete-repository --force` destroys the images it contains, and a
+# deploy script is the wrong place to make that call on an operator's behalf.
+#
+# False positives are avoided by the stack test below: the repository is only an
+# ORPHAN when the stack that owns it is absent. During an ordinary re-deploy the
+# stack exists, legitimately owns the repository, and this check stays silent.
+
+# Stack that owns the retained resources surveyed here.
+COMPUTE_STACK_NAME="EdgeCVPortalComputeStack"
+
+# _stack_absent <stack-name> -> success when CloudFormation has no such stack.
+# describe-stacks by NAME excludes DELETE_COMPLETE stacks, which is exactly the
+# post-rollback-and-delete state this check cares about.
+_stack_absent() {
+    local stack="${1:-}" region="${REGION:-}"
+    local out rc=0
+    out="$(aws cloudformation describe-stacks --stack-name "$stack" \
+        --region "$region" --query 'Stacks[0].StackStatus' --output text 2>&1)" || rc=$?
+    [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'does not exist'
+}
+
+# check_retained_orphans -> fail fast, before synthesis, when a retained
+# resource from a previous failed attempt would collide with a fresh create.
+check_retained_orphans() {
+    local region="${REGION:-}"
+
+    # Only an orphan when the owning stack is gone. An existing stack owns its
+    # resources, so there is nothing to report.
+    if ! _stack_absent "$COMPUTE_STACK_NAME"; then
+        return 0
+    fi
+
+    local orphans=()
+
+    # DetectorExportRepository — compute-stack.ts, explicit physical name, and
+    # ecr.Repository defaults to RemovalPolicy.RETAIN.
+    if aws ecr describe-repositories --repository-names dda-detector-export \
+            --region "$region" >/dev/null 2>&1; then
+        orphans+=("dda-detector-export")
+    fi
+
+    if [ "${#orphans[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    cat >&2 <<EOF
+deploy-portal.sh: $COMPUTE_STACK_NAME does not exist, but resources it creates are still present.
+
+  These survived a previous failed deploy because their removal policy is
+  RETAIN. CloudFormation will reject the changeset with "already exists"
+  unless they are removed first:
+
+EOF
+    local orphan
+    for orphan in "${orphans[@]}"; do
+        case "$orphan" in
+            dda-detector-export)
+                cat >&2 <<EOF
+    ECR repository '$orphan' (DetectorExportRepository)
+      aws ecr delete-repository --repository-name $orphan --region $region
+      # add --force if it holds images; that DELETES those images
+
+EOF
+                ;;
+        esac
+    done
+
+    cat >&2 <<'EOF'
+  Nothing was deleted automatically — removing AWS resources is not this
+  script's call to make. Run the command(s) above, then re-run the deploy.
+EOF
+    return 2
 }
 
 # ---------------------------------------------------------------------------
@@ -1247,11 +1715,35 @@ main() {
     # orchestrator only gates the stacks it drives directly (Req 3.6, 3.7).
     local step
     local needs_bootstrap=0
+    local needs_component_bucket=0
     for step in $steps; do
         case "$step" in
             auth|infrastructure|frontend) needs_bootstrap=1 ;;
         esac
+        case "$step" in
+            infrastructure) needs_component_bucket=1 ;;
+        esac
     done
+
+    # Container runtime gate: each portal CDK step synthesizes the WHOLE app,
+    # and that synthesis stages assets through Docker, so a usable container
+    # runtime is required before the first of them runs. Deliberately not
+    # applied to usecase/data, which run only account-role and its own CDK app
+    # (Req 3.1).
+    if [ "$needs_bootstrap" -eq 1 ]; then
+        check_container_runtime || exit $?
+    fi
+
+    # EdgeCVPortalComputeStack prerequisites, both keyed on the ACCOUNT and
+    # REGION the prerequisite gate resolved and published: the Greengrass
+    # component artifact bucket the stack configures but never creates, and any
+    # RETAIN-policy resource a previous failed attempt left behind that would
+    # collide with a fresh create.
+    if [ "$needs_component_bucket" -eq 1 ]; then
+        ensure_component_bucket || exit $?
+        check_retained_orphans || exit $?
+    fi
+
     if [ "$needs_bootstrap" -eq 1 ]; then
         check_bootstrap || exit $?
     fi

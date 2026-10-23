@@ -156,10 +156,73 @@ Portal Account          UseCase Account         Data Account (Optional)
 - AWS CLI configured, with a region: a default region (`aws configure`) or `AWS_REGION` (`deploy-portal.sh` also takes `--region <region>`)
 - Node.js 18+, Python 3.11+
 - AWS CDK: `npm install -g aws-cdk`
-- Docker (the compute stack builds a Lambda container image during `cdk deploy`)
+- Docker, with its daemon running and reachable by your user (see [Docker](#docker) below)
 - [AWS Marketplace subscription](https://aws.amazon.com/marketplace/pp/prodview-j72hhmlt6avp6) (in UseCase Account — see below)
 
-> `deploy-portal.sh` (Step 1.2) checks the AWS CLI, your credentials, the region, Node.js and CDK before it changes anything, and runs `cdk bootstrap` for you when the account/region is not bootstrapped (or its bootstrap version is below 21). It takes the region from `--region`, else `AWS_REGION` / `AWS_DEFAULT_REGION`, else the CLI's default region, and every step deploys to that region. It does not check Docker, the Marketplace subscription, or the API Gateway CloudWatch Logs role from Step 1.1.
+> `deploy-portal.sh` (Step 1.2) checks the AWS CLI, your credentials, the region, Node.js, CDK and Docker before it changes anything, and runs `cdk bootstrap` for you when the account/region is not bootstrapped (or its bootstrap version is below 21). It takes the region from `--region`, else `AWS_REGION` / `AWS_DEFAULT_REGION`, else the CLI's default region, and every step deploys to that region. For the `single-account` topology it also creates the Greengrass component artifact bucket if it is absent (see [Component artifact bucket](#component-artifact-bucket)) and stops if a previous failed deploy left a retained resource behind that would collide on create. It does not check the Marketplace subscription or the API Gateway CloudWatch Logs role from Step 1.1.
+
+#### Docker
+
+Docker is needed at **synthesis** time, not only at deploy time: the compute stack stages a Lambda layer asset (`ImagingLayer`) and builds a Lambda container image by shelling out to `docker`. Without it the run fails while synthesizing the CDK app — during the `auth` step, before anything is deployed — with:
+
+```
+«FailedToBundleAsset» Failed to bundle asset EdgeCVPortalComputeStack/ImagingLayer/Code/Stage
+Error: spawnSync docker ENOENT
+```
+
+On Debian/Ubuntu, install from Docker's official repository (it carries the buildx plugin that CDK image assets use):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+On RHEL/Fedora/Amazon Linux: `sudo dnf install -y docker` (older Amazon Linux 2: `yum`). Avoid the snap build of Docker — its confinement blocks bind mounts from arbitrary paths, and CDK bundling bind-mounts the asset staging directory into the container.
+
+Then enable the daemon and grant your user access:
+
+```bash
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+Group membership only applies to a **new** login session, so start a fresh shell (or run `newgrp docker`) and confirm with `docker info` before deploying. A `permission denied` on `/var/run/docker.sock` means the group change has not taken effect in your current shell; that is a different failure from Docker being missing entirely.
+
+`./deploy-portal.sh --install-docker` performs the install above automatically. It needs root or `sudo` and a recognized distribution, and it is opt-in by design — the default is to stop with instructions rather than install system packages on your host unasked.
+
+#### Component artifact bucket
+
+The compute stack configures, but never creates, the Greengrass component artifact bucket `dda-component-<region>-<account-id>`: it applies a CORS configuration and a staging lifecycle rule to it for the static image pin upload flow. That bucket normally comes into existence as a side effect of publishing a Greengrass component with GDK, so an account that has never published one does not have it, and the deploy fails partway through `EdgeCVPortalComputeStack` with `The specified bucket does not exist`.
+
+`deploy-portal.sh` creates the bucket when it is absent and leaves it untouched when it already exists. The bucket is deliberately **not** managed by CDK: GDK owns it, and in an established account it holds live component artifacts, so putting it under CloudFormation's delete lifecycle would risk the component artifact store. To create it by hand instead:
+
+```bash
+# every region except us-east-1 requires the LocationConstraint
+aws s3api create-bucket --bucket "dda-component-<region>-<account-id>" \
+  --region "<region>" --create-bucket-configuration "LocationConstraint=<region>"
+
+# us-east-1 must NOT pass --create-bucket-configuration
+aws s3api create-bucket --bucket "dda-component-us-east-1-<account-id>" --region us-east-1
+```
+
+#### Retrying a failed first deploy
+
+A failed *initial* create of a stack leaves it in `ROLLBACK_COMPLETE`, which CloudFormation will not let you update — the stack has to be deleted before you retry. Resources whose removal policy is `RETAIN` survive that deletion, and `aws-cdk-lib`'s `ecr.Repository` retains by default, so `dda-detector-export` outlives the rollback and the next attempt fails at changeset validation with `already exists`. Because each attempt re-creates the repository before failing further in, every rollback re-orphans it.
+
+`deploy-portal.sh` detects this before synthesis and prints the cleanup command, but does not run it — deleting AWS resources is left to you:
+
+```bash
+aws ecr delete-repository --repository-name dda-detector-export --region "<region>"
+# add --force if it holds images; that deletes those images
+```
 
 > **Important: AWS Marketplace Subscription Required**
 > 
@@ -214,7 +277,7 @@ cd edge-cv-portal
 ./deploy-portal.sh single-account
 ```
 
-`deploy-portal.sh` checks the prerequisites (AWS CLI, credentials, region, Node.js, CDK), resolves the trusted UseCase account list (see below), bootstraps CDK in the account/region if needed, prints the resolved account, region and log path, and then runs the existing deployment scripts in this order:
+`deploy-portal.sh` checks the prerequisites (AWS CLI, credentials, region, Node.js, CDK, Docker), resolves the trusted UseCase account list (see below), ensures the Greengrass component artifact bucket exists, bootstraps CDK in the account/region if needed, prints the resolved account, region and log path, and then runs the existing deployment scripts in this order:
 
 1. `./deploy-account-role.sh single-account` — IAM roles and policies (`DDASageMakerExecutionRole`, `DDAPortalComponentAccessPolicy`, `Greengrass_ServiceRole`)
 2. `infrastructure/deploy-auth.sh` — the Cognito `EdgeCVPortalAuthStack`
@@ -229,6 +292,7 @@ Useful options (`./deploy-portal.sh --help` lists them all):
 
 - `--profile <name>` / `--region <region>` — AWS CLI profile and region for all steps (env: `AWS_PROFILE`, `AWS_REGION`)
 - `--sso` — enable SSO on the auth stack; export `SSO_METADATA_URL` (and optionally `SSO_PROVIDER_NAME`, `COGNITO_DOMAIN_PREFIX`) first, see [edge-cv-portal/infrastructure/SSO_SETUP.md](edge-cv-portal/infrastructure/SSO_SETUP.md)
+- `--install-docker` — install Docker automatically when it is missing, instead of stopping with instructions. Needs root or `sudo` and a recognized distribution (env: `PORTAL_DEPLOY_INSTALL_DOCKER`)
 - `--non-interactive` — never prompt (for CI). The `single-account` topology needs no further inputs:
 
   ```bash
