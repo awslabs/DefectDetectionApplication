@@ -696,14 +696,14 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
   - Ensure all tests pass; ask the user if questions arise
   - _Requirements: 16.2, 16.3, 16.5, 16.7, 16.8_
 
-- [ ] 14. Add the on-hardware harness stage (read-only part)
+- [x] 14. Add the on-hardware harness stage (read-only part)
   - [x] 14.1 Register the `mcp` capability and the MCP profile flags in the harness
     - `KNOWN_CAPABILITIES` gains `mcp`; device profiles accept `mcp_mutating` and `mcp_snapshot` booleans (default false; parsed now, used from Phase 2); `DDA_HARNESS_MCP_SOAK_S` (default 600) and `DDA_HARNESS_ON_DEVICE`; `devices.yaml.example` and the README stage table document them and the stage's invocation under Python 3.11 with `mcp==2.3.0`
     - Files: `test/on-hardware/harness/harnesslib/config.py`, `test/on-hardware/harness/devices.yaml.example`, `test/on-hardware/harness/README.md`, `test/on-hardware/harness/selftest/test_config.py`
     - Verify: `python3 -m pytest test/on-hardware/harness/selftest -q`
     - _Requirements: 16.7_
 
-  - [ ] 14.2 Write `stages/test_50_mcp.py` steps (1), (2), (4), (5), (6)
+  - [x] 14.2 Write `stages/test_50_mcp.py` steps (1), (2), (4), (5), (6)
     - (1) `GET /mcp/status` through the authenticated `harnesslib` client (`client.login()`, credential reference `env:`/`file:`, no stored password); (2) official `mcp` `Client` to `{base_url}/mcp` with the session token (never logged): list tools and call the RO tools the design names per present area — incl. `edge_image_source_preview` (exactly one `ImageContent`), `edge_workflow_images_list` with no `limit` on a DIO-triggered workflow (skipped otherwise; ≤ 2 items; no `/` under `*Path` keys), `edge_results_list`, `edge_registration_get` (`executions` dropped), `edge_textgen_models_list` when `vllm`; (4) `/health` healthy and container restart count unchanged across the stage and `DDA_HARNESS_MCP_SOAK_S`; (5) corrupted token → 401, `Origin` → 403; (6) on-device direct loopback checks (skipped when remote)
     - The module skips with a recorded reason (not fails) when `mcp` is not importable, so the existing Python 3.9 harness invocation of the other stages is unaffected
     - Files: new `test/on-hardware/harness/stages/test_50_mcp.py`

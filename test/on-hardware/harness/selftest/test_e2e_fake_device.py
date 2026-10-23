@@ -70,12 +70,15 @@ STAGE_NAMES = {
     "test_30_workflows",
     "test_35_stream_cameras",
     "test_40_coexistence",
+    "test_50_mcp",
 }
 
 #: Tests per capability-gated module that skips as a whole when its
 #: capability is not granted: vlm image generate (vllm) and stream cameras.
 VLM_STAGE_TESTS = 2
 STREAM_STAGE_TESTS = 7
+#: The MCP stage (capability ``mcp``, never granted here): every test skips.
+MCP_STAGE_TESTS = 19
 
 # The stream camera stage's fake sources (never resolved: the fake answers
 # every URL from its scripted FakeStreamServer entries).
@@ -215,7 +218,9 @@ def test_full_run_green_with_results_bundle(pytester, monkeypatch):
     assert result.ret == 0, result.stdout.str()
     # The vlm image stage skips (no multimodal model deployed) and the
     # stream camera stage skips (capability not granted).
-    result.assert_outcomes(passed=14, skipped=VLM_STAGE_TESTS + STREAM_STAGE_TESTS)
+    result.assert_outcomes(
+        passed=14, skipped=VLM_STAGE_TESTS + STREAM_STAGE_TESTS + MCP_STAGE_TESTS
+    )
 
     # Results_Bundle contents (Req 8.1).
     results = _load_results(bundle)
@@ -265,7 +270,9 @@ def test_missing_capability_skips_with_recorded_reason(pytester, monkeypatch):
     # health: 3 passed + auth skipped; vision: 2 passed; vllm: 4 skipped;
     # workflows: 3 skipped; coexistence: 1 skipped; vlm image and stream
     # cameras: all skipped.
-    result.assert_outcomes(passed=5, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS)
+    result.assert_outcomes(
+        passed=5, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS + MCP_STAGE_TESTS
+    )
 
     results = _load_results(bundle)
     vllm_reasons = results["stages"]["test_20_vllm_textgen"]["skip_reasons"]
@@ -300,7 +307,9 @@ def test_declared_but_absent_capability_fails_distinctly(pytester, monkeypatch):
     # workflows and stream cameras: skipped (capability); vllm 4 + vlm
     # image 2 + coexistence 1 error out of the session-scoped vllm_surface
     # probe.
-    result.assert_outcomes(passed=3, skipped=6 + STREAM_STAGE_TESTS, errors=5 + VLM_STAGE_TESTS)
+    result.assert_outcomes(
+        passed=3, skipped=6 + STREAM_STAGE_TESTS + MCP_STAGE_TESTS, errors=5 + VLM_STAGE_TESTS
+    )
     output = result.stdout.str()
     assert f"Capability mismatch on device '{DEVICE_NAME}'" in output
     assert "claims capability 'vllm' is available" in output
@@ -344,7 +353,7 @@ def test_restoration_runs_on_failure_and_spares_found_running(pytester, monkeypa
     # fails; vllm 4 + workflows 3 + coexistence 1 + vlm image + stream
     # cameras skipped (capability).
     result.assert_outcomes(
-        passed=4, failed=1, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS
+        passed=4, failed=1, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS + MCP_STAGE_TESTS
     )
     # The device-reported failure reason surfaces verbatim (Req 4.2).
     assert fail_reason in result.stdout.str()
@@ -412,7 +421,9 @@ def test_run_budget_exceeded_fails_remaining_tests(pytester, monkeypatch):
     # Capability-gated items still skip (collection-time markers evaluate
     # first); every other test dies at setup with the budget diagnostic
     # (a setup-phase pytest.fail is reported as an error outcome).
-    result.assert_outcomes(errors=5, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS)
+    result.assert_outcomes(
+        errors=5, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS + MCP_STAGE_TESTS
+    )
     assert "run budget exceeded" in result.stdout.str()
 
 
@@ -507,7 +518,7 @@ def test_stream_stage_green_with_restoration(pytester, monkeypatch):
     # health: 3 passed + auth skipped; vision: 2 skipped (none expected);
     # vllm 4 + vlm image 2 + workflows 3 + coexistence 1 skipped
     # (capability); stream cameras: all passed.
-    result.assert_outcomes(passed=3 + STREAM_STAGE_TESTS, skipped=13)
+    result.assert_outcomes(passed=3 + STREAM_STAGE_TESTS, skipped=13 + MCP_STAGE_TESTS)
 
     results = _load_results(bundle)
     assert results["stages"]["test_35_stream_cameras"]["passed"] == STREAM_STAGE_TESTS
@@ -568,7 +579,7 @@ def test_stream_stage_without_inputs_skips_each_check_naming_its_key(pytester, m
     assert result.ret == 0, result.stdout.str()
     # health 3 + stream capabilities 1 passed; the other 6 stream checks
     # skip, plus the 13 skips of the other stages.
-    result.assert_outcomes(passed=4, skipped=13 + STREAM_STAGE_TESTS - 1)
+    result.assert_outcomes(passed=4, skipped=13 + STREAM_STAGE_TESTS - 1 + MCP_STAGE_TESTS)
     reasons = _load_results(bundle)["stages"]["test_35_stream_cameras"]["skip_reasons"]
     assert sorted(reasons) == sorted(
         [
@@ -625,7 +636,7 @@ def test_stream_stage_failures_reported_and_sources_still_deleted(pytester, monk
     # health 3 + capabilities 1 passed; URLs, credentials and failure
     # categories fail; the triggered-run check (no workflow) and both
     # continuous checks (found paused) skip, plus the 13 other skips.
-    result.assert_outcomes(passed=4, failed=3, skipped=16)
+    result.assert_outcomes(passed=4, failed=3, skipped=16 + MCP_STAGE_TESTS)
     output = result.stdout.str()
     assert f"{RTMP_H265}: test-connection answered ok=False, category='not_found'" in output
     assert "failed (restoration retries it at teardown)" in output
@@ -665,7 +676,7 @@ def test_stream_capability_declared_but_absent_fails_distinctly(pytester, monkey
     assert result.ret != 0
     # health 3 passed; the 13 other skips; every stream check errors out of
     # the session-scoped stream_cameras_surface probe.
-    result.assert_outcomes(passed=3, skipped=13, errors=STREAM_STAGE_TESTS)
+    result.assert_outcomes(passed=3, skipped=13 + MCP_STAGE_TESTS, errors=STREAM_STAGE_TESTS)
     output = result.stdout.str()
     assert f"Capability mismatch on device '{DEVICE_NAME}'" in output
     assert "claims capability 'stream_cameras' is available" in output
@@ -715,7 +726,7 @@ def test_stream_pause_failures_still_leave_the_workflow_resumed(
     assert result.ret != 0
     # health 3 + capabilities 1 + continuous rate 1 passed; the pause check
     # fails; the 4 other stream checks (no inputs) and 13 other skips.
-    result.assert_outcomes(passed=5, failed=1, skipped=17)
+    result.assert_outcomes(passed=5, failed=1, skipped=17 + MCP_STAGE_TESTS)
     assert reported in result.stdout.str()
     assert device.calls_of("pause") == [continuous_id]
     assert device.calls_of("resume") == [continuous_id]
