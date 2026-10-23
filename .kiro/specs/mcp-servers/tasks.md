@@ -463,33 +463,33 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_lambda_handler.py -q`
     - _Requirements: 7.1, 7.2, 7.3, 1.7, 15.3, 6.2_
 
-- [ ] 7. Write the portal protocol, transport, authorization and guardrail suites
-  - [ ] 7.1 Write the in-memory protocol test
+- [x] 7. Write the portal protocol, transport, authorization and guardrail suites
+  - [x] 7.1 Write the in-memory protocol test
     - `tests/mcp/_principal.py:set_principal` (test-only, sets `auth_context_var`); `test_mcp_protocol.py` per the Testing Strategy row: `server/discover`, deterministic `tools/list` with `ttlMs`/`cacheScope`, rendered descriptions and the alias entry, one RO call (`portal_devices_list`), one M call (`portal_devices_deployment_create` with `MCP_MUTATING_TOOLS_ENABLED=true`, `DELIVERED_PHASES` patched, and `confirm` equal to the thing-group name — [review-9 N7]), error shapes incl. unknown tool `-32602`
     - Files: `edge-cv-portal/backend/tests/mcp/_principal.py`, `edge-cv-portal/backend/tests/mcp/test_mcp_protocol.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_protocol.py -q`
     - _Requirements: 16.1, 1.2, 1.5, 1.7, 5.1, 5.3, 14.4, 15.3_
 
-  - [ ] 7.2 Write the Streamable HTTP transport and auth-failure audit tests
+  - [x] 7.2 Write the Streamable HTTP transport and auth-failure audit tests
     - `test_mcp_http_transport.py` over `httpx2.ASGITransport(app=build_asgi_app())`: PRM documents, facade, 405 on discovery `OPTIONS`/`POST`, 401 challenge per endpoint (SDK behaviour upstream of the gateway), 403 `insufficient_scope`, `Origin` → 403, foreign `Host` → 421, `MCP-Protocol-Version`, `GET /mcp` → 405, no `Mcp-Session-Id`, no redirects; token in a query parameter → 401
     - Extend `test_mcp_auth_failure_audit.py`: marked `authentication_failed` entry for expired / wrong `client_id` / wrong scope, none for a bad signature, and `test_middleware_order`
     - Files: `edge-cv-portal/backend/tests/mcp/test_mcp_http_transport.py`, `edge-cv-portal/backend/tests/mcp/test_mcp_auth_failure_audit.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_http_transport.py tests/mcp/test_mcp_auth_failure_audit.py -q`
     - _Requirements: 2.2, 2.4, 7.3, 7.5, 4.7, 16.1, 16.2_
 
-  - [ ] 7.3 Write the legacy-revision client test
+  - [x] 7.3 Write the legacy-revision client test
     - `Client(..., mode="legacy")` over the ASGI transport: `initialize`, `tools/list`, one `call_tool`; an unknown version header → `UnsupportedProtocolVersionError`
     - Files: `edge-cv-portal/backend/tests/mcp/test_mcp_legacy_client.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_legacy_client.py -q`
     - _Requirements: 7.2, 16.9_
 
-  - [ ] 7.4 Write the RBAC matrix test
+  - [x] 7.4 Write the RBAC matrix test
     - Every catalog tool × six roles × `PORTAL_REGISTRY_ENFORCED` on/off, registry seeding as the Testing Strategy row states, expectations from the real resolver cross-checked against the per-row role mapping, marked `unauthorized_access` entries, registry outage → `authorization_unavailable`, whoami for every role, the `documented-limitation-D29` denials, and the usability guard
     - Files: `edge-cv-portal/backend/tests/mcp/test_mcp_rbac_matrix.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_rbac_matrix.py -q`
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 16.3_
 
-  - [ ] 7.5 Write the confirmation and mutating-switch test
+  - [x] 7.5 Write the confirmation and mutating-switch test
     - Every `M!` tool rejects a missing or mismatching `confirm` (incl. both `oneOf` branches of `portal_devices_deployment_create`, the other branch's value and the former `"deploy"` — [review-9 N7] — and `target_devices: []` and `target_thing_group: ""` as `invalid_input` before the comparison [review-10 N5]); with the switch off every `M` tool is absent from `tools/list` and refused
     - Files: `edge-cv-portal/backend/tests/mcp/test_mcp_guardrails.py`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp/test_mcp_guardrails.py -q`

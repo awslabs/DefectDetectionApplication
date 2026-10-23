@@ -8,6 +8,10 @@ top-level `oneOf`/`anyOf` required-groups, `allOf` patterns and
 `not: {const}`) and filters every draw through the validator, so a
 construct it renders imprecisely costs a rejected example, never an
 invalid one.
+
+`minimal_args(spec)` is the deterministic counterpart for the table-driven
+suites (protocol, RBAC matrix, guardrails): the required properties only,
+each with a fixed sample value, validated before it is returned.
 """
 import re
 
@@ -102,4 +106,58 @@ def arguments(draw, spec):
     """A schema-valid argument object of `spec`."""
     args = draw(_object(spec.input_schema))
     assume(jsonschema.Draft202012Validator(spec.input_schema).is_valid(args))
+    return args
+
+
+# ------------------------------------------------- deterministic arguments
+
+_SAMPLE_STRINGS = ('x1', 's3://fake-bucket/fake-key', 'model-x1', '1.0.0', 'fake-value-1')
+
+
+def _sample(prop: dict):
+    if 'const' in prop:
+        return prop['const']
+    if 'enum' in prop:
+        return prop['enum'][0]
+    kind = prop.get('type')
+    if isinstance(kind, list):
+        kind = kind[0]
+    if kind == 'string':
+        candidates = [s for s in _SAMPLE_STRINGS
+                      if jsonschema.Draft202012Validator(prop).is_valid(s)]
+        return candidates[0] if candidates else 'x1'
+    if kind in ('integer', 'number'):
+        return prop.get('minimum', 1)
+    if kind == 'boolean':
+        return False
+    if kind == 'array':
+        return [_sample(prop.get('items', {}))
+                for _ in range(max(prop.get('minItems', 0), 1))]
+    if kind == 'object':
+        props = prop.get('properties', {})
+        out = {name: _sample(props.get(name, {})) for name in prop.get('required', ())}
+        if not out and prop.get('minProperties'):
+            if props:
+                name = next(iter(props))
+                out = {name: _sample(props[name])}
+            else:
+                extra = prop.get('additionalProperties', True)
+                out = {'key1': _sample(extra) if isinstance(extra, dict) else 'x1'}
+        return out
+    return 'x1'
+
+
+def minimal_args(spec, branch: int = 0, **overrides) -> dict:
+    """A schema-valid argument object with only the required properties (of
+    the `branch`-th `oneOf`/`anyOf` group), plus `overrides`. Raises
+    `jsonschema.ValidationError` when the result does not validate."""
+    schema = spec.input_schema
+    required = list(schema.get('required', ()))
+    for group in ('oneOf', 'anyOf'):
+        if schema.get(group):
+            chosen = schema[group][min(branch, len(schema[group]) - 1)]
+            required += [r for r in chosen.get('required', ()) if r not in required]
+    args = {name: _sample(schema['properties'][name]) for name in required}
+    args.update(overrides)
+    jsonschema.Draft202012Validator(schema).validate(args)
     return args

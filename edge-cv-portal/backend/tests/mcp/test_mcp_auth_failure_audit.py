@@ -6,9 +6,10 @@ Error Handling (Portal) token rows; tasks.md 3.6). Requirements 4.7, 2.7.
 
 A minimal Starlette app: the middleware outermost, then the SDK's
 `AuthenticationMiddleware` with `BearerAuthBackend(CognitoAccessTokenVerifier)`,
-and `RequireAuthMiddleware` on `/mcp/...`. The ASGI-transport and
-middleware-order cases of `build_asgi_app()` are task 7.2's. Keys are
-generated at test time; every identifier is visibly fake.
+and `RequireAuthMiddleware` on `/mcp/...`. The last section (tasks.md 7.2)
+sends the same failures through `build_asgi_app()` over the ASGI transport
+and pins its middleware order (review-4 M1). Keys are generated at test
+time; every identifier is visibly fake.
 """
 import asyncio
 import logging
@@ -257,6 +258,68 @@ def test_recorded_failure_with_401_writes_once(monkeypatch):
     sent = _run(auth_audit.AuthFailureAuditMiddleware(inner))
     assert len(calls) == 1 and calls[0][1].sub == "s-2"
     assert sent[0]["status"] == 401
+
+
+# ------------------------------- build_asgi_app() over the ASGI transport
+# (tasks.md 7.2): the composed root app, not the minimal one above.
+
+@pytest.fixture
+def root_app(aws_stack, monkeypatch):
+    import _portal_harness as h
+
+    monkeypatch.delenv("MCP_SERVER_VERSION", raising=False)
+    handler = h.load_handler(monkeypatch)
+    fake = h.install(monkeypatch)
+    yield h, handler, fake
+    h.unload_handler()
+
+
+def _root_post(h, handler, path, bearer):
+    [response] = h.raw_requests(handler.build_asgi_app, [(
+        "POST", path, {"Authorization": f"Bearer {bearer}", "User-Agent": USER_AGENT,
+                       "Content-Type": "application/json"}, b"{}")])
+    return response
+
+
+@pytest.mark.parametrize("overrides,reason", [
+    ({"exp": int(time.time()) - 60}, "expired"),
+    ({"client_id": "fake-web-client-id"}, "client_id"),
+    ({"scope": "openid"}, "scope"),
+])
+def test_root_app_claim_failure_writes_one_marked_entry(audit, root_app, overrides, reason):
+    h, handler, fake = root_app
+    sub, bearer = h.signed_token(**overrides)
+    response = _root_post(h, handler, "/mcp/devices", bearer)
+    assert response.status_code == 401
+    (item,) = audit(sub)
+    assert item["user_id"] == sub
+    assert item["action"] == "authentication_failed"
+    assert item["result"] == "denied"
+    assert item["details"]["reason"] == reason
+    assert item["channel"] == "mcp" and item["mcp_tool"] == "-"
+    assert item["resource_id"] == f"{h.CANONICAL}/devices"
+    assert item["mcp_server"] == "dda-portal-mcp/devices@1.0.0"
+    assert bearer not in str(item)
+    assert fake.calls == []
+
+
+def test_root_app_bad_signature_writes_nothing(audit, root_app):
+    h, handler, fake = root_app
+    sub, bearer = h.signed_token(key=h.OTHER_KEY, exp=int(time.time()) - 60)
+    assert _root_post(h, handler, "/mcp", bearer).status_code == 401
+    assert audit(sub) == []
+    assert fake.calls == []
+
+
+def test_middleware_order(root_app):
+    from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
+
+    _, handler, _ = root_app
+    middleware = handler.build_asgi_app().user_middleware
+    assert middleware[0].cls is auth_audit.AuthFailureAuditMiddleware, "position 0"
+    assert middleware[1].cls is AuthenticationMiddleware, "position 1"
+    assert middleware[2].cls is AuthContextMiddleware, "position 2"
+    assert len(middleware) == 3
 
 
 def test_non_http_scopes_pass_through():
