@@ -54,6 +54,11 @@ PRE_DISPATCH = ('invalid_input', 'confirmation_required', 'mutating_tools_disabl
 ERROR_STATUSES = (400, 401, 403, 404, 409, 422, 429, 500, 502, 503)
 OUTCOMES = ('success', 'backend_error', 'handler_crash', 'denied', 'unavailable',
             'pre_dispatch', 'refusal')
+# The dispatched outcomes run a fake backing handler, so they draw only specs
+# that have one; the local spec (portal_admin_whoami, backend None) is answered
+# in the MCP Lambda and never reaches dispatch.invoke.
+DISPATCHED = ('success', 'backend_error', 'handler_crash')
+DISPATCHABLE = [s for s in cat.CATALOG if s.backend]
 
 
 @pytest.fixture
@@ -131,7 +136,10 @@ def context_for(spec):
 @st.composite
 def cases(draw):
     outcome = draw(st.sampled_from(OUTCOMES))
-    base = BIND_SPEC if outcome == 'refusal' else draw(st.sampled_from(cat.CATALOG))
+    if outcome == 'refusal':
+        base = BIND_SPEC
+    else:
+        base = draw(st.sampled_from(DISPATCHABLE if outcome in DISPATCHED else cat.CATALOG))
     spec = dataclasses.replace(base, handler_audits=draw(st.booleans()),
                                handler_audits_denials=draw(st.booleans()))
     args = draw(arguments(base))

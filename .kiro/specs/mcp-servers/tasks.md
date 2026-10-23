@@ -526,7 +526,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `cd edge-cv-portal/tests && bats mcp_stack_optout.bats && bats .`
     - _Requirements: 6.4, 16.6_
 
-- [ ] 9. Checkpoint — portal Phase 1 suites green
+- [x] 9. Checkpoint — portal Phase 1 suites green
   - Run `PORTAL_MCP_PYTEST tests/mcp -q`; `PORTAL_PYTEST tests -q --ignore=tests/mcp` (the shared-layer change touches every function); `CDK_TEST` (whole jest suite) and `npx tsc --noEmit`; `cd edge-cv-portal/tests && bats .`; `cd edge-cv-portal/frontend && npx vitest run && npm run build`; `python3 -m pytest test/backend-test/security/preservation -p no:cacheprovider --noconftest -q -k "iam or secrets_jwt"`
   - Ensure all tests pass; ask the user if questions arise
   - _Requirements: 16.1, 16.2, 16.3, 16.4, 16.5, 16.6, 16.9, 6.4_
@@ -691,7 +691,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `docker run … flask-app:latest … pytest test/backend-test/security/preservation -q -p no:cacheprovider` (builds.md) green on both images; `GUARD_SUITE` green
     - _Requirements: 13.1, 16.8_
 
-- [ ] 13. Checkpoint — edge host and container suites green
+- [x] 13. Checkpoint — edge host and container suites green
   - `EDGE_CHILD_PYTEST` over the fourteen child-side files listed in Notes, and `EDGE_CONTAINER_PYTEST` over the eight backend-process files listed in Notes plus `test/backend-test/api-endpoints/test_authorize_request.py`, `test/backend-test/utils/test_auth.py` and `test/backend-test/local_auth`, in both the JP5 and the JP6 flask-app images; the preservation suite in the container
   - Ensure all tests pass; ask the user if questions arise
   - _Requirements: 16.2, 16.3, 16.5, 16.7, 16.8_
