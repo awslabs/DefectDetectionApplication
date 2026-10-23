@@ -669,7 +669,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `EDGE_CHILD_PYTEST test/backend-test/mcp_edge/test_child_catalog_classification.py test/backend-test/mcp_edge/test_child_catalog_arguments.py test/backend-test/mcp_edge/test_property_child_catalog.py -q`
     - **Validates: Requirements 8.2, 8.3, 8.5, 10.1, 10.7, 14.1, 14.2, 14.4, 17.3**
 
-- [ ] 12. Ship the child in the image, add the configuration keys, and update the build gates
+- [x] 12. Ship the child in the image, add the configuration keys, and update the build gates
   - [x] 12.1 Add the venv and the package copy to the five backend Dockerfiles and the keys to the seven recipes
     - (a) after the backend-requirements step of each file — `Dockerfile.jp5:114`, `Dockerfile.jp6:163`, `Dockerfile.jp7:245`, `Dockerfile:44`, `Dockerfile.x86_64_nvidia:60` — `COPY mcp_edge/requirements.lock.txt ./mcp_edge/requirements.lock.txt` and the `python3 -m venv /opt/dda/mcp-venv && … --only-binary :all: -r … && … -c "import mcp, mcp.server; print('mcp venv OK')"` step; (b) `COPY mcp_edge ./mcp_edge` after `COPY user_accounts_sync ./user_accounts_sync` (`Dockerfile:122`, `.jp5:230`, `.jp6:442`, `.jp7:586`, `.x86_64_nvidia:144`); re-confirm the anchors at the then-current HEAD
     - `DefaultConfiguration` gains `McpServerEnabled: "false"` and `McpMutatingToolsEnabled: "false"` beside `LocalLoginEnabled: "false"`, with a comment naming the keys, in `recipe.yaml`, `recipe-arm64.yaml`, `recipe-arm64-jp5.yaml`, `recipe-arm64-jp6.yaml`, `recipe-arm64-jp7.yaml`, `recipe-amd64.yaml`, `recipe-amd64-nvidia.yaml`
@@ -678,13 +678,13 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: `git diff --exit-code src/docker-compose.yaml src/backend/requirements.txt station_install/setup_station.sh`; the image builds in task 17 run the `mcp venv OK` step
     - _Requirements: 12.1, 12.6, 13.1, 13.5, 10.7_
 
-  - [ ] 12.2 Add the backend-process MCP tests to the container build gate
+  - [x] 12.2 Add the backend-process MCP tests to the container build gate
     - Extend the pytest list at `build-custom.sh:262–267` with `test/backend-test/mcp_edge/test_proxy_route.py`, `test_config.py`, `test_shared_ipc_reader.py`, `test_auth_decision.py` and `test/backend-test/api-endpoints/test_authorize_request.py`; `test_auth.py` stays in the list unchanged
     - Files: `build-custom.sh`
     - Verify: `EDGE_CONTAINER_PYTEST` over exactly the extended list passes in the JP5 and the JP6 flask-app images
     - _Requirements: 16.7, 12.7_
 
-  - [ ] 12.3 Rebaseline the Security_Preservation_Gate for the intended Dockerfile edits (builds.md)
+  - [x] 12.3 Rebaseline the Security_Preservation_Gate for the intended Dockerfile edits (builds.md)
     - Recompute and update, in the same change: `test/backend-test/security/baselines/docker_baseline_backend_Dockerfile.jp5_masked.txt`, `…jp6_masked.txt`, `…jp7_masked.txt`, and the `src/backend/Dockerfile` sha256 entry in `docker_baseline_out_of_scope.json` (`sha256sum src/backend/Dockerfile`); confirm at implementation time that `Dockerfile.x86_64_nvidia` and the recipe variants still have no baseline (add none unless the suite has grown one); `dependency_baseline_requirements.txt` and the compose entry do not move; no preservation test is weakened or deleted
     - Run the full preservation suite in the flask-app container (JP5 image, `python3.11`; JP6 image, `python3.10`) and `GUARD_SUITE`; move `edge-cv-portal/infrastructure/cdk.out` aside (`mv cdk.out cdk.out.bak-$(date +%Y%m%dT%H%M%SZ)`) or add its new copies to `cdk_out_baseline.json`/`secrets_cdk_out_baseline.json`
     - Files: the four baseline entries above; `test/backend-test/security/preservation/cdk_out_baseline.json` and `secrets_cdk_out_baseline.json` only if cdk.out is kept
