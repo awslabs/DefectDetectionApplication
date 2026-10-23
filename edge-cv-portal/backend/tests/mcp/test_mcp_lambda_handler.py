@@ -9,13 +9,18 @@ This test sends HTTP API v2 events through it three times in one process
 (twice the same tool call, then other paths) and checks that every call
 answers as expected with no `RuntimeError`/500, that a tool call succeeds
 while the lifespan is open, and that `SERVERS`/`VERIFIER` are the same
-objects across invocations. Keys are generated at test time; every
+objects across invocations. A further case calls `portal_admin_whoami` with
+`PORTAL_REGISTRY_ENFORCED` on and a failing user-roles read: the client gets
+the `authorization_unavailable` tool result, with one marked audit entry and
+one `mcp_tool` line (Error Handling, `RegistryUnavailable` row;
+Requirements 4.1, 4.7, 6.3). Keys are generated at test time; every
 identifier is visibly fake.
 """
 import base64
 import importlib
 import io
 import json
+import logging
 import sys
 import time
 import uuid
@@ -25,6 +30,8 @@ import anyio
 import httpx2
 import jwt
 import pytest
+from boto3.dynamodb.conditions import Attr
+from botocore.exceptions import ClientError
 from cryptography.hazmat.primitives.asymmetric import rsa
 from mcp.client import Client
 from mcp.client.streamable_http import streamable_http_client
@@ -82,9 +89,9 @@ class FakeContext:
         return 28_000
 
 
-def access_token():
+def access_token(sub=None):
     now = int(time.time())
-    payload = {'sub': str(uuid.uuid4()), 'iss': ISSUER, 'exp': now + 600, 'iat': now - 5,
+    payload = {'sub': sub or str(uuid.uuid4()), 'iss': ISSUER, 'exp': now + 600, 'iat': now - 5,
                'token_use': 'access', 'client_id': CLIENT_ID, 'scope': SCOPE,
                'jti': str(uuid.uuid4()), 'username': 'fake-user'}
     return jwt.encode(payload, POOL_KEY, algorithm='RS256', headers={'kid': KID})
@@ -227,3 +234,45 @@ def test_six_endpoints_and_middleware_order(portal):
     first = {r.path: r.app for r in app.routes if r.path.startswith('/mcp')}
     second = {r.path: r.app for r in other.routes if r.path.startswith('/mcp')}
     assert all(first[p] is not second[p] for p in first)
+
+
+class _FailingRolesTable:
+    def get_item(self, **_kwargs):
+        raise ClientError({'Error': {'Code': 'ProvisionedThroughputExceededException',
+                                     'Message': 'registry read failed'}}, 'GetItem')
+
+
+def test_whoami_registry_failure_is_an_audited_tool_result(portal, aws_stack, monkeypatch,
+                                                            caplog):
+    shared = sys.modules['shared_utils']
+    real = shared.dynamodb
+    roles_table = shared.USER_ROLES_TABLE
+
+    class _Resource:
+        def Table(self, name):  # noqa: N802 - boto3 resource API
+            return _FailingRolesTable() if name == roles_table else real.Table(name)
+
+    monkeypatch.setenv('PORTAL_REGISTRY_ENFORCED', 'true')
+    monkeypatch.setattr(shared, 'dynamodb', _Resource())
+    sub = f'whoami-{uuid.uuid4()}'
+    with caplog.at_level(logging.INFO, logger='mcp_portal'):
+        result, _ = captured_tool_call(portal.handler, access_token(sub), 'admin',
+                                       'portal_admin_whoami', {})
+
+    assert result.is_error is True
+    assert result.structured_content['category'] == 'authorization_unavailable'
+    assert portal.fake_lambda.events == []
+    items = aws_stack.tables.audit_log.scan(FilterExpression=Attr('user_id').eq(sub))['Items']
+    marked = [i for i in items if i.get('channel') == 'mcp']
+    assert len(marked) == 1, marked
+    assert marked[0]['action'] == 'mcp_tool_call'
+    assert marked[0]['result'] == 'failure'
+    assert marked[0]['mcp_tool'] == 'portal_admin_whoami'
+    assert marked[0]['details']['error_category'] == 'authorization_unavailable'
+    lines = [json.loads(r.getMessage()) for r in caplog.records
+             if r.name == 'mcp_portal.telemetry']
+    assert [(line['event'], line['tool'], line['outcome'], line['category'])
+            for line in lines] == [
+        ('mcp_tool', 'portal_admin_whoami', 'unavailable', 'authorization_unavailable')]
+    assert any(r.levelno == logging.ERROR and r.name == 'mcp_portal.server'
+               and r.exc_info for r in caplog.records)

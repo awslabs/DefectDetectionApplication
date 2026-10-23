@@ -209,13 +209,26 @@ def confirmation_failure(spec, args: dict) -> Optional[ToolFailure]:
     return None
 
 
-def whoami(principal) -> BackendResponse:
-    """`portal_admin_whoami`: the caller as the real resolver sees it."""
+def whoami(principal):
+    """`portal_admin_whoami`: the caller as the real resolver sees it.
+
+    A registry read failure under `PORTAL_REGISTRY_ENFORCED` returns the
+    `authorization_unavailable` tool failure (Error Handling,
+    `RegistryUnavailable` row), so the call still gets its marked audit
+    entry and its `mcp_tool` line.
+    """
     import shared_utils  # the SharedLayer; imported where it is needed
 
     user = principal.user
-    role = shared_utils.rbac_manager.get_user_role(principal.sub, 'global', user_info=user)
-    usecases = shared_utils.rbac_manager.get_accessible_usecases(principal.sub, user)
+    try:
+        role = shared_utils.rbac_manager.get_user_role(principal.sub, 'global',
+                                                       user_info=user)
+        usecases = shared_utils.rbac_manager.get_accessible_usecases(principal.sub, user)
+    except shared_utils.RegistryUnavailable as error:
+        logger.error('Portal_Identity registry unavailable for MCP tool '
+                     'portal_admin_whoami: %s', error, exc_info=True)
+        return ToolFailure('authorization_unavailable',
+                           'the Portal identity registry is unavailable; retry')
     body = {'user_id': principal.sub, 'username': principal.username,
             'email': principal.email, 'global_role': role.value if role else None,
             'usecases': sorted(usecases or [])}
