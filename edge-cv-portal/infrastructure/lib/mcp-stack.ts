@@ -21,9 +21,9 @@ import { portalRegistryEnforced } from './context-helpers';
  * handler Lambda of the matching REST route. Authentication happens in the
  * Lambda (the MCP SDK's bearer middleware over Cognito access tokens of the
  * MCP app client created here), so every route uses HttpNoneAuthorizer: the
- * portal REST API's authorizer quota is full (memory portal-api-gateway-
- * limits) and the `.well-known` documents are unauthenticated by RFC 9728 /
- * RFC 8414.
+ * portal REST API's authorizer quota is full (see
+ * portal-api-authorizer-count.test.ts) and the `.well-known` documents are
+ * unauthenticated by RFC 9728 / RFC 8414.
  *
  * The only values imported from other stacks are update-stable: function
  * ARNs, table ARNs/names and the user pool. The shared layer is this stack's
