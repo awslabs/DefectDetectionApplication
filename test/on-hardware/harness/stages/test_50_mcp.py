@@ -93,8 +93,10 @@ AREA_TOOLS = (
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(scope="module", autouse=True)
 def _mcp_sdk_importable():
+    """Module-scoped, so pytest sets it up before the module-scoped
+    ``mcp_baseline``: without the SDK the stage skips before any MCP call."""
     if MCP_IMPORT_ERROR is not None:
         pytest.skip(
             "the mcp package is not importable under this interpreter "
@@ -237,16 +239,13 @@ def _container_restart_counts() -> Optional[Dict[str, int]]:
 
 
 @pytest.fixture(scope="module")
-def mcp_baseline(harness_target, edge_client, record_metric) -> Dict[str, Any]:
+def mcp_baseline(harness_target, edge_client) -> Dict[str, Any]:
     """The stage's starting point for step (4): the child's restart count,
     the backend containers' restart counts (on the device only) and the
-    clock."""
+    clock. It requests no function-scoped fixture (``record_metric``);
+    ``test_health_and_restart_counts_hold`` records what it observed."""
     status = _mcp_status(edge_client)
     containers = _container_restart_counts() if harness_target.on_device else None
-    record_metric(
-        "mcp_container_restart_count_observable",
-        containers is not None,
-    )
     return {
         "restartCount": status.get("restartCount"),
         "containers": containers,
@@ -506,6 +505,10 @@ def test_on_device_loopback(harness_target, edge_client, mcp_baseline):
 
 
 def test_health_and_restart_counts_hold(harness_target, edge_client, mcp_baseline, record_metric):
+    record_metric(
+        "mcp_container_restart_count_observable",
+        mcp_baseline["containers"] is not None,
+    )
     soak_s = harness_target.timeouts.mcp_soak_s
     deadline = time.monotonic() + soak_s
     samples = 0

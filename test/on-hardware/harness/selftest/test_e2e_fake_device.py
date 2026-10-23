@@ -77,8 +77,21 @@ STAGE_NAMES = {
 #: capability is not granted: vlm image generate (vllm) and stream cameras.
 VLM_STAGE_TESTS = 2
 STREAM_STAGE_TESTS = 7
-#: The MCP stage (capability ``mcp``, never granted here): every test skips.
+#: The MCP stage (capability ``mcp``): every test skips unless ``mcp`` is
+#: granted (the MCP stage selftests at the end of this file).
 MCP_STAGE_TESTS = 19
+
+# Whether the MCP stage's client imports resolve under this interpreter; the
+# pytester subprocess runs the same one.
+try:
+    import anyio  # noqa: F401
+    import httpx2  # noqa: F401
+    from mcp.client import Client  # noqa: F401
+    from mcp.client.streamable_http import streamable_http_client  # noqa: F401
+except ImportError:
+    MCP_SDK_IMPORTABLE = False
+else:
+    MCP_SDK_IMPORTABLE = True
 
 # The stream camera stage's fake sources (never resolved: the fake answers
 # every URL from its scripted FakeStreamServer entries).
@@ -732,3 +745,63 @@ def test_stream_pause_failures_still_leave_the_workflow_resumed(
     assert device.calls_of("resume") == [continuous_id]
     assert not device.continuous[continuous_id].paused
     assert _load_results(bundle)["restoration_warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# MCP stage with ``mcp`` granted (mcp-servers task 14.2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(MCP_SDK_IMPORTABLE, reason="the mcp SDK is importable here")
+def test_mcp_stage_without_the_sdk_skips_and_the_other_stages_run(pytester, monkeypatch):
+    """With ``mcp`` granted and no importable ``mcp`` SDK (Python 3.9), every
+    MCP stage test skips at setup with the importability reason, the stage
+    reads nothing from the device, and the other stages run as before."""
+    device = FakeDevice()
+    device.enable_mcp()
+    bundle = pytester.path / "bundle"
+    with serve(device) as base_url:
+        _configure_harness_env(monkeypatch, pytester, base_url, "mcp")
+        result = _run_stages(pytester, bundle)
+
+    assert result.ret == 0, result.stdout.str()
+    # health 3 passed; the 13 other skips and stream cameras (capability);
+    # every MCP stage test skips (no SDK), none errors.
+    result.assert_outcomes(passed=3, skipped=13 + STREAM_STAGE_TESTS + MCP_STAGE_TESTS)
+    stage = _load_results(bundle)["stages"]["test_50_mcp"]
+    assert stage["skipped"] == MCP_STAGE_TESTS
+    assert len(stage["skip_reasons"]) == 1
+    assert "the mcp package is not importable under this interpreter" in stage["skip_reasons"][0]
+    assert device.mcp_status_reads == 0
+
+
+@pytest.mark.skipif(not MCP_SDK_IMPORTABLE, reason="needs the mcp SDK (Python 3.10 or later)")
+def test_mcp_stage_with_the_sdk_sets_up_and_records_the_soak(pytester, monkeypatch):
+    """With ``mcp`` granted and the SDK importable, the stage's module
+    fixtures set up: the status check and the soak check pass against the
+    fake's ``/mcp/status`` and ``/health`` (the fake serves no ``/mcp``, so
+    only those two are selected), and the soak records its metrics."""
+    device = FakeDevice()
+    device.enable_mcp()
+    bundle = pytester.path / "bundle"
+    with serve(device) as base_url:
+        _configure_harness_env(monkeypatch, pytester, base_url, "mcp", DDA_HARNESS_MCP_SOAK_S="1")
+        result = pytester.runpytest_subprocess(
+            str(STAGES_DIR / "test_50_mcp.py"),
+            f"--harness-output-dir={bundle}",
+            "-p",
+            "no:cacheprovider",
+            "-k",
+            "test_mcp_status or test_health_and_restart_counts_hold",
+        )
+
+    assert result.ret == 0, result.stdout.str()
+    result.assert_outcomes(passed=2)
+    metrics = _load_results(bundle)["metrics"]
+    # A remote harness cannot read the backend containers' restart counts.
+    assert metrics["mcp_container_restart_count_observable"] is False
+    assert metrics["mcp_server_version"] == "0.0.0-fake-mcp"
+    assert metrics["mcp_soak_s"] == 1.0
+    assert metrics["mcp_soak_samples"] >= 2
+    # The baseline, the status check and at least two soak samples.
+    assert device.mcp_status_reads >= 4
