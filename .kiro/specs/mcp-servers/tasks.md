@@ -773,7 +773,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
 
 - [ ] 18. Deploy the Portal_MCP_Server and run the deployed-stack smoke check
   - [ ] 18.1 Deploy the portal with the MCP stack
-    - Only when no component build is running (`pgrep` as 17.1): `./deploy-infrastructure.sh` (stack on by default; `mcpMutatingToolsEnabled` default false); afterwards move the regenerated `cdk.out` aside before the next component build
+    - Only when no component build is running (`pgrep` as 17.1): `bash backend/layers/mcp/build.sh` and check that `backend/layers/mcp/python/mcp` and `python/mangum` exist (`McpLayer` packages the directory as it is on disk; ADMIN_GUIDE "Enabling and disabling the MCP stack"), then `./deploy-infrastructure.sh` (stack on by default; `mcpMutatingToolsEnabled` default false); afterwards move the regenerated `cdk.out` aside before the next component build
     - Verify: `aws cloudformation describe-stacks --stack-name EdgeCVPortalMcpStack` shows `CREATE_COMPLETE`/`UPDATE_COMPLETE` and the seven outputs; the existing portal web UI and REST API behave unchanged (log in, list devices)
     - _Requirements: 6.1, 6.4, 5.4_
 

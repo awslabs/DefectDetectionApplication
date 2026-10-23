@@ -1729,7 +1729,24 @@ through the Cognito hosted UI.
 ### Enabling and disabling the MCP stack
 
 `./deploy-infrastructure.sh` deploys `EdgeCVPortalMcpStack` by default; no
-setting is needed.
+setting is needed. Build the MCP Lambda layer first, on every deploy host and
+whenever `backend/layers/mcp/requirements.txt` changes:
+
+```bash
+# Installs mcp and mangum (x86_64 CPython 3.11 wheels) into
+# backend/layers/mcp/python/; pip needs network access to the package index.
+bash backend/layers/mcp/build.sh
+# Check the layer content before deploying:
+test -d backend/layers/mcp/python/mcp && test -d backend/layers/mcp/python/mangum \
+  && echo "MCP layer built"
+./deploy-infrastructure.sh
+```
+
+- `McpLayer` packages the `backend/layers/mcp` directory as it is on disk, and
+  no deploy script builds it. Without the build step the layer holds only
+  `build.sh` and `requirements.txt`; the deploy still succeeds, but every MCP
+  request fails (see [Troubleshooting MCP sign-in](#troubleshooting-mcp-sign-in)).
+- `backend/layers/mcp/python/` is build output and is not committed.
 
 Disabling it on a deployed portal takes **two steps, in this order**:
 
@@ -1776,7 +1793,8 @@ DEPLOY_MCP_SERVER=false ./deploy-infrastructure.sh
   EdgeCVPortalMcpStack is deployed` rather than guess. Nothing is deployed in
   either case.
 
-To turn it back on, run `./deploy-infrastructure.sh` without the variable.
+To turn it back on, build the layer as above and run `./deploy-infrastructure.sh`
+without the variable.
 
 ### Stack outputs
 
@@ -1957,6 +1975,22 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
 | Kiro and MCP documentation checked | 2026-10-18 and 2026-10-19 |
 
 ### Troubleshooting MCP sign-in
+
+**Every MCP request, discovery included, answers HTTP 500.** The MCP Lambda
+could not import its packages: the layer was deployed without the build step
+of [Enabling and disabling the MCP stack](#enabling-and-disabling-the-mcp-stack).
+No tool result, audit entry or `McpTimeoutAlarm` state change follows. The log
+group `/dda-portal/mcp-server` shows `Runtime.ImportModuleError: Unable to
+import module 'mcp_portal.handler'` with `No module named 'mangum'` (or
+`'mcp'`):
+
+```bash
+aws logs filter-log-events --log-group-name /dda-portal/mcp-server \
+  --filter-pattern ImportModuleError --max-items 5 --query 'events[].message'
+```
+
+Run `bash backend/layers/mcp/build.sh`, check that `backend/layers/mcp/python/mcp`
+and `python/mangum` exist, and run `./deploy-infrastructure.sh` again.
 
 **"OAuth issuer mismatch".** Fetch the root Protected Resource Metadata and the
 facade, and compare `authorization_servers[0]` with `issuer` byte for byte
