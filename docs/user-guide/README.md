@@ -66,6 +66,10 @@ What a user can see and do depends on the role held in the Portal's user registr
 
 Each section below lists the roles that can use it.
 
+## PDF version
+
+`docs/user-guide/build-pdf.sh` renders this guide, with its screenshots, into a single `DDA-User-Guide.pdf` (about 180 pages). It needs only Docker: Markdown conversion and the Chromium print run happen inside the Playwright container.
+
 ## Conventions used in this guide
 
 - Portal page names are written in **bold** exactly as they appear in the navigation.
