@@ -1563,6 +1563,7 @@ defect-detection-application/
 
 | Document | Description |
 |----------|-------------|
+| [docs/user-guide/README.md](docs/user-guide/README.md) | User guide: one page per Portal section, the device web UI and the station HMI, with screenshots and every field explained |
 | [edge-cv-portal/ADMIN_GUIDE.md](edge-cv-portal/ADMIN_GUIDE.md) | Portal administration guide |
 | [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) | Inference Uploader setup |
 | [datasets/README.md](datasets/README.md) | Sample datasets guide |
