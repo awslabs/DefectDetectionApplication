@@ -12,6 +12,7 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
 
 - [Overview](#overview)
 - [Video Tutorials](#video-tutorials)
+- [User Guide](#user-guide)
 - [Deployment](#deployment)
   - [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account)
   - [Step 2: Redeploy the Frontend (Optional)](#step-2-redeploy-the-frontend-optional)
@@ -72,24 +73,43 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 
 ## Video Tutorials
 
-The DDA video tutorial series on YouTube has an overview video and one video per module, and where this README covers the same topic, the last column links to that section.
+The DDA video tutorial series on YouTube has an overview video and one video per module. Where this README covers the same topic, the third column links to that section; the last column links to the matching pages of the [User Guide](#user-guide).
 
-| Module | Video | Related README section |
-|--------|-------|------------------------|
-| Overview | [Overview](https://youtu.be/lTLSIMHLy7Y) | [Overview](#overview) |
-| Module 0 | [Portal Setup](https://youtu.be/HtH_4zT23Fo) | [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account) |
-| Module 1 | [Device Setup](https://youtu.be/PFdFycCQXA0) | [Step 7: Set Up Edge Devices (Add Device)](#step-7-set-up-edge-devices-add-device) |
-| Module 2 | [Labeling](https://youtu.be/pxSoAIOLp18) | [Labeling](#labeling) |
-| Module 3 | [Workflows](https://youtu.be/vpL62wIT218) | - |
-| Module 4 | [Custom Node Designer](https://youtu.be/si5gOzzPhn0) | - |
-| Module 5 | [Synthetic Data](https://youtu.be/n-egAmfZiJw) | - |
-| Module 6 | [Build Servers](https://youtu.be/ZNJBk94Ucjo) | [Step 4: Build the DDA LocalServer Component (Build Fleet)](#step-4-build-the-dda-localserver-component-build-fleet) |
-| Module 7 | [Deployments](https://youtu.be/FTYq8aql-CU) | [Deploy DDA Application to Edge Device](#deploy-dda-application-to-edge-device) |
-| Module 8 | [Devices](https://youtu.be/r8nz33LQPoc) | [Devices](#devices) |
-| Module 9 | [Training Models](https://youtu.be/azKIaPPlhZM) | [Training](#training) |
-| Module 10 | [Prompt Tuning](https://youtu.be/ZnxGwMxCB1M) | - |
-| Module 11 | [User Access](https://youtu.be/_HDKtKvft3c) | [3.2 Create Portal Admin User](#32-create-portal-admin-user) |
-| Module 12 | [Edge Software](https://youtu.be/pInKqoADn2c) | [Edge Device Management](#edge-device-management) |
+| Module | Video | Related README section | User guide |
+|--------|-------|------------------------|------------|
+| Overview | [Overview](https://youtu.be/lTLSIMHLy7Y) | [Overview](#overview) | [1. Getting started](docs/user-guide/01-getting-started.md) |
+| Module 0 | [Portal Setup](https://youtu.be/HtH_4zT23Fo) | [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account) | [2. Use Cases](docs/user-guide/02-use-cases.md), [19. Settings](docs/user-guide/19-settings.md) |
+| Module 1 | [Device Setup](https://youtu.be/PFdFycCQXA0) | [Step 7: Set Up Edge Devices (Add Device)](#step-7-set-up-edge-devices-add-device) | [15. Devices](docs/user-guide/15-devices.md) |
+| Module 2 | [Labeling](https://youtu.be/pxSoAIOLp18) | [Labeling](#labeling) | [4. Labeling](docs/user-guide/04-labeling.md) |
+| Module 3 | [Workflows](https://youtu.be/vpL62wIT218) | - | [8. Workflows](docs/user-guide/08-workflows.md) |
+| Module 4 | [Custom Node Designer](https://youtu.be/si5gOzzPhn0) | - | [10. Node Designer](docs/user-guide/10-node-designer.md), [17. Plugin Review](docs/user-guide/17-plugin-review.md) |
+| Module 5 | [Synthetic Data](https://youtu.be/n-egAmfZiJw) | - | [5. Synthetic Data](docs/user-guide/05-synthetic-data.md) |
+| Module 6 | [Build Servers](https://youtu.be/ZNJBk94Ucjo) | [Step 4: Build the DDA LocalServer Component (Build Fleet)](#step-4-build-the-dda-localserver-component-build-fleet) | [12. Builds](docs/user-guide/12-builds.md), [18. Build Fleet](docs/user-guide/18-build-fleet.md) |
+| Module 7 | [Deployments](https://youtu.be/FTYq8aql-CU) | [Deploy DDA Application to Edge Device](#deploy-dda-application-to-edge-device) | [13. Deployments](docs/user-guide/13-deployments.md) |
+| Module 8 | [Devices](https://youtu.be/r8nz33LQPoc) | [Devices](#devices) | [15. Devices](docs/user-guide/15-devices.md) |
+| Module 9 | [Training Models](https://youtu.be/azKIaPPlhZM) | [Training](#training) | [6. Training](docs/user-guide/06-training.md), [7. Models](docs/user-guide/07-models.md) |
+| Module 10 | [Prompt Tuning](https://youtu.be/ZnxGwMxCB1M) | - | [9. Workflow Tuning](docs/user-guide/09-workflow-tuning.md) |
+| Module 11 | [User Access](https://youtu.be/_HDKtKvft3c) | [3.2 Create Portal Admin User](#32-create-portal-admin-user) | [20. User Manager](docs/user-guide/20-user-manager.md) |
+| Module 12 | [Edge Software](https://youtu.be/pInKqoADn2c) | [Edge Device Management](#edge-device-management) | [22. Device web UI](docs/user-guide/22-device-web-ui.md), [23. Quality Station HMI](docs/user-guide/23-station-hmi.md) |
+
+## User Guide
+
+The [User Guide](docs/user-guide/README.md) has one page per section of the system, with screenshots and an explanation of every field and value, written around the blue-plates example. Start with the [guide index](docs/user-guide/README.md) for the end-to-end path and the role table.
+
+| Portal | | Edge |
+|--------|--|------|
+| [1. Getting started](docs/user-guide/01-getting-started.md) | [13. Deployments](docs/user-guide/13-deployments.md) | [22. Device web UI](docs/user-guide/22-device-web-ui.md) |
+| [2. Use Cases](docs/user-guide/02-use-cases.md) | [14. Workflow dashboards](docs/user-guide/14-workflow-dashboards.md) | [23. Quality Station HMI](docs/user-guide/23-station-hmi.md) |
+| [3. Data Management](docs/user-guide/03-data-management.md) | [15. Devices](docs/user-guide/15-devices.md) | |
+| [4. Labeling](docs/user-guide/04-labeling.md) | [16. Debug log](docs/user-guide/16-debug-log.md) | |
+| [5. Synthetic Data](docs/user-guide/05-synthetic-data.md) | [17. Plugin Review](docs/user-guide/17-plugin-review.md) | |
+| [6. Training](docs/user-guide/06-training.md) | [18. Build Fleet](docs/user-guide/18-build-fleet.md) | |
+| [7. Models](docs/user-guide/07-models.md) | [19. Settings](docs/user-guide/19-settings.md) | |
+| [8. Workflows](docs/user-guide/08-workflows.md) | [20. User Manager](docs/user-guide/20-user-manager.md) | |
+| [9. Workflow Tuning](docs/user-guide/09-workflow-tuning.md) | [21. Audit Logs](docs/user-guide/21-audit-logs.md) | |
+| [10. Node Designer](docs/user-guide/10-node-designer.md) | | |
+| [11. Components](docs/user-guide/11-components.md) | | |
+| [12. Builds](docs/user-guide/12-builds.md) | | |
 
 ## Deployment
 
@@ -154,7 +174,7 @@ Portal Account          UseCase Account         Data Account (Optional)
 
 ### Step 1: Deploy Portal Infrastructure (Portal Account)
 
-> **Video:** [Module 0: Portal Setup](https://youtu.be/HtH_4zT23Fo)
+> **Video:** [Module 0: Portal Setup](https://youtu.be/HtH_4zT23Fo) · **User guide:** [1. Getting started](docs/user-guide/01-getting-started.md)
 
 #### 1.1 Configure CloudWatch Logs for API Gateway
 
@@ -249,7 +269,7 @@ These are automatically shared when you create a UseCase in the portal. The UseC
 
 #### 3.2 Create Portal Admin User
 
-> **Video:** [Module 11: User Access](https://youtu.be/_HDKtKvft3c)
+> **Video:** [Module 11: User Access](https://youtu.be/_HDKtKvft3c) · **User guide:** [20. User Manager](docs/user-guide/20-user-manager.md)
 
 Self sign-up is off, so you create the first PortalAdmin by hand with the AWS CLI, using credentials for the portal account. Two things make it a working admin:
 
@@ -329,7 +349,7 @@ Sign in at the portal URL that `./deploy-frontend.sh` printed in Step 2 (the `Fr
 
 ### Step 4: Build the DDA LocalServer Component (Build Fleet)
 
-> **Video:** [Module 6: Build Servers](https://youtu.be/ZNJBk94Ucjo)
+> **Video:** [Module 6: Build Servers](https://youtu.be/ZNJBk94Ucjo) · **User guide:** [12. Builds](docs/user-guide/12-builds.md), [18. Build Fleet](docs/user-guide/18-build-fleet.md)
 
 The DDA application runs on each edge device as the LocalServer Greengrass component, `aws.edgeml.dda.LocalServer.<variant>`, with one variant per device architecture. Build it from the portal's **Builds** page: the portal provisions build compute, builds the component from a GitHub repository, and publishes it to AWS IoT Greengrass in the portal account. This is the LocalServer component that [3.1 Shared Components](#31-shared-components) shares with UseCase accounts, so build every variant your devices need before you create the UseCase in [Step 6](#step-6-create-usecase).
 
@@ -488,6 +508,8 @@ This only needs to be done once per data account. All future UseCases can select
 
 ### Step 6: Create UseCase
 
+> **User guide:** [2. Use Cases](docs/user-guide/02-use-cases.md)
+
 1. Go to **Use Cases** → **Onboard New Use Case**
 2. Choose setup type (Single Account or Multi-Account)
 3. For multi-account: upload `usecase-account-*-config.txt` to auto-fill role details
@@ -499,7 +521,7 @@ This provisions Greengrass components, creates `DDAPortalComponentAccessPolicy`,
 
 ### Step 7: Set Up Edge Devices (Add Device)
 
-> **Video:** [Module 1: Device Setup](https://youtu.be/PFdFycCQXA0)
+> **Video:** [Module 1: Device Setup](https://youtu.be/PFdFycCQXA0) · **User guide:** [15. Devices](docs/user-guide/15-devices.md)
 
 Register each edge device with **Add Device** on the **Devices** page. The portal generates a one-line setup command that contains a single-use setup token. Running the command on the device installs AWS IoT Greengrass and the DDA host dependencies, provisions the device in the UseCase account, and registers it with the portal. The device needs no repository checkout, AWS login, IAM user, or access keys. Create the UseCase first ([Step 6](#step-6-create-usecase)): every device is registered under a UseCase.
 
@@ -582,7 +604,7 @@ For details of the setup flow, see [station_install/quick_setup/README.md](stati
 
 ## Deploy DDA Application to Edge Device
 
-> **Video:** [Module 7: Deployments](https://youtu.be/FTYq8aql-CU)
+> **Video:** [Module 7: Deployments](https://youtu.be/FTYq8aql-CU) · **User guide:** [13. Deployments](docs/user-guide/13-deployments.md)
 
 Every device needs the LocalServer variant that matches its **Target Architecture (DDA)** (see the table in [4.2 Start a Build](#42-start-a-build)) before models or workflows can run on it. All deployments are created and revised in the portal.
 
@@ -648,7 +670,7 @@ A packaged workflow is offered only to devices whose recorded architecture is am
 
 ## Devices
 
-> **Video:** [Module 8: Devices](https://youtu.be/r8nz33LQPoc)
+> **Video:** [Module 8: Devices](https://youtu.be/r8nz33LQPoc) · **User guide:** [15. Devices](docs/user-guide/15-devices.md)
 
 ### Device Management (via Portal)
 
@@ -672,13 +694,15 @@ A packaged workflow is offered only to devices whose recorded architecture is am
 
 ### Data Management
 
+> **User guide:** [3. Data Management](docs/user-guide/03-data-management.md)
+
 - Upload and organize training images to S3
 - Browse datasets with image counts
 - Register pre-labeled datasets for quick testing
 
 ### Labeling
 
-> **Video:** [Module 2: Labeling](https://youtu.be/pxSoAIOLp18)
+> **Video:** [Module 2: Labeling](https://youtu.be/pxSoAIOLp18) · **User guide:** [4. Labeling](docs/user-guide/04-labeling.md)
 
 - Create Ground Truth labeling jobs (classification & segmentation)
 - Status auto-syncs from SageMaker
@@ -688,6 +712,8 @@ A packaged workflow is offered only to devices whose recorded architecture is am
 
 ### Manifest Transformation
 
+> **User guide:** [4.5 Monitoring a job](docs/user-guide/04-labeling.md#45-monitoring-a-job)
+
 Ground Truth creates manifests with job-specific attribute names. The portal auto-transforms them to DDA format during training job creation:
 
 - `{job-name}` → `anomaly-label`
@@ -696,7 +722,7 @@ Ground Truth creates manifests with job-specific attribute names. The portal aut
 
 ### Training
 
-> **Video:** [Module 9: Training Models](https://youtu.be/azKIaPPlhZM)
+> **Video:** [Module 9: Training Models](https://youtu.be/azKIaPPlhZM) · **User guide:** [6. Training](docs/user-guide/06-training.md), [7. Models](docs/user-guide/07-models.md)
 
 - Select Ground Truth job or pre-labeled dataset
 - Auto-detect and transform manifests
@@ -705,6 +731,8 @@ Ground Truth creates manifests with job-specific attribute names. The portal aut
 - Optional auto-compile after training
 
 ### Compilation
+
+> **User guide:** [7. Models](docs/user-guide/07-models.md)
 
 - Compile trained models for edge deployment
 - Targets: x86_64 CPU, ARM64 CPU, Jetson (JetPack 5/6/7)
@@ -728,6 +756,8 @@ Ground Truth creates manifests with job-specific attribute names. The portal aut
 4. **Deploy to Device** → Via portal Deployments page
 
 ## Using ONNX Models
+
+> **User guide:** [7.2 Smart Import](docs/user-guide/07-models.md#72-smart-import-recommended-for-your-own-models)
 
 DDA supports **pluggable inference runtimes** so a model can run on the ONNX
 Runtime engine (or native PyTorch) alongside the default SageMaker Neo / DLR
@@ -887,6 +917,8 @@ providers at load, so the same package runs on either a GPU or CPU image.
 
 ## Using LLMs (vLLM)
 
+> **User guide:** [7.3 Manual import and LLM registration](docs/user-guide/07-models.md#73-manual-import-and-llm-registration)
+
 DDA can serve **large language models** on-device alongside the vision stack
 using a companion [vLLM](https://github.com/vllm-project/vllm) runtime. LLMs
 are registered from a **Hugging Face model ID** (no labeling, training, or
@@ -988,6 +1020,8 @@ serving alongside the LLM. For a realistic workload on a 64 GB Orin, use
 
 ## Remote Device Access (SSH)
 
+> **User guide:** [15.8 Remote Access and Debug](docs/user-guide/15-devices.md#158-remote-access-and-debug)
+
 You can open an SSH session to an edge device from the portal (Device page →
 **Remote Access** tab) using **AWS IoT Secure Tunneling** — no inbound ports,
 public IP, or VPN required.
@@ -1054,7 +1088,7 @@ See [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) for detailed conf
 
 ## Edge Device Management
 
-> **Video:** [Module 12: Edge Software](https://youtu.be/pInKqoADn2c)
+> **Video:** [Module 12: Edge Software](https://youtu.be/pInKqoADn2c) · **User guide:** [22. Device web UI](docs/user-guide/22-device-web-ui.md), [23. Quality Station HMI](docs/user-guide/23-station-hmi.md)
 
 Devices are provisioned from the portal with **Add Device** (see [Step 7](#step-7-set-up-edge-devices-add-device)). The commands below inspect and troubleshoot a provisioned device and need a shell on it: a local console, SSH, or [Remote Device Access](#remote-device-access-ssh). A device set up with Add Device has no AWS CLI credentials configured, so run the `aws` commands from a workstation with credentials for the UseCase account.
 
@@ -1563,6 +1597,7 @@ defect-detection-application/
 
 | Document | Description |
 |----------|-------------|
+| [docs/user-guide/README.md](docs/user-guide/README.md) | User guide: one page per Portal section, the device web UI and the station HMI, with screenshots and every field explained |
 | [edge-cv-portal/ADMIN_GUIDE.md](edge-cv-portal/ADMIN_GUIDE.md) | Portal administration guide |
 | [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) | Inference Uploader setup |
 | [datasets/README.md](datasets/README.md) | Sample datasets guide |
