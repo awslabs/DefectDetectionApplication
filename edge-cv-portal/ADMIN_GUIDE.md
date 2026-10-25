@@ -1937,8 +1937,14 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
   that header, so the client may not see it. The MCP specification obliges
   clients to fall back to the well-known URIs (path-suffixed first, then the
   root), and the portal relies on that.
-- Challenge header as observed through API Gateway: recorded after the first
-  deployed-stack smoke check (not recorded yet).
+- Challenge header as observed through API Gateway (first deployed-stack smoke
+  check, 2026-10-25): the HTTP API passed the Lambda's challenge through
+  unchanged, as a plain `www-authenticate` header; no
+  `x-amzn-remapped-www-authenticate` header appeared. The value was
+  `Bearer error="invalid_token", error_description="Authentication required",
+  resource_metadata="<the endpoint's path-suffixed PRM URL>"` on `/mcp` and on
+  each view endpoint. Clients that do read the header can follow it; the
+  well-known fallback above still applies to those that do not.
 
 ### Reading MCP audit entries
 
