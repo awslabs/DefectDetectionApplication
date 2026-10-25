@@ -283,6 +283,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - `edge-cv-portal/backend/functions/mcp_portal/__init__.py`: `__version__`, `DELIVERED_PHASES = (1,)`, `PROTOCOL_REVISIONS = ('2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26')`, `VIEWS = ('data', 'models', 'devices', 'workflows', 'admin')`
     - Add `mcp==2.3.0` and `mangum==0.22.0` to `edge-cv-portal/backend/requirements-dev.txt`; leave `functions/requirements.txt` and `layers/jwt/requirements.txt` byte-identical (both are gate-pinned)
     - Verify: `bash edge-cv-portal/backend/layers/mcp/build.sh` completes and `python/` contains `mcp-2.3.0` and `mangum-0.22.0` cp311 manylinux metadata; `git diff --exit-code edge-cv-portal/backend/functions/requirements.txt edge-cv-portal/backend/layers/jwt/requirements.txt`
+    - Superseded by sign-off item (m) = (b), 2026-10-25: `build.sh <output-dir>` installs `requirements.lock.txt` (every transitive pin) with `--no-deps`, and `McpLayer` runs it at CDK synth (design §1 `McpLayer` row)
     - _Requirements: 7.1, 15.3_
 
   - [x] 3.2 Implement `discovery.py` (root and path-suffixed PRM, RFC 8414 facade)
@@ -780,7 +781,7 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
 
 - [ ] 18. Deploy the Portal_MCP_Server and run the deployed-stack smoke check
   - [ ] 18.1 Deploy the portal with the MCP stack
-    - Only when no component build is running (`pgrep` as 17.1): `bash backend/layers/mcp/build.sh` and check that `backend/layers/mcp/python/mcp` and `python/mangum` exist (`McpLayer` packages the directory as it is on disk; ADMIN_GUIDE "Enabling and disabling the MCP stack"), then `./deploy-infrastructure.sh` (stack on by default; `mcpMutatingToolsEnabled` default false); afterwards move the regenerated `cdk.out` aside before the next component build
+    - Only when no component build is running (`pgrep` as 17.1): `./deploy-infrastructure.sh` (stack on by default; `mcpMutatingToolsEnabled` default false; the synth bundles `McpLayer` from `backend/layers/mcp/requirements.lock.txt`, sign-off item (m), so no manual layer build precedes it; ADMIN_GUIDE "Enabling and disabling the MCP stack"); afterwards move the regenerated `cdk.out` aside before the next component build
     - Verify: `aws cloudformation describe-stacks --stack-name EdgeCVPortalMcpStack` shows `CREATE_COMPLETE`/`UPDATE_COMPLETE` and the seven outputs; the existing portal web UI and REST API behave unchanged (log in, list devices)
     - _Requirements: 6.1, 6.4, 5.4_
 
@@ -791,11 +792,11 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - _Requirements: 2.4, 2.6, 2.8, 4.1, 4.6, 7.4, 7.5, 6.3_
 
 - [ ] 19. Obtain the Phase-1 owner sign-off and release Phase 1
-  - [ ] 19.1 Present the sign-off items and record the decisions
+  - [x] 19.1 Present the sign-off items and record the decisions
     - Items (a)–(i) of the Phasing table — Requirement 3.9 interpretation; no gateway authorizer; the 2.4 header deviation (declining selects Backlog 10's CloudFront remedy before Phase 1 ships); the 2.4 "naming the User_Pool" reading; the `PORTAL_REGISTRY_ENFORCED=false` limitation (D29 options A/B/C); the `max(k, 1)` reading of 16.4; `aud`-less tokens on `client_id` + scope; the operation-level deferrals of 17.4; the status-sync reading — plus **(j) [review-9 N5]** the Greengrass-backed reads scoped by account, not by Use_Case: `portal_devices_get`, `_logs_list`, `_logs_get`, `_logs_analyze` (Phase 2), `_deployment_get`, `_deployment_for_target_get` and `_components_get`. Accept them as REST parity (the design's recommendation), or defer the id-addressed tools until Backlog 26 binds them. (h) also lists `portal_data_labeling_manifest_get` among the operation-level deferrals
     - Any non-default choice becomes a follow-up task before release: option (B) → a synth-time check in `bin/app.ts` and the RBAC matrix's enforcement-off expectations; option (C) → Backlog 12 and Property 5; declining (c) → the CloudFront distribution; deferring under (i)/(j) → reclassify or remove the rows and re-run tasks 5.6–5.11 and 7.4
     - Verify: the owner's decisions recorded in the spec directory's Phase-1 evidence
-    - Recorded answers (owner, 2026-10-23): (a)–(i) accepted as the design recommends, with (e) option A (the documented enforcement-off limitation) and (h) as a documented 17.4 deviation; (j) A, the seven Greengrass-backed reads accepted as REST parity; (k) design revision 12 accepted; (l) (a), fix-only wording for the REST-side Backlog items, with the design reviews kept outside the repository; (n) hardware coverage is JP5 and JP6 on hardware, with JP7, amd64 and amd64-nvidia built but not hardware-verified (task 17.5); (o) reconcile in Phase 2; (m) pending. 19.1 stays open until (m) is answered
+    - Recorded answers (owner, 2026-10-23): (a)–(i) accepted as the design recommends, with (e) option A (the documented enforcement-off limitation) and (h) as a documented 17.4 deviation; (j) A, the seven Greengrass-backed reads accepted as REST parity; (k) design revision 12 accepted; (l) (a), fix-only wording for the REST-side Backlog items, with the design reviews kept outside the repository; (n) hardware coverage is JP5 and JP6 on hardware, with JP7, amd64 and amd64-nvidia built but not hardware-verified (task 17.5); (o) reconcile in Phase 2; (m) (b) bundle at synth, 2026-10-25: `McpLayer` bundles at CDK synth from `backend/layers/mcp/requirements.lock.txt`, and the manual layer build step is removed from ADMIN_GUIDE and 18.1. Every sign-off item is answered
     - _Requirements: 17.1, 17.4, 3.6, 3.9, 2.4, 16.4_
 
   - [ ] 19.2 Release Phase 1
