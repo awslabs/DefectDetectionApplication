@@ -13,6 +13,12 @@
  *   the absence of a public layer member and the exports it gains;
  * - the real app through the CDK CLI with `-c deployMcpServer=false`.
  *
+ * The McpLayer synth-time bundling (backend/layers/mcp/build.sh over
+ * requirements.lock.txt) is tested without network: its options are
+ * asserted directly, and the real build.sh runs against a stand-in `pip` on
+ * PATH that records its arguments. The real wheels are installed by every
+ * full-app `cdk synth` (portal-app-*-shared-authorizer.test.ts) and deploy.
+ *
  * Every account id and identifier is visibly fake.
  */
 import { spawnSync } from 'child_process';
@@ -31,11 +37,13 @@ import {
   MCP_BACKEND_FUNCTIONS_PARAMETER_NAME,
   MCP_BACKEND_KEYS,
   MCP_COMPUTE_BACKEND_KEYS,
+  MCP_LAYER_SOURCE_DIR,
   MCP_LOG_GROUP_NAME,
   McpBackendKey,
   McpStack,
   McpStackProps,
   mcpBackendHandlers,
+  mcpLayerBundling,
   validateMcpAllowedOrigins,
 } from '../lib/mcp-stack';
 import { StorageStack } from '../lib/storage-stack';
@@ -72,8 +80,15 @@ interface UnitApp {
   template: Template;
 }
 
-function unitApp(overrides: Partial<McpStackProps> = {}): UnitApp {
-  const app = new cdk.App({ outdir: tmpOutdir('mcp-stack-unit-') });
+// By default no stack bundles (aws:cdk:bundling-stacks), so the McpLayer
+// asset is not built and the fixture needs no network. Skipped bundling keeps
+// the asset's source hash; the McpLayer bundling suite passes `{}` to bundle.
+const NO_BUNDLING = { 'aws:cdk:bundling-stacks': [] as string[] };
+function unitApp(
+  overrides: Partial<McpStackProps> = {},
+  context: Record<string, unknown> = NO_BUNDLING,
+): UnitApp {
+  const app = new cdk.App({ outdir: tmpOutdir('mcp-stack-unit-'), context });
   const producer = new cdk.Stack(app, 'Producer', { env: ENV });
   const userPool = new cognito.UserPool(producer, 'Pool');
   const userPoolDomain = userPool.addDomain('Domain', {
@@ -365,6 +380,202 @@ describe('EdgeCVPortalMcpStack context values', () => {
   });
 });
 
+// ------------------------------------------------- McpLayer bundling at synth
+
+const LOCK_FILE = path.join(MCP_LAYER_SOURCE_DIR, 'requirements.lock.txt');
+
+/** `name==version` pins of a requirements file, by lower-case name. */
+function pinsOf(file: string): Map<string, string> {
+  const pins = new Map<string, string>();
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    const match = /^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)/.exec(line);
+    if (match) pins.set(match[1].toLowerCase(), match[2]);
+  }
+  return pins;
+}
+
+/**
+ * A directory holding a stand-in `pip` that records its arguments in
+ * args.txt. Modes: `install` creates `<name>-<version>.dist-info` under the
+ * `-t` target for every pin of the `-r` file, `skip-<name>` all but that one,
+ * `empty` nothing (exit 0), `fail` exits 1 as pip does for a missing wheel.
+ */
+function stubPipDir(mode: string): string {
+  const dir = tmpOutdir('mcp-layer-pip-');
+  const script = [
+    '#!/bin/bash',
+    'printf "%s\\n" "$@" > "$(dirname "$0")/args.txt"',
+    `mode='${mode}'`,
+    'if [ "$mode" = fail ]; then',
+    '  echo "ERROR: No matching distribution found for mcp==2.3.0" >&2',
+    '  exit 1',
+    'fi',
+    'req=""; target=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  case "$1" in -r) req="$2"; shift ;; -t) target="$2"; shift ;; esac',
+    '  shift',
+    'done',
+    'mkdir -p "$target"',
+    '[ "$mode" = empty ] && exit 0',
+    'sed -n "s/^\\([A-Za-z0-9][A-Za-z0-9._-]*\\)==\\([^ ;\\\\]*\\).*/\\1 \\2/p" "$req" |',
+    '  while read -r name version; do',
+    '    [ "$mode" = "skip-$name" ] && continue',
+    '    mkdir -p "$target/${name//-/_}-$version.dist-info"',
+    '  done',
+    'exit 0',
+    '',
+  ].join('\n');
+  fs.writeFileSync(path.join(dir, 'pip'), script, { mode: 0o755 });
+  return dir;
+}
+
+/** Runs fn with `dir` first on PATH (or as the whole PATH). */
+function withPath<T>(dir: string, fn: () => T, replace = false): T {
+  const saved = process.env.PATH;
+  process.env.PATH = replace ? dir : `${dir}${path.delimiter}${saved ?? ''}`;
+  try {
+    return fn();
+  } finally {
+    process.env.PATH = saved;
+  }
+}
+
+function tryLocalBundle(outputDir: string): boolean {
+  const options = mcpLayerBundling();
+  return options.local!.tryBundle(outputDir, options);
+}
+
+function argsOf(stubDir: string): string[] {
+  return fs.readFileSync(path.join(stubDir, 'args.txt'), 'utf8').trimEnd().split('\n');
+}
+
+/** The McpLayer LayerVersion resource of a template. */
+function mcpLayerOf(template: Template): any {
+  const layers = Object.entries(resourcesOf(template, 'AWS::Lambda::LayerVersion')).filter(
+    ([id]) => id.startsWith('McpLayer'),
+  );
+  expect(layers).toHaveLength(1);
+  return layers[0][1];
+}
+
+describe('McpLayer bundling at synth (backend/layers/mcp/build.sh over the lock)', () => {
+  beforeEach(() => cdk.AssetStaging.clearAssetHashCache());
+  afterAll(() => cdk.AssetStaging.clearAssetHashCache());
+
+  test('the lock pins every distribution with hashes, resolved for CPython 3.11 x86_64 manylinux_2_17', () => {
+    const body = fs.readFileSync(LOCK_FILE, 'utf8');
+    expect(body).toContain(
+      '--python-version 3.11 --python-platform x86_64-manylinux_2_17 --generate-hashes',
+    );
+    const pins = pinsOf(LOCK_FILE);
+    expect(pins.get('mcp')).toBe('2.3.0');
+    expect(pins.get('mangum')).toBe('0.22.0');
+    expect(pins.size).toBeGreaterThan(2);
+    // One `name==version \` line per distribution, each followed by its hashes.
+    const requirementLines = body.split('\n').filter((line) => /^[A-Za-z0-9]/.test(line));
+    expect(requirementLines).toHaveLength(pins.size);
+    for (const line of requirementLines) {
+      expect(line).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*==\S+ \\$/);
+    }
+    const blocks = body.split(/\n(?=[A-Za-z0-9])/).filter((block) => /^[A-Za-z0-9]/.test(block));
+    expect(blocks).toHaveLength(pins.size);
+    for (const block of blocks) {
+      expect(block).toMatch(/--hash=sha256:[0-9a-f]{64}/);
+    }
+  });
+
+  test('requirements.txt and the lock agree on the direct pins', () => {
+    const direct = pinsOf(path.join(MCP_LAYER_SOURCE_DIR, 'requirements.txt'));
+    expect([...direct.keys()].sort()).toEqual(['mangum', 'mcp']);
+    const locked = pinsOf(LOCK_FILE);
+    for (const [name, version] of direct) expect(locked.get(name)).toBe(version);
+  });
+
+  test('bundling options: the python3.11 image runs the same build.sh as the local step', () => {
+    const options = mcpLayerBundling();
+    expect(options.image.image).toBe(lambda.Runtime.PYTHON_3_11.bundlingImage.image);
+    expect(options.command).toEqual(['bash', '/asset-input/build.sh', '/asset-output']);
+    expect(typeof options.local?.tryBundle).toBe('function');
+    expect(fs.existsSync(path.join(MCP_LAYER_SOURCE_DIR, 'build.sh'))).toBe(true);
+  });
+
+  test('the local step installs the lock with the platform flags, wheels only, no resolution', () => {
+    const stub = stubPipDir('install');
+    const out = tmpOutdir('mcp-layer-out-');
+    expect(withPath(stub, () => tryLocalBundle(out))).toBe(true);
+    const args = argsOf(stub);
+    expect(args[0]).toBe('install');
+    const valueOf = (flag: string) => args[args.indexOf(flag) + 1];
+    expect(valueOf('--platform')).toBe('manylinux2014_x86_64');
+    expect(valueOf('--python-version')).toBe('3.11');
+    expect(valueOf('--implementation')).toBe('cp');
+    expect(valueOf('-r')).toBe(LOCK_FILE);
+    expect(valueOf('-t')).toBe(path.join(out, 'python'));
+    for (const flag of ['--only-binary=:all:', '--no-deps', '--require-hashes']) {
+      expect(args).toContain(flag);
+    }
+    expect(fs.existsSync(path.join(out, 'python', 'mcp-2.3.0.dist-info'))).toBe(true);
+    expect(fs.existsSync(path.join(out, 'python', 'mangum-0.22.0.dist-info'))).toBe(true);
+  });
+
+  test('fails loud: pip exiting non-zero (a missing wheel) throws instead of falling back', () => {
+    const stub = stubPipDir('fail');
+    expect(() => withPath(stub, () => tryLocalBundle(tmpOutdir('mcp-layer-out-')))).toThrow(
+      /McpLayer bundling failed[\s\S]*No matching distribution found/,
+    );
+  });
+
+  test('fails loud: pip "succeeding" without installing a pinned distribution throws', () => {
+    expect(() =>
+      withPath(stubPipDir('empty'), () => tryLocalBundle(tmpOutdir('mcp-layer-out-'))),
+    ).toThrow(/McpLayer bundling failed[\s\S]*mcp==2\.3\.0 is missing/);
+    let message = '';
+    try {
+      withPath(stubPipDir('skip-mangum'), () => tryLocalBundle(tmpOutdir('mcp-layer-out-')));
+    } catch (err) {
+      message = String(err);
+    }
+    expect(message).toMatch(/mangum==0\.22\.0 is missing/);
+    expect(message).not.toMatch(/mcp==2\.3\.0 is missing/);
+  });
+
+  test('a host without pip falls back to the Docker bundling image', () => {
+    const bash = spawnSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
+    const onlyBash = tmpOutdir('mcp-layer-nopip-');
+    fs.symlinkSync(bash, path.join(onlyBash, 'bash'));
+    expect(withPath(onlyBash, () => tryLocalBundle(tmpOutdir('mcp-layer-out-')), true)).toBe(false);
+  });
+
+  test('a bundling synth stages python/ only, under the asset hash of the unbundled source', () => {
+    const skippedKey: string = mcpLayerOf(unitApp().template).Properties.Content.S3Key;
+    const bundled = withPath(stubPipDir('install'), () => unitApp({}, {}));
+    const bundledKey: string = mcpLayerOf(bundled.template).Properties.Content.S3Key;
+    expect(bundledKey).toBe(skippedKey);
+    const assetDir = path.join(
+      cdk.Stage.of(bundled.mcp)!.outdir,
+      `asset.${bundledKey.replace(/\.zip$/, '')}`,
+    );
+    expect(fs.readdirSync(assetDir)).toEqual(['python']);
+    expect(fs.existsSync(path.join(assetDir, 'python', 'mcp-2.3.0.dist-info'))).toBe(true);
+    expect(fs.existsSync(path.join(assetDir, 'python', 'mangum-0.22.0.dist-info'))).toBe(true);
+  });
+
+  test('a bundling synth with a missing distribution fails the synth', () => {
+    expect(() => withPath(stubPipDir('skip-mangum'), () => unitApp({}, {}))).toThrow(
+      /McpLayer bundling failed[\s\S]*mangum==0\.22\.0 is missing/,
+    );
+  });
+
+  test('layer metadata unchanged: python3.11, no architecture list, same description', () => {
+    const layer = mcpLayerOf(unitApp().template);
+    expect(layer.Properties.CompatibleRuntimes).toEqual(['python3.11']);
+    expect(layer.Properties.CompatibleArchitectures).toBeUndefined();
+    expect(layer.Properties.Description).toBe(
+      'mcp==2.3.0 and mangum==0.22.0 for the Portal_MCP_Server',
+    );
+  });
+});
+
 // ------------------------------------------------------ ComputeStack fixture
 
 describe('ComputeStack members the McpStack consumes', () => {
@@ -372,7 +583,12 @@ describe('ComputeStack members the McpStack consumes', () => {
   let computeTemplate: Template;
   let mcpTemplate: Template;
   beforeAll(() => {
-    const app = new cdk.App({ outdir: tmpOutdir('mcp-stack-compute-') });
+    // Every stack but the McpStack bundles as before; the McpLayer bundling
+    // is covered by its own suite below.
+    const app = new cdk.App({
+      outdir: tmpOutdir('mcp-stack-compute-'),
+      context: { 'aws:cdk:bundling-stacks': ['Storage', 'Deps', 'Compute', 'Compute/**'] },
+    });
     const storage = new StorageStack(app, 'Storage');
     const deps = new cdk.Stack(app, 'Deps');
     const userPool = new cognito.UserPool(deps, 'Pool');

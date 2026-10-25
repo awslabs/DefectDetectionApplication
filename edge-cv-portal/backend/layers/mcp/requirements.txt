@@ -1,2 +1,6 @@
+# Direct dependencies of the MCP Lambda layer (Portal_MCP_Server).
+# build.sh installs requirements.lock.txt, never this file. After editing a
+# pin here, regenerate the lock from this directory with the command in its
+# header (uv pip compile for CPython 3.11 on x86_64 manylinux_2_17).
 mcp==2.3.0
 mangum==0.22.0
