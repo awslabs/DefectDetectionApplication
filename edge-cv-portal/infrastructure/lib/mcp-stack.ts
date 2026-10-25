@@ -486,7 +486,12 @@ export class McpStack extends cdk.Stack {
     const none = new apigwv2.HttpNoneAuthorizer();
     const endpointMethods = [apigwv2.HttpMethod.POST, apigwv2.HttpMethod.GET, apigwv2.HttpMethod.DELETE];
     for (const routePath of ['/mcp', '/mcp/{view}']) {
-      httpApi.addRoutes({ path: routePath, methods: endpointMethods, integration, authorizer: none });
+      const endpointRoutes = httpApi.addRoutes({ path: routePath, methods: endpointMethods, integration, authorizer: none });
+      // The stage's RouteSettings name these routes, and API Gateway rejects
+      // settings for a route that does not exist yet: create the stage after them.
+      for (const route of endpointRoutes) {
+        (stage.node.defaultChild as apigwv2.CfnStage).addDependency(route.node.defaultChild as apigwv2.CfnRoute);
+      }
     }
     for (const routePath of [
       '/.well-known/oauth-protected-resource',

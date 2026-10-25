@@ -213,6 +213,21 @@ describe('EdgeCVPortalMcpStack (unit app)', () => {
     }
   });
 
+  test('the stage DependsOn every route its RouteSettings name (created after them)', () => {
+    const stage = onlyResource(unit.template, 'AWS::ApiGatewayV2::Stage');
+    const routeIdByKey = Object.fromEntries(
+      Object.entries(resourcesOf(unit.template, 'AWS::ApiGatewayV2::Route')).map(
+        ([id, route]: [string, any]) => [route.Properties.RouteKey, id],
+      ),
+    );
+    const dependsOn: string[] = stage.DependsOn ?? [];
+    const expected = Object.keys(stage.Properties.RouteSettings).map((key) => {
+      expect(routeIdByKey[key]).toBeDefined();
+      return routeIdByKey[key];
+    });
+    expect([...dependsOn].sort()).toEqual(expected.sort());
+  });
+
   test('the Lambda environment: keys, the issuer, the parameter name, no map, < 3,000 bytes', () => {
     const variables = handlerOf(unit.template).Properties.Environment.Variables;
     for (const key of [
