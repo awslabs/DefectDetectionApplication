@@ -91,6 +91,7 @@ The DDA video tutorial series on YouTube has an overview video and one video per
 | Module 10 | [Prompt Tuning](https://youtu.be/ZnxGwMxCB1M) | - | [9. Workflow Tuning](docs/user-guide/09-workflow-tuning.md) |
 | Module 11 | [User Access](https://youtu.be/_HDKtKvft3c) | [3.2 Create Portal Admin User](#32-create-portal-admin-user) | [20. User Manager](docs/user-guide/20-user-manager.md) |
 | Module 12 | [Edge Software](https://youtu.be/pInKqoADn2c) | [Edge Device Management](#edge-device-management) | [22. Device web UI](docs/user-guide/22-device-web-ui.md), [23. Quality Station HMI](docs/user-guide/23-station-hmi.md) |
+| Module 13 | [Dashboards](https://youtu.be/wTwUSNUQbac) | - | [14. Workflow dashboards](docs/user-guide/14-workflow-dashboards.md) |
 
 ## User Guide
 

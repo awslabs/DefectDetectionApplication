@@ -27,7 +27,7 @@ The worked example throughout is the **cookies** use case and its **blue plates*
 | 11 | [Components](11-components.md) | Components | – |
 | 12 | [Builds](12-builds.md) | Builds | [Module 6: Build Servers](https://youtu.be/ZNJBk94Ucjo) |
 | 13 | [Deployments](13-deployments.md) | Deployments | [Module 7: Deployments](https://youtu.be/FTYq8aql-CU) |
-| 14 | [Workflow dashboards](14-workflow-dashboards.md) | Workflow dashboards, Telemetry settings | – |
+| 14 | [Workflow dashboards](14-workflow-dashboards.md) | Workflow dashboards, Telemetry settings | [Module 13: Dashboards](https://youtu.be/wTwUSNUQbac) |
 | 15 | [Devices](15-devices.md) | Devices | [Module 1: Device Setup](https://youtu.be/PFdFycCQXA0), [Module 8: Devices](https://youtu.be/r8nz33LQPoc) |
 | 16 | [Debug log](16-debug-log.md) | Debug log | – |
 | 17 | [Plugin Review](17-plugin-review.md) | Plugin Review | [Module 4: Custom Node Designer](https://youtu.be/si5gOzzPhn0) |

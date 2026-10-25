@@ -1,6 +1,6 @@
 # 14. Workflow dashboards
 
-**Who:** every role except DataLabeler can open dashboards; Operator, DataScientist, UseCaseAdmin and PortalAdmin create and delete them; UseCaseAdmin and PortalAdmin manage telemetry settings. **Reference:** [Workflow telemetry dashboards](../workflow-dashboards.md).
+**Who:** every role except DataLabeler can open dashboards; Operator, DataScientist, UseCaseAdmin and PortalAdmin create and delete them; UseCaseAdmin and PortalAdmin manage telemetry settings. **Video:** [Module 13: Dashboards](https://youtu.be/wTwUSNUQbac). **Reference:** [Workflow telemetry dashboards](../workflow-dashboards.md).
 
 A workflow dashboard shows how a deployed workflow is doing on the line: runs per minute, latency, detections per class, people seen, the model's readiness, and for PPE workflows the compliance picture, plus a **Now** panel per device, a **Health** panel, and a **Live** frame. The data comes from short summaries the devices publish every few seconds once telemetry is switched on for the use case; nothing is deployed to enable it.
 
