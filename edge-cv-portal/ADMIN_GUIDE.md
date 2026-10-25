@@ -1729,24 +1729,19 @@ through the Cognito hosted UI.
 ### Enabling and disabling the MCP stack
 
 `./deploy-infrastructure.sh` deploys `EdgeCVPortalMcpStack` by default; no
-setting is needed. Build the MCP Lambda layer first, on every deploy host and
-whenever `backend/layers/mcp/requirements.txt` changes:
+setting is needed.
 
-```bash
-# Installs mcp and mangum (x86_64 CPython 3.11 wheels) into
-# backend/layers/mcp/python/; pip needs network access to the package index.
-bash backend/layers/mcp/build.sh
-# Check the layer content before deploying:
-test -d backend/layers/mcp/python/mcp && test -d backend/layers/mcp/python/mangum \
-  && echo "MCP layer built"
-./deploy-infrastructure.sh
-```
-
-- `McpLayer` packages the `backend/layers/mcp` directory as it is on disk, and
-  no deploy script builds it. Without the build step the layer holds only
-  `build.sh` and `requirements.txt`; the deploy still succeeds, but every MCP
-  request fails (see [Troubleshooting MCP sign-in](#troubleshooting-mcp-sign-in)).
-- `backend/layers/mcp/python/` is build output and is not committed.
+- The MCP Lambda layer (`McpLayer`: `mcp`, `mangum` and their dependencies)
+  is built during `cdk synth`, like the other bundled portal layers, so no
+  separate build step comes before the deploy. `backend/layers/mcp/build.sh`
+  installs the x86_64 CPython 3.11 wheels pinned in
+  `backend/layers/mcp/requirements.lock.txt` with the host's `pip`, or inside
+  the Python 3.11 bundling image when the host has no `pip` (Docker needed
+  then). Either way pip needs network access to the package index.
+- The synth fails, and nothing is deployed, when a pinned wheel cannot be
+  installed.
+- To change a version, edit `backend/layers/mcp/requirements.txt` and
+  regenerate the lock with the `uv pip compile` command in its header.
 
 Disabling it on a deployed portal takes **two steps, in this order**:
 
@@ -1977,8 +1972,10 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
 ### Troubleshooting MCP sign-in
 
 **Every MCP request, discovery included, answers HTTP 500.** The MCP Lambda
-could not import its packages: the layer was deployed without the build step
-of [Enabling and disabling the MCP stack](#enabling-and-disabling-the-mcp-stack).
+could not import its packages: the deployed `McpLayer` does not hold them, for
+example after a deploy from an older tree that packaged the layer directory
+without building it (see
+[Enabling and disabling the MCP stack](#enabling-and-disabling-the-mcp-stack)).
 No tool result, audit entry or `McpTimeoutAlarm` state change follows. The log
 group `/dda-portal/mcp-server` shows `Runtime.ImportModuleError: Unable to
 import module 'mcp_portal.handler'` with `No module named 'mangum'` (or
@@ -1989,8 +1986,8 @@ aws logs filter-log-events --log-group-name /dda-portal/mcp-server \
   --filter-pattern ImportModuleError --max-items 5 --query 'events[].message'
 ```
 
-Run `bash backend/layers/mcp/build.sh`, check that `backend/layers/mcp/python/mcp`
-and `python/mangum` exist, and run `./deploy-infrastructure.sh` again.
+Run `./deploy-infrastructure.sh` again from this tree: the synth bundles the
+layer from `backend/layers/mcp/requirements.lock.txt`.
 
 **"OAuth issuer mismatch".** Fetch the root Protected Resource Metadata and the
 facade, and compare `authorization_servers[0]` with `issuer` byte for byte
