@@ -29,6 +29,10 @@ ComponentConfiguration:
     StationName: "DDA_Station_ARM64_JP6"
     ComponentName: "aws.edgeml.dda.LocalServer.arm64JP6"
     LocalLoginEnabled: "false"
+    # Edge_MCP_Server (mcp-servers): McpServerEnabled turns the /mcp route on and
+    # McpMutatingToolsEnabled lets it list and accept mutating tools; both off by default.
+    McpServerEnabled: "false"
+    McpMutatingToolsEnabled: "false"
     # Self-heal is on by default; merge "false" to opt a device out (triton-model-cleanup-wedge).
     ModelLoadSelfHealEnabled: "true"
     accessControl:

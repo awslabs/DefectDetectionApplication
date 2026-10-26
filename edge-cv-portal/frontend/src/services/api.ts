@@ -4542,6 +4542,8 @@ class ApiService {
     end_time?: number;
     limit?: number;
     next_token?: string;
+    channel?: 'api' | 'mcp';
+    mcp_tool?: string;
   }): Promise<{
     logs: Array<{
       event_id: string;
@@ -4553,6 +4555,8 @@ class ApiService {
       resource_id: string;
       result: string;
       details?: Record<string, any>;
+      channel?: string;
+      mcp_tool?: string;
     }>;
     count: number;
     scanned_count: number;
@@ -4568,6 +4572,8 @@ class ApiService {
     if (params?.end_time) queryParams.set('end_time', params.end_time.toString());
     if (params?.limit) queryParams.set('limit', params.limit.toString());
     if (params?.next_token) queryParams.set('next_token', params.next_token);
+    if (params?.channel) queryParams.set('channel', params.channel);
+    if (params?.mcp_tool) queryParams.set('mcp_tool', params.mcp_tool);
     
     const query = queryParams.toString() ? `?${queryParams}` : '';
     return this.request(`/audit-logs${query}`);

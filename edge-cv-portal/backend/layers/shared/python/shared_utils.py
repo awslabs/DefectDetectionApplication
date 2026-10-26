@@ -121,7 +121,12 @@ def get_user_from_event(event: Dict) -> Dict[str, str]:
     Portal_Identity registry (see RBACManager). The shape is unchanged so
     every existing caller keeps working
     (portal-jwt-role-privilege-escalation, design.md Decision 2).
+
+    The event is also remembered as the request audit context (see
+    `_remember_request_event`), so audit entries written later in the same
+    invocation without `identity`/`event` still carry the MCP marker.
     """
+    _remember_request_event(event)
     try:
         authorizer = event.get('requestContext', {}).get('authorizer', {})
         
@@ -190,6 +195,70 @@ UNKNOWN_ATTRIBUTION = 'unknown'
 # Glossary; Requirement 4.1).
 ATTRIBUTION_FIELDS = ('username', 'email', 'source_ip', 'user_agent',
                       'identity_source')
+
+# The MCP_Audit_Marker (mcp-servers design, "Shared-layer and audit-log
+# changes"): `channel` is written on every audit entry ('api' or 'mcp'); the
+# four `mcp_*` attributes only on entries written during an MCP-originated
+# invocation. The source is the `mcp` block the Portal MCP Lambda adds to
+# the event it dispatches; API Gateway events never carry that block.
+MCP_MARKER_FIELDS = ('channel', 'mcp_tool', 'mcp_server', 'mcp_client',
+                     'mcp_request_id')
+AUDIT_CHANNEL_API = 'api'
+AUDIT_CHANNEL_MCP = 'mcp'
+
+# marker attribute -> key of the event's `mcp` block
+_MCP_BLOCK_KEYS = (('mcp_tool', 'tool'), ('mcp_server', 'server'),
+                   ('mcp_client', 'client'), ('mcp_request_id', 'request_id'))
+
+# Request audit context (mcp-servers design D25). A Lambda process serves one
+# invocation at a time, so every audit write between a handler's
+# `get_user_from_event(event)` and its return belongs to that invocation.
+# The remembered event is bound to the invocation's `_X_AMZN_TRACE_ID`, so a
+# context left by an earlier invocation is inert.
+_REQUEST_AUDIT_CONTEXT: Optional[dict] = None
+
+
+def _mcp_block(event: Optional[Dict]) -> Optional[Dict]:
+    """The event's `mcp` block when it is a dict, else None."""
+    if not isinstance(event, dict):
+        return None
+    block = event.get('mcp')
+    return block if isinstance(block, dict) else None
+
+
+def _remember_request_event(event: Optional[Dict]) -> None:
+    """Store `event` as the request audit context of this invocation.
+
+    Every call overwrites the context, except when the stored event carries
+    an `mcp` block, the new one does not, and the trace id is unchanged: a
+    handler that builds an in-process event within an MCP-originated
+    invocation (for example `synthetic_data.retrain_session` calling
+    `training.create_training_job`) keeps the marker. Never raises.
+    """
+    global _REQUEST_AUDIT_CONTEXT
+    try:
+        invocation = os.environ.get('_X_AMZN_TRACE_ID')
+        stored = _REQUEST_AUDIT_CONTEXT
+        if (stored is not None
+                and _mcp_block(stored.get('event')) is not None
+                and _mcp_block(event) is None
+                and stored.get('invocation') == invocation):
+            return
+        _REQUEST_AUDIT_CONTEXT = {'event': event, 'invocation': invocation}
+    except Exception as error:  # noqa: BLE001 - audit context never fails a request
+        logger.warning(f"Could not record the request audit context: {error}")
+
+
+def _current_request_mcp_event() -> Optional[Dict]:
+    """The remembered event when it belongs to the current invocation and
+    carries an `mcp` block; otherwise None."""
+    stored = _REQUEST_AUDIT_CONTEXT
+    if stored is None:
+        return None
+    if stored.get('invocation') != os.environ.get('_X_AMZN_TRACE_ID'):
+        return None
+    event = stored.get('event')
+    return event if _mcp_block(event) is not None else None
 
 
 def _identifying_value(*candidates) -> str:
@@ -285,6 +354,9 @@ def attribution_from(event: Optional[Dict], user: Optional[Dict] = None,
     Returns:
         dict with exactly the five Attribution_Fields, every value a
         non-empty string ('unknown' where the request carries nothing).
+        When the event carries a dict `mcp` block (an MCP-originated
+        dispatch) the dict also holds the five MCP_MARKER_FIELDS; for any
+        other event the result is unchanged.
         Never raises: losing attribution must not fail a request, and a
         write with 'unknown' fields is still an attributable-by-`sub`
         record (Requirement 4.3).
@@ -299,22 +371,36 @@ def attribution_from(event: Optional[Dict], user: Optional[Dict] = None,
             (user or {}).get('username'),
             claims.get('cognito:username'), claims.get('username'),
             authorizer.get('username'))
-        email = _identifying_value(
-            claims.get('email'), authorizer.get('email'),
-            _claimed_email(user))
+        mcp = _mcp_block(event)
+        email_candidates = [claims.get('email'), authorizer.get('email'),
+                            _claimed_email(user)]
+        if mcp is not None:
+            # An access token carries no email claim; the MCP Lambda resolves
+            # it and passes it in the block.
+            email_candidates.insert(1, mcp.get('principal_email'))
+        email = _identifying_value(*email_candidates)
         source_ip = _identifying_value(identity_block.get('sourceIp'))
         user_agent = _identifying_value(identity_block.get('userAgent'))
 
+        if identity_source is None and mcp is not None \
+                and mcp.get('identity_source'):
+            # Decided by the MCP Lambda's authorization step; no registry read.
+            identity_source = mcp.get('identity_source')
         if identity_source is None:
             identity_source = _identity_source_for(user_id, usecase_id)
 
-        return {
+        attribution = {
             'username': username,
             'email': email,
             'source_ip': source_ip,
             'user_agent': user_agent,
             'identity_source': _identifying_value(identity_source),
         }
+        if mcp is not None:
+            attribution['channel'] = AUDIT_CHANNEL_MCP
+            for field, key in _MCP_BLOCK_KEYS:
+                attribution[field] = _identifying_value(mcp.get(key))
+        return attribution
     except Exception as error:  # noqa: BLE001 - attribution never raises
         logger.error(f"Error building audit attribution: {error}")
         return {field: UNKNOWN_ATTRIBUTION for field in ATTRIBUTION_FIELDS}
@@ -323,17 +409,30 @@ def attribution_from(event: Optional[Dict], user: Optional[Dict] = None,
 def _attribution_attributes(identity: Optional[Dict] = None,
                             event: Optional[Dict] = None,
                             usecase_id: Optional[str] = None) -> Dict[str, str]:
-    """The five top-level attribution attributes of an audit item.
+    """The top-level attribution attributes of an audit item.
 
-    Every audit entry carries all five (Requirement 4.1): an explicit
-    `identity` mapping wins, an `event` is read through
+    Every audit entry carries all five Attribution_Fields (Requirement 4.1):
+    an explicit `identity` mapping wins, an `event` is read through
     `attribution_from`, and anything neither supplies records 'unknown'.
+    When neither is passed, the request audit context of the current
+    invocation is used if it carries an `mcp` block (D25).
+
+    Every entry also carries `channel` ('api' unless the attribution is
+    MCP-marked); the four `mcp_*` attributes are added only for 'mcp'.
     """
+    if identity is None and event is None:
+        event = _current_request_mcp_event()
     if identity is None and event is not None:
         identity = attribution_from(event, usecase_id=usecase_id)
     identity = identity or {}
-    return {field: _identifying_value(identity.get(field))
-            for field in ATTRIBUTION_FIELDS}
+    attributes = {field: _identifying_value(identity.get(field))
+                  for field in ATTRIBUTION_FIELDS}
+    channel = identity.get('channel') or AUDIT_CHANNEL_API
+    attributes['channel'] = channel
+    if channel == AUDIT_CHANNEL_MCP:
+        for field in MCP_MARKER_FIELDS[1:]:
+            attributes[field] = _identifying_value(identity.get(field))
+    return attributes
 
 
 def log_audit_event(user_id: str, action: str, resource_type: str, 

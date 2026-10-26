@@ -33,6 +33,7 @@ setup() {
   install_real_if_present deploy-portal.sh
   install_real_if_present scripts/portal-trusted-accounts.sh
   install_real_if_present scripts/portal-registry-enforcement.sh
+  install_real_if_present scripts/portal-mcp-stack.sh
 }
 teardown() { portal_harness_teardown; }
 

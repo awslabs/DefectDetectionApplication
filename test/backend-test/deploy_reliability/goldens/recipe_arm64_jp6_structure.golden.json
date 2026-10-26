@@ -4,6 +4,8 @@
       "AppRunnerShadowName": "appRunnerShadow",
       "ComponentName": "aws.edgeml.dda.LocalServer.arm64JP6",
       "LocalLoginEnabled": "false",
+      "McpMutatingToolsEnabled": "false",
+      "McpServerEnabled": "false",
       "ModelLoadSelfHealEnabled": "true",
       "StationName": "DDA_Station_ARM64_JP6",
       "StreamShadowName": "streamConfigurationShadow",

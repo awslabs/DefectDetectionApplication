@@ -23,6 +23,9 @@ imitates exactly the surface the harness touches:
   entries, stream-health and preview; plus Workflow_Engine registrations,
   triggered executions with run metadata, and continuous status with
   counters that advance in real time until paused;
+* ``/health`` and ``/mcp/status`` (404 until :meth:`FakeDevice.enable_mcp`)
+  for the MCP stage's setup, status and soak checks; the fake serves no
+  ``/mcp`` endpoint;
 * optional local-auth — when enabled, every non-``/local-auth`` endpoint
   demands the bearer token issued by ``POST /local-auth/login``.
 
@@ -87,6 +90,26 @@ def default_stream_capabilities() -> Dict[str, Any]:
         "pyav": "17.1.0",
         "ffmpeg": "7.1.1",
         "probedAtMs": 1790000000000,
+    }
+
+
+def default_mcp_status() -> Dict[str, Any]:
+    """The ``GET /mcp/status`` document of a device whose MCP child listens
+    (the fields ``mcp_edge.status.build_status`` returns)."""
+    return {
+        "enabled": True,
+        "mutatingToolsEnabled": False,
+        "listening": True,
+        "endpoint": "/mcp",
+        "transport": "streamable-http",
+        "protocolRevisions": ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"],
+        "serverVersion": "0.0.0-fake-mcp",
+        "deliveredPhases": [1],
+        "componentVersion": FAKE_LOCAL_SERVER_VERSION,
+        "features": [],
+        "restartCount": 0,
+        "lastExitCode": None,
+        "lastError": None,
     }
 
 
@@ -367,6 +390,11 @@ class FakeDevice:
         self.run_scripts: Dict[str, Dict[str, Any]] = {}
         self.executions: Dict[str, FakeExecution] = {}
         self._next_id = 0
+        # -- MCP server surface (off until enable_mcp) ---------------------
+        #: The ``GET /mcp/status`` document; ``None`` answers 404.
+        self.mcp_status: Optional[Dict[str, Any]] = None
+        #: ``GET /mcp/status`` requests served (the MCP stage's reads).
+        self.mcp_status_reads = 0
 
     # ------------------------------------------------------------------
     # Scripting surface for selftests
@@ -396,6 +424,11 @@ class FakeDevice:
     def calls_of(self, kind: str) -> List[str]:
         """The names ``kind`` calls were issued against, in order."""
         return [name for called_kind, name in self.calls if called_kind == kind]
+
+    def enable_mcp(self) -> None:
+        """Answer ``GET /mcp/status`` as a device whose MCP child listens.
+        The fake serves no ``/mcp`` endpoint itself."""
+        self.mcp_status = default_mcp_status()
 
     def enable_streams(
         self, capabilities: Optional[Dict[str, Any]] = None, probe_503: int = 0
@@ -512,6 +545,21 @@ def build_app(device: FakeDevice) -> FastAPI:
             "status": "HEALTHY",
             "localServerVersion": device.local_server_version,
         }
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
+    # -- MCP server status ---------------------------------------------
+
+    @app.get("/mcp/status")
+    def mcp_status():
+        with device.lock:
+            device.mcp_status_reads += 1
+            status = None if device.mcp_status is None else dict(device.mcp_status)
+        if status is None:
+            return _not_found("The MCP server")
+        return status
 
     # -- Local auth ------------------------------------------------------
 

@@ -341,4 +341,56 @@ describe('SyntheticSessionDetail review workspace', () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/model returned no image/i)).toBeInTheDocument();
   });
+
+  it('scopes the failed-variations banner to the current pass (Req 4.5, 5.4)', async () => {
+    // Pass 1 failed on a long-fixed deployment bug; pass 2 regenerated with
+    // one genuine failure. Only pass 2's failure is current.
+    respond({
+      session: makeSession({ generation_pass: 2 }),
+      previews: [
+        makePreview('p1', {
+          generation_pass: 1,
+          status: 'failed',
+          failure_reason: "No module named 'PIL'",
+          thumbnail_url: undefined,
+        }),
+        makePreview('p2', { generation_pass: 2 }),
+        makePreview('p3', {
+          generation_pass: 2,
+          variation_index: 1,
+          status: 'failed',
+          failure_reason: 'Model returned no image',
+          thumbnail_url: undefined,
+        }),
+      ],
+    });
+    render(<SyntheticSessionDetail />);
+    expect(
+      await screen.findByText('1 variation failed in pass 2')
+    ).toBeInTheDocument();
+    expect(screen.getByText(/model returned no image/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No module named 'PIL'/)).not.toBeInTheDocument();
+  });
+
+  it('shows no failed-variations banner when only earlier passes failed', async () => {
+    respond({
+      session: makeSession({ generation_pass: 3 }),
+      previews: [
+        makePreview('p1', {
+          generation_pass: 1,
+          status: 'failed',
+          failure_reason: "No module named 'PIL'",
+          thumbnail_url: undefined,
+        }),
+        makePreview('p2', { generation_pass: 2 }),
+        makePreview('p3', { generation_pass: 3 }),
+      ],
+    });
+    render(<SyntheticSessionDetail />);
+    // Completed thumbnails from every pass still render for comparison.
+    expect(await screen.findByText('Pass 2')).toBeInTheDocument();
+    expect(screen.getByText('Pass 3')).toBeInTheDocument();
+    expect(screen.queryByText(/variations? failed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No module named 'PIL'/)).not.toBeInTheDocument();
+  });
 });

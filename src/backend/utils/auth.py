@@ -26,9 +26,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import base64
+import json
 import re
 import time
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import httpx
 from fastapi import Depends, HTTPException, Request
@@ -64,6 +65,25 @@ AUTHORIZATION_EXEMPT_PATH_PREFIXES = ("/static/",)
 _LOCAL_SESSION_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 
 
+class AuthDecision(NamedTuple):
+    """Who a request was authorized as (mcp-servers design §6, M3).
+
+    ``source`` is ``'local_session'``, ``'existing_token_auth'`` or
+    ``'anonymous'`` (open access and exempt paths). ``role`` is the synced
+    role of a Local_Session_Token's account, else None. ``expires_at`` is the
+    credential's ``exp`` when known. Surfacing it changes no decision: the
+    matrix and every raise of :func:`authorize_credential` are unchanged.
+    """
+
+    source: str
+    username: str
+    role: Optional[str]
+    expires_at: Optional[int]
+
+
+ANONYMOUS_DECISION = AuthDecision("anonymous", "anonymous", None, None)
+
+
 def validate_remotely(token, clientId, clientSecret, introspectEndpoint):
     dda_client_credentials = f'{clientId}:{clientSecret}'
     basic_auth_header = base64.b64encode(dda_client_credentials.encode()).decode()
@@ -94,6 +114,13 @@ def validate_remotely(token, clientId, clientSecret, introspectEndpoint):
         )
 
 def validate_token(token: str = Depends(oauth2_scheme)):
+    _introspect_token(token)
+
+
+def _introspect_token(token) -> dict:
+    """The body of :func:`validate_token`, returning the introspection JSON
+    of an accepted bearer. Same settings read, remote call, timer and 401
+    behaviour; only data already in hand is returned."""
     # Raise 401 if bearer token not provided and auth enabled
     if (not token) and utils.is_authorization_enabled_on_station():
         raise HTTPException(
@@ -121,6 +148,7 @@ def validate_token(token: str = Depends(oauth2_scheme)):
                 headers={"WWW-Authenticate": "Bearer"},
             )
     logger.info(f"Auth Total Time taken: {t.elapsed_time}")
+    return response.json()
 
 
 def _raise_unauthorized():
@@ -137,12 +165,15 @@ def is_local_session_token_shaped(credential: str) -> bool:
     return bool(_LOCAL_SESSION_TOKEN_PATTERN.match(credential))
 
 
-def _validate_local_session_token(credential: str) -> bool:
+def _validate_local_session_token(credential: str):
     """Validate a Local_Session_Token entirely locally (Requirement 8.5).
 
     Uses the shared signing secret and the live Local_Credential_Cache so a
     disabled or removed account instantly invalidates its outstanding tokens
     (Requirement 8.6, design D6). Never touches the network.
+
+    Returns the token's account (as ``session_tokens.validate_token``
+    returns it) when the token is valid, else None.
     """
     try:
         secret = session_tokens.get_or_create_secret()
@@ -150,18 +181,56 @@ def _validate_local_session_token(credential: str) -> bool:
         logger.warning(
             "Local session token rejected: signing secret unavailable: %s", error
         )
-        return False
+        return None
     result = session_tokens.validate_token(
         secret, credential, int(time.time()), credential_cache.get_default_cache()
     )
     if isinstance(result, session_tokens.AuthError):
         # Reason is logged only; the HTTP response stays uniform (8.7).
         logger.info("Local session token rejected: %s", result.reason)
-        return False
-    return True
+        return None
+    return result
 
 
-def authorize_credential(credential: Optional[str]) -> None:
+def _session_token_payload(credential: str) -> dict:
+    """The decoded payload segment of an already validated
+    Local_Session_Token (the signature was checked by
+    :func:`_validate_local_session_token`); ``{}`` when it does not decode."""
+    try:
+        payload_b64 = credential.split(".", 1)[0]
+        padding = "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + padding))
+    except (ValueError, TypeError, AttributeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _session_token_expiry(credential: str) -> Optional[int]:
+    """The ``exp`` of an already validated Local_Session_Token, else None.
+    Pure."""
+    exp = _session_token_payload(credential).get("exp")
+    if isinstance(exp, int) and not isinstance(exp, bool):
+        return exp
+    return None
+
+
+def _local_session_decision(account, credential: str) -> AuthDecision:
+    """The decision for a valid Local_Session_Token. The credential cache
+    may hold accounts as objects or as mappings keyed by username; the
+    token's ``sub`` is the username the account was looked up by."""
+    if isinstance(account, dict):
+        username, role = account.get("username"), account.get("role")
+    else:
+        username = getattr(account, "username", None)
+        role = getattr(account, "role", None)
+    if not username:
+        username = _session_token_payload(credential).get("sub")
+    return AuthDecision(
+        "local_session", username, role, _session_token_expiry(credential)
+    )
+
+
+def authorize_credential(credential: Optional[str]) -> Optional[AuthDecision]:
     """Per-request authorization decision matrix (portal-user-manager).
 
     | Local login | Existing_Token_Auth | Decision                            |
@@ -180,31 +249,40 @@ def authorize_credential(credential: Optional[str]) -> None:
     locally first, falling back to the existing remote ``validate_token``
     when Existing_Token_Auth is configured. Raises HTTP 401 with
     ``WWW-Authenticate: Bearer`` when no acceptance rule matches.
+
+    Returns None in the open-access row, else the :class:`AuthDecision`
+    naming the accepted credential (callers that ignore the value are
+    unaffected).
     """
     local_login_enabled = local_login_config.is_local_login_enabled()
     existing_token_auth = utils.is_authorization_enabled_on_station()
 
     # Row (disabled, not configured): open access — today's behavior, pinned.
     if not local_login_enabled and not existing_token_auth:
-        return
+        return None
 
     if not credential:
         _raise_unauthorized()
 
     # A Local_Session_Token authorizes only while local login is enabled
     # (8.5, 10.2); validated locally first (never remotely).
-    if (
-        local_login_enabled
-        and is_local_session_token_shaped(credential)
-        and _validate_local_session_token(credential)
-    ):
-        return
+    if local_login_enabled and is_local_session_token_shaped(credential):
+        account = _validate_local_session_token(credential)
+        if account is not None:
+            return _local_session_decision(account, credential)
 
     # Fall back to the existing remote bearer validation when configured
-    # (10.1, 10.4); validate_token raises its own 401 on rejection.
+    # (10.1, 10.4); _introspect_token raises its own 401 on rejection.
     if existing_token_auth:
-        validate_token(credential)
-        return
+        introspection = _introspect_token(credential)
+        if not isinstance(introspection, dict):
+            introspection = {}
+        return AuthDecision(
+            "existing_token_auth",
+            introspection.get("username") or introspection.get("sub") or "unknown",
+            None,
+            introspection.get("exp"),
+        )
 
     _raise_unauthorized()
 
@@ -218,10 +296,16 @@ def authorize_request(
     Local_Login_Configuration changes take effect on subsequent requests
     without a process restart (Requirement 11.2). The login/status endpoints
     and static SPA assets are exempt in every configuration.
+
+    Stores the decision as ``request.state.auth_decision`` (anonymous for
+    open access and exempt paths) for ``GET /local-auth/whoami`` and the
+    ``/mcp`` route.
     """
     path = request.url.path
     if path in AUTHORIZATION_EXEMPT_PATHS or path.startswith(
         AUTHORIZATION_EXEMPT_PATH_PREFIXES
     ):
+        request.state.auth_decision = ANONYMOUS_DECISION
         return
-    authorize_credential(token)
+    decision = authorize_credential(token)
+    request.state.auth_decision = decision or ANONYMOUS_DECISION

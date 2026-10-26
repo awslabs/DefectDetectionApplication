@@ -30,7 +30,17 @@ interface AuditLogEntry {
   resource_id: string;
   result: string;
   details?: Record<string, any>;
+  channel?: string;
+  mcp_tool?: string;
 }
+
+// Channel filter values accepted by GET /audit-logs. Entries written before
+// the channel attribute existed are returned under 'api' (Web & API).
+const CHANNEL_OPTIONS: SelectProps.Option[] = [
+  { label: 'All channels', value: '' },
+  { label: 'Web & API', value: 'api' },
+  { label: 'MCP', value: 'mcp' },
+];
 
 interface UseCase {
   usecase_id: string;
@@ -46,6 +56,7 @@ export default function AuditLogs() {
   const [dateRange, setDateRange] = useState<DateRangePickerProps.Value | null>(null);
   const [selectedAction, setSelectedAction] = useState<SelectProps.Option | null>(null);
   const [selectedUsecase, setSelectedUsecase] = useState<SelectProps.Option | null>(null);
+  const [selectedChannel, setSelectedChannel] = useState<SelectProps.Option>(CHANNEL_OPTIONS[0]);
   const [searchText, setSearchText] = useState('');
   const [availableActions, setAvailableActions] = useState<string[]>([]);
   const [usecases, setUsecases] = useState<UseCase[]>([]);
@@ -92,10 +103,15 @@ export default function AuditLogs() {
         end_time?: number;
         limit?: number;
         next_token?: string;
+        channel?: 'api' | 'mcp';
       } = { limit: 50 };
 
       if (selectedUsecase?.value) {
         params.usecase_id = selectedUsecase.value;
+      }
+
+      if (selectedChannel.value === 'api' || selectedChannel.value === 'mcp') {
+        params.channel = selectedChannel.value;
       }
 
       if (selectedAction?.value) {
@@ -142,11 +158,11 @@ export default function AuditLogs() {
     } finally {
       setLoading(false);
     }
-  }, [dateRange, selectedAction, selectedUsecase, nextToken]);
+  }, [dateRange, selectedAction, selectedUsecase, selectedChannel, nextToken]);
 
   useEffect(() => {
     loadLogs(true);
-  }, [dateRange, selectedAction, selectedUsecase]);
+  }, [dateRange, selectedAction, selectedUsecase, selectedChannel]);
 
   const actionOptions: SelectProps.Option[] = [
     { label: 'All Actions', value: '' },
@@ -267,6 +283,15 @@ export default function AuditLogs() {
             />
           </FormField>
 
+          <FormField label="Channel">
+            <Select
+              selectedOption={selectedChannel}
+              onChange={({ detail }) => setSelectedChannel(detail.selectedOption)}
+              options={CHANNEL_OPTIONS}
+              ariaLabel="Channel"
+            />
+          </FormField>
+
           <FormField label="Action">
             <Select
               selectedOption={selectedAction}
@@ -340,18 +365,23 @@ export default function AuditLogs() {
               id: 'details',
               header: 'Details',
               cell: item => {
-                if (!item.details || Object.keys(item.details).length === 0) return '-';
-                const keys = Object.keys(item.details).slice(0, 2);
+                const hasDetails = !!item.details && Object.keys(item.details).length > 0;
+                if (!item.mcp_tool && !hasDetails) return '-';
+                if (!hasDetails) {
+                  return <Box fontSize="body-s">mcp_tool: {item.mcp_tool}</Box>;
+                }
+                const keys = Object.keys(item.details!).slice(0, 2);
                 return (
                   <Box fontSize="body-s">
+                    {item.mcp_tool && <div>mcp_tool: {item.mcp_tool}</div>}
                     {keys.map(key => (
                       <div key={key}>
                         {key}: {String(item.details![key]).substring(0, 30)}
                         {String(item.details![key]).length > 30 ? '...' : ''}
                       </div>
                     ))}
-                    {Object.keys(item.details).length > 2 && (
-                      <Box color="text-status-inactive">+{Object.keys(item.details).length - 2} more</Box>
+                    {Object.keys(item.details!).length > 2 && (
+                      <Box color="text-status-inactive">+{Object.keys(item.details!).length - 2} more</Box>
                     )}
                   </Box>
                 );

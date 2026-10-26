@@ -65,6 +65,9 @@ def get_audit_logs(event: Dict[str, Any]) -> Dict[str, Any]:
     - usecase_id: Filter by specific usecase (optional for PortalAdmin, required for others)
     - action: Filter by action type (optional)
     - user_id: Filter by user (optional, PortalAdmin only)
+    - channel: 'api' (Web & API, including entries without a channel) or
+      'mcp' (entries written during MCP invocations) (optional)
+    - mcp_tool: Filter by MCP tool name (optional)
     - start_time: Start timestamp in milliseconds (optional)
     - end_time: End timestamp in milliseconds (optional)
     - limit: Maximum number of results (default 100, max 500)
@@ -84,6 +87,8 @@ def get_audit_logs(event: Dict[str, Any]) -> Dict[str, Any]:
         usecase_id = query_params.get('usecase_id')
         action_filter = query_params.get('action')
         user_filter = query_params.get('user_id')
+        channel_filter = query_params.get('channel')
+        mcp_tool_filter = query_params.get('mcp_tool')
         start_time = query_params.get('start_time')
         end_time = query_params.get('end_time')
         limit = min(int(query_params.get('limit', 100)), 500)
@@ -145,6 +150,25 @@ def get_audit_logs(event: Dict[str, Any]) -> Dict[str, Any]:
             expression_values[':action'] = action_filter
             expression_names['#action'] = 'action'
         
+        # Filter by channel (MCP_Audit_Marker). Entries written before the
+        # marker existed carry no `channel` attribute; they are Web & API
+        # entries, so the 'api' filter keeps them visible.
+        if channel_filter == 'api':
+            filter_expressions.append(
+                '(attribute_not_exists(#channel) OR #channel = :channel)')
+            expression_values[':channel'] = 'api'
+            expression_names['#channel'] = 'channel'
+        elif channel_filter == 'mcp':
+            filter_expressions.append('#channel = :channel')
+            expression_values[':channel'] = 'mcp'
+            expression_names['#channel'] = 'channel'
+
+        # Filter by MCP tool name
+        if mcp_tool_filter:
+            filter_expressions.append('#mcp_tool = :mcp_tool')
+            expression_values[':mcp_tool'] = mcp_tool_filter
+            expression_names['#mcp_tool'] = 'mcp_tool'
+
         # Filter by user
         if user_filter:
             filter_expressions.append('#user_id = :user_filter')
@@ -238,4 +262,7 @@ def get_available_actions() -> list:
         'provision_shared_components',
         'unauthorized_access',
         'unauthorized_super_user_access',
+        'mcp_tool_call',
+        'authentication_failed',
+        'authorization_unavailable',
     ]

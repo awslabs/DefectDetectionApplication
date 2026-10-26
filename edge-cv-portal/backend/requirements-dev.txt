@@ -4,3 +4,7 @@
 pytest==9.0.3
 moto[s3,dynamodb]==5.1.22
 PyJWT==2.15.0
+# Portal_MCP_Server (functions/mcp_portal); same pins as layers/mcp/requirements.txt.
+# The MCP suites run under Python >= 3.10 (tests/mcp).
+mcp==2.3.0
+mangum==0.22.0

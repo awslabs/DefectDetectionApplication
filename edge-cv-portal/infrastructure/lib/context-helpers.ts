@@ -54,6 +54,31 @@ export function portalRegistryEnforced(contextValue: unknown): string {
   return 'false';
 }
 
+/**
+ * Default-ON resolution for the `deployMcpServer` CDK context flag
+ * (mcp-servers design §1, D33). Same rule as
+ * {@link groundedSamWorkerEnabled}: only an explicit false (boolean `false`,
+ * or a string equal to 'false' case-insensitively after trimming) omits
+ * EdgeCVPortalMcpStack; absent, true and every other value ('0', 'no', 'off',
+ * typos) synthesize it. deploy-infrastructure.sh's opt-out guard applies the
+ * same test to DEPLOY_MCP_SERVER, so the shell and CDK rules cannot differ.
+ */
+export function mcpServerEnabled(contextValue: unknown): boolean {
+  return groundedSamWorkerEnabled(contextValue);
+}
+
+/**
+ * Default-OFF resolution for the `mcpMutatingToolsEnabled` CDK context flag
+ * (mcp-servers design D9). The returned string is the MCP Lambda's
+ * `MCP_MUTATING_TOOLS_ENABLED`: 'true' only for boolean `true` or one of
+ * '1'/'true'/'yes'/'on'/'enabled' after trimming, case-insensitively (the
+ * {@link portalRegistryEnforced} truthy set); 'false' for absent and every
+ * other value. Always one of the two canonical strings.
+ */
+export function mcpMutatingToolsEnabled(contextValue: unknown): string {
+  return portalRegistryEnforced(contextValue);
+}
+
 // ---------------------------------------------------------------------------
 // Synth-time enforcement acknowledgement (portal-authorization-and-iam-
 // scoping, design I7 "Design (D7-A)"). bin/app.ts refuses to synthesize when

@@ -70,12 +70,28 @@ STAGE_NAMES = {
     "test_30_workflows",
     "test_35_stream_cameras",
     "test_40_coexistence",
+    "test_50_mcp",
 }
 
 #: Tests per capability-gated module that skips as a whole when its
 #: capability is not granted: vlm image generate (vllm) and stream cameras.
 VLM_STAGE_TESTS = 2
 STREAM_STAGE_TESTS = 7
+#: The MCP stage (capability ``mcp``): every test skips unless ``mcp`` is
+#: granted (the MCP stage selftests at the end of this file).
+MCP_STAGE_TESTS = 19
+
+# Whether the MCP stage's client imports resolve under this interpreter; the
+# pytester subprocess runs the same one.
+try:
+    import anyio  # noqa: F401
+    import httpx2  # noqa: F401
+    from mcp.client import Client  # noqa: F401
+    from mcp.client.streamable_http import streamable_http_client  # noqa: F401
+except ImportError:
+    MCP_SDK_IMPORTABLE = False
+else:
+    MCP_SDK_IMPORTABLE = True
 
 # The stream camera stage's fake sources (never resolved: the fake answers
 # every URL from its scripted FakeStreamServer entries).
@@ -215,7 +231,9 @@ def test_full_run_green_with_results_bundle(pytester, monkeypatch):
     assert result.ret == 0, result.stdout.str()
     # The vlm image stage skips (no multimodal model deployed) and the
     # stream camera stage skips (capability not granted).
-    result.assert_outcomes(passed=14, skipped=VLM_STAGE_TESTS + STREAM_STAGE_TESTS)
+    result.assert_outcomes(
+        passed=14, skipped=VLM_STAGE_TESTS + STREAM_STAGE_TESTS + MCP_STAGE_TESTS
+    )
 
     # Results_Bundle contents (Req 8.1).
     results = _load_results(bundle)
@@ -265,7 +283,9 @@ def test_missing_capability_skips_with_recorded_reason(pytester, monkeypatch):
     # health: 3 passed + auth skipped; vision: 2 passed; vllm: 4 skipped;
     # workflows: 3 skipped; coexistence: 1 skipped; vlm image and stream
     # cameras: all skipped.
-    result.assert_outcomes(passed=5, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS)
+    result.assert_outcomes(
+        passed=5, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS + MCP_STAGE_TESTS
+    )
 
     results = _load_results(bundle)
     vllm_reasons = results["stages"]["test_20_vllm_textgen"]["skip_reasons"]
@@ -300,7 +320,9 @@ def test_declared_but_absent_capability_fails_distinctly(pytester, monkeypatch):
     # workflows and stream cameras: skipped (capability); vllm 4 + vlm
     # image 2 + coexistence 1 error out of the session-scoped vllm_surface
     # probe.
-    result.assert_outcomes(passed=3, skipped=6 + STREAM_STAGE_TESTS, errors=5 + VLM_STAGE_TESTS)
+    result.assert_outcomes(
+        passed=3, skipped=6 + STREAM_STAGE_TESTS + MCP_STAGE_TESTS, errors=5 + VLM_STAGE_TESTS
+    )
     output = result.stdout.str()
     assert f"Capability mismatch on device '{DEVICE_NAME}'" in output
     assert "claims capability 'vllm' is available" in output
@@ -344,7 +366,7 @@ def test_restoration_runs_on_failure_and_spares_found_running(pytester, monkeypa
     # fails; vllm 4 + workflows 3 + coexistence 1 + vlm image + stream
     # cameras skipped (capability).
     result.assert_outcomes(
-        passed=4, failed=1, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS
+        passed=4, failed=1, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS + MCP_STAGE_TESTS
     )
     # The device-reported failure reason surfaces verbatim (Req 4.2).
     assert fail_reason in result.stdout.str()
@@ -412,7 +434,9 @@ def test_run_budget_exceeded_fails_remaining_tests(pytester, monkeypatch):
     # Capability-gated items still skip (collection-time markers evaluate
     # first); every other test dies at setup with the budget diagnostic
     # (a setup-phase pytest.fail is reported as an error outcome).
-    result.assert_outcomes(errors=5, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS)
+    result.assert_outcomes(
+        errors=5, skipped=9 + VLM_STAGE_TESTS + STREAM_STAGE_TESTS + MCP_STAGE_TESTS
+    )
     assert "run budget exceeded" in result.stdout.str()
 
 
@@ -507,7 +531,7 @@ def test_stream_stage_green_with_restoration(pytester, monkeypatch):
     # health: 3 passed + auth skipped; vision: 2 skipped (none expected);
     # vllm 4 + vlm image 2 + workflows 3 + coexistence 1 skipped
     # (capability); stream cameras: all passed.
-    result.assert_outcomes(passed=3 + STREAM_STAGE_TESTS, skipped=13)
+    result.assert_outcomes(passed=3 + STREAM_STAGE_TESTS, skipped=13 + MCP_STAGE_TESTS)
 
     results = _load_results(bundle)
     assert results["stages"]["test_35_stream_cameras"]["passed"] == STREAM_STAGE_TESTS
@@ -568,7 +592,7 @@ def test_stream_stage_without_inputs_skips_each_check_naming_its_key(pytester, m
     assert result.ret == 0, result.stdout.str()
     # health 3 + stream capabilities 1 passed; the other 6 stream checks
     # skip, plus the 13 skips of the other stages.
-    result.assert_outcomes(passed=4, skipped=13 + STREAM_STAGE_TESTS - 1)
+    result.assert_outcomes(passed=4, skipped=13 + STREAM_STAGE_TESTS - 1 + MCP_STAGE_TESTS)
     reasons = _load_results(bundle)["stages"]["test_35_stream_cameras"]["skip_reasons"]
     assert sorted(reasons) == sorted(
         [
@@ -625,7 +649,7 @@ def test_stream_stage_failures_reported_and_sources_still_deleted(pytester, monk
     # health 3 + capabilities 1 passed; URLs, credentials and failure
     # categories fail; the triggered-run check (no workflow) and both
     # continuous checks (found paused) skip, plus the 13 other skips.
-    result.assert_outcomes(passed=4, failed=3, skipped=16)
+    result.assert_outcomes(passed=4, failed=3, skipped=16 + MCP_STAGE_TESTS)
     output = result.stdout.str()
     assert f"{RTMP_H265}: test-connection answered ok=False, category='not_found'" in output
     assert "failed (restoration retries it at teardown)" in output
@@ -665,7 +689,7 @@ def test_stream_capability_declared_but_absent_fails_distinctly(pytester, monkey
     assert result.ret != 0
     # health 3 passed; the 13 other skips; every stream check errors out of
     # the session-scoped stream_cameras_surface probe.
-    result.assert_outcomes(passed=3, skipped=13, errors=STREAM_STAGE_TESTS)
+    result.assert_outcomes(passed=3, skipped=13 + MCP_STAGE_TESTS, errors=STREAM_STAGE_TESTS)
     output = result.stdout.str()
     assert f"Capability mismatch on device '{DEVICE_NAME}'" in output
     assert "claims capability 'stream_cameras' is available" in output
@@ -715,9 +739,69 @@ def test_stream_pause_failures_still_leave_the_workflow_resumed(
     assert result.ret != 0
     # health 3 + capabilities 1 + continuous rate 1 passed; the pause check
     # fails; the 4 other stream checks (no inputs) and 13 other skips.
-    result.assert_outcomes(passed=5, failed=1, skipped=17)
+    result.assert_outcomes(passed=5, failed=1, skipped=17 + MCP_STAGE_TESTS)
     assert reported in result.stdout.str()
     assert device.calls_of("pause") == [continuous_id]
     assert device.calls_of("resume") == [continuous_id]
     assert not device.continuous[continuous_id].paused
     assert _load_results(bundle)["restoration_warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# MCP stage with ``mcp`` granted (mcp-servers task 14.2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(MCP_SDK_IMPORTABLE, reason="the mcp SDK is importable here")
+def test_mcp_stage_without_the_sdk_skips_and_the_other_stages_run(pytester, monkeypatch):
+    """With ``mcp`` granted and no importable ``mcp`` SDK (Python 3.9), every
+    MCP stage test skips at setup with the importability reason, the stage
+    reads nothing from the device, and the other stages run as before."""
+    device = FakeDevice()
+    device.enable_mcp()
+    bundle = pytester.path / "bundle"
+    with serve(device) as base_url:
+        _configure_harness_env(monkeypatch, pytester, base_url, "mcp")
+        result = _run_stages(pytester, bundle)
+
+    assert result.ret == 0, result.stdout.str()
+    # health 3 passed; the 13 other skips and stream cameras (capability);
+    # every MCP stage test skips (no SDK), none errors.
+    result.assert_outcomes(passed=3, skipped=13 + STREAM_STAGE_TESTS + MCP_STAGE_TESTS)
+    stage = _load_results(bundle)["stages"]["test_50_mcp"]
+    assert stage["skipped"] == MCP_STAGE_TESTS
+    assert len(stage["skip_reasons"]) == 1
+    assert "the mcp package is not importable under this interpreter" in stage["skip_reasons"][0]
+    assert device.mcp_status_reads == 0
+
+
+@pytest.mark.skipif(not MCP_SDK_IMPORTABLE, reason="needs the mcp SDK (Python 3.10 or later)")
+def test_mcp_stage_with_the_sdk_sets_up_and_records_the_soak(pytester, monkeypatch):
+    """With ``mcp`` granted and the SDK importable, the stage's module
+    fixtures set up: the status check and the soak check pass against the
+    fake's ``/mcp/status`` and ``/health`` (the fake serves no ``/mcp``, so
+    only those two are selected), and the soak records its metrics."""
+    device = FakeDevice()
+    device.enable_mcp()
+    bundle = pytester.path / "bundle"
+    with serve(device) as base_url:
+        _configure_harness_env(monkeypatch, pytester, base_url, "mcp", DDA_HARNESS_MCP_SOAK_S="1")
+        result = pytester.runpytest_subprocess(
+            str(STAGES_DIR / "test_50_mcp.py"),
+            f"--harness-output-dir={bundle}",
+            "-p",
+            "no:cacheprovider",
+            "-k",
+            "test_mcp_status or test_health_and_restart_counts_hold",
+        )
+
+    assert result.ret == 0, result.stdout.str()
+    result.assert_outcomes(passed=2)
+    metrics = _load_results(bundle)["metrics"]
+    # A remote harness cannot read the backend containers' restart counts.
+    assert metrics["mcp_container_restart_count_observable"] is False
+    assert metrics["mcp_server_version"] == "0.0.0-fake-mcp"
+    assert metrics["mcp_soak_s"] == 1.0
+    assert metrics["mcp_soak_samples"] >= 2
+    # The baseline, the status check and at least two soak samples.
+    assert device.mcp_status_reads >= 4

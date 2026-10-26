@@ -78,15 +78,23 @@ def parse_local_login_enabled(value: Any) -> bool:
     return False
 
 
-def _read_local_login_enabled_via_ipc() -> Any:
-    """Default reader: fetch ``LocalLoginEnabled`` from the LocalServer
-    component configuration via Greengrass IPC ``GetConfiguration``.
+#: Serializes reads on the shared reader: the local-login poller and the MCP
+#: configuration poller both read through it, and must never issue
+#: concurrent operations on the one IPC client.
+_IPC_CONFIG_LOCK = threading.Lock()
 
-    Returns the raw configured value, or :data:`MISSING` when the key is
-    absent. Raises on IPC failure — the caller treats any error as
-    disabled (11.4). Mirrors the ``DefectDetectionConfig`` pattern
-    (fresh single-use operation per call); imports are lazy so this
-    module stays importable without the Greengrass SDK.
+
+def read_component_config_via_ipc() -> dict:
+    """Fetch the LocalServer component configuration via Greengrass IPC
+    ``GetConfiguration``.
+
+    Returns the configuration mapping, or ``{}`` when the result is not a
+    dict. Raises on IPC failure; callers treat any error as their fail-safe
+    state. Shared by every component-configuration poller of the process
+    (``LocalLoginEnabled`` here, the MCP keys in ``mcp_edge.config``), so
+    there is one ``DefectDetectionConfig`` instance and one IPC connection
+    per process. Imports are lazy so this module stays importable without
+    the Greengrass SDK.
     """
     from utils.ipc_client import get_ipc_client  # noqa: WPS433 — lazy, see docstring
 
@@ -94,24 +102,37 @@ def _read_local_login_enabled_via_ipc() -> Any:
         DefectDetectionConfig,
     )
 
-    # Reuse one IPC connection + reader across polls. Connecting fresh on
-    # every 30 s poll leaked the previous connection (never closed), and
-    # the accumulating event-stream connections eventually tripped a fatal
-    # awscrt assertion ("Continuation ref count has gone negative"),
-    # aborting the whole LocalServer process. The reader now sits on the
-    # process-wide shared IPC client (DD-19576) so there is exactly one IPC
-    # connection for the whole backend.
-    global _IPC_CONFIG_READER  # noqa: WPS420 — module-level cache, see above
-    if _IPC_CONFIG_READER is None:
-        _IPC_CONFIG_READER = DefectDetectionConfig(get_ipc_client())
-    config_reader = _IPC_CONFIG_READER
-    component_name = config_reader.get_local_server_component_name()
-    # get_component_config is uncached, so every poll observes the live
-    # configuration (unlike get_local_server_config, which caches).
-    component_config = config_reader.get_component_config(component_name)
-    if not isinstance(component_config, dict) or CONFIG_KEY not in component_config:
-        return MISSING
-    return component_config[CONFIG_KEY]
+    with _IPC_CONFIG_LOCK:
+        # Reuse one IPC connection + reader across polls. Connecting fresh on
+        # every 30 s poll leaked the previous connection (never closed), and
+        # the accumulating event-stream connections eventually tripped a fatal
+        # awscrt assertion ("Continuation ref count has gone negative"),
+        # aborting the whole LocalServer process. The reader now sits on the
+        # process-wide shared IPC client (DD-19576) so there is exactly one IPC
+        # connection for the whole backend.
+        global _IPC_CONFIG_READER  # noqa: WPS420 — module-level cache, see above
+        if _IPC_CONFIG_READER is None:
+            _IPC_CONFIG_READER = DefectDetectionConfig(get_ipc_client())
+        config_reader = _IPC_CONFIG_READER
+        component_name = config_reader.get_local_server_component_name()
+        # get_component_config is uncached, so every poll observes the live
+        # configuration (unlike get_local_server_config, which caches).
+        component_config = config_reader.get_component_config(component_name)
+    if not isinstance(component_config, dict):
+        return {}
+    return component_config
+
+
+def _read_local_login_enabled_via_ipc() -> Any:
+    """Default reader: fetch ``LocalLoginEnabled`` from the LocalServer
+    component configuration via Greengrass IPC ``GetConfiguration``.
+
+    Returns the raw configured value, or :data:`MISSING` when the key is
+    absent. Raises on IPC failure — the caller treats any error as
+    disabled (11.4). Reads through :func:`read_component_config_via_ipc`.
+    """
+    config = read_component_config_via_ipc()
+    return config.get(CONFIG_KEY, MISSING)
 
 
 class LocalLoginConfig:

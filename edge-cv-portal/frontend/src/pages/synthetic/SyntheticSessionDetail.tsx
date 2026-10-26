@@ -128,9 +128,14 @@ export default function SyntheticSessionDetail() {
     () => previews.filter((p) => p.status === 'completed'),
     [previews]
   );
+  // Failures are scoped to the current pass: every regeneration opens a
+  // new pass and failed items from earlier passes stay persisted on the
+  // session, so listing all of them made long-fixed failures (a pass-1
+  // "No module named 'PIL'" on a session whose later passes all
+  // succeeded) read as current.
   const failedPreviews = useMemo(
-    () => previews.filter((p) => p.status === 'failed'),
-    [previews]
+    () => currentPassPreviews.filter((p) => p.status === 'failed'),
+    [currentPassPreviews]
   );
   const approvedCount = completedPreviews.filter(
     (p) => p.approval_state === 'approved'
@@ -460,13 +465,13 @@ export default function SyntheticSessionDetail() {
             ))}
           </div>
 
-          {/* Per-variation failure reasons (Req 4.5). */}
+          {/* Per-variation failure reasons for the current pass (Req 4.5). */}
           {failedPreviews.length > 0 && (
             <Alert
               type="warning"
               header={`${failedPreviews.length} variation${
                 failedPreviews.length === 1 ? '' : 's'
-              } failed`}
+              } failed in pass ${currentPass}`}
             >
               <ul style={{ margin: 0, paddingLeft: '20px' }}>
                 {failedPreviews.map((preview) => (

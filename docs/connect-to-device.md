@@ -98,6 +98,29 @@ sudo tail -n 200 /aws_dda/greengrass/v2/logs/aws.edgeml.dda.LocalServer.arm64JP5
 # Confirm the ONNX engine loaded model.onnx and the Triton model repo built.
 ```
 
+## Forward the LocalServer port for MCP
+
+An MCP client on your machine can reach the device's Edge MCP server through
+the same tunnel ([Edge MCP server](edge-mcp-server.md)). The Backend_API runs
+one listener: TLS on 5443 when Existing_Token_Auth is configured
+(`authorization_settings.json` present), otherwise plaintext on 5000. Forward
+the port the device runs. On a plaintext device, with the SSH session:
+
+```bash
+# Keep this session open while the MCP client is connected.
+ssh -p 5555 -L 5000:127.0.0.1:5000 ${SSH_USER}@localhost
+```
+
+Then point the client at `http://127.0.0.1:5000/mcp` (any free local port
+works; use it in the URL). The forwarded connection reaches the device from
+its loopback address, so `/mcp` accepts it on the plaintext listener; this is
+the only MCP form on a plaintext device. On a TLS device, forward `5443`
+instead (`-L 5443:127.0.0.1:5443`) and use `https://localhost:5443/mcp`; the
+client must trust the device certificate, as for the LAN form. Sign in with
+the login helper through the same forward:
+`eval "$(scripts/dda-edge-mcp-login.sh http://127.0.0.1:5000)"` on a
+plaintext device, `https://localhost:5443` on a TLS device.
+
 ## Cleanup
 
 ```bash

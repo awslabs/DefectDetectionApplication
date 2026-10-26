@@ -3,6 +3,8 @@
     "DefaultConfiguration": {
       "AppRunnerShadowName": "appRunnerShadow",
       "LocalLoginEnabled": "false",
+      "McpMutatingToolsEnabled": "false",
+      "McpServerEnabled": "false",
       "ModelLoadSelfHealEnabled": "true",
       "StreamShadowName": "streamConfigurationShadow",
       "accessControl": {

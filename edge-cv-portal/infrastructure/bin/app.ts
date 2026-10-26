@@ -12,12 +12,15 @@ import { SyntheticDataStack } from '../lib/synthetic-data-stack';
 import { WorkflowDebugStack } from '../lib/workflow-debug-stack';
 import { TelemetryStack } from '../lib/telemetry-stack';
 import { FrontendStack } from '../lib/frontend-stack';
+import { McpStack, mcpBackendHandlers } from '../lib/mcp-stack';
 import {
   PORTAL_API_AUTHORIZER_NAME,
   SHARED_AUTHORIZER_CONTEXT_KEY,
   detectorExportImageDefault,
   enforcementRefusalMessage,
   legacyRolesAcknowledged,
+  mcpMutatingToolsEnabled,
+  mcpServerEnabled,
   normalizeCloudFrontDomain,
   sharedAuthorizerIdIfGiven,
 } from '../lib/context-helpers';
@@ -277,6 +280,60 @@ const syntheticDataStack = new SyntheticDataStack(app, 'EdgeCVPortalSyntheticDat
   // Must match ApiGatewayStack deployOptions.stageName.
   apiStageName: 'v1',
 });
+
+// Portal_MCP_Server (mcp-servers design §1): one Lambda behind its own HTTP
+// API, dispatching to the handler functions of the four stacks above, with an
+// MCP app client and resource server on the existing user pool. Default on;
+// only `-c deployMcpServer=false` omits it, and deploy-infrastructure.sh
+// refuses that while the stack is still deployed (D33). Optional context:
+// mcpMutatingToolsEnabled (default false), mcpRedirectUris and
+// mcpAllowedOrigins (comma-separated), mcpBuildSha.
+function contextList(key: string): string[] {
+  return String(app.node.tryGetContext(key) ?? '')
+    .split(',')
+    .map((value: string) => value.trim())
+    .filter((value: string) => value.length > 0);
+}
+function resolveMcpBuildSha(): string {
+  const fromContext = app.node.tryGetContext('mcpBuildSha');
+  if (fromContext) {
+    return String(fromContext);
+  }
+  try {
+    return execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+if (mcpServerEnabled(app.node.tryGetContext('deployMcpServer'))) {
+  new McpStack(app, 'EdgeCVPortalMcpStack', {
+    env,
+    description: 'Portal_MCP_Server (Model Context Protocol endpoint, HTTP API, MCP app client) for Edge CV Portal',
+    userPool: authStack.userPool,
+    // AuthStack declares userPoolDomain optional but always assigns it
+    // (auth-stack.ts constructor); the assertion stays at this one call site.
+    userPoolDomain: authStack.userPoolDomain!,
+    userRolesTable: storageStack.userRolesTable,
+    auditLogTable: storageStack.auditLogTable,
+    usecasesTable: storageStack.useCasesTable,
+    backendHandlers: mcpBackendHandlers({
+      computeHandlers: computeStack.mcpBackendHandlers,
+      nodeDesigner: nodeDesignerStack,
+      buildFleet: buildFleetStack,
+      syntheticData: syntheticDataStack,
+    }),
+    ssoIdentityProviderName: authStack.identityProvider?.providerName,
+    mcpMutatingToolsEnabled: mcpMutatingToolsEnabled(
+      app.node.tryGetContext('mcpMutatingToolsEnabled'),
+    ),
+    mcpRedirectUris: contextList('mcpRedirectUris'),
+    mcpAllowedOrigins: contextList('mcpAllowedOrigins'),
+    mcpBuildSha: resolveMcpBuildSha(),
+  });
+}
 
 // The workflow debug and telemetry stacks below register their routes on the
 // ComputeStack API without a Cognito authorizer of their own: API Gateway

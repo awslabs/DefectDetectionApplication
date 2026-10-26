@@ -390,6 +390,7 @@ assert_bootstrap_then_deploy() {
 
 @test "deploy-infrastructure.sh acknowledges a fresh install and logs the data-plane scoping" {
   install_real deploy-infrastructure.sh
+  install_real scripts/portal-mcp-stack.sh
   install_real "$HELPER_REL"
   set_deployed_enforcement
   # The node stub prints the scoping. stub_output gets an explicit empty
@@ -409,6 +410,7 @@ assert_bootstrap_then_deploy() {
 
 @test "deploy-infrastructure.sh logs a value kept from the deployed handlers" {
   install_real deploy-infrastructure.sh
+  install_real scripts/portal-mcp-stack.sh
   install_real "$HELPER_REL"
   set_deployed_enforcement true
 

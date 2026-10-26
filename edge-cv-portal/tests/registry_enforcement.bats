@@ -144,6 +144,7 @@ npx_args() { stub_args_of npx; }
 
 @test "deploy-infrastructure.sh keeps the deployed value when the variable is unset" {
   install_real deploy-infrastructure.sh
+  install_real scripts/portal-mcp-stack.sh
   install_real "$HELPER_REL"
   set_cfn_output EdgeCVPortalFrontendStack DistributionDomainName d1.cloudfront.net
   set_deployed_enforcement true true
@@ -160,6 +161,7 @@ npx_args() { stub_args_of npx; }
 
 @test "deploy-infrastructure.sh passes an explicit PORTAL_REGISTRY_ENFORCED=false" {
   install_real deploy-infrastructure.sh
+  install_real scripts/portal-mcp-stack.sh
   install_real "$HELPER_REL"
   set_deployed_enforcement true
 
@@ -172,6 +174,7 @@ npx_args() { stub_args_of npx; }
 
 @test "deploy-infrastructure.sh on a fresh install passes no enforcement value" {
   install_real deploy-infrastructure.sh
+  install_real scripts/portal-mcp-stack.sh
   install_real "$HELPER_REL"
   set_deployed_enforcement
 
@@ -184,6 +187,7 @@ npx_args() { stub_args_of npx; }
 
 @test "deploy-infrastructure.sh stops before cdk deploy when the lookup fails" {
   install_real deploy-infrastructure.sh
+  install_real scripts/portal-mcp-stack.sh
   install_real "$HELPER_REL"
   fail_lambda_list
 

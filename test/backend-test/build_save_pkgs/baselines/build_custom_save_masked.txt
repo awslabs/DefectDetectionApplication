@@ -264,7 +264,12 @@ else
         test/backend-test/api-endpoints/test_auth_info_api.py \
         test/backend-test/utils/test_user_group_management_utils.py \
         test/backend-test/utils/test_dda_user_management_utils.py \
-        test/backend-test/host_scripts/test_docker_profile_selection.py -v
+        test/backend-test/host_scripts/test_docker_profile_selection.py \
+        test/backend-test/mcp_edge/test_proxy_route.py \
+        test/backend-test/mcp_edge/test_config.py \
+        test/backend-test/mcp_edge/test_shared_ipc_reader.py \
+        test/backend-test/mcp_edge/test_auth_decision.py \
+        test/backend-test/api-endpoints/test_authorize_request.py -v
 
       # ── Stream camera components gate ─────────────────────────────────────
       # (spec: rtsp-rtmp-stream-cameras, Requirements 17.2, 17.3). Fails the

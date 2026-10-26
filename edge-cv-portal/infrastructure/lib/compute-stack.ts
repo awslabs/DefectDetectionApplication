@@ -134,6 +134,14 @@ export class ComputeStack extends cdk.Stack {
    * against it.
    */
   public readonly ddaLabelingHandler: lambda.Function;
+  /**
+   * The existing handler functions the Portal_MCP_Server dispatches to, by
+   * backend key (mcp-servers design §1, "Additive members"; 32 keys).
+   * EdgeCVPortalMcpStack reads their ARNs; a function ARN is stable across
+   * updates, so the resulting exports never block an update of this stack.
+   * No layer is exposed (D31).
+   */
+  public readonly mcpBackendHandlers: Record<string, lambda.IFunction>;
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
@@ -3945,6 +3953,41 @@ aws events put-permission --event-bus-name default --action events:PutEvents --p
 
     this.api = apiGatewayStack.api;
     this.apiUrl = apiGatewayStack.apiUrl;
+
+    this.mcpBackendHandlers = {
+      devices: devicesHandler,
+      deviceLogs: deviceLogsHandler,
+      deviceLogsAnalyzer: deviceLogsAnalyzerHandler,
+      deployments: deploymentsHandler,
+      models: modelsHandler,
+      modelImport: modelImportHandler,
+      modelConverter: modelConverterHandler,
+      training: trainingHandler,
+      compilation: compilationHandler,
+      packaging: packagingHandler,
+      greengrassPublish: greengrassPublishHandler,
+      components: componentsHandler,
+      componentConfiguration: apiGatewayStack.componentConfigurationHandler,
+      sharedComponents: sharedComponentsHandler,
+      datasets: datasetsHandler,
+      preLabeledDatasets: preLabeledDatasetsHandler,
+      dataManagement: dataManagementHandler,
+      captures: capturesHandler,
+      labeling: labelingHandler,
+      ddaLabeling: ddaLabelingHandler,
+      workflows: workflowsHandler,
+      workflowValidation: workflowValidationHandler,
+      workflowPackaging: workflowPackagingHandler,
+      workflowTesting: workflowTestingHandler,
+      workflowGenerator: workflowGeneratorHandler,
+      useCases: useCasesHandler,
+      userManagement: userManagementHandler,
+      userAdmin: userAdminHandler,
+      auditLogs: auditLogsHandler,
+      cameraRegistry: cameraRegistryHandler,
+      cameraVideoPin: cameraVideoPinHandler,
+      deviceRegistrations: deviceRegistrationsHandler,
+    };
 
     // Camera_Registry routes (camera-registry-sync) in their own nested
     // stack: the ApiGateway nested stack sits at the CloudFormation

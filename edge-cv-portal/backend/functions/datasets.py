@@ -16,10 +16,31 @@ from shared_utils import (
     get_usecase,
     assume_usecase_role,
     create_response,
-    handle_error
+    handle_error,
+    get_user_from_event,
+    check_user_access,
+    log_audit_event,
 )
 
 s3_client = boto3.client('s3')
+
+
+def _insufficient_permissions(usecase_id, user, resource_id=None, required_role=None):
+    """The 403 a data route answers when `check_user_access` fails, after
+    one `unauthorized_access` audit row.
+
+    Mirrors pre_labeled_datasets: nothing has been read from the use case's
+    account at this point (no cross-account role assumption, no S3 listing,
+    no presigned URL), so a refused caller reaches none of it.
+    """
+    details = {'usecase_id': usecase_id or ''}
+    if required_role:
+        details['required_role'] = required_role
+    log_audit_event(
+        user_id=user['user_id'], action='unauthorized_access',
+        resource_type='dataset', resource_id=resource_id or usecase_id or 'unknown',
+        result='denied', details=details)
+    return create_response(403, {'error': 'Insufficient permissions'})
 
 
 def handler(event, context):
@@ -114,6 +135,13 @@ def list_datasets(event):
         
         if not usecase_id:
             return create_response(400, {'error': 'usecase_id is required'})
+        
+        # Membership of the use case named in the query, before any
+        # cross-account credential assumption or S3 listing (data-route
+        # authorization consistency; mirrors pre_labeled_datasets).
+        user = get_user_from_event(event)
+        if not check_user_access(user['user_id'], usecase_id):
+            return _insufficient_permissions(usecase_id, user)
         
         # Get use case details
         usecase = get_usecase(usecase_id)
@@ -267,6 +295,13 @@ def count_images(event):
                 'error': 'usecase_id and prefix are required'
             })
         
+        # Membership of the request's use case, before any cross-account
+        # credential assumption or S3 listing (data-route authorization
+        # consistency; mirrors pre_labeled_datasets).
+        user = get_user_from_event(event)
+        if not check_user_access(user['user_id'], usecase_id):
+            return _insufficient_permissions(usecase_id, user)
+        
         # Get use case details
         usecase = get_usecase(usecase_id)
         
@@ -375,6 +410,13 @@ def get_image_preview(event):
             return create_response(400, {
                 'error': 'usecase_id and prefix are required'
             })
+        
+        # Membership of the use case named in the query, before any
+        # cross-account credential assumption or presigned-URL generation
+        # (data-route authorization consistency; mirrors pre_labeled_datasets).
+        user = get_user_from_event(event)
+        if not check_user_access(user['user_id'], usecase_id):
+            return _insufficient_permissions(usecase_id, user)
         
         # Get use case details
         usecase = get_usecase(usecase_id)

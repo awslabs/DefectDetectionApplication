@@ -1,0 +1,1283 @@
+[
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_admin_account_role_change",
+    "phase": 3,
+    "status_tool": "portal_admin_accounts_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_admin_accounts_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_admin_audit_logs_query",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_admin_edge_sync_device_sync",
+    "phase": 3,
+    "status_tool": "portal_admin_edge_sync_devices_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_admin_edge_sync_devices_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_admin_role_assign",
+    "phase": 3,
+    "status_tool": "portal_admin_user_permissions_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_admin_role_remove",
+    "phase": 3,
+    "status_tool": "portal_admin_users_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_admin_usecase_create",
+    "phase": 3,
+    "status_tool": "portal_admin_usecases_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_admin_usecase_delete",
+    "phase": 3,
+    "status_tool": "portal_admin_usecases_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_admin_usecase_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_admin_usecase_update",
+    "phase": 3,
+    "status_tool": "portal_admin_usecase_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_admin_usecases_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_admin_user_permissions_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_admin_users_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_admin_whoami",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_buckets_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_captures_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_configure",
+    "phase": 3,
+    "status_tool": "portal_data_buckets_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_datasets_count",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_datasets_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_datasets_preview_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_folder_create",
+    "phase": 2,
+    "status_tool": "portal_data_folders_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_folders_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_labeler_jobs_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_labeler_pool_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_labeler_task_image_url_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_labeler_task_next",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_labeler_task_presentation_failure",
+    "phase": 2,
+    "status_tool": "portal_data_labeler_pool_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_labeler_task_steal",
+    "phase": 2,
+    "status_tool": "portal_data_labeler_pool_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_labeler_task_submit",
+    "phase": 2,
+    "status_tool": "portal_data_labeler_pool_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_labeling_job_create",
+    "phase": 2,
+    "status_tool": "portal_data_labeling_job_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_data_labeling_job_delete",
+    "phase": 3,
+    "status_tool": "portal_data_labeling_jobs_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_labeling_job_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_data_labeling_job_stop",
+    "phase": 3,
+    "status_tool": "portal_data_labeling_jobs_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_labeling_jobs_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_labeling_prelabels_rerun",
+    "phase": 2,
+    "status_tool": "portal_data_labeling_job_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_labeling_preview_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_labeling_preview_run",
+    "phase": 2,
+    "status_tool": "portal_data_labeling_preview_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_labeling_review_decide",
+    "phase": 2,
+    "status_tool": "portal_data_labeling_review_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_labeling_review_finalize",
+    "phase": 3,
+    "status_tool": "portal_data_labeling_review_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_labeling_review_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_labeling_team_create",
+    "phase": 3,
+    "status_tool": "portal_data_labeling_teams_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_data_labeling_team_delete",
+    "phase": 3,
+    "status_tool": "portal_data_labeling_teams_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_labeling_team_member_add",
+    "phase": 3,
+    "status_tool": "portal_data_labeling_teams_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_data_labeling_team_member_remove",
+    "phase": 3,
+    "status_tool": "portal_data_labeling_teams_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_labeling_teams_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_manifest_validate",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_prelabeled_create",
+    "phase": 2,
+    "status_tool": "portal_data_prelabeled_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_data_prelabeled_delete",
+    "phase": 3,
+    "status_tool": "portal_data_prelabeled_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_prelabeled_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_prelabeled_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_synthetic_models_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_synthetic_previews_approve",
+    "phase": 2,
+    "status_tool": "portal_data_synthetic_session_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_synthetic_prompt_templates_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_synthetic_prompt_templates_set",
+    "phase": 2,
+    "status_tool": "portal_data_synthetic_prompt_templates_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_synthetic_session_create",
+    "phase": 2,
+    "status_tool": "portal_data_synthetic_session_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_synthetic_session_generate",
+    "phase": 2,
+    "status_tool": "portal_data_synthetic_session_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_synthetic_session_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_synthetic_session_integrate",
+    "phase": 2,
+    "status_tool": "portal_data_synthetic_session_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_synthetic_session_retrain",
+    "phase": 3,
+    "status_tool": "portal_models_training_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_data_synthetic_session_update",
+    "phase": 2,
+    "status_tool": "portal_data_synthetic_session_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_synthetic_sessions_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_data_workteams_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_devices_camera_add",
+    "phase": 2,
+    "status_tool": "portal_devices_cameras_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_devices_camera_delete",
+    "phase": 3,
+    "status_tool": "portal_devices_cameras_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_devices_camera_update",
+    "phase": 2,
+    "status_tool": "portal_devices_cameras_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_cameras_conflicts_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_cameras_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_devices_cameras_refresh",
+    "phase": 2,
+    "status_tool": "portal_devices_cameras_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_devices_component_delete",
+    "phase": 3,
+    "status_tool": "portal_devices_components_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_components_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_components_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_components_schema_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_devices_delete",
+    "phase": 3,
+    "status_tool": "portal_devices_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_devices_deployment_cancel",
+    "phase": 3,
+    "status_tool": "portal_devices_deployments_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_devices_deployment_create",
+    "phase": 3,
+    "status_tool": "portal_devices_deployment_for_target_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_deployment_for_target_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_deployment_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_deployments_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_devices_flags_update",
+    "phase": 3,
+    "status_tool": "portal_devices_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_logs_analyze",
+    "phase": 2,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_logs_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_logs_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_devices_registration_delete",
+    "phase": 3,
+    "status_tool": "portal_devices_registrations_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_registrations_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_shared_components_available_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_shared_components_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_devices_shared_components_provision",
+    "phase": 3,
+    "status_tool": "portal_devices_shared_components_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_shared_components_status_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_devices_shared_components_update_all",
+    "phase": 3,
+    "status_tool": "portal_devices_shared_components_status_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_static_image_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_devices_static_image_unpin",
+    "phase": 2,
+    "status_tool": "portal_devices_static_image_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_static_video_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_devices_static_video_unpin",
+    "phase": 2,
+    "status_tool": "portal_devices_static_video_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_devices_thing_groups_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_models_compilation_create",
+    "phase": 2,
+    "status_tool": "portal_models_compilation_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_compilation_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_models_convert",
+    "phase": 2,
+    "status_tool": "portal_models_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_format_spec_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_models_import",
+    "phase": 2,
+    "status_tool": "portal_models_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_inspect",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_models_manifest_transform",
+    "phase": 2,
+    "status_tool": "portal_models_training_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_models_package",
+    "phase": 3,
+    "status_tool": "portal_models_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_models_publish",
+    "phase": 3,
+    "status_tool": "portal_models_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_models_stage_set",
+    "phase": 2,
+    "status_tool": "portal_models_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_models_training_create",
+    "phase": 2,
+    "status_tool": "portal_models_training_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_training_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_training_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_training_logs_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_types_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_validate",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_models_vllm_engine_configuration_set",
+    "phase": 2,
+    "status_tool": "portal_models_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_models_vllm_engine_spec_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_models_vllm_import",
+    "phase": 2,
+    "status_tool": "portal_models_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_build_branches_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_build_cancel",
+    "phase": 3,
+    "status_tool": "portal_workflows_builds_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_build_config_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_build_config_set",
+    "phase": 3,
+    "status_tool": "portal_workflows_build_config_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_build_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_build_logs_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_build_retry",
+    "phase": 2,
+    "status_tool": "portal_workflows_build_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_build_server_create",
+    "phase": 3,
+    "status_tool": "portal_workflows_build_servers_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_build_server_delete",
+    "phase": 3,
+    "status_tool": "portal_workflows_build_servers_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_build_server_start",
+    "phase": 3,
+    "status_tool": "portal_workflows_build_servers_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_build_server_stop",
+    "phase": 3,
+    "status_tool": "portal_workflows_build_servers_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_build_servers_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_build_submit",
+    "phase": 2,
+    "status_tool": "portal_workflows_build_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_builds_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_create",
+    "phase": 2,
+    "status_tool": "portal_workflows_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_custom_node_type_delete",
+    "phase": 3,
+    "status_tool": "portal_workflows_custom_node_types_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_custom_node_type_deprecate",
+    "phase": 3,
+    "status_tool": "portal_workflows_custom_node_type_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_custom_node_type_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_custom_node_type_register",
+    "phase": 2,
+    "status_tool": "portal_workflows_custom_node_type_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_custom_node_type_update",
+    "phase": 2,
+    "status_tool": "portal_workflows_custom_node_type_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_custom_node_types_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_delete",
+    "phase": 3,
+    "status_tool": "portal_workflows_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_duplicate",
+    "phase": 2,
+    "status_tool": "portal_workflows_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_generate",
+    "phase": 2,
+    "status_tool": "portal_workflows_generation_job_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_generation_job_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_node_catalog_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_package",
+    "phase": 3,
+    "status_tool": "portal_workflows_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_adjust_revision",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_builds_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_architectures_set",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_builds_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_build",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_builds_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_plugin_builds_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_plugin_component_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_create",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_plugin_delete",
+    "phase": 3,
+    "status_tool": "portal_workflows_plugins_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_plugin_demote",
+    "phase": 3,
+    "status_tool": "portal_workflows_plugin_version_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_generate_message",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_generate_status_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_generate_start",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_generate_status_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_plugin_generate_status_get",
+    "phase": 2,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_plugin_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_plugin_gst_properties_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_import",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_plugin_modules_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_new_version",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_plugin_promote",
+    "phase": 3,
+    "status_tool": "portal_workflows_plugin_version_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_plugin_review",
+    "phase": 3,
+    "status_tool": "portal_workflows_plugin_version_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_select_plugins",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_simulate",
+    "phase": 2,
+    "status_tool": "portal_workflows_simulation_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_plugin_source_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_plugin_source_set",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_source_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_plugin_update",
+    "phase": 2,
+    "status_tool": "portal_workflows_plugin_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_plugin_version_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_plugins_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_rename",
+    "phase": 2,
+    "status_tool": "portal_workflows_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_simulation_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_workflows_test_dataset_delete",
+    "phase": 3,
+    "status_tool": "portal_workflows_test_datasets_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_test_dataset_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_test_datasets_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_test_run_get",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_test_run_start",
+    "phase": 2,
+    "status_tool": "portal_workflows_test_run_get"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_test_runs_list",
+    "phase": 1,
+    "status_tool": null
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_update",
+    "phase": 2,
+    "status_tool": "portal_workflows_get"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
+    "name": "portal_workflows_validate",
+    "phase": 2,
+    "status_tool": "portal_workflows_versions_list"
+  },
+  {
+    "classification": "read_only",
+    "destructive": false,
+    "name": "portal_workflows_versions_list",
+    "phase": 1,
+    "status_tool": null
+  }
+]

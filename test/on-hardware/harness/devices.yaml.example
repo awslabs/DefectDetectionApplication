@@ -6,12 +6,14 @@
 #   DDA_HARNESS_BASE_URL, DDA_HARNESS_ARCHITECTURE, DDA_HARNESS_CAPABILITIES,
 #   DDA_HARNESS_CREDENTIALS, DDA_HARNESS_MODEL_READY_S, DDA_HARNESS_VLLM_READY_S,
 #   DDA_HARNESS_GENERATE_S, DDA_HARNESS_WORKFLOW_OUTPUT_S, DDA_HARNESS_RUN_BUDGET_S,
-#   DDA_HARNESS_CONTINUOUS_WINDOW_S,
+#   DDA_HARNESS_CONTINUOUS_WINDOW_S, DDA_HARNESS_MCP_SOAK_S,
 #   DDA_HARNESS_EXPECTED_VISION_MODELS, DDA_HARNESS_EXPECTED_VLLM_MODELS,
 #   DDA_HARNESS_EXPECTED_WORKFLOWS, DDA_HARNESS_EXPECTED_STREAM_URLS,
 #   DDA_HARNESS_EXPECTED_STREAM_SECURE_URL, DDA_HARNESS_EXPECTED_STREAM_CREDENTIALS,
 #   DDA_HARNESS_EXPECTED_STREAM_WORKFLOW, DDA_HARNESS_EXPECTED_CONTINUOUS_WORKFLOW
 # expected.stream_failures is a mapping and is set in this file only.
+# DDA_HARNESS_ON_DEVICE=true marks a run on the device itself (SSH-driven); the
+# MCP stage's direct-loopback checks run only then.
 #
 # Credentials are declared as references, never as values:
 #   env:VAR_NAME     -- read the token from an environment variable at use time
@@ -21,7 +23,12 @@
 # stream camera); stream URLs must never embed credentials.
 #
 # Capabilities: vllm, dlr_models, onnx_models, workflows, auth_enabled,
-# stream_cameras (the RTSP/RTMP stage, test_35; see README "Stream cameras stage").
+# stream_cameras (the RTSP/RTMP stage, test_35; see README "Stream cameras stage"),
+# mcp (the Edge MCP server stage, test_50; runs under Python 3.11 with mcp==2.3.0,
+# see README "MCP stage").
+# MCP stage profile flags (booleans, default false; used once mutating tools ship):
+#   mcp_mutating: true   call the mutating tools, each with restoration
+#   mcp_snapshot: true   also call the snapshot tool (deletes earlier archives)
 
 devices:
   jp6-orinagx:
@@ -48,7 +55,9 @@ devices:
     base_url: http://192.168.1.42:5000
     profile:
       architecture: arm64_jp5
-      capabilities: [dlr_models, onnx_models, workflows]
+      capabilities: [dlr_models, onnx_models, workflows]   # add mcp for test_50
+      # mcp_mutating: false
+      # mcp_snapshot: false
     expected:
       vision_models: []
       vllm_models: []

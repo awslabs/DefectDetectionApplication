@@ -65,10 +65,29 @@ def _make_fake_shared_utils():
             "SessionToken": "tokenfake",
         }
 
+    # Data-route authorization consistency: captures.py now resolves the
+    # caller and checks use-case membership before touching the use case's
+    # account. These metadata/presign unit tests are not about that gate,
+    # so the fake resolves a caller and allows access; the gate itself is
+    # covered end-to-end (enforcement on, seeded/absent registry rows) in
+    # test_captures_authz.py.
+    def get_user_from_event(event):
+        return {"user_id": "tester", "email": "tester@example.test",
+                "username": "tester", "role": "DataScientist"}
+
+    def check_user_access(user_id, usecase_id, required_role=None, user_info=None):
+        return True
+
+    def log_audit_event(*args, **kwargs):
+        return None
+
     mod.create_response = create_response
     mod.handle_error = handle_error
     mod.get_usecase = get_usecase
     mod.assume_usecase_role = assume_usecase_role
+    mod.get_user_from_event = get_user_from_event
+    mod.check_user_access = check_user_access
+    mod.log_audit_event = log_audit_event
     return mod
 
 

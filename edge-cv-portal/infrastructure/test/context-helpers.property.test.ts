@@ -20,6 +20,8 @@
 import * as fc from 'fast-check';
 import {
   groundedSamWorkerEnabled,
+  mcpMutatingToolsEnabled,
+  mcpServerEnabled,
   normalizeCloudFrontDomain,
 } from '../lib/context-helpers';
 
@@ -163,5 +165,64 @@ describe('Feature: portal-deploy-flag-hardening, Property 2: The Domain_Normaliz
       }),
       RUNS,
     );
+  });
+});
+
+// mcp-servers (design §1, D9, D33): the two MCP context helpers.
+describe('Feature: mcp-servers, MCP context flags (deployMcpServer default on, mcpMutatingToolsEnabled default off)', () => {
+  const TRUTHY = ['1', 'true', 'yes', 'on', 'enabled'];
+
+  /** Per-character case flips plus surrounding whitespace of one word. */
+  const decorated = (words: string[]) =>
+    fc
+      .tuple(
+        fc.constantFrom(...words),
+        fc.array(fc.boolean(), { minLength: 8, maxLength: 8 }),
+        whitespaceArb,
+        whitespaceArb,
+      )
+      .map(
+        ([word, flips, left, right]) =>
+          left +
+          word
+            .split('')
+            .map((ch, i) => (flips[i] ? ch.toUpperCase() : ch))
+            .join('') +
+          right,
+      );
+
+  const contextValueArb: fc.Arbitrary<unknown> = fc.oneof(
+    fc.constantFrom<unknown>(undefined, null, true, false, '', 'true', 'false', '0', 'no', 'off'),
+    decorated(['true', 'false', ...TRUTHY, '0', 'no', 'off', 'disabled']),
+    fc.string(),
+    fc.integer(),
+    fc.object(),
+  );
+
+  it('deployMcpServer is off only for an explicit false (Validates: Requirements 6.4, 6.5)', () => {
+    const explicitFalse = (value: unknown): boolean =>
+      value === false ||
+      (typeof value === 'string' && value.trim().toLowerCase() === 'false');
+    fc.assert(
+      fc.property(contextValueArb, (value) => {
+        expect(mcpServerEnabled(value)).toBe(!explicitFalse(value));
+      }),
+      RUNS,
+    );
+  });
+
+  it("mcpMutatingToolsEnabled lands as 'true' only for the truthy set, else 'false' (Validates: Requirement 5.4)", () => {
+    const truthy = (value: unknown): boolean =>
+      value === true ||
+      (typeof value === 'string' && TRUTHY.includes(value.trim().toLowerCase()));
+    fc.assert(
+      fc.property(contextValueArb, (value) => {
+        const resolved = mcpMutatingToolsEnabled(value);
+        expect(['true', 'false']).toContain(resolved);
+        expect(resolved).toBe(truthy(value) ? 'true' : 'false');
+      }),
+      RUNS,
+    );
+    expect(mcpMutatingToolsEnabled(undefined)).toBe('false');
   });
 });

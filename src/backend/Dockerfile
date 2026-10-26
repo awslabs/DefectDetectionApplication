@@ -42,6 +42,10 @@ COPY edgeagent ./edgeagent
 RUN python3 -m pip install --no-cache-dir --only-binary :all: awscrt==0.36.1 && \
     python3 -c "import awscrt.mqtt, awscrt.eventstream; print('awscrt wheel OK')"
 RUN ./edge_ml1_p_camera_management/prereqs_install.sh 
+# Edge_MCP_Server: the MCP SDK in its own virtualenv (wheel-only lock), so
+# the backend interpreter never imports it (mcp-servers design D20).
+COPY mcp_edge/requirements.lock.txt ./mcp_edge/requirements.lock.txt
+RUN python3 -m venv /opt/dda/mcp-venv && /opt/dda/mcp-venv/bin/pip install --no-cache-dir --only-binary :all: -r ./mcp_edge/requirements.lock.txt && /opt/dda/mcp-venv/bin/python -c "import mcp, mcp.server; print('mcp venv OK')"
 # Bake the pinned model conversion dependencies into the image at build time so they
 # are already present and importable at container startup, removing the need for a
 # network-dependent runtime pip install on offline/air-gapped devices.
@@ -120,6 +124,7 @@ COPY stream_ingest ./stream_ingest
 COPY vllm_runtime ./vllm_runtime
 COPY local_auth ./local_auth
 COPY user_accounts_sync ./user_accounts_sync
+COPY mcp_edge ./mcp_edge
 COPY alembic ./alembic
 COPY alembic.ini ./
 COPY dda_triton ./dda_triton
