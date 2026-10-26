@@ -28,6 +28,7 @@ from shared_utils import (
     get_usecase_region,
     create_boto3_client,
     get_user_from_event,
+    check_user_access,
     log_audit_event,
     Permission
 )
@@ -51,6 +52,27 @@ labeling_teams_table = dynamodb.Table(
 LABELING_BACKEND_GROUND_TRUTH = 'GroundTruth'
 LABELING_BACKEND_DDA = 'DDA'
 VALID_LABELING_BACKENDS = (LABELING_BACKEND_GROUND_TRUTH, LABELING_BACKEND_DDA)
+
+
+def _insufficient_permissions(usecase_id, user, resource_id=None, required_role=None):
+    """The 403 a read route answers when `check_user_access` fails, after
+    one `unauthorized_access` audit row.
+
+    Mirrors pre_labeled_datasets: nothing has been read from the use case's
+    account at this point (no SageMaker status sync, no cross-account role
+    assumption), so a refused caller reaches none of it. The POST /labeling
+    create routes authorize through @rbac_check instead (see
+    _create_ground_truth_labeling_job and dda_labeling.create_dda_job).
+    """
+    details = {'usecase_id': usecase_id or ''}
+    if required_role:
+        details['required_role'] = required_role
+    log_audit_event(
+        user_id=user['user_id'], action='unauthorized_access',
+        resource_type='labeling_job',
+        resource_id=resource_id or usecase_id or 'unknown',
+        result='denied', details=details)
+    return create_response(403, {'error': 'Insufficient permissions'})
 
 
 def handler(event, context):
@@ -81,7 +103,7 @@ def handler(event, context):
         elif http_method == 'GET' and '/labeling' in path and '{id}' not in resource:
             return list_labeling_jobs(event)
         elif http_method == 'POST' and '/labeling' in path and '{id}' not in resource:
-            return create_labeling_job(event)
+            return create_labeling_job(event, context)
         elif (http_method == 'POST' and '{id}' in resource
                 and resource.rstrip('/').endswith('/stop')):
             # POST /labeling/{id}/stop (dda-data-labeling, Requirements
@@ -97,7 +119,7 @@ def handler(event, context):
             job_id = event.get('pathParameters', {}).get('id', '')
             if 'manifest' in path:
                 return get_manifest(job_id)
-            return get_labeling_job(job_id)
+            return get_labeling_job(job_id, get_user_from_event(event))
         
         return create_response(404, {'error': 'Not found'})
         
@@ -120,6 +142,13 @@ def list_labeling_jobs(event):
         
         if not usecase_id:
             return create_response(400, {'error': 'usecase_id is required'})
+        
+        # Membership of the use case named in the query, before the jobs
+        # query or any SageMaker status sync / credential assumption
+        # (data-route authorization consistency; mirrors pre_labeled_datasets).
+        user = get_user_from_event(event)
+        if not check_user_access(user['user_id'], usecase_id):
+            return _insufficient_permissions(usecase_id, user)
         
         # Query DynamoDB for jobs
         response = labeling_jobs_table.query(
@@ -271,10 +300,59 @@ def _delegate_dda_job_creation(body, event):
     return create_dda_job(body, get_user_from_event(event))
 
 
-def create_labeling_job(event):
+def create_labeling_job(event, context=None):
+    """Create a new labeling job (POST /labeling): validate the backend
+    switch, then dispatch.
+
+    - labeling_backend is mandatory and validated before anything else, so
+      a rejected submission persists no job record and creates no backend
+      resources (dda-data-labeling, Requirements 1.2/1.3/1.6).
+    - The DDA backend is delegated to dda_labeling.create_dda_job, which
+      authorizes the write itself.
+    - The Ground Truth backend is handled by
+      _create_ground_truth_labeling_job, which is authorized against the
+      request's use case with MANAGE_LABELING_JOBS — the same permission
+      the DDA create path and stop_labeling_job enforce, so both POST
+      /labeling backends gate identically (data-route authorization
+      consistency).
     """
-    Create a new Ground Truth labeling job.
-    
+    body = json.loads(event.get('body', '{}'))
+
+    # Backend switch (dda-data-labeling, Requirements 1.2/1.3/1.6):
+    # labeling_backend is mandatory and validated before anything else,
+    # so a rejected submission persists no job record and creates no
+    # backend resources.
+    labeling_backend = body.get('labeling_backend')
+    if labeling_backend not in VALID_LABELING_BACKENDS:
+        return create_response(400, {
+            'error': (
+                f"Invalid labeling_backend '{labeling_backend}'. "
+                f"labeling_backend is required and must be one of: "
+                f"{', '.join(VALID_LABELING_BACKENDS)}."
+            ),
+            'labeling_backend': labeling_backend,
+        })
+
+    if labeling_backend == LABELING_BACKEND_DDA:
+        # DDA jobs are created entirely within portal-managed AWS
+        # resources; no SageMaker API is called (Requirement 1.3).
+        return _delegate_dda_job_creation(body, event)
+
+    return _create_ground_truth_labeling_job(event, context)
+
+
+@rbac_check([Permission.MANAGE_LABELING_JOBS], allow_global=True)
+def _create_ground_truth_labeling_job(event, context):
+    """
+    Create a new Ground Truth labeling job (POST /labeling, GroundTruth backend).
+
+    Authorized with MANAGE_LABELING_JOBS in the request's use-case scope
+    (resolved from the body's usecase_id) via @rbac_check — identical to the
+    DDA create path (dda_labeling.create_dda_job) and stop_labeling_job, so a
+    caller without job-management rights on the use case gets 403 before any
+    use case lookup, cross-account role assumption, manifest upload, or
+    SageMaker call.
+
     Request Body:
         - usecase_id: Required
         - job_name: Required
@@ -289,26 +367,6 @@ def create_labeling_job(event):
     """
     try:
         body = json.loads(event.get('body', '{}'))
-        
-        # Backend switch (dda-data-labeling, Requirements 1.2/1.3/1.6):
-        # labeling_backend is mandatory and validated before anything else,
-        # so a rejected submission persists no job record and creates no
-        # backend resources.
-        labeling_backend = body.get('labeling_backend')
-        if labeling_backend not in VALID_LABELING_BACKENDS:
-            return create_response(400, {
-                'error': (
-                    f"Invalid labeling_backend '{labeling_backend}'. "
-                    f"labeling_backend is required and must be one of: "
-                    f"{', '.join(VALID_LABELING_BACKENDS)}."
-                ),
-                'labeling_backend': labeling_backend,
-            })
-        
-        if labeling_backend == LABELING_BACKEND_DDA:
-            # DDA jobs are created entirely within portal-managed AWS
-            # resources; no SageMaker API is called (Requirement 1.3).
-            return _delegate_dda_job_creation(body, event)
         
         # Validate required fields
         required_fields = ['usecase_id', 'job_name', 'dataset_prefix', 'task_type', 
@@ -669,7 +727,7 @@ def create_labeling_job(event):
             return create_response(500, {'error': f'Internal server error: {error_str}'})
 
 
-def get_labeling_job(job_id: str):
+def get_labeling_job(job_id: str, user: Dict):
     """Get labeling job details and sync status from SageMaker."""
     try:
         response = labeling_jobs_table.get_item(Key={'job_id': job_id})
@@ -679,6 +737,16 @@ def get_labeling_job(job_id: str):
         
         job = response['Item']
         job.setdefault('labeling_backend', LABELING_BACKEND_GROUND_TRUTH)
+        
+        # Membership of the use case the job belongs to, resolved from the
+        # stored job record first (the route carries no usecase_id of its
+        # own — same scope resolution as _inject_job_usecase_scope), before
+        # any SageMaker status sync or cross-account credential assumption.
+        # 404 is answered above first, so an unknown id is not distinguishable
+        # from a forbidden one by order (mirrors pre_labeled_datasets.get_dataset).
+        record_usecase_id = job.get('usecase_id')
+        if not check_user_access(user['user_id'], record_usecase_id):
+            return _insufficient_permissions(record_usecase_id, user, resource_id=job_id)
         
         # DDA-backend jobs are portal-managed: no SageMaker status sync,
         # console link, or worker-portal resolution applies to them.
