@@ -1872,6 +1872,10 @@ never more permissive than the web UI in either mode.
 - A token the pool signed that fails one of the claim checks (expired, wrong
   `token_use`, client id, scope or audience) writes an `authentication_failed`
   audit entry. A missing or unsigned token is answered `401` without one.
+- **Disabling a portal account ends its MCP access when the client's current
+  access token expires**, up to 60 minutes later, because the server validates
+  the token itself. The next refresh is refused, and the client's tool calls
+  fail from then on (observed 2026-10-26).
 
 ### Configure Kiro IDE or CLI
 
@@ -1898,6 +1902,12 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
 
 - The same entry works for Kiro CLI; the app client has no secret, so no
   confidential-client fields are needed.
+- To use a view endpoint, add a separate server entry with the view URL (one
+  of `McpViewUrls`) beside the aggregate one. In Kiro IDE 1.4.26, changing the
+  `url` of a connected entry and reconnecting kept the client on the old URL.
+  Kiro keeps a token per server entry, so the new entry signs in on its own.
+- `autoApprove` did not suppress the first approval prompt in Kiro IDE 1.4.26
+  or Kiro CLI 2.27.0; expect to approve the first call of a listed tool once.
 - **`redirectUri` must be the literal registered value**
   `http://localhost:7899/oauth/callback`. Kiro binds its loopback listener to
   the configured value and Cognito matches callback URLs exactly. Kiro's
@@ -1980,7 +1990,7 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
 | Supported MCP protocol revisions | `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26` |
 | `mcp` Python SDK | `2.3.0` (Lambda layer, with `mangum` `0.22.0`) |
 | Portal_MCP_Server version | `1.0.0` |
-| Tested Kiro IDE and CLI versions | Kiro IDE 1.4.26 (OAuth sign-in, tool calls and token refresh observed 2026-10-25); Kiro CLI 2.27.0 reads the server from the workspace configuration, interactive sign-in not yet recorded |
+| Tested Kiro IDE and CLI versions | Kiro IDE 1.4.26 (OAuth sign-in, tool calls, token refresh and a view endpoint observed 2026-10-25/26); Kiro CLI 2.27.0 (OAuth sign-in and a tool call observed 2026-10-26); both negotiated MCP protocol `2026-07-28` |
 | Kiro and MCP documentation checked | 2026-10-18 and 2026-10-19 |
 
 ### Troubleshooting MCP sign-in
@@ -2026,7 +2036,22 @@ answer.
 **`Failed to start OAuth redirect server: localhost:7899 is already in use`.**
 The redirect URI pins that port, so only one Kiro window or `kiro-cli` session
 can run the sign-in at a time; close the other, or sign in from one instance
-and let the others reuse the stored tokens.
+and let the others reuse the stored tokens. Two other holders of the port:
+
+- A remote window that forwards port 7899 from the remote host to the local
+  machine. Stop forwarding it in that window's Ports view. To keep it from
+  being forwarded again automatically, set
+  `"remote.portsAttributes": {"7899": {"onAutoForward": "ignore"}}` in that
+  window's settings.
+- `kiro-cli` in WSL with mirrored networking. WSL then shares the Windows
+  localhost, so the CLI contends for the same port as a Kiro window or a port
+  forward on Windows; while another holds it, the CLI fails to start the
+  server with `Address already in use`.
+
+**`connection timed out after 60000ms` during sign-in.** Kiro CLI 2.27.0
+gives the browser sign-in one minute, although `kiro-cli mcp status` prints a
+longer server timeout. Finish the browser sign-in within a minute, then retry
+from `/mcp`.
 
 **Advertising the Cognito issuer directly.** The alternative, a Protected
 Resource Metadata document naming the Cognito issuer as the authorization
