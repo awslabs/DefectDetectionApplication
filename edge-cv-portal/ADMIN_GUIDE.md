@@ -1933,18 +1933,22 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
   `jwks_uri`, and declares `S256`. It issues nothing: Cognito mints and
   verifies every code and token (tokens still carry the Cognito issuer).
 - **Why clients use the well-known URIs.** The Lambda's `401` carries a
-  `WWW-Authenticate` challenge naming the metadata URL, but API Gateway remaps
-  that header, so the client may not see it. The MCP specification obliges
-  clients to fall back to the well-known URIs (path-suffixed first, then the
-  root), and the portal relies on that.
+  `WWW-Authenticate` challenge naming the metadata URL. The portal's HTTP API
+  passes that header through unchanged (observed 2026-10-25); a REST API in
+  front of the Lambda would deliver it under the remapped name
+  `X-Amzn-Remapped-WWW-Authenticate`, and a client may ignore the header
+  anyway. The MCP specification obliges clients to fall back to the well-known
+  URIs (path-suffixed first, then the root), and the portal relies on that.
 - Challenge header as observed through API Gateway (first deployed-stack smoke
-  check, 2026-10-25): the HTTP API passed the Lambda's challenge through
-  unchanged, as a plain `www-authenticate` header; no
-  `x-amzn-remapped-www-authenticate` header appeared. The value was
+  check and the owner's Kiro IDE session, 2026-10-25): the HTTP API passed the
+  Lambda's challenge through unchanged, as a plain `www-authenticate` header;
+  no `x-amzn-remapped-www-authenticate` header appeared. The value was
   `Bearer error="invalid_token", error_description="Authentication required",
   resource_metadata="<the endpoint's path-suffixed PRM URL>"` on `/mcp` and on
-  each view endpoint. Clients that do read the header can follow it; the
-  well-known fallback above still applies to those that do not.
+  each view endpoint, with an `HTTP/2 401`, `content-type: application/json`
+  response whose body is `{"error": "invalid_token", "error_description":
+  "Authentication required"}`. Clients that do read the header can follow it;
+  the well-known fallback above still applies to those that do not.
 
 ### Reading MCP audit entries
 
@@ -1964,6 +1968,10 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
 - `unauthorized_access` and `authorization_unavailable` entries written by the
   MCP Lambda carry the same marker attributes, and entries the backing
   handlers write during an MCP call carry them too.
+- The Channel filter scans the table page by page (only the page is sorted
+  newest-first), so a page can hold few MCP rows among the web polling entries
+  and MCP entries may appear out of time order across pages. Entries written
+  before the MCP release carry no `channel` attribute; they count as Web & API.
 
 ### Versions
 
@@ -1972,7 +1980,7 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
 | Supported MCP protocol revisions | `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26` |
 | `mcp` Python SDK | `2.3.0` (Lambda layer, with `mangum` `0.22.0`) |
 | Portal_MCP_Server version | `1.0.0` |
-| Tested Kiro IDE and CLI versions | Recorded after the first deployed-stack smoke check (not recorded yet) |
+| Tested Kiro IDE and CLI versions | Kiro IDE 1.4.26 (OAuth sign-in, tool calls and token refresh observed 2026-10-25); Kiro CLI 2.27.0 reads the server from the workspace configuration, interactive sign-in not yet recorded |
 | Kiro and MCP documentation checked | 2026-10-18 and 2026-10-19 |
 
 ### Troubleshooting MCP sign-in
@@ -2008,9 +2016,17 @@ curl -s https://<api-id>.execute-api.<region>.amazonaws.com/.well-known/oauth-au
 does not allow (for example `offline_access` or `openid`). Set `oauthScopes` to
 the `McpOAuthScope` output, or to `[]`.
 
-**The client reports no `WWW-Authenticate` header.** Expected behind API
-Gateway, which remaps that header. The client must use well-known discovery,
-which the portal serves; check that both URLs above answer.
+**The client reports no `WWW-Authenticate` header.** The portal's HTTP API
+passes that header through unchanged (observed 2026-10-25), so a missing
+header points at something in between: a REST API in front of the Lambda
+remaps it to `X-Amzn-Remapped-WWW-Authenticate`. Either way the client can
+use well-known discovery, which the portal serves; check that both URLs above
+answer.
+
+**`Failed to start OAuth redirect server: localhost:7899 is already in use`.**
+The redirect URI pins that port, so only one Kiro window or `kiro-cli` session
+can run the sign-in at a time; close the other, or sign in from one instance
+and let the others reuse the stored tokens.
 
 **Advertising the Cognito issuer directly.** The alternative, a Protected
 Resource Metadata document naming the Cognito issuer as the authorization
@@ -2113,6 +2129,10 @@ server until their release.
 | `portal_models_publish` | 3 | MUTATING. | `promote_models` | usecase |
 
 **`data` view** (48 tools, `…/mcp/data`)
+
+`portal_data_datasets_list` walks the bucket prefix to its `max_depth`
+(3 by default): on large buckets pass `max_depth` 1 and a `limit`, since the
+default depth can exceed the tool timeout.
 
 | Tool | Phase | Classification | Permission | Scope |
 |---|---|---|---|---|
