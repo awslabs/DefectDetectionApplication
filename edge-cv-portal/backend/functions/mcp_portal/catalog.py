@@ -1591,6 +1591,7 @@ DATA: Tuple[ToolSpec, ...] = (
         backend='datasets', handler_module='datasets',
         handler_function='list_datasets', method='GET', resource='/datasets',
         param_map=UC_QUERY, permissions=('view_datasets',),
+        handler_audits_denials=True,
         result_shape='collection', collection_key='datasets'),
     ToolSpec(
         name='portal_data_datasets_preview_get', domain='data',
@@ -1605,8 +1606,9 @@ DATA: Tuple[ToolSpec, ...] = (
         handler_function='get_image_preview', method='GET',
         resource='/datasets/preview',
         param_map={'usecase_id': 'usecase_id', 'offset': 'offset', 'limit': 'limit'},
-        permissions=('view_datasets',), result_shape='collection',
-        collection_key='images', limit_max=50, limit_default=8),
+        permissions=('view_datasets',), handler_audits_denials=True,
+        result_shape='collection', collection_key='images', limit_max=50,
+        limit_default=8),
     ToolSpec(
         name='portal_data_datasets_count', domain='data', title='Count dataset images',
         description='Counts the images under a prefix of the Use_Case data bucket.',
@@ -1614,7 +1616,8 @@ DATA: Tuple[ToolSpec, ...] = (
         input_schema=uc_schema({'prefix': text(1024)}, required=['prefix']),
         backend='datasets', handler_module='datasets',
         handler_function='count_images', method='POST', resource='/datasets/count',
-        param_map=UC_QUERY, permissions=('view_datasets',)),
+        param_map=UC_QUERY, permissions=('view_datasets',),
+        handler_audits_denials=True),
     ToolSpec(
         name='portal_data_prelabeled_list', domain='data',
         title='List pre-labeled datasets',
@@ -1728,8 +1731,9 @@ DATA: Tuple[ToolSpec, ...] = (
         backend='captures', handler_module='captures',
         handler_function='list_captures', method='GET', resource='/captures',
         param_map={'usecase_id': 'usecase_id', 'limit': 'limit'},
-        permissions=('view_datasets',), result_shape='collection',
-        collection_key='captures', limit_max=30, limit_default=20),
+        permissions=('view_datasets',), handler_audits_denials=True,
+        result_shape='collection', collection_key='captures', limit_max=30,
+        limit_default=20),
     ToolSpec(
         name='portal_data_labeling_jobs_list', domain='data', title='List labeling jobs',
         description=('Lists the labeling jobs of a Use_Case; refreshes Ground Truth '
@@ -1739,8 +1743,8 @@ DATA: Tuple[ToolSpec, ...] = (
         backend='labeling', handler_module='labeling',
         handler_function='list_labeling_jobs', method='GET', resource='/labeling',
         param_map={'usecase_id': 'usecase_id', 'status': 'status'},
-        permissions=('view_labeling_jobs',), result_shape='collection',
-        collection_key='jobs',
+        permissions=('view_labeling_jobs',), handler_audits_denials=True,
+        result_shape='collection', collection_key='jobs',
         **_status_sync(AcceptedWrite('labeling.list_labeling_jobs', 'update_item',
                                      'labeling_jobs_table', 1))),
     ToolSpec(
@@ -1752,7 +1756,7 @@ DATA: Tuple[ToolSpec, ...] = (
         backend='labeling', handler_module='labeling',
         handler_function='get_labeling_job', method='GET', resource='/labeling/{id}',
         param_map={'job_id': 'id'}, permissions=('view_labeling_jobs',),
-        bind_usecase_path='job.usecase_id',
+        handler_audits_denials=True, bind_usecase_path='job.usecase_id',
         **_status_sync(AcceptedWrite('labeling.get_labeling_job', 'update_item',
                                      'labeling_jobs_table', 1))),
     ToolSpec(
