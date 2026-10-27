@@ -35,12 +35,16 @@ export interface UserAdminApiStackProps extends cdk.NestedStackProps {
  * enforced inside the Lambda.
  *
  * Route table (design "Portal backend — user_admin.py Lambda"):
- * - GET  /admin/users                                (account listing)
- * - POST /admin/users/{username}/password            (password change)
- * - POST /admin/users/{username}/forgot-password     (temporary password)
- * - PUT  /admin/users/{username}/role                (role change)
- * - GET  /admin/edge-sync/devices                    (per-device sync state)
- * - POST /admin/edge-sync/devices/{deviceId}         (stage + sync attempt)
+ * - GET    /admin/users                              (account listing)
+ * - POST   /admin/users                              (account creation)
+ * - DELETE /admin/users/{username}                   (account deletion)
+ * - POST   /admin/users/{username}/password          (password change)
+ * - POST   /admin/users/{username}/forgot-password   (temporary password)
+ * - PUT    /admin/users/{username}/role              (role change)
+ * - POST   /admin/users/{username}/disable           (account disable)
+ * - POST   /admin/users/{username}/enable            (account enable)
+ * - GET    /admin/edge-sync/devices                  (per-device sync state)
+ * - POST   /admin/edge-sync/devices/{deviceId}       (stage + sync attempt)
  */
 export class UserAdminApiStack extends cdk.NestedStack {
   constructor(scope: Construct, id: string, props: UserAdminApiStackProps) {
@@ -103,8 +107,15 @@ export class UserAdminApiStack extends cdk.NestedStack {
     const usersResource = adminResource.addResource('users');
     addMethod(usersResource, 'GET');
 
+    // POST /admin/users — account creation (user_admin.create_account)
+    addMethod(usersResource, 'POST');
+
     // Per-account actions under /admin/users/{username}.
     const userResource = usersResource.addResource('{username}');
+
+    // DELETE /admin/users/{username} — account deletion
+    // (user_admin.delete_account)
+    addMethod(userResource, 'DELETE');
 
     // POST /admin/users/{username}/password — password change (Req 3.1)
     addMethod(userResource.addResource('password'), 'POST');
@@ -116,6 +127,14 @@ export class UserAdminApiStack extends cdk.NestedStack {
     // PUT /admin/users/{username}/role — role change with the
     // last-PortalAdmin guard (Requirement 5.1)
     addMethod(userResource.addResource('role'), 'PUT');
+
+    // POST /admin/users/{username}/disable — account disable
+    // (user_admin.disable_account)
+    addMethod(userResource.addResource('disable'), 'POST');
+
+    // POST /admin/users/{username}/enable — account enable
+    // (user_admin.enable_account)
+    addMethod(userResource.addResource('enable'), 'POST');
 
     // /admin/edge-sync/devices — Account_Sync_Service device panel.
     const edgeSyncResource = adminResource.addResource('edge-sync');
