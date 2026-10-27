@@ -12,7 +12,8 @@
  * fixture. Each Method's path is walked up its `ParentId` chain inside its
  * own template; a parent imported from another stack is named by the prefix
  * table below, and an imported parent absent from the table fails the test.
- * The account-lifecycle routes of Backlog 2 are absent from both sides.
+ * The account-lifecycle routes of Backlog 2 are registered on the API but
+ * are not offered by the MCP catalog.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -149,10 +150,10 @@ describe('catalog routes are registered Portal_API methods', () => {
     expect(missing).toEqual([]);
   });
 
-  test('the account-lifecycle routes are absent from the API and from the catalog', () => {
+  test('the account-lifecycle routes are registered on the API and absent from the catalog', () => {
     const inCatalog = new Set(catalog.map((route) => `${route.method} ${route.resource}`));
     for (const route of ACCOUNT_LIFECYCLE_ROUTES) {
-      expect(registered.has(route)).toBe(false);
+      expect(registered.has(route)).toBe(true);
       expect(inCatalog.has(route)).toBe(false);
     }
   });
