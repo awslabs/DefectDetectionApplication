@@ -19,8 +19,11 @@
 #     this file): portal_scrub_aws_env, portal_require_stubbed_tools,
 #     install_real_if_present, stub_tools_ignore_stdin, trusted_param_*,
 #     portal_not_deployed / deploy_stack_template / deploy_portal_stacks /
-#     deny_stack_template / missing_stacks, set_profile_account /
-#     set_profile_region, set_cdk_json_context / set_cdk_context_json /
+#     deny_stack_template / missing_stacks / deny_describe_stacks /
+#     set_stack_status, component_bucket_absent / head_bucket_fails /
+#     create_bucket_fails / ecr_repositories_exist / dynamodb_tables_exist,
+#     set_profile_account / set_profile_region, set_cdk_json_context /
+#     set_cdk_context_json /
 #     set_user_cdk_json, seed_frontend_stack_outputs, output_has_line,
 #     log_has_line / log_line_of and the per-call trace queries
 #     (stub_trace_table, stub_call_index, stub_call_count_matching,
@@ -211,7 +214,8 @@ _stub_key() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_'
 stub_output() {
   local key; key="$(_stub_key "$1")"
   export "STUB_${key}_STDOUT=${2:-}"
-  [ "$#" -ge 3 ] && export "STUB_${key}_STDERR=$3"
+  # an if, so that leaving out [stderr] does not return non-zero and fail the test
+  if [ "$#" -ge 3 ]; then export "STUB_${key}_STDERR=$3"; fi
 }
 
 # stub_exit <name> <code>
@@ -338,6 +342,19 @@ deploy_portal_stacks() {
 }
 deny_stack_template() { portal_not_deployed; : > "$STUB_CFN_TEMPLATES_DIR/$1.denied"; }
 missing_stacks() { export STUB_CFN_MISSING_STACKS="$*"; }
+# deny_describe_stacks <stack ...> -> describe-stacks of these stacks fails with AccessDenied
+deny_describe_stacks() { export STUB_CFN_DENIED_STACKS="$*"; }
+# set_stack_status <stack> <status> -> describe-stacks --query Stacks[0].StackStatus prints <status>
+set_stack_status() { export STUB_CFN_STACK_STATUSES="${STUB_CFN_STACK_STATUSES:+$STUB_CFN_STACK_STATUSES }$1=$2"; }
+
+# The Greengrass component artifact bucket (s3api head-bucket succeeds and
+# create-bucket creates it unless one of these is set) and the resources a
+# failed deploy can leave behind (none exists unless named here).
+component_bucket_absent() { export STUB_S3_HEAD_BUCKET_STDERR="An error occurred (404) when calling the HeadBucket operation: Not Found"; }
+head_bucket_fails() { export STUB_S3_HEAD_BUCKET_STDERR="$1"; }
+create_bucket_fails() { export STUB_S3_CREATE_BUCKET_STDERR="$1"; }
+ecr_repositories_exist() { export STUB_ECR_REPOSITORIES="$*"; }
+dynamodb_tables_exist() { export STUB_DYNAMODB_TABLES="$*"; }
 
 # Per-profile identity: `aws sts` / `aws configure get region` under AWS_PROFILE=<profile>
 set_profile_account() { export STUB_AWS_PROFILE_ACCOUNTS="${STUB_AWS_PROFILE_ACCOUNTS:+$STUB_AWS_PROFILE_ACCOUNTS }$1=$2"; }
@@ -402,6 +419,8 @@ stub_call_args_n() { _b64d "$(sed -n "${1}p" "$STUB_TRACE" | cut -f3)"; }
 stub_call_env_n() { _b64d "$(sed -n "${1}p" "$STUB_TRACE" | cut -f4)"; }
 stub_call_env_value_n() { stub_call_env_n "$1" | sed -n "s/^$2=//p"; }
 stub_call_pwd_n() { sed -n "${1}p" "$STUB_TRACE" | cut -f2; }
+# stub_call_stdin_n <n> -> the stdin call n received
+stub_call_stdin_n() { _b64d "$(sed -n "${1}p" "$STUB_TRACE" | cut -f5)"; }
 # stub_call_has_pair <n> <option> <value> -> call n's argv has <option> then <value>
 # (the decoded argv has no trailing newline, so the last arg is read too)
 stub_call_has_pair() {
