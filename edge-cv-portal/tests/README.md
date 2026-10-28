@@ -6,7 +6,7 @@ Offline `bats` test harness for the one-command portal deploy orchestrator
 ## Prerequisites
 
 [Bats](https://github.com/bats-core/bats-core) (Bash Automated Testing System),
-version 1.5+ (`registry_enforcement.bats` and the trusted-account, region and usecase/data files call `bats_require_minimum_version 1.5.0` and use `run --separate-stderr`; `harness.bats` and `cdk_context_guard.bats` still run on 1.2). Distribution packages can be older; check `bats --version` and install from source if it is below 1.5.
+version 1.5+ (`registry_enforcement.bats` and the trusted-account, region and usecase/data files call `bats_require_minimum_version 1.5.0` and use `run --separate-stderr`, and `fresh_account_preflight.bats` calls it too; `harness.bats` and `cdk_context_guard.bats` still run on 1.2). Distribution packages can be older; check `bats --version` and install from source if it is below 1.5.
 
 ```bash
 # macOS
@@ -27,19 +27,20 @@ bats harness.bats      # self-tests for the harness itself
 bats .                 # run every *.bats file in this directory
 ```
 
-No CI workflow runs this suite yet; run it locally before changing a deploy script. `harness.bats` and the trusted-account, region and usecase/data files scrub the AWS environment themselves in their setup (`portal_scrub_aws_env`) and refuse to run unless the tools resolve to the stubs (`portal_require_stubbed_tools`).
+No CI workflow runs this suite yet; run it locally before changing a deploy script. `harness.bats` and the trusted-account, region, usecase/data and fresh-account preflight files scrub the AWS environment themselves in their setup (`portal_scrub_aws_env`) and refuse to run unless the tools resolve to the stubs (`portal_require_stubbed_tools`). None of the files needs Docker: `docker` is stubbed, and the fresh-account preflight tests that need it absent run on a `PATH` without any `docker`.
 
 ## Layout
 
 | File | Purpose |
 |------|---------|
-| `helpers/stub.sh` | Single generic stub backing every stubbed executable. Records each invocation (name, order, `$PWD`, args, selected env vars, stdin) to `$STUB_TRACE` and emits caller-controlled stdout/stderr/exit codes. Serves canned `aws` responses for a clean account (`ecr describe-repositories` and `dynamodb describe-table` find nothing; `s3api head-bucket` finds the component bucket), plus opt-in ones while their variable is set: the SSM parameter `/dda-portal/trusted-usecase-account-ids` (`STUB_SSM_TRUSTED_FILE`, `STUB_SSM_TRUSTED_GET_STDERR`, `STUB_SSM_TRUSTED_PUT_STDERR`), `cloudformation get-template` (`STUB_CFN_TEMPLATES_DIR`), missing stacks (`STUB_CFN_MISSING_STACKS`), per-profile accounts and regions (`STUB_AWS_PROFILE_ACCOUNTS`, `STUB_AWS_PROFILE_REGIONS`) and stubs that leave stdin unread (`STUB_IGNORE_STDIN_FOR`). `aws configure export-credentials` always fails. |
+| `helpers/stub.sh` | Single generic stub backing every stubbed executable. Records each invocation (name, order, `$PWD`, args, selected env vars, stdin) to `$STUB_TRACE` and emits caller-controlled stdout/stderr/exit codes. Serves canned `aws` responses for a clean account (`ecr describe-repositories` and `dynamodb describe-table` find nothing; `s3api head-bucket` finds the component bucket and `s3api create-bucket` creates it), plus opt-in ones while their variable is set: the SSM parameter `/dda-portal/trusted-usecase-account-ids` (`STUB_SSM_TRUSTED_FILE`, `STUB_SSM_TRUSTED_GET_STDERR`, `STUB_SSM_TRUSTED_PUT_STDERR`), `cloudformation get-template` (`STUB_CFN_TEMPLATES_DIR`), missing, refused and per-status stacks (`STUB_CFN_MISSING_STACKS`, `STUB_CFN_DENIED_STACKS`, `STUB_CFN_STACK_STATUSES`), `s3api head-bucket` / `create-bucket` errors (`STUB_S3_HEAD_BUCKET_STDERR`, `STUB_S3_CREATE_BUCKET_STDERR`), existing ECR repositories and DynamoDB tables (`STUB_ECR_REPOSITORIES`, `STUB_DYNAMODB_TABLES`), per-profile accounts and regions (`STUB_AWS_PROFILE_ACCOUNTS`, `STUB_AWS_PROFILE_REGIONS`) and stubs that leave stdin unread (`STUB_IGNORE_STDIN_FOR`). `aws configure export-credentials` always fails. A stubbed `sudo` never runs its command; a Docker package install puts a `docker` stub next to it. |
 | `test_helper.bash` | `bats` setup helper: builds a temp `bin/` (prepended to `PATH`) with PATH-shadow stubs for `deploy-account-role.sh`, `deploy-auth.sh`, `deploy-infrastructure.sh`, `deploy-frontend.sh`, `configure-bucket-cors.sh` and for `aws`/`node`/`cdk`/`npx`/`docker`; seeds a fake `edge-cv-portal` working tree; and provides seed + trace-query helpers. |
 | `fixtures/trusted-accounts/` | Hand-written stack templates (not synthesized) that grant `sts:AssumeRole` on one account, two accounts (and the same two reordered), the pre-scoping wildcard, or no `DDAPortalAccessRole` at all. |
 | `trusted_accounts_helper.bats` | `scripts/portal-trusted-accounts.sh` on its own: the source order (CDK context, `TRUSTED_USECASE_ACCOUNT_IDS`, SSM, the deployed stacks), every fail-closed case, the comparison with the deployed stacks and the create-only store. |
 | `trusted_accounts_deploy.bats` | The scripts that use the trusted list: `deploy-portal.sh` single-account (first deploy, re-run, every stop before a step, the store error in the Deployment_Log), the compute redeploys of `deploy-frontend.sh` and `deploy_portal_fixes.sh`, what `deploy-infrastructure.sh` shows without changing the list, and `deploy-auth.sh`'s exported `AWS_PROFILE`. |
 | `region_profile.bats` | One region for every call of each deploy script (an exported region before the configured one, a hint when there is none) and `deploy-portal.sh`'s profile and region order. |
 | `usecase_data_setup.bats` | UseCase/Data account setup: `npm ci` before the first `npx` call, a bootstrap through that account's own CDK app, and one region throughout. |
+| `fresh_account_preflight.bats` | `deploy-portal.sh`'s fresh-account preflight: the Greengrass component artifact bucket (present, absent, refused, unreadable, created concurrently or taken), the RETAIN resources a failed first create of `EdgeCVPortalComputeStack` leaves behind (for each stack state), the container runtime (Docker missing, stopped or refused, `CDK_DOCKER`, `--install-docker`), the usecase topology that runs none of it, and the Docker install instructions and commands per distribution. |
 | `harness.bats` | Self-tests proving the harness works offline. |
 | `registry_enforcement.bats` | `scripts/portal-registry-enforcement.sh` and the three deploy scripts that use it: an unset `PORTAL_REGISTRY_ENFORCED` keeps the deployed value, an explicit one wins, a fresh install passes no enforcement value, and a failed lookup stops the deploy. |
 | `cdk_context_guard.bats` | Every script that synthesizes the portal app passes the enforcement context: the pinned set of four scripts, every `cdk bootstrap` naming an app with `-a` or carrying the context itself, `deploy-auth.sh`'s bootstrap and deploy context on a fresh install, a deployed value and a failed lookup, and the provenance and `Data-plane scoping:` lines of the deploy scripts. |
@@ -87,6 +88,9 @@ teardown() { portal_harness_teardown; }
 - `trusted_param_absent` / `trusted_param_found <ids>` / `trusted_param_read_fails [error]` / `trusted_param_write_fails [error]` / `trusted_param_value` — the SSM parameter `/dda-portal/trusted-usecase-account-ids`.
 - `portal_not_deployed` / `deploy_stack_template <stack> <fixture>` / `deploy_portal_stacks <compute> [<nodedesigner>|-] [<syntheticdata>|-]` / `deny_stack_template <stack>` — the templates `cloudformation get-template` serves.
 - `missing_stacks <stack ...>` — `cloudformation describe-stacks` says these do not exist.
+- `deny_describe_stacks <stack ...>` / `set_stack_status <stack> <status>` — `describe-stacks` of these stacks is refused (AccessDenied), and what `describe-stacks --query Stacks[0].StackStatus` answers.
+- `component_bucket_absent` / `head_bucket_fails <error>` / `create_bucket_fails <error>` — the component artifact bucket's `s3api head-bucket` and `create-bucket` (present, and created, by default).
+- `ecr_repositories_exist <name ...>` / `dynamodb_tables_exist <name ...>` — the repositories and tables that exist (none by default).
 - `set_profile_account <profile> <id>` / `set_profile_region <profile> <region>` — what `sts` and `configure get region` answer under `AWS_PROFILE=<profile>`.
 - `set_cdk_json_context <json>` / `set_cdk_context_json <json>` / `set_user_cdk_json <json>` — the CDK context files.
 - `seed_frontend_stack_outputs` — the stack outputs `deploy-frontend.sh` and the Deployment Summary read.
@@ -101,7 +105,7 @@ Per call, rather than the first call of a name:
 
 - `stub_trace_table` — one row per call: index, name, `$PWD`, args and env (space-joined).
 - `stub_call_index <name> <ERE>` / `stub_call_count_matching <name> <ERE>` — the first matching call's index, and how many calls match (the ERE is matched against the space-joined args).
-- `stub_call_args_n <n>` / `stub_call_env_n <n>` / `stub_call_env_value_n <n> <VAR>` / `stub_call_pwd_n <n>` / `stub_call_has_pair <n> <option> <value>` — one call's args, env and `$PWD`.
+- `stub_call_args_n <n>` / `stub_call_env_n <n>` / `stub_call_env_value_n <n> <VAR>` / `stub_call_pwd_n <n>` / `stub_call_stdin_n <n>` / `stub_call_has_pair <n> <option> <value>` — one call's args, env, `$PWD` and stdin.
 - `stub_env_values_all <name> <VAR>` — the value of `VAR` in every call of `<name>` (`<unset>` when not set).
 - `stub_regions_used` — the region each regional `aws`/`npx`/`cdk` call would use.
 - `output_has_line <text>` / `log_has_line <text>` / `log_line_of <text>` — exact lines of the last `run` output and of `$PORTAL_SANDBOX/deploy.log`.

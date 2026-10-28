@@ -6,7 +6,8 @@
 # taken from $0 (basename), so the same file is symlinked/copied as
 # deploy-account-role.sh, deploy-auth.sh, deploy-infrastructure.sh,
 # deploy-frontend.sh, configure-bucket-cors.sh, aws, node, cdk, npx and docker
-# (so `docker info` succeeds without a real daemon).
+# (so `docker info` succeeds without a real daemon), and as any other tool a
+# test stubs (npm, sleep, sudo, ...).
 #
 # On every invocation the stub:
 #   1. Records a single tab-separated line to $STUB_TRACE containing the stub
@@ -29,9 +30,10 @@
 #      describe-repositories` and `dynamodb describe-table` answer that the
 #      repository / table does not exist (254), so no resource a failed deploy
 #      could have left behind is present; `s3api head-bucket` succeeds (the
-#      component bucket exists), like every other unhandled call.
-#   4. Opt-in fixtures for the trusted UseCase account list and per-profile
-#      identities; each is off (the answers above) while its variable is unset:
+#      component bucket exists) and `s3api create-bucket` creates it.
+#   4. Opt-in fixtures for the trusted UseCase account list, per-profile
+#      identities and the deploy-portal.sh preflight; each is off (the answers
+#      above) while its variable is unset:
 #         STUB_SSM_TRUSTED_FILE      state file of SSM
 #                                    /dda-portal/trusted-usecase-account-ids:
 #                                    get-parameter prints it (ParameterNotFound
@@ -44,6 +46,17 @@
 #                                    AccessDenied; any other stack does not exist
 #         STUB_CFN_MISSING_STACKS    describe-stacks of these stacks (space-
 #                                    separated) fails with "does not exist"
+#         STUB_CFN_DENIED_STACKS     describe-stacks of these stacks (space-
+#                                    separated) fails with AccessDenied
+#         STUB_CFN_STACK_STATUSES    "stack=status ..." map: what describe-stacks
+#                                    --query Stacks[0].StackStatus prints
+#         STUB_S3_HEAD_BUCKET_STDERR / STUB_S3_CREATE_BUCKET_STDERR
+#                                    s3api head-bucket / create-bucket fails
+#                                    with this error (254)
+#         STUB_ECR_REPOSITORIES / STUB_DYNAMODB_TABLES
+#                                    repositories / tables (space-separated)
+#                                    that describe-repositories / describe-table
+#                                    find
 #         STUB_AWS_PROFILE_ACCOUNTS / STUB_AWS_PROFILE_REGIONS
 #                                    "profile=value ..." maps: the account sts
 #                                    and the region `configure get region`
@@ -51,6 +64,9 @@
 #         STUB_IGNORE_STDIN_FOR      stub names (space-separated) that leave
 #                                    stdin unread
 #      `aws configure export-credentials` always fails (no credentials).
+#   5. As `sudo` it records the command and never runs it. When the command
+#      installs the Docker packages, it also puts a docker stub next to itself,
+#      the way a real install puts docker on PATH.
 #
 # Everything runs fully offline; no real AWS account or network is touched.
 
@@ -143,16 +159,23 @@ _has_flag() {
   return 1
 }
 
-# _profile_value <"profile=value ..."> -> the value mapped to $AWS_PROFILE
-# (rc 1, nothing printed, when AWS_PROFILE is unset or not in the map).
-_profile_value() {
-  local kv
-  [ -n "${AWS_PROFILE:-}" ] || return 1
-  for kv in $1; do
-    if [ "${kv%%=*}" = "$AWS_PROFILE" ]; then printf '%s' "${kv#*=}"; return 0; fi
+# _map_value <key> <"key=value ..."> -> the value mapped to <key> (rc 1,
+# nothing printed, when <key> is empty or not in the map).
+_map_value() {
+  local key="$1" kv
+  [ -n "$key" ] || return 1
+  for kv in $2; do
+    if [ "${kv%%=*}" = "$key" ]; then printf '%s' "${kv#*=}"; return 0; fi
   done
   return 1
 }
+
+# _profile_value <"profile=value ..."> -> the value mapped to $AWS_PROFILE
+# (rc 1, nothing printed, when AWS_PROFILE is unset or not in the map).
+_profile_value() { _map_value "${AWS_PROFILE:-}" "$1"; }
+
+# _in_list <word> <"word ..."> -> success when <word> is non-empty and in the list.
+_in_list() { [ -n "$1" ] || return 1; case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }
 
 _aws_main() {
   # Always allow a hard override first.
@@ -239,8 +262,9 @@ _aws_main() {
       local stack key query
       stack="$(_arg_value --stack-name "$@" || true)"
       query="$(_arg_value --query "$@" || true)"
-      # Opt-in: get-template from STUB_CFN_TEMPLATES_DIR, and describe-stacks
-      # of the stacks in STUB_CFN_MISSING_STACKS fails (see the header).
+      # Opt-in: get-template from STUB_CFN_TEMPLATES_DIR, describe-stacks of
+      # the stacks in STUB_CFN_MISSING_STACKS / STUB_CFN_DENIED_STACKS fails,
+      # and STUB_CFN_STACK_STATUSES answers the status query (see the header).
       local cfn_op="${1:-}"
       if [ "$cfn_op" = "get-template" ] && [ -n "${STUB_CFN_TEMPLATES_DIR:-}" ]; then
         if [ -e "$STUB_CFN_TEMPLATES_DIR/$stack.denied" ]; then
@@ -259,6 +283,16 @@ _aws_main() {
             printf '\n%s\n' "An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id $stack does not exist" >&2
             exit 254 ;;
         esac
+        if _in_list "$stack" "${STUB_CFN_DENIED_STACKS:-}"; then
+          printf '\n%s\n' "An error occurred (AccessDenied) when calling the DescribeStacks operation: User: arn:aws:sts::${STUB_AWS_ACCOUNT_ID-123456789012}:assumed-role/stub/stub is not authorized to perform: cloudformation:DescribeStacks on resource: $stack" >&2
+          exit 254
+        fi
+        local stack_status
+        if [ "$query" = "Stacks[0].StackStatus" ] \
+            && stack_status="$(_map_value "$stack" "${STUB_CFN_STACK_STATUSES:-}")"; then
+          printf '%s\n' "$stack_status"
+          exit 0
+        fi
       fi
       # Extract the OutputKey referenced by the query (handles '...' or `...`).
       key="$(printf '%s' "$query" | grep -oE "OutputKey==[\`']?[A-Za-z0-9]+" | head -n1 | sed -E "s/OutputKey==[\`']?//")"
@@ -273,19 +307,55 @@ _aws_main() {
       fi
       exit 0
       ;;
+    s3api)
+      # head-bucket: the bucket exists; create-bucket: it is created. Each
+      # fails with STUB_S3_HEAD_BUCKET_STDERR / STUB_S3_CREATE_BUCKET_STDERR
+      # when set. Any other s3api call is generic.
+      case "${1:-}" in
+        head-bucket)
+          if [ -n "${STUB_S3_HEAD_BUCKET_STDERR:-}" ]; then
+            printf '\n%s\n' "$STUB_S3_HEAD_BUCKET_STDERR" >&2; exit 254
+          fi
+          exit 0
+          ;;
+        create-bucket)
+          if [ -n "${STUB_S3_CREATE_BUCKET_STDERR:-}" ]; then
+            printf '\n%s\n' "$STUB_S3_CREATE_BUCKET_STDERR" >&2; exit 254
+          fi
+          printf '{\n    "Location": "/%s"\n}\n' "$(_arg_value --bucket "$@" || true)"
+          exit 0
+          ;;
+      esac
+      _emit_fixture_output
+      _fixture_exit
+      ;;
     ecr)
-      # describe-repositories: no repository exists in the modelled account.
+      # describe-repositories: only the repositories in STUB_ECR_REPOSITORIES
+      # exist in the modelled account.
       if [ "${1:-}" = "describe-repositories" ]; then
-        printf '\n%s\n' "An error occurred (RepositoryNotFoundException) when calling the DescribeRepositories operation: The repository with name '$(_arg_value --repository-names "$@" || true)' does not exist in the registry with id '${STUB_AWS_ACCOUNT_ID-123456789012}'" >&2
+        local repo
+        repo="$(_arg_value --repository-names "$@" || true)"
+        if _in_list "$repo" "${STUB_ECR_REPOSITORIES:-}"; then
+          printf '{\n    "repositories": [{"repositoryName": "%s"}]\n}\n' "$repo"
+          exit 0
+        fi
+        printf '\n%s\n' "An error occurred (RepositoryNotFoundException) when calling the DescribeRepositories operation: The repository with name '$repo' does not exist in the registry with id '${STUB_AWS_ACCOUNT_ID-123456789012}'" >&2
         exit 254
       fi
       _emit_fixture_output
       _fixture_exit
       ;;
     dynamodb)
-      # describe-table: no table exists in the modelled account.
+      # describe-table: only the tables in STUB_DYNAMODB_TABLES exist in the
+      # modelled account.
       if [ "${1:-}" = "describe-table" ]; then
-        printf '\n%s\n' "An error occurred (ResourceNotFoundException) when calling the DescribeTable operation: Requested resource not found: Table: $(_arg_value --table-name "$@" || true) not found" >&2
+        local table
+        table="$(_arg_value --table-name "$@" || true)"
+        if _in_list "$table" "${STUB_DYNAMODB_TABLES:-}"; then
+          printf '{\n    "Table": {"TableName": "%s", "TableStatus": "ACTIVE"}\n}\n' "$table"
+          exit 0
+        fi
+        printf '\n%s\n' "An error occurred (ResourceNotFoundException) when calling the DescribeTable operation: Requested resource not found: Table: $table not found" >&2
         exit 254
       fi
       _emit_fixture_output
@@ -315,10 +385,30 @@ _aws_main() {
   esac
 }
 
+# ---- sudo -------------------------------------------------------------------
+# Records the command and never runs it. A Docker package install (apt-get /
+# dnf / yum install -y docker...) also copies this stub to `docker` next to
+# itself, the way a real install puts docker on PATH.
+_sudo_main() {
+  case " $* " in
+    *" install -y docker-ce "*|*" install -y docker "*)
+      local bin_dir
+      bin_dir="$(dirname -- "$0")"
+      rm -f "$bin_dir/docker"
+      cp "$0" "$bin_dir/docker" && chmod +x "$bin_dir/docker"
+      ;;
+  esac
+  _emit_fixture_output
+  _fixture_exit
+}
+
 # ---- dispatch ---------------------------------------------------------------
 case "$STUB_NAME" in
   aws)
     _aws_main "$@"
+    ;;
+  sudo)
+    _sudo_main "$@"
     ;;
   *)
     _emit_fixture_output
