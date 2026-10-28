@@ -196,13 +196,15 @@ sudo usermod -aG docker "$USER"
 
 Group membership only applies to a **new** login session, so start a fresh shell (or run `newgrp docker`) and confirm with `docker info` before deploying. A `permission denied` on `/var/run/docker.sock` means the group change has not taken effect in your current shell; that is a different failure from Docker being missing entirely.
 
+If you build with another container runtime through CDK's `CDK_DOCKER` variable (for example `CDK_DOCKER=finch`), `deploy-portal.sh` checks that command instead of `docker`.
+
 `./deploy-portal.sh --install-docker` performs the install above automatically. It needs root or `sudo` and a recognized distribution, and it is opt-in by design — the default is to stop with instructions rather than install system packages on your host unasked.
 
 #### Component artifact bucket
 
 The compute stack configures, but never creates, the Greengrass component artifact bucket `dda-component-<region>-<account-id>`: it applies a CORS configuration and a staging lifecycle rule to it for the static image pin upload flow. That bucket normally comes into existence as a side effect of publishing a Greengrass component with GDK, so an account that has never published one does not have it, and the deploy fails partway through `EdgeCVPortalComputeStack` with `The specified bucket does not exist`.
 
-`deploy-portal.sh` creates the bucket when it is absent and leaves it untouched when it already exists. The bucket is deliberately **not** managed by CDK: GDK owns it, and in an established account it holds live component artifacts, so putting it under CloudFormation's delete lifecycle would risk the component artifact store. To create it by hand instead:
+`deploy-portal.sh` creates the bucket when it is absent and leaves it untouched when your account already owns it. It stops, creating nothing, when the name belongs to another account or when it cannot tell (the check is `aws s3api head-bucket` with `--expected-bucket-owner <account-id>`). The bucket is deliberately **not** managed by CDK: GDK owns it, and in an established account it holds live component artifacts, so putting it under CloudFormation's delete lifecycle would risk the component artifact store. To create it by hand instead:
 
 ```bash
 # every region except us-east-1 requires the LocationConstraint
@@ -215,14 +217,19 @@ aws s3api create-bucket --bucket "dda-component-us-east-1-<account-id>" --region
 
 #### Retrying a failed first deploy
 
-A failed *initial* create of a stack leaves it in `ROLLBACK_COMPLETE`, which CloudFormation will not let you update — the stack has to be deleted before you retry. Resources whose removal policy is `RETAIN` survive that deletion, and `aws-cdk-lib`'s `ecr.Repository` retains by default, so `dda-detector-export` outlives the rollback and the next attempt fails at changeset validation with `already exists`. Because each attempt re-creates the repository before failing further in, every rollback re-orphans it.
+A failed *initial* create of a stack leaves it in `ROLLBACK_COMPLETE`, which CloudFormation will not update; the next `cdk deploy` deletes that stack and creates it again. Resources whose removal policy is `RETAIN` are kept by the rollback and are no longer part of the stack, and `EdgeCVPortalComputeStack` has three with fixed names: the ECR repository `dda-detector-export` and the DynamoDB tables `dda-portal-edge-credentials` and `dda-portal-account-sync`. The next attempt then fails at changeset validation with `already exists`, and because each attempt re-creates them before failing further in, every rollback leaves them behind again.
 
-`deploy-portal.sh` detects this before synthesis and prints the cleanup command, but does not run it — deleting AWS resources is left to you:
+`deploy-portal.sh` detects this before synthesis (when the compute stack does not exist yet, or is in `ROLLBACK_COMPLETE`, `ROLLBACK_FAILED` or `REVIEW_IN_PROGRESS`) and prints the cleanup commands for the ones it finds, but does not run them; deleting AWS resources is left to you:
 
 ```bash
 aws ecr delete-repository --repository-name dda-detector-export --region "<region>"
 # add --force if it holds images; that deletes those images
+aws dynamodb delete-table --table-name dda-portal-edge-credentials --region "<region>"
+aws dynamodb delete-table --table-name dda-portal-account-sync --region "<region>"
+# deleting a table deletes its items; after a failed first deploy both are empty
 ```
+
+The rollback also keeps the stack's KMS key for those two tables (description `DDA Portal: encryption at rest for dda-portal-edge-credentials and dda-portal-account-sync...`). It has no fixed name, so it does not block the retry; once the tables it encrypted are deleted you can schedule its deletion with `aws kms schedule-key-deletion`.
 
 > **Important: AWS Marketplace Subscription Required**
 > 
@@ -277,7 +284,7 @@ cd edge-cv-portal
 ./deploy-portal.sh single-account
 ```
 
-`deploy-portal.sh` checks the prerequisites (AWS CLI, credentials, region, Node.js, CDK, Docker), resolves the trusted UseCase account list (see below), ensures the Greengrass component artifact bucket exists, bootstraps CDK in the account/region if needed, prints the resolved account, region and log path, and then runs the existing deployment scripts in this order:
+`deploy-portal.sh` checks the prerequisites (AWS CLI, credentials, region, Node.js, CDK, Docker) and for resources a failed first deploy left behind, resolves the trusted UseCase account list (see below), ensures the Greengrass component artifact bucket exists, bootstraps CDK in the account/region if needed, prints the resolved account, region and log path, and then runs the existing deployment scripts in this order:
 
 1. `./deploy-account-role.sh single-account` — IAM roles and policies (`DDASageMakerExecutionRole`, `DDAPortalComponentAccessPolicy`, `Greengrass_ServiceRole`)
 2. `infrastructure/deploy-auth.sh` — the Cognito `EdgeCVPortalAuthStack`

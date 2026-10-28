@@ -759,6 +759,7 @@ _os_release_field() {
     local field="${1:-}"
     [ -r /etc/os-release ] || return 0
     # Read in a subshell so the sourced variables never leak into the script.
+    # shellcheck source=/dev/null
     ( . /etc/os-release 2>/dev/null || exit 0
       printf '%s' "${!field:-}" ) | tr '[:upper:]' '[:lower:]'
 }
@@ -929,9 +930,18 @@ _docker_install() {
 #   * binary present, info X -> daemon stopped, or the user cannot reach the
 #                               socket (group membership, or a stale login
 #                               session that predates the usermod)
+# CDK runs the command named by CDK_DOCKER instead of `docker` when that is set
+# (finch, podman, ...), so that command is the one checked; it is never
+# installed for the operator.
 check_container_runtime() {
+    local runtime="${CDK_DOCKER:-docker}"
+
     # 1. The binary must be resolvable on the PATH.
-    if ! command -v docker >/dev/null 2>&1; then
+    if ! command -v "$runtime" >/dev/null 2>&1; then
+        if [ -n "${CDK_DOCKER:-}" ]; then
+            echo "deploy-portal.sh: CDK_DOCKER is set to '$CDK_DOCKER', but that command is not on PATH — the portal CDK app bundles Lambda layers and container images with it, so synthesis cannot run without it. Install it, or unset CDK_DOCKER to use Docker." >&2
+            return 2
+        fi
         if [ "${INSTALL_DOCKER:-0}" -eq 1 ]; then
             _docker_install || return $?
         else
@@ -943,9 +953,17 @@ check_container_runtime() {
 
     # 2. The daemon must be reachable by THIS user.
     local info_err info_rc=0
-    info_err="$(docker info 2>&1)" || info_rc=$?
+    info_err="$("$runtime" info 2>&1)" || info_rc=$?
     if [ "$info_rc" -eq 0 ]; then
         return 0
+    fi
+
+    # A CDK_DOCKER runtime has its own daemon and socket conventions, so the
+    # Docker-specific advice below does not apply to it.
+    if [ -n "${CDK_DOCKER:-}" ]; then
+        echo "deploy-portal.sh: '$runtime info' failed (CDK_DOCKER=$CDK_DOCKER), so the portal CDK app cannot bundle its assets. The underlying error was:" >&2
+        printf '%s\n' "$info_err" | sed 's/^/    /' >&2
+        return 2
     fi
 
     # Permission denied on the socket is the common post-install stumble: the
@@ -1035,9 +1053,12 @@ ensure_component_bucket() {
         return 2
     fi
 
-    # Does it already exist and can we see it?
+    # Does it already exist in THIS account? --expected-bucket-owner makes S3
+    # answer 403 for a bucket of that name owned by any other account, so a
+    # success here can only be the deploying account's own bucket.
     local head_err head_rc=0
-    head_err="$(aws s3api head-bucket --bucket "$bucket" --region "$region" 2>&1)" || head_rc=$?
+    head_err="$(aws s3api head-bucket --bucket "$bucket" --region "$region" \
+        --expected-bucket-owner "$account" 2>&1)" || head_rc=$?
     if [ "$head_rc" -eq 0 ]; then
         echo "Component bucket: s3://$bucket (already exists)"
         return 0
@@ -1056,6 +1077,15 @@ deploy-portal.sh: cannot determine whether s3://$bucket exists — the HeadBucke
   bucket, so resolve the access question before deploying. The underlying
   error was:
 EOF
+        printf '%s\n' "$head_err" | sed 's/^/    /' >&2
+        return 2
+    fi
+
+    # Only a 404 means absent. Anything else (throttling, a network or
+    # credential error) says nothing about the bucket, so report it rather
+    # than attempt a create on a guess.
+    if ! printf '%s' "$head_err" | grep -qiE '\(404\)|not found|NoSuchBucket'; then
+        echo "deploy-portal.sh: could not check whether s3://$bucket exists. The underlying error was:" >&2
         printf '%s\n' "$head_err" | sed 's/^/    /' >&2
         return 2
     fi
@@ -1108,78 +1138,129 @@ EOF
 # ---------------------------------------------------------------------------
 # Retained-resource collision detection (non-destructive)
 # ---------------------------------------------------------------------------
-# A failed FIRST create of EdgeCVPortalComputeStack rolls back and is deleted,
-# but resources whose construct type defaults to RemovalPolicy.RETAIN survive
-# that teardown. aws-cdk-lib's ecr.Repository is one: DetectorExportRepository
-# (physical name dda-detector-export) outlives the rollback and the NEXT attempt
-# then fails at changeset validation with
+# A failed FIRST create of EdgeCVPortalComputeStack rolls back to
+# ROLLBACK_COMPLETE, and the next `cdk deploy` deletes that stack and creates
+# it again. Resources whose removal policy is RETAIN are kept by the rollback
+# and are no longer part of the stack, and three of them have fixed physical
+# names (compute-stack.ts), so the next create fails at changeset validation
+# with, for example,
 #   Resource of type 'AWS::ECR::Repository' with identifier
 #   'dda-detector-export' already exists.
-# Because each attempt re-creates the repository before dying further in, every
-# rollback re-orphans it — a self-regenerating blocker.
+# Each attempt re-creates them before failing further in, so every rollback
+# leaves them behind again. The stack's KMS key (AccountTablesKey) is retained
+# as well, but it has no fixed name and does not collide.
 #
 # This check DETECTS and REPORTS only. It deliberately does not delete anything:
-# `aws ecr delete-repository --force` destroys the images it contains, and a
-# deploy script is the wrong place to make that call on an operator's behalf.
+# deleting the repository with --force destroys its images and deleting a table
+# destroys its items, and a deploy script is the wrong place to make that call
+# on an operator's behalf.
 #
-# False positives are avoided by the stack test below: the repository is only an
-# ORPHAN when the stack that owns it is absent. During an ordinary re-deploy the
-# stack exists, legitimately owns the repository, and this check stays silent.
+# It only looks when the next deploy will CREATE the stack: the stack does not
+# exist, its first create failed (ROLLBACK_COMPLETE or ROLLBACK_FAILED, which
+# the CDK CLI deletes before creating it again), or it holds only an unexecuted
+# change set (REVIEW_IN_PROGRESS). A deployed stack owns these resources, so an
+# ordinary re-deploy stays silent.
 
 # Stack that owns the retained resources surveyed here.
 COMPUTE_STACK_NAME="EdgeCVPortalComputeStack"
 
-# _stack_absent <stack-name> -> success when CloudFormation has no such stack.
-# describe-stacks by NAME excludes DELETE_COMPLETE stacks, which is exactly the
-# post-rollback-and-delete state this check cares about.
-_stack_absent() {
+# The compute stack's RETAIN resources with fixed physical names, as
+# "<kind>:<physical name>:<construct id>".
+COMPUTE_STACK_RETAINED=(
+    "ecr:dda-detector-export:DetectorExportRepository"
+    "dynamodb:dda-portal-edge-credentials:EdgeCredentialsTable"
+    "dynamodb:dda-portal-account-sync:AccountSyncTable"
+)
+
+# _stack_create_pending <stack-name> -> success, printing why, when the next
+# deploy creates the stack from scratch (see above). Any other answer, a failed
+# lookup included, counts as a stack that owns its resources.
+_stack_create_pending() {
     local stack="${1:-}" region="${REGION:-}"
     local out rc=0
     out="$(aws cloudformation describe-stacks --stack-name "$stack" \
         --region "$region" --query 'Stacks[0].StackStatus' --output text 2>&1)" || rc=$?
-    [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'does not exist'
+    if [ "$rc" -ne 0 ]; then
+        # describe-stacks by NAME does not return DELETE_COMPLETE stacks.
+        printf '%s' "$out" | grep -qi 'does not exist' || return 1
+        printf 'does not exist'
+        return 0
+    fi
+    case "$out" in
+        ROLLBACK_COMPLETE|ROLLBACK_FAILED|REVIEW_IN_PROGRESS)
+            printf 'is in %s' "$out"
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# _retained_resource_present <kind> <physical name> -> success when it exists.
+_retained_resource_present() {
+    local kind="$1" name="$2" region="${REGION:-}"
+    case "$kind" in
+        ecr)
+            aws ecr describe-repositories --repository-names "$name" \
+                --region "$region" >/dev/null 2>&1
+            ;;
+        dynamodb)
+            aws dynamodb describe-table --table-name "$name" \
+                --region "$region" >/dev/null 2>&1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 # check_retained_orphans -> fail fast, before synthesis, when a retained
 # resource from a previous failed attempt would collide with a fresh create.
 check_retained_orphans() {
-    local region="${REGION:-}"
+    local region="${REGION:-}" why
 
-    # Only an orphan when the owning stack is gone. An existing stack owns its
-    # resources, so there is nothing to report.
-    if ! _stack_absent "$COMPUTE_STACK_NAME"; then
+    # Only an orphan when the next deploy creates the owning stack. An existing
+    # stack owns its resources, so there is nothing to report.
+    if ! why="$(_stack_create_pending "$COMPUTE_STACK_NAME")"; then
         return 0
     fi
 
-    local orphans=()
+    local entry kind name construct
+    local found=()
+    for entry in "${COMPUTE_STACK_RETAINED[@]}"; do
+        IFS=: read -r kind name construct <<< "$entry"
+        if _retained_resource_present "$kind" "$name"; then
+            found+=("$entry")
+        fi
+    done
 
-    # DetectorExportRepository — compute-stack.ts, explicit physical name, and
-    # ecr.Repository defaults to RemovalPolicy.RETAIN.
-    if aws ecr describe-repositories --repository-names dda-detector-export \
-            --region "$region" >/dev/null 2>&1; then
-        orphans+=("dda-detector-export")
-    fi
-
-    if [ "${#orphans[@]}" -eq 0 ]; then
+    if [ "${#found[@]}" -eq 0 ]; then
         return 0
     fi
 
     cat >&2 <<EOF
-deploy-portal.sh: $COMPUTE_STACK_NAME does not exist, but resources it creates are still present.
+deploy-portal.sh: $COMPUTE_STACK_NAME $why, so this deploy creates it from scratch, but resources it creates with fixed names are still present.
 
-  These survived a previous failed deploy because their removal policy is
-  RETAIN. CloudFormation will reject the changeset with "already exists"
-  unless they are removed first:
+  A previous failed deploy left them behind: their removal policy is RETAIN,
+  so the rollback kept them. CloudFormation will reject the new create with
+  "already exists" unless they are removed first:
 
 EOF
-    local orphan
-    for orphan in "${orphans[@]}"; do
-        case "$orphan" in
-            dda-detector-export)
+    for entry in "${found[@]}"; do
+        IFS=: read -r kind name construct <<< "$entry"
+        case "$kind" in
+            ecr)
                 cat >&2 <<EOF
-    ECR repository '$orphan' (DetectorExportRepository)
-      aws ecr delete-repository --repository-name $orphan --region $region
+    ECR repository '$name' ($construct)
+      aws ecr delete-repository --repository-name $name --region $region
       # add --force if it holds images; that DELETES those images
+
+EOF
+                ;;
+            dynamodb)
+                cat >&2 <<EOF
+    DynamoDB table '$name' ($construct)
+      aws dynamodb delete-table --table-name $name --region $region
+      # that DELETES the table's items; back it up first if they matter
 
 EOF
                 ;;
@@ -1698,14 +1779,6 @@ main() {
     # exports ACCOUNT/REGION and prints them (Req 3.1-3.5, 3.8).
     check_prerequisites || exit $?
 
-    # Single-account: resolve the trusted UseCase account list once, before the
-    # bootstrap and the first step, so every step synthesizes the portal app
-    # with the same list (see resolve_trusted_accounts). usecase/data runs
-    # deploy their own CDK apps, which do not read it.
-    if [ "$TOPOLOGY" = "single-account" ]; then
-        resolve_trusted_accounts || exit $?
-    fi
-
     # Ordered step sequence for the resolved topology (Req 1.1, 1.2, 1.4, 4.4).
     local steps="${STEPS_FOR[$TOPOLOGY]}"
 
@@ -1715,16 +1788,18 @@ main() {
     # orchestrator only gates the stacks it drives directly (Req 3.6, 3.7).
     local step
     local needs_bootstrap=0
-    local needs_component_bucket=0
+    local needs_compute_stack=0
     for step in $steps; do
         case "$step" in
             auth|infrastructure|frontend) needs_bootstrap=1 ;;
         esac
         case "$step" in
-            infrastructure) needs_component_bucket=1 ;;
+            infrastructure) needs_compute_stack=1 ;;
         esac
     done
 
+    # The read-only checks run before anything below changes the account.
+    #
     # Container runtime gate: each portal CDK step synthesizes the WHOLE app,
     # and that synthesis stages assets through Docker, so a usable container
     # runtime is required before the first of them runs. Deliberately not
@@ -1734,14 +1809,25 @@ main() {
         check_container_runtime || exit $?
     fi
 
-    # EdgeCVPortalComputeStack prerequisites, both keyed on the ACCOUNT and
-    # REGION the prerequisite gate resolved and published: the Greengrass
-    # component artifact bucket the stack configures but never creates, and any
-    # RETAIN-policy resource a previous failed attempt left behind that would
-    # collide with a fresh create.
-    if [ "$needs_component_bucket" -eq 1 ]; then
-        ensure_component_bucket || exit $?
+    # A RETAIN-policy resource a previous failed attempt left behind would
+    # collide with a fresh create of EdgeCVPortalComputeStack. Keyed on the
+    # ACCOUNT and REGION the prerequisite gate resolved and published.
+    if [ "$needs_compute_stack" -eq 1 ]; then
         check_retained_orphans || exit $?
+    fi
+
+    # Single-account: resolve the trusted UseCase account list once, before the
+    # bootstrap and the first step, so every step synthesizes the portal app
+    # with the same list (see resolve_trusted_accounts). usecase/data runs
+    # deploy their own CDK apps, which do not read it.
+    if [ "$TOPOLOGY" = "single-account" ]; then
+        resolve_trusted_accounts || exit $?
+    fi
+
+    # The Greengrass component artifact bucket EdgeCVPortalComputeStack
+    # configures but never creates: created here when absent.
+    if [ "$needs_compute_stack" -eq 1 ]; then
+        ensure_component_bucket || exit $?
     fi
 
     if [ "$needs_bootstrap" -eq 1 ]; then
