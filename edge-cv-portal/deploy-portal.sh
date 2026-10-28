@@ -784,26 +784,63 @@ _docker_family() {
 # buildx plugin that CDK image assets want) and the package-manager one-liner
 # for the RHEL family. An unrecognized distro is pointed at upstream docs rather
 # than given a command that would not work.
+# _docker_apt_repo -> the download.docker.com repository for a Debian-family
+# host: `ubuntu` for Ubuntu and its derivatives (Mint, Pop!_OS list ubuntu in
+# ID_LIKE), `debian` for Debian and the rest of the family. Docker publishes the
+# two separately, keyed on different codenames.
+_docker_apt_repo() {
+    local id id_like
+    id="$(_os_release_field ID)"
+    id_like="$(_os_release_field ID_LIKE)"
+    case " $id $id_like " in
+        *" ubuntu "*) printf 'ubuntu' ;;
+        *) printf 'debian' ;;
+    esac
+}
+
+# _docker_apt_codename -> the codename that repository is keyed on. Ubuntu
+# derivatives carry their own VERSION_CODENAME, so UBUNTU_CODENAME comes first,
+# as in Docker's install instructions.
+_docker_apt_codename() {
+    local codename=""
+    if [ "$(_docker_apt_repo)" = "ubuntu" ]; then
+        codename="$(_os_release_field UBUNTU_CODENAME)"
+    fi
+    [ -n "$codename" ] || codename="$(_os_release_field VERSION_CODENAME)"
+    printf '%s' "$codename"
+}
+
 _docker_install_hint() {
     local family
     family="$(_docker_family)"
 
     case "$family" in
         debian)
-            cat >&2 <<'EOF'
+            # The recipe is printed for the operator to paste, so its $(...)
+            # stays literal; only the repository and the codename variable are
+            # filled in for this host.
+            local repo codename_expr
+            repo="$(_docker_apt_repo)"
+            # shellcheck disable=SC2016
+            codename_expr='$VERSION_CODENAME'
+            if [ "$repo" = "ubuntu" ]; then
+                # shellcheck disable=SC2016
+                codename_expr='${UBUNTU_CODENAME:-$VERSION_CODENAME}'
+            fi
+            sed -e "s|@REPO@|$repo|g" -e "s|@CODENAME@|$codename_expr|g" >&2 <<'EOF'
 
   Install Docker (Debian/Ubuntu, official repository — includes buildx):
 
     sudo apt-get update
     sudo apt-get install -y ca-certificates curl
     sudo install -m 0755 -d /etc/apt/keyrings
-    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+    sudo curl -fsSL https://download.docker.com/linux/@REPO@/gpg \
       -o /etc/apt/keyrings/docker.asc
     sudo chmod a+r /etc/apt/keyrings/docker.asc
     echo "deb [arch=$(dpkg --print-architecture) \
 signed-by=/etc/apt/keyrings/docker.asc] \
-https://download.docker.com/linux/ubuntu \
-$(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+https://download.docker.com/linux/@REPO@ \
+$(. /etc/os-release && echo "@CODENAME@") stable" \
       | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
     sudo apt-get update
     sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
@@ -878,8 +915,9 @@ _docker_install() {
 
     if [ "$family" = "debian" ]; then
         export DEBIAN_FRONTEND=noninteractive
-        local codename arch
-        codename="$(_os_release_field VERSION_CODENAME)"
+        local codename arch repo
+        repo="$(_docker_apt_repo)"
+        codename="$(_docker_apt_codename)"
         arch="$(dpkg --print-architecture 2>/dev/null || true)"
         if [ -z "$codename" ] || [ -z "$arch" ]; then
             echo "deploy-portal.sh: could not determine the Debian/Ubuntu codename or architecture" >&2
@@ -888,11 +926,11 @@ _docker_install() {
         ${sudo_cmd} apt-get update || return 2
         ${sudo_cmd} apt-get install -y ca-certificates curl || return 2
         ${sudo_cmd} install -m 0755 -d /etc/apt/keyrings || return 2
-        ${sudo_cmd} curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+        ${sudo_cmd} curl -fsSL "https://download.docker.com/linux/$repo/gpg" \
             -o /etc/apt/keyrings/docker.asc || return 2
         ${sudo_cmd} chmod a+r /etc/apt/keyrings/docker.asc || return 2
-        printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu %s stable\n' \
-            "$arch" "$codename" \
+        printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
+            "$arch" "$repo" "$codename" \
             | ${sudo_cmd} tee /etc/apt/sources.list.d/docker.list >/dev/null || return 2
         ${sudo_cmd} apt-get update || return 2
         ${sudo_cmd} apt-get install -y docker-ce docker-ce-cli containerd.io \
