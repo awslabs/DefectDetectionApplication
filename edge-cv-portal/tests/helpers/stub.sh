@@ -5,7 +5,8 @@
 # A single implementation backs every stubbed executable. The concrete name is
 # taken from $0 (basename), so the same file is symlinked/copied as
 # deploy-account-role.sh, deploy-auth.sh, deploy-infrastructure.sh,
-# deploy-frontend.sh, configure-bucket-cors.sh, aws, node, cdk and npx.
+# deploy-frontend.sh, configure-bucket-cors.sh, aws, node, cdk, npx and docker
+# (so `docker info` succeeds without a real daemon).
 #
 # On every invocation the stub:
 #   1. Records a single tab-separated line to $STUB_TRACE containing the stub
@@ -24,7 +25,11 @@
 #      orchestrator makes (sts get-caller-identity, configure get region,
 #      ssm get-parameter bootstrap version, cloudformation describe-stacks)
 #      and for the enforcement lookup the deploy scripts make (lambda
-#      list-functions).
+#      list-functions). The account it models is clean: `ecr
+#      describe-repositories` and `dynamodb describe-table` answer that the
+#      repository / table does not exist (254), so no resource a failed deploy
+#      could have left behind is present; `s3api head-bucket` succeeds (the
+#      component bucket exists), like every other unhandled call.
 #   4. Opt-in fixtures for the trusted UseCase account list and per-profile
 #      identities; each is off (the answers above) while its variable is unset:
 #         STUB_SSM_TRUSTED_FILE      state file of SSM
@@ -267,6 +272,24 @@ _aws_main() {
         printf '%s\n' "${!value_var}"
       fi
       exit 0
+      ;;
+    ecr)
+      # describe-repositories: no repository exists in the modelled account.
+      if [ "${1:-}" = "describe-repositories" ]; then
+        printf '\n%s\n' "An error occurred (RepositoryNotFoundException) when calling the DescribeRepositories operation: The repository with name '$(_arg_value --repository-names "$@" || true)' does not exist in the registry with id '${STUB_AWS_ACCOUNT_ID-123456789012}'" >&2
+        exit 254
+      fi
+      _emit_fixture_output
+      _fixture_exit
+      ;;
+    dynamodb)
+      # describe-table: no table exists in the modelled account.
+      if [ "${1:-}" = "describe-table" ]; then
+        printf '\n%s\n' "An error occurred (ResourceNotFoundException) when calling the DescribeTable operation: Requested resource not found: Table: $(_arg_value --table-name "$@" || true) not found" >&2
+        exit 254
+      fi
+      _emit_fixture_output
+      _fixture_exit
       ;;
     lambda)
       # list-functions --query "...PORTAL_REGISTRY_ENFORCED" --output text

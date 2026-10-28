@@ -157,10 +157,80 @@ Portal Account          UseCase Account         Data Account (Optional)
 - AWS CLI configured, with a region: a default region (`aws configure`) or `AWS_REGION` (`deploy-portal.sh` also takes `--region <region>`)
 - Node.js 18+, Python 3.11+
 - AWS CDK: `npm install -g aws-cdk`
-- Docker (the compute stack builds a Lambda container image during `cdk deploy`)
+- Docker, with its daemon running and reachable by your user (see [Docker](#docker) below)
 - [AWS Marketplace subscription](https://aws.amazon.com/marketplace/pp/prodview-j72hhmlt6avp6) (in UseCase Account — see below)
 
-> `deploy-portal.sh` (Step 1.2) checks the AWS CLI, your credentials, the region, Node.js and CDK before it changes anything, and runs `cdk bootstrap` for you when the account/region is not bootstrapped (or its bootstrap version is below 21). It takes the region from `--region`, else `AWS_REGION` / `AWS_DEFAULT_REGION`, else the CLI's default region, and every step deploys to that region. It does not check Docker, the Marketplace subscription, or the API Gateway CloudWatch Logs role from Step 1.1.
+> `deploy-portal.sh` (Step 1.2) checks the AWS CLI, your credentials, the region, Node.js, CDK and Docker before it changes anything, and runs `cdk bootstrap` for you when the account/region is not bootstrapped (or its bootstrap version is below 21). It takes the region from `--region`, else `AWS_REGION` / `AWS_DEFAULT_REGION`, else the CLI's default region, and every step deploys to that region. For the `single-account` topology it also creates the Greengrass component artifact bucket if it is absent (see [Component artifact bucket](#component-artifact-bucket)) and stops if a previous failed deploy left a retained resource behind that would collide on create. It does not check the Marketplace subscription or the API Gateway CloudWatch Logs role from Step 1.1.
+
+#### Docker
+
+Docker is needed at **synthesis** time, not only at deploy time: the compute stack stages a Lambda layer asset (`ImagingLayer`) and builds a Lambda container image by shelling out to `docker`. Without it the run fails while synthesizing the CDK app — during the `auth` step, before anything is deployed — with:
+
+```
+«FailedToBundleAsset» Failed to bundle asset EdgeCVPortalComputeStack/ImagingLayer/Code/Stage
+Error: spawnSync docker ENOENT
+```
+
+On Ubuntu, install from Docker's official repository (it carries the buildx plugin that CDK image assets use). On Debian, use `debian` in place of `ubuntu` in both URLs and `$VERSION_CODENAME` as the codename:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+On RHEL/Fedora/Amazon Linux: `sudo dnf install -y docker` (older Amazon Linux 2: `yum`). Avoid the snap build of Docker — its confinement blocks bind mounts from arbitrary paths, and CDK bundling bind-mounts the asset staging directory into the container.
+
+Then enable the daemon and grant your user access:
+
+```bash
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+Group membership only applies to a **new** login session, so start a fresh shell (or run `newgrp docker`) and confirm with `docker info` before deploying. A `permission denied` on `/var/run/docker.sock` means the group change has not taken effect in your current shell; that is a different failure from Docker being missing entirely.
+
+If you build with another container runtime through CDK's `CDK_DOCKER` variable (for example `CDK_DOCKER=finch`), `deploy-portal.sh` checks that command instead of `docker`.
+
+`./deploy-portal.sh --install-docker` performs the install above automatically (from the Ubuntu or the Debian repository, whichever matches the host). It needs root or `sudo` and a recognized distribution, and it is opt-in by design — the default is to stop with instructions rather than install system packages on your host unasked.
+
+#### Component artifact bucket
+
+The compute stack configures, but never creates, the Greengrass component artifact bucket `dda-component-<region>-<account-id>`: it applies a CORS configuration and a staging lifecycle rule to it for the static image pin upload flow. That bucket normally comes into existence as a side effect of publishing a Greengrass component with GDK, so an account that has never published one does not have it, and the deploy fails partway through `EdgeCVPortalComputeStack` with `The specified bucket does not exist`.
+
+`deploy-portal.sh` creates the bucket when it is absent and leaves it untouched when your account already owns it. It stops, creating nothing, when the name belongs to another account or when it cannot tell (the check is `aws s3api head-bucket` with `--expected-bucket-owner <account-id>`). The bucket is deliberately **not** managed by CDK: GDK owns it, and in an established account it holds live component artifacts, so putting it under CloudFormation's delete lifecycle would risk the component artifact store. To create it by hand instead:
+
+```bash
+# every region except us-east-1 requires the LocationConstraint
+aws s3api create-bucket --bucket "dda-component-<region>-<account-id>" \
+  --region "<region>" --create-bucket-configuration "LocationConstraint=<region>"
+
+# us-east-1 must NOT pass --create-bucket-configuration
+aws s3api create-bucket --bucket "dda-component-us-east-1-<account-id>" --region us-east-1
+```
+
+#### Retrying a failed first deploy
+
+A failed *initial* create of a stack leaves it in `ROLLBACK_COMPLETE`, which CloudFormation will not update; the next `cdk deploy` deletes that stack and creates it again. Resources whose removal policy is `RETAIN` are kept by the rollback and are no longer part of the stack, and `EdgeCVPortalComputeStack` has three with fixed names: the ECR repository `dda-detector-export` and the DynamoDB tables `dda-portal-edge-credentials` and `dda-portal-account-sync`. The next attempt then fails at changeset validation with `already exists`, and because each attempt re-creates them before failing further in, every rollback leaves them behind again.
+
+`deploy-portal.sh` detects this before synthesis (when the compute stack does not exist yet, or is in `ROLLBACK_COMPLETE`, `ROLLBACK_FAILED` or `REVIEW_IN_PROGRESS`) and prints the cleanup commands for the ones it finds, but does not run them; deleting AWS resources is left to you:
+
+```bash
+aws ecr delete-repository --repository-name dda-detector-export --region "<region>"
+# add --force if it holds images; that deletes those images
+aws dynamodb delete-table --table-name dda-portal-edge-credentials --region "<region>"
+aws dynamodb delete-table --table-name dda-portal-account-sync --region "<region>"
+# deleting a table deletes its items; after a failed first deploy both are empty
+```
+
+The rollback also keeps the stack's KMS key for those two tables (description `DDA Portal: encryption at rest for dda-portal-edge-credentials and dda-portal-account-sync...`). It has no fixed name, so it does not block the retry; once the tables it encrypted are deleted you can schedule its deletion with `aws kms schedule-key-deletion`.
 
 > **Important: AWS Marketplace Subscription Required**
 > 
@@ -215,7 +285,7 @@ cd edge-cv-portal
 ./deploy-portal.sh single-account
 ```
 
-`deploy-portal.sh` checks the prerequisites (AWS CLI, credentials, region, Node.js, CDK), resolves the trusted UseCase account list (see below), bootstraps CDK in the account/region if needed, prints the resolved account, region and log path, and then runs the existing deployment scripts in this order:
+`deploy-portal.sh` checks the prerequisites (AWS CLI, credentials, region, Node.js, CDK, Docker) and for resources a failed first deploy left behind, resolves the trusted UseCase account list (see below), ensures the Greengrass component artifact bucket exists, bootstraps CDK in the account/region if needed, prints the resolved account, region and log path, and then runs the existing deployment scripts in this order:
 
 1. `./deploy-account-role.sh single-account` — IAM roles and policies (`DDASageMakerExecutionRole`, `DDAPortalComponentAccessPolicy`, `Greengrass_ServiceRole`)
 2. `infrastructure/deploy-auth.sh` — the Cognito `EdgeCVPortalAuthStack`
@@ -230,13 +300,14 @@ Useful options (`./deploy-portal.sh --help` lists them all):
 
 - `--profile <name>` / `--region <region>` — AWS CLI profile and region for all steps (env: `AWS_PROFILE`, `AWS_REGION`)
 - `--sso` — enable SSO on the auth stack; export `SSO_METADATA_URL` (and optionally `SSO_PROVIDER_NAME`, `COGNITO_DOMAIN_PREFIX`) first, see [edge-cv-portal/infrastructure/SSO_SETUP.md](edge-cv-portal/infrastructure/SSO_SETUP.md)
+- `--install-docker` — install Docker automatically when it is missing, instead of stopping with instructions. Needs root or `sudo` and a recognized distribution (env: `PORTAL_DEPLOY_INSTALL_DOCKER`)
 - `--non-interactive` — never prompt (for CI). The `single-account` topology needs no further inputs:
 
   ```bash
   ./deploy-portal.sh single-account --non-interactive
   ```
 
-**Manual path (advanced).** The four scripts above remain runnable on their own, in the same order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`). Use them to repeat a single step, e.g. `./deploy-frontend.sh` after a frontend change. When you skip the orchestrator on an account/region that is not bootstrapped yet, bootstrap it first from `edge-cv-portal/`: `cdk bootstrap aws://<ACCOUNT_ID>/<REGION>`. There is no `cdk.json` in that directory, so the CLI bootstraps that environment without synthesizing the portal app; run from `infrastructure/`, it would synthesize the app first, which fails until `npm ci` has run there and the trusted UseCase account list is set. `deploy-auth.sh` and `deploy-infrastructure.sh` synthesize the whole portal app, so set the list before you run them: the SSM parameter `/dda-portal/trusted-usecase-account-ids` (a first `./deploy-portal.sh single-account` creates it; or `aws ssm put-parameter --name /dda-portal/trusted-usecase-account-ids --type String --value <ACCOUNT_ID> --region <REGION>`), `TRUSTED_USECASE_ACCOUNT_IDS` (that run only), or the CDK context value `trustedUseCaseAccountIds`; without one they stop with `ComputeStack requires a non-empty trustedUseCaseAccountIds list`. `deploy-frontend.sh` resolves the list the same way as `deploy-portal.sh` and, when none is configured, uses the list the deployed portal stacks grant. `deploy-infrastructure.sh` has no such fallback: it deploys the list the CDK app reads (the CDK context value, `TRUSTED_USECASE_ACCOUNT_IDS`, then the SSM parameter) and prints it first, with the same `⚠️` lines for each account the deploy removes or adds. `deploy-infrastructure.sh` handles the npm install and `cdk deploy` for you. Run on their own, the scripts use `AWS_REGION` (or `AWS_DEFAULT_REGION`) when set, otherwise the CLI's default region; `deploy-auth.sh` also takes `--region`.
+**Manual path (advanced).** The four scripts above remain runnable on their own, in the same order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`). Use them to repeat a single step, e.g. `./deploy-frontend.sh` after a frontend change. When you skip the orchestrator on an account/region that is not bootstrapped yet, bootstrap it first from `edge-cv-portal/`: `cdk bootstrap aws://<ACCOUNT_ID>/<REGION>`. There is no `cdk.json` in that directory, so the CLI bootstraps that environment without synthesizing the portal app; run from `infrastructure/`, it would synthesize the app first, which fails until `npm ci` has run there and the trusted UseCase account list is set. On an account that has never published a Greengrass component, also create the component artifact bucket first (see [Component artifact bucket](#component-artifact-bucket)): `deploy-infrastructure.sh` does not create it. `deploy-auth.sh` and `deploy-infrastructure.sh` synthesize the whole portal app, so set the list before you run them: the SSM parameter `/dda-portal/trusted-usecase-account-ids` (a first `./deploy-portal.sh single-account` creates it; or `aws ssm put-parameter --name /dda-portal/trusted-usecase-account-ids --type String --value <ACCOUNT_ID> --region <REGION>`), `TRUSTED_USECASE_ACCOUNT_IDS` (that run only), or the CDK context value `trustedUseCaseAccountIds`; without one they stop with `ComputeStack requires a non-empty trustedUseCaseAccountIds list`. `deploy-frontend.sh` resolves the list the same way as `deploy-portal.sh` and, when none is configured, uses the list the deployed portal stacks grant. `deploy-infrastructure.sh` has no such fallback: it deploys the list the CDK app reads (the CDK context value, `TRUSTED_USECASE_ACCOUNT_IDS`, then the SSM parameter) and prints it first, with the same `⚠️` lines for each account the deploy removes or adds. `deploy-infrastructure.sh` handles the npm install and `cdk deploy` for you. Run on their own, the scripts use `AWS_REGION` (or `AWS_DEFAULT_REGION`) when set, otherwise the CLI's default region; `deploy-auth.sh` also takes `--region`.
 
 > **Registry enforcement and allowed buckets.** Production deployments run with the Portal_Identity registry enforced: `PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh`, after `edge-cv-portal/backfill_portal_registry.py` has been applied and the accounts verified (a fresh install starts with enforcement off, and the script prints a warning whenever the value it resolves for a deploy is not `true`). Independently of that flag, the portal reads and writes S3 only in each use case's **allowed buckets** — its configured S3 bucket, its Data Account bucket, and the **Additional S3 buckets** a UseCaseAdmin allows (Use Cases → Edit → Allowed buckets, or "Allow for this use case" in Data Management). A bucket must be tagged `dda-portal:managed=true` (`aws s3control tag-resource --account-id ACCOUNT_ID --resource-arn arn:aws:s3:::BUCKET --tags Key=dda-portal:managed,Value=true`, plus `aws s3api put-bucket-abac --bucket BUCKET --abac-status Status=Enabled` for a bucket reached through a cross-account role) **before** a use case is created with it or allows it; buckets created through the portal are tagged, ABAC-enabled and allowed automatically. See `edge-cv-portal/ADMIN_GUIDE.md`, "Use case buckets and Additional S3 buckets" and "The enforcement flag".
 

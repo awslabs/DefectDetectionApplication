@@ -6,7 +6,7 @@
 #   * portal_harness_setup / portal_harness_teardown
 #       - build a per-test temp sandbox
 #       - build a temp bin/ prepended to PATH with PATH-shadow stubs for the
-#         five orchestrated scripts and for aws / node / cdk / npx
+#         five orchestrated scripts and for aws / node / cdk / npx / docker
 #       - seed a fake `edge-cv-portal` working tree (with the five script
 #         stubs at the exact relative paths the orchestrator invokes)
 #   * seed helpers: seed_config_file, set_cfn_output, set_bootstrap_version,
@@ -42,7 +42,7 @@ PORTAL_SCRIPT_STUBS=(
   deploy-frontend.sh
   configure-bucket-cors.sh
 )
-PORTAL_TOOL_STUBS=(aws node cdk npx)
+PORTAL_TOOL_STUBS=(aws node cdk npx docker)
 
 # ---------------------------------------------------------------------------
 # Setup / teardown
@@ -274,17 +274,18 @@ portal_scrub_aws_env() {
         PORTAL_TRUSTED_ACCOUNTS_COMPARED PORTAL_REGISTRY_ENFORCED DATA_BUCKET_ALLOWLIST \
         cloudFrontDomain CDK_STACKS PORTAL_DEPLOY_TOPOLOGY PORTAL_DEPLOY_NON_INTERACTIVE \
         PORTAL_DEPLOY_SSO PORTAL_ACCOUNT_ID EXTERNAL_ID DATA_BUCKET_NAMES \
-        SSO_METADATA_URL SSO_PROVIDER_NAME COGNITO_DOMAIN_PREFIX
+        SSO_METADATA_URL SSO_PROVIDER_NAME COGNITO_DOMAIN_PREFIX \
+        PORTAL_DEPLOY_INSTALL_DOCKER CDK_DOCKER
   export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_EC2_METADATA_DISABLED=true
   export HOME="$PORTAL_SANDBOX/home" TMPDIR="$PORTAL_SANDBOX/tmp"
   mkdir -p "$HOME" "$TMPDIR"
 }
 
-# portal_require_stubbed_tools [name ...] -> fail unless aws, node, cdk, npx and
-# every named tool resolve to the stubs in $PORTAL_BIN.
+# portal_require_stubbed_tools [name ...] -> fail unless aws, node, cdk, npx,
+# docker and every named tool resolve to the stubs in $PORTAL_BIN.
 portal_require_stubbed_tools() {
   local t got
-  for t in aws node cdk npx "$@"; do
+  for t in aws node cdk npx docker "$@"; do
     got="$(command -v "$t" 2>/dev/null || true)"
     if [ "$got" != "$PORTAL_BIN/$t" ]; then
       echo "refusing to run: '$t' resolves to '${got:-nothing}', not $PORTAL_BIN/$t" >&2

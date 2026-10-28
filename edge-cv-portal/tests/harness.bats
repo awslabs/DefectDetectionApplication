@@ -29,7 +29,7 @@ teardown() { portal_harness_teardown; }
 @test "harness: temp bin/ is prepended to PATH with all stubs" {
   case ":$PATH:" in *":$PORTAL_BIN:"*) : ;; *) false ;; esac
   for name in deploy-account-role.sh deploy-auth.sh deploy-infrastructure.sh \
-              deploy-frontend.sh configure-bucket-cors.sh aws node cdk npx; do
+              deploy-frontend.sh configure-bucket-cors.sh aws node cdk npx docker; do
     run command -v "$name"
     [ "$status" -eq 0 ]
     [[ "$output" == "$PORTAL_BIN/$name" ]]
