@@ -318,7 +318,12 @@ def test_exchange_can_be_retried_after_sts_failure(qs_stack):
 
     retry_body = json.loads(retry["body"])
     assert retry["statusCode"] == 200, (retry["statusCode"], retry_body)
-    assert len(recorder.calls) == 1
+    # One station issuance plus the Lambda's own token exchange role
+    # preparation session (dda-qs-tes-*).
+    station_calls = [c for c in recorder.calls
+                     if not c["RoleSessionName"].startswith("dda-qs-tes-")]
+    assert len(station_calls) == 1, recorder.calls
+    assert len(recorder.calls) == 2, recorder.calls
     creds = retry_body["credentials"]
     assert creds["access_key_id"]
     assert creds["secret_access_key"]

@@ -937,6 +937,8 @@ export class UseCaseAccountStack extends cdk.Stack {
     // stream camera secrets, through ${credentials-iot:ThingName},
     // Requirement 6.7) and DDAWorkflowTuningSampleAccess
     // (quality-prompt-tuning). Both are written get-then-put, idempotently.
+    // Station Quick Setup also writes the setup_station.sh inline policies
+    // through this grant (backend/functions/token_exchange_role.py).
     // Inline policies on that one role only: no attach, create, or PassRole.
     this.role.addToPolicy(
       new iam.PolicyStatement({

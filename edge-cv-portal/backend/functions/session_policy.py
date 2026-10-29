@@ -16,7 +16,22 @@ uses a wildcard action (e.g. `iot:*`).
 The document is kept COMPACT (no `Sid`s, statements merged by resource) because
 `sts.assume_role` enforces a 2048-character *packed* limit on the inline session
 policy; verbose per-action statements overflow it for long device names.
+
+The station's policy carries no IAM write action and no `iam:PassRole`. The
+Lambda prepares the Greengrass token exchange role, its IoT role alias and its
+policies itself before it returns the station's credentials
+(token_exchange_role.py), in a separate session narrowed by
+`build_tes_preparation_policy`. That session's credentials never leave the
+Lambda. The station keeps the read-only `iam:GetRole` and `iam:GetPolicy` that
+the Greengrass installer calls before it would create those resources, and
+`iot:DescribeRoleAlias`, which tells the installer that the alias exists.
 """
+
+from token_exchange_role import (
+    tes_access_policy_arn,
+    tes_role_alias_arn,
+    tes_role_arn,
+)
 
 # Fixed IoT provisioning actions whose target resources cannot be known in
 # advance (certificate ids are generated during provisioning, DescribeEndpoint /
@@ -32,19 +47,13 @@ _IOT_CERT_POLICY_ENDPOINT_ACTIONS = [
     "iot:CreatePolicyVersion",
     "iot:DeletePolicyVersion",
     "iot:DescribeEndpoint",
-    "iot:CreateRoleAlias",
     "iot:DescribeRoleAlias",
 ]
 
-# Greengrass Token Exchange Service (TES) role + policy setup performed by the
-# provisioner (scoped to the GreengrassV2TokenExchangeRole* names below).
-_IAM_TES_ACTIONS = [
+# Read-only checks the Greengrass installer makes on the token exchange role
+# and its access policy before it would create them.
+_IAM_TES_READ_ACTIONS = [
     "iam:GetRole",
-    "iam:CreateRole",
-    "iam:AttachRolePolicy",
-    "iam:PutRolePolicy",
-    "iam:PassRole",
-    "iam:CreatePolicy",
     "iam:GetPolicy",
 ]
 
@@ -87,10 +96,6 @@ def build_session_policy(device_name, device_group, region, account_id):
     core_device_arn = (
         f"arn:aws:greengrass:{region}:{account_id}:coreDevices:{device_name}"
     )
-    tes_role_arn = f"arn:aws:iam::{account_id}:role/GreengrassV2TokenExchangeRole*"
-    tes_policy_arn = (
-        f"arn:aws:iam::{account_id}:policy/GreengrassV2TokenExchangeRoleAccess*"
-    )
 
     return {
         "Version": "2012-10-17",
@@ -110,16 +115,69 @@ def build_session_policy(device_name, device_group, region, account_id):
                 "Resource": "*",
             },
             {
-                # Greengrass TES role + policy setup.
+                # Installer checks on the token exchange role and its access
+                # policy. Read-only.
                 "Effect": "Allow",
-                "Action": list(_IAM_TES_ACTIONS),
-                "Resource": [tes_role_arn, tes_policy_arn],
+                "Action": list(_IAM_TES_READ_ACTIONS),
+                "Resource": [
+                    tes_role_arn(account_id),
+                    tes_access_policy_arn(account_id),
+                ],
             },
             {
                 # Tag the Greengrass core device (dda-portal:managed).
                 "Effect": "Allow",
                 "Action": "greengrass:TagResource",
                 "Resource": core_device_arn,
+            },
+        ],
+    }
+
+
+def build_tes_preparation_policy(region, account_id):
+    """Session policy for the Lambda's own token exchange role preparation.
+
+    Used only server-side (token_exchange_role.prepare); these credentials are
+    never returned to the station. Every resource is one fixed name:
+    the role, its access policy and its IoT role alias. `iam:AttachRolePolicy`
+    may attach only that access policy. `iam:PassRole` is what
+    `iot:CreateRoleAlias` requires on the role it points at.
+
+    The assumed role's own policy still applies: DDAStationProvisioningRole
+    allows all of these, and a cross-account DDAPortalAccessRole allows only
+    `iam:PutRolePolicy` (and `iam:GetRolePolicy`) on the role.
+    """
+    role_arn = tes_role_arn(account_id)
+    access_policy_arn = tes_access_policy_arn(account_id)
+
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "iam:GetRole",
+                    "iam:CreateRole",
+                    "iam:PutRolePolicy",
+                    "iam:PassRole",
+                ],
+                "Resource": role_arn,
+            },
+            {
+                "Effect": "Allow",
+                "Action": "iam:AttachRolePolicy",
+                "Resource": role_arn,
+                "Condition": {"ArnEquals": {"iam:PolicyARN": access_policy_arn}},
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["iam:GetPolicy", "iam:CreatePolicy"],
+                "Resource": access_policy_arn,
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["iot:DescribeRoleAlias", "iot:CreateRoleAlias"],
+                "Resource": tes_role_alias_arn(region, account_id),
             },
         ],
     }

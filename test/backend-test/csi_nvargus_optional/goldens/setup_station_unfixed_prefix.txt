@@ -1397,9 +1397,9 @@ echo "▶ Updating GreengrassV2TokenExchangeRole"
 echo "=========================================="
 echo ""
 
-# Get AWS account ID for policy ARNs
+# Get AWS account ID for policy ARNs. Portal Quick Setup writes these policies itself (token_exchange_role.py) and skips this section.
 aws_account_id=$(aws sts get-caller-identity --query 'Account' --output text 2>/dev/null || echo "")
-if [ -z "$aws_account_id" ]; then
+if [ "${DDA_TES_ROLE_PREPARED:-0}" = "1" ]; then echo "✓ GreengrassV2TokenExchangeRole was prepared by the Edge CV Portal; skipping role policy updates"; elif [ -z "$aws_account_id" ]; then
     add_warning "Could not get AWS account ID - skipping role policy updates"
 else
     echo "AWS Account ID: $aws_account_id"
