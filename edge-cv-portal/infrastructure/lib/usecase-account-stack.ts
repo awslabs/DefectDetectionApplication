@@ -843,6 +843,8 @@ export class UseCaseAccountStack extends cdk.Stack {
         actions: [
           'iot:CreateJob',
           'iot:DescribeJob',
+          // greengrass:ListEffectiveDeployments reads each job execution.
+          'iot:DescribeJobExecution',
           'iot:UpdateJob',
           'iot:CancelJob',
           'iot:ListJobs',
