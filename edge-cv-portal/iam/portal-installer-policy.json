@@ -90,15 +90,30 @@
       ]
     },
     {
-      "Sid": "SageMakerExecutionRole",
+      "Sid": "SageMakerExecutionRoleRead",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:GetPolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerExecutionRole",
+        "arn:aws:iam::ACCOUNT_ID:policy/dda-sagemaker-execution-boundary"
+      ]
+    },
+    {
+      "Sid": "SageMakerExecutionRoleWithinBoundary",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole",
-        "iam:GetRole",
-        "iam:UpdateAssumeRolePolicy",
         "iam:PutRolePolicy"
       ],
-      "Resource": "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerExecutionRole"
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerExecutionRole",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::ACCOUNT_ID:policy/dda-sagemaker-execution-boundary"
+        }
+      }
     },
     {
       "Sid": "ComponentAccessPolicy",

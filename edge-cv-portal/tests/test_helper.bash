@@ -76,6 +76,10 @@ portal_harness_setup() {
   # Fake edge-cv-portal working tree.
   seed_portal_tree
 
+  # The scripts run a plain (AdministratorAccess) cdk bootstrap only on an
+  # explicit opt-in. These suites exercise that bootstrap path, so opt in.
+  export DDA_ALLOW_ADMIN_BOOTSTRAP=1
+
   # Deterministic, offline-safe defaults for the AWS stub. Individual tests
   # override these via the seed helpers below.
   set_account_id "123456789012"

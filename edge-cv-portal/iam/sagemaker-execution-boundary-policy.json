@@ -1,0 +1,82 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DdaAndSageMakerBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketCors",
+        "s3:PutBucketCors",
+        "s3:GetBucketVersioning"
+      ],
+      "Resource": [
+        "arn:aws:s3:::dda-*",
+        "arn:aws:s3:::sagemaker-*"
+      ]
+    },
+    {
+      "Sid": "LogsAndMetrics",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricData",
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DdaSageMakerJobs",
+      "Effect": "Allow",
+      "Action": [
+        "sagemaker:CreateTrainingJob",
+        "sagemaker:DescribeTrainingJob",
+        "sagemaker:StopTrainingJob",
+        "sagemaker:ListTrainingJobs",
+        "sagemaker:CreateCompilationJob",
+        "sagemaker:DescribeCompilationJob",
+        "sagemaker:StopCompilationJob",
+        "sagemaker:ListCompilationJobs",
+        "sagemaker:CreateLabelingJob",
+        "sagemaker:DescribeLabelingJob",
+        "sagemaker:ListLabelingJobs",
+        "sagemaker:CreateModel",
+        "sagemaker:DescribeModel",
+        "sagemaker:DeleteModel",
+        "sagemaker:ListModels"
+      ],
+      "Resource": [
+        "arn:aws:sagemaker:*:ACCOUNT_ID:training-job/dda-*",
+        "arn:aws:sagemaker:*:ACCOUNT_ID:compilation-job/dda-*",
+        "arn:aws:sagemaker:*:ACCOUNT_ID:labeling-job/dda-*",
+        "arn:aws:sagemaker:*:ACCOUNT_ID:model/dda-*"
+      ]
+    },
+    {
+      "Sid": "PassItselfToSageMaker",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerExecutionRole"
+    },
+    {
+      "Sid": "PullContainerImages",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

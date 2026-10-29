@@ -15,6 +15,26 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# require_admin_bootstrap_opt_in <portal|usecase|data>: a plain `cdk bootstrap`
+# gives the CloudFormation execution role AdministratorAccess, so it runs only
+# when the operator opts in with DDA_ALLOW_ADMIN_BOOTSTRAP. Otherwise stop and
+# name the administrator setup, which bootstraps with the DDA execution
+# policies (iam/setup-account.sh).
+require_admin_bootstrap_opt_in() {
+    case "$(printf '%s' "${DDA_ALLOW_ADMIN_BOOTSTRAP:-}" | tr '[:upper:]' '[:lower:]')" in
+        1|true|yes|on)
+            echo -e "${YELLOW}⚠ DDA_ALLOW_ADMIN_BOOTSTRAP is set: the bootstrap gives the CloudFormation execution role AdministratorAccess${NC}"
+            return 0
+            ;;
+    esac
+    echo -e "${RED}✗ CDK is not bootstrapped here (or is below version 21), and this script does not run a plain cdk bootstrap.${NC}"
+    echo "   A plain cdk bootstrap gives the CloudFormation execution role AdministratorAccess."
+    echo "   Ask an administrator to run the one-time setup for this account and region:"
+    echo "     edge-cv-portal/iam/setup-account.sh $1 --installer-principal <principal-arn>"
+    echo "   To bootstrap with AdministratorAccess anyway, re-run with DDA_ALLOW_ADMIN_BOOTSTRAP=1."
+    exit 1
+}
+
 # Check AWS CLI is available
 if ! command -v aws &> /dev/null; then
     echo -e "${RED}✗ AWS CLI is not installed or not in PATH${NC}"
@@ -167,47 +187,94 @@ if [ "$DEPLOYMENT_TYPE" = "single-account" ]; then
 EOF
 )
     
+    # Permissions boundary (iam/sagemaker-execution-boundary-policy.json). The
+    # installer policy lets the installer create this role and write its
+    # inline policies only while the role carries this boundary, so whatever
+    # an inline policy says, the role can do no more than the boundary
+    # allows. An administrator creates the boundary once
+    # (iam/setup-account.sh); an administrator running this script creates
+    # it here when it is missing.
+    SAGEMAKER_BOUNDARY_NAME="dda-sagemaker-execution-boundary"
+    SAGEMAKER_BOUNDARY_ARN="arn:aws:iam::${CURRENT_ACCOUNT}:policy/${SAGEMAKER_BOUNDARY_NAME}"
+    SAGEMAKER_BOUNDARY_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/iam/sagemaker-execution-boundary-policy.json"
+    if aws iam get-policy --policy-arn "$SAGEMAKER_BOUNDARY_ARN" >/dev/null 2>&1; then
+        echo -e "${GREEN}✓${NC} Permissions boundary ${SAGEMAKER_BOUNDARY_NAME} exists"
+    else
+        BOUNDARY_DOC=$(mktemp)
+        if [ -f "$SAGEMAKER_BOUNDARY_FILE" ] \
+            && sed -e "s/ACCOUNT_ID/${CURRENT_ACCOUNT}/g" "$SAGEMAKER_BOUNDARY_FILE" > "$BOUNDARY_DOC" \
+            && aws iam create-policy --policy-name "$SAGEMAKER_BOUNDARY_NAME" \
+                --description "Permissions boundary of DDASageMakerExecutionRole" \
+                --policy-document "file://$BOUNDARY_DOC" >/dev/null; then
+            echo -e "${GREEN}✓${NC} Created permissions boundary ${SAGEMAKER_BOUNDARY_NAME}"
+            rm -f "$BOUNDARY_DOC"
+        else
+            rm -f "$BOUNDARY_DOC"
+            echo -e "${RED}✗ The permissions boundary ${SAGEMAKER_BOUNDARY_NAME} does not exist, and this identity cannot create it.${NC}"
+            echo "   An administrator creates it once: edge-cv-portal/iam/setup-account.sh portal --installer-principal <principal-arn>"
+            exit 1
+        fi
+    fi
+
+    # trust_policies_match <current-json> <desired-json>: true when the two
+    # trust policies are the same document.
+    trust_policies_match() {
+        python3 - "$1" "$2" <<'PY' 2>/dev/null
+import json, sys
+try:
+    sys.exit(0 if json.loads(sys.argv[1]) == json.loads(sys.argv[2]) else 1)
+except ValueError:
+    sys.exit(1)
+PY
+    }
+
     # Create role
     if aws iam create-role \
         --role-name DDASageMakerExecutionRole \
-        --assume-role-policy-document "$TRUST_POLICY" 2>/dev/null; then
+        --assume-role-policy-document "$TRUST_POLICY" \
+        --permissions-boundary "$SAGEMAKER_BOUNDARY_ARN" 2>/dev/null; then
         echo -e "${GREEN}✓${NC} Created DDASageMakerExecutionRole"
     else
         ROLE_EXISTS=$(aws iam get-role --role-name DDASageMakerExecutionRole 2>/dev/null || echo "")
         if [ -n "$ROLE_EXISTS" ]; then
             echo -e "${YELLOW}⚠${NC} DDASageMakerExecutionRole already exists"
-            echo "Updating trust policy with region-aware SageMaker account..."
-            # Create a temporary file for the policy document
-            TEMP_POLICY=$(mktemp)
-            cat > "$TEMP_POLICY" <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Service": "sagemaker.amazonaws.com"
-      },
-      "Action": "sts:AssumeRole"
-    },
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::$SAGEMAKER_ACCOUNT:root"
-      },
-      "Action": "sts:AssumeRole"
-    }
-  ]
-}
-EOF
-            if aws iam update-assume-role-policy \
-                --role-name DDASageMakerExecutionRole \
-                --policy-document file://"$TEMP_POLICY"; then
-                echo -e "${GREEN}✓${NC} Trust policy updated"
-            else
-                echo -e "${RED}✗ Failed to update trust policy${NC}"
+            # A role created before the boundary existed has none. Only an
+            # administrator can add it, and the installer cannot write the
+            # inline policies below until it is there.
+            CURRENT_BOUNDARY=$(aws iam get-role --role-name DDASageMakerExecutionRole \
+                --query 'Role.PermissionsBoundary.PermissionsBoundaryArn' --output text 2>/dev/null || echo "")
+            if [ "$CURRENT_BOUNDARY" != "$SAGEMAKER_BOUNDARY_ARN" ]; then
+                if aws iam put-role-permissions-boundary --role-name DDASageMakerExecutionRole \
+                    --permissions-boundary "$SAGEMAKER_BOUNDARY_ARN" 2>/dev/null; then
+                    echo -e "${GREEN}✓${NC} Set the ${SAGEMAKER_BOUNDARY_NAME} permissions boundary on DDASageMakerExecutionRole"
+                else
+                    echo -e "${RED}✗ DDASageMakerExecutionRole has no ${SAGEMAKER_BOUNDARY_NAME} permissions boundary, and this identity cannot add it.${NC}"
+                    echo "   An administrator adds it once:"
+                    echo "   aws iam put-role-permissions-boundary --role-name DDASageMakerExecutionRole --permissions-boundary $SAGEMAKER_BOUNDARY_ARN"
+                    exit 1
+                fi
             fi
-            rm -f "$TEMP_POLICY"
+            # The trust policy names the region's Ground Truth account. Update it
+            # only when it differs: the installer policy does not allow
+            # iam:UpdateAssumeRolePolicy, so after a region change an
+            # administrator runs this step.
+            CURRENT_TRUST=$(aws iam get-role --role-name DDASageMakerExecutionRole \
+                --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null || echo "")
+            if trust_policies_match "$CURRENT_TRUST" "$TRUST_POLICY"; then
+                echo -e "${GREEN}✓${NC} Trust policy is up to date"
+            else
+                echo "Updating trust policy with region-aware SageMaker account..."
+                TEMP_POLICY=$(mktemp)
+                printf '%s\n' "$TRUST_POLICY" > "$TEMP_POLICY"
+                if aws iam update-assume-role-policy \
+                    --role-name DDASageMakerExecutionRole \
+                    --policy-document file://"$TEMP_POLICY"; then
+                    echo -e "${GREEN}✓${NC} Trust policy updated"
+                else
+                    echo -e "${RED}✗ Failed to update trust policy${NC} (an administrator can; the installer role cannot)"
+                fi
+                rm -f "$TEMP_POLICY"
+            fi
         else
             echo -e "${RED}✗ Failed to create role. Check IAM permissions.${NC}"
             exit 1
@@ -654,6 +721,7 @@ elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
     CDK_CONTEXT="-c portalAccountId=$PORTAL_ACCOUNT_ID -c externalId=$EXTERNAL_ID"
     if [ "$BOOTSTRAP_VERSION" = "0" ] || [ "$BOOTSTRAP_VERSION" -lt 21 ]; then
         echo -e "${YELLOW}⚠ CDK bootstrap is missing or outdated (version: $BOOTSTRAP_VERSION, need: 21+)${NC}"
+        require_admin_bootstrap_opt_in usecase
         echo "Running cdk bootstrap..."
         cd infrastructure
         # Bootstrap through this account's own app: a bare `cdk bootstrap`
@@ -860,6 +928,7 @@ elif [ "$DEPLOYMENT_TYPE" = "data" ]; then
     BOOTSTRAP_VERSION=$(aws ssm get-parameter --name /cdk-bootstrap/hnb659fds/version --query 'Parameter.Value' --output text 2>/dev/null || echo "0")
     if [ "$BOOTSTRAP_VERSION" = "0" ] || [ "$BOOTSTRAP_VERSION" -lt 21 ]; then
         echo -e "${YELLOW}⚠ CDK bootstrap is missing or outdated (version: $BOOTSTRAP_VERSION, need: 21+)${NC}"
+        require_admin_bootstrap_opt_in data
         echo "Running cdk bootstrap..."
         cd infrastructure
         # Bootstrap through this account's own app (the data app exits 1
