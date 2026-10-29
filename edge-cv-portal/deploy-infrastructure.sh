@@ -91,6 +91,13 @@ else
   CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c allowLegacyRoles=true"
   echo "Portal_Identity enforcement: CDK default (off), acknowledged (fresh install)"
 fi
+# The DDA permissions boundary the account was bootstrapped with: every role
+# the app creates must carry it. See scripts/portal-permissions-boundary.sh.
+. "$SCRIPT_DIR/scripts/portal-permissions-boundary.sh"
+if ! BOUNDARY=$(portal_permissions_boundary "$AWS_REGION"); then
+  exit 1
+fi
+if [ -n "$BOUNDARY" ]; then CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c ddaPermissionsBoundary=$BOUNDARY"; fi
 # Production posture (ADMIN_GUIDE "The enforcement flag"): a deploy that leaves
 # enforcement off must never be silent. The resolved value is passed through
 # as requested (1/true/yes/on/enabled all read as on, like the Lambda layer),

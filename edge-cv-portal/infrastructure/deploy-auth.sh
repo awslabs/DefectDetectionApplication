@@ -171,6 +171,14 @@ else
   echo "CDK already bootstrapped in this region"
 fi
 
+# The DDA permissions boundary the account was bootstrapped with: every role
+# the app creates must carry it. See scripts/portal-permissions-boundary.sh.
+. "$SCRIPT_DIR/../scripts/portal-permissions-boundary.sh"
+if ! BOUNDARY=$(portal_permissions_boundary "$REGION"); then
+  exit 1
+fi
+if [ -n "$BOUNDARY" ]; then ENFORCEMENT_CONTEXT+=(-c "ddaPermissionsBoundary=$BOUNDARY"); fi
+
 # Deploy the auth stack
 echo "Deploying EdgeCVPortalAuthStack..."
 npx cdk deploy EdgeCVPortalAuthStack --require-approval never "${ENFORCEMENT_CONTEXT[@]}"

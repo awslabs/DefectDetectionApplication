@@ -1,0 +1,141 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DdaServices",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:*",
+        "bedrock:*",
+        "cloudformation:*",
+        "cloudfront:*",
+        "cloudwatch:*",
+        "codebuild:*",
+        "cognito-idp:*",
+        "dynamodb:*",
+        "ec2:*",
+        "ec2messages:*",
+        "ecr:*",
+        "ecs:*",
+        "events:*",
+        "firehose:*",
+        "greengrass:*",
+        "iot:*",
+        "kms:*",
+        "lambda:*",
+        "logs:*",
+        "s3:*",
+        "sagemaker:*",
+        "scheduler:*",
+        "secretsmanager:*",
+        "servicequotas:Get*",
+        "ses:*",
+        "sns:*",
+        "sqs:*",
+        "ssm:*",
+        "ssmmessages:*",
+        "states:*",
+        "tag:*",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AssumeDdaRoles",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::*:role/DDA*"
+    },
+    {
+      "Sid": "ReadIam",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetAccountSummary",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:ListEntitiesForPolicy",
+        "iam:GetInstanceProfile"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ChangeDdaRolesAndPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:TagPolicy",
+        "iam:UntagPolicy",
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:UntagInstanceProfile"
+      ],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/EdgeCVPortal*",
+        "arn:aws:iam::ACCOUNT_ID:role/DDAStationProvisioningRole",
+        "arn:aws:iam::ACCOUNT_ID:role/dda-build-role",
+        "arn:aws:iam::ACCOUNT_ID:role/GreengrassV2TokenExchangeRole*",
+        "arn:aws:iam::ACCOUNT_ID:policy/EdgeCVPortal*",
+        "arn:aws:iam::ACCOUNT_ID:policy/GreengrassV2TokenExchangeRoleAccess*",
+        "arn:aws:iam::ACCOUNT_ID:instance-profile/dda-build-role"
+      ]
+    },
+    {
+      "Sid": "PassDdaRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/EdgeCVPortal*",
+        "arn:aws:iam::*:role/DDA*Role",
+        "arn:aws:iam::ACCOUNT_ID:role/dda-build-role",
+        "arn:aws:iam::ACCOUNT_ID:role/GreengrassV2TokenExchangeRole*",
+        "arn:aws:iam::ACCOUNT_ID:role/cdk-hnb659fds-cfn-exec-role-ACCOUNT_ID-*"
+      ]
+    },
+    {
+      "Sid": "ServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS",
+        "arn:aws:iam::ACCOUNT_ID:role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway"
+      ]
+    },
+    {
+      "Sid": "NoRoleWithoutThisBoundary",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary"
+      ],
+      "NotResource": "arn:aws:iam::ACCOUNT_ID:role/GreengrassV2TokenExchangeRole",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::ACCOUNT_ID:policy/dda-portal-permissions-boundary"
+        }
+      }
+    }
+  ]
+}

@@ -259,7 +259,7 @@ not_bootstrapped() {
   mkdir -p "$real"
   ln -s "$PORTAL_STUB_SRC" "$real/aws" 2>/dev/null || cp "$PORTAL_STUB_SRC" "$real/aws"
   rm -f "$PORTAL_BIN/aws"
-  printf '%s\n' '#!/usr/bin/env bash' 'case " $* " in *" CDKToolkit "*) exit 255 ;; esac' \
+  printf '%s\n' '#!/usr/bin/env bash' 'case " $* " in *InputPermissionsBoundary*) ;; *" CDKToolkit "*) exit 255 ;; esac' \
     "exec \"$real/aws\" \"\$@\"" > "$PORTAL_BIN/aws"
   chmod +x "$PORTAL_BIN/aws"
 }
