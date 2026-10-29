@@ -54,6 +54,18 @@
         "arn:aws:iam::ACCOUNT_ID:role/DDAPortalDataAccessRole",
         "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerDataAccessRole"
       ]
+    },
+    {
+      "Sid": "PreconfiguredDataBucketPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy"
+      ],
+      "Resource": [
+        "arn:aws:s3:::DATA_BUCKET_NAME"
+      ]
     }
   ]
 }
