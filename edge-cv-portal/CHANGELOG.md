@@ -4,6 +4,12 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed - Use case region in the onboarding wizard (2026-10-29)
+
+- **A single-account use case records the portal's region.** The onboarding wizard shows the region field only for multi-account setups, but it sent `region: us-east-1` for single-account ones too. Quick Setup, the device list, Greengrass components and deployments, and SageMaker jobs all use that stored region, so a portal running in another region provisioned the use case's devices in us-east-1. The wizard now sends no region for a single-account use case, and the backend records the portal's own region. A bucket created from the wizard's single-account bucket picker also goes in the portal's region now.
+- **The multi-account region field defaults to the portal's region** instead of us-east-1.
+- **Existing use cases keep their stored region.** The **Region** column on the **Use Cases** page shows it. To correct a use case, set `region` with `PUT /usecases/{id}`, then remove and set up again any device that was provisioned in the old region.
+
 ### Changed - Authorization consistency and IAM scoping (2026-10-15)
 
 Use-case creation, account grants, internal invocations and the portal's S3 data plane follow one authorization rule each, and every API route's authorization is committed in `infrastructure/ROUTE_AUTH.md` (generated from the synthesized stacks; the infrastructure tests fail on an unlisted unauthenticated method).

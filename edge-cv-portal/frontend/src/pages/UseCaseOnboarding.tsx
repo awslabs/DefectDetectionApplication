@@ -17,6 +17,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../services/api';
 import type { RegistrationReport } from '../services/api';
+import { getConfig } from '../config';
 import { validateBucketName } from '../utils/s3Validation';
 import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 import { bucketErrorCode } from '../utils/bucketErrors';
@@ -87,7 +88,9 @@ export default function UseCaseOnboarding() {
     setupType: 'multi-account',
     useCaseName: '',
     description: '',
-    region: 'us-east-1',  // Default region
+    // Multi-account default: the portal's own region (config.json). A
+    // single-account use case sends no region at all (see handleSubmit).
+    region: getConfig().region,
     accountId: '',
     roleArn: '',
     sagemakerExecutionRoleArn: '',
@@ -156,8 +159,14 @@ export default function UseCaseOnboarding() {
       const useCaseData: Record<string, unknown> = {
         name: state.useCaseName,
         description: state.description,  // Persist the description entered in Basic Information
-        region: state.region,  // Include region
       };
+      // Only multi-account setups show the region field. A single-account
+      // use case sends none, so the backend records the portal's own region;
+      // sending the hidden default put its devices, Greengrass components and
+      // SageMaker jobs in us-east-1 whatever region the portal ran in.
+      if (state.setupType === 'multi-account') {
+        useCaseData.region = state.region;
+      }
 
       // For single-account setup: only name and s3_bucket required
       // Backend will auto-detect account_id and roles
@@ -399,10 +408,10 @@ export default function UseCaseOnboarding() {
                       stretch
                     >
                       <SpaceBetween size="s">
+                        {/* No region: a new bucket goes in the portal region. */}
                         <S3BucketPicker
                           selectedBucket={state.s3Bucket}
                           onSelect={(bucketName) => updateState({ s3Bucket: bucketName })}
-                          region={state.region}
                         />
                         <Input
                           value={state.s3Bucket}
