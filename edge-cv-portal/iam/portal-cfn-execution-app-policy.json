@@ -1,0 +1,257 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DdaFunctions",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:DeleteFunction*",
+        "lambda:GetFunction*",
+        "lambda:UpdateFunction*",
+        "lambda:PutFunction*",
+        "lambda:PublishVersion",
+        "lambda:ListVersionsByFunction",
+        "lambda:*Alias",
+        "lambda:*Permission",
+        "lambda:GetPolicy",
+        "lambda:InvokeFunction",
+        "lambda:*RuntimeManagementConfig",
+        "lambda:*ProvisionedConcurrencyConfig",
+        "lambda:TagResource",
+        "lambda:UntagResource",
+        "lambda:ListTags"
+      ],
+      "Resource": [
+        "arn:aws:lambda:REGION:ACCOUNT_ID:function:EdgeCVPortal*",
+        "arn:aws:lambda:REGION:ACCOUNT_ID:function:dda-*"
+      ]
+    },
+    {
+      "Sid": "DdaLayersAndEventSourceMappingTags",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:PublishLayerVersion",
+        "lambda:DeleteLayerVersion",
+        "lambda:GetLayerVersion",
+        "lambda:TagResource",
+        "lambda:UntagResource",
+        "lambda:ListTags"
+      ],
+      "Resource": [
+        "arn:aws:lambda:REGION:ACCOUNT_ID:layer:*",
+        "arn:aws:lambda:REGION:ACCOUNT_ID:event-source-mapping:*"
+      ]
+    },
+    {
+      "Sid": "EventSourceMappings",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:GetEventSourceMapping",
+        "lambda:UpdateEventSourceMapping",
+        "lambda:DeleteEventSourceMapping",
+        "lambda:ListEventSourceMappings"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "REGION"
+        }
+      }
+    },
+    {
+      "Sid": "EventSourceMappingsForDdaFunctions",
+      "Effect": "Allow",
+      "Action": "lambda:CreateEventSourceMapping",
+      "Resource": "*",
+      "Condition": {
+        "ArnLike": {
+          "lambda:FunctionArn": [
+            "arn:aws:lambda:REGION:ACCOUNT_ID:function:EdgeCVPortal*",
+            "arn:aws:lambda:REGION:ACCOUNT_ID:function:dda-*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DdaTables",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable",
+        "dynamodb:DeleteTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:UpdateTable",
+        "dynamodb:*TimeToLive",
+        "dynamodb:*ContinuousBackups",
+        "dynamodb:DescribeContributorInsights",
+        "dynamodb:UpdateContributorInsights",
+        "dynamodb:DescribeKinesisStreamingDestination",
+        "dynamodb:*ResourcePolicy",
+        "dynamodb:TagResource",
+        "dynamodb:UntagResource",
+        "dynamodb:ListTagsOfResource"
+      ],
+      "Resource": "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/dda-portal-*"
+    },
+    {
+      "Sid": "DdaBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket*",
+        "s3:ListBucket",
+        "s3:GetBucket*",
+        "s3:PutBucket*",
+        "s3:Get*Configuration",
+        "s3:PutEncryptionConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:TagResource",
+        "s3:UntagResource",
+        "s3:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:s3:::dda-portal-*",
+        "arn:aws:s3:::edgecv-portal-telemetry-*"
+      ]
+    },
+    {
+      "Sid": "DdaApis",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET",
+        "apigateway:POST",
+        "apigateway:PUT",
+        "apigateway:PATCH",
+        "apigateway:DELETE",
+        "apigateway:UpdateRestApiPolicy",
+        "apigateway:TagResource",
+        "apigateway:UntagResource"
+      ],
+      "Resource": [
+        "arn:aws:apigateway:REGION::/restapis",
+        "arn:aws:apigateway:REGION::/restapis/*",
+        "arn:aws:apigateway:REGION::/apis",
+        "arn:aws:apigateway:REGION::/apis/*",
+        "arn:aws:apigateway:REGION::/tags/*"
+      ]
+    },
+    {
+      "Sid": "UserPool",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:DeleteUserPool",
+        "cognito-idp:DescribeUserPool",
+        "cognito-idp:UpdateUserPool",
+        "cognito-idp:AddCustomAttributes",
+        "cognito-idp:*UserPoolMfaConfig",
+        "cognito-idp:*UserPoolClient",
+        "cognito-idp:ListUserPoolClientSecrets",
+        "cognito-idp:CreateUserPoolDomain",
+        "cognito-idp:UpdateUserPoolDomain",
+        "cognito-idp:DeleteUserPoolDomain",
+        "cognito-idp:*ResourceServer",
+        "cognito-idp:*IdentityProvider",
+        "cognito-idp:TagResource",
+        "cognito-idp:UntagResource",
+        "cognito-idp:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:cognito-idp:REGION:ACCOUNT_ID:userpool/*"
+    },
+    {
+      "Sid": "Distribution",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:GetDistribution",
+        "cloudfront:GetDistributionConfig",
+        "cloudfront:UpdateDistribution",
+        "cloudfront:DeleteDistribution",
+        "cloudfront:GetCloudFrontOriginAccessIdentity",
+        "cloudfront:GetCloudFrontOriginAccessIdentityConfig",
+        "cloudfront:UpdateCloudFrontOriginAccessIdentity",
+        "cloudfront:DeleteCloudFrontOriginAccessIdentity",
+        "cloudfront:TagResource",
+        "cloudfront:UntagResource",
+        "cloudfront:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:cloudfront::ACCOUNT_ID:distribution/*",
+        "arn:aws:cloudfront::ACCOUNT_ID:origin-access-identity/*"
+      ]
+    },
+    {
+      "Sid": "DdaKeys",
+      "Effect": "Allow",
+      "Action": [
+        "kms:DescribeKey",
+        "kms:GetKeyPolicy",
+        "kms:PutKeyPolicy",
+        "kms:GetKeyRotationStatus",
+        "kms:EnableKeyRotation",
+        "kms:DisableKeyRotation",
+        "kms:EnableKey",
+        "kms:DisableKey",
+        "kms:ScheduleKeyDeletion",
+        "kms:UpdateKeyDescription",
+        "kms:TagResource",
+        "kms:UntagResource",
+        "kms:ListResourceTags",
+        "kms:CreateAlias",
+        "kms:UpdateAlias",
+        "kms:DeleteAlias"
+      ],
+      "Resource": [
+        "arn:aws:kms:REGION:ACCOUNT_ID:key/*",
+        "arn:aws:kms:REGION:ACCOUNT_ID:alias/dda-portal/*"
+      ]
+    },
+    {
+      "Sid": "EncryptDdaTablesWithDdaKeys",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateGrant",
+        "kms:RevokeGrant",
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*"
+      ],
+      "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "dynamodb.REGION.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "UserPoolKeysThroughCognito",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateGrant",
+        "kms:DescribeKey",
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "cognito-idp.REGION.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "CreateWithoutResourceArn",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateDistribution",
+        "cloudfront:CreateCloudFrontOriginAccessIdentity",
+        "cognito-idp:CreateUserPool",
+        "cognito-idp:DescribeUserPoolDomain",
+        "kms:CreateKey",
+        "kms:ListAliases"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

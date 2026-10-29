@@ -1,0 +1,209 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "UseCdkBootstrapRoles",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/cdk-hnb659fds-deploy-role-ACCOUNT_ID-REGION",
+        "arn:aws:iam::ACCOUNT_ID:role/cdk-hnb659fds-file-publishing-role-ACCOUNT_ID-REGION",
+        "arn:aws:iam::ACCOUNT_ID:role/cdk-hnb659fds-image-publishing-role-ACCOUNT_ID-REGION"
+      ]
+    },
+    {
+      "Sid": "ReadPortalStacks",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:DescribeStacks",
+        "cloudformation:GetTemplate",
+        "cloudformation:DescribeStackResources"
+      ],
+      "Resource": [
+        "arn:aws:cloudformation:REGION:ACCOUNT_ID:stack/EdgeCVPortal*/*",
+        "arn:aws:cloudformation:REGION:ACCOUNT_ID:stack/CDKToolkit/*"
+      ]
+    },
+    {
+      "Sid": "DeployParameters",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": [
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/cdk-bootstrap/hnb659fds/version",
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/dda-portal/trusted-usecase-account-ids",
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/dda-portal/detector-export-image"
+      ]
+    },
+    {
+      "Sid": "TrustedUseCaseAccountList",
+      "Effect": "Allow",
+      "Action": "ssm:PutParameter",
+      "Resource": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/dda-portal/trusted-usecase-account-ids"
+    },
+    {
+      "Sid": "ComponentArtifactBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:CreateBucket"
+      ],
+      "Resource": "arn:aws:s3:::dda-component-REGION-ACCOUNT_ID"
+    },
+    {
+      "Sid": "RetainedResourcePreflight",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:DescribeRepositories",
+        "dynamodb:DescribeTable"
+      ],
+      "Resource": [
+        "arn:aws:ecr:REGION:ACCOUNT_ID:repository/dda-detector-export",
+        "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/dda-portal-edge-credentials",
+        "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/dda-portal-account-sync"
+      ]
+    },
+    {
+      "Sid": "ReadDeployedEnforcementFlag",
+      "Effect": "Allow",
+      "Action": "lambda:ListFunctions",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadApiAuthorizers",
+      "Effect": "Allow",
+      "Action": "apigateway:GET",
+      "Resource": "arn:aws:apigateway:REGION::/restapis/*/authorizers"
+    },
+    {
+      "Sid": "PublishFrontend",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "cloudfront:CreateInvalidation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::dda-portal-frontend-ACCOUNT_ID",
+        "arn:aws:s3:::dda-portal-frontend-ACCOUNT_ID/*",
+        "arn:aws:cloudfront::ACCOUNT_ID:distribution/*"
+      ]
+    },
+    {
+      "Sid": "SageMakerExecutionRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerExecutionRole"
+    },
+    {
+      "Sid": "ComponentAccessPolicy",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:GetPolicy"
+      ],
+      "Resource": "arn:aws:iam::ACCOUNT_ID:policy/DDAPortalComponentAccessPolicy"
+    },
+    {
+      "Sid": "ServiceRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/Greengrass_ServiceRole",
+        "arn:aws:iam::ACCOUNT_ID:role/APIGatewayCloudWatchLogsRole"
+      ]
+    },
+    {
+      "Sid": "GreengrassServiceRolePolicy",
+      "Effect": "Allow",
+      "Action": "iam:AttachRolePolicy",
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/Greengrass_ServiceRole",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/service-role/AWSGreengrassResourceAccessRolePolicy"
+        }
+      }
+    },
+    {
+      "Sid": "ApiGatewayLoggingRolePolicy",
+      "Effect": "Allow",
+      "Action": "iam:AttachRolePolicy",
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/APIGatewayCloudWatchLogsRole",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+        }
+      }
+    },
+    {
+      "Sid": "PassGreengrassServiceRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/Greengrass_ServiceRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "greengrass.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "PassApiGatewayLoggingRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/APIGatewayCloudWatchLogsRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "apigateway.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "AssociateGreengrassServiceRole",
+      "Effect": "Allow",
+      "Action": [
+        "greengrass:GetServiceRoleForAccount",
+        "greengrass:AssociateServiceRoleToAccount"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ApiGatewayAccountLogging",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET",
+        "apigateway:PATCH"
+      ],
+      "Resource": "arn:aws:apigateway:REGION::/account"
+    },
+    {
+      "Sid": "FirstPortalAdmin",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:AdminCreateUser",
+        "cognito-idp:AdminSetUserPassword",
+        "cognito-idp:AdminGetUser",
+        "cognito-idp:ListUsers",
+        "dynamodb:PutItem",
+        "dynamodb:GetItem"
+      ],
+      "Resource": [
+        "arn:aws:cognito-idp:REGION:ACCOUNT_ID:userpool/*",
+        "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/dda-portal-user-roles"
+      ]
+    },
+    {
+      "Sid": "BuildAlertsSubscription",
+      "Effect": "Allow",
+      "Action": "sns:Subscribe",
+      "Resource": "arn:aws:sns:REGION:ACCOUNT_ID:dda-portal-build-alerts"
+    }
+  ]
+}
