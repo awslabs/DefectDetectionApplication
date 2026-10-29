@@ -150,7 +150,22 @@ fi
 # Bootstrap CDK if needed (only for first-time deployment)
 echo "Checking CDK bootstrap status..."
 if ! aws cloudformation describe-stacks --stack-name CDKToolkit --region "$REGION" &>/dev/null; then
+  # A plain `cdk bootstrap` gives the CloudFormation execution role
+  # AdministratorAccess: run one only when the operator opts in. Otherwise an
+  # administrator bootstraps with the DDA execution policies
+  # (iam/setup-account.sh).
+  case "$(printf '%s' "${DDA_ALLOW_ADMIN_BOOTSTRAP:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) ;;
+    *)
+      echo "❌ CDK is not bootstrapped in $REGION, and this script does not run a plain cdk bootstrap," >&2
+      echo "   which would give the CloudFormation execution role AdministratorAccess." >&2
+      echo "   Ask an administrator to run: edge-cv-portal/iam/setup-account.sh portal --installer-principal <principal-arn>" >&2
+      echo "   To bootstrap with AdministratorAccess anyway, re-run with DDA_ALLOW_ADMIN_BOOTSTRAP=1." >&2
+      exit 1
+      ;;
+  esac
   echo "CDK not bootstrapped in this region. Bootstrapping..."
+  echo "⚠️  DDA_ALLOW_ADMIN_BOOTSTRAP is set: the bootstrap gives the CloudFormation execution role AdministratorAccess"
   npx cdk bootstrap --region "$REGION" "${ENFORCEMENT_CONTEXT[@]}"
 else
   echo "CDK already bootstrapped in this region"

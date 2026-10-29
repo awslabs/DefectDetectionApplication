@@ -163,6 +163,11 @@ json_string() {
         | sed -E "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"([^\"]*)\".*/\1/"
 }
 
+# json_true <file> <key> -> succeeds when the flat boolean field <key> is true.
+json_true() {
+    grep -qE "\"$2\"[[:space:]]*:[[:space:]]*true" "$1"
+}
+
 # json_escape <string> -> a value safe to embed in a JSON string literal.
 json_escape() {
     printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -286,6 +291,11 @@ AWS_SECRET_ACCESS_KEY=$(json_string "$CRED_FILE" "secret_access_key")
 AWS_SESSION_TOKEN=$(json_string "$CRED_FILE" "session_token")
 REPORT_SECRET=$(json_string "$CRED_FILE" "report_secret")
 CRED_REGION=$(json_string "$CRED_FILE" "aws_region")
+# The portal prepares the Greengrass token exchange role before it returns
+# these credentials, which carry no IAM write action. When it reports success,
+# setup_station.sh skips its own role policy updates.
+TES_ROLE_PREPARED=0
+json_true "$CRED_FILE" "tes_role_prepared" && TES_ROLE_PREPARED=1
 # Shred the response file immediately; credentials live only in shell variables.
 rm -f "$CRED_FILE" 2>/dev/null || true
 
@@ -331,6 +341,7 @@ fi
 # is redacted (Req 5.8) and captured to both the log and SS_OUT for inspection.
 DDA_THING_GROUP="$THING_GROUP" \
 DDA_PLATFORM_VARIANT="$DETECTED_ARCH" \
+DDA_TES_ROLE_PREPARED="$TES_ROLE_PREPARED" \
 AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
 AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
 AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
