@@ -187,8 +187,11 @@ export class DataAccountStack extends cdk.Stack {
         // Import the existing bucket
         const bucket = s3.Bucket.fromBucketName(this, `DataBucket-${bucketName}`, bucketName);
 
-        // Add bucket policy for cross-account SageMaker access
-        // Note: This creates a new policy that will be merged with any existing policy
+        // Add bucket policy for cross-account SageMaker access.
+        // Note: CloudFormation replaces the bucket's whole policy with this one
+        // (it is not merged), so statements already on the bucket are dropped,
+        // and a later update of this stack drops the statements the portal adds
+        // when it onboards a use case.
         const bucketPolicy = new s3.BucketPolicy(this, `BucketPolicy-${bucketName}`, {
           bucket: bucket,
         });
