@@ -10,7 +10,9 @@ Property 13 (design.md): *For any* registered device name, Device_Group,
 region, and account id, the generated session policy contains no thing or
 thing-group resource ARN referencing any name other than the registered device
 name and Device_Group, no wildcard-action statements (`iot:*`, `greengrass:*`,
-`iam:*`), and only actions from the fixed provisioning action set.
+`iam:*`), and only actions from the fixed provisioning action set. That set
+holds no IAM write action and no `iam:PassRole`: the portal prepares the
+Greengrass token exchange role itself (token_exchange_role.py).
 
 `build_session_policy` is a pure, side-effect-free function, so this test needs
 no AWS mocking and imports the module directly (functions/ is on sys.path via
@@ -46,15 +48,10 @@ FIXED_PROVISIONING_ACTIONS = frozenset({
     "iot:CreatePolicyVersion",
     "iot:DeletePolicyVersion",
     "iot:DescribeEndpoint",
-    "iot:CreateRoleAlias",
     "iot:DescribeRoleAlias",
-    # IAM Greengrass Token Exchange Service (TES) role setup
+    # Read-only installer checks on the Greengrass token exchange role and
+    # its access policy (the portal prepares both)
     "iam:GetRole",
-    "iam:CreateRole",
-    "iam:AttachRolePolicy",
-    "iam:PutRolePolicy",
-    "iam:PassRole",
-    "iam:CreatePolicy",
     "iam:GetPolicy",
     # Greengrass core-device tagging
     "greengrass:TagResource",

@@ -42,13 +42,15 @@ import secrets
 import time
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 import rate_limiter
+import token_exchange_role
 import token_service
-from session_policy import build_session_policy
+from session_policy import build_session_policy, build_tes_preparation_policy
 from token_service import ValidationResult
 from shared_utils import (
+    create_boto3_client,
     create_response,
     record_audit_event_strict,
     finalize_audit_event,
@@ -551,8 +553,15 @@ def exchange_credentials(registration, event, now):
            outlive the token (Req 5.1, 5.2, 5.3). Any STS/lookup failure here
            returns an issuance error and leaves the token UNCONSUMED so the
            Setup_Bundle can retry within the remaining lifetime (Req 5.7).
-        3. Mint a per-registration ``report_secret`` for status reporting.
-        4. Consume the token atomically — the linearization point (Req 5.4,
+        3. Prepare the Greengrass token exchange role server-side
+           (:func:`_prepare_token_exchange_role`). The station's session
+           policy carries no IAM write action, so the Lambda writes the
+           role's inline policies itself and, for same-account use cases,
+           first creates the role, its role alias and its access policy when
+           they are missing. A failure discards the minted credentials and
+           leaves the token unconsumed, as in step 2.
+        4. Mint a per-registration ``report_secret`` for status reporting.
+        5. Consume the token atomically — the linearization point (Req 5.4,
            5.5): a single conditional ``UpdateItem`` requiring the token hash
            to still match, the token to be unconsumed and unexpired, and the
            status to still be ``pending``; it sets status ``in_progress``,
@@ -599,7 +608,8 @@ def exchange_credentials(registration, event, now):
     # dedicated station-provisioning role in the portal account (trusted only by
     # this Lambda); the per-device session policy below still scopes the result.
     # The account root has no external id, so none is presented.
-    if role_arn.rstrip("/").endswith(":root"):
+    same_account = role_arn.rstrip("/").endswith(":root")
+    if same_account:
         if not QUICK_SETUP_PROVISIONING_ROLE_ARN:
             logger.error(
                 "Same-account use case but QUICK_SETUP_PROVISIONING_ROLE_ARN is "
@@ -633,13 +643,26 @@ def exchange_credentials(registration, event, now):
                      exc_info=True)
         return create_response(502, {"error": "credential_issuance_failed"})
 
-    # 3. Mint the per-registration report secret (Req 6 status reporting).
+    # 3. Prepare the token exchange role server-side. The credentials minted
+    #    above are discarded on failure and the token stays unconsumed, so the
+    #    exchange can be retried (Req 5.7).
+    try:
+        tes_role_prepared = _prepare_token_exchange_role(
+            role_arn, external_id, registration_id, region, account_id,
+            same_account,
+        )
+    except (ClientError, BotoCoreError, KeyError):
+        logger.error("Could not prepare the Greengrass token exchange role",
+                     exc_info=True)
+        return create_response(503, {"error": "credential_issuance_failed"})
+
+    # 4. Mint the per-registration report secret (Req 6 status reporting).
     report_secret = secrets.token_urlsafe(32)
     report_secret_hash = hashlib.sha256(
         report_secret.encode("utf-8")
     ).hexdigest()
 
-    # 4. Consume the token atomically — the linearization point (Req 5.4/5.5).
+    # 5. Consume the token atomically — the linearization point (Req 5.4/5.5).
     try:
         _registrations_table().update_item(
             Key={"registration_id": registration_id},
@@ -674,8 +697,10 @@ def exchange_credentials(registration, event, now):
                      exc_info=True)
         return create_response(503, {"error": "credential_issuance_failed"})
 
-    # 5. Return the credentials, report secret, and region. Expiration is a
+    # 6. Return the credentials, report secret, and region. Expiration is a
     #    datetime from STS; serialize to ISO-8601 for the JSON body.
+    #    tes_role_prepared tells run.sh that setup_station.sh can skip its own
+    #    token exchange role policy updates.
     expiration = credentials.get("Expiration")
     return create_response(200, {
         "credentials": {
@@ -686,7 +711,43 @@ def exchange_credentials(registration, event, now):
         },
         "report_secret": report_secret,
         "aws_region": region,
+        "tes_role_prepared": tes_role_prepared,
     })
+
+
+def _prepare_token_exchange_role(role_arn, external_id, registration_id,
+                                 region, account_id, same_account):
+    """Prepare the Greengrass token exchange role for this exchange.
+
+    Assumes the same role as the station's credentials (with the same
+    external id), but narrowed by ``build_tes_preparation_policy`` to the
+    role, its access policy and its role alias. These credentials stay in
+    the Lambda. Same-account use cases get the full preparation; a
+    cross-account DDAPortalAccessRole can only write the role's inline
+    policies (see token_exchange_role.prepare).
+
+    Returns:
+        True when setup_station.sh can skip its own role policy updates.
+
+    Raises:
+        ClientError, BotoCoreError or KeyError when the session cannot be
+        created or a preparation step fails.
+    """
+    assume_params = {
+        "RoleArn": role_arn,
+        "RoleSessionName": f"dda-qs-tes-{registration_id}"[:64],
+        "Policy": json.dumps(build_tes_preparation_policy(region, account_id)),
+        "DurationSeconds": STS_MIN_DURATION_SECONDS,
+    }
+    if external_id:
+        assume_params["ExternalId"] = external_id
+    session = sts.assume_role(**assume_params)["Credentials"]
+    return token_exchange_role.prepare(
+        create_boto3_client("iam", session, region),
+        create_boto3_client("iot", session, region),
+        account_id,
+        create_missing=same_account,
+    )
 
 
 def _record_target_architecture(device_name, usecase_id, target_architecture, now):

@@ -966,7 +966,10 @@ export class ComputeStack extends cdk.Stack {
     // to mint the scoped, short-lived Provisioning_Credentials handed to the
     // station. It holds the provisioning action CEILING; the session policy
     // narrows every issuance to the single registered thing / Device_Group, so
-    // the station never receives broader access. It is trusted ONLY by the
+    // the station never receives broader access. The Lambda also assumes it,
+    // narrowed by session_policy.build_tes_preparation_policy, to prepare the
+    // Greengrass token exchange role itself (token_exchange_role.py); those
+    // credentials never leave the Lambda. It is trusted ONLY by the
     // QuickSetupHandler role — no other principal may assume it. Cross-account
     // use cases continue to use their use-case-account DDAPortalAccessRole.
     const stationProvisioningRole = new iam.Role(this, 'StationProvisioningRole', {
@@ -1035,8 +1038,10 @@ export class ComputeStack extends cdk.Stack {
       actions: ['iot:CreateRoleAlias', 'iot:DescribeRoleAlias'],
       resources: [iotArn('rolealias/GreengrassCoreTokenExchangeRoleAlias')],
     }));
-    // Greengrass Token Exchange Service (TES) role setup performed by the
-    // provisioner, scoped to the GreengrassV2TokenExchangeRole* names.
+    // Greengrass Token Exchange Service (TES) role setup, scoped to the
+    // GreengrassV2TokenExchangeRole* names. The quick_setup Lambda performs it
+    // in its own session (token_exchange_role.py); the station's session
+    // policy keeps only iam:GetRole and iam:GetPolicy.
     stationProvisioningRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [

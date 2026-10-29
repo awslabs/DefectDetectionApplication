@@ -44,9 +44,12 @@ token's expiry. The session policy sets these resource scopes:
 - The IoT thing and thing-group actions are limited to the registered thing
   name and Device_Group.
 - The IoT certificate, policy, policy-version, endpoint and role-alias actions
-  use `Resource: "*"`.
-- The IAM role and policy actions are limited to the names
-  `GreengrassV2TokenExchangeRole*` and `GreengrassV2TokenExchangeRoleAccess*`.
+  use `Resource: "*"`. The only role-alias action is `iot:DescribeRoleAlias`.
+- The only IAM actions are the read-only `iam:GetRole` and `iam:GetPolicy`, on
+  the `GreengrassV2TokenExchangeRole` role and the
+  `GreengrassV2TokenExchangeRoleAccess` policy. The station gets no IAM write
+  action and no `iam:PassRole` (see
+  [Token exchange role preparation](#token-exchange-role-preparation)).
   `setup_station.sh` installs every device with the
   `GreengrassV2TokenExchangeRole` role and the `GreengrassV2IoTThingPolicy` IoT
   policy, so these names are shared by all devices in the account.
@@ -68,21 +71,59 @@ Which role is assumed depends on the Use_Case:
   no manual step.
 - **Trusted only by the `quick_setup` Lambda role** (`QuickSetupHandlerRole`).
   No other principal can assume it.
-- Holds the provisioning **action ceiling** (the same action set as
-  `build_session_policy`: IoT thing/group/cert/policy/endpoint/role-alias,
-  Greengrass TES role setup, `greengrass:TagResource`, `sts:GetCallerIdentity`).
-  The Lambda always assumes it *with* the per-device session policy, so the
-  station receives the intersection of the two. That intersection limits the
-  thing and thing-group actions to the registered device, and allows
-  new versions of the shared `GreengrassV2IoTThingPolicy` IoT policy and
-  changes to roles named `GreengrassV2TokenExchangeRole*`, which all devices
-  in the account use.
+- Holds the provisioning **action ceiling**: the station's actions
+  (`build_session_policy`: IoT thing/group/cert/policy/endpoint/role-alias,
+  `greengrass:TagResource`, `sts:GetCallerIdentity`) plus the IAM and
+  role-alias writes of the token exchange role preparation. The Lambda always
+  assumes it with a session policy. The station receives the intersection
+  with the per-device session policy, which limits the thing and thing-group
+  actions to the registered device and still allows new versions of the
+  shared `GreengrassV2IoTThingPolicy` IoT policy, which all devices in the
+  account use. The token exchange role preparation session gets the
+  intersection with `build_tes_preparation_policy` and stays in the Lambda.
 - The Lambda receives its ARN via the `QUICK_SETUP_PROVISIONING_ROLE_ARN`
   environment variable and selects it automatically when a Use_Case's
   `cross_account_role_arn` ends in `:root`.
 
 No action is required to enable this for same-account portals beyond deploying
 `EdgeCVPortalComputeStack`.
+
+### Token exchange role preparation
+
+Every Greengrass core device in the account gets its AWS credentials from the
+`GreengrassV2TokenExchangeRole` role through the
+`GreengrassCoreTokenExchangeRoleAlias` IoT role alias. Before it returns the
+station's credentials, `POST /quick-setup/credentials` prepares that role
+itself (`backend/functions/token_exchange_role.py`). It assumes the same role
+as the station's credentials, narrowed by
+`session_policy.py::build_tes_preparation_policy` to the role, its access
+policy and its role alias, and those credentials never leave the Lambda.
+
+- **Same-account Use_Cases** — the Lambda does what the Greengrass installer
+  does when these resources are missing: it creates the role (trusted by
+  `credentials.iot.amazonaws.com`), the role alias, and the
+  `GreengrassV2TokenExchangeRoleAccess` managed policy, which it attaches to
+  the role. Existing resources are left as they are. It then writes the four
+  inline policies that `setup_station.sh` writes (`GreengrassComponentS3Access`,
+  `CloudWatchLogsPolicy`, `ECRComponentAccess`, `ShadowManagerSyncPolicy`).
+- **Cross-account Use_Cases** — `DDAPortalAccessRole` may only write inline
+  policies on the role, so the Lambda writes the four inline policies when the
+  role exists.
+
+The response's `tes_role_prepared` field tells `run.sh` whether that
+succeeded. When it is `true`, `run.sh` passes `DDA_TES_ROLE_PREPARED=1` to
+`setup_station.sh`, which then skips its own role policy updates. When it is
+`false` (a cross-account role that is missing, or a `DDAPortalAccessRole`
+without the inline policy grant), `setup_station.sh` tries the updates itself,
+and they end in warnings as before. Any other preparation failure returns
+`503 credential_issuance_failed` and leaves the setup token unused, so the
+operator can run the setup command again.
+
+Before this change the station's credentials held `iam:CreateRole`,
+`iam:AttachRolePolicy`, `iam:PutRolePolicy`, `iam:PassRole` and
+`iam:CreatePolicy` on `GreengrassV2TokenExchangeRole*` names, so a setup token
+holder could give that role any managed or inline policy, or create a
+similarly named role with any trust policy.
 
 ## Detected Target_Architecture recording
 

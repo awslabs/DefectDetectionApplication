@@ -296,8 +296,14 @@ def test_credential_duration_never_exceeds_remaining_token_lifetime(
         # DurationSeconds is min(ceiling, remaining) -- in particular NEVER
         # more than the remaining token lifetime (the core property).
         assert response["statusCode"] == 200, response
-        assert len(recorder.calls) == 1, recorder.calls
-        requested_duration = recorder.calls[0]["DurationSeconds"]
+        # Two sessions: the station's credentials and the Lambda's own token
+        # exchange role preparation session (dda-qs-tes-*), whose credentials
+        # are never returned to the station.
+        station_calls = [c for c in recorder.calls
+                         if not c["RoleSessionName"].startswith("dda-qs-tes-")]
+        assert len(station_calls) == 1, recorder.calls
+        assert len(recorder.calls) == 2, recorder.calls
+        requested_duration = station_calls[0]["DurationSeconds"]
 
         # Core property: credential validity never exceeds remaining lifetime.
         assert requested_duration <= remaining, (

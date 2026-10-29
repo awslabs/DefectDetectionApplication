@@ -289,12 +289,15 @@ def build_session_policy(device_name, device_group, region, account_id) -> dict:
       - iot: CreateKeysAndCertificate, AttachThingPrincipal, AttachPolicy,
              CreatePolicy, GetPolicy, ListPolicyVersions,
              CreatePolicyVersion, DeletePolicyVersion, DescribeEndpoint,
-             CreateRoleAlias, DescribeRoleAlias
+             DescribeRoleAlias
              (certificate ids unknowable in advance -> resource *,
               actions minimal)
-      - iam:  GetRole/CreateRole/AttachRolePolicy/PassRole/CreatePolicy/GetPolicy
-             scoped to GreengrassV2TokenExchangeRole /
-             GreengrassV2TokenExchangeRoleAccess (provisioner TES setup)
+      - iam:  GetRole/GetPolicy (read-only) on GreengrassV2TokenExchangeRole /
+             GreengrassV2TokenExchangeRoleAccess. The Lambda prepares the
+             TES role, role alias and policies itself before issuing these
+             credentials (token_exchange_role.py, in a separate session
+             narrowed by build_tes_preparation_policy that never leaves the
+             Lambda), so the station gets no IAM write and no PassRole.
       - greengrass: TagResource on
              ...:coreDevices:{device_name}              # dda-portal:managed tag
       - sts: GetCallerIdentity
