@@ -1240,6 +1240,19 @@ export class ComputeStack extends cdk.Stack {
     props.deviceRegistrationsTable.grant(
       devicesHandler, 'dynamodb:Query', 'dynamodb:DeleteItem');
 
+    // greengrass:ListEffectiveDeployments (on the base role) also needs
+    // iot:DescribeJobExecution on each deployment's IoT job. Without it the
+    // call is denied, and the device page and the deployment detail show no
+    // per-device deployment status. Granted to the two handlers that make the
+    // call (devices.get_device, deployments.py) for same-account use cases;
+    // the use-case account stack grants DDAPortalAccessRole the same.
+    const describeJobExecutionStatement = () => new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iot:DescribeJobExecution'],
+      resources: ['arn:aws:iot:*:*:job/*', 'arn:aws:iot:*:*:thing/*'],
+    });
+    devicesHandler.role?.addToPrincipalPolicy(describeJobExecutionStatement());
+
     // Device Logs Lambda Handler
     const deviceLogsHandler = new lambda.Function(this, 'DeviceLogsHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
@@ -1301,6 +1314,7 @@ export class ComputeStack extends cdk.Stack {
       actions: ['iam:GetRolePolicy', 'iam:PutRolePolicy'],
       resources: [`arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:role/GreengrassV2TokenExchangeRole`],
     }));
+    deploymentsRole.addToPolicy(describeJobExecutionStatement());
 
     // Component store limit auto-remediation sweep: detects devices whose
     // latest deployment failed with the Nucleus "Component store size limit

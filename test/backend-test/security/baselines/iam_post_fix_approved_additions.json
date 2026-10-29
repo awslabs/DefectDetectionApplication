@@ -88,6 +88,13 @@
         "statements": 46,
         "status": "Recorded by the spec implementation on branch feature/workflow-telemetry-dashboards; the repository owner reviews it with the branch before the Portal deploy (runbook RB-2) and the template update (RB-3).",
         "reviewed": "Purely additive: 46 added, 0 removed (EdgeCVPortalTelemetryStack: 44 statements over the ingest (7), roll-up (6), API (14), maintenance (9), rule-error (1) and schedule (1) roles and the two Firehose delivery roles (3 each); DDAPortalUseCaseAccountStack: 2, the condition-gated DDATelemetryRuleErrorRole's three logs actions on the /dda/telemetry/rule-errors group of its own account and the unconditional Sid TelemetryLiveFrameExpiry, s3:DeleteObject on dda-inference-results-<account>/dda-telemetry/live/* for DDAPortalAccessRole). Wildcard resources only where the action has no resource type: dynamodb:ListStreams (the stream event sources' grantStreamRead) and the three Greengrass core-device reads the ComputeStack already grants on '*', plus the per-account iot thing/* and cert/* patterns; DynamoDB per table and index (the API role never scans the telemetry tables; Devices is scanned as the debug stack does); s3 only on the account's dda-inference-results bucket under dda-telemetry/ (read, list with an s3:prefix condition, the two lifecycle/versioning reads, and DeleteObject under dda-telemetry/live/ for the maintenance role) and on the stack's own lake bucket under raw/ and errors/ for the two Firehose roles; firehose:PutRecordBatch on the two fixed-name delivery streams; sts:AssumeRole scoped to the trusted account ids (the fixture renders 222222222222/333333333333); lambda:InvokeFunction only on the maintenance function for the scheduler role; the IoT Lambda actions carry no role and are authorized by the alias resource policies (SourceArn rule/dda_tel_* per trusted account). No new iam:PassRole. infrastructure/test/telemetry-stack.test.ts and usecase-account-telemetry.test.ts pin every statement."
+      },
+      {
+        "spec": "none (fix/portal-describe-job-execution: an IAM gap found on a live single-account portal)",
+        "added_on": "2026-10-29",
+        "statements": 3,
+        "status": "Recorded with the fix on branch fix/portal-describe-job-execution; the repository owner reviews it with the PR.",
+        "reviewed": "Purely additive: 3 added, 0 removed. EdgeCVPortalComputeStack: 2, iot:DescribeJobExecution on arn:aws:iot:*:*:job/* and thing/* for DevicesRole and DeploymentsRole, the two handlers that call greengrass:ListEffectiveDeployments (devices.get_device, deployments.py), which the base role already grants but which is denied without this dependent read. DDAPortalUseCaseAccountStack: 1, iot:DescribeJobExecution joins the IoTJobs Sid on DDAPortalAccessRole, so it also covers that Sid's thinggroup/* resource, a no-op for this action. One read-only action; no new wildcard account beyond the patterns these roles already use."
       }
     ]
   },
@@ -169,7 +176,9 @@
         "{\"Action\": [\"s3:DeleteObject\", \"s3:GetObject\", \"s3:PutObject\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:s3:::dda-inference-results-\", {\"Ref\": \"AWS::AccountId\"}, \"/workflow-tuning/*\"]]}}",
         "{\"Action\": \"s3:PutBucketABAC\", \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*\"}",
         "{\"Action\": [\"iam:GetRolePolicy\", \"iam:PutRolePolicy\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:iam::\", {\"Ref\": \"AWS::AccountId\"}, \":role/GreengrassV2TokenExchangeRole\"]]}, \"Sid\": \"DeviceRoleInlinePolicyGrants\"}",
-        "{\"Action\": [\"iam:GetRolePolicy\", \"iam:PutRolePolicy\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:iam::\", {\"Ref\": \"AWS::AccountId\"}, \":role/GreengrassV2TokenExchangeRole\"]]}, \"Sid\": \"DeviceRoleInlinePolicyGrants\"}"
+        "{\"Action\": [\"iam:GetRolePolicy\", \"iam:PutRolePolicy\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:iam::\", {\"Ref\": \"AWS::AccountId\"}, \":role/GreengrassV2TokenExchangeRole\"]]}, \"Sid\": \"DeviceRoleInlinePolicyGrants\"}",
+        "{\"Action\": \"iot:DescribeJobExecution\", \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:iot:*:*:job/*\", \"arn:aws:iot:*:*:thing/*\"]}",
+        "{\"Action\": \"iot:DescribeJobExecution\", \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:iot:*:*:job/*\", \"arn:aws:iot:*:*:thing/*\"]}"
       ]
     },
     "DDAPortalUseCaseAccountStack": {
@@ -183,7 +192,8 @@
         "{\"Action\": \"iot:GetTopicRule\", \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:iot:*:111111111111:rule/dda_tel_ingest\", \"arn:aws:iot:*:111111111111:rule/dda_dbg_ingest\"], \"Sid\": \"TelemetryConventionRuleRead\"}",
         "{\"Action\": [\"logs:CreateLogStream\", \"logs:DescribeLogStreams\", \"logs:PutLogEvents\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:logs:us-east-1:111111111111:log-group:/dda/workflow-debug/rule-errors:*\", \"Sid\": \"WriteDebugRuleErrors\"}",
         "{\"Action\": \"s3:DeleteObject\", \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::dda-inference-results-111111111111/dda-telemetry/live/*\", \"Sid\": \"TelemetryLiveFrameExpiry\"}",
-        "{\"Action\": [\"logs:CreateLogStream\", \"logs:DescribeLogStreams\", \"logs:PutLogEvents\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:logs:us-east-1:111111111111:log-group:/dda/telemetry/rule-errors:*\", \"Sid\": \"WriteTelemetryRuleErrors\"}"
+        "{\"Action\": [\"logs:CreateLogStream\", \"logs:DescribeLogStreams\", \"logs:PutLogEvents\"], \"Effect\": \"Allow\", \"Resource\": \"arn:aws:logs:us-east-1:111111111111:log-group:/dda/telemetry/rule-errors:*\", \"Sid\": \"WriteTelemetryRuleErrors\"}",
+        "{\"Action\": \"iot:DescribeJobExecution\", \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:iot:*:111111111111:job/*\", \"arn:aws:iot:*:111111111111:thing/*\", \"arn:aws:iot:*:111111111111:thinggroup/*\"]}"
       ]
     },
     "EdgeCVPortalWorkflowDebugStack": {
