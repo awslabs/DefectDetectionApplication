@@ -15,8 +15,12 @@
 #     arch="$(detect_target_architecture)"
 #
 # On aarch64/arm64 the JetPack major is derived from the installed L4T release
-# (which distinguishes JetPack 5/6/7 — the kernel CPU arch does not); an
-# aarch64 host with no L4T at all is a generic (non-Jetson) arm64 CPU host
+# (which distinguishes JetPack 5/6/7 — the kernel CPU arch does not): R35 is
+# arm64_jp5, R36 is arm64_jp6, and R38 (JetPack 7.0/7.1, Thor only) is
+# arm64_jp7. R39 (JetPack 7.2) runs on both Thor and Orin, and the JP7 build
+# targets Thor's GPU, so R39 is arm64_jp7 only when the device tree names the
+# Thor SoC (nvidia,tegra264); an Orin on R39 stays undetermined. An aarch64
+# host with no L4T at all is a generic (non-Jetson) arm64 CPU host
 # (arm64_cpu), while an L4T release outside the supported set (e.g. JetPack
 # 4's R32) stays undetermined rather than being misreported as CPU. On
 # x86_64/amd64 the value is x86_64_nvidia when an NVIDIA GPU runtime is
@@ -28,6 +32,9 @@
 #                               (default /etc/nv_tegra_release)
 #     NVIDIA_PROC_VERSION_FILE  path to the NVIDIA kernel-module version file
 #                               (default /proc/driver/nvidia/version)
+#     DEVICE_TREE_COMPATIBLE_FILE  path to the device tree's NUL-separated
+#                               compatible list
+#                               (default /proc/device-tree/compatible)
 #     DETECT_ARCH_UNAME_M       overrides the `uname -m` machine name
 # The dpkg-query / nvidia-smi / lspci probes resolve through PATH so they can
 # be stubbed in tests.
@@ -41,13 +48,25 @@ _detect_arch_machine() {
     fi
 }
 
+# _detect_is_thor -> 0 (true) when the device tree's compatible list names the
+# Jetson Thor SoC (nvidia,tegra264), else 1. Read-only.
+_detect_is_thor() {
+    local file="${DEVICE_TREE_COMPATIBLE_FILE:-/proc/device-tree/compatible}"
+    [ -r "$file" ] || return 1
+    tr '\0' '\n' < "$file" 2>/dev/null | grep -qxF 'nvidia,tegra264'
+}
+
 # _detect_jetpack_arch_from_major <major> -> the arch token for a supported
-# L4T major (35/36/38), else nothing (JetPack 4's R32 is no longer supported).
+# L4T major (35/36/38, and 39 on Thor), else nothing (JetPack 4's R32 is no
+# longer supported).
 _detect_jetpack_arch_from_major() {
     case "$1" in
         35) printf 'arm64_jp5' ;;
         36) printf 'arm64_jp6' ;;
         38) printf 'arm64_jp7' ;;
+        # JetPack 7.2 (R39) also runs on Orin, which the JP7 build does not
+        # support. The if keeps the exit status 0 on a non-Thor device.
+        39) if _detect_is_thor; then printf 'arm64_jp7'; fi ;;
         *)  : ;;   # unknown / empty -> undetermined
     esac
 }

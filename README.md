@@ -584,7 +584,7 @@ On **Builds**, fill in **Submit build**:
    |--------|-----------|-------------------------------|
    | JP5 | `aws.edgeml.dda.LocalServer.arm64JP5` | Jetson, JetPack 5 (L4T R35, Ubuntu 20.04): `arm64_jp5` |
    | JP6 | `aws.edgeml.dda.LocalServer.arm64JP6` | Jetson, JetPack 6 (L4T R36, Ubuntu 22.04): `arm64_jp6` |
-   | JP7 | `aws.edgeml.dda.LocalServer.arm64JP7` | Jetson Thor, JetPack 7 (L4T R38, Ubuntu 24.04): `arm64_jp7` |
+   | JP7 | `aws.edgeml.dda.LocalServer.arm64JP7` | Jetson Thor, JetPack 7 (L4T R38 or R39, Ubuntu 24.04): `arm64_jp7` |
    | AMD64 | `aws.edgeml.dda.LocalServer.amd64` | x86_64 CPU: `x86_64` |
    | AMD64_NVIDIA | `aws.edgeml.dda.LocalServer.amd64Nvidia` | x86_64 with an NVIDIA GPU: `x86_64_nvidia` |
 
@@ -802,7 +802,8 @@ For details of the setup flow, see [station_install/quick_setup/README.md](stati
 
 #### 7.6 JetPack 7 (JP7) Devices
 
-- Jetson Thor devices on JetPack 7 (L4T R38, Ubuntu 24.04) are recorded as `arm64_jp7` and need `aws.edgeml.dda.LocalServer.arm64JP7`. Create Deployment does not offer them the JP5 or JP6 LocalServer, and it does not offer the JP7 LocalServer to JP5 or JP6 devices.
+- Jetson Thor devices on JetPack 7 (L4T R38, or R39 from JetPack 7.2; Ubuntu 24.04) are recorded as `arm64_jp7` and need `aws.edgeml.dda.LocalServer.arm64JP7`. Create Deployment does not offer them the JP5 or JP6 LocalServer, and it does not offer the JP7 LocalServer to JP5 or JP6 devices.
+- An Orin on JetPack 7.2 also reports L4T R39, but setup leaves its architecture unrecorded, because the JP7 build targets Thor's GPU.
 - GPU access needs the NVIDIA container runtime registered with Docker. The setup registers it with `nvidia-ctk` or in `/etc/docker/daemon.json`. If the output warns that neither `nvidia-ctk` nor `nvidia-container-runtime` was found, GPU containers will not start: install the NVIDIA Container Toolkit on the device before you deploy.
 - DLR-only (Neo-compiled) models are not supported on JP7. Use ONNX models instead ([Using ONNX Models](#using-onnx-models)).
 - The JP7 LocalServer includes vLLM ([Using LLMs (vLLM)](#using-llms-vllm)).
