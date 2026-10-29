@@ -108,7 +108,7 @@ It checks the prerequisites (AWS CLI, credentials, region, Node.js, CDK), bootst
 
 1. `./deploy-account-role.sh single-account` — IAM roles and policies
 2. `infrastructure/deploy-auth.sh` — the Cognito `EdgeCVPortalAuthStack`
-3. `./deploy-infrastructure.sh` — the main CDK stacks (`cdk deploy --all`)
+3. `./deploy-infrastructure.sh` — the main CDK stacks (`cdk deploy --all`). On a new install a second `cdk deploy` follows for the workflow debug and telemetry stacks, which attach to the authorizer of the API that the first one creates
 4. `./deploy-frontend.sh` — generates `frontend/public/config.json` from the stack outputs, builds and publishes the frontend, and redeploys the compute stack with the CloudFront domain
 
 All output goes to the terminal and to `edge-cv-portal/deploy-portal-<UTC-timestamp>.log` (`--log-file <path>` to override). If a step fails, the command stops, prints the failed step and the log path, and rolls nothing back; fix the cause and re-run the same command. On success it prints a Deployment Summary with the Portal URL, the created role ARNs and each step's outcome.

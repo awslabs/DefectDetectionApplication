@@ -310,7 +310,8 @@ owner-approved action.
   a component build. `deploy-infrastructure.sh` resolves the shared authorizer
   id and passes it as `-c sharedAuthorizerId=<id>`; without it the CDK app
   skips the two new stacks with a warning and deploys every other stack as
-  before (a fresh install runs the script twice).
+  before. On a fresh install, where that deploy creates the API, the script
+  then looks the id up again and deploys the two stacks in a second pass.
 - **RB-3, the results bucket:** create or confirm the lab bucket and apply the
   lifecycle rules with `scripts/telemetry_lifecycle.py`.
 - **RB-4, rollback:** destroy the telemetry stack and re-create the API

@@ -288,7 +288,7 @@ cd edge-cv-portal
 
 1. `./deploy-account-role.sh single-account` — IAM roles and policies (`DDASageMakerExecutionRole`, `DDAPortalComponentAccessPolicy`, `Greengrass_ServiceRole`)
 2. `infrastructure/deploy-auth.sh` — the Cognito `EdgeCVPortalAuthStack`
-3. `./deploy-infrastructure.sh` — the main CDK stacks (`cdk deploy --all`)
+3. `./deploy-infrastructure.sh` — the main CDK stacks (`cdk deploy --all`). On a new install a second `cdk deploy` follows for the workflow debug and telemetry stacks, which attach to the authorizer of the API that the first one creates
 4. `./deploy-frontend.sh` — generates `config.json` from the stack outputs, builds and publishes the React frontend, and redeploys the compute stack with the CloudFront domain
 
 Each step's output is shown on the terminal and written to `edge-cv-portal/deploy-portal-<UTC-timestamp>.log` (override with `--log-file <path>`). If a step fails, the command stops, prints `Deployment failed at step: <name>` and the log path, and rolls nothing back; fix the cause and re-run the same command. When every step succeeds it prints a **Deployment Summary** with the Portal URL (the CloudFront domain), the created role ARNs and each step's outcome.
