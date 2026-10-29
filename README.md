@@ -266,7 +266,7 @@ The installer role does not use the CDK lookup role: the DDA CDK apps make no co
 | Account | File in `edge-cv-portal/iam/` | Policy name | Attach to |
 |---------|-------------------------------|-------------|-----------|
 | Portal (also single-account) | `portal-installer-policy.json` | `dda-installer-portal` | Installer role |
-| Portal (also single-account) | `portal-cfn-execution-iam-policy.json`, `portal-cfn-execution-app-policy.json`, `portal-cfn-execution-platform-policy.json` | `dda-cfn-exec-portal-iam`, `dda-cfn-exec-portal-app`, `dda-cfn-exec-portal-platform` | CloudFormation execution role, through `cdk bootstrap` |
+| Portal (also single-account) | `portal-cfn-execution-iam-policy.json`, `portal-cfn-execution-app-policy.json`, `portal-cfn-execution-platform-policy.json`, `portal-cfn-execution-network-policy.json` | `dda-cfn-exec-portal-iam`, `dda-cfn-exec-portal-app`, `dda-cfn-exec-portal-platform`, `dda-cfn-exec-portal-network` | CloudFormation execution role, through `cdk bootstrap` |
 | UseCase | `usecase-installer-policy.json` | `dda-installer-usecase` | Installer role |
 | UseCase | `usecase-cfn-execution-policy.json` | `dda-cfn-exec-usecase` | CloudFormation execution role, through `cdk bootstrap` |
 | Data | `data-installer-policy.json` | `dda-installer-data` | Installer role |
@@ -275,7 +275,9 @@ The installer role does not use the CDK lookup role: the DDA CDK apps make no co
 | Any | `cdk-bootstrap-policy.json` | `dda-cdk-bootstrap` | Optional: a separate bootstrap role, if an administrator does not run `cdk bootstrap` (not the installer role) |
 | UseCase (the Portal Account in single-account) | AWS managed policy `AWSMarketplaceManageSubscriptions` | - | Installer role, for the Marketplace subscription only |
 
-The Portal execution policy is split into three files because IAM limits a managed policy to 6,144 characters. IAM Access Analyzer reports `apigateway:TagResource` and `apigateway:UntagResource` in `portal-cfn-execution-app-policy.json` as unknown actions. Keep them: API Gateway checks `apigateway:TagResource` when CloudFormation creates the stage of the MCP server's HTTP API, and the deploy fails without it.
+The Portal execution policy is split into four files because IAM limits a managed policy to 6,144 characters.
+
+The Portal execution policies manage KMS keys and EC2 network resources (VPCs, subnets, route tables, internet gateways, security groups, VPC endpoints) only when they carry the tag `dda-portal:managed=true`, the tag the portal already uses for its buckets and core devices. The portal stacks create every key and network resource with that tag, and the execution role can create one only with the tag in the create request. It can add EC2 tags only while creating a resource or to a resource that already has the tag, so it cannot take over another network resource by tagging it. KMS is weaker: to create a key with tags, KMS requires `kms:TagResource` on every key in the account and Region, so the execution role can still add `dda-portal:managed=true` to another key and then manage it. On an account deployed before these conditions, `iam/setup-account.sh` first adds the tag to the KMS keys and network resources of the `EdgeCVPortal*` stacks, as the administrator; a deploy that changes an untagged one is refused. IAM Access Analyzer reports `apigateway:TagResource` and `apigateway:UntagResource` in `portal-cfn-execution-app-policy.json` as unknown actions. Keep them: API Gateway checks `apigateway:TagResource` when CloudFormation creates the stage of the MCP server's HTTP API, and the deploy fails without it.
 
 #### One-time setup (administrator)
 
@@ -289,7 +291,7 @@ cd edge-cv-portal
 
 The script:
 
-1. Fills the account and region into the policy files.
+1. Fills the account and region into the policy files. In the Portal Account it first tags the KMS keys and network resources of the `EdgeCVPortal*` stacks `dda-portal:managed=true`, which the execution policies require.
 2. Creates the policies, or adds a new default version when a document changed. That covers the execution policies, the installer policy and, in the Portal Account, the `DDASageMakerExecutionRole` permissions boundary. It also puts that boundary on a `DDASageMakerExecutionRole` left by an earlier install.
 3. Bootstraps CDK with the execution policies instead of `AdministratorAccess`.
 4. Creates the `DDAInstaller` role, trusting `--installer-principal`, and attaches the installer policy. An existing role keeps its trust policy.

@@ -31572,7 +31572,13 @@
       }
      ],
      "Version": "2012-10-17"
-    }
+    },
+    "Tags": [
+     {
+      "Key": "dda-portal:managed",
+      "Value": "true"
+     }
+    ]
    },
    "UpdateReplacePolicy": "Retain",
    "DeletionPolicy": "Retain",

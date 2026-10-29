@@ -13,6 +13,7 @@ import { WorkflowDebugStack } from '../lib/workflow-debug-stack';
 import { TelemetryStack } from '../lib/telemetry-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { McpStack, mcpBackendHandlers } from '../lib/mcp-stack';
+import { tagExecPolicyManagedResources } from '../lib/managed-tag';
 import {
   PORTAL_API_AUTHORIZER_NAME,
   SHARED_AUTHORIZER_CONTEXT_KEY,
@@ -435,5 +436,10 @@ const frontendStack = new FrontendStack(app, 'EdgeCVPortalFrontendStack', {
   userPoolId: authStack.userPool.userPoolId,
   userPoolClientId: authStack.userPoolClient.userPoolClientId,
 });
+
+// The execution policies let a deploy manage KMS keys and network resources
+// only when they carry dda-portal:managed=true (lib/managed-tag.ts), so every
+// stack creates them with it.
+tagExecPolicyManagedResources(app);
 
 app.synth();
