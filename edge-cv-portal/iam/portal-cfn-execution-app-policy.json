@@ -286,6 +286,17 @@
         "kms:ListAliases"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "KeepTheManagedTag",
+      "Effect": "Deny",
+      "Action": "kms:UntagResource",
+      "Resource": "*",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "aws:TagKeys": "dda-portal:managed"
+        }
+      }
     }
   ]
 }

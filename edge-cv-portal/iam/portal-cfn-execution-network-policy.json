@@ -122,6 +122,17 @@
         "ec2:UpdateSecurityGroupRuleDescriptionsEgress"
       ],
       "Resource": "arn:aws:ec2:REGION:ACCOUNT_ID:security-group-rule/*"
+    },
+    {
+      "Sid": "KeepTheManagedTag",
+      "Effect": "Deny",
+      "Action": "ec2:DeleteTags",
+      "Resource": "*",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "aws:TagKeys": "dda-portal:managed"
+        }
+      }
     }
   ]
 }
