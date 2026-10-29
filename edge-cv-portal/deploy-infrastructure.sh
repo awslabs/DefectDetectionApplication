@@ -117,10 +117,11 @@ fi
 #
 # When nothing resolves (a fresh install has no API yet, or the lookup is
 # denied) no value is passed; the CDK app then warns, skips those two stacks
-# and deploys every other stack as before. On a fresh install that is the
-# first pass: run this script again once EdgeCVPortalComputeStack exists and
-# the lookup succeeds. The lookup itself never stops the deploy: both reads
-# run under `|| true`.
+# and deploys every other stack as before. The script then looks the id up
+# again after that deploy: on a fresh install the deploy has just created the
+# API, so the lookup succeeds and a second `cdk deploy` adds the two stacks
+# (see the end of this script). The lookup itself never stops the deploy:
+# both reads run under `|| true`.
 resolve_shared_authorizer_id() {
   local api_id
   if [ -n "${SHARED_AUTHORIZER_ID:-}" ]; then
@@ -138,12 +139,13 @@ resolve_shared_authorizer_id() {
     --query "items[?name=='EdgeCVPortalAuthorizer' && type=='COGNITO_USER_POOLS'].id" --output text 2>/dev/null \
     | awk 'NF { print $1; exit }' || true
 }
+shared_authorizer_found() { [ -n "$SHARED_AUTHORIZER" ] && [ "$SHARED_AUTHORIZER" != "None" ]; }
 SHARED_AUTHORIZER=$(resolve_shared_authorizer_id || true)
-if [ -n "$SHARED_AUTHORIZER" ] && [ "$SHARED_AUTHORIZER" != "None" ]; then
+if shared_authorizer_found; then
   echo "🔑 Shared API authorizer (EdgeCVPortalAuthorizer): $SHARED_AUTHORIZER"
   CDK_CONTEXT_ARGS="$CDK_CONTEXT_ARGS -c sharedAuthorizerId=$SHARED_AUTHORIZER"
 else
-  echo "⚠️  No EdgeCVPortalAuthorizer found on the deployed portal API (is EdgeCVPortalComputeStack deployed?). The workflow debug and telemetry stacks need its id: the CDK app skips those two stacks (and deploys every other stack) without it. Run this script again once EdgeCVPortalComputeStack exists, or set SHARED_AUTHORIZER_ID=<id> to pass one by hand." >&2
+  echo "ℹ️  No EdgeCVPortalAuthorizer found on the deployed portal API yet. The workflow debug and telemetry stacks need its id, so this deploy leaves them out; the script looks the id up again after it and then deploys those two stacks (on a fresh install, this deploy creates the API)."
 fi
 
 # Trusted UseCase account list, for visibility only. bin/app.ts synthesizes the
@@ -206,6 +208,25 @@ fi
 # aws-cdk-lib emits a cloud-assembly schema that an older global `cdk` on
 # PATH cannot read ("Cloud assembly schema version mismatch").
 npx cdk deploy --all --require-approval never --force $CDK_CONTEXT_ARGS
+
+# Second pass for the two stacks that need the shared authorizer id. When the
+# lookup above found none, the deploy just run left them out; on a fresh
+# install it has now created the API, so look the id up again. Naming the two
+# stacks without --exclusively lets the CLI also deploy the stacks they import
+# values from, should a change ever give those stacks an export that only the
+# two use; without --force, it skips the ones whose template did not change.
+if ! shared_authorizer_found; then
+  SHARED_AUTHORIZER=$(resolve_shared_authorizer_id || true)
+  if shared_authorizer_found; then
+    echo "🔑 Shared API authorizer (EdgeCVPortalAuthorizer): $SHARED_AUTHORIZER"
+    echo "🚀 Deploying the workflow debug and telemetry stacks..."
+    # shellcheck disable=SC2086 # CDK_CONTEXT_ARGS is a word list, as in the first pass
+    npx cdk deploy EdgeCVPortalWorkflowDebugStack EdgeCVPortalTelemetryStack \
+      --require-approval never $CDK_CONTEXT_ARGS -c "sharedAuthorizerId=$SHARED_AUTHORIZER"
+  else
+    echo "⚠️  No EdgeCVPortalAuthorizer found on the deployed portal API after this deploy either (is EdgeCVPortalComputeStack deployed, and may these credentials read its authorizers with apigateway:GET?). The workflow debug and telemetry stacks were not deployed: fix the lookup and run this script again, or set SHARED_AUTHORIZER_ID=<id> to pass the id by hand." >&2
+  fi
+fi
 
 echo "✅ Deployment completed successfully!"
 echo ""

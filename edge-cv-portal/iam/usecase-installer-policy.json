@@ -1,0 +1,60 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "UseCdkBootstrapRoles",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/cdk-hnb659fds-deploy-role-ACCOUNT_ID-REGION",
+        "arn:aws:iam::ACCOUNT_ID:role/cdk-hnb659fds-file-publishing-role-ACCOUNT_ID-REGION"
+      ]
+    },
+    {
+      "Sid": "ReadBootstrapVersion",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/cdk-bootstrap/hnb659fds/version"
+    },
+    {
+      "Sid": "GreengrassServiceRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:GetRole"
+      ],
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/Greengrass_ServiceRole"
+    },
+    {
+      "Sid": "GreengrassServiceRolePolicy",
+      "Effect": "Allow",
+      "Action": "iam:AttachRolePolicy",
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/Greengrass_ServiceRole",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": "arn:aws:iam::aws:policy/service-role/AWSGreengrassResourceAccessRolePolicy"
+        }
+      }
+    },
+    {
+      "Sid": "PassGreengrassServiceRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/Greengrass_ServiceRole",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "greengrass.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "AssociateGreengrassServiceRole",
+      "Effect": "Allow",
+      "Action": [
+        "greengrass:GetServiceRoleForAccount",
+        "greengrass:AssociateServiceRoleToAccount"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

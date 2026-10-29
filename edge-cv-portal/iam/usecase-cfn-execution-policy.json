@@ -1,0 +1,150 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ResolveBootstrapVersionParameter",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
+      "Resource": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/cdk-bootstrap/hnb659fds/version"
+    },
+    {
+      "Sid": "PreDeploymentChecks",
+      "Effect": "Allow",
+      "Action": "iam:GetAccountSummary",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PreDeploymentQuotaChecks",
+      "Effect": "Allow",
+      "Action": "servicequotas:GetServiceQuota",
+      "Resource": "arn:aws:servicequotas:REGION:ACCOUNT_ID:*"
+    },
+    {
+      "Sid": "ReadCdkAssetsBucketConfiguration",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucket*",
+        "s3:Get*Configuration",
+        "s3:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:s3:::cdk-hnb659fds-assets-ACCOUNT_ID-REGION"
+    },
+    {
+      "Sid": "DdaRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerExecutionRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDAPortalAccessRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDACameraShadowRuleRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDADebugRuleErrorRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDATelemetryRuleErrorRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDAEventBridgeCrossAccountRole"
+      ]
+    },
+    {
+      "Sid": "ComponentAccessPolicy",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:DeletePolicy",
+        "iam:GetPolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:ListEntitiesForPolicy",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": "arn:aws:iam::ACCOUNT_ID:policy/DDAPortalComponentAccessPolicy"
+    },
+    {
+      "Sid": "PassDdaRolesToRules",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/DDACameraShadowRuleRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDADebugRuleErrorRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDATelemetryRuleErrorRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDAEventBridgeCrossAccountRole"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "iot.amazonaws.com",
+            "events.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DdaRules",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:DeleteRule",
+        "events:DescribeRule",
+        "events:EnableRule",
+        "events:DisableRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule",
+        "events:TagResource",
+        "events:UntagResource",
+        "events:ListTagsForResource",
+        "iot:CreateTopicRule",
+        "iot:ReplaceTopicRule",
+        "iot:DeleteTopicRule",
+        "iot:GetTopicRule",
+        "iot:EnableTopicRule",
+        "iot:DisableTopicRule",
+        "iot:TagResource",
+        "iot:UntagResource",
+        "iot:ListTagsForResource"
+      ],
+      "Resource": [
+        "arn:aws:events:REGION:ACCOUNT_ID:rule/dda-*",
+        "arn:aws:iot:REGION:ACCOUNT_ID:rule/dda_*"
+      ]
+    },
+    {
+      "Sid": "DdaRuleErrorLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
+        "logs:PutRetentionPolicy",
+        "logs:DeleteRetentionPolicy",
+        "logs:TagResource",
+        "logs:UntagResource",
+        "logs:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:logs:REGION:ACCOUNT_ID:log-group:/dda/*"
+    },
+    {
+      "Sid": "WithoutResourceArn",
+      "Effect": "Allow",
+      "Action": "logs:DescribeLogGroups",
+      "Resource": "*"
+    }
+  ]
+}

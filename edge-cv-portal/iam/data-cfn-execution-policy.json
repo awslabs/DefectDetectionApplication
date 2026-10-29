@@ -1,0 +1,59 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ResolveBootstrapVersionParameter",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
+      "Resource": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/cdk-bootstrap/hnb659fds/version"
+    },
+    {
+      "Sid": "PreDeploymentChecks",
+      "Effect": "Allow",
+      "Action": "iam:GetAccountSummary",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PreDeploymentQuotaChecks",
+      "Effect": "Allow",
+      "Action": "servicequotas:GetServiceQuota",
+      "Resource": "arn:aws:servicequotas:REGION:ACCOUNT_ID:*"
+    },
+    {
+      "Sid": "ReadCdkAssetsBucketConfiguration",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucket*",
+        "s3:Get*Configuration",
+        "s3:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:s3:::cdk-hnb659fds-assets-ACCOUNT_ID-REGION"
+    },
+    {
+      "Sid": "DdaDataAccessRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/DDAPortalDataAccessRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerDataAccessRole"
+      ]
+    }
+  ]
+}

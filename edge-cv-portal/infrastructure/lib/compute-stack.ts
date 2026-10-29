@@ -2033,7 +2033,7 @@ export class ComputeStack extends cdk.Stack {
       Expiration: { Days: 1 },
       AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
     };
-    new cr.AwsCustomResource(this, 'StaticImagePinStagingLifecycle', {
+    const staticImagePinStagingLifecycle = new cr.AwsCustomResource(this, 'StaticImagePinStagingLifecycle', {
       onCreate: {
         service: 'S3',
         action: 'putBucketLifecycleConfiguration',
@@ -2100,7 +2100,7 @@ export class ComputeStack extends cdk.Stack {
         `${componentBucketNameForPins}/static-image-pin-cors/${pinUploadCorsRule.AllowedOrigins[0]}`,
       ),
     };
-    new cr.AwsCustomResource(this, 'StaticImagePinUploadCors', {
+    const staticImagePinUploadCors = new cr.AwsCustomResource(this, 'StaticImagePinUploadCors', {
       onCreate: pinUploadCorsCall,
       onUpdate: pinUploadCorsCall,
       // No onDelete, for the same reason as the lifecycle rule above.
@@ -2112,6 +2112,9 @@ export class ComputeStack extends cdk.Stack {
         }),
       ]),
     });
+    // S3 refuses a bucket configuration write while another one is in progress
+    // on the same bucket (409 OperationAborted), so apply the two in order.
+    staticImagePinUploadCors.node.addDependency(staticImagePinStagingLifecycle);
 
     // Deploy-time Camera_Binding delivery: deployments.py writes
     // desired.bindings["{workflowId}/{version}"] into each target thing's

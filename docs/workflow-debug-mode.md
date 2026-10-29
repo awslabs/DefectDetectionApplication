@@ -297,8 +297,10 @@ delivery:
   during a component build. `deploy-infrastructure.sh` resolves the shared
   authorizer id and passes it as `-c sharedAuthorizerId=<id>`; without it the
   CDK app skips the two new stacks with a warning and deploys every other
-  stack as before (a fresh install runs the script twice). Set
-  `registryEnforced` in the frontend config to match the enforcement state.
+  stack as before. On a fresh install, where that deploy creates the API, the
+  script then looks the id up again and deploys the two stacks in a second
+  pass. Set `registryEnforced` in the frontend config to match the
+  enforcement state.
 - **RB-3, use-case template.** Update the use-case account template in any
   cross-account use case; this also lands the shared telemetry read
   statements on the Portal access role.

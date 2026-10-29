@@ -14,6 +14,7 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
 - [Video Tutorials](#video-tutorials)
 - [User Guide](#user-guide)
 - [Deployment](#deployment)
+  - [IAM Permissions for Installation](#iam-permissions-for-installation)
   - [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account)
   - [Step 2: Redeploy the Frontend (Optional)](#step-2-redeploy-the-frontend-optional)
   - [Step 3: Post-Deployment Setup](#step-3-post-deployment-setup)
@@ -155,6 +156,7 @@ Portal Account          UseCase Account         Data Account (Optional)
 ### Prerequisites
 
 - AWS CLI configured, with a region: a default region (`aws configure`) or `AWS_REGION` (`deploy-portal.sh` also takes `--region <region>`)
+- Credentials for an IAM role with the DDA installer permissions. An administrator user is not needed: see [IAM Permissions for Installation](#iam-permissions-for-installation)
 - Node.js 18+, Python 3.11+
 - AWS CDK: `npm install -g aws-cdk`
 - Docker, with its daemon running and reachable by your user (see [Docker](#docker) below)
@@ -243,6 +245,137 @@ The rollback also keeps the stack's KMS key for those two tables (description `D
 > 
 > For multi-account setups, the subscription must be in the UseCase Account (where SageMaker runs), not the Portal Account or Data Account.
 
+### IAM Permissions for Installation
+
+Installing DDA does not need an administrator user. An administrator does a one-time setup in each account (create the policies, bootstrap CDK with them, create an installer role); the person installing DDA then runs every step with the installer role. The policy documents are in [`edge-cv-portal/iam/`](edge-cv-portal/iam/).
+
+#### Roles involved
+
+| Role | Created by | Purpose |
+|------|------------|---------|
+| Installer role (for example `DDAInstaller`) | An administrator, once per account | Runs the deploy scripts and the CLI commands in this README. Its direct calls are listed in [What each step needs](#what-each-step-needs) |
+| CDK deploy, file-publishing and image-publishing roles (`cdk-hnb659fds-<name>-role-<account>-<region>`) | `cdk bootstrap` | The CDK CLI assumes them: the deploy role starts the CloudFormation deployments, the publishing roles upload the Lambda code and the container image |
+| CloudFormation execution role (`cdk-hnb659fds-cfn-exec-role-<account>-<region>`) | `cdk bootstrap` | Creates, updates and deletes the DDA resources. A plain `cdk bootstrap` attaches `AdministratorAccess` to it, so bootstrap with the DDA execution policies instead (below) |
+
+The installer role does not use the CDK lookup role: the DDA CDK apps make no context lookups. `cdk deploy` and `cdk diff` print that the current credentials could not be used to assume the lookup role and then proceed with the installer's own permissions; that warning is expected. When a deploy fails, the CDK CLI also tries to read CloudTrail for the cause, which the installer policy does not allow: read the failed resource's reason in the stack events instead.
+
+#### Policy files
+
+Replace `ACCOUNT_ID` and `REGION` in each file before you create the policy (step 1 below). The ARNs use the `aws` partition.
+
+| Account | File in `edge-cv-portal/iam/` | Policy name | Attach to |
+|---------|-------------------------------|-------------|-----------|
+| Portal (also single-account) | `portal-installer-policy.json` | `dda-installer-portal` | Installer role |
+| Portal (also single-account) | `portal-cfn-execution-iam-policy.json`, `portal-cfn-execution-app-policy.json`, `portal-cfn-execution-platform-policy.json` | `dda-cfn-exec-portal-iam`, `dda-cfn-exec-portal-app`, `dda-cfn-exec-portal-platform` | CloudFormation execution role, through `cdk bootstrap` |
+| UseCase | `usecase-installer-policy.json` | `dda-installer-usecase` | Installer role |
+| UseCase | `usecase-cfn-execution-policy.json` | `dda-cfn-exec-usecase` | CloudFormation execution role, through `cdk bootstrap` |
+| Data | `data-installer-policy.json` | `dda-installer-data` | Installer role |
+| Data | `data-cfn-execution-policy.json` | `dda-cfn-exec-data` | CloudFormation execution role, through `cdk bootstrap` |
+| Any | `cdk-bootstrap-policy.json` | `dda-cdk-bootstrap` | Optional: a separate bootstrap role, if an administrator does not run `cdk bootstrap` (not the installer role) |
+| UseCase (the Portal Account in single-account) | AWS managed policy `AWSMarketplaceManageSubscriptions` | - | Installer role, for the Marketplace subscription only |
+
+The Portal execution policy is split into three files because IAM limits a managed policy to 6,144 characters. IAM Access Analyzer reports `apigateway:TagResource` and `apigateway:UntagResource` in `portal-cfn-execution-app-policy.json` as unknown actions. Keep them: API Gateway checks `apigateway:TagResource` when CloudFormation creates the stage of the MCP server's HTTP API, and the deploy fails without it.
+
+#### One-time setup (administrator)
+
+Run this once in each account. The example is for the Portal Account; for a UseCase or Data Account, use that account's files and policy names from the table (one execution policy each). The files are filled in for one region: for another region in the same account, fill them in again, create the policies with a region suffix (for example `dda-cfn-exec-portal-iam-eu-west-1`), bootstrap that region with them, and attach the second installer policy to the same installer role.
+
+```bash
+cd edge-cv-portal/iam
+ACCOUNT_ID="<account-id>"
+REGION="<region>"
+# The user or role that assumes the installer role, for example an IAM Identity Center role
+INSTALLER_PRINCIPAL="<principal-arn>"
+
+# 1. Fill in the account and region
+mkdir -p /tmp/dda-iam
+for f in *.json; do
+  sed -e "s/ACCOUNT_ID/$ACCOUNT_ID/g" -e "s/REGION/$REGION/g" "$f" > "/tmp/dda-iam/$f"
+done
+
+# 2. Create the execution policies and bootstrap CDK with them instead of AdministratorAccess.
+#    This directory has no cdk.json, so cdk bootstrap does not synthesize the portal app.
+for p in iam app platform; do
+  aws iam create-policy --policy-name "dda-cfn-exec-portal-$p" \
+    --policy-document "file:///tmp/dda-iam/portal-cfn-execution-$p-policy.json"
+done
+cdk bootstrap "aws://$ACCOUNT_ID/$REGION" \
+  --cloudformation-execution-policies "arn:aws:iam::$ACCOUNT_ID:policy/dda-cfn-exec-portal-iam" \
+  --cloudformation-execution-policies "arn:aws:iam::$ACCOUNT_ID:policy/dda-cfn-exec-portal-app" \
+  --cloudformation-execution-policies "arn:aws:iam::$ACCOUNT_ID:policy/dda-cfn-exec-portal-platform"
+
+# 3. Create the installer role and attach its policy
+aws iam create-role --role-name DDAInstaller --assume-role-policy-document "{
+  \"Version\": \"2012-10-17\",
+  \"Statement\": [{\"Effect\": \"Allow\", \"Principal\": {\"AWS\": \"$INSTALLER_PRINCIPAL\"}, \"Action\": \"sts:AssumeRole\"}]
+}"
+aws iam create-policy --policy-name dda-installer-portal \
+  --policy-document file:///tmp/dda-iam/portal-installer-policy.json
+aws iam attach-role-policy --role-name DDAInstaller \
+  --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/dda-installer-portal"
+# Single-account only, for the Marketplace subscription; detach it afterwards
+aws iam attach-role-policy --role-name DDAInstaller \
+  --policy-arn arn:aws:iam::aws:policy/AWSMarketplaceManageSubscriptions
+```
+
+In a UseCase Account, steps 2 and 3 use the UseCase files (for a Data Account, replace `usecase` with `data` and skip the Marketplace policy):
+
+```bash
+aws iam create-policy --policy-name dda-cfn-exec-usecase \
+  --policy-document file:///tmp/dda-iam/usecase-cfn-execution-policy.json
+cdk bootstrap "aws://$ACCOUNT_ID/$REGION" \
+  --cloudformation-execution-policies "arn:aws:iam::$ACCOUNT_ID:policy/dda-cfn-exec-usecase"
+
+# create the DDAInstaller role as in step 3 above, then:
+aws iam create-policy --policy-name dda-installer-usecase \
+  --policy-document file:///tmp/dda-iam/usecase-installer-policy.json
+aws iam attach-role-policy --role-name DDAInstaller \
+  --policy-arn "arn:aws:iam::$ACCOUNT_ID:policy/dda-installer-usecase"
+# For the Marketplace subscription only; detach it afterwards
+aws iam attach-role-policy --role-name DDAInstaller \
+  --policy-arn arn:aws:iam::aws:policy/AWSMarketplaceManageSubscriptions
+```
+
+With IAM Identity Center, use a permission set with the same customer managed policies instead of the `DDAInstaller` role.
+
+- **Bootstrap before the first deploy.** On an account or region that is not bootstrapped, `deploy-portal.sh`, `infrastructure/deploy-auth.sh` and `deploy-account-role.sh` run a plain `cdk bootstrap`, which would use `AdministratorAccess`. The installer role cannot bootstrap, so that step fails: run step 2 first. Once the account is bootstrapped (version 21 or later), the scripts do not bootstrap again, and a later `cdk bootstrap` keeps the execution policies unless you pass new ones.
+- **Already bootstrapped with `AdministratorAccess`?** Run the `cdk bootstrap` command from step 2 to replace it.
+- **The execution role is shared.** Every CDK app that deploys to the same account and region with the default bootstrap qualifier uses it, so after step 2 those apps get only the DDA policies. Give DDA its own accounts, or add those apps' policies with more `--cloudformation-execution-policies` options.
+- **Bootstrapping without an administrator.** `cdk-bootstrap-policy.json` lists what `cdk bootstrap` needs, for a separate bootstrap role. Treat that role as privileged: it can write the inline policies of the `cdk-hnb659fds-*` roles, which the installer assumes. It attaches to the bootstrap roles only `ReadOnlyAccess`, `AWSCloudFormationReadOnlyAccess` (both used by the bootstrap template) and policies named `dda-cfn-exec-*`, so a plain `cdk bootstrap` rolls back with it; delete the `CDKToolkit` stack and run step 2. Only an administrator creates the `dda-cfn-exec-*` policies: neither the installer policies nor the execution policies allow it.
+
+#### What each step needs
+
+Every `cdk deploy` goes through the CDK roles. The table lists the calls each step makes with the installer role itself; the installer policy files allow these calls, except where a row says otherwise, and no others.
+
+| Step | Account | Calls made with the installer role |
+|------|---------|------------------------------------|
+| [1.1](#11-configure-cloudwatch-logs-for-api-gateway) API Gateway logging role | Portal | `iam:CreateRole` and `iam:GetRole` on `APIGatewayCloudWatchLogsRole`, `iam:AttachRolePolicy` (only `AmazonAPIGatewayPushToCloudWatchLogs`), `iam:PassRole` to API Gateway; `apigateway:GET` and `apigateway:PATCH` on the account settings |
+| [1.2](#12-deploy-the-portal-with-one-command) preflight checks | Portal | `ssm:GetParameter` on `/cdk-bootstrap/hnb659fds/version`, `/dda-portal/trusted-usecase-account-ids` and `/dda-portal/detector-export-image`; `ssm:PutParameter` on the trusted list; `cloudformation:DescribeStacks` and `cloudformation:GetTemplate` on the `EdgeCVPortal*` stacks and `CDKToolkit`; `s3:ListBucket` and `s3:CreateBucket` on `dda-component-<region>-<account>`; `ecr:DescribeRepositories` and `dynamodb:DescribeTable` on the three retained resources |
+| 1.2 `account-role` step | Portal | `iam:CreateRole`, `iam:GetRole`, `iam:UpdateAssumeRolePolicy` and `iam:PutRolePolicy` on `DDASageMakerExecutionRole`; `iam:CreatePolicy` and `iam:GetPolicy` on `DDAPortalComponentAccessPolicy`; for `Greengrass_ServiceRole`: `iam:CreateRole`, `iam:GetRole`, `iam:AttachRolePolicy` (only `AWSGreengrassResourceAccessRolePolicy`) and `iam:PassRole` to Greengrass; `greengrass:GetServiceRoleForAccount` and `greengrass:AssociateServiceRoleToAccount` |
+| 1.2 `auth`, `infrastructure` and `frontend` steps, [Step 2](#step-2-redeploy-the-frontend-optional) | Portal | `sts:AssumeRole` on the CDK deploy and publishing roles; `cloudformation:DescribeStackResources` on the `EdgeCVPortal*` stacks (the CDK CLI reads the failed resources when a deploy fails); `lambda:ListFunctions` (reads the deployed `PORTAL_REGISTRY_ENFORCED` value); `apigateway:GET` on the API's authorizers; `s3:ListBucket`, `s3:PutObject` and `s3:DeleteObject` on `dda-portal-frontend-<account>`; `cloudfront:CreateInvalidation` |
+| [3.2](#32-create-portal-admin-user) first PortalAdmin | Portal | `cognito-idp:AdminCreateUser`, `cognito-idp:AdminSetUserPassword` and `cognito-idp:AdminGetUser` on the user pool; `dynamodb:PutItem` and `dynamodb:GetItem` on `dda-portal-user-roles`. `backfill_portal_registry.py` also uses `cognito-idp:ListUsers` |
+| [4.1](#41-one-time-setup) build alerts (optional) | Portal | `sns:Subscribe` on `dda-portal-build-alerts` |
+| [5.1](#51-usecase-account-required) `deploy-portal.sh usecase` | UseCase | `sts:AssumeRole` on the CDK deploy and file-publishing roles; `ssm:GetParameter` on the bootstrap version; the `Greengrass_ServiceRole` calls listed above |
+| 5.1 trust the UseCase Account | Portal | The trusted-list `ssm:GetParameter` and `ssm:PutParameter`, `cloudformation:GetTemplate`, then the 1.2 deploy |
+| [5.2](#52-data-account-optional-for-multi-account) `deploy-portal.sh data` | Data | `sts:AssumeRole` on the CDK deploy and file-publishing roles; `ssm:GetParameter` on the bootstrap version |
+| Marketplace subscription | UseCase | `AWSMarketplaceManageSubscriptions`, in the AWS Console |
+| Tag an existing bucket for a use case ([1.2](#12-deploy-the-portal-with-one-command) note) | Bucket owner | `s3:TagResource` and `s3:PutBucketAbac` on that bucket. Not in the files, because the bucket names are yours |
+| Steps 4, 6 and 7, deployments | - | Nothing: the portal's own roles do this work, and devices use the setup token |
+
+#### What the execution policies allow
+
+CloudFormation can create, change and delete only the resource types the DDA stacks use, and only under DDA's names where a resource has one:
+
+- **IAM:** roles named `EdgeCVPortal*` (the names CloudFormation generates for the portal stacks) and each stack's fixed-name roles (`DDAStationProvisioningRole` and `dda-build-role` in the Portal Account, the six `DDA*` roles of the UseCase stack, the two of the Data stack); managed policies named `EdgeCVPortal*` or `DDAPortalComponentAccessPolicy`; the `dda-build-role` instance profile. It attaches only `AWSLambdaBasicExecutionRole`, `AmazonSSMManagedInstanceCore`, `AmazonEventBridgeFullAccess` and its own `EdgeCVPortal*` policies, passes roles only to the services that use them, and creates only the ECS and API Gateway service-linked roles (on a new account, the first deploy creates them).
+- **Read-only checks:** the `/cdk-bootstrap/hnb659fds/version` parameter, which CloudFormation resolves with this role, and the checks CloudFormation runs before a deployment (IAM account summary, Lambda account settings, service quotas, the CDK staging bucket's configuration).
+- **Named resources:** `dda-portal-*` tables, queues, topics, Firehose streams, schedules and `/dda-portal/*` parameters; `dda-portal-*` and `EdgeCVPortal*` alarms; `dda-portal-*` and `edgecv-portal-telemetry-*` buckets; `EdgeCVPortal*` and `dda-*` Lambda functions; `dda-*` ECR repositories, ECS clusters, CodeBuild projects and state machines; `dda_*` IoT rules; `dda-*` and `EdgeCVPortal*` EventBridge rules; `/dda/*`, `/dda-portal/*` and `/aws/kinesisfirehose/dda-portal-*` log groups; `EdgeCVPortal*` nested stacks.
+- **Without a DDA name to scope by** (limited to the deploy region where the service is regional): API Gateway APIs, the Cognito user pool, the CloudFront distribution, KMS keys, Lambda layers and event source mappings, ECS task definitions, CloudWatch Logs deliveries and resource policies, and the VPC networking.
+- **Not allowed:** reading or writing table items or bucket objects (other than the CDK assets it deploys), launching instances, and changing any other named resource.
+
+These policies keep CloudFormation to what DDA deploys, but they are not a privilege boundary: anyone who can use the installer role can deploy a template that creates an `EdgeCVPortal*` role with any inline policy. Grant the installer role only to the people who install and update DDA. A hard boundary would need an IAM permissions boundary on every role DDA creates, which the DDA stacks do not set today.
+
+The files match the stacks in this version of the repository. If a later version needs an action they do not list, the deploy stops with a stack event that says the `cdk-hnb659fds-cfn-exec-role` is not authorized to perform that action: add it to the matching `dda-cfn-exec-*` policy (`aws iam create-policy-version --set-as-default`) and deploy again. `teardown-portal.sh` and the maintenance scripts in `edge-cv-portal/scripts/` are not covered.
+
 ### Step 1: Deploy Portal Infrastructure (Portal Account)
 
 > **Video:** [Module 0: Portal Setup](https://youtu.be/HtH_4zT23Fo) · **User guide:** [1. Getting started](docs/user-guide/01-getting-started.md)
@@ -262,19 +395,19 @@ aws iam create-role \
     }]
   }'
 
-# 2. Attach CloudWatch Logs policy
+# 2. Attach the AWS managed policy API Gateway uses to write logs
 aws iam attach-role-policy \
   --role-name APIGatewayCloudWatchLogsRole \
-  --policy-arn arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
 
-# 3. Get the role ARN and set in API Gateway
+# 3. Get the role ARN and set it in API Gateway, in the region you deploy the portal to
 ROLE_ARN=$(aws iam get-role --role-name APIGatewayCloudWatchLogsRole --query 'Role.Arn' --output text)
 aws apigateway update-account \
   --patch-operations op=replace,path=/cloudwatchRoleArn,value=$ROLE_ARN \
-  --region us-east-2
+  --region <REGION>
 ```
 
-> **Note**: This is a one-time setup per AWS account.
+> **Note**: The role is created once per AWS account; the API Gateway setting is per region. If `aws apigateway get-account --region <REGION>` already shows a `cloudwatchRoleArn`, skip this step.
 
 #### 1.2 Deploy the Portal with One Command
 
@@ -289,7 +422,7 @@ cd edge-cv-portal
 
 1. `./deploy-account-role.sh single-account` — IAM roles and policies (`DDASageMakerExecutionRole`, `DDAPortalComponentAccessPolicy`, `Greengrass_ServiceRole`)
 2. `infrastructure/deploy-auth.sh` — the Cognito `EdgeCVPortalAuthStack`
-3. `./deploy-infrastructure.sh` — the main CDK stacks (`cdk deploy --all`)
+3. `./deploy-infrastructure.sh` — the main CDK stacks (`cdk deploy --all`). On a new install a second `cdk deploy` follows for the workflow debug and telemetry stacks, which attach to the authorizer of the API that the first one creates
 4. `./deploy-frontend.sh` — generates `config.json` from the stack outputs, builds and publishes the React frontend, and redeploys the compute stack with the CloudFront domain
 
 Each step's output is shown on the terminal and written to `edge-cv-portal/deploy-portal-<UTC-timestamp>.log` (override with `--log-file <path>`). If a step fails, the command stops, prints `Deployment failed at step: <name>` and the log path, and rolls nothing back; fix the cause and re-run the same command. When every step succeeds it prints a **Deployment Summary** with the Portal URL (the CloudFront domain), the created role ARNs and each step's outcome.
@@ -307,7 +440,7 @@ Useful options (`./deploy-portal.sh --help` lists them all):
   ./deploy-portal.sh single-account --non-interactive
   ```
 
-**Manual path (advanced).** The four scripts above remain runnable on their own, in the same order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`). Use them to repeat a single step, e.g. `./deploy-frontend.sh` after a frontend change. When you skip the orchestrator on an account/region that is not bootstrapped yet, bootstrap it first from `edge-cv-portal/`: `cdk bootstrap aws://<ACCOUNT_ID>/<REGION>`. There is no `cdk.json` in that directory, so the CLI bootstraps that environment without synthesizing the portal app; run from `infrastructure/`, it would synthesize the app first, which fails until `npm ci` has run there and the trusted UseCase account list is set. On an account that has never published a Greengrass component, also create the component artifact bucket first (see [Component artifact bucket](#component-artifact-bucket)): `deploy-infrastructure.sh` does not create it. `deploy-auth.sh` and `deploy-infrastructure.sh` synthesize the whole portal app, so set the list before you run them: the SSM parameter `/dda-portal/trusted-usecase-account-ids` (a first `./deploy-portal.sh single-account` creates it; or `aws ssm put-parameter --name /dda-portal/trusted-usecase-account-ids --type String --value <ACCOUNT_ID> --region <REGION>`), `TRUSTED_USECASE_ACCOUNT_IDS` (that run only), or the CDK context value `trustedUseCaseAccountIds`; without one they stop with `ComputeStack requires a non-empty trustedUseCaseAccountIds list`. `deploy-frontend.sh` resolves the list the same way as `deploy-portal.sh` and, when none is configured, uses the list the deployed portal stacks grant. `deploy-infrastructure.sh` has no such fallback: it deploys the list the CDK app reads (the CDK context value, `TRUSTED_USECASE_ACCOUNT_IDS`, then the SSM parameter) and prints it first, with the same `⚠️` lines for each account the deploy removes or adds. `deploy-infrastructure.sh` handles the npm install and `cdk deploy` for you. Run on their own, the scripts use `AWS_REGION` (or `AWS_DEFAULT_REGION`) when set, otherwise the CLI's default region; `deploy-auth.sh` also takes `--region`.
+**Manual path (advanced).** The four scripts above remain runnable on their own, in the same order, from `edge-cv-portal/` (`deploy-auth.sh` from `edge-cv-portal/infrastructure/`). Use them to repeat a single step, e.g. `./deploy-frontend.sh` after a frontend change. When you skip the orchestrator on an account/region that is not bootstrapped yet, bootstrap it first from `edge-cv-portal/`: `cdk bootstrap aws://<ACCOUNT_ID>/<REGION>` (add the DDA execution policies when you do not want `AdministratorAccess` on the execution role, see [IAM Permissions for Installation](#iam-permissions-for-installation)). There is no `cdk.json` in that directory, so the CLI bootstraps that environment without synthesizing the portal app; run from `infrastructure/`, it would synthesize the app first, which fails until `npm ci` has run there and the trusted UseCase account list is set. On an account that has never published a Greengrass component, also create the component artifact bucket first (see [Component artifact bucket](#component-artifact-bucket)): `deploy-infrastructure.sh` does not create it. `deploy-auth.sh` and `deploy-infrastructure.sh` synthesize the whole portal app, so set the list before you run them: the SSM parameter `/dda-portal/trusted-usecase-account-ids` (a first `./deploy-portal.sh single-account` creates it; or `aws ssm put-parameter --name /dda-portal/trusted-usecase-account-ids --type String --value <ACCOUNT_ID> --region <REGION>`), `TRUSTED_USECASE_ACCOUNT_IDS` (that run only), or the CDK context value `trustedUseCaseAccountIds`; without one they stop with `ComputeStack requires a non-empty trustedUseCaseAccountIds list`. `deploy-frontend.sh` resolves the list the same way as `deploy-portal.sh` and, when none is configured, uses the list the deployed portal stacks grant. `deploy-infrastructure.sh` has no such fallback: it deploys the list the CDK app reads (the CDK context value, `TRUSTED_USECASE_ACCOUNT_IDS`, then the SSM parameter) and prints it first, with the same `⚠️` lines for each account the deploy removes or adds. `deploy-infrastructure.sh` handles the npm install and `cdk deploy` for you. Run on their own, the scripts use `AWS_REGION` (or `AWS_DEFAULT_REGION`) when set, otherwise the CLI's default region; `deploy-auth.sh` also takes `--region`.
 
 > **Registry enforcement and allowed buckets.** Production deployments run with the Portal_Identity registry enforced: `PORTAL_REGISTRY_ENFORCED=true ./deploy-infrastructure.sh`, after `edge-cv-portal/backfill_portal_registry.py` has been applied and the accounts verified (a fresh install starts with enforcement off, and the script prints a warning whenever the value it resolves for a deploy is not `true`). Independently of that flag, the portal reads and writes S3 only in each use case's **allowed buckets** — its configured S3 bucket, its Data Account bucket, and the **Additional S3 buckets** a UseCaseAdmin allows (Use Cases → Edit → Allowed buckets, or "Allow for this use case" in Data Management). A bucket must be tagged `dda-portal:managed=true` (`aws s3control tag-resource --account-id ACCOUNT_ID --resource-arn arn:aws:s3:::BUCKET --tags Key=dda-portal:managed,Value=true`, plus `aws s3api put-bucket-abac --bucket BUCKET --abac-status Status=Enabled` for a bucket reached through a cross-account role) **before** a use case is created with it or allows it; buckets created through the portal are tagged, ABAC-enabled and allowed automatically. See `edge-cv-portal/ADMIN_GUIDE.md`, "Use case buckets and Additional S3 buckets" and "The enforcement flag".
 
@@ -1646,6 +1779,7 @@ defect-detection-application/
 │   │   ├── src/pages/           # Page components
 │   │   ├── src/components/      # Shared components
 │   │   └── src/services/        # API services
+│   ├── iam/                     # Installer and CloudFormation execution IAM policies
 │   ├── deploy-portal.sh         # One-command portal deploy (orchestrates the deploy-*.sh scripts)
 │   ├── deploy-account-role.sh   # Account setup
 │   ├── launch-arm64-build-server.sh  # Build server launcher

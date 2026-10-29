@@ -9,8 +9,11 @@
 # instantiates them only when its id is present as CDK context. The deploy
 # script resolves that id from the Compute stack's ApiId output and
 # `aws apigateway get-authorizers`, an explicit SHARED_AUTHORIZER_ID wins, and
-# a failed lookup (a fresh install) must not stop the script: the CDK app then
-# skips the two stacks with a warning and deploys the rest.
+# a failed lookup must not stop the script: the CDK app then skips the two
+# stacks with a warning and deploys the rest, and the script looks the id up
+# again after that deploy (on a fresh install the deploy creates the API) to
+# deploy the two stacks in a second pass. In these tests the stubbed lookup
+# answers the same before and after the deploy, so there is one cdk deploy.
 bats_require_minimum_version 1.5.0
 load test_helper
 setup() {
@@ -67,7 +70,7 @@ npx_args() { stub_args_of npx; }
   [[ "$output" == *"sharedAuthorizerId=byhand0"* ]]
   [[ "$output" != *"auth01"* ]]
 }
-@test "a fresh install (no Compute stack) warns, passes no id and still runs cdk deploy" {
+@test "no Compute stack, before or after the deploy, warns, passes no id and still runs cdk deploy" {
   export STUB_CFN_MISSING_STACKS="EdgeCVPortalComputeStack"
   run bash -c 'cd "$PORTAL_TREE" && ./deploy-infrastructure.sh'
   [ "$status" -eq 0 ]
