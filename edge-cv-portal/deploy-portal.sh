@@ -89,6 +89,14 @@ Options:
                               instead of failing with instructions. Requires
                               root or sudo and a recognized distribution.
                               (env: PORTAL_DEPLOY_INSTALL_DOCKER)
+  --allow-admin-bootstrap     When the account and region are not CDK-
+                              bootstrapped (or are below version 21), run a
+                              plain CDK bootstrap, which gives the
+                              CloudFormation execution role
+                              AdministratorAccess. Without it the deploy
+                              stops and names the administrator setup,
+                              iam/setup-account.sh.
+                              (env: DDA_ALLOW_ADMIN_BOOTSTRAP)
   --help                      Show this help message and exit
 
 Environment passthrough (forwarded unchanged to the frontend step):
@@ -187,6 +195,7 @@ parse_args() {
     local flag_external_id="" flag_data_buckets="" flag_sso=""
     local flag_profile="" flag_region="" flag_log_file=""
     local flag_install_docker=""
+    local flag_allow_admin_bootstrap=""
     local topology_seen=0
 
     SHOW_HELP=0
@@ -205,6 +214,9 @@ parse_args() {
                 ;;
             --install-docker)
                 flag_install_docker="1"
+                ;;
+            --allow-admin-bootstrap)
+                flag_allow_admin_bootstrap="1"
                 ;;
             --portal-account-id)
                 flag_portal_account_id="${2:-}"; shift
@@ -295,6 +307,13 @@ parse_args() {
     INSTALL_DOCKER=0
     if [ -n "$flag_install_docker" ] || _is_truthy "${PORTAL_DEPLOY_INSTALL_DOCKER:-}"; then
         INSTALL_DOCKER=1
+    fi
+    # Exported so deploy-account-role.sh and infrastructure/deploy-auth.sh,
+    # which also bootstrap a fresh account, honour the same choice.
+    if [ -n "$flag_allow_admin_bootstrap" ] || _is_truthy "${DDA_ALLOW_ADMIN_BOOTSTRAP:-}"; then
+        export DDA_ALLOW_ADMIN_BOOTSTRAP=1
+    else
+        unset DDA_ALLOW_ADMIN_BOOTSTRAP
     fi
 
     # Forward the frontend passthrough env and the SSO env unchanged (Req 8.4, 5.6).
@@ -727,7 +746,28 @@ check_bootstrap() {
         cdk_cmd=(npx cdk)
     fi
 
+    # A plain `cdk bootstrap` gives the CloudFormation execution role
+    # AdministratorAccess. Run one only on --allow-admin-bootstrap; otherwise
+    # stop before any step and name the administrator setup, which
+    # bootstraps with the DDA execution policies.
+    if ! _is_truthy "${DDA_ALLOW_ADMIN_BOOTSTRAP:-}"; then
+        local setup_kind="portal"
+        case "${TOPOLOGY:-}" in
+            usecase) setup_kind="usecase" ;;
+            data) setup_kind="data" ;;
+        esac
+        {
+            echo "CDK bootstrap version '${version}' in aws://${account}/${region} is below required ${BOOTSTRAP_MIN_VERSION}, and deploy-portal.sh does not run a plain cdk bootstrap:"
+            echo "it would give the CloudFormation execution role AdministratorAccess."
+            echo "Ask an administrator to run the one-time setup for this account and region:"
+            echo "  edge-cv-portal/iam/setup-account.sh ${setup_kind} --installer-principal <principal-arn>"
+            echo "To bootstrap with AdministratorAccess anyway, re-run with --allow-admin-bootstrap."
+        } >&2
+        return 2
+    fi
+
     echo "CDK bootstrap version '${version}' is below required ${BOOTSTRAP_MIN_VERSION}; running cdk bootstrap for aws://${account}/${region}"
+    echo "--allow-admin-bootstrap is set: the bootstrap gives the CloudFormation execution role AdministratorAccess"
     # Run from PORTAL_DIR (edge-cv-portal/, which has no cdk.json) whatever the
     # operator's cwd: from infrastructure/ the CLI would synthesize the portal app.
     if ! ( cd "$PORTAL_DIR" && "${cdk_cmd[@]}" bootstrap "aws://${account}/${region}" ); then
