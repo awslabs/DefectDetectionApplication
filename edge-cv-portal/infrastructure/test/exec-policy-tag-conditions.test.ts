@@ -150,6 +150,15 @@ describe('wiring and policy files', () => {
   const statement = (doc: any, sid: string) => doc.Statement.find((s: any) => s.Sid === sid);
   const asArray = (v: any): string[] => (Array.isArray(v) ? v : [v]);
 
+  test('neither policy lets a deploy remove the managed tag', () => {
+    for (const [file, action] of [['portal-cfn-execution-network-policy.json', 'ec2:DeleteTags'],
+      ['portal-cfn-execution-app-policy.json', 'kms:UntagResource']]) {
+      expect(statement(policy(file), 'KeepTheManagedTag')).toEqual({
+        Sid: 'KeepTheManagedTag', Effect: 'Deny', Action: action, Resource: '*',
+        Condition: { 'ForAnyValue:StringEquals': { 'aws:TagKeys': MANAGED_TAG_KEY } } });
+    }
+  });
+
   test('bin/app.ts tags the whole app before it synthesizes', () => {
     const source = fs.readFileSync(path.join(__dirname, '..', 'bin', 'app.ts'), 'utf-8');
     const call = source.indexOf('tagExecPolicyManagedResources(app);');
@@ -201,7 +210,8 @@ describe('wiring and policy files', () => {
       asArray(s.Resource).some((r) => r.includes(':key/') || r === '*')
       && asArray(s.Action).some((a) => a.startsWith('kms:') && a !== 'kms:ListAliases'));
     expect(keyStatements.map((s: any) => s.Sid).sort()).toEqual(
-      ['CreateTaggedKeys', 'DdaKeys', 'EncryptDdaTablesWithDdaKeys', 'TagKeysAtCreation', 'UserPoolKeysThroughCognito'].sort());
+      ['CreateTaggedKeys', 'DdaKeys', 'EncryptDdaTablesWithDdaKeys', 'KeepTheManagedTag', 'TagKeysAtCreation',
+        'UserPoolKeysThroughCognito'].sort());
     // The platform policy no longer carries the network statement.
     expect(policy('portal-cfn-execution-platform-policy.json').Statement
       .some((s: any) => asArray(s.Action).some((a) => a.startsWith('ec2:')))).toBe(false);
