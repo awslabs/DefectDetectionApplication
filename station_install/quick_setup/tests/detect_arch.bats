@@ -42,6 +42,9 @@ setup() {
     # Point the NVIDIA proc-version file at a guaranteed-absent path so the
     # x86_64 GPU probe does not pick up the host's real /proc entry.
     export NVIDIA_PROC_VERSION_FILE="${FIX}/no-such-nvidia-version"
+    # Likewise the device-tree compatible list (the Thor check for R39); the
+    # R39 tests write their own.
+    export DEVICE_TREE_COMPATIBLE_FILE="${FIX}/no-such-device-tree-compatible"
 }
 
 teardown() {
@@ -98,6 +101,16 @@ _tegra_release() {  # <R-major-line-body>
     export NV_TEGRA_RELEASE_FILE="${FIX}/nv_tegra_release"
 }
 
+# _compatible <entry>... : a device-tree compatible list, NUL-separated and
+# NUL-terminated like /proc/device-tree/compatible.
+_compatible() {
+    printf '%s\0' "$@" > "${FIX}/compatible"
+    export DEVICE_TREE_COMPATIBLE_FILE="${FIX}/compatible"
+}
+
+THOR_COMPATIBLE=(nvidia,p3971-0080+p3834-0008 nvidia,p3834-0008 nvidia,tegra264)
+ORIN_COMPATIBLE=(nvidia,p3768-0000+p3767-0005 nvidia,p3767-0005 nvidia,tegra234)
+
 # ============================================================================
 # aarch64 via /etc/nv_tegra_release (Req 1.2)
 # ============================================================================
@@ -124,6 +137,42 @@ _tegra_release() {  # <R-major-line-body>
     export DETECT_ARCH_UNAME_M="aarch64"
     _tegra_release "# R38 (release), REVISION: 4.0, GCID: 12345, BOARD: generic"
     _run_detect "arm64_jp7"
+}
+
+# JetPack 7.2 (R39) runs on Thor and Orin; the JP7 build targets Thor only.
+
+@test "aarch64: nv_tegra_release R39 on Thor (nvidia,tegra264) -> arm64_jp7" {
+    export DETECT_ARCH_UNAME_M="aarch64"
+    _tegra_release "# R39 (release), REVISION: 2.0, GCID: 12345, BOARD: generic"
+    _compatible "${THOR_COMPATIBLE[@]}"
+    _run_detect "arm64_jp7"
+}
+
+@test "aarch64: nv_tegra_release R39 on Orin (nvidia,tegra234) -> empty (undetermined)" {
+    export DETECT_ARCH_UNAME_M="aarch64"
+    _tegra_release "# R39 (release), REVISION: 2.0, GCID: 12345, BOARD: generic"
+    _compatible "${ORIN_COMPATIBLE[@]}"
+    _run_detect ""
+}
+
+@test "aarch64: nv_tegra_release R39 with no device-tree compatible list -> empty" {
+    export DETECT_ARCH_UNAME_M="aarch64"
+    _tegra_release "# R39 (release), REVISION: 2.0, GCID: 12345, BOARD: generic"
+    _run_detect ""
+}
+
+@test "aarch64: tegra264 only as part of a longer compatible entry is not Thor" {
+    export DETECT_ARCH_UNAME_M="aarch64"
+    _tegra_release "# R39 (release), REVISION: 2.0, GCID: 12345, BOARD: generic"
+    _compatible nvidia,p3768-0000+p3767-0005 nvidia,tegra264-like nvidia,tegra234
+    _run_detect ""
+}
+
+@test "aarch64: Thor's compatible list does not change R36 -> arm64_jp6" {
+    export DETECT_ARCH_UNAME_M="aarch64"
+    _tegra_release "# R36 (release), REVISION: 4.0, GCID: 12345, BOARD: generic"
+    _compatible "${THOR_COMPATIBLE[@]}"
+    _run_detect "arm64_jp6"
 }
 
 @test "arm64 machine name is treated like aarch64" {
@@ -169,6 +218,22 @@ _tegra_release() {  # <R-major-line-body>
     export NV_TEGRA_RELEASE_FILE="${FIX}/absent-tegra-release"
     export STUB_DPKG_L4T_VERSION="38.4.0-20251201000000"
     _run_detect "arm64_jp7"
+}
+
+@test "aarch64: dpkg nvidia-l4t-core 39.x fallback on Thor -> arm64_jp7" {
+    export DETECT_ARCH_UNAME_M="aarch64"
+    export NV_TEGRA_RELEASE_FILE="${FIX}/absent-tegra-release"
+    export STUB_DPKG_L4T_VERSION="39.2.0-20260901000000"
+    _compatible "${THOR_COMPATIBLE[@]}"
+    _run_detect "arm64_jp7"
+}
+
+@test "aarch64: dpkg nvidia-l4t-core 39.x fallback on Orin -> empty (undetermined)" {
+    export DETECT_ARCH_UNAME_M="aarch64"
+    export NV_TEGRA_RELEASE_FILE="${FIX}/absent-tegra-release"
+    export STUB_DPKG_L4T_VERSION="39.2.0-20260901000000"
+    _compatible "${ORIN_COMPATIBLE[@]}"
+    _run_detect ""
 }
 
 @test "aarch64: tegra release wins over dpkg fallback" {

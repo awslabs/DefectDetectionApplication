@@ -164,6 +164,7 @@ EOF
     echo "AWS_SECRET_ACCESS_KEY=\${AWS_SECRET_ACCESS_KEY:-}"
     echo "AWS_SESSION_TOKEN=\${AWS_SESSION_TOKEN:-}"
     echo "DDA_THING_GROUP=\${DDA_THING_GROUP:-}"
+    echo "DDA_TES_ROLE_PREPARED=\${DDA_TES_ROLE_PREPARED-<unset>}"
     echo "ARGS=\$*"
 } > "${SS_ENV_FILE}"
 echo "provisioning with key \${AWS_ACCESS_KEY_ID} secret \${AWS_SECRET_ACCESS_KEY} token \${AWS_SESSION_TOKEN}"
@@ -336,6 +337,43 @@ _log_path() {
     # No leftover file under the bundle workdir holds the secret material.
     ! grep -rqF "$FAKE_SECRET" "$BUNDLE"
     ! grep -rqF "$FAKE_SESSION" "$BUNDLE"
+}
+
+# ============================================================================
+# Token exchange role prepared by the portal (tes_role_prepared)
+# ============================================================================
+
+# _cred_body_with <json-fragment> : the default credential response plus a
+# trailing top-level field.
+_cred_body_with() {
+    export STUB_CRED_BODY="{\"credentials\": {\"access_key_id\":\"${FAKE_KEY}\",\"secret_access_key\":\"${FAKE_SECRET}\",\"session_token\":\"${FAKE_SESSION}\"}, \"report_secret\":\"${FAKE_REPORT}\", \"aws_region\":\"us-east-1\", $1}"
+}
+
+@test "tes role: tes_role_prepared true reaches setup_station.sh as DDA_TES_ROLE_PREPARED=1" {
+    _cred_body_with '"tes_role_prepared": true'
+    run bash "$RUN"
+    [ "$status" -eq 0 ]
+    grep -qx "DDA_TES_ROLE_PREPARED=1" "$SS_ENV_FILE"
+}
+
+@test "tes role: tes_role_prepared false is passed as DDA_TES_ROLE_PREPARED=0" {
+    _cred_body_with '"tes_role_prepared":false'
+    run bash "$RUN"
+    [ "$status" -eq 0 ]
+    grep -qx "DDA_TES_ROLE_PREPARED=0" "$SS_ENV_FILE"
+}
+
+@test "tes role: a response without the field (an older portal) is passed as 0" {
+    run bash "$RUN"
+    [ "$status" -eq 0 ]
+    grep -qx "DDA_TES_ROLE_PREPARED=0" "$SS_ENV_FILE"
+}
+
+@test "tes role: a string \"true\" is not the boolean and is passed as 0" {
+    _cred_body_with '"tes_role_prepared": "true"'
+    run bash "$RUN"
+    [ "$status" -eq 0 ]
+    grep -qx "DDA_TES_ROLE_PREPARED=0" "$SS_ENV_FILE"
 }
 
 # ============================================================================
