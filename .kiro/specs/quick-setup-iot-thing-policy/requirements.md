@@ -55,10 +55,10 @@ This feature moves the IoT policy writes to the portal, as #110 did for the IAM 
 
 #### Acceptance Criteria
 
-1. THE design SHALL choose between (a) keeping `iot:AttachPolicy` on the station, limited as far as IoT authorization allows, and (b) moving certificate creation and policy attachment to the portal, so the station gets no `iot:AttachPolicy` at all (Requirement 4).
-2. IF option (a) is chosen, THEN THE design SHALL record which part of the risk remains. IoT authorizes `iot:AttachPolicy` on the target certificate only, not on the policy.
+1. THE design SHALL choose between (a) keeping `iot:AttachPolicy` on the station, limited as far as IoT authorization allows, and (b) moving certificate creation and policy attachment to the portal, so the station gets no `iot:AttachPolicy` at all (Requirement 4). Option (b) was chosen on 2026-10-30.
+2. Until option (b) ships, THE design SHALL record which part of the risk remains. IoT authorizes `iot:AttachPolicy` on the target certificate only, not on the policy.
 
-### Requirement 4: Certificate creation without IoT writes on the station (if chosen)
+### Requirement 4: Certificate creation without IoT writes on the station (option b, phase 2)
 
 **User Story:** As a station operator, I want the device's private key to stay on the device, and the station to need no IoT write permissions.
 

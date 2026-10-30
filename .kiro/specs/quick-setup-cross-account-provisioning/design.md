@@ -35,11 +35,11 @@ Every Use_Case_Account gets a `DDAStationProvisioningRole` created by the UseCas
 - `quick_setup.exchange_credentials`:
   - **Cross-account role**: the role ARN for a cross-account use case becomes `arn:aws:iam::<account_id>:role/DDAStationProvisioningRole`. This is derived from the use case's account id, not stored. The external id is unchanged. `same_account` stays a separate flag: the TES preparation now gets `create_missing=True` for both.
   - **Missing role**: an `AccessDenied` from `AssumeRole` on that role means the account predates this feature or the stack failed. It returns `503 provisioning_role_unavailable` with a message naming the UseCase account stack. The token stays unconsumed. `run.sh` prints the message.
-- The `DDAPortalAccessRole` fallback for the inline-only TES preparation is removed once every trusted account has the role. Until then it stays behind a check of the use case record (`station_provisioning_role: "dedicated" | "legacy"`), set when the account stack is redeployed. Keeping the fallback is a decision point. The simpler alternative is to fail with the remedy above and drop the fallback; it is recommended, because cross-account Quick Setup does not work today anyway.
+- **No fallback** (decided 2026-10-30): the inline-only TES preparation through `DDAPortalAccessRole` (`create_missing=False`) is removed, and the use case record gets no `legacy` mode. An account without the dedicated role gets the `503` and the remedy above. Cross-account Quick Setup does not work today, so no working install loses anything.
 
 ## Policies and least-privilege install
 
-- **UseCase execution policy** (`usecase-cfn-execution-policy.json`): `iam:CreateRole`, `iam:PutRolePolicy` and the other role actions on `role/DDAStationProvisioningRole`. If the boundary follow-up has been extended to the UseCase account, the role carries that boundary. Its Ceiling must then fit within the boundary, including the token exchange role exemption.
+- **UseCase execution policy** (`usecase-cfn-execution-policy.json`): `iam:CreateRole`, `iam:PutRolePolicy` and the other role actions on `role/DDAStationProvisioningRole`. The role carries the UseCase account's permissions boundary (`dda-usecase-permissions-boundary`). Its Ceiling must fit within it, including the token exchange role exemption.
 - **UseCase installer policy**: no change. The installer only deploys the stack.
 - **README**: one paragraph under the multi-account setup.
 
@@ -55,5 +55,5 @@ Every Use_Case_Account gets a `DDAStationProvisioningRole` created by the UseCas
 
 ## Dependencies
 
-- The IoT thing policy spec (`quick-setup-iot-thing-policy`) adds IoT policy preparation to the same Preparation_Session. If its phase 2 (a certificate from a CSR) is chosen, the Ceiling here changes to match.
-- The permissions boundary follow-up, if extended to UseCase accounts.
+- The IoT thing policy spec (`quick-setup-iot-thing-policy`) adds IoT policy preparation to the same Preparation_Session. Its phase 2 (a certificate from a CSR, approved on 2026-10-30) changes the Ceiling here to match.
+- The UseCase account's permissions boundary (`dda-usecase-permissions-boundary`).

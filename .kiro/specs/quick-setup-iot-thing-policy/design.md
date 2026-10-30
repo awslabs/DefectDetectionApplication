@@ -5,9 +5,9 @@
 Two phases.
 
 - **Phase 1** moves the two IoT policy writes into the `quick_setup` Lambda's Preparation_Session, as #110 did for the token exchange role. The station loses `iot:CreatePolicy`, `iot:CreatePolicyVersion`, `iot:DeletePolicyVersion` and `iot:ListPolicyVersions`. That closes the most severe path: rewriting the Thing_Policy of every device. Phase 1 is small and keeps the Greengrass installer's `--provision true` flow.
-- **Phase 2** (recommended, Requirement 3 option b) moves certificate creation and policy attachment to the portal through a certificate signing request. The station then needs no IoT write action, and its private key never leaves it. That also closes `iot:AttachPolicy` on `cert/*`, which phase 1 cannot limit. IoT authorizes `AttachPolicy` on the target only, so the policy name cannot be restricted.
+- **Phase 2** (Requirement 3 option b) moves certificate creation and policy attachment to the portal through a certificate signing request. The station then needs no IoT write action, and its private key never leaves it. That also closes `iot:AttachPolicy` on `cert/*`, which phase 1 cannot limit. IoT authorizes `AttachPolicy` on the target only, so the policy name cannot be restricted.
 
-Phase 2 is a larger change to the station flow, so it is a decision point. The tasks file covers phase 1 in full and phase 2 as a separate block.
+Both phases were approved on 2026-10-30. Phase 1 ships first. Phase 2 is a larger change to the station flow and builds on phase 1's Preparation_Session. Until phase 2 ships, the station keeps `iot:AttachPolicy` on `cert/*`, the remaining risk of Requirement 3.2.
 
 ## What the station does today (from the installer and setup_station.sh)
 
@@ -70,7 +70,7 @@ Phase 1 reproduces it exactly, plus the Shadow_Statement, so Quick Setup devices
 
 `DDAPortalAccessRole` has no IoT policy permission. Cross-account preparation therefore depends on the cross-account provisioning spec (`quick-setup-cross-account-provisioning`), which gives the use-case account its own `DDAStationProvisioningRole`. Until then a cross-account use case reports `iot_policies_prepared: false`, and the station keeps today's behaviour.
 
-## Phase 2 (decision point): certificate from a CSR
+## Phase 2: certificate from a CSR
 
 - **Station**: `run.sh` generates an EC P-256 key and a CSR with `openssl` before the exchange. The key is written with mode 600 to the Greengrass root and never sent anywhere.
 - **Exchange**: `POST /quick-setup/credentials` accepts an optional `csr`. With it, the Lambda runs in its Preparation_Session (extended to the actions below):

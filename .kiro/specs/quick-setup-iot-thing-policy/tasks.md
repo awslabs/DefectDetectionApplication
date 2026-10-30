@@ -2,7 +2,7 @@
 
 ## Overview
 
-Phase 1 (tasks 1-6) moves the shared IoT policy writes to the portal. Phase 2 (tasks 7-10) is the decision point of design.md: a certificate from a CSR and no IoT write on the station. Start phase 2 only once the user chooses it.
+Phase 1 (tasks 1-6) moves the shared IoT policy writes to the portal. Phase 2 (tasks 7-10), approved on 2026-10-30, adds a certificate from a CSR and removes every IoT write from the station. Do phase 1 first; phase 2 builds on its Preparation_Session.
 
 ## Tasks
 
