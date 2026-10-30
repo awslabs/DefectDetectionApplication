@@ -293,6 +293,12 @@ _aws_main() {
           printf '%s\n' "$stack_status"
           exit 0
         fi
+        # The bootstrap's permissions boundary (scripts/portal-permissions-
+        # boundary.sh): STUB_CDKTOOLKIT_BOUNDARY, None when unset.
+        if [ "$stack" = "CDKToolkit" ] && [[ "$query" == *InputPermissionsBoundary* ]]; then
+          printf '%s\n' "${STUB_CDKTOOLKIT_BOUNDARY:-None}"
+          exit 0
+        fi
       fi
       # Extract the OutputKey referenced by the query (handles '...' or `...`).
       key="$(printf '%s' "$query" | grep -oE "OutputKey==[\`']?[A-Za-z0-9]+" | head -n1 | sed -E "s/OutputKey==[\`']?//")"

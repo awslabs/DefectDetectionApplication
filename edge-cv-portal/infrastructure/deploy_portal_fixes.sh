@@ -93,6 +93,13 @@ else
   ENFORCED_ARGS=(-c "allowLegacyRoles=true")
   ENFORCEMENT_PROVENANCE="Portal_Identity enforcement: CDK default (off), acknowledged (fresh install)"
 fi
+# The DDA permissions boundary the account was bootstrapped with: every role
+# the app creates must carry it. See scripts/portal-permissions-boundary.sh.
+. "$SCRIPT_DIR/../scripts/portal-permissions-boundary.sh"
+if ! BOUNDARY=$(portal_permissions_boundary "$REGION"); then
+  exit 1
+fi
+if [ -n "$BOUNDARY" ]; then ENFORCED_ARGS+=(-c "ddaPermissionsBoundary=$BOUNDARY"); fi
 
 # The deploy itself needs no build (cdk.json runs bin/app.ts through ts-node);
 # the build writes lib/context-helpers.js, from which the data-plane scoping

@@ -75,6 +75,11 @@ portal_harness_setup() {
 
   # Fake edge-cv-portal working tree.
   seed_portal_tree
+  # Every script that deploys the portal app sources the permissions-boundary
+  # helper; the stub aws answers its CDKToolkit lookup (STUB_CDKTOOLKIT_BOUNDARY,
+  # None by default), so the real helper is part of every fake tree.
+  mkdir -p "$PORTAL_TREE/scripts"
+  cp "$PORTAL_REAL_DIR/scripts/portal-permissions-boundary.sh" "$PORTAL_TREE/scripts/"
 
   # The scripts run a plain (AdministratorAccess) cdk bootstrap only on an
   # explicit opt-in. These suites exercise that bootstrap path, so opt in.

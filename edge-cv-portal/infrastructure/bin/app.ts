@@ -14,6 +14,7 @@ import { TelemetryStack } from '../lib/telemetry-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { McpStack, mcpBackendHandlers } from '../lib/mcp-stack';
 import { tagExecPolicyManagedResources } from '../lib/managed-tag';
+import { applyDdaPermissionsBoundary } from '../lib/permissions-boundary';
 import {
   PORTAL_API_AUTHORIZER_NAME,
   SHARED_AUTHORIZER_CONTEXT_KEY,
@@ -441,5 +442,10 @@ const frontendStack = new FrontendStack(app, 'EdgeCVPortalFrontendStack', {
 // only when they carry dda-portal:managed=true (lib/managed-tag.ts), so every
 // stack creates them with it.
 tagExecPolicyManagedResources(app);
+
+// In an account bootstrapped with the DDA permissions boundary
+// (iam/setup-account.sh), every role must carry it; the deploy scripts pass
+// -c ddaPermissionsBoundary=<name> (scripts/portal-permissions-boundary.sh).
+applyDdaPermissionsBoundary(app);
 
 app.synth();

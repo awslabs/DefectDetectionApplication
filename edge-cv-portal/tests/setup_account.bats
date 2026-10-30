@@ -227,6 +227,7 @@ _seed_portal_up_to_date() {
     _seed_policy dda-cfn-exec-portal-network "$(_filled portal-cfn-execution-network-policy.json)"
     _seed_policy dda-installer-portal "$(_filled portal-installer-policy.json)"
     _seed_policy dda-sagemaker-execution-boundary "$(_filled sagemaker-execution-boundary-policy.json)"
+    _seed_policy dda-portal-permissions-boundary "$(_filled portal-permissions-boundary-policy.json)"
 }
 
 _run_setup() {
@@ -295,11 +296,12 @@ ARN_PREFIX="arn:aws:iam::${ACCOUNT}:policy"
 # Portal Account, first run
 # ============================================================================
 
-@test "portal, fresh account: creates the six policies with the account and region filled in" {
+@test "portal, fresh account: creates the seven policies with the account and region filled in" {
     _run_setup portal --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
     [ "$status" -eq 0 ]
     for name in dda-cfn-exec-portal-iam dda-cfn-exec-portal-app dda-cfn-exec-portal-platform \
-                dda-cfn-exec-portal-network dda-installer-portal dda-sagemaker-execution-boundary; do
+                dda-cfn-exec-portal-network dda-installer-portal dda-sagemaker-execution-boundary \
+                dda-portal-permissions-boundary; do
         [ "$(_calls_matching "^iam create-policy --policy-name ${name} ")" -eq 1 ]
         ! _policy_default_doc "$name" | grep -qE 'ACCOUNT_ID|"REGION"|:REGION:'
     done
@@ -308,7 +310,7 @@ ARN_PREFIX="arn:aws:iam::${ACCOUNT}:policy"
     [ "$(_calls_matching '^iam create-policy-version ')" -eq 0 ]
 }
 
-@test "portal: bootstraps CDK with the four execution policies, from the iam directory" {
+@test "portal: bootstraps CDK with the four execution policies and the permissions boundary, from the iam directory" {
     _run_setup portal --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
     [ "$status" -eq 0 ]
     [ "$(wc -l < "$STUB_STATE/cdk.log")" -eq 1 ]
@@ -317,7 +319,11 @@ ARN_PREFIX="arn:aws:iam::${ACCOUNT}:policy"
     expected+=" --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-portal-app"
     expected+=" --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-portal-platform"
     expected+=" --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-portal-network"
+    expected+=" --custom-permissions-boundary dda-portal-permissions-boundary"
     [ "$(cat "$STUB_STATE/cdk.log")" = "$expected" ]
+    # The boundary policy exists before the bootstrap names it.
+    [ "$(_calls_matching '^iam create-policy --policy-name dda-portal-permissions-boundary ')" -eq 1 ]
+    ! _policy_default_doc dda-portal-permissions-boundary | grep -q REGION
 }
 
 @test "portal: creates DDAInstaller trusting the principal and attaches the installer policy" {
@@ -478,7 +484,8 @@ PY
     [ "$status" -eq 0 ]
     for name in dda-cfn-exec-portal-iam-eu-west-1 dda-cfn-exec-portal-app-eu-west-1 \
                 dda-cfn-exec-portal-platform-eu-west-1 dda-cfn-exec-portal-network-eu-west-1 \
-                dda-installer-portal-eu-west-1 dda-sagemaker-execution-boundary; do
+                dda-installer-portal-eu-west-1 dda-sagemaker-execution-boundary \
+                dda-portal-permissions-boundary; do
         [ -d "$STUB_STATE/policies/$name" ]
     done
     [ ! -d "$STUB_STATE/policies/dda-installer-portal" ]
@@ -531,6 +538,7 @@ PY
     _run_setup usecase --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
     [ "$status" -eq 0 ]
     [ "$(ls "$STUB_STATE/policies" | sort | tr '\n' ' ')" = "dda-cfn-exec-usecase dda-installer-usecase " ]
+    ! grep -q -- "--custom-permissions-boundary" "$STUB_STATE/cdk.log"
     [ "$(_policy_default_doc dda-cfn-exec-usecase)" = "$(_filled usecase-cfn-execution-policy.json)" ]
     grep -qF "|bootstrap aws://${ACCOUNT}/${REGION_NAME} --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-usecase" \
         "$STUB_STATE/cdk.log"

@@ -221,6 +221,14 @@ else
   echo "Portal_Identity enforcement: CDK default (off), acknowledged (fresh install)"
 fi
 
+# The DDA permissions boundary the account was bootstrapped with: every role
+# the app creates must carry it. See scripts/portal-permissions-boundary.sh.
+. "$SCRIPT_DIR/scripts/portal-permissions-boundary.sh"
+if ! BOUNDARY=$(portal_permissions_boundary "$CDK_REGION"); then
+  exit 1
+fi
+if [ -n "$BOUNDARY" ]; then ENFORCED_ARGS+=(-c "ddaPermissionsBoundary=$BOUNDARY"); fi
+
 echo "Redeploying compute stack with CloudFront domain: $CLOUDFRONT_URL"
 echo "   Trusted UseCase accounts: $TRUSTED"
 npm run build
