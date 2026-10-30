@@ -199,10 +199,44 @@
         "kms:UpdateAlias",
         "kms:DeleteAlias"
       ],
-      "Resource": [
-        "arn:aws:kms:REGION:ACCOUNT_ID:key/*",
-        "arn:aws:kms:REGION:ACCOUNT_ID:alias/dda-portal/*"
-      ]
+      "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/dda-portal:managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "DdaKeyAliases",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateAlias",
+        "kms:UpdateAlias",
+        "kms:DeleteAlias"
+      ],
+      "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:alias/dda-portal/*"
+    },
+    {
+      "Sid": "CreateTaggedKeys",
+      "Effect": "Allow",
+      "Action": "kms:CreateKey",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/dda-portal:managed": "true"
+        }
+      }
+    },
+    {
+      "Sid": "TagKeysAtCreation",
+      "Effect": "Allow",
+      "Action": "kms:TagResource",
+      "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/dda-portal:managed": "true"
+        }
+      }
     },
     {
       "Sid": "EncryptDdaTablesWithDdaKeys",
@@ -218,7 +252,8 @@
       "Resource": "arn:aws:kms:REGION:ACCOUNT_ID:key/*",
       "Condition": {
         "StringEquals": {
-          "kms:ViaService": "dynamodb.REGION.amazonaws.com"
+          "kms:ViaService": "dynamodb.REGION.amazonaws.com",
+          "aws:ResourceTag/dda-portal:managed": "true"
         }
       }
     },
@@ -248,10 +283,20 @@
         "cloudfront:CreateCloudFrontOriginAccessIdentity",
         "cognito-idp:CreateUserPool",
         "cognito-idp:DescribeUserPoolDomain",
-        "kms:CreateKey",
         "kms:ListAliases"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "KeepTheManagedTag",
+      "Effect": "Deny",
+      "Action": "kms:UntagResource",
+      "Resource": "*",
+      "Condition": {
+        "ForAnyValue:StringEquals": {
+          "aws:TagKeys": "dda-portal:managed"
+        }
+      }
     }
   ]
 }

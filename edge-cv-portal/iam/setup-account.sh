@@ -12,6 +12,9 @@
 #
 # It:
 #   1. fills ACCOUNT_ID and REGION into this directory's policy files;
+#      for the Portal Account, it first tags the KMS keys and EC2 network
+#      resources of the EdgeCVPortal* stacks dda-portal:managed=true, which
+#      the execution policies require (an earlier deploy left them untagged);
 #   2. creates the policies, or adds a new default version when one exists and
 #      its document changed: the CloudFormation execution policies
 #      (dda-cfn-exec-*), the installer policy (dda-installer-*) and, for the
@@ -181,8 +184,9 @@ upsert_policy() {
 case "$KIND" in
     portal)
         EXEC_FILES=(portal-cfn-execution-iam-policy.json portal-cfn-execution-app-policy.json
-                    portal-cfn-execution-platform-policy.json)
-        EXEC_NAMES=(dda-cfn-exec-portal-iam dda-cfn-exec-portal-app dda-cfn-exec-portal-platform)
+                    portal-cfn-execution-platform-policy.json portal-cfn-execution-network-policy.json)
+        EXEC_NAMES=(dda-cfn-exec-portal-iam dda-cfn-exec-portal-app dda-cfn-exec-portal-platform
+                    dda-cfn-exec-portal-network)
         ;;
     usecase)
         EXEC_FILES=(usecase-cfn-execution-policy.json)
@@ -199,6 +203,47 @@ INSTALLER_NAME="dda-installer-${KIND}${NAME_SUFFIX}"
 echo "DDA least-privilege setup: $KIND account $ACCOUNT_ID, region $REGION"
 [ "$DRY_RUN" -eq 1 ] && echo "(dry run: changes are printed, not made)"
 echo ""
+
+# The Portal execution policies manage KMS keys and EC2 network resources only
+# when they carry dda-portal:managed=true, and the portal stacks create them
+# with that tag. A deploy made before those conditions left them untagged, so
+# tag the ones the EdgeCVPortal* stacks (nested stacks included) own before the
+# conditions apply. A first install has none.
+MANAGED_TAG_TYPES=(AWS::KMS::Key AWS::EC2::VPC AWS::EC2::Subnet AWS::EC2::RouteTable
+                   AWS::EC2::InternetGateway AWS::EC2::SecurityGroup AWS::EC2::VPCEndpoint)
+tag_portal_resources() {
+    local query stacks stack type id tagged=0 failed=0
+    query="StackResourceSummaries[?$(printf "ResourceType=='%s' || " "${MANAGED_TAG_TYPES[@]}" | sed 's/ || $//')]"
+    query+=".[ResourceType,PhysicalResourceId]"
+    stacks="$(aws cloudformation describe-stacks \
+        --query "Stacks[?starts_with(StackName, 'EdgeCVPortal')].StackName" --output text)"
+    for stack in $stacks; do
+        while read -r type id; do
+            [ -n "$id" ] && [ "$id" != "None" ] || continue
+            if [ "$type" = "AWS::KMS::Key" ]; then
+                run aws kms tag-resource --key-id "$id" \
+                    --tags TagKey=dda-portal:managed,TagValue=true && tagged=$((tagged + 1)) || failed=$((failed + 1))
+            else
+                run aws ec2 create-tags --resources "$id" \
+                    --tags Key=dda-portal:managed,Value=true && tagged=$((tagged + 1)) || failed=$((failed + 1))
+            fi
+        done < <(aws cloudformation list-stack-resources --stack-name "$stack" --query "$query" --output text)
+    done
+    if [ "$failed" -gt 0 ]; then
+        echo "  $failed resource(s) could not be tagged (for example a key pending deletion); a deploy" >&2
+        echo "  that changes an untagged one is refused by the execution policies." >&2
+    fi
+    if [ "$tagged" -eq 0 ] && [ "$failed" -eq 0 ]; then
+        echo "✓ No portal KMS keys or network resources yet"
+    else
+        done_msg "dda-portal:managed=true on $tagged portal KMS key(s) and network resource(s)"
+    fi
+}
+if [ "$KIND" = "portal" ]; then
+    echo "▶ Tag the portal's KMS keys and network resources"
+    tag_portal_resources
+    echo ""
+fi
 
 echo "▶ Policies"
 EXEC_ARNS=()

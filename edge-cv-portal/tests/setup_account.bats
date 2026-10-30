@@ -4,8 +4,9 @@
 # setup of a least-privilege install. Offline: `aws` and `cdk` are fakes.
 #
 # The fake `aws` (Python) keeps IAM state in $STUB_STATE: managed policies with
-# their versions and default version, and roles with their trust policy,
-# permissions boundary and attached policies. It records every call in
+# their versions and default version, roles with their trust policy,
+# permissions boundary and attached policies, and the EdgeCVPortal* stacks with
+# their resources; tags it adds go to $STUB_STATE/tagged. It records every call in
 # $STUB_STATE/calls.log and fails on a call it does not know, so a new AWS call
 # in the script shows up here. The fake `cdk` records its arguments and working
 # directory in $STUB_STATE/cdk.log.
@@ -23,7 +24,7 @@ setup() {
     SANDBOX="$(mktemp -d)"
     BIN="$SANDBOX/bin"
     export STUB_STATE="$SANDBOX/state"
-    mkdir -p "$BIN" "$STUB_STATE/policies" "$STUB_STATE/roles" "$SANDBOX/home"
+    mkdir -p "$BIN" "$STUB_STATE/policies" "$STUB_STATE/roles" "$STUB_STATE/stacks" "$SANDBOX/home"
     IAM_SRC="$(cd "${BATS_TEST_DIRNAME}/../iam" && pwd)"
     cp -R "$IAM_SRC" "$SANDBOX/iam"
     SCRIPT="$SANDBOX/iam/setup-account.sh"
@@ -51,6 +52,7 @@ _write_fakes() {
 import json
 import os
 import pathlib
+import re
 import sys
 
 state = pathlib.Path(os.environ["STUB_STATE"])
@@ -147,6 +149,24 @@ elif command == ["iam", "create-role"]:
 elif command == ["iam", "attach-role-policy"]:
     with open(state / "roles" / opt("--role-name") / "attached", "a") as fh:
         fh.write(opt("--policy-arn") + "\n")
+elif command == ["cloudformation", "describe-stacks"]:
+    if opt("--query") != "Stacks[?starts_with(StackName, 'EdgeCVPortal')].StackName":
+        fail("UnknownQuery")
+    print("\t".join(sorted(f.name for f in (state / "stacks").glob("EdgeCVPortal*"))))
+elif command == ["cloudformation", "list-stack-resources"]:
+    query = opt("--query")
+    types = re.findall(r"ResourceType=='([^']+)'", query)
+    if not types or not query.endswith(".[ResourceType,PhysicalResourceId]"):
+        fail("UnknownQuery")
+    for line in (state / "stacks" / opt("--stack-name")).read_text().splitlines():
+        if line.split("\t")[0] in types:
+            print(line)
+elif command in (["ec2", "create-tags"], ["kms", "tag-resource"]):
+    resource = opt("--resources") or opt("--key-id")
+    if resource in os.environ.get("STUB_TAG_FAIL", "").split():
+        fail("KMSInvalidStateException")
+    with open(state / "tagged", "a") as fh:
+        fh.write(f"{args[0]} {resource} {opt('--tags')}\n")
 else:
     sys.stderr.write("fake aws: unhandled call: " + " ".join(args) + "\n")
     sys.exit(255)
@@ -187,11 +207,24 @@ _seed_role() {
     return 0
 }
 
+# _seed_stack <name> <type> <physical-id> [<type> <physical-id>]... : a stack
+# and the resources list-stack-resources reports for it.
+_seed_stack() {
+    local name="$1"
+    shift
+    : > "$STUB_STATE/stacks/$name"
+    while [ $# -gt 1 ]; do
+        printf '%s\t%s\n' "$1" "$2" >> "$STUB_STATE/stacks/$name"
+        shift 2
+    done
+}
+
 # _seed_portal_up_to_date : every portal policy exists with the current document.
 _seed_portal_up_to_date() {
     _seed_policy dda-cfn-exec-portal-iam "$(_filled portal-cfn-execution-iam-policy.json)"
     _seed_policy dda-cfn-exec-portal-app "$(_filled portal-cfn-execution-app-policy.json)"
     _seed_policy dda-cfn-exec-portal-platform "$(_filled portal-cfn-execution-platform-policy.json)"
+    _seed_policy dda-cfn-exec-portal-network "$(_filled portal-cfn-execution-network-policy.json)"
     _seed_policy dda-installer-portal "$(_filled portal-installer-policy.json)"
     _seed_policy dda-sagemaker-execution-boundary "$(_filled sagemaker-execution-boundary-policy.json)"
 }
@@ -210,7 +243,7 @@ _policy_default_doc() {  # <name> -> the default version's document
 }
 
 _mutating_calls() {
-    _calls_matching '^iam (create-policy|create-policy-version|delete-policy-version|put-role-permissions-boundary|create-role|attach-role-policy) '
+    _calls_matching '^(iam (create-policy|create-policy-version|delete-policy-version|put-role-permissions-boundary|create-role|attach-role-policy)|ec2 create-tags|kms tag-resource) '
 }
 
 ARN_PREFIX="arn:aws:iam::${ACCOUNT}:policy"
@@ -262,11 +295,11 @@ ARN_PREFIX="arn:aws:iam::${ACCOUNT}:policy"
 # Portal Account, first run
 # ============================================================================
 
-@test "portal, fresh account: creates the five policies with the account and region filled in" {
+@test "portal, fresh account: creates the six policies with the account and region filled in" {
     _run_setup portal --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
     [ "$status" -eq 0 ]
     for name in dda-cfn-exec-portal-iam dda-cfn-exec-portal-app dda-cfn-exec-portal-platform \
-                dda-installer-portal dda-sagemaker-execution-boundary; do
+                dda-cfn-exec-portal-network dda-installer-portal dda-sagemaker-execution-boundary; do
         [ "$(_calls_matching "^iam create-policy --policy-name ${name} ")" -eq 1 ]
         ! _policy_default_doc "$name" | grep -qE 'ACCOUNT_ID|"REGION"|:REGION:'
     done
@@ -275,7 +308,7 @@ ARN_PREFIX="arn:aws:iam::${ACCOUNT}:policy"
     [ "$(_calls_matching '^iam create-policy-version ')" -eq 0 ]
 }
 
-@test "portal: bootstraps CDK with the three execution policies, from the iam directory" {
+@test "portal: bootstraps CDK with the four execution policies, from the iam directory" {
     _run_setup portal --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
     [ "$status" -eq 0 ]
     [ "$(wc -l < "$STUB_STATE/cdk.log")" -eq 1 ]
@@ -283,6 +316,7 @@ ARN_PREFIX="arn:aws:iam::${ACCOUNT}:policy"
     expected+=" --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-portal-iam"
     expected+=" --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-portal-app"
     expected+=" --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-portal-platform"
+    expected+=" --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-portal-network"
     [ "$(cat "$STUB_STATE/cdk.log")" = "$expected" ]
 }
 
@@ -310,6 +344,62 @@ PY
     _run_setup portal --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
     [ "$status" -eq 0 ]
     [ "$(_calls_matching '^iam put-role-permissions-boundary ')" -eq 0 ]
+}
+
+# ============================================================================
+# Portal Account: tagging the resources of an earlier deploy
+# ============================================================================
+
+@test "portal, no portal stacks yet: nothing to tag" {
+    _seed_stack SomeOtherStack AWS::EC2::VPC vpc-other
+    _run_setup portal --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"No portal KMS keys or network resources yet"* ]]
+    [ ! -e "$STUB_STATE/tagged" ]
+}
+
+@test "portal: tags the KMS keys and network resources of every EdgeCVPortal stack, nested ones too" {
+    _seed_stack EdgeCVPortalComputeStack AWS::KMS::Key key-1 AWS::Lambda::Function fn-1 AWS::KMS::Alias alias/dda-portal/x
+    _seed_stack EdgeCVPortalNodeDesignerStack-NodeDesignerApiNestedStack-ABC \
+        AWS::EC2::VPC vpc-1 AWS::EC2::Subnet subnet-1 AWS::EC2::RouteTable rtb-1 \
+        AWS::EC2::SubnetRouteTableAssociation rtbassoc-1 AWS::EC2::InternetGateway igw-1 \
+        AWS::EC2::SecurityGroup sg-1 AWS::EC2::VPCEndpoint vpce-1
+    _seed_stack SomeOtherStack AWS::EC2::VPC vpc-other AWS::KMS::Key key-other
+    _run_setup portal --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
+    [ "$status" -eq 0 ]
+    [ "$(sort "$STUB_STATE/tagged")" = "$(printf '%s\n' \
+        "ec2 igw-1 Key=dda-portal:managed,Value=true" \
+        "ec2 rtb-1 Key=dda-portal:managed,Value=true" \
+        "ec2 sg-1 Key=dda-portal:managed,Value=true" \
+        "ec2 subnet-1 Key=dda-portal:managed,Value=true" \
+        "ec2 vpc-1 Key=dda-portal:managed,Value=true" \
+        "ec2 vpce-1 Key=dda-portal:managed,Value=true" \
+        "kms key-1 TagKey=dda-portal:managed,TagValue=true" | sort)" ]
+    [[ "$output" == *"dda-portal:managed=true on 7 portal KMS key(s) and network resource(s)"* ]]
+    # Before the conditioned execution policies are written.
+    last_tag=$(grep -nE '^(ec2 create-tags|kms tag-resource) ' "$STUB_STATE/calls.log" | tail -1 | cut -d: -f1)
+    first_policy=$(grep -nE '^iam create-policy ' "$STUB_STATE/calls.log" | head -1 | cut -d: -f1)
+    [ "$last_tag" -lt "$first_policy" ]
+}
+
+@test "portal: a resource that cannot be tagged is reported and the setup goes on" {
+    _seed_stack EdgeCVPortalComputeStack AWS::KMS::Key key-pending AWS::KMS::Key key-1
+    export STUB_TAG_FAIL=key-pending
+    _run_setup portal --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"1 resource(s) could not be tagged"* ]]
+    [ "$(cat "$STUB_STATE/tagged")" = "kms key-1 TagKey=dda-portal:managed,TagValue=true" ]
+    [ -d "$STUB_STATE/policies/dda-cfn-exec-portal-network" ]
+}
+
+@test "usecase and data accounts tag nothing" {
+    _seed_stack EdgeCVPortalComputeStack AWS::KMS::Key key-1
+    for kind in usecase data; do
+        _run_setup "$kind" --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
+        [ "$status" -eq 0 ]
+    done
+    [ "$(_calls_matching '^cloudformation ')" -eq 0 ]
+    [ ! -e "$STUB_STATE/tagged" ]
 }
 
 # ============================================================================
@@ -387,8 +477,8 @@ PY
     _run_setup portal --installer-principal "$PRINCIPAL" --region eu-west-1 --name-suffix -eu-west-1
     [ "$status" -eq 0 ]
     for name in dda-cfn-exec-portal-iam-eu-west-1 dda-cfn-exec-portal-app-eu-west-1 \
-                dda-cfn-exec-portal-platform-eu-west-1 dda-installer-portal-eu-west-1 \
-                dda-sagemaker-execution-boundary; do
+                dda-cfn-exec-portal-platform-eu-west-1 dda-cfn-exec-portal-network-eu-west-1 \
+                dda-installer-portal-eu-west-1 dda-sagemaker-execution-boundary; do
         [ -d "$STUB_STATE/policies/$name" ]
     done
     [ ! -d "$STUB_STATE/policies/dda-installer-portal" ]
@@ -402,6 +492,7 @@ PY
 
 @test "--dry-run changes nothing and prints the calls it would make" {
     _seed_role DDASageMakerExecutionRole
+    _seed_stack EdgeCVPortalComputeStack AWS::KMS::Key key-1 AWS::EC2::VPC vpc-1
     _run_setup portal --installer-principal "$PRINCIPAL" --region "$REGION_NAME" --dry-run
     [ "$status" -eq 0 ]
     [ "$(_mutating_calls)" -eq 0 ]
@@ -411,6 +502,9 @@ PY
     [[ "$stderr" == *"+ aws iam create-policy --policy-name dda-installer-portal"* ]]
     [[ "$stderr" == *"+ aws iam put-role-permissions-boundary --role-name DDASageMakerExecutionRole"* ]]
     [[ "$stderr" == *"+ cdk bootstrap aws://${ACCOUNT}/${REGION_NAME}"* ]]
+    [[ "$stderr" == *"+ aws kms tag-resource --key-id key-1"* ]]
+    [[ "$stderr" == *"+ aws ec2 create-tags --resources vpc-1"* ]]
+    [ ! -e "$STUB_STATE/tagged" ]
     [[ "$output" == *"(dry run) dda-installer-portal created"* ]]
 }
 
