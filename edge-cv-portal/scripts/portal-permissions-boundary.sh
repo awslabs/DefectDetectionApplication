@@ -11,7 +11,10 @@
 # ddaPermissionsBoundary names it (lib/permissions-boundary.ts). Sourced by the
 # scripts that deploy the portal app (deploy-infrastructure.sh,
 # deploy-frontend.sh, infrastructure/deploy-auth.sh,
-# infrastructure/deploy_portal_fixes.sh), which ask it for the name:
+# infrastructure/deploy_portal_fixes.sh), which ask it for the name. The
+# UseCase and Data accounts work the same way with their own boundaries
+# (dda-usecase-permissions-boundary, dda-data-permissions-boundary):
+# deploy-account-role.sh usecase|data asks it too.
 #
 #   1. DDA_PERMISSIONS_BOUNDARY set and non-empty -> that policy name, or no
 #      boundary for "none".
