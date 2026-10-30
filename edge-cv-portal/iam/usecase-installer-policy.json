@@ -17,6 +17,12 @@
       "Resource": "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/cdk-bootstrap/hnb659fds/version"
     },
     {
+      "Sid": "ReadBootstrapBoundary",
+      "Effect": "Allow",
+      "Action": "cloudformation:DescribeStacks",
+      "Resource": "arn:aws:cloudformation:REGION:ACCOUNT_ID:stack/CDKToolkit/*"
+    },
+    {
       "Sid": "GreengrassServiceRole",
       "Effect": "Allow",
       "Action": [
