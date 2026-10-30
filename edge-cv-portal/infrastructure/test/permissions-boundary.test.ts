@@ -9,10 +9,15 @@
  * - The boundary allows every action the roles of the compute, node
  *   designer, test runner and build fleet stacks are granted, and every action
  *   of the four Portal execution policies (the execution role carries the
- *   boundary too); IAM actions also on the resources they are granted on.
+ *   boundary too); IAM and STS actions also on the resources they are granted on.
+ * - The same holds for the real app: bin/app.ts synthesized through the CDK
+ *   CLI with the IAM synth gate's fixture context and the boundary, every
+ *   stack it instantiates included.
  * - bin/app.ts applies it after every stack exists.
  */
 import * as cdk from 'aws-cdk-lib';
+import { spawnSync } from 'child_process';
+import * as os from 'os';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -162,6 +167,44 @@ const roles = (tpl: Record<string, any>) => Object.entries(tpl)
   .flatMap(([name, t]) => Object.entries<any>(t.Resources ?? {})
     .filter(([, r]) => r.Type === 'AWS::IAM::Role').map(([id, r]) => ({ name, id, r })));
 
+/**
+ * Every action the roles and policies of these templates allow that the
+ * boundary does not; IAM and STS actions also on the literal resources they
+ * are granted on.
+ */
+function outsideBoundary(tpls: Record<string, any>): string[] {
+  const missing = new Set<string>();
+  for (const tpl of Object.values(tpls)) {
+    const resources: Record<string, any> = tpl.Resources ?? {};
+    const roleArn = new Map<string, string>();
+    for (const [id, r] of Object.entries<any>(resources)) {
+      if (r.Type !== 'AWS::IAM::Role') continue;
+      const roleName = r.Properties?.RoleName;
+      roleArn.set(id, `arn:aws:iam::${ACCOUNT}:role/${typeof roleName === 'string' ? roleName : 'EdgeCVPortalGenerated'}`);
+    }
+    const statements: Statement[] = [];
+    for (const r of Object.values<any>(resources)) {
+      if (r.Type === 'AWS::IAM::Role') {
+        for (const p of asArray(r.Properties?.Policies)) statements.push(...(p as any).PolicyDocument.Statement);
+      } else if (r.Type === 'AWS::IAM::Policy' || r.Type === 'AWS::IAM::ManagedPolicy') {
+        statements.push(...r.Properties.PolicyDocument.Statement);
+      }
+    }
+    for (const s of statements.filter((x) => x.Effect === 'Allow')) {
+      if (s.NotAction !== undefined) missing.add(`NotAction ${JSON.stringify(s.NotAction)}`);
+      for (const action of asArray(s.Action)) {
+        if (!boundaryAllowsAction(action)) { missing.add(action); continue; }
+        if (!/^(iam|sts):/i.test(action)) continue;
+        for (const r of asArray(s.Resource)) {
+          const arn = literalResource(r, roleArn);
+          if (arn !== undefined && arn !== '*' && !boundaryAllowsAction(action, arn)) missing.add(`${action} on ${arn}`);
+        }
+      }
+    }
+  }
+  return [...missing].sort();
+}
+
 describe('applyDdaPermissionsBoundary', () => {
   let withBoundary: Record<string, any>;
   let without: Record<string, any>;
@@ -188,35 +231,80 @@ describe('applyDdaPermissionsBoundary', () => {
   });
 
   test('the boundary allows every action the roles are granted', () => {
-    const missing = new Set<string>();
-    for (const tpl of Object.values(withBoundary)) {
-      const resources: Record<string, any> = tpl.Resources ?? {};
-      const roleArn = new Map<string, string>();
-      for (const [id, r] of Object.entries<any>(resources)) {
-        if (r.Type !== 'AWS::IAM::Role') continue;
-        const roleName = r.Properties?.RoleName;
-        roleArn.set(id, `arn:aws:iam::${ACCOUNT}:role/${typeof roleName === 'string' ? roleName : 'EdgeCVPortalGenerated'}`);
-      }
-      const statements: Statement[] = [];
-      for (const r of Object.values<any>(resources)) {
-        if (r.Type === 'AWS::IAM::Role') {
-          for (const p of asArray(r.Properties?.Policies)) statements.push(...(p as any).PolicyDocument.Statement);
-        } else if (r.Type === 'AWS::IAM::Policy' || r.Type === 'AWS::IAM::ManagedPolicy') {
-          statements.push(...r.Properties.PolicyDocument.Statement);
-        }
-      }
-      for (const s of statements.filter((x) => x.Effect === 'Allow')) {
-        for (const action of asArray(s.Action)) {
-          if (!boundaryAllowsAction(action)) { missing.add(action); continue; }
-          if (!action.startsWith('iam:')) continue;
-          for (const r of asArray(s.Resource)) {
-            const arn = literalResource(r, roleArn);
-            if (arn !== undefined && arn !== '*' && !boundaryAllowsAction(action, arn)) missing.add(`${action} on ${arn}`);
-          }
-        }
+    expect(outsideBoundary(withBoundary)).toEqual([]);
+  });
+});
+
+describe('cdk synth of bin/app.ts with the boundary context', () => {
+  // The real app through the CDK CLI, as deploy-infrastructure.sh runs it, with
+  // the IAM synth gate's fixture context (portal-app-with-shared-authorizer.test.ts)
+  // so the context-gated stacks are in it too. Ambient credentials are stripped
+  // so the CLI cannot replace the fixture account.
+  let outdir: string;
+  let status: number | null;
+  let stderr: string;
+  let synthesized: Record<string, any>;
+  let stackNames: string[];
+
+  beforeAll(() => {
+    outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'permissions-boundary-app-'));
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_PROFILE',
+      'AWS_DEFAULT_PROFILE', 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI', 'AWS_CONTAINER_CREDENTIALS_FULL_URI',
+      'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_ROLE_ARN']) {
+      delete env[key];
+    }
+    env.CDK_DEFAULT_ACCOUNT = ACCOUNT;
+    env.CDK_DEFAULT_REGION = REGION;
+    env.AWS_SHARED_CREDENTIALS_FILE = path.join(outdir, 'no-such-credentials');
+    env.AWS_CONFIG_FILE = path.join(outdir, 'no-such-config');
+    env.AWS_EC2_METADATA_DISABLED = 'true';
+    const result = spawnSync(process.execPath, [require.resolve('aws-cdk/bin/cdk'), 'synth', '--quiet',
+      '--output', outdir,
+      '--context', `portalAccountId=${ACCOUNT}`,
+      '--context', 'externalId=fixture-eid',
+      '--context', 'trustedUseCaseAccountIds=222222222222,333333333333',
+      '--context', 'portalRegistryEnforced=false',
+      '--context', 'sharedAuthorizerId=fixture0',
+      '--context', `${PERMISSIONS_BOUNDARY_CONTEXT_KEY}=${BOUNDARY_NAME}`,
+    ], { cwd: path.join(__dirname, '..'), env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    status = result.status;
+    stderr = result.stderr ?? '';
+    synthesized = {};
+    stackNames = [];
+    if (status === 0) {
+      for (const file of fs.readdirSync(outdir)) {
+        if (!file.endsWith('.template.json')) continue;
+        synthesized[file] = JSON.parse(fs.readFileSync(path.join(outdir, file), 'utf-8'));
+        if (!file.endsWith('.nested.template.json')) stackNames.push(file.replace('.template.json', ''));
       }
     }
-    expect([...missing].sort()).toEqual([]);
+  }, 900_000);
+
+  afterAll(() => {
+    if (outdir) fs.rmSync(outdir, { recursive: true, force: true });
+  });
+
+  test('synthesizes every stack bin/app.ts instantiates', () => {
+    if (status !== 0) throw new Error(`cdk synth exited ${status}\n${stderr.slice(-4000)}`);
+    const source = fs.readFileSync(path.join(__dirname, '..', 'bin', 'app.ts'), 'utf-8');
+    const expected = Array.from(source.matchAll(/new\s+(\w+Stack)\s*\(\s*app\s*,/g), (m) => `EdgeCVPortal${m[1]}`);
+    expect(expected.length).toBeGreaterThanOrEqual(11);
+    expect(stackNames.sort()).toEqual(expected.sort());
+  });
+
+  test('every role of every stack and nested stack carries the boundary', () => {
+    const all = roles(synthesized);
+    expect(all.length).toBeGreaterThan(90);
+    for (const { name, id, r } of all) {
+      expect({ name, id, boundary: JSON.stringify(r.Properties?.PermissionsBoundary ?? null) })
+        .toEqual({ name, id, boundary: expect.stringContaining(`:policy/${BOUNDARY_NAME}`) });
+    }
+  });
+
+  test('the boundary allows every action the roles of the whole app are granted', () => {
+    expect(Object.keys(synthesized).length).toBeGreaterThan(11);
+    expect(outsideBoundary(synthesized)).toEqual([]);
   });
 });
 
@@ -247,6 +335,25 @@ describe('the boundary and the execution policies', () => {
       NotResource: `arn:aws:iam::${ACCOUNT}:role/GreengrassV2TokenExchangeRole`,
       Condition: { StringNotEquals: { 'iam:PermissionsBoundary': `arn:aws:iam::${ACCOUNT}:policy/${BOUNDARY_NAME}` } },
     }]);
+  });
+
+  test('the execution role can give the portal roles this boundary, and no other', () => {
+    // CloudFormation adds the boundary to a role an earlier deploy created with
+    // iam:PutRolePermissionsBoundary, so an upgrade needs it in the execution policy.
+    const grants = filled('portal-cfn-execution-iam-policy.json').Statement.filter((s) => s.Effect === 'Allow'
+      && asArray(s.Action).some((a) => matches(a, 'iam:PutRolePermissionsBoundary', true)));
+    expect(grants).toEqual([{
+      Sid: 'DdaRolesGetOnlyTheDdaBoundary',
+      Effect: 'Allow',
+      Action: 'iam:PutRolePermissionsBoundary',
+      Resource: [`arn:aws:iam::${ACCOUNT}:role/EdgeCVPortal*`, `arn:aws:iam::${ACCOUNT}:role/DDAStationProvisioningRole`,
+        `arn:aws:iam::${ACCOUNT}:role/dda-build-role`],
+      Condition: { StringEquals: { 'iam:PermissionsBoundary': `arn:aws:iam::${ACCOUNT}:policy/${BOUNDARY_NAME}` } },
+    }]);
+    // CloudFormation also reads the boundary policy when it sets it on a role.
+    expect(filled('portal-cfn-execution-iam-policy.json').Statement.filter((s) => s.Sid === 'ReadTheDdaBoundary'))
+      .toEqual([{ Sid: 'ReadTheDdaBoundary', Effect: 'Allow', Action: 'iam:GetPolicy',
+        Resource: `arn:aws:iam::${ACCOUNT}:policy/${BOUNDARY_NAME}` }]);
   });
 
   test('the boundary grants no IAM user, access key, boundary removal or policy change outside DDA', () => {
