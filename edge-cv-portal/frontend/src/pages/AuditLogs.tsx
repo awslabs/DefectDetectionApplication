@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Container,
   Header,
@@ -64,13 +64,22 @@ export default function AuditLogs() {
   const [nextToken, setNextToken] = useState<string | undefined>();
   const [totalCount, setTotalCount] = useState(0);
 
+  // Sequence number of the latest getAuditLogs request. Each request is a
+  // separate scan and responses can arrive out of order, so only the latest
+  // request's response is applied.
+  const requestSeq = useRef(0);
+
   const isPortalAdmin = user?.role === 'PortalAdmin';
 
   // Load usecases for filter dropdown
   useEffect(() => {
+    // An older response must not re-apply a saved use case the user has
+    // since changed.
+    let cancelled = false;
     const loadUsecases = async () => {
       try {
         const response = await apiService.listUseCases();
+        if (cancelled) return;
         const usecaseList = response.usecases || [];
         setUsecases(usecaseList);
         
@@ -89,12 +98,30 @@ export default function AuditLogs() {
       }
     };
     loadUsecases();
+    return () => {
+      cancelled = true;
+    };
   }, [selectedUsecaseId]);
 
-  const loadLogs = useCallback(async (resetPage = false) => {
+  // The loader depends on the filter values, not the option objects, so
+  // re-selecting the same use case (e.g. when listUseCases resolves) does not
+  // trigger another fetch.
+  const usecaseFilter = selectedUsecase?.value || undefined;
+  const channelFilter = selectedChannel.value;
+  const actionFilter = selectedAction?.value || undefined;
+
+  // Loads the first page for the current filters, or, given a pagination
+  // token, appends the next page. Every request carries the current filters.
+  const loadLogs = useCallback(async (pageToken?: string) => {
+    const seq = ++requestSeq.current;
+    const append = !!pageToken;
     setLoading(true);
     setError(null);
-    
+    if (!append) {
+      // The previous token belongs to the previous filters' scan.
+      setNextToken(undefined);
+    }
+
     try {
       const params: {
         usecase_id?: string;
@@ -106,16 +133,16 @@ export default function AuditLogs() {
         channel?: 'api' | 'mcp';
       } = { limit: 50 };
 
-      if (selectedUsecase?.value) {
-        params.usecase_id = selectedUsecase.value;
+      if (usecaseFilter) {
+        params.usecase_id = usecaseFilter;
       }
 
-      if (selectedChannel.value === 'api' || selectedChannel.value === 'mcp') {
-        params.channel = selectedChannel.value;
+      if (channelFilter === 'api' || channelFilter === 'mcp') {
+        params.channel = channelFilter;
       }
 
-      if (selectedAction?.value) {
-        params.action = selectedAction.value;
+      if (actionFilter) {
+        params.action = actionFilter;
       }
 
       if (dateRange) {
@@ -140,29 +167,34 @@ export default function AuditLogs() {
         }
       }
 
-      if (!resetPage && nextToken) {
-        params.next_token = nextToken;
+      if (pageToken) {
+        params.next_token = pageToken;
       }
 
       const response = await apiService.getAuditLogs(params);
-      
-      setLogs(response.logs || []);
-      setTotalCount(response.count || 0);
+      if (seq !== requestSeq.current) return;
+
+      const page = response.logs || [];
+      setLogs(prev => (append ? [...prev, ...page] : page));
+      setTotalCount(prev => (append ? prev : 0) + (response.count || 0));
       setAvailableActions(response.available_actions || []);
       setIsAdmin(response.is_admin || false);
       setNextToken(response.next_token);
     } catch (err: any) {
+      if (seq !== requestSeq.current) return;
       console.error('Failed to load audit logs:', err);
       setError(err.message || 'Failed to load audit logs');
       setLogs([]);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) {
+        setLoading(false);
+      }
     }
-  }, [dateRange, selectedAction, selectedUsecase, selectedChannel, nextToken]);
+  }, [dateRange, actionFilter, usecaseFilter, channelFilter]);
 
   useEffect(() => {
-    loadLogs(true);
-  }, [dateRange, selectedAction, selectedUsecase, selectedChannel]);
+    loadLogs();
+  }, [loadLogs]);
 
   const actionOptions: SelectProps.Option[] = [
     { label: 'All Actions', value: '' },
@@ -218,7 +250,7 @@ export default function AuditLogs() {
             ? "View audit logs for all portal actions across all use cases" 
             : "View audit logs for your assigned use cases"
           }
-          actions={<Button onClick={() => loadLogs(true)} iconName="refresh">Refresh</Button>}
+          actions={<Button onClick={() => loadLogs()} iconName="refresh">Refresh</Button>}
         >
           Audit Logs
         </Header>
@@ -406,7 +438,7 @@ export default function AuditLogs() {
           footer={
             nextToken && (
               <Box textAlign="center" padding="s">
-                <Button onClick={() => loadLogs(false)}>Load More</Button>
+                <Button onClick={() => loadLogs(nextToken)}>Load More</Button>
               </Box>
             )
           }
