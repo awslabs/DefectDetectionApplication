@@ -37,6 +37,7 @@ The worked example throughout is the **cookies** use case and its **blue plates*
 | 21 | [Audit Logs](21-audit-logs.md) | Audit Logs | – |
 | 22 | [Device web UI](22-device-web-ui.md) | On the edge device, port 3000 | [Module 12: Edge Software](https://youtu.be/pInKqoADn2c) |
 | 23 | [Quality Station HMI](23-station-hmi.md) | On the edge device, `/hmi/` | – |
+| 24 | [MCP support](24-mcp-support.md) | Kiro or another MCP client; Audit Logs → Channel | [Module 14: MCP support](https://youtu.be/0vL4eq0mcgM) |
 
 ## The end-to-end path
 
