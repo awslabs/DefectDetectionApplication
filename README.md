@@ -93,6 +93,7 @@ The DDA video tutorial series on YouTube has an overview video and one video per
 | Module 11 | [User Access](https://youtu.be/_HDKtKvft3c) | [3.2 Create Portal Admin User](#32-create-portal-admin-user) | [20. User Manager](docs/user-guide/20-user-manager.md) |
 | Module 12 | [Edge Software](https://youtu.be/pInKqoADn2c) | [Edge Device Management](#edge-device-management) | [22. Device web UI](docs/user-guide/22-device-web-ui.md), [23. Quality Station HMI](docs/user-guide/23-station-hmi.md) |
 | Module 13 | [Dashboards](https://youtu.be/wTwUSNUQbac) | - | [14. Workflow dashboards](docs/user-guide/14-workflow-dashboards.md) |
+| Module 14 | [MCP support](https://youtu.be/0vL4eq0mcgM) | [Documentation](#documentation) | [24. MCP support](docs/user-guide/24-mcp-support.md) |
 
 ## User Guide
 
@@ -109,7 +110,7 @@ The [User Guide](docs/user-guide/README.md) has one page per section of the syst
 | [7. Models](docs/user-guide/07-models.md) | [19. Settings](docs/user-guide/19-settings.md) | |
 | [8. Workflows](docs/user-guide/08-workflows.md) | [20. User Manager](docs/user-guide/20-user-manager.md) | |
 | [9. Workflow Tuning](docs/user-guide/09-workflow-tuning.md) | [21. Audit Logs](docs/user-guide/21-audit-logs.md) | |
-| [10. Node Designer](docs/user-guide/10-node-designer.md) | | |
+| [10. Node Designer](docs/user-guide/10-node-designer.md) | [24. MCP support](docs/user-guide/24-mcp-support.md) | |
 | [11. Components](docs/user-guide/11-components.md) | | |
 | [12. Builds](docs/user-guide/12-builds.md) | | |
 
