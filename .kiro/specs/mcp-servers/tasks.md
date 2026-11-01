@@ -833,10 +833,11 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - _Requirements: 5.2, 10.1, 17.2_
 
 - [ ] 22. Deliver Phase 2 on the portal
-  - [ ] 22.1 Bump the delivered phases and the documentation
+  - [x] 22.1 Bump the delivered phases and the documentation
     - `mcp_portal.DELIVERED_PHASES = (1, 2)` and a minor `__version__` bump; ADMIN_GUIDE tool table shows the Phase-2 tools incl. `portal_devices_logs_analyze` and `portal_workflows_plugin_generate_status_get` [review-9 N6]
     - Files: `edge-cv-portal/backend/functions/mcp_portal/__init__.py`, `edge-cv-portal/ADMIN_GUIDE.md`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp -q` (Property 3 and the protocol test list the Phase-2 tools; the RBAC matrix, guardrail and audit suites cover them)
+    - Done (2026-11-01, commit `d0a14971`): `DELIVERED_PHASES = (1, 2)`, `__version__` `1.1.0` (and `MCP_SERVER_VERSION` in `mcp-stack.ts`); `mcpMutatingToolsEnabled` stays `false` by default. The portal test harness now defaults to the delivered phases instead of pinning `(1,)`, so the protocol, guardrail, audit and property suites run against Phases 1 and 2 as delivered: with the switch off the aggregate lists 89 tools (the 87 Phase-1 tools, `portal_devices_logs_analyze` and `portal_workflows_plugin_generate_status_get`), with it on 140 and no Phase-3 tool. ADMIN_GUIDE (intro, the setting, the MCP tools preamble, the Versions row) and user guide 24 (read-only counts devices 20, workflows 27) updated. Counts: `PORTAL_MCP_PYTEST tests/mcp` 3,800 passed; `CDK_TEST` 44 suites / 527 tests; the IAM preservation synth gate 40 passed; the 16.3 docs check PASS (256 documented rows); the design recount unchanged (161 rows; portal 184 = 87/53/44, edge 73 = 47/9/17)
     - _Requirements: 17.2, 17.3, 5.3, 5.4, 16.4, 16.5_
 
   - [ ] 22.2 Deploy and exercise one Phase-2 mutating tool per area
@@ -845,10 +846,11 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - _Requirements: 1.4, 4.3, 4.4, 5.3, 5.7, 3.5, 6.2_
 
 - [ ] 23. Deliver Phase 2 on the edge
-  - [ ] 23.1 Bump the delivered phases and add the harness's mutating step
+  - [x] 23.1 Bump the delivered phases and add the harness's mutating step
     - `mcp_edge.DELIVERED_PHASES = (1, 2)`; `test_50_mcp.py` step (3) when the profile declares `mcp_mutating: true`: `edge_static_image_pin` → `_pin_get` → `edge_static_image_unpin` (skipped when an image is already pinned), `edge_results_summary_reset` with the restoration of review-7 N5, `edge_execution_log_get(tail_chars=2000)`, `edge_cameras_rescan` with the before/after camera list, `edge_system_snapshot_create(confirm="snapshot")` only with `mcp_snapshot: true`; `edge_image_source_capture` deliberately not called; `docs/edge-mcp-server.md` tool table updated
     - Files: `src/backend/mcp_edge/__init__.py`, `test/on-hardware/harness/stages/test_50_mcp.py`, `docs/edge-mcp-server.md`
     - Verify: the task-13 commands green; `python3 -m pytest test/on-hardware/harness/selftest -q`
+    - Done (2026-11-01, commit `eda358d8`): `DELIVERED_PHASES = (1, 2)`; with `McpMutatingToolsEnabled` the child lists the nine Phase-2 mutating tools, without it the 47 read-only tools as before; the edge `__version__` stays `1.0.0`. `test_50_mcp.py` step (3) runs only with `mcp_mutating: true` and fails when the device then reports `mutatingToolsEnabled` false; `tools/list` must name no mutating tool with the switch off and exactly the Phase-2 ones with it on. `devices.yaml.example`: `jp5-xavier` and `jp6-orinagx` declare `mcp_mutating: true` and `mcp_snapshot: false` (the snapshot deletes earlier archives the harness cannot restore; 23.2 may set it per device). Counts: `EDGE_CHILD_PYTEST` 411 passed; `EDGE_CONTAINER_PYTEST` over the eight backend-process files 113 passed in the JP5 image (`arm64JP5-1.0.56`, Python 3.11.9) and 113 in the JP6 image (`arm64JP6-1.0.80`, Python 3.10.12); the harness selftest 193 passed, 3 skipped (host Python 3.9) and 195 passed, 1 skipped (Python 3.11 with `mcp==2.3.0`); the 16.3 docs check PASS; the design recount unchanged
     - _Requirements: 17.2, 17.3, 10.6, 16.7_
 
   - [ ] 23.2 Build and verify Phase 2 on JP5 and JP6
