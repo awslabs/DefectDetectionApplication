@@ -819,15 +819,17 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
 
 ### Phase 2 — low-consequence mutating tools
 
-- [ ] 21. Meet the Phase-2 entry criteria
-  - [ ] 21.1 Re-verify the Phase-2 rows at the current HEAD
+- [x] 21. Meet the Phase-2 entry criteria
+  - [x] 21.1 Re-verify the Phase-2 rows at the current HEAD
     - Re-run tasks 5.6–5.11 and 11.13 (route, classification, audit-flag, argument, permission suites of both catalogs) at the HEAD Phase 2 is cut from; correct any row whose handler drifted since `c3bf88c1`, and re-export `catalog_routes.json`/`catalog_tools.json`
     - Verify: `PORTAL_MCP_PYTEST tests/mcp -q` and `EDGE_CHILD_PYTEST` over the task-13 child list green
+    - Done (2026-11-01, commit `5fe1a031`): the suites re-ran at `b88f88f0`. Since `e2ac8443` the handlers in `captures.py`, `datasets.py` and `labeling.py` changed, and no edge handler changed. The one Phase-2 row on a changed handler, `portal_data_labeling_job_create`, keeps its `catalog.py` row; its design.md handler cell and the permission test's handler-admitted set were corrected. `catalog_routes.json`/`catalog_tools.json` re-exported unchanged. Counts: `PORTAL_MCP_PYTEST tests/mcp` 3,799 passed (at the base and at `5fe1a031`); `EDGE_CHILD_PYTEST` 411 passed; `CDK_TEST` 44 suites / 527 tests; the IAM preservation synth gate 40 passed
     - _Requirements: 1.3, 5.1, 10.1, 17.2_
 
-  - [ ] 21.2 Obtain the owner sign-off on the Phase-2 destructive tools
-    - The design names the static unpins (portal and edge), `edge_system_snapshot_create` and `portal_workflows_plugin_source_set`; present the complete Phase-2 `destructive=true` list generated from `catalog_tools.json` and the edge `CATALOG` so none is missed
+  - [x] 21.2 Obtain the owner sign-off on the Phase-2 destructive tools
+    - The design names the static unpins (portal and edge), `edge_system_snapshot_create`, `portal_workflows_plugin_source_set` and `edge_results_summary_reset`; present the complete Phase-2 `destructive=true` list generated from `catalog_tools.json` and the edge `CATALOG` so none is missed
     - Verify: the decision recorded in the Phase-2 evidence
+    - Done (owner, 2026-11-01, gate 1): approve all. The list generated at `5fe1a031` has seven tools: portal `portal_devices_static_image_unpin`, `portal_devices_static_video_unpin` (`confirm`=`device_id`) and `portal_workflows_plugin_source_set` (`confirm`=`plugin_id`); edge `edge_results_summary_reset` (`confirm`=`workflow_id`), `edge_static_image_unpin` (`"static-image"`), `edge_static_video_unpin` (`"static-video"`) and `edge_system_snapshot_create` (`"snapshot"`). It matches the named set; the Phasing table and this bullet now also name `edge_results_summary_reset`, whose design row was already `M!`. No tool is excluded and no row changed phase
     - _Requirements: 5.2, 10.1, 17.2_
 
 - [ ] 22. Deliver Phase 2 on the portal
