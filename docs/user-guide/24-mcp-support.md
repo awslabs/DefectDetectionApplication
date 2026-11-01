@@ -42,8 +42,8 @@ No password, token or client secret goes into `mcp.json`. The same entry works f
 
 ## 24.3 Sign in
 
-1. Enable the server entry in Kiro (or start Kiro CLI). Kiro opens the Portal's sign-in page in your browser.
-2. Sign in with your Portal username and password, as on the Portal itself.
+1. Enable the server entry in Kiro (or start Kiro CLI). Kiro opens the Amazon Cognito sign-in page of the Portal's user pool in your browser, at an address of the form `https://<domain-prefix>.auth.<region>.amazoncognito.com`. This page looks different from the Portal's own sign-in page ([1.1](01-getting-started.md#11-sign-in)).
+2. Sign in with your Portal username and password; they are the same as on the Portal.
 3. The browser returns to Kiro, and the server's tools appear in Kiro's MCP panel.
 
 - Kiro keeps the sign-in and renews it by itself for up to 30 days; after that it asks you to sign in again. When a Portal account is disabled, its tool calls stop working within the hour.
