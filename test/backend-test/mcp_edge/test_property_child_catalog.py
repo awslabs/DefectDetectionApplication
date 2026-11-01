@@ -223,10 +223,15 @@ def test_tool_list_determinism_and_filtering(phases, mutating, features):
         assert accepted == (spec.name in listed)
 
 
-def test_delivered_list_is_phase_one_read_only():
+def test_delivered_list_is_phases_one_and_two():
     tools = catalog.tools_for(delivered_phases=DELIVERED_PHASES, features=('vllm',))
-    assert DELIVERED_PHASES == (1,)
+    assert DELIVERED_PHASES == (1, 2)
     assert len([t for t in tools if t.name in BY_NAME]) == 47
     assert all(BY_NAME[t.name].read_only for t in tools if t.name in BY_NAME)
+    mutating = catalog.tools_for(delivered_phases=DELIVERED_PHASES, mutating_enabled=True,
+                                 features=('vllm',))
+    added = {t.name for t in mutating if t.name in BY_NAME} - {t.name for t in tools}
+    assert added == {s.name for s in CATALOG if s.phase == 2}
+    assert len(added) == 9 and not [n for n in added if BY_NAME[n].read_only]
     without = catalog.tools_for(delivered_phases=DELIVERED_PHASES)
     assert not [t for t in without if t.name in BY_NAME and BY_NAME[t.name].feature]

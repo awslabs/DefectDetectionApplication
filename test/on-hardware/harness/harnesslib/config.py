@@ -93,8 +93,8 @@ ENV_CREDENTIALS = "DDA_HARNESS_CREDENTIALS"
 #: MCP stage's direct-loopback checks run only then.
 ENV_ON_DEVICE = "DDA_HARNESS_ON_DEVICE"
 
-#: Boolean Device_Profile flags of the MCP stage (default false). Parsed now;
-#: the stage uses them from Phase 2 (mutating tools; the snapshot tool).
+#: Boolean Device_Profile flags of the MCP stage (default false); they gate
+#: its step (3) (the mutating tools; the snapshot tool).
 PROFILE_FLAGS = ("mcp_mutating", "mcp_snapshot")
 
 _HARNESS_DIR = Path(__file__).resolve().parent.parent

@@ -30,7 +30,7 @@ __version__ = "1.0.0"
 
 # The only phase gate: an edge catalog spec whose phase is not listed here is
 # neither listed nor accepted.
-DELIVERED_PHASES = (1,)
+DELIVERED_PHASES = (1, 2)
 
 # The in-image virtualenv's interpreter (built from requirements.lock.txt).
 VENV_PYTHON = "/opt/dda/mcp-venv/bin/python"

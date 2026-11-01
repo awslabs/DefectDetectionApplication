@@ -79,7 +79,10 @@ VLM_STAGE_TESTS = 2
 STREAM_STAGE_TESTS = 7
 #: The MCP stage (capability ``mcp``): every test skips unless ``mcp`` is
 #: granted (the MCP stage selftests at the end of this file).
-MCP_STAGE_TESTS = 19
+MCP_STAGE_TESTS = 24
+#: The MCP stage's step (3) tests (``test_mutating_*``), gated on the
+#: profile's ``mcp_mutating`` flag.
+MCP_MUTATING_STEP_TESTS = 5
 
 # Whether the MCP stage's client imports resolve under this interpreter; the
 # pytester subprocess runs the same one.
@@ -805,3 +808,42 @@ def test_mcp_stage_with_the_sdk_sets_up_and_records_the_soak(pytester, monkeypat
     assert metrics["mcp_soak_samples"] >= 2
     # The baseline, the status check and at least two soak samples.
     assert device.mcp_status_reads >= 4
+
+
+@pytest.mark.skipif(not MCP_SDK_IMPORTABLE, reason="needs the mcp SDK (Python 3.10 or later)")
+@pytest.mark.parametrize("declared", [False, True], ids=["not-declared", "declared"])
+def test_mcp_mutating_step_follows_the_profile_flag(pytester, monkeypatch, declared):
+    """Step (3) is gated before any MCP call: without ``mcp_mutating: true``
+    every ``test_mutating_*`` test skips naming the flag; with it, against a
+    device reporting ``mutatingToolsEnabled: false`` (the fake's default),
+    every one errors naming ``McpMutatingToolsEnabled``. The fake serves no
+    ``/mcp``, so a call reaching it would fail differently."""
+    device = FakeDevice()
+    device.enable_mcp()
+    bundle = pytester.path / "bundle"
+    flag = "true" if declared else "false"
+    config_text = (
+        "devices:\n"
+        f"  {DEVICE_NAME}:\n"
+        "    base_url: http://fake.invalid:5000\n"
+        f"    profile: {{architecture: arm64_jp6, mcp_mutating: {flag}}}\n"
+    )
+    with serve(device) as base_url:
+        _configure_harness_env(monkeypatch, pytester, base_url, "mcp", config_text=config_text)
+        result = pytester.runpytest_subprocess(
+            str(STAGES_DIR / "test_50_mcp.py"),
+            f"--harness-output-dir={bundle}",
+            "-p",
+            "no:cacheprovider",
+            "-k",
+            "test_mutating_",
+            "-rsE",
+        )
+    output = result.stdout.str()
+    if declared:
+        result.assert_outcomes(errors=MCP_MUTATING_STEP_TESTS)
+        assert "McpMutatingToolsEnabled" in output
+    else:
+        assert result.ret == 0, output
+        result.assert_outcomes(skipped=MCP_MUTATING_STEP_TESTS)
+        assert "does not declare mcp_mutating: true" in output

@@ -95,7 +95,7 @@ Field reference:
 | `base_url` | The device Backend_API root, e.g. `http://192.168.1.42:5000` or a tunnel-forwarded `http://localhost:5000`. Required. |
 | `profile.architecture` | One of `x86_64`, `arm64_cpu`, `arm64_jp5`, `arm64_jp6`, `arm64_jp7`. Unknown values are rejected (fail closed). Required. |
 | `profile.capabilities` | Any of `vllm`, `dlr_models`, `onnx_models`, `workflows`, `auth_enabled`, `stream_cameras`, `mcp`. Unknown names are rejected. Stages gate on these (see below). |
-| `profile.mcp_mutating`, `profile.mcp_snapshot` | Booleans of the MCP stage, default `false`; any other value is rejected. `mcp_mutating: true` lets the stage call the mutating tools (each with restoration); `mcp_snapshot: true` also allows the snapshot tool, which deletes earlier archives, so set it only on devices that keep no operator archive. Parsed now; the stage uses them once mutating tools are delivered (Phase 2). |
+| `profile.mcp_mutating`, `profile.mcp_snapshot` | Booleans of the MCP stage, default `false`; any other value is rejected. `mcp_mutating: true` lets the stage call the mutating tools (each with restoration); `mcp_snapshot: true` also allows the snapshot tool, which deletes earlier archives, so set it only on devices that keep no operator archive. See [MCP stage](#mcp-stage). |
 | `credentials` | A credential **reference** (never a value) — see [Credentials](#credentials). Required only with `auth_enabled`. |
 | `expected.vision_models` | Vision model names the device must report (asserted present). Empty list = enumerate-only. |
 | `expected.vllm_models` | vLLM model names the device must report and bring to READY. Empty list = exercise whatever `VllmModel` entries the device reports. |
@@ -201,7 +201,7 @@ The stages, in run order (module naming keeps health first):
 | `test_30_workflows.py` | `workflows` | `workflows` | expected workflows present, run → observable output, `llm_inference` metadata |
 | `test_35_stream_cameras.py` | `stream_cameras` | `stream_cameras` (+ each check skips when its `expected.*` input is unset) | stream capabilities, RTSP/RTMP connection test + preview + health, credentials, failure categories, triggered and continuous stream workflows |
 | `test_40_coexistence.py` | `coexistence` | `vllm` | vision + vLLM READY simultaneously through a completed generate |
-| `test_50_mcp.py` | `mcp` | `mcp` (+ skips when the `mcp` package is not importable) | `/mcp/status`, the read-only tools through `/mcp`, health and restart count across `timeouts.mcp_soak_s`, 401/403 negatives, on-device loopback checks with `DDA_HARNESS_ON_DEVICE=true` |
+| `test_50_mcp.py` | `mcp` | `mcp` (+ skips when the `mcp` package is not importable) | `/mcp/status`, the read-only tools through `/mcp`, the mutating tools with restoration when `mcp_mutating` is true, health and restart count across `timeouts.mcp_soak_s`, 401/403 negatives, on-device loopback checks with `DDA_HARNESS_ON_DEVICE=true` |
 
 Selection uses standard pytest mechanisms — no test-code edits:
 
@@ -241,6 +241,25 @@ The stage logs in through the harness client with the configured credential
 reference and passes the session token as a bearer header; the token is never
 logged. `profile.mcp_mutating`, `profile.mcp_snapshot`, `timeouts.mcp_soak_s`
 and `DDA_HARNESS_ON_DEVICE` are described above.
+
+With `profile.mcp_mutating: true` the stage also calls one mutating tool per
+area. The device must then run with `McpMutatingToolsEnabled: "true"`; with
+the switch off, the `test_mutating_*` tests fail. Each call leaves the device
+as the stage found it:
+
+- `edge_static_image_pin` with a bundled 707-byte JPEG named `harness-pin.jpg`,
+  `edge_static_image_pin_get`, then `edge_static_image_unpin`. Skipped when an
+  image is already pinned, so an operator's pin is never replaced.
+- `edge_results_summary_reset` on the first `expected.workflows` entry (skipped
+  when none is set), then a second reset back to the original `lastResetTime`.
+  When the original was null there is nothing to restore, and the run records
+  the new value as `mcp_results_summary_left_at_reset_time`.
+- `edge_execution_log_get` with `tail_chars=2000` on the latest execution.
+- `edge_cameras_rescan`, asserting the camera list is the same before and after.
+- `edge_system_snapshot_create`, only with `profile.mcp_snapshot: true`.
+
+`edge_image_source_capture` is never called: the route returns no identifier
+of the file it writes, so the stage could not remove it.
 
 ## Results bundle
 
