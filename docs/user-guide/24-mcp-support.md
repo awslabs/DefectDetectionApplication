@@ -2,7 +2,7 @@
 
 **Who:** every signed-in Portal user; each tool needs the same permission as the matching Portal page, so an assistant can read only what you can read in the web UI. **Video:** [Module 14: MCP support](https://youtu.be/0vL4eq0mcgM). **Reference:** [Administrator Guide, MCP server (AI assistants)](../../edge-cv-portal/ADMIN_GUIDE.md#mcp-server-ai-assistants), [Edge MCP server](../edge-mcp-server.md).
 
-The Model Context Protocol (MCP) lets an AI assistant such as Kiro work with DDA through tools: "list the devices of the cookies use case", "show the last training job's logs", "which workflows are deployed to this station". The assistant calls the tools as you, with the credentials you already have, and every call goes through the same role and permission checks as the Portal. In this release every tool is read-only: an assistant can look things up, but it cannot create, change, deploy or delete anything.
+The Model Context Protocol (MCP) lets an AI assistant such as Kiro work with DDA through tools: "list the devices of the cookies use case", "show the last training job's logs", "which workflows are deployed to this station". The assistant calls the tools as you, with the credentials you already have, and every call goes through the same role and permission checks as the Portal. By default every tool is read-only: an assistant can look things up, but it cannot create, change, deploy or delete anything. Tools that make changes are off unless an administrator turns them on ([24.4](#244-what-the-tools-can-read)).
 
 ## 24.1 The two MCP servers
 
@@ -61,8 +61,8 @@ The server URL ending in `/mcp` offers every tool. Each view URL offers one area
 |------|------------|---------------------|-----------------|
 | **data** | `/mcp/data` | Buckets, datasets and folders, captures, labeling jobs and teams, your own labeling tasks, pre-labeled datasets and synthetic-data sessions. | 23 |
 | **models** | `/mcp/models` | Models, training jobs and their logs, compilations, model types and format checks. | 11 |
-| **devices** | `/mcp/devices` | Devices, their cameras, components, deployments, logs, registrations and pinned images and videos. | 19 |
-| **workflows** | `/mcp/workflows` | Workflows and versions, test datasets and runs, custom nodes and plugins, builds and build servers. | 26 |
+| **devices** | `/mcp/devices` | Devices, their cameras, components, deployments, logs, registrations and pinned images and videos. | 20 |
+| **workflows** | `/mcp/workflows` | Workflows and versions, test datasets and runs, custom nodes and plugins, builds and build servers. | 27 |
 | **admin** | `/mcp/admin` | Use cases, users and their permissions, edge-sync devices, the audit log, and `portal_admin_whoami`. | 8 |
 
 - Tool names start with `portal_` and the view, then say what they read, for example `portal_devices_list`, `portal_models_training_logs_get` or `portal_workflows_test_runs_list`.
@@ -71,7 +71,7 @@ The server URL ending in `/mcp` offers every tool. Each view URL offers one area
 - Most list tools return 50 items by default and at most 200 per call.
 - A tool answers **not authorized** when your role does not allow the same read in the Portal. If a tool is refused although the Portal page works for you, ask your PortalAdmin; some account-wide tools depend on how your role is recorded ([Administrator Guide, Roles and the registry-enforcement flag](../../edge-cv-portal/ADMIN_GUIDE.md#roles-and-the-registry-enforcement-flag)).
 
-Tools that create, change or delete are planned for later releases; the server neither lists nor accepts them today. The full tool list, with the permission each tool needs, is in the [Administrator Guide, MCP tools](../../edge-cv-portal/ADMIN_GUIDE.md#mcp-tools).
+Tools that create or change something, for example creating a dataset folder, starting a training job or submitting a build, are off by default: the server lists and accepts them only when your PortalAdmin turns them on for the Portal, and each one needs the same permission as the matching Portal action. Tools such as deleting a device or a use case, or creating a deployment, are planned for a later release. The full tool list, with the permission each tool needs, is in the [Administrator Guide, MCP tools](../../edge-cv-portal/ADMIN_GUIDE.md#mcp-tools).
 
 ## 24.5 MCP calls in the Audit Logs
 
@@ -87,7 +87,7 @@ Calls to the edge MCP server are logged on the device, not in the Portal's Audit
 
 ## 24.6 The edge MCP server
 
-Each edge device can also serve its own MCP server from the LocalServer, so an assistant can read that station's state: cameras and image sources, workflows and their runs, results and images, and the system's health. It is off until it is enabled for the device through a deployment configuration change. It offers read-only tools only.
+Each edge device can also serve its own MCP server from the LocalServer, so an assistant can read that station's state: cameras and image sources, workflows and their runs, results and images, and the system's health. It is off until it is enabled for the device through a deployment configuration change. It offers read-only tools; tools that change the station, for example pinning a static image or rescanning the cameras, are listed only when they are also turned on for the device.
 
 - Connect to it on the device's local network, or through a port forward to the device ([Connect to an edge device](../connect-to-device.md#forward-the-localserver-port-for-mcp)).
 - On a device with local login enabled, sign in with your Portal account synced to the device ([20.3](20-user-manager.md#203-edge-account-sync)), through the login helper the edge guide describes.

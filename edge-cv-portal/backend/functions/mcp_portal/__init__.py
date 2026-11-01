@@ -6,12 +6,12 @@ Lambda of the matching REST route (spec: .kiro/specs/mcp-servers/).
 """
 
 # Semver of this package; also the default of MCP_SERVER_VERSION.
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 # The only phase gate: a catalog spec whose phase is not listed here is neither
 # listed nor accepted. Bumped to (1, 2) and (1, 2, 3) by the release that ships
 # each phase.
-DELIVERED_PHASES: tuple = (1,)
+DELIVERED_PHASES: tuple = (1, 2)
 
 # MCP protocol revisions the server negotiates, newest first.
 PROTOCOL_REVISIONS = ('2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26')

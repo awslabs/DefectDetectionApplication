@@ -53,7 +53,7 @@ def test_legacy_initialize_list_and_call(portal):
     version, info, tools, result = h.over_http(handler.build_asgi_app, go, token,
                                                view='devices', mode='legacy')
     assert version in HANDSHAKE_PROTOCOL_VERSIONS and version in PROTOCOL_REVISIONS
-    assert info.name == 'dda-portal-mcp/devices' and info.version == '1.0.0'
+    assert info.name == 'dda-portal-mcp/devices' and info.version == '1.1.0'
     assert any(t.name == 'portal_devices_list' for t in tools.tools)
     assert result.is_error is False
     assert result.structured_content['result']['devices'] == [{'device_id': 'fake-device-1'}]

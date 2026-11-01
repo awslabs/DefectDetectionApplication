@@ -67,7 +67,7 @@ def test_discover_fields(portal, view):
     info, instructions = h.in_memory(view, go, h.access_token())
     assert info.name == server.server_name(view)
     assert info.name == ('dda-portal-mcp' if view is None else f'dda-portal-mcp/{view}')
-    assert info.version == '1.0.0'
+    assert info.version == '1.1.0'
     assert instructions == server.instructions_for(view)
 
 
@@ -99,8 +99,11 @@ def test_tools_list_is_deterministic_and_rendered(portal, view):
         assert tool.input_schema == spec.input_schema
 
 
-def test_aggregate_lists_the_87_phase_one_tools(portal):
-    assert len(listed(None).tools) == 87
+def test_aggregate_lists_the_89_delivered_read_only_tools(portal):
+    # 87 Phase-1 tools and the two Phase-2 read-only tools; the switch is off.
+    names = [t.name for t in listed(None).tools]
+    assert len(names) == 89
+    assert {'portal_devices_logs_analyze', 'portal_workflows_plugin_generate_status_get'} <= set(names)
 
 
 def test_switch_and_phases_widen_the_list(portal):
@@ -113,6 +116,15 @@ def test_switch_and_phases_widen_the_list(portal):
                    'portal_devices_deployment_create'][0]
     assert destructive.description.endswith(
         'MUTATING, DESTRUCTIVE — requires confirm=<target_thing_group | target_devices[0]>.')
+
+
+def test_switch_lists_the_delivered_phase_two_tools_only(portal):
+    assert DELIVERED_PHASES == (1, 2)
+    portal.monkeypatch.setenv('MCP_MUTATING_TOOLS_ENABLED', 'true')
+    names = {t.name for t in listed(None).tools}
+    assert names == expected_names(None, mutating=True)
+    assert len(names) == 87 + 53
+    assert not [n for n in names if BY_NAME[n].phase == 3]
 
 
 # ------------------------------------------------------------------ alias
@@ -162,14 +174,14 @@ def test_read_only_call_dispatches_once(portal):
     assert event['requestContext']['authorizer']['claims'] == token.claims
     assert event['mcp']['channel'] == 'mcp'
     assert event['mcp']['tool'] == 'portal_devices_list'
-    assert event['mcp']['server'] == 'dda-portal-mcp/devices@1.0.0'
+    assert event['mcp']['server'] == 'dda-portal-mcp/devices@1.1.0'
     assert event['mcp']['principal_email'] == h.EMAIL
 
 
 def test_aggregate_endpoint_serves_every_view(portal):
     result = call(None, 'portal_devices_list', {'usecase_id': USECASE})
     assert result.is_error is False
-    assert portal.events[-1]['mcp']['server'] == 'dda-portal-mcp@1.0.0'
+    assert portal.events[-1]['mcp']['server'] == 'dda-portal-mcp@1.1.0'
 
 
 # ---------------------------------------------------------------- M call
