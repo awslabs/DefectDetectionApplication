@@ -68,7 +68,9 @@ HANDLER_ROLES = {
     'portal_data_labeler_task_presentation_failure': LABEL,
     'portal_data_labeler_task_steal': LABEL,
     'portal_data_labeler_task_submit': LABEL,
-    'portal_data_labeling_job_create': ANY,
+    # Re-read at task 21.1: the GroundTruth branch checks MANAGE_LABELING_JOBS
+    # (@rbac_check), the DDA branch CREATE_LABELING_JOBS; both admit SCIENCE.
+    'portal_data_labeling_job_create': SCIENCE,
     'portal_data_labeling_job_delete': SCIENCE,
     'portal_data_labeling_job_get': ANY,
     'portal_data_labeling_job_stop': SCIENCE,
