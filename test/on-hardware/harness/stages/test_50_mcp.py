@@ -21,7 +21,8 @@ Capability-gated on ``mcp``. The stage:
    otherwise), ``edge_results_list``, ``edge_registration_get``
    (``executions`` dropped) and ``edge_textgen_models_list`` (``vllm``);
    ``tools/list`` names no mutating tool while ``mutatingToolsEnabled`` is
-   false, and exactly the Phase-2 mutating tools while it is true;
+   false, and exactly the delivered (Phase-2 and Phase-3) mutating tools
+   while it is true;
 3. only when the device profile declares ``mcp_mutating: true`` (and the
    device reports ``mutatingToolsEnabled``), one mutating tool per area, each
    leaving the device as found: ``edge_static_image_pin`` ->
@@ -102,9 +103,10 @@ AREA_TOOLS = (
     "edge_static_image_pin_get",
 )
 #: The phases ``/mcp/status`` reports as delivered.
-DELIVERED_PHASES = [1, 2]
-#: The delivered mutating tools: listed exactly while ``mutatingToolsEnabled``.
-PHASE_2_MUTATING_TOOLS = (
+DELIVERED_PHASES = [1, 2, 3]
+#: The delivered mutating tools (Phases 2 and 3): listed exactly while
+#: ``mutatingToolsEnabled``.
+DELIVERED_MUTATING_TOOLS = (
     "edge_camera_connect",
     "edge_cameras_rescan",
     "edge_image_source_capture",
@@ -114,6 +116,24 @@ PHASE_2_MUTATING_TOOLS = (
     "edge_static_image_unpin",
     "edge_static_video_unpin",
     "edge_system_snapshot_create",
+    # Phase 3
+    "edge_camera_disconnect",
+    "edge_camera_features_apply",
+    "edge_image_source_add",
+    "edge_image_source_delete",
+    "edge_image_source_update",
+    "edge_model_start",
+    "edge_model_stop",
+    "edge_registration_continuous_pause",
+    "edge_registration_continuous_resume",
+    "edge_registration_trigger",
+    "edge_result_delete",
+    "edge_system_restart_dda",
+    "edge_workflow_create",
+    "edge_workflow_delete",
+    "edge_workflow_retry",
+    "edge_workflow_run",
+    "edge_workflow_update",
 )
 #: Step (3): the static image the stage pins and removes again.
 PIN_FILE_NAME = "harness-pin.jpg"
@@ -366,7 +386,7 @@ def test_tools_list_follows_the_mutating_switch(
     assert not missing, f"tools/list lacks {missing}"
     mutating = sorted(t.name for t in listed.tools if not t.annotations.read_only_hint)
     if _mcp_status(edge_client).get("mutatingToolsEnabled") is True:
-        assert mutating == sorted(PHASE_2_MUTATING_TOOLS), (
+        assert mutating == sorted(DELIVERED_MUTATING_TOOLS), (
             f"with mutatingToolsEnabled, tools/list names the mutating tools {mutating}"
         )
     else:

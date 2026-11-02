@@ -8,10 +8,9 @@ request to a supervised child process bound to `127.0.0.1:5790`. Every tool
 call is checked by the Backend_API's existing request authorizer with the
 caller's own credential, and by an MCP-scoped role gate.
 
-Phases 1 and 2 are delivered: the server lists and accepts the Phase-1 and
-Phase-2 rows of the tool table below. The Phase-2 rows are mutating tools, so
-they are listed and accepted only while `McpMutatingToolsEnabled` is true. The
-Phase-3 tools arrive in a later release.
+Phases 1, 2 and 3 are delivered: the server lists and accepts every row of the
+tool table below. The Phase-2 and Phase-3 rows are mutating tools, so they are
+listed and accepted only while `McpMutatingToolsEnabled` is true.
 
 The portal has its own MCP server; see the
 [Administrator Guide: MCP server (AI assistants)](../edge-cv-portal/ADMIN_GUIDE.md#mcp-server-ai-assistants).
@@ -43,8 +42,8 @@ for example:
 
 - `McpServerEnabled` starts the MCP child and serves `/mcp`.
 - `McpMutatingToolsEnabled` lets the server list and accept mutating tools
-  (it requires `McpServerEnabled`): the Phase-2 rows of the
-  [tool table](#tools).
+  (it requires `McpServerEnabled`): the Phase-2 and Phase-3 rows of the
+  [tool table](#tools). A DESTRUCTIVE tool also needs `confirm`.
 - Only an explicit true value turns a switch on; a value the component cannot
   read means both switches are off.
 - The LocalServer re-reads the configuration every 30 s. A change starts,
@@ -179,7 +178,7 @@ record.
 ```json
 {"enabled": true, "mutatingToolsEnabled": false, "listening": true, "endpoint": "/mcp",
  "transport": "streamable-http", "protocolRevisions": ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"],
- "serverVersion": "1.0.0", "deliveredPhases": [1, 2], "componentVersion": "<component version>",
+ "serverVersion": "1.0.0", "deliveredPhases": [1, 2, 3], "componentVersion": "<component version>",
  "features": ["vllm"], "restartCount": 0, "lastExitCode": null, "lastError": null}
 ```
 
@@ -211,9 +210,8 @@ shaped before they reach the client:
   `result_too_large`.
 - Video pin upload and results export are available in the HMI only.
 
-Phases 1 and 2 are delivered; the Phase-2 tools are listed and accepted only
-while `McpMutatingToolsEnabled` is true. Phase 3 rows are listed for reference
-and are neither listed nor accepted by the server until their release.
+Phases 1, 2 and 3 are delivered; the Phase-2 and Phase-3 tools are listed and
+accepted only while `McpMutatingToolsEnabled` is true.
 
 | Tool | Phase | Classification | Result shaping and limits |
 |---|---|---|---|

@@ -138,7 +138,7 @@ def make(config=None, ready=True, features=("vllm",), **kwargs):
 
 def test_package_constants():
     assert mcp_edge.__version__ == "1.0.0"
-    assert mcp_edge.DELIVERED_PHASES == (1, 2)
+    assert mcp_edge.DELIVERED_PHASES == (1, 2, 3)
     assert mcp_edge.VENV_PYTHON == "/opt/dda/mcp-venv/bin/python"
     assert mcp_edge.CHILD_PORT == 5790
 
@@ -492,7 +492,7 @@ def test_build_status():
         "endpoint": "/mcp", "transport": "streamable-http",
         "protocolRevisions": ["2026-07-28", "2025-11-25", "2025-06-18",
                               "2025-03-26"],
-        "serverVersion": "1.0.0", "deliveredPhases": [1, 2],
+        "serverVersion": "1.0.0", "deliveredPhases": [1, 2, 3],
         "componentVersion": "1.0.130", "features": ["vllm"], "restartCount": 0,
         "lastExitCode": None, "lastError": None}
 

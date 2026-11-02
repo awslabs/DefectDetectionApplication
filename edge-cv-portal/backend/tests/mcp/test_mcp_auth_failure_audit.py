@@ -140,7 +140,7 @@ def test_claim_failure_writes_one_marked_entry(audit, overrides, reason):
     assert item["details"] == expected_details
     assert item["channel"] == "mcp"
     assert item["mcp_tool"] == "-"
-    assert item["mcp_server"] == "dda-portal-mcp/devices@1.1.0"
+    assert item["mcp_server"] == "dda-portal-mcp/devices@1.2.0"
     assert item["mcp_client"] == USER_AGENT
     assert item["mcp_request_id"] == f"req-{reason}"
     assert item["source_ip"] == SOURCE_IP
@@ -153,7 +153,7 @@ def test_aggregate_endpoint_names_the_aggregate_server(audit):
     assert post("/mcp", bearer).status_code == 401
     (item,) = audit(sub)
     assert item["resource_id"] == CANONICAL
-    assert item["mcp_server"] == "dda-portal-mcp@1.1.0"
+    assert item["mcp_server"] == "dda-portal-mcp@1.2.0"
 
 
 # ------------------------------------------------- nothing verifiable: none
@@ -298,7 +298,7 @@ def test_root_app_claim_failure_writes_one_marked_entry(audit, root_app, overrid
     assert item["details"]["reason"] == reason
     assert item["channel"] == "mcp" and item["mcp_tool"] == "-"
     assert item["resource_id"] == f"{h.CANONICAL}/devices"
-    assert item["mcp_server"] == "dda-portal-mcp/devices@1.1.0"
+    assert item["mcp_server"] == "dda-portal-mcp/devices@1.2.0"
     assert bearer not in str(item)
     assert fake.calls == []
 
