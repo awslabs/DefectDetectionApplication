@@ -128,8 +128,11 @@ def test_unknown_and_undelivered_tools_are_protocol_errors(backend):
             return error
         return None
 
-    for name in ('edge_no_such_tool', 'edge_registration_trigger'):
-        error = h.in_memory(lambda client: go(client, name))
+    # Every phase is delivered, so the undelivered case pins Phases 1 and 2:
+    # the Phase-3 edge_registration_trigger is then an unknown tool.
+    undelivered = h.options(delivered_phases=(1, 2), mutating_enabled=True)
+    for name, opts in (('edge_no_such_tool', None), ('edge_registration_trigger', undelivered)):
+        error = h.in_memory(lambda client: go(client, name), opts)
         assert isinstance(error, MCPError) and error.error.code == -32602, name
     assert backend.requests == []
 

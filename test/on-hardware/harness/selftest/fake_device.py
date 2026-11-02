@@ -104,7 +104,7 @@ def default_mcp_status() -> Dict[str, Any]:
         "transport": "streamable-http",
         "protocolRevisions": ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"],
         "serverVersion": "0.0.0-fake-mcp",
-        "deliveredPhases": [1, 2],
+        "deliveredPhases": [1, 2, 3],
         "componentVersion": FAKE_LOCAL_SERVER_VERSION,
         "features": [],
         "restartCount": 0,
