@@ -1132,10 +1132,15 @@ DEVICES: Tuple[ToolSpec, ...] = (
     ToolSpec(
         name='portal_devices_component_delete', domain='devices',
         title='Delete a component',
-        description='Deletes a Greengrass component version that is not deployed.',
+        description=('Deletes exactly one Greengrass component version that is not '
+                     'deployed. portal_devices_components_list returns base ARNs: '
+                     "append ':versions:<version>' (e.g. the item's latest_version) "
+                     'to choose the version. A base ARN deletes nothing.'),
         resource_type='component',
         input_schema=uc_schema({
-            'component_arn': identifier("The component ARN (a components_list item's arn)."),
+            'component_arn': identifier(
+                "The component-version ARN: a components_list item's arn "
+                "followed by ':versions:<version>'."),
             'confirm': confirm_arg('Repeat component_arn.'),
         }, required=['component_arn']),
         backend='components', handler_module='components',
