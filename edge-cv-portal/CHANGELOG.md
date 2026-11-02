@@ -4,6 +4,15 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Added - MCP server mutating tools, Phase 2 (2026-11-01)
+
+The Portal MCP server (`EdgeCVPortalMcpStack`, server version `1.1.0`) and the edge MCP server of the LocalServer deliver Phase 2 of the MCP tool catalog: the low-consequence mutating tools, beside the read-only tools of Phase 1 (server version `1.0.0`, 2026-10-25). Phase 2 adds 53 portal tools (51 mutating, plus the read-only `portal_devices_logs_analyze` and `portal_workflows_plugin_generate_status_get`) and 9 edge mutating tools. Nothing changes for an existing deployment until an administrator turns the switch on.
+
+- **Off by default.** The portal lists and accepts its mutating tools only while the CDK context `mcpMutatingToolsEnabled` is `true` (default `false`); an edge device only while its LocalServer configuration key `McpMutatingToolsEnabled` is `"true"` (default `"false"`, and it requires `McpServerEnabled`). With the switch off, the portal's `/mcp` lists 89 tools (the 87 Phase-1 tools and the two Phase-2 read-only tools) and a device lists its read-only tools; a call to a mutating tool answers `mutating_tools_disabled`.
+- **Same permissions as the web UI.** Each mutating tool needs the permission of the matching Portal action (on a device, the Operator role or above on a synced account); other roles are refused `not_authorized`. Every portal call is written to the Audit Logs with the MCP markers, so the **Channel = MCP** filter shows it.
+- **Destructive tools need `confirm`.** Seven Phase-2 tools are destructive and are accepted only with a `confirm` argument equal to their target: portal `portal_devices_static_image_unpin` and `portal_devices_static_video_unpin` (the device id) and `portal_workflows_plugin_source_set` (the plugin id); edge `edge_results_summary_reset` (the workflow id), `edge_static_image_unpin` (`"static-image"`), `edge_static_video_unpin` (`"static-video"`) and `edge_system_snapshot_create` (`"snapshot"`). A call without `confirm`, or with another value, answers `confirmation_required`.
+- **Docs and tests.** The tool tables in the Admin Guide ("MCP tools") and in `docs/edge-mcp-server.md` give the phase of every tool; user guide chapter 24 describes the switch. The on-hardware harness stage `test_50_mcp.py` gains a mutating step that runs only when the device profile declares `mcp_mutating: true` and leaves the device as it found it.
+
 ### Fixed - Use case region in the onboarding wizard (2026-10-29)
 
 - **A single-account use case records the portal's region.** The onboarding wizard shows the region field only for multi-account setups, but it sent `region: us-east-1` for single-account ones too. Quick Setup, the device list, Greengrass components and deployments, and SageMaker jobs all use that stored region, so a portal running in another region provisioned the use case's devices in us-east-1. The wizard now sends no region for a single-account use case, and the backend records the portal's own region. A bucket created from the wizard's single-account bucket picker also goes in the portal's region now.

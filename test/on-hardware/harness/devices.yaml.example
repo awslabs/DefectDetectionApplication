@@ -26,9 +26,11 @@
 # stream_cameras (the RTSP/RTMP stage, test_35; see README "Stream cameras stage"),
 # mcp (the Edge MCP server stage, test_50; runs under Python 3.11 with mcp==2.3.0,
 # see README "MCP stage").
-# MCP stage profile flags (booleans, default false; used once mutating tools ship):
-#   mcp_mutating: true   call the mutating tools, each with restoration
-#   mcp_snapshot: true   also call the snapshot tool (deletes earlier archives)
+# MCP stage profile flags (booleans, default false; step (3) of test_50):
+#   mcp_mutating: true   call the mutating tools, each with restoration; the
+#                        device must run with McpMutatingToolsEnabled: "true"
+#   mcp_snapshot: true   also call the snapshot tool (deletes earlier archives,
+#                        so set it only where no operator archive is kept)
 
 devices:
   jp6-orinagx:
@@ -36,6 +38,8 @@ devices:
     profile:
       architecture: arm64_jp6             # x86_64 | arm64_cpu | arm64_jp5 | arm64_jp6 | arm64_jp7
       capabilities: [vllm, onnx_models, workflows]   # no dlr_models on JP6 (TRT10)
+      mcp_mutating: true
+      mcp_snapshot: false
     credentials: env:DDA_HARNESS_TOKEN    # omit when local auth is disabled
     expected:
       vision_models:
@@ -56,8 +60,8 @@ devices:
     profile:
       architecture: arm64_jp5
       capabilities: [dlr_models, onnx_models, workflows]   # add mcp for test_50
-      # mcp_mutating: false
-      # mcp_snapshot: false
+      mcp_mutating: true
+      mcp_snapshot: false
     expected:
       vision_models: []
       vllm_models: []

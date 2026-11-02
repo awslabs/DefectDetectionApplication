@@ -1,5 +1,5 @@
-"""Stage 50 — the Edge MCP server, read-only part (design "Edge — on-hardware
-harness", steps (1), (2), (4), (5), (6); Requirements 16.7, 13.3, 8.5, 12.3).
+"""Stage 50 — the Edge MCP server (design "Edge — on-hardware harness",
+steps (1) to (6); Requirements 16.7, 13.3, 8.5, 12.3).
 
 Capability-gated on ``mcp``. The stage:
 
@@ -20,6 +20,22 @@ Capability-gated on ``mcp``. The stage:
    it (a digital-input-triggered workflow with its process running; skipped
    otherwise), ``edge_results_list``, ``edge_registration_get``
    (``executions`` dropped) and ``edge_textgen_models_list`` (``vllm``);
+   ``tools/list`` names no mutating tool while ``mutatingToolsEnabled`` is
+   false, and exactly the Phase-2 mutating tools while it is true;
+3. only when the device profile declares ``mcp_mutating: true`` (and the
+   device reports ``mutatingToolsEnabled``), one mutating tool per area, each
+   leaving the device as found: ``edge_static_image_pin`` ->
+   ``edge_static_image_pin_get`` -> ``edge_static_image_unpin`` (skipped when
+   an image is already pinned, so an operator's pin is never replaced);
+   ``edge_results_summary_reset`` on the harness workflow, then a second
+   reset back to the original ``lastResetTime`` when there was one;
+   ``edge_execution_log_get`` with ``tail_chars=2000`` on the latest
+   execution; ``edge_cameras_rescan`` with the camera list unchanged
+   before and after; ``edge_system_snapshot_create`` only with
+   ``mcp_snapshot: true`` (the script deletes every earlier archive).
+   ``edge_image_source_capture`` is deliberately not called: the route
+   returns no identifier of the file it writes, so the stage could not
+   remove it;
 4. asserts ``/health`` stays healthy and the restart counts stay unchanged
    across the stage and for ``timeouts.mcp_soak_s`` (``DDA_HARNESS_MCP_SOAK_S``,
    default 600 s): the MCP child's ``restartCount`` from ``/mcp/status``
@@ -33,8 +49,6 @@ Capability-gated on ``mcp``. The stage:
    and no ``Authorization`` on a local-login device -> an ``isError``
    ``not_authenticated`` tool result; skipped when the harness runs remotely.
 
-Step (3), the mutating tools with restoration, belongs to Phase 2.
-
 The ``mcp`` SDK needs Python 3.10 or later (README "MCP stage"). When it is
 not importable every test of the stage skips with that reason, so the other
 stages keep running under the host's Python.
@@ -42,6 +56,7 @@ stages keep running under the host's Python.
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 import subprocess
@@ -86,6 +101,49 @@ AREA_TOOLS = (
     "edge_feature_configurations_list",
     "edge_static_image_pin_get",
 )
+#: The phases ``/mcp/status`` reports as delivered.
+DELIVERED_PHASES = [1, 2]
+#: The delivered mutating tools: listed exactly while ``mutatingToolsEnabled``.
+PHASE_2_MUTATING_TOOLS = (
+    "edge_camera_connect",
+    "edge_cameras_rescan",
+    "edge_image_source_capture",
+    "edge_results_summary_reset",
+    "edge_results_update",
+    "edge_static_image_pin",
+    "edge_static_image_unpin",
+    "edge_static_video_unpin",
+    "edge_system_snapshot_create",
+)
+#: Step (3): the static image the stage pins and removes again.
+PIN_FILE_NAME = "harness-pin.jpg"
+#: Step (3): ``edge_execution_log_get``'s ``tail_chars``.
+LOG_TAIL_CHARS = 2000
+#: Step (3): ``edge_cameras_list`` page size (the tool's maximum).
+CAMERAS_LIMIT = 200
+#: Step (3): tolerated clock difference between the harness host and the
+#: device, which stamps ``lastResetTime`` with its own clock.
+CLOCK_SKEW_S = 300
+#: Bundled test asset (the pattern of ``test_25_vlm_image_generate.py``): a
+#: 64x64 white JPEG with a centered red square (707 bytes), embedded so the
+#: harness needs no image dependency and no binary file.
+PIN_IMAGE_B64 = (
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8l"
+    "JCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7KCIo"
+    "Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozv/wAAR"
+    "CABAAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAA"
+    "AgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkK"
+    "FhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWG"
+    "h4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl"
+    "5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREA"
+    "AgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYk"
+    "NOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOE"
+    "hYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk"
+    "5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD2aiiigAooooAKKKKACiiigAooooA+c6KK"
+    "K8g/RAooooA+jKKKK9c/OwooooA+c6KKK8g/RAooooA+jKKKK9c/OwooooAKKKKACiiigAoo"
+    "ooA//9k="
+)
+assert base64.b64decode(PIN_IMAGE_B64)[:3] == b"\xff\xd8\xff", "PIN_IMAGE_B64 is not a JPEG"
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +340,7 @@ def test_mcp_status(edge_client, mcp_baseline, record_metric):
     assert status.get("endpoint") == "/mcp"
     assert status.get("transport") == "streamable-http"
     assert MODERN_REVISION in (status.get("protocolRevisions") or [])
-    assert status.get("deliveredPhases") == [1]
+    assert status.get("deliveredPhases") == DELIVERED_PHASES
     assert isinstance(status.get("mutatingToolsEnabled"), bool)
     assert status.get("restartCount") == mcp_baseline["restartCount"]
     record_metric("mcp_server_version", status.get("serverVersion"))
@@ -294,7 +352,9 @@ def test_mcp_status(edge_client, mcp_baseline, record_metric):
 # ---------------------------------------------------------------------------
 
 
-def test_tools_list_is_read_only(harness_target, edge_client, mcp_baseline, record_metric):
+def test_tools_list_follows_the_mutating_switch(
+    harness_target, edge_client, mcp_baseline, record_metric
+):
     listed = _run_mcp(
         f"{harness_target.base_url.rstrip('/')}/mcp",
         lambda client: client.list_tools(),
@@ -304,9 +364,15 @@ def test_tools_list_is_read_only(harness_target, edge_client, mcp_baseline, reco
     assert names == sorted(names), "tools/list is not sorted by name"
     missing = [name for name in AREA_TOOLS if name not in names]
     assert not missing, f"tools/list lacks {missing}"
-    mutating = [t.name for t in listed.tools if not t.annotations.read_only_hint]
-    assert mutating == [], f"Phase 1 lists mutating tools: {mutating}"
+    mutating = sorted(t.name for t in listed.tools if not t.annotations.read_only_hint)
+    if _mcp_status(edge_client).get("mutatingToolsEnabled") is True:
+        assert mutating == sorted(PHASE_2_MUTATING_TOOLS), (
+            f"with mutatingToolsEnabled, tools/list names the mutating tools {mutating}"
+        )
+    else:
+        assert mutating == [], f"with mutatingToolsEnabled false, tools/list names {mutating}"
     record_metric("mcp_tools_listed", len(names))
+    record_metric("mcp_mutating_tools_listed", len(mutating))
 
 
 @pytest.mark.parametrize("name", AREA_TOOLS)
@@ -325,11 +391,8 @@ def test_streams_capabilities(harness_target, edge_client, mcp_baseline):
     )
 
 
-def test_execution_output_image(harness_target, edge_client, mcp_baseline):
-    registrations = edge_client.workflow_registrations()
-    if not registrations:
-        pytest.skip("the device has no workflow registration, so no execution")
-    execution_id = None
+def _latest_execution_id(harness_target, edge_client, registrations) -> Optional[str]:
+    """The latest execution of the first registration that has one, or None."""
     for registration in registrations:
         executions = _items(
             _assert_ok(
@@ -344,8 +407,15 @@ def test_execution_output_image(harness_target, edge_client, mcp_baseline):
             "executions",
         )
         if executions:
-            execution_id = executions[0].get("executionId")
-            break
+            return executions[0].get("executionId")
+    return None
+
+
+def test_execution_output_image(harness_target, edge_client, mcp_baseline):
+    registrations = edge_client.workflow_registrations()
+    if not registrations:
+        pytest.skip("the device has no workflow registration, so no execution")
+    execution_id = _latest_execution_id(harness_target, edge_client, registrations)
     if not execution_id:
         pytest.skip("no registration has an execution yet")
     result = _call(
@@ -449,6 +519,197 @@ def test_textgen_models_list(harness_target, edge_client, mcp_baseline):
         "edge_textgen_models_list",
         _call(harness_target, edge_client, "edge_textgen_models_list"),
     )
+
+
+# ---------------------------------------------------------------------------
+# (3) one mutating tool per area, each leaving the device as found
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def mutating_step(harness_target, edge_client, mcp_baseline) -> None:
+    """The gate of step (3): the device profile declares ``mcp_mutating:
+    true`` (else every step-(3) test skips) and the device lists mutating
+    tools (else they fail: a declared but disabled switch is a mismatch).
+    It runs before any step-(3) MCP call."""
+    if not harness_target.profile.mcp_mutating:
+        pytest.skip(
+            f"device profile {harness_target.name} does not declare mcp_mutating: true"
+        )
+    enabled = _mcp_status(edge_client).get("mutatingToolsEnabled")
+    if enabled is not True:
+        pytest.fail(
+            f"device profile {harness_target.name} declares mcp_mutating: true, but "
+            f"/mcp/status reports mutatingToolsEnabled={enabled!r}; set the LocalServer "
+            'configuration McpMutatingToolsEnabled to "true" for the run'
+        )
+
+
+def _pin_status(harness_target, edge_client) -> Dict[str, Any]:
+    content = _assert_ok(
+        "edge_static_image_pin_get",
+        _call(harness_target, edge_client, "edge_static_image_pin_get"),
+    )
+    return content.get("result") or {}
+
+
+def _last_reset_time(harness_target, edge_client, workflow_id: str) -> Any:
+    content = _assert_ok(
+        "edge_results_summary_get",
+        _call(harness_target, edge_client, "edge_results_summary_get", {"workflow_id": workflow_id}),
+    )
+    return (content.get("result") or {}).get("lastResetTime")
+
+
+def _camera_list(harness_target, edge_client) -> List[Dict[str, Any]]:
+    content = _assert_ok(
+        "edge_cameras_list",
+        _call(harness_target, edge_client, "edge_cameras_list", {"limit": CAMERAS_LIMIT}),
+    )
+    cameras = _items(content.get("result"), "cameras")
+    return sorted(cameras, key=lambda camera: json.dumps(camera, sort_keys=True))
+
+
+def test_mutating_static_image_pin_round_trip(harness_target, edge_client, mutating_step):
+    if _pin_status(harness_target, edge_client).get("pinned"):
+        pytest.skip(
+            "a static image is already pinned; the stage never replaces an "
+            "operator's pin (its bytes cannot be pinned again through MCP)"
+        )
+    _assert_ok(
+        "edge_static_image_pin",
+        _call(
+            harness_target,
+            edge_client,
+            "edge_static_image_pin",
+            {"image_base64": PIN_IMAGE_B64, "file_name": PIN_FILE_NAME},
+        ),
+    )
+    try:
+        status = _pin_status(harness_target, edge_client)
+        assert status.get("pinned") is True, f"pinned={status.get('pinned')!r} after the pin"
+        file_name = (status.get("metadata") or {}).get("fileName")
+        assert file_name == PIN_FILE_NAME, f"metadata.fileName={file_name!r}"
+    finally:
+        _assert_ok(
+            "edge_static_image_unpin",
+            _call(
+                harness_target,
+                edge_client,
+                "edge_static_image_unpin",
+                {"confirm": "static-image"},
+            ),
+        )
+    assert _pin_status(harness_target, edge_client).get("pinned") is False
+
+
+def test_mutating_results_summary_reset_restores(
+    harness_target, edge_client, mutating_step, harness_workflow_id, record_metric
+):
+    workflow_id = harness_workflow_id
+    original = _last_reset_time(harness_target, edge_client, workflow_id)
+    # Checked before any reset: a value reset_time cannot carry is never touched.
+    assert original is None or (
+        isinstance(original, int) and not isinstance(original, bool) and original >= 0
+    ), f"lastResetTime {original!r} cannot be restored through reset_time"
+    started = int(time.time())
+    _assert_ok(
+        "edge_results_summary_reset",
+        _call(
+            harness_target,
+            edge_client,
+            "edge_results_summary_reset",
+            {"workflow_id": workflow_id, "confirm": workflow_id},
+        ),
+    )
+    try:
+        reset_at = _last_reset_time(harness_target, edge_client, workflow_id)
+        finished = int(time.time())
+        assert reset_at is not None, "lastResetTime is still null after the reset"
+        assert started - CLOCK_SKEW_S <= reset_at <= finished + CLOCK_SKEW_S, (
+            f"lastResetTime {reset_at} is outside the reset window [{started}, {finished}]"
+        )
+    finally:
+        if original is not None:
+            _assert_ok(
+                "edge_results_summary_reset",
+                _call(
+                    harness_target,
+                    edge_client,
+                    "edge_results_summary_reset",
+                    {"workflow_id": workflow_id, "reset_time": original, "confirm": workflow_id},
+                ),
+            )
+    if original is None:
+        # Nothing to restore: the summary window now starts at the reset.
+        record_metric("mcp_results_summary_left_at_reset_time", reset_at)
+    else:
+        restored = _last_reset_time(harness_target, edge_client, workflow_id)
+        assert restored == original, f"lastResetTime {restored!r} != original {original!r}"
+        record_metric("mcp_results_summary_restored", True)
+
+
+def test_mutating_execution_log_tail(harness_target, edge_client, mutating_step):
+    registrations = edge_client.workflow_registrations()
+    if not registrations:
+        pytest.skip("the device has no workflow registration, so no execution")
+    execution_id = _latest_execution_id(harness_target, edge_client, registrations)
+    if not execution_id:
+        pytest.skip("no registration has an execution yet")
+    result = _call(
+        harness_target,
+        edge_client,
+        "edge_execution_log_get",
+        {"execution_id": execution_id, "tail_chars": LOG_TAIL_CHARS},
+    )
+    if result.is_error and _content(result).get("category") == "not_found":
+        pytest.skip(f"the latest execution has no Run_Log: {_content(result).get('message')!r}")
+    content = _assert_ok("edge_execution_log_get", result)
+    text = (content.get("result") or {}).get("text")
+    assert isinstance(text, str), f"result.text is {type(text).__name__}"
+    assert len(text) <= LOG_TAIL_CHARS, f"{len(text)} characters for tail_chars={LOG_TAIL_CHARS}"
+    assert ("truncated" in content) == ("total_chars" in content), sorted(content)
+    if content.get("truncated"):
+        assert content["total_chars"] > LOG_TAIL_CHARS, content["total_chars"]
+
+
+def test_mutating_cameras_rescan_keeps_the_camera_list(
+    harness_target, edge_client, mutating_step, record_metric
+):
+    before = _camera_list(harness_target, edge_client)
+    _assert_ok(
+        "edge_cameras_rescan",
+        _call(harness_target, edge_client, "edge_cameras_rescan"),
+    )
+    after = _camera_list(harness_target, edge_client)
+    assert after == before, (
+        f"the camera list changed across the rescan: "
+        f"{[c.get('id') for c in before]} -> {[c.get('id') for c in after]}"
+    )
+    record_metric("mcp_cameras_rescanned", len(after))
+
+
+def test_mutating_system_snapshot_create(harness_target, edge_client, mutating_step):
+    if not harness_target.profile.mcp_snapshot:
+        pytest.skip(
+            f"device profile {harness_target.name} does not declare mcp_snapshot: true "
+            "(the snapshot deletes every earlier archive)"
+        )
+    content = _assert_ok(
+        "edge_system_snapshot_create",
+        _call(
+            harness_target,
+            edge_client,
+            "edge_system_snapshot_create",
+            {"confirm": "snapshot"},
+        ),
+    )
+    archive = (content.get("result") or {}).get("archivePath")
+    assert isinstance(archive, str) and "/" not in archive, f"archivePath={archive!r}"
+    assert archive.startswith("snapshot-") and archive.endswith(".tar.gz"), archive
+    assert content.get("scrubbed_fields") == ["archivePath"], content.get("scrubbed_fields")
+    health = _health(edge_client)
+    assert health.get("status") == "ok", f"/health reports {health!r} after the snapshot"
 
 
 # ---------------------------------------------------------------------------

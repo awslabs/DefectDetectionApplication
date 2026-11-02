@@ -632,6 +632,15 @@ class TestMcpStageConfig:
         assert profile.mcp_mutating is True
         assert profile.mcp_snapshot is False
 
+    @pytest.mark.parametrize("device", ["jp5-xavier", "jp6-orinagx"])
+    def test_example_lab_profiles_declare_the_mutating_step(self, device):
+        """devices.yaml.example's lab profiles run the MCP stage's step (3)
+        and leave the snapshot tool off (it deletes earlier archives)."""
+        example = Path(__file__).resolve().parent.parent / "devices.yaml.example"
+        profile = load(example, {"DDA_HARNESS_DEVICE": device}).profile
+        assert profile.mcp_mutating is True
+        assert profile.mcp_snapshot is False
+
     @pytest.mark.parametrize("value", ["'true'", "1", "yes-please", "[true]"])
     def test_non_boolean_profile_flag_rejected(self, tmp_path, value):
         path = mcp_config(tmp_path, f"{{architecture: arm64_jp6, mcp_snapshot: {value}}}")

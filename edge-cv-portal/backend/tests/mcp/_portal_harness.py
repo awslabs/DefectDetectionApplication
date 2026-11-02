@@ -104,11 +104,14 @@ def backend_arn(key: str) -> str:
     return f'arn:fake:function:{key}'
 
 
-def install(monkeypatch, fake_lambda: Optional[FakeLambda] = None, phases=(1,),
+def install(monkeypatch, fake_lambda: Optional[FakeLambda] = None, phases=None,
             mutating: bool = False) -> FakeLambda:
-    """Wire `mcp_portal` to a fake Lambda; returns it."""
-    from mcp_portal import catalog, dispatch, principal, server
+    """Wire `mcp_portal` to a fake Lambda; returns it. `phases` defaults to
+    the delivered phases (`mcp_portal.DELIVERED_PHASES`)."""
+    from mcp_portal import DELIVERED_PHASES, catalog, dispatch, principal, server
 
+    if phases is None:
+        phases = DELIVERED_PHASES
     fake_lambda = fake_lambda or FakeLambda()
     shared = sys.modules['shared_utils']
     for key, value in ENV.items():

@@ -1718,8 +1718,10 @@ the portal's existing Cognito user pool, dispatches each tool call to the
 existing handler Lambda of the matching REST route, applies the same role and
 permission checks as the web UI, and writes every call to the Audit_Log.
 
-Phase 1 delivers read-only tools only: the server lists and accepts only the
-Phase-1 rows of the [tool tables](#mcp-tools). The edge devices have their own
+Phases 1 and 2 are delivered: the server lists and accepts the Phase-1 and
+Phase-2 rows of the [tool tables](#mcp-tools). Its mutating tools are listed
+and accepted only while `mcpMutatingToolsEnabled` is on, which it is not by
+default ([Settings](#settings-cdk-context)). The edge devices have their own
 MCP server: [docs/edge-mcp-server.md](../docs/edge-mcp-server.md).
 
 No stdio MCP package is distributed, so the portal's only connection form is
@@ -1816,7 +1818,7 @@ Set these in the `context` block of `infrastructure/cdk.json` (which
 | Context key | Default | Effect |
 |---|---|---|
 | `mcpRedirectUris` | empty | Extra OAuth callback URLs (comma-separated) beside `http://localhost:7899/oauth/callback`, for a client on another port. Each must be `http://localhost[:port]/path` or `https://…`: Cognito registers plain-HTTP callbacks for `localhost` only, and the synth refuses anything else. |
-| `mcpMutatingToolsEnabled` | `false` | Lists and accepts mutating tools. In Phase 1 no mutating tool is delivered, so this changes nothing yet. |
+| `mcpMutatingToolsEnabled` | `false` | Lists and accepts mutating tools: the Phase-2 rows classified MUTATING in the [tool tables](#mcp-tools). Each still needs the permission its row names, and a DESTRUCTIVE one also needs `confirm`. |
 | `mcpAllowedOrigins` | empty | `Origin` values (`http(s)://host[:port]`, no path) the endpoints accept. Empty by default: any request carrying an `Origin` header is refused. Set it only if the deployed-stack smoke check shows your client sending an `Origin` header. |
 
 ### Timeout alarm
@@ -1989,7 +1991,7 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
 |---|---|
 | Supported MCP protocol revisions | `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26` |
 | `mcp` Python SDK | `2.3.0` (Lambda layer, with `mangum` `0.22.0`) |
-| Portal_MCP_Server version | `1.0.0` |
+| Portal_MCP_Server version | `1.1.0` (Phases 1 and 2, released 2026-11-01; `1.0.0` was Phase 1, released 2026-10-25). The edge MCP server reports `deliveredPhases` `[1, 2]` from the LocalServer builds of the same date on; Phase 2 was verified on a JP5 and a JP6 device |
 | Tested Kiro IDE and CLI versions | Kiro IDE 1.4.26 (OAuth sign-in, tool calls, token refresh and a view endpoint observed 2026-10-25/26); Kiro CLI 2.27.0 (OAuth sign-in and a tool call observed 2026-10-26); both negotiated MCP protocol `2026-07-28` |
 | Kiro and MCP documentation checked | 2026-10-18 and 2026-10-19 |
 
@@ -2064,9 +2066,12 @@ Each tool's description ends with its classification. List tools take
 `limit` (50 by default, at most 200, unless the tool's schema states
 other bounds). Tools of the `usecase` scope take
 `usecase_id` and are authorized in that Use_Case; `global` tools are
-authorized at the account level. Phase 1 is delivered; Phase 2 and Phase 3
-rows are listed for reference and are neither listed nor accepted by the
-server until their release.
+authorized at the account level. Phases 1 and 2 are delivered. The Phase-2
+read-only tools (`portal_devices_logs_analyze`,
+`portal_workflows_plugin_generate_status_get`) are always listed; the Phase-2
+mutating tools only while `mcpMutatingToolsEnabled` is on. Phase 3 rows are
+listed for reference and are neither listed nor accepted by the server until
+their release.
 
 **`admin` view** (15 tools, `…/mcp/admin`)
 
