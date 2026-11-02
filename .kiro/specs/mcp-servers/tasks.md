@@ -879,9 +879,10 @@ Property-based tests use Hypothesis (Python) and fast-check (TypeScript), each c
     - Verify: suites green; the ARN check recorded
     - _Requirements: 1.3, 5.7, 17.2_
 
-  - [ ] 26.2 Obtain the owner sign-off on the Phase-3 destructive list
+  - [x] 26.2 Obtain the owner sign-off on the Phase-3 destructive list
     - The full Phase-3 `destructive=true` list from `catalog_tools.json` and the edge `CATALOG`, incl. the revision-9 additions (deployment create, role remove, edge-sync device sync, team member remove, workflow update/retry)
     - Verify: the decision recorded in the Phase-3 evidence
+    - Done (owner, 2026-11-02, gate 1): approve all. The list generated at `ff2c5aee` has 35 tools, 25 portal and 10 edge. Portal: `portal_admin_usecase_delete`, `portal_admin_role_remove`, `portal_admin_edge_sync_device_sync`, `portal_devices_delete`, `portal_devices_camera_delete`, `portal_devices_deployment_create` (`confirm`=`<target_thing_group | target_devices[0]>`), `portal_devices_deployment_cancel`, `portal_devices_component_delete` (still subject to the 26.1 ARN check), `portal_devices_registration_delete`, `portal_data_prelabeled_delete`, `portal_data_labeling_job_stop`/`_delete`, `portal_data_labeling_team_member_remove`, `portal_data_labeling_team_delete`, `portal_workflows_delete`, `portal_workflows_test_dataset_delete`, `portal_workflows_plugin_promote`/`_demote`/`_review`/`_delete`, `portal_workflows_custom_node_type_deprecate`/`_delete`, `portal_workflows_build_cancel`, `portal_workflows_build_server_stop`/`_delete`. Edge: `edge_system_restart_dda` (`"restart-dda"`), `edge_workflow_update`/`_retry`/`_delete`, `edge_registration_continuous_pause`/`_resume`, `edge_result_delete`, `edge_camera_disconnect`, `edge_image_source_delete`, `edge_model_stop`. It matches the design's `M!` set, including the revision-9 additions, except `portal_models_delete`, which stays deferred until Backlog 1 merges (43 of 44 portal Phase-3 tools). No tool is excluded and no row changed phase. The account-lifecycle tools are deferred to a follow-up spec by owner decision (design Backlog 31)
     - _Requirements: 5.2, 10.1, 17.2_
 
 - [ ] 27. Deliver Phase 3 on the portal
