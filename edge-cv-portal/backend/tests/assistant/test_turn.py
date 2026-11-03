@@ -453,3 +453,122 @@ def test_property_no_content_in_logs_or_audit(assistant_env, fake_bedrock, caplo
         assert sentinel not in json.dumps(item, default=str)
     for event in turn['events']:
         assert sentinel not in json.dumps(event)
+
+
+# ------------------------------------------------------- window (P6)
+
+_history_messages = st.lists(
+    st.tuples(st.sampled_from(['user', 'assistant']), st.text(min_size=0, max_size=600)),
+    min_size=0, max_size=14)
+
+
+@given(history=_history_messages, budget=st.integers(min_value=1, max_value=600))
+@hsettings(max_examples=150, deadline=None)
+def test_property_history_window(history, budget):
+    """The window is a contiguous suffix of the history, starts with a user
+    message (or is empty), fits the budget unless the single newest message
+    is itself larger than the budget, and carries text blocks only (P6)."""
+    messages = [{'seq': i, 'role': role, 'content': [{'text': text}], 'turn_id': f't{i}'}
+                for i, (role, text) in enumerate(history)]
+    window = turn_module.history_window(messages, budget)
+    expected_tail = [{'role': m['role'], 'content': m['content']} for m in messages]
+    assert window == expected_tail[len(expected_tail) - len(window):]       # a contiguous suffix
+    if window:
+        assert window[0]['role'] == 'user'
+        total = sum(turn_module._estimate_tokens(m) for m in window)
+        assert total <= budget or len(window) == 1
+        # Nothing but text blocks ever reaches the model from stored history.
+        assert all(set(block) == {'text'} for m in window for block in m['content'])
+        # Maximal: the next older message would either break the budget, or
+        # the window was cut at the user-message boundary just after it.
+        older = len(expected_tail) - len(window) - 1
+        if older >= 0:
+            over = total + turn_module._estimate_tokens(expected_tail[older]) > budget
+            assert over or expected_tail[older]['role'] == 'assistant'
+    else:
+        # Empty only when nothing fits in front of a user message.
+        kept_user = [m for m in messages if m['role'] == 'user']
+        assert not kept_user or turn_module._estimate_tokens(
+            {'role': messages[-1]['role'], 'content': messages[-1]['content']}) > budget \
+            or messages[-1]['role'] == 'assistant'
+
+
+# ------------------------------------------------- status transitions (P10)
+
+ALLOWED_TRANSITIONS = {
+    ('queued', 'running'), ('running', 'awaiting_confirmation'), ('awaiting_confirmation', 'running'),
+    ('running', 'completed'), ('running', 'stopped'), ('running', 'failed'),
+}
+
+
+def _status_trace(monkeypatch):
+    """Record every `status` the worker writes to the Turn item, in order."""
+    trace: list = []
+    real_update, real_progress = store.update_turn, store.append_progress
+
+    def spy_update(cid, tid, **attrs):
+        if 'status' in attrs:
+            trace.append(attrs['status'])
+        return real_update(cid, tid, **attrs)
+
+    def spy_progress(cid, tid, **kwargs):
+        if 'status' in kwargs:
+            trace.append(kwargs['status'])
+        return real_progress(cid, tid, **kwargs)
+
+    monkeypatch.setattr(store, 'update_turn', spy_update)
+    monkeypatch.setattr(store, 'append_progress', spy_progress)
+    return trace
+
+
+SCENARIOS = {
+    'text': lambda: [text_events('plain answer')],
+    'read_only_tool': lambda: [tool_use_events([('tu-1', 'portal_devices_list', {'usecase_id': USECASE})]),
+                               text_events('done')],
+    'mutating_confirm': lambda: [tool_use_events([('tu-1', 'portal_devices_deployment_create', PROPOSAL)]),
+                                 text_events('deployed')],
+    'mutating_reject': lambda: [tool_use_events([('tu-1', 'portal_devices_deployment_create', PROPOSAL)]),
+                                text_events('not deployed')],
+    'stop': lambda: [tool_use_events([('tu-1', 'portal_devices_list', {'usecase_id': USECASE})]),
+                     text_events('never reached')],
+    'model_error': lambda: [client_error('AccessDeniedException')],
+    'throttled_out': lambda: [client_error('ThrottlingException') for _ in range(3)],
+    'budget': lambda: [tool_use_events([('tu-1', 'portal_devices_list', {'usecase_id': USECASE})], text='Hmm.')],
+}
+
+
+@pytest.mark.parametrize('scenario', sorted(SCENARIOS))
+def test_property_turn_status_transitions(assistant_env, fake_bedrock, actions_delivered, scenario):
+    """Across every worker path, the Turn's status only ever moves along
+    queued → running → {awaiting_confirmation ↔ running} → {completed,
+    stopped, failed}, and ends in exactly one terminal status (P10)."""
+    if scenario == 'budget':
+        assistant_env.monkeypatch.setenv('ASSISTANT_LIMITS_JSON', json.dumps({'model_calls_per_turn': 1}))
+    fake_bedrock(*SCENARIOS[scenario]())
+    trace = _status_trace(assistant_env.monkeypatch)
+    claims, cid, tid = make_turn(assistant_env, prompt='Deploy to line-1')
+    if scenario == 'stop':
+        store.request_stop(cid, tid)
+    result = run_worker(cid, tid)
+    if scenario.startswith('mutating_'):
+        assert result['status'] == 'awaiting_confirmation'
+        card = store.get_turn(cid, tid)['confirmation']
+        decision = 'confirm' if scenario == 'mutating_confirm' else 'reject'
+        store.consume_binding(claims['sub'], card['binding_id'], decision)
+        store.update_turn(cid, tid, status='running')          # what the API does on a decision
+        result = run_worker(cid, tid, resume={'binding_id': card['binding_id']})
+    final = store.get_turn(cid, tid)['status']
+    assert result['status'] == final and final in store.TERMINAL_STATUSES
+    # Re-writing the current status (the worker re-asserts `running` on resume
+    # after the API set it) is not a transition: collapse consecutive repeats.
+    path = ['queued']
+    for status in trace:
+        if status != path[-1]:
+            path.append(status)
+    assert all((a, b) in ALLOWED_TRANSITIONS for a, b in zip(path, path[1:])), path
+    assert [s for s in path if s in store.TERMINAL_STATUSES] == [final]
+    assert live_count(assistant_env, claims['sub']) == 0
+    # a finished Turn is never re-opened
+    before = len(trace)
+    run_worker(cid, tid)
+    assert trace[before:] == []
