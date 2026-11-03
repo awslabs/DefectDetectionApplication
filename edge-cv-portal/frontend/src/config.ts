@@ -31,6 +31,18 @@ export interface AppConfig {
    * banner, never what the API accepts.
    */
   registryEnforced?: boolean;
+  /**
+   * Base URL of the Portal assistant API (EdgeCVPortalAssistantStack output
+   * `AssistantApiUrl`, written by deploy-frontend.sh). Absent means the
+   * assistant is not deployed: no panel, no requests
+   * (portal-ai-assistant Requirement 1.5, design §11).
+   */
+  assistantApiUrl?: string;
+  /**
+   * Where the assistant's `guide:` citations open. Defaults to the public
+   * repository's docs/user-guide path, then branding.documentationUrl.
+   */
+  assistantGuideBaseUrl?: string;
 }
 
 // Default configuration for development
