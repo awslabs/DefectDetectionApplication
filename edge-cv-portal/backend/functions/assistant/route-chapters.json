@@ -26,5 +26,5 @@
     {"prefix": "/admin/user-manager", "chapter": "20-user-manager.md", "domain": "admin"},
     {"prefix": "/audit", "chapter": "21-audit-logs.md", "domain": "admin"}
   ],
-  "non_route_chapters": ["22-device-web-ui.md", "23-station-hmi.md", "24-mcp-support.md"]
+  "non_route_chapters": ["22-device-web-ui.md", "23-station-hmi.md", "24-mcp-support.md", "25-assistant.md"]
 }
