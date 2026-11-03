@@ -19,6 +19,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 MUTATING_PREFIX_HINT = None  # filled from the catalog file when available
@@ -225,12 +226,26 @@ def run_smoke(args, client):
     check('a read-only tool ran', any(CLASSIFICATION.get(t) == 'read_only' for t in tools_called(lookup)))
     if args.portal_api:
         portal = Client(args.portal_api, client.token)
-        status, logs = portal.call('GET', '/audit-logs?channel=assistant&limit=50', expect=(200, 403))
+        # GET /audit-logs is a DynamoDB Scan whose filter applies after the page
+        # limit, so a page can be empty while later pages match; follow
+        # next_token the way the Audit Logs page does, bounded by time and pages.
+        tids = {lookup.get('turn_id'), guidance.get('turn_id')}
+        since = int((time.time() - 1800) * 1000)
+        path = f'/audit-logs?channel=assistant&limit=500&start_time={since}'
+        found, status, pages = [], None, 0
+        while path and pages < 60:
+            status, logs = portal.call('GET', path, expect=(200, 403))
+            if status != 200:
+                break
+            pages += 1
+            found += [l for l in logs.get('logs', []) if l.get('channel') == 'assistant'
+                      and any((l.get('mcp_request_id') or '').startswith(t or '~') for t in tids)]
+            token = logs.get('next_token')
+            path = f'/audit-logs?channel=assistant&limit=500&start_time={since}&next_token={urllib.parse.quote(token)}' if token else None
         if status == 200:
-            tids = {lookup.get('turn_id'), guidance.get('turn_id')}
-            found = [l for l in logs.get('logs', []) if l.get('channel') == 'assistant'
-                     and any((l.get('mcp_request_id') or '').startswith(t or '~') for t in tids)]
-            check('audit filter shows the assistant entries', bool(found), f'{len(found)} entries')
+            tools_seen = sorted({l.get('mcp_tool') for l in found if l.get('mcp_tool')})
+            check('audit filter shows the assistant entries', bool(found),
+                  f'{len(found)} entries over {pages} page(s); tools {tools_seen}')
         else:
             check('audit filter (needs view_audit_logs)', True, 'skipped: 403')
     # the toggle (PortalAdmin): off -> state false -> on
