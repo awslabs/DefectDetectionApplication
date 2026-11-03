@@ -61,8 +61,10 @@ from botocore.exceptions import (
 # Shared Bedrock_Configuration resolution and client construction - same
 # Lambda bundle (backend/functions is one code asset), same semantics as
 # workflow generation (Requirement 4).
-from bedrock_common import (
+from bedrock_common import (  # noqa: F401 - BEDROCK_ERROR_CATEGORIES/categorize are re-exported
+    BEDROCK_ERROR_CATEGORIES,
     build_inference_config,
+    categorize_bedrock_error,
     get_bedrock_client,
     get_bedrock_configuration,
 )
@@ -680,29 +682,8 @@ def validate_entry_point(code: str, contract: str) -> Optional[str]:
 # Bedrock failure categorization (Requirement 5.1)
 # --------------------------------------------------------------------------
 
-# botocore error code -> Requirement 5.1 failure category. Total: every
-# unlisted code falls through to 'model-error' (design mapping table).
-BEDROCK_ERROR_CATEGORIES: Dict[str, str] = {
-    'ThrottlingException': 'throttling',
-    'TooManyRequestsException': 'throttling',
-    'ServiceQuotaExceededException': 'throttling',
-    'AccessDeniedException': 'authorization',
-    'UnrecognizedClientException': 'authorization',
-    'ExpiredTokenException': 'authorization',
-    'ResourceNotFoundException': 'model-access',
-    'ModelNotReadyException': 'model-access',
-    'ValidationException': 'model-access',
-    'ModelErrorException': 'model-error',
-    'ModelTimeoutException': 'model-error',
-    'ServiceUnavailableException': 'model-error',
-    'InternalServerException': 'model-error',
-}
-
-
-def categorize_bedrock_error(error_code: Any) -> str:
-    """Map a botocore error code to exactly one of the four Requirement
-    5.1 failure categories; anything unrecognized is 'model-error'."""
-    return BEDROCK_ERROR_CATEGORIES.get(error_code, 'model-error')
+# The table and `categorize_bedrock_error` live in bedrock_common (shared with
+# the Portal assistant) and are re-exported here for the tests and callers.
 
 
 # --------------------------------------------------------------------------

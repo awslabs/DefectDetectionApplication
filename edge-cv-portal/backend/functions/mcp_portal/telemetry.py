@@ -33,10 +33,16 @@ def outcome_for(category: Optional[str]) -> str:
 def log_tool_completion(*, principal, tool: str, view: Optional[str],
                         category: Optional[str], status: Optional[int],
                         duration_ms: int, request_id: Optional[str],
-                        client: Optional[str], server_version: str) -> dict:
-    """Emit the line and return the record that was logged."""
+                        client: Optional[str], server_version: str,
+                        event: str = EVENT) -> dict:
+    """Emit the line and return the record that was logged.
+
+    `event` names the line: `mcp_tool` for the MCP server, `assistant_tool`
+    for the Portal assistant (portal-ai-assistant design §1); the keys are
+    the same either way.
+    """
     record = {
-        'event': EVENT,
+        'event': event,
         'sub': principal.sub,
         'username': principal.username,
         'tool': tool,

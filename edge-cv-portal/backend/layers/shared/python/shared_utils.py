@@ -205,6 +205,11 @@ MCP_MARKER_FIELDS = ('channel', 'mcp_tool', 'mcp_server', 'mcp_client',
                      'mcp_request_id')
 AUDIT_CHANNEL_API = 'api'
 AUDIT_CHANNEL_MCP = 'mcp'
+# The Portal assistant (portal-ai-assistant design D3) runs the same tool
+# pipeline in-process and marks its entries with its own channel; the four
+# `mcp_*` attributes carry the tool, server, client and request id as for MCP.
+AUDIT_CHANNEL_ASSISTANT = 'assistant'
+MARKED_CHANNELS = (AUDIT_CHANNEL_MCP, AUDIT_CHANNEL_ASSISTANT)
 
 # marker attribute -> key of the event's `mcp` block
 _MCP_BLOCK_KEYS = (('mcp_tool', 'tool'), ('mcp_server', 'server'),
@@ -397,7 +402,11 @@ def attribution_from(event: Optional[Dict], user: Optional[Dict] = None,
             'identity_source': _identifying_value(identity_source),
         }
         if mcp is not None:
-            attribution['channel'] = AUDIT_CHANNEL_MCP
+            # A block without a recognized channel is an MCP block of an
+            # older build.
+            channel = mcp.get('channel')
+            attribution['channel'] = channel if channel in MARKED_CHANNELS \
+                else AUDIT_CHANNEL_MCP
             for field, key in _MCP_BLOCK_KEYS:
                 attribution[field] = _identifying_value(mcp.get(key))
         return attribution
@@ -429,7 +438,7 @@ def _attribution_attributes(identity: Optional[Dict] = None,
                   for field in ATTRIBUTION_FIELDS}
     channel = identity.get('channel') or AUDIT_CHANNEL_API
     attributes['channel'] = channel
-    if channel == AUDIT_CHANNEL_MCP:
+    if channel in MARKED_CHANNELS:
         for field in MCP_MARKER_FIELDS[1:]:
             attributes[field] = _identifying_value(identity.get(field))
     return attributes

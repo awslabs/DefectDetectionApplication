@@ -24,18 +24,22 @@ Its `on_call_tool` runs the §4 pipeline:
 8. log: one `telemetry.log_tool_completion` line per completion;
 9. shape: the `CallToolResult` (a refused body is `not_found`).
 
-`portal_admin_whoami` is the one local spec: it is answered here from the
-real resolver and never dispatched.
+`portal_admin_whoami` is the one local spec: it is answered from the real
+resolver and never dispatched.
+
+Steps 3-9 live in `mcp_portal.pipeline.call_tool` (portal-ai-assistant
+design §1), shared with the Portal assistant; this module authenticates,
+looks the tool up and renders the `ToolOutcome` as a `CallToolResult`. The
+helper names below (`find_spec`, `validation_failure`, `expected_confirm`,
+`confirmation_failure`, `whoami`) are re-exported from the pipeline so the
+tests and the catalog documentation keep one import path.
 """
-import dataclasses
 import logging
 import os
-import time
 import uuid
 from typing import Optional
 
 import anyio
-import jsonschema
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.caching import CacheHint
 from mcp.server.lowlevel.server import Server
@@ -44,9 +48,11 @@ from mcp.types import INVALID_PARAMS, CallToolResult, ListToolsResult, TextConte
 from mcp_types import CLIENT_INFO_META_KEY
 
 from mcp_portal import DELIVERED_PHASES, VIEWS, __version__
-from mcp_portal import audit, authz, catalog, dispatch, shaping, telemetry
-from mcp_portal.dispatch import BackendResponse, McpContext
+from mcp_portal import catalog, pipeline
+from mcp_portal.dispatch import McpContext
 from mcp_portal.errors import ToolFailure
+from mcp_portal.pipeline import (  # noqa: F401 - re-exported for tests and docs
+    confirmation_failure, expected_confirm, find_spec, validation_failure, whoami)
 from mcp_portal.principal import principal_from_access_token
 
 logger = logging.getLogger(__name__)
@@ -142,99 +148,6 @@ def _request_identity(ctx):
     return source_ip, user_agent
 
 
-def find_spec(name: str, specs) -> Optional[tuple]:
-    """(spec, called_by_alias) for a tool name, or None."""
-    for spec in specs:
-        if spec.name == name:
-            return spec, False
-    for spec in specs:
-        if spec.deprecated_alias and spec.deprecated_alias == name:
-            return spec, True
-    return None
-
-
-def validation_failure(spec, args) -> Optional[ToolFailure]:
-    """`invalid_input` naming the first failing property, or None. The
-    message names the property and the failed keyword, never the value."""
-    validator = jsonschema.Draft202012Validator(spec.input_schema)
-    errors = sorted(validator.iter_errors(args), key=lambda e: (list(e.path), e.validator))
-    if not errors:
-        return None
-    error = errors[0]
-    if error.path:
-        name = str(error.path[0])
-    elif error.validator == 'required':
-        missing = [r for r in error.validator_value if r not in (args or {})]
-        name = missing[0] if missing else 'arguments'
-    elif error.validator == 'additionalProperties':
-        extra = [k for k in (args or {}) if k not in spec.input_schema.get('properties', {})]
-        name = extra[0] if extra else 'arguments'
-    else:
-        name = 'arguments'
-    if error.validator == 'required':
-        return ToolFailure('invalid_input', f'{name} is required')
-    if error.validator == 'additionalProperties':
-        return ToolFailure('invalid_input', f'{name} is not an argument of {spec.name}')
-    return ToolFailure('invalid_input', f'{name} fails {error.validator}')
-
-
-def _target_value(args: dict, target: str):
-    if target.endswith('[0]'):
-        value = args.get(target[:-3])
-        return value[0] if isinstance(value, list) and value else None
-    return args.get(target)
-
-
-def expected_confirm(spec, args: dict) -> Optional[str]:
-    """The value `confirm` must equal (D9; review-3 N2, review-9 N7)."""
-    target = spec.confirm_target
-    if isinstance(target, tuple):
-        for branch, branch_target in zip(spec.input_schema.get('oneOf', ()), target):
-            if all(name in args for name in branch.get('required', ())):
-                return _target_value(args, branch_target)
-        return None
-    if target:
-        return _target_value(args, target)
-    return spec.confirm_literal
-
-
-def confirmation_failure(spec, args: dict) -> Optional[ToolFailure]:
-    if not spec.destructive:
-        return None
-    expected = expected_confirm(spec, args)
-    confirm = args.get('confirm')
-    if expected is None or confirm is None or str(confirm) != str(expected):
-        return ToolFailure('confirmation_required',
-                           f'{spec.name} is destructive; pass confirm={catalog.confirm_text(spec)}')
-    return None
-
-
-def whoami(principal):
-    """`portal_admin_whoami`: the caller as the real resolver sees it.
-
-    A registry read failure under `PORTAL_REGISTRY_ENFORCED` returns the
-    `authorization_unavailable` tool failure (Error Handling,
-    `RegistryUnavailable` row), so the call still gets its marked audit
-    entry and its `mcp_tool` line.
-    """
-    import shared_utils  # the SharedLayer; imported where it is needed
-
-    user = principal.user
-    try:
-        role = shared_utils.rbac_manager.get_user_role(principal.sub, 'global',
-                                                       user_info=user)
-        usecases = shared_utils.rbac_manager.get_accessible_usecases(principal.sub, user)
-    except shared_utils.RegistryUnavailable as error:
-        logger.error('Portal_Identity registry unavailable for MCP tool '
-                     'portal_admin_whoami: %s', error, exc_info=True)
-        return ToolFailure('authorization_unavailable',
-                           'the Portal identity registry is unavailable; retry')
-    body = {'user_id': principal.sub, 'username': principal.username,
-            'email': principal.email, 'global_role': role.value if role else None,
-            'usecases': sorted(usecases or [])}
-    return BackendResponse(200, body, {}, None)
-
-
 # ------------------------------------------------------------------ server
 
 def build_server(view: Optional[str], specs=None) -> Server:
@@ -251,7 +164,6 @@ def build_server(view: Optional[str], specs=None) -> Server:
             catalog=specs))
 
     async def on_call_tool(ctx, params) -> CallToolResult:
-        started = time.monotonic()
         name = params.name
         args = dict(params.arguments or {})
         request_id = str(ctx.request_id) if getattr(ctx, 'request_id', None) is not None \
@@ -263,13 +175,6 @@ def build_server(view: Optional[str], specs=None) -> Server:
             return ToolFailure('not_authenticated', 'no verified access token').to_result(
                 request_id)
         principal = await anyio.to_thread.run_sync(principal_from_access_token, token)
-
-        def log(tool, category, status):
-            telemetry.log_tool_completion(
-                principal=principal, tool=tool, view=view, category=category,
-                status=status, duration_ms=(time.monotonic() - started) * 1000,
-                request_id=request_id, client=mcp_client, server_version=server_version())
-
         mcp_client = client_label(ctx)
 
         # 2. lookup (and the phase gate of step 4)
@@ -286,70 +191,20 @@ def build_server(view: Optional[str], specs=None) -> Server:
                              client=mcp_client, source_ip=source_ip, user_agent=user_agent,
                              principal_email=principal.email)
 
-        def finish(failure: Optional[ToolFailure], dispatched: bool, status=None,
-                   shaped=None, event=None, identity_source=None):
-            outcome = audit.Outcome(
-                dispatched=dispatched, category=failure.category if failure else None,
-                binding_refused=bool(shaped is not None and shaped.binding_refused),
-                args=args, usecase_id=usecase_id)
-            ctx_for_audit = dataclasses.replace(mcp_ctx, identity_source=identity_source)
-            audit.write_envelope(spec, principal, ctx_for_audit, outcome,
-                                 (time.monotonic() - started) * 1000, status,
-                                 shaped.resource_id if shaped is not None else None,
-                                 mcp_event=event)
-            log(spec.name, failure.category if failure else None, status)
-            result = failure.to_result(request_id) if failure is not None \
-                else shaped.to_result(request_id)
-            if by_alias and failure is None:
-                notice = (f'{name} is a deprecated alias of {spec.name}; removed in '
-                          f'{spec.alias_removed_in}')
-                result.structured_content = dict(result.structured_content or {},
-                                                 deprecation=notice)
-                result.content.append(TextContent(type='text', text=notice))
-            return result
-
-        # 3. validate
-        failure = validation_failure(spec, args) or confirmation_failure(spec, args)
-        if failure is not None:
-            logger.info('%s for %s: %s', failure.category, spec.name, failure.message)
-            return finish(failure, dispatched=False)
-        # 4. gate
-        if not spec.read_only and not mutating_enabled():
-            return finish(ToolFailure('mutating_tools_disabled',
-                                      f'{spec.name} is mutating and mutating tools are '
-                                      'disabled on this deployment'), dispatched=False)
-        # 5. authorize
-        event = dispatch.build_backend_event(spec, args, principal, mcp_ctx) \
-            if spec.backend else None
-        decision = await anyio.to_thread.run_sync(
-            lambda: authz.authorize(spec, principal, usecase_id, mcp_event=event))
-        if isinstance(decision.decision, authz.Denied):
-            log(spec.name, 'not_authorized', None)
-            return ToolFailure('not_authorized',
-                               f'{spec.name} requires one of {list(spec.permissions)} '
-                               f'at scope {decision.scope}', status=403).to_result(request_id)
-        if isinstance(decision.decision, authz.Unavailable):
-            log(spec.name, 'authorization_unavailable', None)
-            return ToolFailure('authorization_unavailable',
-                               'the Portal identity registry is unavailable; retry'
-                               ).to_result(request_id)
-        identity_source = decision.identity_source
-        # 6. dispatch
-        if spec.backend is None:
-            response = await anyio.to_thread.run_sync(whoami, principal)
-            event = None
-        else:
-            event = dispatch.build_backend_event(
-                spec, args, principal,
-                dataclasses.replace(mcp_ctx, identity_source=identity_source))
-            response = await anyio.to_thread.run_sync(dispatch.invoke, spec, event)
-        if isinstance(response, ToolFailure):
-            return finish(response, dispatched=True, status=None, event=event,
-                          identity_source=identity_source)
-        # 7-9. binding check and shaping, audit, log, result
-        shaped = shaping.shape(spec, args, response)
-        return finish(shaped.failure, dispatched=True, status=response.status,
-                      shaped=shaped, event=event, identity_source=identity_source)
+        outcome = await anyio.to_thread.run_sync(
+            lambda: pipeline.call_tool(spec, args, principal, mcp_ctx,
+                                       mutating_enabled=mutating_enabled(), view=view,
+                                       server_version=server_version()))
+        if outcome.failure is not None:
+            return outcome.failure.to_result(request_id)
+        result = outcome.shaped.to_result(request_id)
+        if by_alias:
+            notice = (f'{name} is a deprecated alias of {spec.name}; removed in '
+                      f'{spec.alias_removed_in}')
+            result.structured_content = dict(result.structured_content or {},
+                                             deprecation=notice)
+            result.content.append(TextContent(type='text', text=notice))
+        return result
 
     return Server(
         server_name(view),
