@@ -12,9 +12,11 @@ The worked example throughout is the **cookies** use case and its **blue plates*
 
 ## Sections
 
+The **Video module** column links the video of the DDA Learning Series on YouTube that covers each section. The series opens with an [overview video](https://youtu.be/viPfq9Awbd8); the [full playlist](https://www.youtube.com/playlist?list=PLDTkDYXAuWR4) has the overview and Modules 0-14 in order.
+
 | # | Section | Portal page | Video module |
 |---|---------|-------------|--------------|
-| 1 | [Getting started: signing in and finding your way around](01-getting-started.md) | Sign in, Dashboard, navigation | [Overview](https://youtu.be/lTLSIMHLy7Y) |
+| 1 | [Getting started: signing in and finding your way around](01-getting-started.md) | Sign in, Dashboard, navigation | [Overview](https://youtu.be/viPfq9Awbd8) |
 | 2 | [Use Cases](02-use-cases.md) | Use Cases | [Module 0: Portal Setup](https://youtu.be/HtH_4zT23Fo) |
 | 3 | [Data Management](03-data-management.md) | Data Management | – |
 | 4 | [Labeling](04-labeling.md) | Labeling, My Labeling Tasks | [Module 2: Labeling](https://youtu.be/pxSoAIOLp18) |
@@ -37,7 +39,7 @@ The worked example throughout is the **cookies** use case and its **blue plates*
 | 21 | [Audit Logs](21-audit-logs.md) | Audit Logs | – |
 | 22 | [Device web UI](22-device-web-ui.md) | On the edge device, port 3000 | [Module 12: Edge Software](https://youtu.be/pInKqoADn2c) |
 | 23 | [Quality Station HMI](23-station-hmi.md) | On the edge device, `/hmi/` | – |
-| 24 | [MCP support](24-mcp-support.md) | Kiro or another MCP client; Audit Logs → Channel | [Module 14: MCP support](https://youtu.be/0vL4eq0mcgM) |
+| 24 | [MCP support](24-mcp-support.md) | Kiro or another MCP client; Audit Logs → Channel | [Module 14: MCP support](https://youtu.be/4rWMVBdDABM) |
 
 ## The end-to-end path
 

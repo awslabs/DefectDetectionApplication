@@ -1,6 +1,6 @@
 # 1. Getting started: signing in and finding your way around
 
-**Who:** every Portal user. **Video:** [Overview](https://youtu.be/lTLSIMHLy7Y).
+**Who:** every Portal user. **Video:** [Overview](https://youtu.be/viPfq9Awbd8).
 
 The Portal is a web application served from the CloudFront URL printed at the end of the Portal deployment (the `FrontendUrl` output). This section covers signing in, the dashboard, the side navigation, the use case selector, and the user menu.
 

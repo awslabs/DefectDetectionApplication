@@ -1,6 +1,6 @@
 # 24. MCP support
 
-**Who:** every signed-in Portal user; each tool needs the same permission as the matching Portal page, so an assistant can read only what you can read in the web UI. **Video:** [Module 14: MCP support](https://youtu.be/0vL4eq0mcgM). **Reference:** [Administrator Guide, MCP server (AI assistants)](../../edge-cv-portal/ADMIN_GUIDE.md#mcp-server-ai-assistants), [Edge MCP server](../edge-mcp-server.md).
+**Who:** every signed-in Portal user; each tool needs the same permission as the matching Portal page, so an assistant can read only what you can read in the web UI. **Video:** [Module 14: MCP support](https://youtu.be/4rWMVBdDABM). **Reference:** [Administrator Guide, MCP server (AI assistants)](../../edge-cv-portal/ADMIN_GUIDE.md#mcp-server-ai-assistants), [Edge MCP server](../edge-mcp-server.md).
 
 The Model Context Protocol (MCP) lets an AI assistant such as Kiro work with DDA through tools: "list the devices of the cookies use case", "show the last training job's logs", "which workflows are deployed to this station". The assistant calls the tools as you, with the credentials you already have, and every call goes through the same role and permission checks as the Portal. By default every tool is read-only: an assistant can look things up, but it cannot create, change, deploy or delete anything. Tools that make changes are off unless an administrator turns them on ([24.4](#244-what-the-tools-can-read)).
 
