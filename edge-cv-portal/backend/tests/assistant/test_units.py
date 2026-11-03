@@ -283,9 +283,15 @@ def test_stream_errors_are_classified():
 def test_cache_point_support_and_request_assembly(monkeypatch):
     assert bedrock.supports_cache_points('us.anthropic.claude-sonnet-4-5-20250929-v1:0')
     assert bedrock.supports_cache_points('anthropic.claude-3-7-sonnet-20250219-v1:0')
+    # a global inference profile and a generation newer than the 4.x names
+    assert bedrock.supports_cache_points('global.anthropic.claude-fable-5')
+    assert bedrock.supports_cache_points('apac.amazon.nova-pro-v1:0')
     assert not bedrock.supports_cache_points('meta.llama3-1-70b-instruct-v1:0')
+    assert not bedrock.supports_cache_points('us.meta.llama3-1-70b-instruct-v1:0')
+    assert not bedrock.supports_cache_points('')
     monkeypatch.setenv(bedrock.CACHE_PREFIXES_ENV, 'meta.llama')
     assert bedrock.supports_cache_points('us.meta.llama3-1-70b-instruct-v1:0')
+    assert not bedrock.supports_cache_points('anthropic.claude-3-7-sonnet-20250219-v1:0')
     request = bedrock.build_request(
         model_id='m', system=[{'text': 's'}, {'cachePoint': {'type': 'default'}}],
         messages=[{'role': 'user', 'content': [{'text': 'hi'}]}],

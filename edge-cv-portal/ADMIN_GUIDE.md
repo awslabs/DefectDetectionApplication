@@ -2367,7 +2367,7 @@ settings table under `assistant_configuration`.
 | CDK context | `deployAssistant` | on | `false` omits the stack (see the two-step removal). |
 | CDK context | `assistantSupportEmail`, `assistantDocumentationUrl` | unset | Shown to the model as the support contact and documentation link it may point users to. |
 | Worker environment | `ASSISTANT_LIMITS_JSON` | unset | A JSON object overriding any of the limits below (positive integers). Set it on the worker and the API Lambda, or edit the stack. |
-| Worker environment | `ASSISTANT_CACHE_MODEL_PREFIXES` | the Anthropic Claude 3.7/4.x and Amazon Nova prefixes | Model ids (region prefix stripped) for which prompt cache points are emitted. A model that rejects them is retried without, once per container. |
+| Worker environment | `ASSISTANT_CACHE_MODEL_PREFIXES` | `anthropic.claude-,amazon.nova` | Model id prefixes (matched with or without an inference-profile prefix such as `us.` or `global.`) for which prompt cache points are emitted. A model that rejects them is retried without, once per container. |
 
 Limits (the defaults): 2 concurrent turns and 60 turns per hour per user,
 1,500,000 model tokens per user per day; per turn 10 model calls, 10 tool

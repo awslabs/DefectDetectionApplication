@@ -17,8 +17,13 @@ from botocore.exceptions import BotoCoreError, ClientError, ReadTimeoutError
 import bedrock_common
 
 CACHE_PREFIXES_ENV = 'ASSISTANT_CACHE_MODEL_PREFIXES'
-DEFAULT_CACHE_PREFIXES = ('anthropic.claude-3-7', 'anthropic.claude-sonnet-4',
-                          'anthropic.claude-opus-4', 'anthropic.claude-haiku-4', 'amazon.nova')
+# Model families that take `cachePoint` blocks: every Anthropic Claude id
+# (generations before 3.5 Haiku reject them, and the rejection path below
+# strips the points and retries once per container, so listing the family
+# costs one failed call on such a model rather than missing the cache on every
+# newer one) and Amazon Nova. Validate-first (ii) on 2026-11-03 found the
+# deployed model outside the earlier 3.7/4.x enumeration.
+DEFAULT_CACHE_PREFIXES = ('anthropic.claude-', 'amazon.nova')
 
 FAILURE_CODES = {
     'throttling': 'bedrock_throttled',
@@ -60,11 +65,15 @@ def supports_cache_points(model_id: str) -> bool:
     raw = os.environ.get(CACHE_PREFIXES_ENV)
     prefixes = tuple(p.strip() for p in raw.split(',') if p.strip()) if raw else DEFAULT_CACHE_PREFIXES
     bare = model_id or ''
-    # strip a cross-region inference profile prefix such as `us.` / `eu.`
-    parts = bare.split('.', 1)
-    if len(parts) == 2 and len(parts[0]) <= 4 and parts[0].isalpha():
-        bare = parts[1]
-    return any(bare.startswith(p) for p in prefixes)
+    candidates = {bare}
+    # An inference profile id carries a region or scope prefix before the
+    # provider: `us.`, `eu.`, `apac.`, `global.`. Every prefix in the list
+    # starts with the provider name, so the stripped form can only match a
+    # model id, never a bare `claude-…` tail.
+    head, sep, tail = bare.partition('.')
+    if sep and head.isalpha():
+        candidates.add(tail)
+    return any(candidate.startswith(p) for candidate in candidates for p in prefixes)
 
 
 def client(config: Dict[str, Any]):
