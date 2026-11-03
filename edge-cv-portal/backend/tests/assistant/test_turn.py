@@ -71,6 +71,7 @@ def test_text_only_turn(assistant_env, fake_bedrock):
     assert 'portal_devices_list' in names and 'journey_status' in names
     assert not any(tools.BY_NAME[n].destructive for n in names if n in tools.BY_NAME)
     assert '15-devices.md' in request['system'][2]['text']
+    # the daily tally: input 100 + output 20 (no cache traffic in this stream)
     assert store.tokens_today(claims['sub']) == 120
     # the worker is idempotent on a finished turn
     assert run_worker(cid, tid)['status'] == 'completed'
@@ -424,6 +425,26 @@ def test_window_helpers():
                       {'role': 'assistant', 'content': [{'text': 'c'}]}]
     assert turn_module.args_summary({'usecase_id': 'u', 'prompt_text': 'secret words', 'device_id': 'd'}) \
         == 'device_id=d, prompt_text, usecase_id=u'
+
+
+def test_billable_tokens_weights_cache_reads():
+    """Cache reads count at a tenth (Bedrock bills them at a tenth), rounded up;
+    everything else at full weight (Requirement 9.3's quota is a cost cap)."""
+    assert turn_module.billable_tokens({'input': 100, 'output': 20, 'cache_read': 0, 'cache_write': 0}) == 120
+    assert turn_module.billable_tokens({'input': 5000, 'output': 500, 'cache_read': 27165, 'cache_write': 0}) \
+        == 5000 + 500 + 2717
+    assert turn_module.billable_tokens({'input': 0, 'output': 0, 'cache_read': 1, 'cache_write': 0}) == 1
+    assert turn_module.billable_tokens({'input': 83, 'output': 1, 'cache_read': 0, 'cache_write': 57698}) == 57782
+    assert turn_module.billable_tokens({}) == 0
+
+
+def test_daily_tally_uses_the_weighted_count(assistant_env, fake_bedrock):
+    fake_bedrock(text_events('cached answer', usage=(5000, 500, 27165, 0)))
+    claims, cid, tid = make_turn(assistant_env)
+    run_worker(cid, tid)
+    turn = store.get_turn(cid, tid)
+    assert turn['usage'] == {'input': 5000, 'output': 500, 'cache_read': 27165, 'cache_write': 0}
+    assert store.tokens_today(claims['sub']) == 5000 + 500 + 2717
 
 
 # ---------------------------------------------------------- hygiene (P8)

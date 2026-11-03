@@ -11,6 +11,7 @@ progress into the Turn item as it goes, and finishes with `completed`,
 import datetime as dt
 import json
 import logging
+import math
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -31,6 +32,12 @@ MIN_REMAINING_MS = 20_000
 MAX_TEXT_CHARS = 60_000
 STORED_RESULT_CHARS = 8_000
 IDENTIFIER_KEYS = ('usecase_id', 'name', 'status', 'limit')
+# Weight of a cache-read token in the daily quota: Bedrock bills a cache read
+# at one tenth of the input price, and the quota is a cost cap (COST_ESTIMATE:
+# "1.5M tokens caps one user at about $5/day"). Counted at full weight, the
+# ~27k cached tokens every model call reads exhausted a day in ~29 Turns on
+# the first deployed evaluation run (2026-11-03).
+CACHE_READ_WEIGHT = 0.1
 
 
 class TurnEnded(Exception):
@@ -259,7 +266,7 @@ class TurnRunner:
             self.text = (base_text + response.text)[:MAX_TEXT_CHARS]
             for key in self.usage:
                 self.usage[key] = int(self.usage.get(key, 0)) + int(response.usage.get(key, 0))
-            store.add_tokens(self.sub, sum(int(v) for v in response.usage.values()))
+            store.add_tokens(self.sub, billable_tokens(response.usage))
             if response.stop_reason in ('guardrail_intervened', 'content_filtered'):
                 self._event('error', code=response.stop_reason)
             if response.stop_reason == 'max_tokens':
@@ -490,6 +497,15 @@ class TurnRunner:
 
 
 # ------------------------------------------------------------------ helpers
+
+def billable_tokens(usage: Dict[str, Any]) -> int:
+    """The tokens one model call charges against `tokens_per_day`: input,
+    output and cache-write tokens at full weight, cache reads at
+    CACHE_READ_WEIGHT, rounded up so a call never counts as free."""
+    full = sum(int(usage.get(key, 0) or 0) for key in ('input', 'output', 'cache_write'))
+    cached = int(usage.get('cache_read', 0) or 0)
+    return full + int(math.ceil(cached * CACHE_READ_WEIGHT))
+
 
 def args_summary(args: Dict[str, Any]) -> str:
     """Argument names, with identifier-like values only (design §7)."""

@@ -30,7 +30,7 @@ The DDA Portal uses a multi-account architecture:
 
 **Portal Account Subtotal: ~$148/month (without the assistant); ~$175/month with 10 assistant turns a day**
 
-The assistant's Bedrock cost scales with use: a one-call guidance turn is about $0.07 ($0.03 with a warm prompt cache), a turn with three model calls and tool look-ups about $0.11; 100 turns a day are about $250/month. The per-user daily token quota (1.5M tokens by default) caps one user at about $5/day. Turn the assistant off in Settings → Assistant to stop the Bedrock cost; the fixed part is the KMS key ($1/month) and the retained table.
+The assistant's Bedrock cost scales with use: a one-call guidance turn is about $0.07 ($0.03 with a warm prompt cache), a turn with three model calls and tool look-ups about $0.11; 100 turns a day are about $250/month. The per-user daily token quota (1.5M tokens by default, cache reads weighted at one tenth as Bedrock bills them) caps one user at about $5/day. Turn the assistant off in Settings → Assistant to stop the Bedrock cost; the fixed part is the KMS key ($1/month) and the retained table.
 
 ---
 

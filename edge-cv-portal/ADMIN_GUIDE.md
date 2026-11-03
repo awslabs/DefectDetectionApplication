@@ -2370,7 +2370,7 @@ settings table under `assistant_configuration`.
 | Worker environment | `ASSISTANT_CACHE_MODEL_PREFIXES` | `anthropic.claude-,amazon.nova` | Model id prefixes (matched with or without an inference-profile prefix such as `us.` or `global.`) for which prompt cache points are emitted. A model that rejects them is retried without, once per container. |
 
 Limits (the defaults): 2 concurrent turns and 60 turns per hour per user,
-1,500,000 model tokens per user per day; per turn 10 model calls, 10 tool
+1,500,000 model tokens per user per day (cache-read tokens count at one tenth, as Bedrock bills them); per turn 10 model calls, 10 tool
 calls (24 pipeline calls, `journey_status` fans out to 8), 6,000 output
 tokens, 240 seconds; per conversation 60 turns or 400 KB.
 
@@ -2415,7 +2415,7 @@ assistant off in Settings stops the Bedrock cost.
 | "This model rejected tool definitions: guidance only" in Settings | The configured Bedrock model does not support the Converse tool API | Choose a model with tool use under Bedrock Configuration; the flag is re-checked on the next turn |
 | Turns fail with `bedrock_authorization` or `bedrock_model_access` | The account cannot invoke the configured model or inference profile in that region | Enable model access in Bedrock; check the model id and region |
 | Turns fail with `worker_lost` | The worker Lambda died (timeout, out of memory) | CloudWatch `/dda-portal/assistant-worker`; the `AssistantWorkerErrorsAlarm` |
-| Users hit the token quota early | The daily quota counts every model call including cache reads | Raise `tokens_per_day` through `ASSISTANT_LIMITS_JSON` |
+| Users hit the token quota early | The daily quota counts every model call (cache reads at one tenth); long conversations and many tool round trips add up | Raise `tokens_per_day` through `ASSISTANT_LIMITS_JSON` |
 | Audit entries without the `assistant` channel for assistant look-ups | The backing handler writes its own entry: it is marked through the request audit context only when the shared layer of its stack is current | Redeploy the portal so every stack carries the updated shared layer |
 
 ## Support
