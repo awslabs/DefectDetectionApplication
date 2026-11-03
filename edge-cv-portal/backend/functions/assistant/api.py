@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import boto3
@@ -106,6 +107,42 @@ def _identity(event: Dict[str, Any]) -> Dict[str, Optional[str]]:
 def _claims(event: Dict[str, Any]) -> Dict[str, Any]:
     claims = ((event.get('requestContext') or {}).get('authorizer') or {}).get('claims') or {}
     return dict(claims)
+
+
+# The REST API's Cognito authorizer hands `exp` and `iat` to the integration
+# as Java Date strings (`Tue Nov 03 17:16:29 UTC 2026`), not the token's
+# epoch seconds; the Lambda authorizers and the test fixtures pass numbers.
+_JAVA_DATE = re.compile(
+    r'^[A-Z][a-z]{2} (?P<mon>[A-Z][a-z]{2}) (?P<day>\d{1,2}) (?P<h>\d{2}):(?P<m>\d{2}):(?P<s>\d{2}) '
+    r'(?P<tz>[A-Z]{3,4}) (?P<year>\d{4})$')
+_MONTHS = {m: i for i, m in enumerate(
+    ('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'), 1)}
+
+
+def token_expiry(claims: Dict[str, Any]) -> Optional[int]:
+    """The `exp` claim as epoch seconds, from a number, a numeric string or the
+    Cognito authorizer's Java Date form (UTC/GMT only); None when unreadable,
+    which the caller treats as unauthenticated rather than as "never expires"."""
+    raw = claims.get('exp')
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if re.fullmatch(r'\d{1,12}', text):
+        return int(text)
+    match = _JAVA_DATE.match(text)
+    if not match or match.group('tz') not in ('UTC', 'GMT') or match.group('mon') not in _MONTHS:
+        return None
+    try:
+        moment = datetime(int(match.group('year')), _MONTHS[match.group('mon')], int(match.group('day')),
+                          int(match.group('h')), int(match.group('m')), int(match.group('s')),
+                          tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return int(moment.timestamp())
 
 
 def _ulid(value: str, what: str) -> str:
@@ -338,14 +375,16 @@ def handle_turn_start(event, user, params, body):
         raise errors.conversation_full()
     if store.tokens_today(user['user_id']) >= limits['tokens_per_day']:
         raise errors.quota_exceeded('tokens_per_day', store.day_resets_at())
+    # The worker refuses a Turn whose token has expired (design §8.2), so the
+    # expiry must be readable here, before anything is reserved or stored.
+    claims = _claims(event)
+    exp = token_expiry(claims)
+    if exp is None:
+        logger.error('turn refused: the exp claim is unreadable (type %s)', type(claims.get('exp')).__name__)
+        raise AssistantError(401, 'not_authenticated', 'the session could not be verified; sign in again')
     refused = store.reserve_turn(user['user_id'], limits)
     if refused:
         raise errors.quota_exceeded(*refused)
-    claims = _claims(event)
-    try:
-        exp = int(claims.get('exp') or 0)
-    except (TypeError, ValueError):
-        exp = 0
     identity = _identity(event)
     turn = store.create_turn(
         sub=user['user_id'], cid=meta['conversation_id'], prompt=data['prompt'],

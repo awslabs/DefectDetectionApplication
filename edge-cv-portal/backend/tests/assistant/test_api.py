@@ -159,6 +159,41 @@ def test_turn_start_records_the_turn_and_invokes_the_worker(assistant_env):
     assert status == 202 and store.get_turn(cid, tid)['stop_requested'] is True
 
 
+@pytest.mark.parametrize('raw, expected', [
+    (4102444800, 4102444800),                       # number (Lambda authorizer, fixtures)
+    ('4102444800', 4102444800),                     # numeric string
+    ('Tue Nov 03 17:16:29 UTC 2026', 1793726189),   # the REST Cognito authorizer's Java Date
+    ('Fri Jan 01 00:00:00 GMT 2027', 1798761600),
+    ('Tue Nov 03 17:16:29 PST 2026', None),         # a zone the parser does not know
+    ('Nov 03 2026', None), ('', None), (None, None), (True, None), (1.5, 1),
+    ('Xyz Foo 99 17:16:29 UTC 2026', None),
+])
+def test_token_expiry_forms(raw, expected):
+    assert api.token_expiry({'exp': raw}) == expected
+
+
+def test_turn_start_reads_the_gateway_date_form_of_exp(assistant_env):
+    """The deployed REST authorizer hands `exp` as `Tue Nov 03 17:16:29 UTC
+    2026`; the Turn must carry the epoch seconds the worker compares against
+    (found on the first deployed smoke check, 2026-11-03)."""
+    alice = claims_for(exp='Fri Jan 01 00:00:00 UTC 2100')
+    cid = create_conversation(alice)
+    status, body = start_turn(alice, cid)
+    assert status == 202, body
+    assert store.get_turn(cid, body['turn_id'])['exp'] == 4102444800
+
+
+def test_turn_start_refuses_an_unreadable_exp_without_reserving(assistant_env):
+    alice = claims_for(exp='not a date')
+    cid = create_conversation(alice)
+    status, body = start_turn(alice, cid)
+    assert status == 401 and body['error']['code'] == 'not_authenticated'
+    assert assistant_env.invoked == []
+    assert store.get_meta(cid)['live_turn_id'] is None
+    live = assistant_env.table.get_item(Key={'pk': f"USER#{alice['sub']}", 'sk': 'QUOTA#LIVE'}).get('Item')
+    assert not live or int(live['count']) == 0
+
+
 def test_turn_start_validation_and_bad_client_label(assistant_env):
     alice = claims_for()
     cid = create_conversation(alice)
