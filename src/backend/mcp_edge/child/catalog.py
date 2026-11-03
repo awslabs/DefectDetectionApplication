@@ -514,7 +514,9 @@ CATALOG: Tuple[ToolSpec, ...] = (
         method='GET', resource='/system/station', drop_fields=('logoImage',)),
     ToolSpec(
         name='edge_system_restart_dda', title='Restart DDA',
-        description='Restarts the DDA LocalServer component.',
+        description=('Restarts the DDA LocalServer component. After the restart the models '
+                     'come back in state UNKNOWN until each is started again with '
+                     'edge_model_start.'),
         resource_type='system', input_schema=schema({'confirm': confirm_arg(
             "The literal 'restart-dda'.")}),
         handler_module='endpoints.system', handler_function='restart_dda',

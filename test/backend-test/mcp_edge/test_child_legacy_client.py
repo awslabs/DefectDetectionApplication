@@ -43,7 +43,7 @@ def test_legacy_initialize_list_and_call(backend):
 
     version, info, tools, result = h.over_http(
         go, mode='legacy', headers={'Authorization': 'Bearer session-token'})
-    assert info.name == 'dda-edge-mcp' and info.version == '1.0.0'
+    assert info.name == 'dda-edge-mcp' and info.version == '1.0.1'
     assert version < '2026-07-28'
     assert any(t.name == 'edge_system_station_get' for t in tools.tools)
     assert not result.is_error and result.structured_content['result'] == {'name': 's'}

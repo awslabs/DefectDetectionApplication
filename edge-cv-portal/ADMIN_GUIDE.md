@@ -2072,8 +2072,8 @@ read-only tools, among them the Phase-2 `portal_devices_logs_analyze` and
 Phase-2 and Phase-3 mutating tools only while `mcpMutatingToolsEnabled` is
 on. A DESTRUCTIVE tool also needs `confirm` with the value its row names.
 The tables list the 43 delivered Phase-3 tools. A 44th, `portal_models_delete`,
-is not offered yet: the model-deletion route it would call currently refuses
-every caller, so the tool follows once that route is fixed.
+is not offered yet: deleting a model is destructive, so the tool is held for a
+later release with its own `confirm` rule.
 
 **`admin` view** (15 tools, `…/mcp/admin`)
 
