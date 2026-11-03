@@ -40,6 +40,7 @@ The **Video module** column links the video of the DDA Learning Series on YouTub
 | 22 | [Device web UI](22-device-web-ui.md) | On the edge device, port 3000 | [Module 12: Edge Software](https://youtu.be/pInKqoADn2c) |
 | 23 | [Quality Station HMI](23-station-hmi.md) | On the edge device, `/hmi/` | – |
 | 24 | [MCP support](24-mcp-support.md) | Kiro or another MCP client; Audit Logs → Channel | [Module 14: MCP support](https://youtu.be/4rWMVBdDABM) |
+| 25 | [The assistant](25-assistant.md) | The assistant panel on every page; Settings → Assistant | – |
 
 ## The end-to-end path
 

@@ -21,6 +21,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as cdk from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import { AssistantStack } from '../lib/assistant-stack';
 import { BuildFleetStack } from '../lib/build-fleet-stack';
 import { ComputeStack } from '../lib/compute-stack';
 import { NodeDesignerStack } from '../lib/node-designer-stack';
@@ -30,6 +31,7 @@ import {
   collectInventoryMethods,
   renderRouteAuthMarkdown,
 } from '../lib/route-auth-inventory';
+import { mcpBackendHandlers } from '../lib/mcp-stack';
 import { StorageStack } from '../lib/storage-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
 import { TelemetryStack } from '../lib/telemetry-stack';
@@ -57,7 +59,10 @@ export interface InventoryStacks {
 /** Construct the six inventory stacks (and the storage/fixture stacks they need) in one app. */
 export function buildInventoryStacks(): InventoryStacks {
   const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'route-auth-'));
-  const app = new cdk.App({ outdir });
+  // No asset bundling: the inventory needs the methods only, and the
+  // assistant stack's layers (the MCP SDK lock, the user guide) would
+  // otherwise be built on every rendering.
+  const app = new cdk.App({ outdir, context: { 'aws:cdk:bundling-stacks': [] } });
   const storage = new StorageStack(app, 'EdgeCVPortalStorageStack');
   const fixtures = new cdk.Stack(app, 'RouteAuthFixtures');
   const userPool = new cognito.UserPool(fixtures, 'Pool');
@@ -157,6 +162,19 @@ export function buildInventoryStacks(): InventoryStacks {
     apiStageName: FIXTURE_STAGE_NAME,
     sharedAuthorizerId: FIXTURE_SHARED_AUTHORIZER_ID,
   });
+  const assistant = new AssistantStack(app, 'EdgeCVPortalAssistantStack', {
+    userPool,
+    userRolesTable: storage.userRolesTable,
+    auditLogTable: storage.auditLogTable,
+    usecasesTable: storage.useCasesTable,
+    settingsTable: storage.settingsTable,
+    backendHandlers: mcpBackendHandlers({
+      computeHandlers: compute.mcpBackendHandlers,
+      nodeDesigner,
+      buildFleet,
+      syntheticData,
+    }),
+  });
   const stacks: Record<string, cdk.Stack> = {
     EdgeCVPortalComputeStack: compute,
     EdgeCVPortalNodeDesignerStack: nodeDesigner,
@@ -164,6 +182,7 @@ export function buildInventoryStacks(): InventoryStacks {
     EdgeCVPortalSyntheticDataStack: syntheticData,
     EdgeCVPortalWorkflowDebugStack: workflowDebug,
     EdgeCVPortalTelemetryStack: telemetry,
+    EdgeCVPortalAssistantStack: assistant,
   };
   for (const entry of API_STACK_INVENTORY) {
     if (!stacks[entry.stackName]) {

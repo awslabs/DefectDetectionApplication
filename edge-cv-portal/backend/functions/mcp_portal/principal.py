@@ -105,6 +105,23 @@ def clear_email_cache() -> None:
         _EMAILS.clear()
 
 
+def principal_from_claims(claims: dict) -> Principal:
+    """The `Principal` of verified ID-token claims, as the REST authorizer
+    hands them to every handler (`requestContext.authorizer.claims`).
+
+    Used by the Portal assistant (portal-ai-assistant design §2): the web
+    UI's ID token carries `email`, so no `AdminGetUser` call is needed
+    unless the claim is missing.
+    """
+    claims = dict(claims or {})
+    sub = claims.get('sub') or UNKNOWN
+    username = claims.get('cognito:username') or claims.get('username') or sub
+    email = claims.get('email')
+    if not (isinstance(email, str) and email.strip()):
+        email = lookup_email(sub, username)
+    return Principal(sub=sub, username=username, email=email, claims=claims)
+
+
 def principal_from_access_token(token) -> Principal:
     """The `Principal` of an `AccessToken` returned by the verifier (its
     `claims` hold the verified payload)."""

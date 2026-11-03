@@ -4542,7 +4542,7 @@ class ApiService {
     end_time?: number;
     limit?: number;
     next_token?: string;
-    channel?: 'api' | 'mcp';
+    channel?: 'api' | 'mcp' | 'assistant';
     mcp_tool?: string;
   }): Promise<{
     logs: Array<{

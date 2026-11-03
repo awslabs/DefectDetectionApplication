@@ -48,6 +48,15 @@ export function UsecaseProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * The use-case context when a provider is present, else undefined. The
+ * assistant provider uses it so a Layout rendered without UsecaseProvider
+ * (component tests) still works (portal-ai-assistant design §12).
+ */
+export function useOptionalUsecase(): UsecaseContextType | undefined {
+  return useContext(UsecaseContext);
+}
+
 export function useUsecase() {
   const context = useContext(UsecaseContext);
   if (context === undefined) {

@@ -92,7 +92,7 @@ def _resource_id(spec, outcome: Outcome, resource_id: Optional[str]) -> str:
 def marker_event(principal, mcp_ctx) -> dict:
     """A minimal event carrying the claims, the request identity and the `mcp`
     block, for completions that ended before a backend event was built."""
-    block = {'channel': 'mcp', 'tool': mcp_ctx.tool, 'server': mcp_ctx.server,
+    block = {'channel': mcp_ctx.channel, 'tool': mcp_ctx.tool, 'server': mcp_ctx.server,
              'client': mcp_ctx.client, 'request_id': mcp_ctx.request_id,
              'principal_email': mcp_ctx.principal_email}
     if mcp_ctx.identity_source is not None:

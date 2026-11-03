@@ -150,6 +150,32 @@ def get_bedrock_client(region: str, timeout_seconds: int):
     return client
 
 
+# botocore error code -> failure category (custom-node-code-assist
+# Requirement 5.1; shared with the Portal assistant). Total: every unlisted
+# code falls through to 'model-error'.
+BEDROCK_ERROR_CATEGORIES: Dict[str, str] = {
+    'ThrottlingException': 'throttling',
+    'TooManyRequestsException': 'throttling',
+    'ServiceQuotaExceededException': 'throttling',
+    'AccessDeniedException': 'authorization',
+    'UnrecognizedClientException': 'authorization',
+    'ExpiredTokenException': 'authorization',
+    'ResourceNotFoundException': 'model-access',
+    'ModelNotReadyException': 'model-access',
+    'ValidationException': 'model-access',
+    'ModelErrorException': 'model-error',
+    'ModelTimeoutException': 'model-error',
+    'ServiceUnavailableException': 'model-error',
+    'InternalServerException': 'model-error',
+}
+
+
+def categorize_bedrock_error(error_code: Any) -> str:
+    """Map a botocore error code to exactly one of the four failure
+    categories; anything unrecognized is 'model-error'."""
+    return BEDROCK_ERROR_CATEGORIES.get(error_code, 'model-error')
+
+
 def build_inference_config(config: Dict) -> Dict:
     """
     Converse inferenceConfig from a resolved Bedrock_Configuration.

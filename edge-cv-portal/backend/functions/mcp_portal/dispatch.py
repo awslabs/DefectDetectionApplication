@@ -65,6 +65,9 @@ class McpContext:
     user_agent: Optional[str] = None
     principal_email: Optional[str] = None
     identity_source: Optional[str] = None
+    # The audit channel the marker block declares: 'mcp' for the MCP server,
+    # 'assistant' for the Portal assistant (portal-ai-assistant design D3).
+    channel: str = 'mcp'
 
 
 @dataclass(frozen=True)
@@ -135,7 +138,7 @@ def build_backend_event(spec, args: dict, principal, mcp_ctx: McpContext) -> dic
     if mcp_ctx.user_agent:
         headers['User-Agent'] = mcp_ctx.user_agent
     mcp_block = {
-        'channel': 'mcp', 'tool': mcp_ctx.tool, 'server': mcp_ctx.server,
+        'channel': mcp_ctx.channel, 'tool': mcp_ctx.tool, 'server': mcp_ctx.server,
         'client': mcp_ctx.client, 'request_id': mcp_ctx.request_id,
         'principal_email': mcp_ctx.principal_email,
     }
