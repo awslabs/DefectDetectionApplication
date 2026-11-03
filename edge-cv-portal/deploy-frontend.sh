@@ -84,6 +84,15 @@ API_URL=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' \
   --output text 2>/dev/null || echo "")
 
+# The Portal assistant's API (portal-ai-assistant design §11): absent when
+# the stack is not deployed, in which case the frontend shows no assistant.
+ASSISTANT_API_URL=$(aws cloudformation describe-stacks \
+  --stack-name EdgeCVPortalAssistantStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`AssistantApiUrl`].OutputValue' \
+  --output text 2>/dev/null || echo "")
+if [ "$ASSISTANT_API_URL" = "None" ]; then ASSISTANT_API_URL=""; fi
+ASSISTANT_API_URL="${ASSISTANT_API_URL%/}"
+
 if [ -n "$AUTH_CONFIG" ] && [ -n "$API_URL" ] && [ "$AUTH_CONFIG" != "None" ] && [ "$API_URL" != "None" ]; then
   USER_POOL_ID=$(echo "$AUTH_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
   CLIENT_ID=$(echo "$AUTH_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolWebClientId'])")
@@ -102,6 +111,11 @@ existing['apiUrl'] = '${API_URL}'
 existing['userPoolId'] = '${USER_POOL_ID}'
 existing['userPoolClientId'] = '${CLIENT_ID}'
 existing['region'] = '${REGION}'
+assistant_url = '${ASSISTANT_API_URL}'
+if assistant_url:
+    existing['assistantApiUrl'] = assistant_url
+else:
+    existing.pop('assistantApiUrl', None)
 with open('public/config.json', 'w') as f:
     json.dump(existing, f, indent=2)
     f.write('\n')
@@ -113,12 +127,14 @@ with open('public/config.json', 'w') as f:
   "apiUrl": "$API_URL",
   "userPoolId": "$USER_POOL_ID",
   "userPoolClientId": "$CLIENT_ID",
-  "region": "$REGION"
+  "region": "$REGION"${ASSISTANT_API_URL:+,
+  "assistantApiUrl": "$ASSISTANT_API_URL"}
 }
 EOF
     echo "✅ config.json created:"
   fi
   echo "   API URL:      $API_URL"
+  echo "   Assistant:    ${ASSISTANT_API_URL:-not deployed}"
   echo "   User Pool:    $USER_POOL_ID"
   echo "   Client ID:    $CLIENT_ID"
   echo "   Region:       $REGION"

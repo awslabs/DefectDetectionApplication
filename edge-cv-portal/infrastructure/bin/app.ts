@@ -13,6 +13,7 @@ import { WorkflowDebugStack } from '../lib/workflow-debug-stack';
 import { TelemetryStack } from '../lib/telemetry-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { McpStack, mcpBackendHandlers } from '../lib/mcp-stack';
+import { AssistantStack } from '../lib/assistant-stack';
 import { tagExecPolicyManagedResources } from '../lib/managed-tag';
 import { applyDdaPermissionsBoundary } from '../lib/permissions-boundary';
 import {
@@ -21,6 +22,7 @@ import {
   detectorExportImageDefault,
   enforcementRefusalMessage,
   legacyRolesAcknowledged,
+  assistantEnabled,
   mcpMutatingToolsEnabled,
   mcpServerEnabled,
   normalizeCloudFrontDomain,
@@ -430,6 +432,32 @@ if (sharedAuthorizerId === undefined) {
 }
 
 // Frontend Stack (CloudFront, S3)
+// Portal assistant (portal-ai-assistant design §10): its own Regional REST
+// API, two Lambdas and one table, dispatching to the same handler functions
+// as the MCP server. Default on; only `-c deployAssistant=false` omits it,
+// and deploy-infrastructure.sh refuses that while the stack is still
+// deployed (scripts/portal-assistant-stack.sh). Optional context:
+// assistantSupportEmail, assistantDocumentationUrl.
+if (assistantEnabled(app.node.tryGetContext('deployAssistant'))) {
+  new AssistantStack(app, 'EdgeCVPortalAssistantStack', {
+    env,
+    description: 'Portal assistant (in-Portal AI assistant over the MCP tool catalog) for Edge CV Portal',
+    userPool: authStack.userPool,
+    userRolesTable: storageStack.userRolesTable,
+    auditLogTable: storageStack.auditLogTable,
+    usecasesTable: storageStack.useCasesTable,
+    settingsTable: storageStack.settingsTable,
+    backendHandlers: mcpBackendHandlers({
+      computeHandlers: computeStack.mcpBackendHandlers,
+      nodeDesigner: nodeDesignerStack,
+      buildFleet: buildFleetStack,
+      syntheticData: syntheticDataStack,
+    }),
+    supportEmail: app.node.tryGetContext('assistantSupportEmail'),
+    documentationUrl: app.node.tryGetContext('assistantDocumentationUrl'),
+  });
+}
+
 const frontendStack = new FrontendStack(app, 'EdgeCVPortalFrontendStack', {
   env,
   description: 'Frontend hosting infrastructure for Edge CV Portal',

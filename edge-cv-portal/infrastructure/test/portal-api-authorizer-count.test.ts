@@ -43,6 +43,7 @@ import { ComputeStack } from '../lib/compute-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 import { NodeDesignerStack } from '../lib/node-designer-stack';
 import { StorageStack } from '../lib/storage-stack';
+import { AssistantStack } from '../lib/assistant-stack';
 import { McpStack, mcpBackendHandlers } from '../lib/mcp-stack';
 import { SyntheticDataStack } from '../lib/synthetic-data-stack';
 import { TelemetryStack } from '../lib/telemetry-stack';
@@ -66,6 +67,7 @@ const MIRRORED_STACKS = [
   'BuildFleetStack',
   'SyntheticDataStack',
   'McpStack',
+  'AssistantStack',
   'WorkflowDebugStack',
   'TelemetryStack',
   'FrontendStack',
@@ -172,6 +174,21 @@ beforeAll(() => {
     mcpRedirectUris: [],
     mcpAllowedOrigins: [],
     mcpBuildSha: 'fixture',
+  });
+  // The Portal assistant's own Regional REST API and authorizer
+  // (portal-ai-assistant design §10): counted per API below.
+  new AssistantStack(app, 'EdgeCVPortalAssistantStack', {
+    userPool: authStack.userPool,
+    userRolesTable: storageStack.userRolesTable,
+    auditLogTable: storageStack.auditLogTable,
+    usecasesTable: storageStack.useCasesTable,
+    settingsTable: storageStack.settingsTable,
+    backendHandlers: mcpBackendHandlers({
+      computeHandlers: computeStack.mcpBackendHandlers,
+      nodeDesigner: nodeDesignerStack,
+      buildFleet: buildFleetStack,
+      syntheticData: syntheticDataStack,
+    }),
   });
   new WorkflowDebugStack(app, 'EdgeCVPortalWorkflowDebugStack', {
     useCasesTable: storageStack.useCasesTable,
