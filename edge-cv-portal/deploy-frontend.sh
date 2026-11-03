@@ -101,17 +101,27 @@ if [ -n "$AUTH_CONFIG" ] && [ -n "$API_URL" ] && [ "$AUTH_CONFIG" != "None" ] &&
   # Remove trailing slash from API URL if present
   API_URL="${API_URL%/}"
 
-  # Merge with existing config.json to preserve branding/custom fields
+  # Merge with existing config.json to preserve branding/custom fields; a
+  # missing file starts from {}. One writer for both cases: the earlier
+  # heredoc for the create case used `${ASSISTANT_API_URL:+...}` and a heredoc
+  # strips the quotes inside that expansion, which published an unquoted
+  # `assistantApiUrl:` line (invalid JSON) on the first assistant deploy.
   if [ -f public/config.json ]; then
-    python3 -c "
-import json, sys
+    CONFIG_VERB="updated (branding preserved)"
+  else
+    CONFIG_VERB="created"
+    echo '{}' > public/config.json
+  fi
+  API_URL="$API_URL" USER_POOL_ID="$USER_POOL_ID" CLIENT_ID="$CLIENT_ID" REGION="$REGION" \
+  ASSISTANT_API_URL="$ASSISTANT_API_URL" python3 -c "
+import json, os
 with open('public/config.json') as f:
     existing = json.load(f)
-existing['apiUrl'] = '${API_URL}'
-existing['userPoolId'] = '${USER_POOL_ID}'
-existing['userPoolClientId'] = '${CLIENT_ID}'
-existing['region'] = '${REGION}'
-assistant_url = '${ASSISTANT_API_URL}'
+existing['apiUrl'] = os.environ['API_URL']
+existing['userPoolId'] = os.environ['USER_POOL_ID']
+existing['userPoolClientId'] = os.environ['CLIENT_ID']
+existing['region'] = os.environ['REGION']
+assistant_url = os.environ.get('ASSISTANT_API_URL', '')
 if assistant_url:
     existing['assistantApiUrl'] = assistant_url
 else:
@@ -120,19 +130,8 @@ with open('public/config.json', 'w') as f:
     json.dump(existing, f, indent=2)
     f.write('\n')
 "
-    echo "✅ config.json updated (branding preserved):"
-  else
-    cat > public/config.json << EOF
-{
-  "apiUrl": "$API_URL",
-  "userPoolId": "$USER_POOL_ID",
-  "userPoolClientId": "$CLIENT_ID",
-  "region": "$REGION"${ASSISTANT_API_URL:+,
-  "assistantApiUrl": "$ASSISTANT_API_URL"}
-}
-EOF
-    echo "✅ config.json created:"
-  fi
+  python3 -c "import json; json.load(open('public/config.json'))" || { echo "❌ public/config.json is not valid JSON" >&2; exit 1; }
+  echo "✅ config.json $CONFIG_VERB:"
   echo "   API URL:      $API_URL"
   echo "   Assistant:    ${ASSISTANT_API_URL:-not deployed}"
   echo "   User Pool:    $USER_POOL_ID"
