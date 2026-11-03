@@ -518,8 +518,9 @@ def delete_model(event: Dict, context: Any) -> Dict:
         item = response['Item']
         usecase_id = item.get('usecase_id')
         
-        # Check user access (require Admin for deletion)
-        if not check_user_access(user_id, usecase_id, 'Admin'):
+        # Check user access (require DataScientist or higher, as the stage
+        # update does: the DELETE_MODELS holders of the shared role check)
+        if not check_user_access(user_id, usecase_id, 'DataScientist'):
             return create_response(403, {'error': 'Insufficient permissions'})
         
         # Check if model is deployed

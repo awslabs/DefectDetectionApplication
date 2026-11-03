@@ -313,8 +313,11 @@ def test_former_permission_fails_with_the_extra_roles_named(
         assert role in problem
 
 
-def test_models_delete_is_absent_while_the_handler_checks_a_role_that_does_not_exist():
-    # models.py checks the literal 'Admin', which no Role carries: the
-    # handler-admitted set is empty (Backlog 1).
+def test_models_delete_is_absent_until_the_owner_decides_to_add_it():
+    # Backlog 1: models.py checked the literal 'Admin', which no Role carries,
+    # so the handler-admitted set was empty. The REST side now runs the shared
+    # role check (DataScientist floor, tests/test_models_delete_authz.py); the
+    # destructive tool itself is added only on an owner decision, with its own
+    # sign-off, deploy and live exercise.
     assert 'portal_models_delete' not in BY_NAME
     assert 'portal_models_delete' not in HANDLER_ROLES
