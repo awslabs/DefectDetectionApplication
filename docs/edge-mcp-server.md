@@ -178,7 +178,7 @@ record.
 ```json
 {"enabled": true, "mutatingToolsEnabled": false, "listening": true, "endpoint": "/mcp",
  "transport": "streamable-http", "protocolRevisions": ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26"],
- "serverVersion": "1.0.0", "deliveredPhases": [1, 2, 3], "componentVersion": "<component version>",
+ "serverVersion": "1.0.1", "deliveredPhases": [1, 2, 3], "componentVersion": "<component version>",
  "features": ["vllm"], "restartCount": 0, "lastExitCode": null, "lastError": null}
 ```
 
@@ -282,7 +282,7 @@ accepted only while `McpMutatingToolsEnabled` is true.
 | `edge_registration_continuous_resume` | 3 | MUTATING, DESTRUCTIVE — requires confirm=registration_id. | - |
 | `edge_registration_trigger` | 3 | MUTATING. | - |
 | `edge_result_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=capture_id. | - |
-| `edge_system_restart_dda` | 3 | MUTATING, DESTRUCTIVE — requires confirm='restart-dda'. | - |
+| `edge_system_restart_dda` | 3 | MUTATING, DESTRUCTIVE — requires confirm='restart-dda'. | after the restart the models come back in state UNKNOWN until each is started again with `edge_model_start` |
 | `edge_workflow_create` | 3 | MUTATING. | - |
 | `edge_workflow_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=workflow_id. | - |
 | `edge_workflow_retry` | 3 | MUTATING, DESTRUCTIVE — requires confirm=workflow_id. | - |

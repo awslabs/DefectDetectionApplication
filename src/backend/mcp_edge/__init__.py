@@ -26,7 +26,8 @@ This module is imported by both, so it holds constants and one entry point,
 """
 
 # Semver of the edge catalog; serverInfo.version is "<this>+<component>".
-__version__ = "1.0.0"
+# Bumped on catalog changes: 1.0.1 extends the edge_system_restart_dda text.
+__version__ = "1.0.1"
 
 # The only phase gate: an edge catalog spec whose phase is not listed here is
 # neither listed nor accepted.

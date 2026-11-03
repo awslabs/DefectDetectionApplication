@@ -71,7 +71,7 @@ def test_discover_and_list(backend):
         return client.server_info, client.instructions, first, second
 
     info, instructions, first, second = h.in_memory(go)
-    assert info.name == 'dda-edge-mcp' and info.version == '1.0.0'
+    assert info.name == 'dda-edge-mcp' and info.version == '1.0.1'
     assert instructions == server.INSTRUCTIONS
     names = [t.name for t in first.tools]
     assert names == sorted(names) == [t.name for t in second.tools]

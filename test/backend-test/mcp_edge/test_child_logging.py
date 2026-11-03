@@ -252,7 +252,7 @@ def test_version_and_help_exit_0(capsys):
     with pytest.raises(SystemExit) as exited:
         child_main.parse_args(["--version"])
     assert exited.value.code == 0
-    assert capsys.readouterr().out.strip() == "dda-edge-mcp 1.0.0"
+    assert capsys.readouterr().out.strip() == "dda-edge-mcp 1.0.1"
     with pytest.raises(SystemExit) as exited:
         child_main.parse_args(["--help"])
     assert exited.value.code == 0

@@ -137,7 +137,7 @@ def make(config=None, ready=True, features=("vllm",), **kwargs):
 # ------------------------------------------------------------- constants
 
 def test_package_constants():
-    assert mcp_edge.__version__ == "1.0.0"
+    assert mcp_edge.__version__ == "1.0.1"
     assert mcp_edge.DELIVERED_PHASES == (1, 2, 3)
     assert mcp_edge.VENV_PYTHON == "/opt/dda/mcp-venv/bin/python"
     assert mcp_edge.CHILD_PORT == 5790
