@@ -6,7 +6,7 @@
 
 The Defect Detection Application (DDA) is an edge-deployed computer vision solution for quality assurance in discrete manufacturing environments. Originally developed by the AWS EdgeML service team, DDA is now available as an open-source project under the stewardship of the AWS Manufacturing TFC and Auto/Manufacturing IBU.
 
-> **New to DDA?** Watch the [overview video](https://youtu.be/lTLSIMHLy7Y), then follow the [video tutorial series](#video-tutorials).
+> **New to DDA?** Watch the [overview video](https://youtu.be/viPfq9Awbd8), then follow the [video tutorial series](#video-tutorials).
 
 ## Table of Contents
 
@@ -76,9 +76,11 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 
 The DDA video tutorial series on YouTube has an overview video and one video per module. Where this README covers the same topic, the third column links to that section; the last column links to the matching pages of the [User Guide](#user-guide).
 
+Watch the full playlist: [Defect Detection Application - Learning Series](https://www.youtube.com/playlist?list=PLDTkDYXAuWR4).
+
 | Module | Video | Related README section | User guide |
 |--------|-------|------------------------|------------|
-| Overview | [Overview](https://youtu.be/lTLSIMHLy7Y) | [Overview](#overview) | [1. Getting started](docs/user-guide/01-getting-started.md) |
+| Overview | [Overview](https://youtu.be/viPfq9Awbd8) | [Overview](#overview) | [1. Getting started](docs/user-guide/01-getting-started.md) |
 | Module 0 | [Portal Setup](https://youtu.be/HtH_4zT23Fo) | [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account) | [2. Use Cases](docs/user-guide/02-use-cases.md), [19. Settings](docs/user-guide/19-settings.md) |
 | Module 1 | [Device Setup](https://youtu.be/PFdFycCQXA0) | [Step 7: Set Up Edge Devices (Add Device)](#step-7-set-up-edge-devices-add-device) | [15. Devices](docs/user-guide/15-devices.md) |
 | Module 2 | [Labeling](https://youtu.be/pxSoAIOLp18) | [Labeling](#labeling) | [4. Labeling](docs/user-guide/04-labeling.md) |
@@ -93,7 +95,7 @@ The DDA video tutorial series on YouTube has an overview video and one video per
 | Module 11 | [User Access](https://youtu.be/_HDKtKvft3c) | [3.2 Create Portal Admin User](#32-create-portal-admin-user) | [20. User Manager](docs/user-guide/20-user-manager.md) |
 | Module 12 | [Edge Software](https://youtu.be/pInKqoADn2c) | [Edge Device Management](#edge-device-management) | [22. Device web UI](docs/user-guide/22-device-web-ui.md), [23. Quality Station HMI](docs/user-guide/23-station-hmi.md) |
 | Module 13 | [Dashboards](https://youtu.be/wTwUSNUQbac) | - | [14. Workflow dashboards](docs/user-guide/14-workflow-dashboards.md) |
-| Module 14 | [MCP support](https://youtu.be/0vL4eq0mcgM) | [Documentation](#documentation) | [24. MCP support](docs/user-guide/24-mcp-support.md) |
+| Module 14 | [MCP support](https://youtu.be/4rWMVBdDABM) | [Documentation](#documentation) | [24. MCP support](docs/user-guide/24-mcp-support.md) |
 
 ## User Guide
 
@@ -1787,7 +1789,7 @@ The edge server is off by default and enabled per device: see
 | [docs/edge-mcp-server.md](docs/edge-mcp-server.md) | Edge MCP server: enabling, connecting, role gating and tools |
 | [INFERENCE_UPLOADER_SETUP.md](INFERENCE_UPLOADER_SETUP.md) | Inference Uploader setup |
 | [datasets/README.md](datasets/README.md) | Sample datasets guide |
-| [Video Tutorials](#video-tutorials) | Video tutorial series: an overview and Modules 0-12 |
+| [Video Tutorials](#video-tutorials) | Video tutorial series: an overview and Modules 0-14 |
 
 ## Contributing
 
