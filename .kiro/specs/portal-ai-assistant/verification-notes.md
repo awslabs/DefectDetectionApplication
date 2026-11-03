@@ -51,8 +51,8 @@ API or worker log groups after the exp fix.
 
 ## Smoke check (Requirement 14.6)
 
-`run_eval.py smoke` with a temporary PortalAdmin account against use case
-`645504ce…` (third run, after the fixes): **10/10** — state enabled; guidance
+`run_eval.py smoke` with a temporary PortalAdmin account against the test
+use case (third run, after the fixes): **10/10** — state enabled; guidance
 turn completed and cited the guide; read-only tool turn completed and ran
 `portal_devices_list`; audit filter shows the entries; toggle off hides the
 assistant and refuses turns; toggle on restores it; actions not delivered.
