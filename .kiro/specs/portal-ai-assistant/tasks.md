@@ -69,8 +69,8 @@ Standing rule: implementation and local tests run autonomously; a live AWS chang
 
 ### Wave 6 — Owner gates (each waits for a numbered go)
 
-- [ ] 6.1 **Deploy gate.** Read-only `cdk diff` of the full app with the deployed context; present the diff summary (new stack only, no change to other stacks' templates beyond the shared-layer asset hash); on go: `./deploy-infrastructure.sh` then `./deploy-frontend.sh`.
-- [ ] 6.2 Validate-first (i)–(v) on the deployed stack; smoke check (14.6) and the evaluation set (14.5); write `verification-notes.md`.
+- [x] 6.1 **Deploy gate.** Read-only `cdk diff` of the full app with the deployed context; present the diff summary (new stack only, no change to other stacks' templates beyond the shared-layer asset hash); on go: `./deploy-infrastructure.sh` then `./deploy-frontend.sh`.
+- [x] 6.2 Validate-first (i)–(v) on the deployed stack; smoke check (14.6) and the evaluation set (14.5); write `verification-notes.md`.
 - [ ] 6.3 **Push gate.** Hygiene sweep of the branch; on go: push `feature/portal-ai-assistant`, open the PR to `integration/all-specs`, wait for CodeQL, merge only on a passing check with no new alerts.
 
 ### Phase 2 — actions (after the owner's allow-list sign-off)
