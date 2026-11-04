@@ -145,7 +145,19 @@ def _error_text(body) -> Optional[str]:
     return None
 
 
-def map_backend_status(status: int, body) -> ToolFailure:
-    """The error result of a backing route that answered `status` >= 300."""
+def map_backend_status(status: int, body, detail_key: Optional[str] = None) -> ToolFailure:
+    """The error result of a backing route that answered `status` >= 300.
+
+    With `detail_key` (a spec's `error_detail_key`), a non-empty string at
+    that key of an object body, when it differs from the error text, is
+    joined to it as `"<error>: <detail>"` (the detail alone when the body
+    has no error text) before the scrub, so a handler's recovery text or
+    reason reaches the caller (mcp-user-operations design A7).
+    """
     category = category_for(int(status))
-    return ToolFailure(category, scrub(_error_text(body), category), status=int(status))
+    text = _error_text(body)
+    if detail_key and isinstance(body, dict):
+        detail = body.get(detail_key)
+        if isinstance(detail, str) and detail and detail != text:
+            text = f'{text}: {detail}' if text else detail
+    return ToolFailure(category, scrub(text, category), status=int(status))

@@ -312,6 +312,41 @@ def test_documented_limitation_D29_enforcement_off(matrix):  # noqa: N802
         assert result.structured_content.get('category') != 'not_authorized', spec.name
 
 
+# ----------------------------------- Phase-4 account tools, disabled caller
+
+ACCOUNT_TOOLS = [s for s in CATALOG if s.name in (
+    'portal_admin_account_create', 'portal_admin_account_disable',
+    'portal_admin_account_enable', 'portal_admin_account_delete')]
+
+
+@pytest.mark.parametrize('enforced', MODES, ids=mode_id)
+@pytest.mark.parametrize('spec', ACCOUNT_TOOLS, ids=lambda s: s.name)
+def test_disabled_portal_admin_is_denied_the_account_tools(matrix, spec, enforced):
+    """**Feature: mcp-user-operations, Property 3: Phase-4 authorization decision**
+
+    A `global` row `{role: PortalAdmin, status: 'disabled'}`: under
+    enforcement the registry treats it as no role (Requirement 2.3); the
+    legacy order reads its role and not its status, as the web UI does in
+    that mode (documented-limitation-D29, Requirement 2.5)."""
+    shared, stack, fake, recorder, monkeypatch = matrix
+    monkeypatch.setenv('PORTAL_REGISTRY_ENFORCED', 'true' if enforced else 'false')
+    sub = f'rbac-disabled-PortalAdmin-{mode_id(enforced)}-{uuid.uuid4()}'
+    stack.tables.user_roles.put_item(Item={'user_id': sub, 'usecase_id': 'global',
+                                           'role': 'PortalAdmin', 'status': 'disabled'})
+    result = run(spec, sub, call_args(spec))
+    content = result.structured_content or {}
+    denials = marked(recorder.items, authz.UNAUTHORIZED_ACTION, spec.name)
+    if enforced:
+        assert content['category'] == 'not_authorized' and content['status'] == 403
+        assert fake.calls == []
+        assert len(denials) == 1 and len(recorder.items) == 1
+        assert denials[0]['user_id'] == sub and denials[0]['result'] == 'denied'
+    else:  # documented-limitation-D29
+        assert content.get('category') != 'not_authorized', content
+        assert denials == []
+        assert len(fake.calls) == 1
+
+
 # ------------------------------------------------------- usability guard
 
 def test_usability_guard(matrix):

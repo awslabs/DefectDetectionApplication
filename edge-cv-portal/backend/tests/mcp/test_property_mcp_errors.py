@@ -10,6 +10,11 @@ For any backend status and body, `map_backend_status` yields the category of
 the mapping table and a message without traceback markers or the token; for
 a `bind_usecase_path` spec a backend 404 gives the same whole
 `CallToolResult` as the D36 refusal of a 2xx body, except `request_id`.
+
+Extended by .kiro/specs/mcp-user-operations/ (Property 5, tasks.md 2.11):
+**Feature: mcp-user-operations, Property 5: Backend status mapping with the
+detail key** - without `detail_key` the mapping is the baseline's; with
+`detail_key='message'` the handler's `message` is joined to its `error`.
 """
 import base64
 import json
@@ -88,6 +93,72 @@ def test_status_mapping_and_scrubbing(data, status, token):
         assert f'{payload}.{signature}' not in text
     rendered = json.dumps(failure.to_result('req').model_dump(mode='json'))
     assert token not in rendered and 'Traceback' not in rendered
+
+
+def baseline_mapping(status, body) -> errors.ToolFailure:
+    """`map_backend_status` as it was before the detail key."""
+    category = errors.category_for(int(status))
+    return errors.ToolFailure(category, errors.scrub(errors._error_text(body), category),
+                              status=int(status))
+
+
+@st.composite
+def detail_bodies(draw, token):
+    """An object body whose `error` and `message` are each absent, a string
+    (possibly with a traceback marker or the token), or another value."""
+    text = st.lists(st.one_of(st.text(max_size=40), st.just(TRACEBACK),
+                              st.just(f'Bearer {token}'), st.just(token),
+                              st.just('x' * 700)),
+                    max_size=3).map(''.join)
+    value = st.one_of(text, st.none(), st.integers(), st.booleans())
+    body = {}
+    for key in ('error', 'message'):
+        if draw(st.booleans()):
+            body[key] = draw(value)
+    if 'error' in body and isinstance(body['error'], str) and draw(st.booleans()):
+        body['message'] = body['error']          # the same text twice
+    return body
+
+
+@SETTINGS
+@given(data=st.data(), status=statuses, token=tokens)
+def test_status_mapping_with_the_detail_key(data, status, token):
+    """**Feature: mcp-user-operations, Property 5: Backend status mapping with the detail key**
+
+    Validates: Requirements 3.4, 3.5, 3.6, 5.8 of .kiro/specs/mcp-user-operations/."""
+    body = data.draw(st.one_of(detail_bodies(token), bodies(token)))
+    plain = errors.map_backend_status(status, body)
+    assert plain == baseline_mapping(status, body)
+    assert plain.text == baseline_mapping(status, body).text
+    joined = errors.map_backend_status(status, body, detail_key='message')
+    assert joined.category == plain.category and joined.status == plain.status
+    # The rule (design A7): a non-empty string at the key, different from
+    # the error text, is joined to it; anything else leaves the baseline.
+    text = errors._error_text(body)
+    detail = body.get('message') if isinstance(body, dict) else None
+    if isinstance(detail, str) and detail and detail != text:
+        expected = f'{text}: {detail}' if text else detail
+    else:
+        expected = text
+    assert joined.message == errors.scrub(expected, joined.category)
+    # The clauses of Property 5, case by case.
+    if isinstance(body, dict):
+        error, message = body.get('error'), body.get('message')
+        error_is_text = isinstance(error, str) and bool(error)
+        message_is_text = isinstance(message, str) and bool(message)
+        if 'error' not in body and message_is_text:
+            assert joined.message == errors.scrub(message, joined.category)
+        elif error_is_text and message_is_text and message != error:
+            assert joined.message == errors.scrub(f'{error}: {message}', joined.category)
+        elif error_is_text:
+            assert joined.message == plain.message
+    else:
+        assert joined.message == plain.message
+    payload, signature = token.split('.')[1:]
+    for text in (joined.message, joined.text):
+        assert 'Traceback' not in text and 'File "' not in text
+        assert token not in text and f'{payload}.{signature}' not in text
+    assert len(joined.message) <= errors.MAX_MESSAGE_CHARS
 
 
 @SETTINGS

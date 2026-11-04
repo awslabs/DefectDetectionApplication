@@ -2074,9 +2074,10 @@ Phase-2 and Phase-3 mutating tools only while `mcpMutatingToolsEnabled` is
 on. A DESTRUCTIVE tool also needs `confirm` with the value its row names.
 The tables list the 43 delivered Phase-3 tools. A 44th, `portal_models_delete`,
 is not offered yet: deleting a model is destructive, so the tool is held for a
-later release with its own `confirm` rule.
+later release with its own `confirm` rule. The four Phase-4 account tools are
+listed with phase 4 and are served from server version `1.3.0` on.
 
-**`admin` view** (15 tools, `…/mcp/admin`)
+**`admin` view** (19 tools, `…/mcp/admin`)
 
 | Tool | Phase | Classification | Permission | Scope |
 |---|---|---|---|---|
@@ -2095,6 +2096,10 @@ later release with its own `confirm` rule.
 | `portal_admin_usecase_create` | 3 | MUTATING. | `create_usecases` | global |
 | `portal_admin_usecase_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=usecase_id. | `delete_usecases` | usecase |
 | `portal_admin_usecase_update` | 3 | MUTATING. | `update_usecases` | usecase |
+| `portal_admin_account_create` | 4 | MUTATING. | `manage_users` | global |
+| `portal_admin_account_delete` | 4 | MUTATING, DESTRUCTIVE — requires confirm=account_username. | `manage_users` | global |
+| `portal_admin_account_disable` | 4 | MUTATING, DESTRUCTIVE — requires confirm=account_username. | `manage_users` | global |
+| `portal_admin_account_enable` | 4 | MUTATING, DESTRUCTIVE — requires confirm=account_username. | `manage_users` | global |
 
 **`devices` view** (34 tools, `…/mcp/devices`)
 

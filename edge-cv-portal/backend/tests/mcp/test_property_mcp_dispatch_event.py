@@ -35,8 +35,8 @@ def _b64(data: dict) -> str:
 
 
 @st.composite
-def calls(draw):
-    spec = draw(st.sampled_from(ROUTED))
+def calls(draw, specs=ROUTED):
+    spec = draw(st.sampled_from(specs))
     args = draw(arguments(spec))
     sub = draw(st.uuids()).hex
     claims = {'sub': sub, 'iss': 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_pool',
@@ -125,3 +125,54 @@ def test_dispatch_event_faithfulness(call):
     assert token not in serialized
     assert token.split('.')[2] not in serialized
     assert 'Authorization' not in event['headers']
+
+
+# --------------------------- Phase-4 account tools (mcp-user-operations)
+
+ACCOUNT_ROWS = [s for s in ROUTED if s.phase == 4]
+ACCOUNT_SUFFIX = {'portal_admin_account_disable': '/disable',
+                  'portal_admin_account_enable': '/enable',
+                  'portal_admin_account_delete': ''}
+
+
+def _keys(value):
+    """Every mapping key anywhere in a JSON value."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            yield key
+            yield from _keys(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _keys(nested)
+
+
+@settings(max_examples=100, deadline=None)
+@given(calls(ACCOUNT_ROWS))
+def test_account_tool_dispatch_event_faithfulness(call):
+    """**Feature: mcp-user-operations, Property 8: Dispatch event faithfulness for the four rows**
+
+    Validates: Requirements 1.3, 2.6, 6.7 of .kiro/specs/mcp-user-operations/."""
+    spec, args, claims, token, ctx = call
+    principal = Principal(sub=claims['sub'], username=claims['username'],
+                          email=ctx.principal_email, claims=claims)
+    event = build_backend_event(spec, args, principal, ctx)
+    username = args['account_username']
+    assert (event['httpMethod'], event['resource']) == (spec.method, spec.resource)
+    if spec.name == 'portal_admin_account_create':
+        assert event['path'] == '/admin/users' and event['pathParameters'] is None
+        assert json.loads(event['body']) == {'username': username,
+                                             'email': args['account_email'],
+                                             'role': args['role']}
+    else:
+        assert event['path'] == (f"/admin/users/{quote(username, safe='')}"
+                                 f'{ACCOUNT_SUFFIX[spec.name]}')
+        assert event['pathParameters'] == {'username': username}
+        if spec.method == 'DELETE':
+            assert event['body'] is None
+        else:
+            assert json.loads(event['body']) == {}
+    assert event['queryStringParameters'] is None
+    assert 'confirm' not in set(_keys(event))
+    assert event['requestContext']['authorizer'] == {'claims': claims}
+    assert event['mcp']['tool'] == spec.name and event['mcp']['channel'] == 'mcp'
+    assert token not in json.dumps(event)

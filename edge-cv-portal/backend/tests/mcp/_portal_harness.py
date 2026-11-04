@@ -37,6 +37,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.server.auth.provider import AccessToken
 
 from _principal import set_principal
+from mcp_portal import catalog as _catalog
 
 ISSUER = 'https://cognito-idp.us-east-1.amazonaws.com/us-east-1_FAKEPOOL1'
 CLIENT_ID = 'fake-mcp-client-id'
@@ -46,7 +47,10 @@ CANONICAL = f'{ORIGIN}/mcp'
 SCOPE = f'{CANONICAL}/portal.tools'
 HOSTED_UI = 'https://fake-portal.auth.us-east-1.amazoncognito.com'
 VIEWS = ('data', 'models', 'devices', 'workflows', 'admin')
-ALL_PHASES = (1, 2, 3)
+# Every phase the catalog authors, derived so that it cannot lag the catalog
+# (mcp-user-operations design A16): the suites that install all phases then
+# cover each new phase's rows.
+ALL_PHASES = tuple(sorted({spec.phase for spec in _catalog.CATALOG}))
 KID = 'fake-kid-1'
 ENV = {
     'COGNITO_ISSUER': ISSUER,
@@ -118,7 +122,8 @@ def install(monkeypatch, fake_lambda: Optional[FakeLambda] = None, phases=None,
         monkeypatch.setenv(key, value)
     monkeypatch.setenv('MCP_MUTATING_TOOLS_ENABLED', 'true' if mutating else 'false')
     monkeypatch.setattr(server, 'DELIVERED_PHASES', tuple(phases))
-    monkeypatch.setattr(principal, 'lookup_email', lambda _sub, _username: EMAIL)
+    monkeypatch.setattr(principal, 'lookup_email',
+                        lambda _sub, _username, refresh=False: principal.EmailLookup(EMAIL, False))
     monkeypatch.setattr(shared, '_REQUEST_AUDIT_CONTEXT', None)
     monkeypatch.setattr(dispatch, 'LAMBDA', fake_lambda)
     monkeypatch.setattr(dispatch, 'LAMBDA_CONTEXT', None)

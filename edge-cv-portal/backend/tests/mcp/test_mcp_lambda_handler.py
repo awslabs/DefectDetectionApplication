@@ -110,7 +110,8 @@ def portal(aws_stack, monkeypatch):
     from mcp_portal import dispatch, principal
     shared = sys.modules['shared_utils']
     monkeypatch.setattr(handler.VERIFIER, 'jwks_client', FakeJwksClient())
-    monkeypatch.setattr(principal, 'lookup_email', lambda _sub, _username: 'person@example.com')
+    monkeypatch.setattr(principal, 'lookup_email', lambda _sub, _username, refresh=False:
+                        principal.EmailLookup('person@example.com', False))
     monkeypatch.setattr(shared, '_REQUEST_AUDIT_CONTEXT', None)
     monkeypatch.setattr(shared.rbac_manager, 'has_permission', lambda *_a, **_k: True)
     fake_lambda = FakeLambda()

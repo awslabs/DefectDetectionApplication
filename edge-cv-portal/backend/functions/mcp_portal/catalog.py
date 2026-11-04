@@ -279,6 +279,16 @@ class ToolSpec:
     limit_max: Optional[int] = None
     limit_default: Optional[int] = None
     resource_id_path: Optional[str] = None
+    # The argument naming a Portal account; a call whose value names the
+    # calling Principal's own account (its username, its `sub` or its email
+    # alias) is refused `conflict` before dispatch (pipeline step 5b).
+    self_protect_arg: Optional[str] = None
+    # The argument whose value is the envelope's `resource_id` when no
+    # response-derived id exists.
+    resource_id_arg: Optional[str] = None
+    # The key of the backing route's error body whose text is appended to the
+    # `error` text.
+    error_detail_key: Optional[str] = None
 
     def __post_init__(self):
         set_ = object.__setattr__
@@ -524,6 +534,17 @@ PAGE_ARGS = {'limit': LIMIT, 'offset': OFFSET}
 # ------------------------------------------------------------ admin view
 # Handlers: usecases.py, user_management.py, user_admin.py, audit_logs.py.
 
+# The Phase-4 account-lifecycle rows (spec: .kiro/specs/mcp-user-operations/):
+# an account is addressed by its username or its email sign-in alias, and
+# every username the create tool accepts is addressable by the three path
+# tools. The email pattern is no looser than `user_admin.validate_create_request`.
+ACCOUNT_USERNAME_PATH = {'type': 'string', 'pattern': PATH_PARAM_PATTERN,
+                         'description': 'The account username, or its email sign-in alias.'}
+ACCOUNT_USERNAME_NEW = {'type': 'string', 'pattern': PATH_PARAM_PATTERN, 'maxLength': 128,
+                        'description': ("The new account's username (not an email address; "
+                                        "the account's email goes in account_email).")}
+ACCOUNT_EMAIL_PATTERN = r'^[^@\s]+@[^@\s]+\.[^@\s]+$'
+
 ADMIN: Tuple[ToolSpec, ...] = (
     ToolSpec(
         name='portal_admin_whoami', domain='admin', title='Who am I',
@@ -745,6 +766,100 @@ ADMIN: Tuple[ToolSpec, ...] = (
         classification=MUTATING, destructive=True, confirm_target='device_id',
         phase=3, handler_audits_denials=True,
         status_tool='portal_admin_edge_sync_devices_list'),
+    ToolSpec(
+        name='portal_admin_account_create', domain='admin',
+        title='Create a portal account',
+        description=('Creates a Portal account with an account-level role; the User_Pool '
+                     'emails an invitation with a temporary password to account_email.'),
+        resource_type='account',
+        input_schema=schema({
+            'account_username': ACCOUNT_USERNAME_NEW,
+            'account_email': {'type': 'string', 'maxLength': 254,
+                              'pattern': ACCOUNT_EMAIL_PATTERN,
+                              'description': ("The account's email address; the User_Pool "
+                                              'sends the invitation there.')},
+            'role': enum('PortalAdmin', 'UseCaseAdmin', 'DataScientist', 'Operator',
+                         'Viewer', 'DataLabeler',
+                         description='The account-level Portal role.'),
+        }, required=['account_username', 'account_email', 'role']),
+        backend='userAdmin', handler_module='user_admin',
+        handler_function='create_account', method='POST', resource='/admin/users',
+        param_map={'account_username': 'username', 'account_email': 'email'},
+        permissions=('manage_users',), scope='global',
+        classification=MUTATING, phase=4, idempotent=False,
+        handler_audits=True, handler_audits_denials=True,
+        audit_args=('account_username', 'role'),
+        resource_id_path='username', resource_id_arg='account_username',
+        error_detail_key='message',
+        status_tool='portal_admin_accounts_list'),
+    ToolSpec(
+        name='portal_admin_account_disable', domain='admin',
+        title='Disable a portal account',
+        description=('Disables a Portal account: it loses Portal privilege on its next '
+                     'request and is marked disabled on every synced device at the next '
+                     'sync.'),
+        resource_type='account',
+        input_schema=schema({
+            'account_username': ACCOUNT_USERNAME_PATH,
+            'confirm': confirm_arg('Repeat account_username.'),
+        }, required=['account_username']),
+        backend='userAdmin', handler_module='user_admin',
+        handler_function='disable_account', method='POST',
+        resource='/admin/users/{username}/disable',
+        param_map={'account_username': 'username'},
+        permissions=('manage_users',), scope='global',
+        classification=MUTATING, destructive=True, confirm_target='account_username',
+        # handler_audits stays False (pinned): the already-disabled no-op
+        # branch writes no audit entry, so the envelope records every call.
+        phase=4, handler_audits_denials=True,
+        audit_args=('account_username',),
+        resource_id_path='username', resource_id_arg='account_username',
+        error_detail_key='message', self_protect_arg='account_username',
+        status_tool='portal_admin_accounts_list'),
+    ToolSpec(
+        name='portal_admin_account_enable', domain='admin',
+        title='Enable a portal account',
+        description=('Enables a disabled Portal account: it regains Portal privilege on its '
+                     'next request and local login on every synced device at the next sync.'),
+        resource_type='account',
+        input_schema=schema({
+            'account_username': ACCOUNT_USERNAME_PATH,
+            'confirm': confirm_arg('Repeat account_username.'),
+        }, required=['account_username']),
+        backend='userAdmin', handler_module='user_admin',
+        handler_function='enable_account', method='POST',
+        resource='/admin/users/{username}/enable',
+        param_map={'account_username': 'username'},
+        permissions=('manage_users',), scope='global',
+        classification=MUTATING, destructive=True, confirm_target='account_username',
+        # handler_audits stays False (pinned): the already-enabled no-op
+        # branch writes no audit entry, so the envelope records every call.
+        phase=4, handler_audits_denials=True,
+        audit_args=('account_username',),
+        resource_id_path='username', resource_id_arg='account_username',
+        error_detail_key='message',
+        status_tool='portal_admin_accounts_list'),
+    ToolSpec(
+        name='portal_admin_account_delete', domain='admin',
+        title='Delete a portal account',
+        description=('Deletes a Portal account, its Portal registry rows and its edge '
+                     'credential record; every synced device drops it at the next sync.'),
+        resource_type='account',
+        input_schema=schema({
+            'account_username': ACCOUNT_USERNAME_PATH,
+            'confirm': confirm_arg('Repeat account_username.'),
+        }, required=['account_username']),
+        backend='userAdmin', handler_module='user_admin',
+        handler_function='delete_account', method='DELETE',
+        resource='/admin/users/{username}',
+        param_map={'account_username': 'username'},
+        permissions=('manage_users',), scope='global',
+        classification=MUTATING, destructive=True, confirm_target='account_username',
+        phase=4, handler_audits=True, handler_audits_denials=True,
+        audit_args=('account_username',),
+        resource_id_path='username', resource_id_arg='account_username',
+        error_detail_key='message', self_protect_arg='account_username',
+        status_tool='portal_admin_accounts_list'),
 )
 
 # ---------------------------------------------------------- devices view

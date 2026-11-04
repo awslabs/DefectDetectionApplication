@@ -2,9 +2,16 @@
 
 Feature: mcp-servers, Property 2: Catalog well-formedness
 
+**Feature: mcp-user-operations, Property 1: Phase-4 catalog well-formedness**
+
 Spec: .kiro/specs/mcp-servers/ (design.md "Correctness Properties",
 Property 2; §2 `catalog.py` row; Tool-catalogs conventions; tasks.md 5.7).
 Validates: Requirements 1.2, 1.3, 3.1, 3.9, 5.1, 5.2, 5.6, 14.1, 14.2, 14.4, 17.1
+
+Extended by .kiro/specs/mcp-user-operations/ (Property 1, tasks.md 2.7):
+the clauses of the three Phase-4 `ToolSpec` fields and the fixed cases of
+the four account-lifecycle rows. Validates: Requirements 1.1, 1.2, 4.1,
+4.2, 4.3, 4.5, 6.1, 6.2, 6.4, 7.3 of that spec.
 
 The AST clauses (classification, arguments, permissions, audit flags, route
 dispatch) are the honesty suites of tasks 5.6 and 5.8-5.11. Hypothesis
@@ -193,6 +200,17 @@ def problems(spec, catalog=CATALOG) -> list:
     # review-10 N1
     if spec.usecase_not_forwarded is not None and 'usecase_id' in spec.param_map:
         bad('usecase_not_forwarded with a forwarded usecase_id')
+    # mcp-user-operations Property 1: the three Phase-4 fields
+    if spec.self_protect_arg is not None:
+        if spec.read_only:
+            bad('self_protect_arg on a read-only spec')
+        if spec.self_protect_arg not in props:
+            bad(f'self_protect_arg {spec.self_protect_arg!r} is not a property')
+    if spec.resource_id_arg is not None and spec.resource_id_arg not in props:
+        bad(f'resource_id_arg {spec.resource_id_arg!r} is not a property')
+    if spec.error_detail_key is not None and not (
+            isinstance(spec.error_detail_key, str) and spec.error_detail_key):
+        bad('error_detail_key must be a non-empty string')
     return out
 
 
@@ -246,6 +264,13 @@ def _mutations(spec):
     if 'usecase_id' in schema.get('required', ()) and spec.scope == 'usecase':
         req = [r for r in schema['required'] if r != 'usecase_id']
         out.append(('scope', dataclasses.replace(spec, input_schema=dict(schema, required=req))))
+    # mcp-user-operations Property 1
+    out.append(('self_protect_bad', dataclasses.replace(spec, self_protect_arg='no_such_arg')))
+    out.append(('resource_id_arg_bad', dataclasses.replace(spec, resource_id_arg='confirm_x')))
+    out.append(('detail_key_empty', dataclasses.replace(spec, error_detail_key='')))
+    if spec.read_only:
+        named = next(iter(schema.get('properties', {})), 'no_such_arg')
+        out.append(('ro_self_protect', dataclasses.replace(spec, self_protect_arg=named)))
     return out
 
 
@@ -317,3 +342,78 @@ def test_usecase_not_forwarded_fixed_cases():
 def test_status_tool_rule():
     mutating = [s for s in CATALOG if not s.read_only]
     assert mutating and all(BY_NAME[s.status_tool].read_only for s in mutating)
+
+
+# ------------------------- Phase-4 account tools (mcp-user-operations)
+
+ACCOUNT_TOOLS = ('portal_admin_account_create', 'portal_admin_account_disable',
+                 'portal_admin_account_enable', 'portal_admin_account_delete')
+PORTAL_ROLES = ['PortalAdmin', 'UseCaseAdmin', 'DataScientist', 'Operator', 'Viewer',
+                'DataLabeler']
+DESTRUCTIVE_TEXT = 'Touches: account. MUTATING, DESTRUCTIVE — requires confirm=account_username.'
+
+
+def test_account_lifecycle_fixed_cases():
+    """Feature: mcp-user-operations, Property 1: the fixed cases of the four
+    rows (design Data Models, "New `ToolSpec` fields")."""
+    specs = [BY_NAME[name] for name in ACCOUNT_TOOLS]
+    for spec in specs:
+        assert problems(spec) == [], spec.name
+        assert (spec.phase, spec.domain, spec.backend, spec.handler_module) == (
+            4, 'admin', 'userAdmin', 'user_admin'), spec.name
+        assert spec.permissions == ('manage_users',) and spec.scope == 'global'
+        assert spec.resource_type == 'account'
+        assert spec.status_tool == 'portal_admin_accounts_list'
+        assert spec.resource_id_path == 'username'
+        assert spec.resource_id_arg == 'account_username'
+        assert spec.error_detail_key == 'message'
+        assert spec.handler_audits_denials is True
+        assert spec.input_schema['properties']['account_username']['pattern'] == \
+            PATH_PARAM_PATTERN
+        assert (spec.method, spec.resource) in ROUTES
+    create, disable, enable, delete = specs
+    assert create.classification == cat.MUTATING and create.destructive is False
+    assert create.idempotent is False and create.confirm_target is None
+    props = create.input_schema['properties']
+    assert set(props) == {'account_username', 'account_email', 'role'}
+    assert create.input_schema['required'] == ['account_username', 'account_email', 'role']
+    assert props['account_username']['maxLength'] == 128
+    assert props['account_email']['maxLength'] == 254
+    assert props['account_email']['pattern'] == cat.ACCOUNT_EMAIL_PATTERN
+    assert props['role']['enum'] == PORTAL_ROLES
+    assert (create.method, create.resource) == ('POST', '/admin/users')
+    assert render_description(create).endswith('Touches: account. MUTATING.')
+    for spec, method, resource in (
+            (disable, 'POST', '/admin/users/{username}/disable'),
+            (enable, 'POST', '/admin/users/{username}/enable'),
+            (delete, 'DELETE', '/admin/users/{username}')):
+        assert (spec.method, spec.resource) == (method, resource)
+        assert spec.destructive is True and spec.confirm_target == 'account_username'
+        assert set(spec.input_schema['properties']) == {'account_username', 'confirm'}
+        assert spec.input_schema['required'] == ['account_username']
+        assert render_description(spec).endswith(DESTRUCTIVE_TEXT)
+    assert disable.self_protect_arg == delete.self_protect_arg == 'account_username'
+    assert enable.self_protect_arg is None and create.self_protect_arg is None
+    # No other row sets any of the three fields at this revision.
+    assert [s.name for s in CATALOG if s.self_protect_arg] == [
+        'portal_admin_account_disable', 'portal_admin_account_delete']
+    assert {s.name for s in CATALOG if s.resource_id_arg or s.error_detail_key} == \
+        set(ACCOUNT_TOOLS)
+
+
+def test_account_lifecycle_variants_fail():
+    disable = BY_NAME['portal_admin_account_disable']
+    create = BY_NAME['portal_admin_account_create']
+    assert any('self_protect_arg' in p for p in problems(
+        dataclasses.replace(disable, self_protect_arg='no_such_arg')))
+    assert any('resource_id_arg' in p for p in problems(
+        dataclasses.replace(disable, resource_id_arg='confirm_x')))
+    assert any('error_detail_key' in p for p in problems(
+        dataclasses.replace(disable, error_detail_key='')))
+    listing = BY_NAME['portal_admin_accounts_list']
+    assert any('read-only' in p for p in problems(
+        dataclasses.replace(listing, self_protect_arg='limit')))
+    props = dict(create.input_schema['properties'], username={'type': 'string'})
+    variant = dataclasses.replace(create, input_schema=dict(create.input_schema,
+                                                            properties=props))
+    assert any("claim-named property 'username'" in p for p in problems(variant))

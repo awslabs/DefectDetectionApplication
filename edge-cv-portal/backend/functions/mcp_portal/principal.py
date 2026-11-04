@@ -13,13 +13,19 @@ The principal's email comes from a per-container cache over
 `'unknown'` (WARNING) and is not cached. The response also carries the
 account's `custom:role` attribute; this module deliberately reads only
 `email` (D29 option (A)). Reading `custom:role` is option (C), Backlog 12.
+
+`lookup_email` returns an `EmailLookup(email, failed)` tuple, so a lookup
+that failed is told apart from an account without an email attribute (both
+read `'unknown'`). `refresh_email` reads the caller's address from the pool
+on the call, never from the cache, for the self-protection rule of pipeline
+step 5b (spec: .kiro/specs/mcp-user-operations/, design A4).
 """
 import collections
 import logging
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +83,24 @@ class Principal:
         }
 
 
-def lookup_email(sub: str, username: str) -> str:
-    """The account's `email` attribute (cached per `sub`), or 'unknown'."""
-    with _EMAILS_LOCK:
-        if sub in _EMAILS:
-            _EMAILS.move_to_end(sub)
-            return _EMAILS[sub]
+class EmailLookup(NamedTuple):
+    """The result of `lookup_email`. `failed` is True only when
+    `AdminGetUser` raised on this call; `email` is then 'unknown' and the
+    call cached nothing."""
+    email: str      # the account's email attribute, or 'unknown'
+    failed: bool
+
+
+def lookup_email(sub: str, username: str, refresh: bool = False) -> EmailLookup:
+    """The account's `email` attribute (cached per `sub`), or 'unknown'.
+
+    With `refresh` the cache is not read: the User_Pool is asked on this
+    call, and a successful answer rewrites the cache entry."""
+    if not refresh:
+        with _EMAILS_LOCK:
+            if sub in _EMAILS:
+                _EMAILS.move_to_end(sub)
+                return EmailLookup(_EMAILS[sub], False)
     try:
         response = _cognito().admin_get_user(
             UserPoolId=os.environ['COGNITO_USER_POOL_ID'], Username=username)
@@ -90,14 +108,21 @@ def lookup_email(sub: str, username: str) -> str:
                       if a.get('Name') == 'email'), None)
     except Exception as error:  # noqa: BLE001 - attribution degrades, never fails
         logger.warning('Email lookup failed for sub %s: %s', sub, type(error).__name__)
-        return UNKNOWN
+        return EmailLookup(UNKNOWN, True)
     email = email if isinstance(email, str) and email.strip() else UNKNOWN
     with _EMAILS_LOCK:
         _EMAILS[sub] = email
         _EMAILS.move_to_end(sub)
         while len(_EMAILS) > EMAIL_CACHE_SIZE:
             _EMAILS.popitem(last=False)
-    return email
+    return EmailLookup(email, False)
+
+
+def refresh_email(principal: Principal) -> EmailLookup:
+    """The caller's address read from the User_Pool on this call (pipeline
+    step 5b). The one caller of `refresh=True`; it lives here so a test
+    patch of `lookup_email` covers step 1 and step 5b alike."""
+    return lookup_email(principal.sub, principal.username, refresh=True)
 
 
 def clear_email_cache() -> None:
@@ -118,7 +143,7 @@ def principal_from_claims(claims: dict) -> Principal:
     username = claims.get('cognito:username') or claims.get('username') or sub
     email = claims.get('email')
     if not (isinstance(email, str) and email.strip()):
-        email = lookup_email(sub, username)
+        email = lookup_email(sub, username).email
     return Principal(sub=sub, username=username, email=email, claims=claims)
 
 
@@ -131,4 +156,4 @@ def principal_from_access_token(token) -> Principal:
     sub = claims.get('sub') or getattr(token, 'subject', None) or UNKNOWN
     username = claims.get('username') or claims.get('cognito:username') or sub
     return Principal(sub=sub, username=username,
-                     email=lookup_email(sub, username), claims=claims)
+                     email=lookup_email(sub, username).email, claims=claims)

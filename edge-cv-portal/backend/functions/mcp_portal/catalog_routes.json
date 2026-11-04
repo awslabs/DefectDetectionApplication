@@ -16,6 +16,26 @@
   },
   {
     "backend": "userAdmin",
+    "method": "POST",
+    "resource": "/admin/users"
+  },
+  {
+    "backend": "userAdmin",
+    "method": "DELETE",
+    "resource": "/admin/users/{username}"
+  },
+  {
+    "backend": "userAdmin",
+    "method": "POST",
+    "resource": "/admin/users/{username}/disable"
+  },
+  {
+    "backend": "userAdmin",
+    "method": "POST",
+    "resource": "/admin/users/{username}/enable"
+  },
+  {
+    "backend": "userAdmin",
     "method": "PUT",
     "resource": "/admin/users/{username}/role"
   },

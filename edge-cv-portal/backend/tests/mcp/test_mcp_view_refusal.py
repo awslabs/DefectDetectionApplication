@@ -150,6 +150,41 @@ def test_a_deprecated_alias_of_a_tool_of_another_view_is_refused_too(portal, cap
                            sub)
 
 
+# ------------------------------- Phase-4 account tools (mcp-user-operations)
+
+ACCOUNT_TOOLS = [BY_NAME[name] for name in (
+    'portal_admin_account_create', 'portal_admin_account_disable',
+    'portal_admin_account_enable', 'portal_admin_account_delete')]
+
+
+def account_args(spec):
+    """Valid arguments, with the matching `confirm` on the three M! rows."""
+    args = minimal_args(spec)
+    if spec.destructive:
+        args['confirm'] = server.expected_confirm(spec, args)
+    return args
+
+
+@pytest.mark.parametrize('view', [v for v in VIEWS if v != 'admin'])
+@pytest.mark.parametrize('spec', ACCOUNT_TOOLS, ids=lambda s: s.name)
+def test_an_account_tool_is_unknown_on_every_other_view(portal, caplog, spec, view):
+    """Feature: mcp-user-operations, Property 7: the four rows are served on
+    `/mcp/admin` and `/mcp` only (Requirement 1.4)."""
+    sub = f'view-{uuid.uuid4()}'
+    with caplog.at_level(logging.INFO, logger='mcp_portal'):
+        outcome = refusal(view, spec.name, account_args(spec), h.access_token(sub))
+    assert_refused_unknown(portal, caplog, outcome, spec.name, view, sub)
+
+
+@pytest.mark.parametrize('endpoint', ['admin', None], ids=['admin', 'aggregate'])
+def test_the_account_tools_are_accepted_on_admin_and_the_aggregate(portal, endpoint):
+    for spec in ACCOUNT_TOOLS:
+        outcome = refusal(endpoint, spec.name, account_args(spec), h.access_token())
+        assert not isinstance(outcome, MCPError), (spec.name, endpoint, outcome)
+        assert outcome.is_error is False, outcome.structured_content
+    assert [event['mcp']['tool'] for event in portal.events] == [s.name for s in ACCOUNT_TOOLS]
+
+
 # ---------------------------------------------------------- nonexistent name
 
 @pytest.mark.parametrize('endpoint', (None,) + VIEWS, ids=lambda v: v or 'aggregate')
