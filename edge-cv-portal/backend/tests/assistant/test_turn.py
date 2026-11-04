@@ -297,6 +297,113 @@ def test_each_proposal_gets_its_own_confirmation(assistant_env, fake_bedrock):
         'confirmation_requested', 'confirmation_resolved']
 
 
+def team_proposal(*names):
+    return tool_use_events([(f'tu-{i}', 'portal_data_labeling_team_create',
+                             {'usecase_id': USECASE, 'team_name': name})
+                            for i, name in enumerate(names, 1)])
+
+
+def test_a_confirmation_after_the_session_expired_runs_nothing(assistant_env, fake_bedrock):
+    """Requirement 6.8, design Security ("`exp` is checked before every model
+    call and tool call"): the Turn's credential expires while its card is
+    shown; the confirmed change does not run and the Turn fails
+    `not_authenticated`."""
+    client = fake_bedrock(team_proposal('night shift'))
+    claims, cid, tid = make_turn(assistant_env, route='/labeling')
+    assert run_worker(cid, tid)['status'] == 'awaiting_confirmation'
+    card = store.get_turn(cid, tid)['confirmation']
+    store.update_turn(cid, tid, exp=store.now_s() - 1)
+    store.consume_binding(claims['sub'], card['binding_id'], 'confirm')
+    store.update_turn(cid, tid, status='running')
+    assert run_worker(cid, tid, resume={'binding_id': card['binding_id']})['status'] == 'failed'
+    turn = store.get_turn(cid, tid)
+    assert turn['failure']['code'] == 'not_authenticated'
+    assert assistant_env.fake_lambda.calls == [] and len(client.requests) == 1
+    assert 'confirmation_resolved' not in [e['type'] for e in turn['events']]
+
+
+def test_session_expiry_between_queued_tools_runs_no_further_tool(assistant_env, fake_bedrock):
+    """The `exp` check runs before each queued tool, not only before the next
+    model call (Requirement 6.8)."""
+    fake_bedrock(tool_use_events([('tu-1', 'portal_devices_list', {'usecase_id': USECASE}),
+                                  ('tu-2', 'portal_devices_list', {'usecase_id': USECASE})]))
+    claims, cid, tid = make_turn(assistant_env)
+
+    def expires_during_the_call(arn, event):
+        store.update_turn(cid, tid, exp=store.now_s() - 1)
+        return __import__('conftest')._default_answer(arn, event)
+
+    assistant_env.fake_lambda.answer = expires_during_the_call
+    assert run_worker(cid, tid)['status'] == 'failed'
+    assert store.get_turn(cid, tid)['failure']['code'] == 'not_authenticated'
+    assert len(assistant_env.fake_lambda.calls) == 1
+
+
+def test_actions_turned_off_after_the_card_was_shown_run_nothing(assistant_env, fake_bedrock):
+    """The Actions_Switch allows Mutating_Tools at all (glossary; 10.4):
+    turned off while a card is shown, the confirmed change does not run and
+    the model is told `mutating_tools_disabled`."""
+    client = fake_bedrock(team_proposal('night shift'),
+                          text_events('Actions are switched off; use the Labeling page.'))
+    claims, cid, tid = make_turn(assistant_env, route='/labeling')
+    assert run_worker(cid, tid)['status'] == 'awaiting_confirmation'
+    card = store.get_turn(cid, tid)['confirmation']
+    settings.write_configuration({'actions_enabled': False}, {'user_id': 'admin', 'username': 'admin'})
+    store.consume_binding(claims['sub'], card['binding_id'], 'confirm')
+    store.update_turn(cid, tid, status='running')
+    assert run_worker(cid, tid, resume={'binding_id': card['binding_id']})['status'] == 'completed'
+    assert assistant_env.fake_lambda.calls == []
+    result = client.requests[1]['messages'][-1]['content'][0]['toolResult']
+    assert result['toolUseId'] == 'tu-1' and result['status'] == 'error'
+    assert result['content'][0]['json']['category'] == 'mutating_tools_disabled'
+    assert 'tool_start' not in [e['type'] for e in store.get_turn(cid, tid)['events']]
+
+
+def test_actions_switch_is_read_before_every_model_call(assistant_env, fake_bedrock):
+    """Design D8: a switch turned off during a Turn applies at its next model
+    call; the mutating tools of the page are no longer offered."""
+    client = fake_bedrock(tool_use_events([('tu-1', 'portal_devices_list', {'usecase_id': USECASE})]),
+                          text_events('Done.'))
+    claims, cid, tid = make_turn(assistant_env, route='/labeling')
+
+    def switched_off_during_the_call(arn, event):
+        settings.write_configuration({'actions_enabled': False},
+                                     {'user_id': 'admin', 'username': 'admin'})
+        return __import__('conftest')._default_answer(arn, event)
+
+    assistant_env.fake_lambda.answer = switched_off_during_the_call
+    assert run_worker(cid, tid)['status'] == 'completed'
+    offered = [[t['toolSpec']['name'] for t in r['toolConfig']['tools'] if 'toolSpec' in t]
+               for r in client.requests]
+    assert 'portal_data_labeling_team_create' in offered[0]
+    assert 'portal_data_labeling_team_create' not in offered[1]
+
+
+def test_a_repeated_resume_event_acts_once(assistant_env, fake_bedrock):
+    """Requirements 5.5 and 5.8 with Lambda delivering an asynchronous event
+    more than once: deliveries that load the Turn together, and a later one,
+    run the confirmed change once and leave the next card intact."""
+    fake_bedrock(team_proposal('day shift', 'night shift'))
+    claims, cid, tid = make_turn(assistant_env, route='/labeling', prompt='Create two teams')
+    assert run_worker(cid, tid)['status'] == 'awaiting_confirmation'
+    first = store.get_turn(cid, tid)['confirmation']
+    store.consume_binding(claims['sub'], first['binding_id'], 'confirm')
+    store.update_turn(cid, tid, status='running')
+    resume = {'binding_id': first['binding_id']}
+    one, two = turn_module.TurnRunner(cid, tid), turn_module.TurnRunner(cid, tid)
+    assert one.run(resume)['status'] == 'awaiting_confirmation'
+    assert two.run(resume)['status'] == 'awaiting_confirmation'
+    assert run_worker(cid, tid, resume=resume)['status'] == 'awaiting_confirmation'
+    assert len(assistant_env.fake_lambda.calls) == 1
+    turn = store.get_turn(cid, tid)
+    second = turn['confirmation']
+    assert second['binding_id'] != first['binding_id']
+    assert second['args'] == {'usecase_id': USECASE, 'team_name': 'night shift'}
+    assert [e['type'] for e in turn['events']] == [
+        'confirmation_requested', 'confirmation_resolved', 'tool_start', 'tool_end',
+        'confirmation_requested']
+
+
 PROPOSAL = {'usecase_id': USECASE, 'target_thing_group': 'line-1', 'confirm': 'model-supplied',
             'components': [{'component_name': 'fake.component'}]}
 

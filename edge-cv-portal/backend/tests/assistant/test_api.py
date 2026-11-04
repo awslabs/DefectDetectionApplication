@@ -313,17 +313,35 @@ def test_confirmation_route(assistant_env):
     assert status == 409 and body['error']['code'] == 'binding_used'
 
 
+def assert_conversation_shows_the_stopped_turn(claims, cid, tid, last_event):
+    """Requirements 8.2 and 8.5: a Turn the API closes stays in the
+    Conversation (the panel re-reads it when the Turn ends), marked stopped,
+    with the text produced so far."""
+    status, body = call_api(api_event('GET', CONV, claims, params={'cid': cid}))
+    assert status == 200 and body['turn_count'] == 1 and body['live_turn_id'] is None
+    user, assistant = body['messages']
+    assert user['turn_id'] == tid and user['blocks'] == [{'type': 'user', 'text': 'What is this page?'}]
+    [block] = assistant['blocks']
+    assert block['status'] == 'stopped' and block['text'] == 'I will create the team.'
+    assert block['events'][-1]['type'] == last_event
+
+
 def test_expired_confirmation_stops_the_turn(assistant_env):
     alice = claims_for()
     cid = create_conversation(alice)
     status, body = start_turn(alice, cid)
     tid = body['turn_id']
     binding = store.create_binding(sub=alice['sub'], cid=cid, tid=tid, tool='x', args={}, seconds=600)
-    store.update_turn(cid, tid, status='awaiting_confirmation',
+    store.update_turn(cid, tid, status='awaiting_confirmation', text='I will create the team.',
                       confirmation={'binding_id': binding['binding_id'], 'tool': 'x', 'expires_at': 1})
+    stale = store.get_turn(cid, tid)
     status, body = call_api(api_event('GET', TURN, alice, params={'cid': cid, 'tid': tid}))
     assert body['status'] == 'stopped' and body['events'][-1]['type'] == 'confirmation_expired'
     assert store.get_meta(cid)['live_turn_id'] is None
+    assert_conversation_shows_the_stopped_turn(alice, cid, tid, 'confirmation_expired')
+    # a concurrent reap that read the Turn before the close writes nothing more
+    assert api._reap(stale, api.limits_module.limits())['status'] == 'stopped'
+    assert store.get_meta(cid)['turn_count'] == 1 and len(store.list_messages(cid)) == 2
 
 
 def test_stop_while_awaiting_confirmation_closes_the_turn(assistant_env):
@@ -331,11 +349,40 @@ def test_stop_while_awaiting_confirmation_closes_the_turn(assistant_env):
     cid = create_conversation(alice)
     status, body = start_turn(alice, cid)
     tid = body['turn_id']
-    store.update_turn(cid, tid, status='awaiting_confirmation',
+    store.update_turn(cid, tid, status='awaiting_confirmation', text='I will create the team.',
                       confirmation={'binding_id': store.new_id(), 'tool': 'x',
                                     'expires_at': store.now_s() + 600})
     status, body = call_api(api_event('POST', TURN + '/stop', alice, params={'cid': cid, 'tid': tid}))
     assert status == 202 and body['status'] == 'stopped'
     assert store.get_meta(cid)['live_turn_id'] is None
+    assert_conversation_shows_the_stopped_turn(alice, cid, tid, 'stopped')
     status, body = call_api(api_event('DELETE', CONV, alice, params={'cid': cid}))
     assert status == 204
+
+
+def test_a_stop_that_closes_the_turn_first_wins_over_the_decision(assistant_env):
+    """A Stop that closes the awaiting Turn while a decision is being recorded
+    wins: the decision is refused, no worker resumes, the Turn counts once."""
+    alice = claims_for()
+    cid = create_conversation(alice)
+    status, body = start_turn(alice, cid)
+    tid = body['turn_id']
+    binding = store.create_binding(sub=alice['sub'], cid=cid, tid=tid, tool='x', args={}, seconds=600)
+    store.update_turn(cid, tid, status='awaiting_confirmation',
+                      confirmation={'binding_id': binding['binding_id'], 'tool': 'x',
+                                    'expires_at': binding['expires_at']})
+    consume = store.consume_binding
+
+    def stopped_meanwhile(*args, **kwargs):
+        consumed = consume(*args, **kwargs)
+        call_api(api_event('POST', TURN + '/stop', alice, params={'cid': cid, 'tid': tid}))
+        return consumed
+
+    assistant_env.monkeypatch.setattr(store, 'consume_binding', stopped_meanwhile)
+    status, body = call_api(api_event('POST', TURN + '/confirmation', alice,
+                                      params={'cid': cid, 'tid': tid},
+                                      body={'binding_id': binding['binding_id'], 'decision': 'confirm'}))
+    assert status == 409 and body['error']['code'] == 'not_awaiting_confirmation'
+    assert store.get_turn(cid, tid)['status'] == 'stopped'
+    assert [i for i in assistant_env.invoked if 'resume' in i] == []
+    assert store.get_meta(cid)['turn_count'] == 1

@@ -41,7 +41,9 @@ CACHE_READ_WEIGHT = 0.1
 
 
 class TurnEnded(Exception):
-    """Raised by `_finish` to unwind the loop after the Turn's final write."""
+    """Raised to unwind the loop: by `_finish` after the Turn's final write, on
+    a suspension for a confirmation, and by `_resume` for a resume event that
+    an earlier delivery already acted on (nothing is written then)."""
 
 
 class TurnRunner:
@@ -119,20 +121,30 @@ class TurnRunner:
     def _resume(self, resume: Dict[str, Any]) -> None:
         binding_id = str(resume.get('binding_id') or '')
         binding = store.get_binding(self.sub, binding_id)
-        confirmation = self.turn.get('confirmation') or {}
-        if (binding is None or not binding.get('used') or binding.get('tid') != self.tid
-                or confirmation.get('binding_id') != binding_id):
+        if binding is None or not binding.get('used') or binding.get('tid') != self.tid:
             self._fail('binding_invalid', 'the confirmation does not belong to this turn')
         expected = store.binding_hash(binding['tool'], binding['args'], self.sub, self.cid, self.tid)
         if binding.get('hash') != expected:
             self._fail('binding_invalid', 'the confirmation does not match the proposal')
+        # Lambda may deliver an asynchronous event more than once: the first
+        # delivery claims the binding before anything is written or invoked.
+        if not store.claim_binding(self.sub, binding_id):
+            logger.warning('turn %s: repeated resume event ignored', self.tid)
+            raise TurnEnded()
+        confirmation = self.turn.get('confirmation') or {}
+        if confirmation.get('binding_id') != binding_id:
+            self._fail('binding_invalid', 'the confirmation does not belong to this turn')
         if not self.pending_tool_uses or self.pending_tool_uses[0].get('name') != binding['tool']:
             self._fail('binding_invalid', 'no proposal is pending for this confirmation')
+        self._check_session()
         use = self.pending_tool_uses.pop(0)
         decision = binding.get('decision')
         self._event('confirmation_resolved', decision=decision, tool=binding['tool'])
-        if decision == 'confirm':
-            spec = tools.BY_NAME.get(binding['tool'])
+        spec = tools.BY_NAME.get(binding['tool'])
+        if decision == 'confirm' and not tools.mutating_allowed(spec, self.actions):
+            # the Actions_Switch was turned off while the card was shown
+            block = self._refusal(use['toolUseId'], spec)
+        elif decision == 'confirm':
             args = dict(binding['args'])
             confirm_value = pipeline.expected_confirm(spec, args)
             if confirm_value is not None:
@@ -163,12 +175,21 @@ class TurnRunner:
 
     # ------------------------------------------------------------- guards
 
-    def _guard(self) -> None:
+    def _check_session(self) -> None:
+        """Before every model call and every tool call (design §8.2 and
+        Security Considerations; Requirements 6.8, 12.3): the runtime toggle
+        and the Turn's `exp`, then the Actions_Switch from the same uncached
+        read (design D8), so a switch turned off mid-Turn applies at its next
+        step."""
         config = settings.read_configuration(0)
         if not config.get('enabled', True):
             self._fail('assistant_disabled', 'the assistant was disabled by an administrator')
         if store.now_s() >= int(self.turn.get('exp') or 0):
             self._fail('not_authenticated', 'the session expired; sign in again')
+        self.actions = settings.actions_enabled(config)
+
+    def _guard(self) -> None:
+        self._check_session()
         if self.stop_requested:
             self._finish('stopped')
         elapsed = time.monotonic() - self.started
@@ -279,6 +300,7 @@ class TurnRunner:
     def _process_tool_uses(self) -> None:
         while self.pending_tool_uses:
             use = self.pending_tool_uses[0]
+            self._check_session()
             self._check_stop()
             block = self._dispatch_tool_use(use)
             self.pending_results.append(block)
@@ -310,13 +332,19 @@ class TurnRunner:
             return self._run_catalog_tool(use, spec, args, mutating=False)
         args.pop('confirm', None)  # never the model's (design D7, Requirement 5.6)
         if not tools.mutating_allowed(spec, self.actions):
-            category = 'mutating_tools_disabled' if not self.actions else 'not_available'
-            return tools.tool_result_block(tool_use_id, {
-                'category': category,
-                'message': f'{spec.name} changes Portal state and is not available through the '
-                           'assistant on this deployment; offer the Portal page instead'}, True)
+            return self._refusal(tool_use_id, spec)
         self._suspend_for_confirmation(use, spec, args)
         raise AssertionError('unreachable')  # pragma: no cover
+
+    def _refusal(self, tool_use_id: str, spec) -> Dict[str, Any]:
+        """The answer to a mutating tool the switches do not allow: nothing is
+        invoked; `mutating_tools_disabled` while the Actions_Switch is off,
+        `not_available` for a destructive tool outside the allow-list."""
+        category = 'mutating_tools_disabled' if not self.actions else 'not_available'
+        return tools.tool_result_block(tool_use_id, {
+            'category': category,
+            'message': f'{spec.name} changes Portal state and is not available through the '
+                       'assistant on this deployment; offer the Portal page instead'}, True)
 
     def _run_local_tool(self, use: Dict[str, Any], name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         self._event('tool_start', tool=name, title=name.replace('_', ' '),
@@ -470,30 +498,12 @@ class TurnRunner:
         raise TurnEnded()
 
     def _store_messages(self, status: str, failure: Optional[Dict[str, str]]) -> None:
-        retention = int(self.config.get('retention_days') or 30)
-        turn_count = int(self.meta.get('turn_count') or 0)
-        prompt = self.turn.get('prompt') or ''
-        answer = self.text.strip()
-        if not answer:
-            answer = ('[The assistant did not answer: ' + (failure['code'] if failure else status)
-                      + ']')
-        content: List[Dict[str, Any]] = [{'text': answer}]
-        if self.tool_activity:
-            content.append({'text': '(Tools used in this turn: ' + '; '.join(self.tool_activity[-12:])
-                            + ')'})
         events = list((store.get_turn(self.cid, self.tid) or {}).get('events') or [])
-        messages = [
-            {'role': 'user', 'content': [{'text': prompt}]},
-            {'role': 'assistant', 'content': content,
-             'display': {'text': self.text, 'events': events, 'status': status,
-                         'failure': failure, 'turn_id': self.tid}},
-        ]
-        store.append_messages(self.cid, messages, first_seq=turn_count * 2, turn_id=self.tid,
-                              retention_days=retention)
-        store.touch_conversation(
-            self.sub, self.cid, retention_days=retention,
-            title=(prompt.strip()[:80] if turn_count == 0 and not self.meta.get('title') else None),
-            turn_delta=1, size_delta=store.size_of(messages), live_turn_id=None)
+        store.write_turn_messages(
+            sub=self.sub, cid=self.cid, tid=self.tid, prompt=self.turn.get('prompt') or '',
+            text=self.text, status=status, failure=failure, events=events,
+            activity=self.tool_activity, meta=self.meta,
+            retention_days=int(self.config.get('retention_days') or 30))
 
 
 # ------------------------------------------------------------------ helpers
