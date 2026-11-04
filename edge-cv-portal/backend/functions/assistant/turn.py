@@ -140,6 +140,11 @@ class TurnRunner:
         use = self.pending_tool_uses.pop(0)
         decision = binding.get('decision')
         self._event('confirmation_resolved', decision=decision, tool=binding['tool'])
+        # A Stop pressed after the decision was accepted: this write reads
+        # `stop_requested` back, the last look before the change starts, so a
+        # stopped Turn invokes nothing (Requirement 8.2, design §8.4).
+        self._persist()
+        self._check_stop()
         spec = tools.BY_NAME.get(binding['tool'])
         if decision == 'confirm' and not tools.mutating_allowed(spec, self.actions):
             # the Actions_Switch was turned off while the card was shown

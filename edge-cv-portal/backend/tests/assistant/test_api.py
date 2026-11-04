@@ -6,9 +6,9 @@ import json
 import pytest
 from boto3.dynamodb.conditions import Attr
 
-from assistant import api, settings, store
+from assistant import api, settings, store, worker
 
-from conftest import api_event, call_api, claims_for
+from conftest import api_event, call_api, claims_for, tool_use_events
 
 CONVS = '/assistant/conversations'
 CONV = '/assistant/conversations/{cid}'
@@ -386,3 +386,45 @@ def test_a_stop_that_closes_the_turn_first_wins_over_the_decision(assistant_env)
     assert store.get_turn(cid, tid)['status'] == 'stopped'
     assert [i for i in assistant_env.invoked if 'resume' in i] == []
     assert store.get_meta(cid)['turn_count'] == 1
+
+
+@pytest.mark.parametrize('after_load', [False, True], ids=['stop_before_load', 'stop_after_load'])
+def test_a_stop_after_the_decision_stops_the_confirmed_change(assistant_env, fake_bedrock, after_load):
+    """Requirement 8.2, design §8.4: a Stop pressed after Confirm, before the
+    resuming worker runs the change, invokes nothing; the Turn ends stopped
+    and stays in the Conversation. The Stop lands before the worker loads
+    the Turn, or after it did (the worker reads `stop_requested` again)."""
+    client = fake_bedrock(tool_use_events(
+        [('tu-1', 'portal_data_labeling_team_create', {'usecase_id': 'uc-1', 'team_name': 'night shift'})],
+        text='I will create the team.'))
+    alice = claims_for()
+    cid = create_conversation(alice)
+    status, body = start_turn(alice, cid, route='/labeling')
+    tid = body['turn_id']
+    assert worker.handler(assistant_env.invoked[-1], None)['status'] == 'awaiting_confirmation'
+    card = store.get_turn(cid, tid)['confirmation']
+    status, body = call_api(api_event('POST', TURN + '/confirmation', alice,
+                                      params={'cid': cid, 'tid': tid},
+                                      body={'binding_id': card['binding_id'], 'decision': 'confirm'}))
+    assert status == 202, body
+
+    def stop():
+        status, body = call_api(api_event('POST', TURN + '/stop', alice, params={'cid': cid, 'tid': tid}))
+        assert status == 202 and body['status'] == 'running'
+
+    if after_load:  # the worker already loaded the Turn and claimed the binding
+        claim = store.claim_binding
+
+        def stopped_meanwhile(*args, **kwargs):
+            claimed = claim(*args, **kwargs)
+            stop()
+            return claimed
+
+        assistant_env.monkeypatch.setattr(store, 'claim_binding', stopped_meanwhile)
+    else:
+        stop()
+    assert worker.handler(assistant_env.invoked[-1], None)['status'] == 'stopped'
+    assert assistant_env.fake_lambda.calls == [] and len(client.requests) == 1
+    assert [e['type'] for e in store.get_turn(cid, tid)['events']] == [
+        'confirmation_requested', 'confirmation_resolved', 'stopped']
+    assert_conversation_shows_the_stopped_turn(alice, cid, tid, 'stopped')
