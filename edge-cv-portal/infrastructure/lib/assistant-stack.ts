@@ -42,7 +42,7 @@ export const ASSISTANT_API_LOG_GROUP_NAME = '/dda-portal/assistant-api';
 export const ASSISTANT_WORKER_LOG_GROUP_NAME = '/dda-portal/assistant-worker';
 export const ASSISTANT_METRIC_NAMESPACE = 'DDA/Assistant';
 /** assistant.__version__ */
-export const ASSISTANT_VERSION = '1.0.0';
+export const ASSISTANT_VERSION = '1.1.0';
 export const GUIDE_SOURCE_DIR = path.join(__dirname, '../../../docs/user-guide');
 /** The user guide files the guide layer ships: chapters and the index only. */
 export const GUIDE_FILE_PATTERN = /^(README|[0-9]{2}-[a-z0-9-]+)\.md$/;

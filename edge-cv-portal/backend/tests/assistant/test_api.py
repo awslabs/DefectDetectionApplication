@@ -34,7 +34,8 @@ def start_turn(claims, cid, prompt='What is this page?', route='/devices'):
 def test_state_for_a_regular_user(assistant_env):
     status, body = call_api(api_event('GET', '/assistant/state', claims_for()))
     assert status == 200
-    assert body == {'enabled': True, 'actions_enabled': False, 'version': api.__version__}
+    # Phase 2: actions are delivered and the Actions_Switch defaults to on (Requirement 10.4)
+    assert body == {'enabled': True, 'actions_enabled': True, 'version': api.__version__}
 
 
 def test_state_when_disabled_and_for_labelers(assistant_env):
@@ -84,20 +85,35 @@ def test_settings_require_portal_admin_and_are_audited(assistant_env):
                                       lambda *_a, **_k: True)
     admin = claims_for(role='PortalAdmin')
     status, body = call_api(api_event('GET', '/assistant/settings', admin))
-    assert status == 200 and body['actions_delivered'] is False
+    assert status == 200 and body['actions_delivered'] is True
+    assert body['destructive_allowlist'] == sorted(api.DESTRUCTIVE_ALLOWLIST)
     assert body['model']['model_id'] and body['limits']['turns_per_hour'] == 60
     status, body = call_api(api_event('PUT', '/assistant/settings', admin,
                                       body={'retention_days': 14, 'guardrail_id': 'abc123',
                                             'guardrail_version': '2'}))
     assert status == 200 and body['retention_days'] == 14 and body['guardrail_version'] == '2'
+    # the Actions_Switch (Phase 2): off hides every mutating tool from the model
+    status, body = call_api(api_event('PUT', '/assistant/settings', admin,
+                                      body={'actions_enabled': False}))
+    assert status == 200 and body['actions_enabled'] is False
+    status, state = call_api(api_event('GET', '/assistant/state', claims_for()))
+    assert state['actions_enabled'] is False
+    status, body = call_api(api_event('PUT', '/assistant/settings', admin, body={'actions_enabled': True}))
+    assert status == 200 and body['actions_enabled'] is True
+    # while actions are undelivered the switch is refused (the Phase 1 posture)
+    assistant_env.monkeypatch.setattr(api, 'ACTIONS_DELIVERED', False)
     status, body = call_api(api_event('PUT', '/assistant/settings', admin,
                                       body={'actions_enabled': True}))
     assert status == 400 and body['error']['code'] == 'actions_not_delivered'
+    assistant_env.monkeypatch.setattr(api, 'ACTIONS_DELIVERED', True)
     status, body = call_api(api_event('PUT', '/assistant/settings', admin, body={'retention_days': 0}))
     assert status == 400 and body['error']['details']['field'] == 'retention_days'
     audited = assistant_env.shared.dynamodb.Table(assistant_env.shared.AUDIT_LOG_TABLE).scan(
         FilterExpression=Attr('user_id').eq(admin['sub']))['Items']
-    assert sorted(a['details']['setting'] for a in audited) == ['guardrail_id', 'guardrail_version',
+    # one entry per changed field: the three fields of the first PUT plus the
+    # two Actions_Switch writes (off, then on)
+    assert sorted(a['details']['setting'] for a in audited) == ['actions_enabled', 'actions_enabled',
+                                                                'guardrail_id', 'guardrail_version',
                                                                 'retention_days']
 
 

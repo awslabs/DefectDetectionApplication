@@ -2299,10 +2299,16 @@ selected use case, and looks things up for them. Every look-up runs through
 the same tool catalog and pipeline as the [MCP server](#mcp-server-ai-assistants),
 in-process, as the signed-in user: the same role and permission checks, the
 same audit entries, marked with the channel `assistant`. The model is the one
-configured under Settings → Bedrock Configuration. This release delivers
-guidance and read-only tools; state-changing tools ("actions") are a later
-phase and are off in the code (`ACTIONS_DELIVERED = False` in
-`backend/functions/assistant/__init__.py`), whatever the settings say.
+configured under Settings → Bedrock Configuration. From assistant version
+1.1.0 it also makes changes ("actions"): with Settings → Assistant → Actions
+on (the default) it may propose the catalog's non-destructive
+state-changing tools, and each proposal runs only after the user confirms
+its card in the panel, once, while the card is valid (ten minutes by
+default, the `binding_seconds` limit). It never proposes a
+destructive tool (deletions, cancellations, stops, removals, deployments and
+the like): the list of destructive tools it may propose,
+`DESTRUCTIVE_ALLOWLIST` in `backend/functions/assistant/__init__.py`, is
+empty, and changing it is a code change and a deploy, not a setting.
 
 The user-facing description is the user guide's
 [25. The assistant](../docs/user-guide/25-assistant.md).
@@ -2351,7 +2357,7 @@ Run `./deploy-frontend.sh` again afterwards so `config.json` loses
 | Setting | Default | Effect |
 |---------|---------|--------|
 | Assistant | Enabled | Off refuses new turns, stops turns in progress at their next step, makes no Bedrock call, and hides the panel in every open browser within 60 seconds (the frontend re-reads the state every 30 seconds). Back on within the same time, with every conversation intact. |
-| Actions | Enabled (shown only once actions are delivered) | Whether the assistant may propose state-changing tools, each behind the user's confirmation card. Not shown in this release. |
+| Actions | Enabled | Whether the assistant may propose state-changing tools, each behind the user's confirmation card. Off: no state-changing tool is offered to the model, and the assistant looks things up and points users to the page for a change. A change applies from the next turn, without a deploy; a card already shown can still be confirmed until it expires. The tab lists the destructive tools the assistant may propose under the switch (none in this release). |
 | Conversation retention (days) | 30 | Inactive conversations are deleted after this many days (1 to 365, DynamoDB TTL). A change applies to a conversation at its next activity. |
 | Bedrock guardrail id / version | none | When set, `guardrailConfig` is passed on every model call. |
 | Model | from Bedrock Configuration | Read-only here; shows whether the model accepted tool definitions on its first call. A model that rejects them leaves the assistant in guidance-only mode. |
@@ -2372,7 +2378,10 @@ settings table under `assistant_configuration`.
 Limits (the defaults): 2 concurrent turns and 60 turns per hour per user,
 1,500,000 model tokens per user per day (cache-read tokens count at one tenth, as Bedrock bills them); per turn 10 model calls, 10 tool
 calls (24 pipeline calls, `journey_status` fans out to 8), 6,000 output
-tokens, 240 seconds; per conversation 60 turns or 400 KB.
+tokens, 240 seconds (the time a turn waits for a confirmation counts: a
+change confirmed after that still runs, then the turn ends with the limit
+sentence); per conversation 60 turns or 400 KB; a confirmation card is
+valid for 600 seconds (`binding_seconds`).
 
 ### Audit and logs
 
@@ -2381,7 +2390,9 @@ tokens, 240 seconds; per conversation 60 turns or 400 KB.
   `mcp_server` = `dda-portal-assistant@<version>`, `mcp_client` =
   `dda-portal-frontend/<frontend build>` and `mcp_request_id` =
   `<turn id>/<n>`. Denials are `unauthorized_access` entries on the same
-  channel. Prompts, answers, arguments and results are never audited or
+  channel. A confirmed change is audited like the same call through the MCP
+  server; a declined or expired confirmation runs nothing and writes no
+  entry. Prompts, answers, arguments and results are never audited or
   logged; the assistant's logs carry identifiers, categories, sizes,
   durations and token counts.
 - Log groups: `/dda-portal/assistant-api` and `/dda-portal/assistant-worker`

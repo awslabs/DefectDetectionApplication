@@ -156,7 +156,15 @@ def test_guide_and_find_tools_local_tools(assistant_env, fake_bedrock):
 
 # ----------------------------------------------------------- mutating
 
-def test_mutating_tool_is_refused_while_actions_are_undelivered(assistant_env, fake_bedrock):
+@pytest.fixture
+def actions_undelivered(monkeypatch):
+    """The Phase 1 posture, for the tests that pin it."""
+    monkeypatch.setattr(tools, 'ACTIONS_DELIVERED', False)
+    monkeypatch.setattr(settings, 'ACTIONS_DELIVERED', False)
+
+
+def test_mutating_tool_is_refused_while_actions_are_undelivered(assistant_env, fake_bedrock,
+                                                                actions_undelivered):
     client = fake_bedrock(
         tool_use_events([('tu-1', 'portal_devices_deployment_create',
                           {'usecase_id': USECASE, 'target_thing_group': 'tg', 'confirm': 'tg',
@@ -175,10 +183,118 @@ def test_mutating_tool_is_refused_while_actions_are_undelivered(assistant_env, f
 
 @pytest.fixture
 def actions_delivered(assistant_env, monkeypatch):
+    """Actions on with a destructive tool allow-listed, whatever the signed-off
+    list holds, so the confirmation path is exercised on a destructive spec."""
     monkeypatch.setattr(tools, 'ACTIONS_DELIVERED', True)
     monkeypatch.setattr(settings, 'ACTIONS_DELIVERED', True)
     monkeypatch.setattr(tools, 'DESTRUCTIVE_ALLOWLIST', ('portal_devices_deployment_create',))
     return True
+
+
+def test_actions_switch_off_refuses_mutating_tools(assistant_env, fake_bedrock):
+    """Phase 2 with the Actions_Switch off (Requirement 10.4): the proposal is
+    refused as `mutating_tools_disabled`, nothing runs, no binding is written."""
+    settings.write_configuration({'actions_enabled': False}, {'user_id': 'admin', 'username': 'admin'})
+    client = fake_bedrock(
+        tool_use_events([('tu-1', 'portal_data_labeling_team_create',
+                          {'usecase_id': USECASE, 'team_name': 'night shift'})]),
+        text_events('Actions are switched off; use the Labeling page.'))
+    claims, cid, tid = make_turn(assistant_env, route='/labeling')
+    run_worker(cid, tid)
+    turn = store.get_turn(cid, tid)
+    assert turn['status'] == 'completed' and turn['confirmation'] is None
+    result = client.requests[1]['messages'][-1]['content'][0]['toolResult']
+    assert result['content'][0]['json']['category'] == 'mutating_tools_disabled'
+    names = [t['toolSpec']['name'] for t in client.requests[0]['toolConfig']['tools'] if 'toolSpec' in t]
+    assert 'portal_data_labeling_team_create' not in names     # not even offered
+    assert assistant_env.fake_lambda.calls == []
+    assert not [i for i in assistant_env.table.scan()['Items'] if i['sk'].startswith('BIND#')]
+
+
+def test_destructive_tool_outside_the_allowlist_is_refused(assistant_env, fake_bedrock, monkeypatch):
+    """Requirement 15.2: a destructive tool outside the allow-list is not
+    offered and, if the model names it anyway, is answered `not_available`
+    without a confirmation card."""
+    monkeypatch.setattr(tools, 'DESTRUCTIVE_ALLOWLIST', ())
+    client = fake_bedrock(
+        tool_use_events([('tu-1', 'portal_devices_delete', {'usecase_id': USECASE, 'device_id': 'd-1',
+                                                             'confirm': 'd-1'})]),
+        text_events('Deleting devices is done on the Devices page.'))
+    claims, cid, tid = make_turn(assistant_env, route='/devices')
+    run_worker(cid, tid)
+    turn = store.get_turn(cid, tid)
+    assert turn['status'] == 'completed' and turn['confirmation'] is None
+    names = [t['toolSpec']['name'] for t in client.requests[0]['toolConfig']['tools'] if 'toolSpec' in t]
+    assert 'portal_devices_flags_update' in names and 'portal_devices_delete' not in names
+    result = client.requests[1]['messages'][-1]['content'][0]['toolResult']
+    assert result['status'] == 'error'
+    assert result['content'][0]['json']['category'] == 'not_available'
+    assert assistant_env.fake_lambda.calls == []
+    assert not [i for i in assistant_env.table.scan()['Items'] if i['sk'].startswith('BIND#')]
+
+
+def test_non_destructive_proposal_runs_after_confirmation(assistant_env, fake_bedrock):
+    """The Phase 2 default path with no allow-list needed: a non-destructive
+    mutating tool of the page's domain is proposed, confirmed, run with the
+    model's `confirm` stripped, and followed by the status tool hint."""
+    client = fake_bedrock(
+        tool_use_events([('tu-1', 'portal_data_labeling_team_create',
+                          {'usecase_id': USECASE, 'team_name': 'night shift', 'confirm': 'x'})],
+                        text='I will create the team.'),
+        text_events('Created the team "night shift".'))
+    claims, cid, tid = make_turn(assistant_env, route='/labeling', prompt='Create a team night shift')
+    assert run_worker(cid, tid)['status'] == 'awaiting_confirmation'
+    card = store.get_turn(cid, tid)['confirmation']
+    assert card['tool'] == 'portal_data_labeling_team_create' and card['destructive'] is False
+    assert card['args'] == {'usecase_id': USECASE, 'team_name': 'night shift'}
+    store.consume_binding(claims['sub'], card['binding_id'], 'confirm')
+    store.update_turn(cid, tid, status='running')
+    assert run_worker(cid, tid, resume={'binding_id': card['binding_id']})['status'] == 'completed'
+    [(arn, event)] = assistant_env.fake_lambda.calls
+    body = json.loads(event['body'])
+    assert body == {'usecase_id': USECASE, 'team_name': 'night shift'}
+    payload = client.requests[1]['messages'][-1]['content'][0]['toolResult']['content'][0]['json']
+    assert payload['status_tool'] == 'portal_data_labeling_teams_list'
+
+
+def test_each_proposal_gets_its_own_confirmation(assistant_env, fake_bedrock):
+    """Requirement 5.8: two proposals in one model response suspend the Turn
+    twice; confirming the first runs it alone, declining the second runs
+    nothing more, and the next model call sees both results in order."""
+    client = fake_bedrock(
+        tool_use_events([('tu-1', 'portal_data_labeling_team_create',
+                          {'usecase_id': USECASE, 'team_name': 'day shift'}),
+                         ('tu-2', 'portal_data_labeling_team_create',
+                          {'usecase_id': USECASE, 'team_name': 'night shift'})]),
+        text_events('Created "day shift"; "night shift" was declined.'))
+    claims, cid, tid = make_turn(assistant_env, route='/labeling', prompt='Create two teams')
+    assert run_worker(cid, tid)['status'] == 'awaiting_confirmation'
+    first = store.get_turn(cid, tid)['confirmation']
+    assert first['args'] == {'usecase_id': USECASE, 'team_name': 'day shift'}
+    store.consume_binding(claims['sub'], first['binding_id'], 'confirm')
+    store.update_turn(cid, tid, status='running')
+    assert run_worker(cid, tid, resume={'binding_id': first['binding_id']})['status'] == \
+        'awaiting_confirmation'
+    second = store.get_turn(cid, tid)['confirmation']
+    assert second['binding_id'] != first['binding_id']
+    assert second['args'] == {'usecase_id': USECASE, 'team_name': 'night shift'}
+    assert len(assistant_env.fake_lambda.calls) == 1        # one confirmation, one invocation
+    with pytest.raises(store.BindingUnusable):               # the first binding is spent
+        store.consume_binding(claims['sub'], first['binding_id'], 'confirm')
+    store.consume_binding(claims['sub'], second['binding_id'], 'reject')
+    store.update_turn(cid, tid, status='running')
+    assert run_worker(cid, tid, resume={'binding_id': second['binding_id']})['status'] == 'completed'
+    [(arn, event)] = assistant_env.fake_lambda.calls
+    assert json.loads(event['body']) == {'usecase_id': USECASE, 'team_name': 'day shift'}
+    results = client.requests[1]['messages'][-1]['content']
+    assert [r['toolResult']['toolUseId'] for r in results] == ['tu-1', 'tu-2']
+    assert results[0]['toolResult']['status'] == 'success'
+    assert results[1]['toolResult']['content'][0]['json']['declined'] is True
+    turn = store.get_turn(cid, tid)
+    assert turn['confirmations'] == 2 and turn['confirmation'] is None
+    assert [e['type'] for e in turn['events']] == [
+        'confirmation_requested', 'confirmation_resolved', 'tool_start', 'tool_end',
+        'confirmation_requested', 'confirmation_resolved']
 
 
 PROPOSAL = {'usecase_id': USECASE, 'target_thing_group': 'line-1', 'confirm': 'model-supplied',

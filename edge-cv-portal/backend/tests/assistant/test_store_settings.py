@@ -147,7 +147,8 @@ def test_property_live_counter_stays_within_bounds(assistant_env, ops):
 def test_settings_defaults_write_and_audit(assistant_env):
     config = settings.read_configuration(0)
     assert config['enabled'] is True and config['retention_days'] == 30
-    assert settings.actions_enabled(config) is False  # Phase 1: undelivered
+    assert settings.actions_enabled(config) is True   # Phase 2: delivered, switch default on
+    assert settings.actions_enabled({**config, 'actions_enabled': False}) is False
     user = {'user_id': 'admin-1', 'username': 'admin', 'email': 'a@example.com', 'role': 'PortalAdmin'}
     updated = settings.write_configuration({'enabled': False, 'retention_days': 7}, user)
     assert updated['enabled'] is False and updated['retention_days'] == 7

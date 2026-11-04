@@ -193,7 +193,7 @@ def call_tool(spec, args: dict, principal, ctx: McpContext, *,
 
 | Module | Responsibility |
 |---|---|
-| `__init__.py` | `__version__ = '1.0.0'`, `SERVER_NAME = 'dda-portal-assistant'`, `ACTIONS_DELIVERED = False` (Phase 1), `DESTRUCTIVE_ALLOWLIST: tuple = ()` (Phase 2 fills it), `LOCAL_TOOL_NAMES` |
+| `__init__.py` | `__version__` (`'1.0.0'` in Phase 1, `'1.1.0'` in Phase 2), `SERVER_NAME = 'dda-portal-assistant'`, `ACTIONS_DELIVERED` (`False` in Phase 1, `True` in Phase 2), `DESTRUCTIVE_ALLOWLIST: tuple = ()` (the Phase 2 sign-off of 2026-11-04 keeps it empty), `LOCAL_TOOL_NAMES` |
 | `api.py` | Lambda handler of the REST routes (§6): routing on `resource` + `httpMethod`, `shared_utils.get_user_from_event`, request validation (`schemas.py`), ownership checks, quota reservation, worker invocation, settings read/write with the `SYSTEM_ADMIN` gate and audit entries |
 | `worker.py` | Lambda handler: `turn.run(turn_id, resume)` with the Lambda context's remaining time |
 | `turn.py` | The agent loop (§8): loads the Conversation window, builds the request, streams the model, runs tools, suspends/resumes on confirmations, persists progress and the final messages |
@@ -246,7 +246,7 @@ Every method except `OPTIONS` carries the stack's own `CognitoUserPoolsAuthorize
 | Method and path | Who | Request | Response |
 |---|---|---|---|
 | `GET /assistant/state` | any signed-in user | — | `200 {enabled, actions_enabled, reason?: 'disabled_by_admin'\|'role_excluded', version}`; `enabled` is false for a DataLabeler-only principal (reason `role_excluded`) |
-| `GET /assistant/settings` | `SYSTEM_ADMIN` | — | `200 {enabled, actions_enabled, actions_delivered, retention_days, guardrail_id, guardrail_version, model: {model_id, region, tool_use_supported: true\|false\|null, checked_at}, limits, updated_at, updated_by}` |
+| `GET /assistant/settings` | `SYSTEM_ADMIN` | — | `200 {enabled, actions_enabled, actions_delivered, destructive_allowlist (sorted names), retention_days, guardrail_id, guardrail_version, model: {model_id, region, tool_use_supported: true\|false\|null, checked_at}, limits, updated_at, updated_by}` |
 | `PUT /assistant/settings` | `SYSTEM_ADMIN` | `{enabled?, actions_enabled?, retention_days? (1–365), guardrail_id? (string\|null), guardrail_version? (string\|null)}` | `200` the record; one `assistant_settings_changed` audit entry per changed field (`details: {setting, previous, new}`); `actions_enabled` is rejected with `400 actions_not_delivered` while `ACTIONS_DELIVERED` is false |
 | `GET /assistant/conversations?limit=` | owner | `limit` 1–50 (default 20) | `200 {items: [{conversation_id, title, created_at, updated_at, turn_count, live_turn_id}]}` newest first |
 | `POST /assistant/conversations` | owner | `{title?}` | `201 {conversation_id}` |
@@ -397,7 +397,7 @@ Route-auth inventory: `assistant-stack.ts` joins `API_STACK_INVENTORY` and `buil
 | `ActivityTrace.tsx` | One compact row per `tool_start`/`tool_end`: title, identifier-like arguments, outcome category, duration |
 | `ConversationList.tsx` | Recent Conversations with reopen and delete (delete confirms through `ConfirmationModal`) |
 | `suggestedPrompts.ts` | ≤ 4 prompts per chapter, chosen by the current route's chapter (the same `ROUTE_CHAPTERS` map, duplicated in TypeScript and pinned by a test fixture shared with the backend: `assistant/route-chapters.json` committed once and read by both test suites) |
-| `AssistantSettings.tsx` | Settings tab (PortalAdmin only): the toggle, the Actions_Switch (hidden while `actions_delivered` is false), retention days (1–365), guardrail id/version, the model and its tool-use flag, limits read-only |
+| `AssistantSettings.tsx` | Settings tab (PortalAdmin only): the toggle, the Actions_Switch (hidden while `actions_delivered` is false) with the destructive allow-list under it, retention days (1–365), guardrail id/version, the model and its tool-use flag, limits read-only |
 | `AssistantErrorBoundary.tsx` | Class component; renders a compact "The assistant hit an error" state with Retry inside the drawer only |
 
 `Layout.tsx`: wraps the layout content in `AssistantProvider`; passes `drawers={available ? [assistantDrawer] : []}`, `activeDrawerId={open ? 'assistant' : null}`, `onDrawerChange` → provider; the drawer: `id: 'assistant'`, `trigger: {iconName: 'gen-ai'}`, `badge: unread`, `resizable: true`, `defaultSize: 380`, `ariaLabels: {drawerName: 'Assistant', triggerButton: 'Open the assistant', closeButton: 'Hide the assistant', resizeHandle: 'Resize the assistant'}`, `preserveInactiveContent: true` (the draft and scroll position survive hide/show, 1.3). The build banner stays fixed; the drawer content gets `paddingBottom: 24px` so the composer clears it.

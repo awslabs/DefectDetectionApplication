@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional
 
 import boto3
 
-from assistant import ACTIONS_DELIVERED, __version__
+from assistant import ACTIONS_DELIVERED, DESTRUCTIVE_ALLOWLIST, __version__
 from assistant import errors, limits as limits_module, schemas, settings, store
 from assistant.errors import AssistantError
 
@@ -280,6 +280,7 @@ def _settings_view(config: Dict[str, Any]) -> Dict[str, Any]:
         'enabled': bool(config.get('enabled', True)),
         'actions_enabled': bool(config.get('actions_enabled', True)),
         'actions_delivered': ACTIONS_DELIVERED,
+        'destructive_allowlist': sorted(DESTRUCTIVE_ALLOWLIST),
         'retention_days': int(config.get('retention_days') or 30),
         'guardrail_id': config.get('guardrail_id'),
         'guardrail_version': config.get('guardrail_version'),
