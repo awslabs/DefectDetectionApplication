@@ -109,7 +109,7 @@ def test_the_same_tool_is_accepted_on_its_own_view_and_on_the_aggregate(portal, 
         assert outcome.is_error is False, outcome.structured_content
     assert len(portal.calls) == 2
     assert {event['mcp']['server'] for event in portal.events} == {
-        f'{server.server_name(view)}@1.2.0', 'dda-portal-mcp@1.2.0'}
+        f'{server.server_name(view)}@1.3.0', 'dda-portal-mcp@1.3.0'}
 
 
 @pytest.mark.parametrize('view', [v for v in VIEWS if v != DEPLOY.domain])

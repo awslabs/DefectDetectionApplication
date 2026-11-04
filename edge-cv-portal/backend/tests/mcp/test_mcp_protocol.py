@@ -69,7 +69,7 @@ def test_discover_fields(portal, view):
     info, instructions = h.in_memory(view, go, h.access_token())
     assert info.name == server.server_name(view)
     assert info.name == ('dda-portal-mcp' if view is None else f'dda-portal-mcp/{view}')
-    assert info.version == '1.2.0'
+    assert info.version == '1.3.0'
     assert instructions == server.instructions_for(view)
 
 
@@ -103,7 +103,7 @@ def test_tools_list_is_deterministic_and_rendered(portal, view):
 
 def test_aggregate_lists_the_89_delivered_read_only_tools(portal):
     # 87 Phase-1 tools and the two Phase-2 read-only tools; the switch is off
-    # (Phase 3 has no read-only tool).
+    # (Phases 3 and 4 have no read-only tool).
     names = [t.name for t in listed(None).tools]
     assert len(names) == 89
     assert {'portal_devices_logs_analyze', 'portal_workflows_plugin_generate_status_get'} <= set(names)
@@ -121,15 +121,18 @@ def test_switch_and_phases_widen_the_list(portal):
         'MUTATING, DESTRUCTIVE — requires confirm=<target_thing_group | target_devices[0]>.')
 
 
-def test_switch_lists_the_delivered_phase_three_tools(portal):
-    assert DELIVERED_PHASES == (1, 2, 3)
+def test_switch_lists_the_delivered_phase_four_tools(portal):
+    assert DELIVERED_PHASES == (1, 2, 3, 4)
     portal.monkeypatch.setenv('MCP_MUTATING_TOOLS_ENABLED', 'true')
     names = {t.name for t in listed(None).tools}
     assert names == expected_names(None, mutating=True)
-    # 87 + 53 + 43: portal_models_delete is not in the catalog (Backlog 1).
-    assert len(names) == 87 + 53 + 43
+    # 87 + 53 + 43 + 4: portal_models_delete is not in the catalog (Backlog 1).
+    assert len(names) == 87 + 53 + 43 + 4
     assert {n for n in names if BY_NAME[n].phase == 3} == \
         {s.name for s in BY_NAME.values() if s.phase == 3}
+    assert {n for n in names if BY_NAME[n].phase == 4} == {
+        'portal_admin_account_create', 'portal_admin_account_disable',
+        'portal_admin_account_enable', 'portal_admin_account_delete'}
     assert 'portal_devices_deployment_create' in names
     assert 'portal_models_delete' not in names
 
@@ -241,14 +244,14 @@ def test_read_only_call_dispatches_once(portal):
     assert event['requestContext']['authorizer']['claims'] == token.claims
     assert event['mcp']['channel'] == 'mcp'
     assert event['mcp']['tool'] == 'portal_devices_list'
-    assert event['mcp']['server'] == 'dda-portal-mcp/devices@1.2.0'
+    assert event['mcp']['server'] == 'dda-portal-mcp/devices@1.3.0'
     assert event['mcp']['principal_email'] == h.EMAIL
 
 
 def test_aggregate_endpoint_serves_every_view(portal):
     result = call(None, 'portal_devices_list', {'usecase_id': USECASE})
     assert result.is_error is False
-    assert portal.events[-1]['mcp']['server'] == 'dda-portal-mcp@1.2.0'
+    assert portal.events[-1]['mcp']['server'] == 'dda-portal-mcp@1.3.0'
 
 
 # ---------------------------------------------------------------- M call

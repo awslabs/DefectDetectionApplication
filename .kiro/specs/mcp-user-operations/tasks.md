@@ -191,10 +191,17 @@ Baselines are those of the implementation branch's base `3fa572f5` (the merge of
       - The step-5b refusals are checked for their INFO line (the fixed message, without the target).
     - _Requirements: 7.1, 7.2, 8.1, 9.1_
 
-- [ ] 3. Obtain the owner's sign-off on the Phase-4 destructive list (owner gate 1)
+- [x] 3. Obtain the owner's sign-off on the Phase-4 destructive list (owner gate 1)
   - Generate the Phase-4 `destructive=true` list from `catalog_tools.json` at the authoring commit and cross-check it with the design's catalog table and the guardrails pin (`len(DESTRUCTIVE) == 31`): `portal_admin_account_disable`, `portal_admin_account_enable`, `portal_admin_account_delete`, each `confirm`=`account_username`; beside them `portal_admin_account_create` as the one mutating non-destructive Phase-4 tool (no `confirm`). State why enable is destructive (it re-grants Portal privilege and, at the next sync, local login on every device whose staged set holds the account) and that the Self_Protection_Rule applies to disable and delete only
   - **Gate 1 question (the owner answers by number):** 1 = approve the list as generated (three destructive tools with `confirm=account_username`, create as mutating) — proceed to the delivering commit; 2 = exclude or reclassify a named tool — the named row is withheld from the delivering commit (it keeps `phase=4` in `catalog.py` only if its class is unchanged; otherwise the row, the design table, the exports and the pins are replanned with the owner before task 4); 3 = hold
   - Verify: the decision recorded under this task with the date and the list as generated; nothing is listed or accepted before the answer (`DELIVERED_PHASES` is still `(1, 2, 3)`)
+  - Done (2026-11-04): gate 1 answered **1, approve the list as generated** (owner, chat, 2026-11-04 10:38Z). Nothing is excluded or reclassified, so all four rows go into the delivering commit with the classes below. The list as generated from `catalog_tools.json` at the authoring commit `4bf0b9e6` (the export sorts by name):
+    - `destructive=true`, each with `confirm=account_username`: `portal_admin_account_delete`, `portal_admin_account_disable`, `portal_admin_account_enable`
+    - mutating with `destructive=false` and no `confirm`: `portal_admin_account_create`
+    - no read-only Phase-4 row; `status_tool` is `portal_admin_accounts_list` on all four
+    - Cross-checks, all in agreement: the design's catalog table (create `M`; disable, enable and delete `M!`; phase 4; `confirm`=`account_username` on the three `M!` rows); the guardrails pin `len(DESTRUCTIVE) == 31` in `test_mcp_guardrails.py` (28 through Phase 3 plus these three) and the export's 31 `destructive=true` entries (187 entries; 87/53/43/4 by phase; 89 RO / 67 M / 31 M!; every destructive entry is mutating); `catalog.py` sets `confirm_target='account_username'` on the three destructive rows and none on create, and `self_protect_arg` on disable and delete only
+    - Stated with the question: enable is destructive because it re-grants Portal privilege and, at the next sync, local login on every device whose staged set holds the account; the Self_Protection_Rule applies to disable and delete only
+    - Before the answer, `DELIVERED_PHASES` was `(1, 2, 3)` and `__version__` `1.2.0` at `24152ee6`, so no Phase-4 tool was listed or accepted. This record is carried by the delivering commit (task 4)
   - _Requirements: 4.6, 4.1, 4.2_
 
 - [ ] 4. Deliver Phase 4 on the portal (the delivering commit)
