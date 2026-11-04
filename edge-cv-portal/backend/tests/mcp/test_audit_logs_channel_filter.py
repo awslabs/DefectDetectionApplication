@@ -29,6 +29,8 @@ ENTRIES = (
     ("mcp-list-a", UC_A, "mcp", "portal_devices_list"),
     ("mcp-get-b", UC_B, "mcp", "portal_devices_get"),
     ("pre-upgrade-b", UC_B, None, None),
+    # Written during a Portal assistant turn (portal-ai-assistant design D3).
+    ("assistant-list-a", UC_A, "assistant", "portal_devices_list"),
 )
 
 
@@ -111,9 +113,16 @@ def test_mcp_filter_selects_marked_entries(as_admin):
     assert ids == ["mcp-get-b", "mcp-list-a"]
 
 
+def test_assistant_filter_selects_assistant_entries_only(as_admin):
+    # portal-ai-assistant Requirement 6.5: the assistant's entries are
+    # separable from external MCP clients and from browser activity.
+    _, ids = call(as_admin, channel="assistant")
+    assert ids == ["assistant-list-a"]
+
+
 def test_mcp_tool_filter(as_admin):
     _, ids = call(as_admin, mcp_tool="portal_devices_list")
-    assert ids == ["mcp-list-a"]
+    assert ids == ["assistant-list-a", "mcp-list-a"]
     _, ids = call(as_admin, channel="mcp", mcp_tool="portal_devices_get")
     assert ids == ["mcp-get-b"]
     _, ids = call(as_admin, channel="api", mcp_tool="portal_devices_get")

@@ -21,6 +21,8 @@ import { getErrorMessage, scrollToTop } from '../utils/errorHandling';
 import { useAuth } from '../contexts/AuthContext';
 import BedrockConfigurationSettings from '../components/BedrockConfigurationSettings';
 import BuildInfrastructureSettings from '../components/BuildInfrastructureSettings';
+import AssistantSettings from '../components/assistant/AssistantSettings';
+import { assistantConfigured } from '../components/assistant/assistantApi';
 
 interface DataAccount {
   data_account_id: string;
@@ -420,6 +422,17 @@ export default function Settings() {
                     label: 'Build Infrastructure',
                     content: <BuildInfrastructureSettings />,
                   },
+                  // Portal assistant (portal-ai-assistant Requirement 12):
+                  // PortalAdmin-only, shown when the assistant is deployed.
+                  ...(assistantConfigured()
+                    ? [
+                        {
+                          id: 'assistant',
+                          label: 'Assistant',
+                          content: <AssistantSettings />,
+                        },
+                      ]
+                    : []),
                 ]
               : []),
             {

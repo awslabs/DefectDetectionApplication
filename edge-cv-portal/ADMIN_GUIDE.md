@@ -14,6 +14,7 @@ Complete guide for deploying, configuring, and managing the Defect Detection App
 8. [User Roles and Permissions](#user-roles-and-permissions)
 9. [Portal Users and Privilege (Portal_Identity Registry)](#portal-users-and-privilege-portal_identity-registry)
 10. [MCP server (AI assistants)](#mcp-server-ai-assistants)
+11. [Portal assistant](#portal-assistant)
 
 **Related Guides:**
 - [README: Deployment](../README.md#deployment) - Portal deployment, Build Fleet builds, accounts, and device setup
@@ -2288,6 +2289,134 @@ default depth can exceed the tool timeout.
 | `portal_workflows_test_dataset_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=dataset_id. | `workflow:test` | usecase |
 
 ---
+
+## Portal assistant
+
+The portal has a built-in assistant: a chat panel on every signed-in page
+(spec `.kiro/specs/portal-ai-assistant/`). It explains pages and the
+end-to-end path from the user guide, tells users what to do next for the
+selected use case, and looks things up for them. Every look-up runs through
+the same tool catalog and pipeline as the [MCP server](#mcp-server-ai-assistants),
+in-process, as the signed-in user: the same role and permission checks, the
+same audit entries, marked with the channel `assistant`. The model is the one
+configured under Settings → Bedrock Configuration. This release delivers
+guidance and read-only tools; state-changing tools ("actions") are a later
+phase and are off in the code (`ACTIONS_DELIVERED = False` in
+`backend/functions/assistant/__init__.py`), whatever the settings say.
+
+The user-facing description is the user guide's
+[25. The assistant](../docs/user-guide/25-assistant.md).
+
+### Deploying and removing the assistant stack
+
+`./deploy-infrastructure.sh` deploys `EdgeCVPortalAssistantStack` by default
+and `./deploy-frontend.sh` writes its API URL into the frontend's
+`config.json` (`assistantApiUrl`). Without that key the frontend shows no
+assistant and makes no assistant request, so a portal whose frontend was
+deployed before the stack simply has no panel until the next
+`./deploy-frontend.sh`.
+
+The stack holds its own Regional REST API (`dda-portal-assistant`, stage `v1`)
+with its own Cognito authorizer on the portal user pool, two Lambdas (the API
+handler and the asynchronous Turn worker), the table `dda-portal-assistant`
+under the customer managed key `alias/dda-portal/assistant`, the SSM
+parameter `/dda-portal/assistant/backend-functions` (the assistant's own copy
+of the MCP dispatch map, so it works with `DEPLOY_MCP_SERVER=false`), and
+three layers: the shared layer, the MCP SDK lock (for jsonschema at the MCP
+server's pins) and the user guide chapters at `/opt/guide`.
+
+Removing it is the same two steps as the MCP stack, because `cdk deploy --all`
+never deletes a stack that merely left the app and the producing stacks
+cannot drop exports a deployed consumer imports:
+
+```bash
+# 1. With the stack still in the app (no DEPLOY_ASSISTANT=false yet), in the
+#    deploy's region and with the CDK context the deploy resolved:
+cd edge-cv-portal/infrastructure && npx cdk destroy EdgeCVPortalAssistantStack --force -c portalRegistryEnforced=<deployed value>
+# 2. Then deploy without it:
+DEPLOY_ASSISTANT=false ./deploy-infrastructure.sh
+```
+
+Only the literal `false` (any case, trimmed) turns the stack off; the deploy
+script refuses `DEPLOY_ASSISTANT=false` while the stack still exists and
+prints step 1 (`scripts/portal-assistant-stack.sh`). The table and the KMS
+key are retained by the destroy; delete them by hand when the conversations
+are no longer needed (`aws dynamodb delete-table --table-name dda-portal-assistant`,
+then schedule the key deletion from the alias `alias/dda-portal/assistant`).
+Run `./deploy-frontend.sh` again afterwards so `config.json` loses
+`assistantApiUrl`.
+
+### Settings (Settings → Assistant, PortalAdmin only)
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| Assistant | Enabled | Off refuses new turns, stops turns in progress at their next step, makes no Bedrock call, and hides the panel in every open browser within 60 seconds (the frontend re-reads the state every 30 seconds). Back on within the same time, with every conversation intact. |
+| Actions | Enabled (shown only once actions are delivered) | Whether the assistant may propose state-changing tools, each behind the user's confirmation card. Not shown in this release. |
+| Conversation retention (days) | 30 | Inactive conversations are deleted after this many days (1 to 365, DynamoDB TTL). A change applies to a conversation at its next activity. |
+| Bedrock guardrail id / version | none | When set, `guardrailConfig` is passed on every model call. |
+| Model | from Bedrock Configuration | Read-only here; shows whether the model accepted tool definitions on its first call. A model that rejects them leaves the assistant in guidance-only mode. |
+
+Every change writes an `assistant_settings_changed` audit entry with the
+setting, the previous and the new value. The record lives in the portal
+settings table under `assistant_configuration`.
+
+### Context and environment
+
+| Where | Name | Default | Meaning |
+|-------|------|---------|---------|
+| CDK context | `deployAssistant` | on | `false` omits the stack (see the two-step removal). |
+| CDK context | `assistantSupportEmail`, `assistantDocumentationUrl` | unset | Shown to the model as the support contact and documentation link it may point users to. |
+| Worker environment | `ASSISTANT_LIMITS_JSON` | unset | A JSON object overriding any of the limits below (positive integers). Set it on the worker and the API Lambda, or edit the stack. |
+| Worker environment | `ASSISTANT_CACHE_MODEL_PREFIXES` | `anthropic.claude-,amazon.nova` | Model id prefixes (matched with or without an inference-profile prefix such as `us.` or `global.`) for which prompt cache points are emitted. A model that rejects them is retried without, once per container. |
+
+Limits (the defaults): 2 concurrent turns and 60 turns per hour per user,
+1,500,000 model tokens per user per day (cache-read tokens count at one tenth, as Bedrock bills them); per turn 10 model calls, 10 tool
+calls (24 pipeline calls, `journey_status` fans out to 8), 6,000 output
+tokens, 240 seconds; per conversation 60 turns or 400 KB.
+
+### Audit and logs
+
+- Audit Logs → Channel → **Assistant** shows every tool call the assistant
+  made: the same entries the MCP server would write, with `mcp_tool`,
+  `mcp_server` = `dda-portal-assistant@<version>`, `mcp_client` =
+  `dda-portal-frontend/<frontend build>` and `mcp_request_id` =
+  `<turn id>/<n>`. Denials are `unauthorized_access` entries on the same
+  channel. Prompts, answers, arguments and results are never audited or
+  logged; the assistant's logs carry identifiers, categories, sizes,
+  durations and token counts.
+- Log groups: `/dda-portal/assistant-api` and `/dda-portal/assistant-worker`
+  (30 days). Each finished turn logs one `assistant_turn` line; each tool
+  completion one `assistant_tool` line (the MCP `mcp_tool` record under
+  another event name). Metrics are in the CloudWatch namespace
+  `DDA/Assistant` (`Turns`, `ModelCalls`, `ToolCalls`, `InputTokens`,
+  `OutputTokens`, `CacheReadTokens`, `TurnDurationMs`, `ModelErrors`,
+  `BedrockThrottled`, `WorkerLost`).
+- Alarms without actions, to wire to the portal's notification topic as for
+  the MCP timeout alarm: `AssistantModelErrorsAlarm` (5 or more model errors
+  in 15 minutes), `AssistantThrottledAlarm` (5 or more throttled turns in 5
+  minutes), `AssistantWorkerErrorsAlarm` (the worker Lambda failed) and
+  `AssistantWorkerLostAlarm` (a turn was reaped because its worker did not
+  finish).
+
+### Cost
+
+See [COST_ESTIMATE.md](COST_ESTIMATE.md): about $0.07 per one-call guidance
+turn at Claude Sonnet 4.5 list prices (less with a warm prompt cache), about
+$0.11 for a turn with tool look-ups, about $25/month at 10 turns a day. The
+per-user daily token quota caps one user at about $5/day. Turning the
+assistant off in Settings stops the Bedrock cost.
+
+### Troubleshooting the assistant
+
+| Symptom | Cause | Remedy |
+|---------|-------|--------|
+| No panel for anyone | `config.json` has no `assistantApiUrl` (frontend deployed before the stack), or the assistant is off in Settings | `./deploy-frontend.sh`; Settings → Assistant |
+| No panel for one user | The account's only role is DataLabeler | By design (Requirement 1.6) |
+| "This model rejected tool definitions: guidance only" in Settings | The configured Bedrock model does not support the Converse tool API | Choose a model with tool use under Bedrock Configuration; the flag is re-checked on the next turn |
+| Turns fail with `bedrock_authorization` or `bedrock_model_access` | The account cannot invoke the configured model or inference profile in that region | Enable model access in Bedrock; check the model id and region |
+| Turns fail with `worker_lost` | The worker Lambda died (timeout, out of memory) | CloudWatch `/dda-portal/assistant-worker`; the `AssistantWorkerErrorsAlarm` |
+| Users hit the token quota early | The daily quota counts every model call (cache reads at one tenth); long conversations and many tool round trips add up | Raise `tokens_per_day` through `ASSISTANT_LIMITS_JSON` |
+| Audit entries without the `assistant` channel for assistant look-ups | The backing handler writes its own entry: it is marked through the request audit context only when the shared layer of its stack is current | Redeploy the portal so every stack carries the updated shared layer |
 
 ## Support
 

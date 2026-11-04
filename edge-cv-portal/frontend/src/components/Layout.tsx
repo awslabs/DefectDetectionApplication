@@ -23,6 +23,9 @@ import { canViewDebugLog } from '../utils/debugAccess';
 import { canReadDashboards } from '../utils/telemetryPermissions';
 import { canAccessWorkflowTuning } from '../utils/workflowTuningAccess';
 import { clearAttemptedLocation } from '../services/sessionRedirect';
+import { AssistantProvider, useAssistant } from './assistant/AssistantProvider';
+import AssistantDrawer from './assistant/AssistantDrawer';
+import { ASSISTANT_DRAWER_ID, ASSISTANT_DRAWER_DEFAULT_SIZE } from './assistant/constants';
 
 /**
  * Builds the items for the top-navigation settings dropdown based on the
@@ -209,10 +212,24 @@ export function buildNavigationItems(
   return [...baseNavigationItems];
 }
 
+/**
+ * The authenticated shell. The assistant provider wraps the layout so the
+ * drawer's conversation and state survive route changes
+ * (portal-ai-assistant Requirement 1.3).
+ */
 export default function Layout() {
+  return (
+    <AssistantProvider>
+      <LayoutShell />
+    </AssistantProvider>
+  );
+}
+
+function LayoutShell() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout, changePassword } = useAuth();
+  const assistant = useAssistant();
   const config = getConfig();
   const branding = config.branding;
   const build = getBuildInfo();
@@ -307,6 +324,33 @@ export default function Layout() {
         content={<Outlet />}
         toolsHide
         navigationWidth={200}
+        // The Portal assistant lives in an AppLayout drawer
+        // (portal-ai-assistant design D6): Cloudscape owns hide/show, the
+        // narrow-viewport overlay and resizing; the trigger in the drawer
+        // bar is the collapsed control (Requirement 2).
+        drawers={
+          assistant.available
+            ? [
+                {
+                  id: ASSISTANT_DRAWER_ID,
+                  content: <AssistantDrawer />,
+                  trigger: { iconName: 'gen-ai' },
+                  badge: assistant.unread,
+                  resizable: true,
+                  defaultSize: ASSISTANT_DRAWER_DEFAULT_SIZE,
+                  preserveInactiveContent: true,
+                  ariaLabels: {
+                    drawerName: 'Assistant',
+                    triggerButton: 'Open the assistant',
+                    closeButton: 'Hide the assistant',
+                    resizeHandle: 'Resize the assistant',
+                  },
+                },
+              ]
+            : []
+        }
+        activeDrawerId={assistant.available && assistant.open ? ASSISTANT_DRAWER_ID : null}
+        onDrawerChange={({ detail }) => assistant.setOpen(detail.activeDrawerId === ASSISTANT_DRAWER_ID)}
       />
 
       {/* Bottom version banner — shows the exact portal build that is running.

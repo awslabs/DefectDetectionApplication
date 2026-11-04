@@ -274,5 +274,8 @@ def test_whoami_registry_failure_is_an_audited_tool_result(portal, aws_stack, mo
     assert [(line['event'], line['tool'], line['outcome'], line['category'])
             for line in lines] == [
         ('mcp_tool', 'portal_admin_whoami', 'unavailable', 'authorization_unavailable')]
-    assert any(r.levelno == logging.ERROR and r.name == 'mcp_portal.server'
+    # `whoami` lives in `mcp_portal.pipeline` since the portal-ai-assistant
+    # refactor (its design D1); the server module name is kept for older trees.
+    assert any(r.levelno == logging.ERROR
+               and r.name in ('mcp_portal.server', 'mcp_portal.pipeline')
                and r.exc_info for r in caplog.records)

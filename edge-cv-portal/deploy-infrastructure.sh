@@ -210,6 +210,13 @@ show_trusted_accounts || true
 if ! portal_mcp_optout_guard "$AWS_REGION" "${DEPLOY_MCP_SERVER:-}"; then
   exit 1
 fi
+# Portal assistant opt-out (portal-ai-assistant design D8): DEPLOY_ASSISTANT=false
+# omits EdgeCVPortalAssistantStack, refused while that stack is still deployed.
+# See scripts/portal-assistant-stack.sh.
+. "$SCRIPT_DIR/scripts/portal-assistant-stack.sh"
+if ! portal_assistant_optout_guard "$AWS_REGION" "${DEPLOY_ASSISTANT:-}"; then
+  exit 1
+fi
 
 # The project-local CLI (devDependency aws-cdk, installed by `npm ci` above):
 # aws-cdk-lib emits a cloud-assembly schema that an older global `cdk` on

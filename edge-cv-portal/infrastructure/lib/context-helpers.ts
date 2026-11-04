@@ -79,6 +79,16 @@ export function mcpMutatingToolsEnabled(contextValue: unknown): string {
   return portalRegistryEnforced(contextValue);
 }
 
+/**
+ * Default-ON resolution for the `deployAssistant` CDK context flag
+ * (portal-ai-assistant design D8): the same rule as {@link mcpServerEnabled}
+ * - only an explicit false omits EdgeCVPortalAssistantStack, and
+ * deploy-infrastructure.sh's guard applies the same test to DEPLOY_ASSISTANT.
+ */
+export function assistantEnabled(contextValue: unknown): boolean {
+  return groundedSamWorkerEnabled(contextValue);
+}
+
 // ---------------------------------------------------------------------------
 // Synth-time enforcement acknowledgement (portal-authorization-and-iam-
 // scoping, design I7 "Design (D7-A)"). bin/app.ts refuses to synthesize when

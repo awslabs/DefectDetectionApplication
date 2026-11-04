@@ -65,8 +65,9 @@ def get_audit_logs(event: Dict[str, Any]) -> Dict[str, Any]:
     - usecase_id: Filter by specific usecase (optional for PortalAdmin, required for others)
     - action: Filter by action type (optional)
     - user_id: Filter by user (optional, PortalAdmin only)
-    - channel: 'api' (Web & API, including entries without a channel) or
-      'mcp' (entries written during MCP invocations) (optional)
+    - channel: 'api' (Web & API, including entries without a channel),
+      'mcp' (entries written during MCP invocations) or 'assistant' (entries
+      written during Portal assistant turns) (optional)
     - mcp_tool: Filter by MCP tool name (optional)
     - start_time: Start timestamp in milliseconds (optional)
     - end_time: End timestamp in milliseconds (optional)
@@ -158,9 +159,9 @@ def get_audit_logs(event: Dict[str, Any]) -> Dict[str, Any]:
                 '(attribute_not_exists(#channel) OR #channel = :channel)')
             expression_values[':channel'] = 'api'
             expression_names['#channel'] = 'channel'
-        elif channel_filter == 'mcp':
+        elif channel_filter in ('mcp', 'assistant'):
             filter_expressions.append('#channel = :channel')
-            expression_values[':channel'] = 'mcp'
+            expression_values[':channel'] = channel_filter
             expression_names['#channel'] = 'channel'
 
         # Filter by MCP tool name

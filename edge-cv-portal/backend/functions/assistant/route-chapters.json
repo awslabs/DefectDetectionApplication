@@ -1,0 +1,30 @@
+{
+  "comment": "Portal route prefix -> user guide chapter (design §5, D4). Longest prefix wins. Shared by assistant/guide.py and the frontend's suggested prompts; test_route_chapters.py and routeChapters.test.ts pin both copies to this file.",
+  "routes": [
+    {"prefix": "/dashboard", "chapter": "01-getting-started.md", "domain": "admin"},
+    {"prefix": "/usecases", "chapter": "02-use-cases.md", "domain": "admin"},
+    {"prefix": "/data", "chapter": "03-data-management.md", "domain": "data"},
+    {"prefix": "/labeling/datasets", "chapter": "03-data-management.md", "domain": "data"},
+    {"prefix": "/labeling", "chapter": "04-labeling.md", "domain": "data"},
+    {"prefix": "/labeler", "chapter": "04-labeling.md", "domain": "data"},
+    {"prefix": "/synthetic", "chapter": "05-synthetic-data.md", "domain": "data"},
+    {"prefix": "/training", "chapter": "06-training.md", "domain": "models"},
+    {"prefix": "/models", "chapter": "07-models.md", "domain": "models"},
+    {"prefix": "/workflows/builder", "chapter": "08-workflows.md", "domain": "workflows"},
+    {"prefix": "/workflow-tuning", "chapter": "09-workflow-tuning.md", "domain": "workflows"},
+    {"prefix": "/node-designer/review", "chapter": "17-plugin-review.md", "domain": "workflows"},
+    {"prefix": "/node-designer", "chapter": "10-node-designer.md", "domain": "workflows"},
+    {"prefix": "/components", "chapter": "11-components.md", "domain": "devices"},
+    {"prefix": "/builds", "chapter": "12-builds.md", "domain": "workflows"},
+    {"prefix": "/deployments", "chapter": "13-deployments.md", "domain": "devices"},
+    {"prefix": "/workflow-dashboards", "chapter": "14-workflow-dashboards.md", "domain": "devices"},
+    {"prefix": "/telemetry-settings", "chapter": "14-workflow-dashboards.md", "domain": "devices"},
+    {"prefix": "/devices", "chapter": "15-devices.md", "domain": "devices"},
+    {"prefix": "/debug", "chapter": "16-debug-log.md", "domain": "devices"},
+    {"prefix": "/admin/fleet", "chapter": "18-build-fleet.md", "domain": "workflows"},
+    {"prefix": "/settings", "chapter": "19-settings.md", "domain": "admin"},
+    {"prefix": "/admin/user-manager", "chapter": "20-user-manager.md", "domain": "admin"},
+    {"prefix": "/audit", "chapter": "21-audit-logs.md", "domain": "admin"}
+  ],
+  "non_route_chapters": ["22-device-web-ui.md", "23-station-hmi.md", "24-mcp-support.md", "25-assistant.md"]
+}

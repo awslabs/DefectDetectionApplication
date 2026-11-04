@@ -40,6 +40,9 @@ const CHANNEL_OPTIONS: SelectProps.Option[] = [
   { label: 'All channels', value: '' },
   { label: 'Web & API', value: 'api' },
   { label: 'MCP', value: 'mcp' },
+  // Entries written during Portal assistant turns (portal-ai-assistant
+  // Requirement 6.5, design D3).
+  { label: 'Assistant', value: 'assistant' },
 ];
 
 interface UseCase {
@@ -130,14 +133,14 @@ export default function AuditLogs() {
         end_time?: number;
         limit?: number;
         next_token?: string;
-        channel?: 'api' | 'mcp';
+        channel?: 'api' | 'mcp' | 'assistant';
       } = { limit: 50 };
 
       if (usecaseFilter) {
         params.usecase_id = usecaseFilter;
       }
 
-      if (channelFilter === 'api' || channelFilter === 'mcp') {
+      if (channelFilter === 'api' || channelFilter === 'mcp' || channelFilter === 'assistant') {
         params.channel = channelFilter;
       }
 

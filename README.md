@@ -113,7 +113,7 @@ The [User Guide](docs/user-guide/README.md) has one page per section of the syst
 | [8. Workflows](docs/user-guide/08-workflows.md) | [20. User Manager](docs/user-guide/20-user-manager.md) | |
 | [9. Workflow Tuning](docs/user-guide/09-workflow-tuning.md) | [21. Audit Logs](docs/user-guide/21-audit-logs.md) | |
 | [10. Node Designer](docs/user-guide/10-node-designer.md) | [24. MCP support](docs/user-guide/24-mcp-support.md) | |
-| [11. Components](docs/user-guide/11-components.md) | | |
+| [11. Components](docs/user-guide/11-components.md) | [25. The assistant](docs/user-guide/25-assistant.md) | |
 | [12. Builds](docs/user-guide/12-builds.md) | | |
 
 ## Deployment
@@ -1781,6 +1781,16 @@ no stdio package is distributed): see the
 [Administrator Guide: MCP server (AI assistants)](edge-cv-portal/ADMIN_GUIDE.md#mcp-server-ai-assistants).
 The edge server is off by default and enabled per device: see
 [docs/edge-mcp-server.md](docs/edge-mcp-server.md).
+
+**Portal assistant.** The portal has a built-in assistant panel on every
+signed-in page. It explains pages and the end-to-end path from the user
+guide, tells users what to do next, and looks things up for them through the
+same tool catalog and permission checks as the MCP server, as the signed-in
+user; state-changing actions are reserved for a later release. It is
+deployed with the portal (`EdgeCVPortalAssistantStack`), uses the portal's
+Bedrock configuration, and can be turned off by a PortalAdmin in Settings:
+see the [Administrator Guide: Portal assistant](edge-cv-portal/ADMIN_GUIDE.md#portal-assistant)
+and the user guide chapter [25. The assistant](docs/user-guide/25-assistant.md).
 
 | Document | Description |
 |----------|-------------|

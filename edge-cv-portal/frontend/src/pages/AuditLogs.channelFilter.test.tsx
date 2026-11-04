@@ -94,7 +94,7 @@ describe('AuditLogs channel filter', () => {
       .findDropdown()
       .findOptions()
       .map(o => o.getElement().textContent);
-    expect(labels).toEqual(['All channels', 'Web & API', 'MCP']);
+    expect(labels).toEqual(['All channels', 'Web & API', 'MCP', 'Assistant']);
   });
 
   it('reloads with channel=mcp and channel=api when those options are chosen', async () => {
@@ -102,6 +102,10 @@ describe('AuditLogs channel filter', () => {
     await waitFor(() => expect(apiMocks.getAuditLogs).toHaveBeenCalled());
 
     const select = channelSelect();
+    select.openDropdown();
+    select.selectOption(4);
+    // the Portal assistant's entries (portal-ai-assistant Requirement 6.5)
+    await waitFor(() => expect(lastChannelParam()).toBe('assistant'));
     select.openDropdown();
     select.selectOption(3);
     await waitFor(() => expect(lastChannelParam()).toBe('mcp'));
@@ -114,7 +118,7 @@ describe('AuditLogs channel filter', () => {
     select.selectOption(1);
     await waitFor(() => {
       const calls = apiMocks.getAuditLogs.mock.calls;
-      expect(calls.length).toBeGreaterThanOrEqual(4);
+      expect(calls.length).toBeGreaterThanOrEqual(5);
       expect(lastChannelParam()).toBeUndefined();
     });
   });

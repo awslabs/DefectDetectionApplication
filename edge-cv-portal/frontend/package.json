@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
+    "@cloudscape-design/chat-components": "^1.0.186",
     "@cloudscape-design/components": "^3.0.0",
     "@cloudscape-design/global-styles": "^1.0.0",
     "@tanstack/react-query": "^5.0.0",
@@ -10,7 +11,9 @@
     "aws-amplify": "^6.22.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-markdown": "^10.1.0",
     "react-router-dom": "^7.18.4",
+    "remark-gfm": "^4.0.1",
     "typescript": "^5.0.0"
   },
   "devDependencies": {

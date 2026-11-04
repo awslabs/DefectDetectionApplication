@@ -84,6 +84,15 @@ API_URL=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs[?OutputKey==`ApiUrl`].OutputValue' \
   --output text 2>/dev/null || echo "")
 
+# The Portal assistant's API (portal-ai-assistant design §11): absent when
+# the stack is not deployed, in which case the frontend shows no assistant.
+ASSISTANT_API_URL=$(aws cloudformation describe-stacks \
+  --stack-name EdgeCVPortalAssistantStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`AssistantApiUrl`].OutputValue' \
+  --output text 2>/dev/null || echo "")
+if [ "$ASSISTANT_API_URL" = "None" ]; then ASSISTANT_API_URL=""; fi
+ASSISTANT_API_URL="${ASSISTANT_API_URL%/}"
+
 if [ -n "$AUTH_CONFIG" ] && [ -n "$API_URL" ] && [ "$AUTH_CONFIG" != "None" ] && [ "$API_URL" != "None" ]; then
   USER_POOL_ID=$(echo "$AUTH_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolId'])")
   CLIENT_ID=$(echo "$AUTH_CONFIG" | python3 -c "import sys,json; print(json.load(sys.stdin)['userPoolWebClientId'])")
@@ -92,33 +101,39 @@ if [ -n "$AUTH_CONFIG" ] && [ -n "$API_URL" ] && [ "$AUTH_CONFIG" != "None" ] &&
   # Remove trailing slash from API URL if present
   API_URL="${API_URL%/}"
 
-  # Merge with existing config.json to preserve branding/custom fields
+  # Merge with existing config.json to preserve branding/custom fields; a
+  # missing file starts from {}. One writer for both cases: the earlier
+  # heredoc for the create case used `${ASSISTANT_API_URL:+...}` and a heredoc
+  # strips the quotes inside that expansion, which published an unquoted
+  # `assistantApiUrl:` line (invalid JSON) on the first assistant deploy.
   if [ -f public/config.json ]; then
-    python3 -c "
-import json, sys
+    CONFIG_VERB="updated (branding preserved)"
+  else
+    CONFIG_VERB="created"
+    echo '{}' > public/config.json
+  fi
+  API_URL="$API_URL" USER_POOL_ID="$USER_POOL_ID" CLIENT_ID="$CLIENT_ID" REGION="$REGION" \
+  ASSISTANT_API_URL="$ASSISTANT_API_URL" python3 -c "
+import json, os
 with open('public/config.json') as f:
     existing = json.load(f)
-existing['apiUrl'] = '${API_URL}'
-existing['userPoolId'] = '${USER_POOL_ID}'
-existing['userPoolClientId'] = '${CLIENT_ID}'
-existing['region'] = '${REGION}'
+existing['apiUrl'] = os.environ['API_URL']
+existing['userPoolId'] = os.environ['USER_POOL_ID']
+existing['userPoolClientId'] = os.environ['CLIENT_ID']
+existing['region'] = os.environ['REGION']
+assistant_url = os.environ.get('ASSISTANT_API_URL', '')
+if assistant_url:
+    existing['assistantApiUrl'] = assistant_url
+else:
+    existing.pop('assistantApiUrl', None)
 with open('public/config.json', 'w') as f:
     json.dump(existing, f, indent=2)
     f.write('\n')
 "
-    echo "✅ config.json updated (branding preserved):"
-  else
-    cat > public/config.json << EOF
-{
-  "apiUrl": "$API_URL",
-  "userPoolId": "$USER_POOL_ID",
-  "userPoolClientId": "$CLIENT_ID",
-  "region": "$REGION"
-}
-EOF
-    echo "✅ config.json created:"
-  fi
+  python3 -c "import json; json.load(open('public/config.json'))" || { echo "❌ public/config.json is not valid JSON" >&2; exit 1; }
+  echo "✅ config.json $CONFIG_VERB:"
   echo "   API URL:      $API_URL"
+  echo "   Assistant:    ${ASSISTANT_API_URL:-not deployed}"
   echo "   User Pool:    $USER_POOL_ID"
   echo "   Client ID:    $CLIENT_ID"
   echo "   Region:       $REGION"

@@ -88,6 +88,13 @@ export const API_STACK_INVENTORY: ReadonlyArray<InventoryStack> = [
     registration: 'direct',
     sources: [{ nestedStackId: null, file: 'telemetry-stack.ts' }],
   },
+  // The Portal assistant's own Regional REST API with its own Cognito
+  // authorizer (portal-ai-assistant design §6, §10).
+  {
+    stackName: 'EdgeCVPortalAssistantStack',
+    registration: 'direct',
+    sources: [{ nestedStackId: null, file: 'assistant-stack.ts' }],
+  },
 ];
 
 /** A method that is deliberately registered without the Cognito authorizer. */
