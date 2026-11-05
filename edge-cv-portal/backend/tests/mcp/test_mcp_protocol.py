@@ -18,6 +18,8 @@ import json
 import sys
 
 import pytest
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 from mcp.shared.exceptions import MCPError
 from mcp.types import INVALID_PARAMS
 
@@ -67,7 +69,7 @@ def test_discover_fields(portal, view):
     info, instructions = h.in_memory(view, go, h.access_token())
     assert info.name == server.server_name(view)
     assert info.name == ('dda-portal-mcp' if view is None else f'dda-portal-mcp/{view}')
-    assert info.version == '1.2.0'
+    assert info.version == '1.3.0'
     assert instructions == server.instructions_for(view)
 
 
@@ -101,7 +103,7 @@ def test_tools_list_is_deterministic_and_rendered(portal, view):
 
 def test_aggregate_lists_the_89_delivered_read_only_tools(portal):
     # 87 Phase-1 tools and the two Phase-2 read-only tools; the switch is off
-    # (Phase 3 has no read-only tool).
+    # (Phases 3 and 4 have no read-only tool).
     names = [t.name for t in listed(None).tools]
     assert len(names) == 89
     assert {'portal_devices_logs_analyze', 'portal_workflows_plugin_generate_status_get'} <= set(names)
@@ -119,17 +121,80 @@ def test_switch_and_phases_widen_the_list(portal):
         'MUTATING, DESTRUCTIVE — requires confirm=<target_thing_group | target_devices[0]>.')
 
 
-def test_switch_lists_the_delivered_phase_three_tools(portal):
-    assert DELIVERED_PHASES == (1, 2, 3)
+def test_switch_lists_the_delivered_phase_four_tools(portal):
+    assert DELIVERED_PHASES == (1, 2, 3, 4)
     portal.monkeypatch.setenv('MCP_MUTATING_TOOLS_ENABLED', 'true')
     names = {t.name for t in listed(None).tools}
     assert names == expected_names(None, mutating=True)
-    # 87 + 53 + 43: portal_models_delete is not in the catalog (Backlog 1).
-    assert len(names) == 87 + 53 + 43
+    # 87 + 53 + 43 + 4: portal_models_delete is not in the catalog (Backlog 1).
+    assert len(names) == 87 + 53 + 43 + 4
     assert {n for n in names if BY_NAME[n].phase == 3} == \
         {s.name for s in BY_NAME.values() if s.phase == 3}
+    assert {n for n in names if BY_NAME[n].phase == 4} == {
+        'portal_admin_account_create', 'portal_admin_account_disable',
+        'portal_admin_account_enable', 'portal_admin_account_delete'}
     assert 'portal_devices_deployment_create' in names
     assert 'portal_models_delete' not in names
+
+
+# ----------------------- Phase 4 across the phase gate (mcp-user-operations)
+
+PHASE_FOUR = {s.name for s in CATALOG if s.phase == 4}
+
+
+def test_phase_four_listed_and_accepted_only_when_delivered(portal):
+    # Independent of the current DELIVERED_PHASES: both values are patched.
+    spec = BY_NAME['portal_admin_account_create']
+    args = minimal_args(spec)
+
+    async def go(client):
+        try:
+            return await client.call_tool(spec.name, args)
+        except MCPError as error:
+            return error
+
+    portal.monkeypatch.setenv('MCP_MUTATING_TOOLS_ENABLED', 'true')
+    portal.monkeypatch.setattr(server, 'DELIVERED_PHASES', (1, 2, 3))
+    names = {t.name for t in listed('admin').tools}
+    assert len(names) == 15 and not names & PHASE_FOUR
+    error = h.in_memory('admin', go, h.access_token())
+    assert isinstance(error, MCPError)
+    assert error.error.code == INVALID_PARAMS and error.error.message == f'Unknown tool: {spec.name}'
+    assert portal.calls == []
+    portal.monkeypatch.setattr(server, 'DELIVERED_PHASES', (1, 2, 3, 4))
+    names = {t.name for t in listed('admin').tools}
+    assert len(names) == 19 and PHASE_FOUR <= names
+    result = h.in_memory('admin', go, h.access_token())
+    assert not isinstance(result, MCPError) and result.is_error is False, result
+    assert len(portal.calls) == 1
+
+
+@settings(max_examples=100, deadline=None)
+@given(view=st.one_of(st.none(), st.sampled_from(VIEWS)),
+       phases=st.sets(st.sampled_from((1, 2, 3, 4))).map(lambda s: tuple(sorted(s))),
+       mutating=st.booleans())
+@example(view=None, phases=(1, 2, 3), mutating=False)
+@example(view=None, phases=(1, 2, 3), mutating=True)
+@example(view='admin', phases=(1, 2, 3), mutating=True)
+@example(view=None, phases=(1, 2, 3, 4), mutating=True)
+@example(view='admin', phases=(1, 2, 3, 4), mutating=True)
+@example(view='admin', phases=(1, 2, 3, 4), mutating=False)
+def test_phase_four_listing_property(view, phases, mutating):
+    """**Feature: mcp-user-operations, Property 7: Listing and gate across Phase 4**
+
+    `tools_for_view` lists the Phase-4 rows iff 4 is delivered, the switch
+    is on and the view is `admin` or the aggregate; with (1, 2, 3) the lists
+    are the baseline's (89 / 183 on the aggregate, 8 / 15 on `admin`), with
+    (1, 2, 3, 4) and the switch on 187 and 19."""
+    names = {t.name for t in catalog.tools_for_view(view, phases, mutating)}
+    if 4 in phases and mutating and view in (None, 'admin'):
+        assert PHASE_FOUR <= names
+    else:
+        assert not names & PHASE_FOUR
+    counts = {(None, (1, 2, 3)): (89, 183), ('admin', (1, 2, 3)): (8, 15),
+              (None, (1, 2, 3, 4)): (89, 187), ('admin', (1, 2, 3, 4)): (8, 19)}
+    if (view, phases) in counts:
+        assert len(names) == counts[(view, phases)][1 if mutating else 0]
 
 
 # ------------------------------------------------------------------ alias
@@ -179,14 +244,14 @@ def test_read_only_call_dispatches_once(portal):
     assert event['requestContext']['authorizer']['claims'] == token.claims
     assert event['mcp']['channel'] == 'mcp'
     assert event['mcp']['tool'] == 'portal_devices_list'
-    assert event['mcp']['server'] == 'dda-portal-mcp/devices@1.2.0'
+    assert event['mcp']['server'] == 'dda-portal-mcp/devices@1.3.0'
     assert event['mcp']['principal_email'] == h.EMAIL
 
 
 def test_aggregate_endpoint_serves_every_view(portal):
     result = call(None, 'portal_devices_list', {'usecase_id': USECASE})
     assert result.is_error is False
-    assert portal.events[-1]['mcp']['server'] == 'dda-portal-mcp@1.2.0'
+    assert portal.events[-1]['mcp']['server'] == 'dda-portal-mcp@1.3.0'
 
 
 # ---------------------------------------------------------------- M call

@@ -141,7 +141,8 @@ def shape(spec, args: dict, response) -> Shaped:
     if status >= 300:
         if spec.bind_usecase_path and status == 404:
             return Shaped(failure=binding_failure())
-        return Shaped(failure=map_backend_status(status, body))
+        return Shaped(failure=map_backend_status(status, body,
+                                                 detail_key=spec.error_detail_key))
     refusal = check_binding(spec, body, args.get('usecase_id'))
     if refusal is not None:
         return Shaped(failure=refusal, binding_refused=True)

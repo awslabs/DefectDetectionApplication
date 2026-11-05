@@ -56,7 +56,11 @@ def args_for(spec, branch=0):
 
 
 def test_every_destructive_tool_has_a_confirm_argument():
-    assert len(DESTRUCTIVE) == 28
+    # 28 through Phase 3, plus the three Phase-4 M! rows (mcp-user-operations):
+    # portal_admin_account_disable, portal_admin_account_enable and
+    # portal_admin_account_delete, each with confirm=account_username. The
+    # owner's destructive-list sign-off is read against this pin.
+    assert len(DESTRUCTIVE) == 31
     for spec in DESTRUCTIVE:
         assert 'confirm' in spec.input_schema['properties'], spec.name
         assert spec.confirm_target or spec.confirm_literal, spec.name

@@ -183,10 +183,11 @@ def test_component_create_and_discover_are_not_implemented_and_absent():
     assert ('POST', '/components/discover') not in routes
 
 
-def test_account_lifecycle_routes_are_absent():
-    # Not registered until Backlog 2.
-    routes = {(r['method'], r['resource']) for r in cat.catalog_routes()}
-    for absent in (('POST', '/admin/users'), ('POST', '/admin/users/{username}/disable'),
-                   ('POST', '/admin/users/{username}/enable'),
-                   ('DELETE', '/admin/users/{username}')):
-        assert absent not in routes
+def test_account_lifecycle_routes_are_present():
+    # Registered since Backlog 2; offered as the Phase-4 account tools
+    # (spec: .kiro/specs/mcp-user-operations/, Requirement 7.2).
+    routes = {(r['method'], r['resource']): r['backend'] for r in cat.catalog_routes()}
+    for present in (('POST', '/admin/users'), ('POST', '/admin/users/{username}/disable'),
+                    ('POST', '/admin/users/{username}/enable'),
+                    ('DELETE', '/admin/users/{username}')):
+        assert routes.get(present) == 'userAdmin', present

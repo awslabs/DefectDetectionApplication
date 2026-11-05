@@ -36,6 +36,12 @@ PINNED_AUDIT_FLAGS = {
         False, "only an 'approved' decision audits"),
     'portal_workflows_plugin_generate_message': (
         False, 'only an accept turn audits'),
+    # mcp-user-operations A10: _set_account_enabled answers an account already
+    # in the requested state with 200 `changed: false` and no audit write.
+    'portal_admin_account_disable': (
+        False, 'the already-in-state no-op branch writes no entry'),
+    'portal_admin_account_enable': (
+        False, 'the already-in-state no-op branch writes no entry'),
 }
 
 
@@ -99,6 +105,12 @@ def test_pinned_specs_exist():
     ('build_fleet', 'stop_build_server', (True, None)),
     ('build_fleet', 'terminate_build_server', (True, None)),
     ('workflow_validation', 'validate_workflow', (None, True)),
+    # Phase 4: the pending account_* entry on the success path, and
+    # @require_portal_admin (disable and enable through _set_account_enabled)
+    ('user_admin', 'create_account', (True, True)),
+    ('user_admin', 'delete_account', (True, True)),
+    ('user_admin', 'disable_account', (True, True)),
+    ('user_admin', 'enable_account', (True, True)),
 ])
 def test_fixed_cases(module, function, expected):
     audits, denials, calls = computed_flags(module, function)
@@ -133,3 +145,16 @@ def test_shared_components_provision_is_pinned_false():
     assert BY_NAME['portal_devices_shared_components_provision'].handler_audits is False
     audits, _d, _c = computed_flags('shared_components', 'provision_components')
     assert audits
+
+
+def test_disable_and_enable_are_pinned_false():
+    # The walk finds the pending entry, but the no-op branch writes none, so
+    # the envelope is always written: a no-op leaves one marked entry and a
+    # changed call leaves two (k + 1). Create and delete audit on every
+    # success path and keep the computed flag.
+    for name in ('portal_admin_account_disable', 'portal_admin_account_enable'):
+        assert BY_NAME[name].handler_audits is False, name
+        assert PINNED_AUDIT_FLAGS[name][0] is False, name
+    for name in ('portal_admin_account_create', 'portal_admin_account_delete'):
+        assert BY_NAME[name].handler_audits is True, name
+        assert name not in PINNED_AUDIT_FLAGS, name

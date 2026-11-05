@@ -24,7 +24,10 @@ from types import SimpleNamespace
 
 import pytest
 from boto3.dynamodb.conditions import Attr
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
+from _schema_strategy import arguments
 from mcp_portal import audit, dispatch, shaping, telemetry
 from mcp_portal import catalog as cat
 from mcp_portal.dispatch import BackendResponse, McpContext
@@ -35,6 +38,9 @@ BY_NAME = {s.name: s for s in cat.CATALOG}
 JOB_GET = BY_NAME['portal_data_labeling_job_get']      # bind_usecase_path, audits nothing
 DEVICES = BY_NAME['portal_devices_list']               # handler_audits
 CAMERAS = BY_NAME['portal_devices_cameras_list']       # handler_audits_denials only
+# mcp-user-operations: the four account rows carry `resource_id_arg`
+ACCOUNT_TOOLS = [s for s in cat.CATALOG if s.resource_id_arg]
+ACCOUNT_DISABLE = BY_NAME['portal_admin_account_disable']
 MARKER = ('channel', 'mcp_tool', 'mcp_server', 'mcp_client', 'mcp_request_id')
 DENYLISTED = ('password', 'verifier', 'hash')
 TOKEN = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJl'
@@ -269,20 +275,88 @@ def test_invoke_failure_writes_an_envelope(env):
 
 # ------------------------------------------------------------ pre-dispatch
 
-@pytest.mark.parametrize('category', ['invalid_input', 'confirmation_required',
-                                      'mutating_tools_disabled', 'timeout',
-                                      'backend_failure'])
-def test_pre_dispatch_outcomes_write_one_envelope(env, category):
+PRE_DISPATCH_CASES = [
+    (category, DEVICES, {'usecase_id': 'uc-1'}, 'collection')
+    for category in ('invalid_input', 'confirmation_required', 'mutating_tools_disabled',
+                     'timeout', 'backend_failure')
+] + [
+    # mcp-user-operations: the step-5b refusal of an account tool names the
+    # target account (`resource_id_arg`), not 'collection'
+    ('conflict', ACCOUNT_DISABLE, {'account_username': 'alice-x1', 'confirm': 'alice-x1'},
+     'alice-x1'),
+]
+
+
+@pytest.mark.parametrize('category,spec,args,resource_id', PRE_DISPATCH_CASES,
+                         ids=[f'{c[1].name}-{c[0]}' for c in PRE_DISPATCH_CASES])
+def test_pre_dispatch_outcomes_write_one_envelope(env, category, spec, args, resource_id):
     sub = f'env-{uuid.uuid4()}'
-    principal, ctx = principal_for(sub), context_for(DEVICES, identity_source=None)
-    outcome = audit.Outcome(dispatched=False, category=category,
-                            args={'usecase_id': 'uc-1'}, usecase_id='uc-1')
-    assert audit.write_envelope(DEVICES, principal, ctx, outcome, 3)
+    principal, ctx = principal_for(sub), context_for(spec, identity_source=None)
+    outcome = audit.Outcome(dispatched=False, category=category, args=args,
+                            usecase_id=args.get('usecase_id'))
+    assert audit.write_envelope(spec, principal, ctx, outcome, 3)
     items = entries(env, sub)
     assert len(items) == 1 and items[0]['result'] == 'failure'
     assert items[0]['details']['error_category'] == category
-    assert items[0]['resource_id'] == 'collection'
-    assert_marked(items, DEVICES)
+    assert items[0]['resource_id'] == resource_id
+    assert_marked(items, spec)
+
+
+# ------------------------------------- envelope `resource_id` rule (Property 6)
+
+def baseline_resource_id(spec, outcome, resource_id):
+    """`audit._resource_id` as it was before `resource_id_arg`."""
+    if resource_id:
+        return str(resource_id)
+    for name in spec.input_schema.get('properties', {}):
+        if name.endswith('_id') and name != 'usecase_id' and outcome.args.get(name):
+            return str(outcome.args[name])
+    return audit.COLLECTION
+
+
+@settings(max_examples=100, deadline=None,
+          suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much])
+@given(data=st.data(), shaper_id=st.one_of(st.none(), st.just(''),
+                                          st.text(min_size=1, max_size=12)))
+def test_envelope_resource_id_rule(data, shaper_id):
+    """**Feature: mcp-user-operations, Property 6: Envelope `resource_id` rule**
+
+    The shaper's id; else the `resource_id_arg` value when supplied; else
+    the first `_id` argument other than `usecase_id`; else 'collection'. A
+    spec without the field gets the baseline's answer. Validates:
+    Requirement 5.6 of .kiro/specs/mcp-user-operations/."""
+    spec = data.draw(st.one_of(st.sampled_from(ACCOUNT_TOOLS), st.sampled_from(cat.CATALOG)))
+    properties = list(spec.input_schema.get('properties', {}))
+    if properties and data.draw(st.booleans()):
+        spec = dataclasses.replace(spec, resource_id_arg=data.draw(st.sampled_from(properties)))
+    args = dict(data.draw(arguments(spec)))
+    if spec.resource_id_arg and data.draw(st.booleans()):
+        args.pop(spec.resource_id_arg, None)
+    outcome = audit.Outcome(dispatched=False, args=args)
+    got = audit._resource_id(spec, outcome, shaper_id)
+    if shaper_id:
+        assert got == shaper_id
+    elif spec.resource_id_arg and args.get(spec.resource_id_arg):
+        assert got == str(args[spec.resource_id_arg])
+    else:
+        assert got == baseline_resource_id(spec, outcome, shaper_id)
+    if spec.resource_id_arg is None:
+        assert got == baseline_resource_id(spec, outcome, shaper_id)
+
+
+def test_resource_id_arg_fixed_cases():
+    args = {'account_username': 'alice-x1', 'confirm': 'alice-x1'}
+    named = audit.Outcome(dispatched=False, args=args)
+    assert audit._resource_id(ACCOUNT_DISABLE, named, None) == 'alice-x1'
+    assert audit._resource_id(ACCOUNT_DISABLE, named, 'from-the-body') == 'from-the-body'
+    assert audit._resource_id(ACCOUNT_DISABLE, audit.Outcome(dispatched=False), None) == \
+        'collection'
+    # Without the field the argument is no `_id` argument: 'collection', as before.
+    plain = dataclasses.replace(ACCOUNT_DISABLE, resource_id_arg=None)
+    assert audit._resource_id(plain, named, None) == 'collection'
+    sync = BY_NAME['portal_admin_edge_sync_device_sync']
+    assert audit._resource_id(sync, audit.Outcome(dispatched=False,
+                                                  args={'device_id': 'd1'}), None) == 'd1'
 
 
 @pytest.mark.parametrize('category', ['not_authorized', 'authorization_unavailable'])

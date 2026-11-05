@@ -18,6 +18,11 @@ Its `on_call_tool` runs the §4 pipeline:
 4. gate: a mutating spec with the switch off is `mutating_tools_disabled`;
 5. authorize: `authz.authorize` (it writes the marked denial /
    unavailability entry);
+5b. self-protection, for a spec with `self_protect_arg` (the account
+   disable and delete tools; mcp-user-operations design A4): the time-budget
+   guard, the caller's email read from the User_Pool on the call, and a
+   target naming the caller's own account refused `conflict` before
+   dispatch;
 6. dispatch: `dispatch.invoke` with the `mcp` block (`client_label(ctx)`);
 7. audit: `shaping.shape` runs the D36 binding check first, then
    `audit.write_envelope`;
@@ -27,9 +32,10 @@ Its `on_call_tool` runs the §4 pipeline:
 `portal_admin_whoami` is the one local spec: it is answered from the real
 resolver and never dispatched.
 
-Steps 3-9 live in `mcp_portal.pipeline.call_tool` (portal-ai-assistant
-design §1), shared with the Portal assistant; this module authenticates,
-looks the tool up and renders the `ToolOutcome` as a `CallToolResult`. The
+Steps 3-9, step 5b included, live in `mcp_portal.pipeline.call_tool`
+(portal-ai-assistant design §1), shared with the Portal assistant; this
+module authenticates, looks the tool up and renders the `ToolOutcome` as a
+`CallToolResult`. The
 helper names below (`find_spec`, `validation_failure`, `expected_confirm`,
 `confirmation_failure`, `whoami`) are re-exported from the pipeline so the
 tests and the catalog documentation keep one import path.

@@ -81,8 +81,15 @@ def _result(outcome: Outcome) -> str:
 
 
 def _resource_id(spec, outcome: Outcome, resource_id: Optional[str]) -> str:
+    """The envelope's `resource_id`: the shaper's id from the response; else
+    the value of the spec's `resource_id_arg` when the call supplied it
+    (mcp-user-operations design A8: `account_username` does not end in
+    `_id`); else the first `_id`-suffixed argument other than `usecase_id`;
+    else `'collection'`."""
     if resource_id:
         return str(resource_id)
+    if spec.resource_id_arg and outcome.args.get(spec.resource_id_arg):
+        return str(outcome.args[spec.resource_id_arg])
     for name in spec.input_schema.get('properties', {}):
         if name.endswith('_id') and name != 'usecase_id' and outcome.args.get(name):
             return str(outcome.args[name])

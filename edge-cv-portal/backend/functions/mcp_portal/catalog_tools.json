@@ -2,6 +2,34 @@
   {
     "classification": "mutating",
     "destructive": false,
+    "name": "portal_admin_account_create",
+    "phase": 4,
+    "status_tool": "portal_admin_accounts_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_admin_account_delete",
+    "phase": 4,
+    "status_tool": "portal_admin_accounts_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_admin_account_disable",
+    "phase": 4,
+    "status_tool": "portal_admin_accounts_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": true,
+    "name": "portal_admin_account_enable",
+    "phase": 4,
+    "status_tool": "portal_admin_accounts_list"
+  },
+  {
+    "classification": "mutating",
+    "destructive": false,
     "name": "portal_admin_account_role_change",
     "phase": 3,
     "status_tool": "portal_admin_accounts_list"

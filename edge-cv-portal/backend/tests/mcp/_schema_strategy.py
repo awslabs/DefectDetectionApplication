@@ -111,7 +111,11 @@ def arguments(draw, spec):
 
 # ------------------------------------------------- deterministic arguments
 
-_SAMPLE_STRINGS = ('x1', 's3://fake-bucket/fake-key', 'model-x1', '1.0.0', 'fake-value-1')
+# `_sample` takes the first member valid for a property. The address comes
+# last, so it fills only an email-shaped property (`account_email`), and
+# every identifier, `account_username` included, still samples as 'x1'.
+_SAMPLE_STRINGS = ('x1', 's3://fake-bucket/fake-key', 'model-x1', '1.0.0', 'fake-value-1',
+                   'fake-user-1@example.com')
 
 
 def _sample(prop: dict):

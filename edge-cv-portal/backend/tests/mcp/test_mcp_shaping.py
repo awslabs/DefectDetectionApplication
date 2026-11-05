@@ -4,11 +4,19 @@ Spec: .kiro/specs/mcp-servers/ (design.md §2 `errors.py` and `shaping.py`
 rows, D32, D36, §4 step 9, Error Handling "Backend status", "Use_Case
 binding", "Result shaping", Data Models "Tool error result"; tasks.md 6.5).
 Requirements 1.4, 1.5, 1.6, 3.3, 2.7.
+
+The account-tool cases at the end are .kiro/specs/mcp-user-operations/
+(design A7, Property 5; tasks.md 2.11): the handler's `message` reaches
+the caller through the rows' `error_detail_key`.
 """
+import dataclasses
 import json
+import sys
 
 import pytest
+from boto3.dynamodb.conditions import Attr
 
+import _portal_harness as h
 from mcp_portal import catalog as cat
 from mcp_portal import errors, shaping
 from mcp_portal.dispatch import BackendResponse
@@ -190,3 +198,102 @@ def test_read_only_results_carry_no_resource_id():
     shaped = shaping.shape(BY_NAME['portal_devices_get'], {'usecase_id': 'uc', 'device_id': 'd'},
                            response(200, {'deployment_id': 'dep-1'}))
     assert shaped.resource_id is None
+
+
+# ------------------- account tools: the error detail key (mcp-user-operations)
+
+TARGET = 'fake-target-1'
+GUARD_REASON = (f'{TARGET} is the last remaining enabled PortalAdmin account; the portal '
+                'must retain at least one enabled PortalAdmin')
+# The partial-state and guard bodies of `user_admin.py` (design Key research
+# findings), each with the text its `message` carries.
+HANDLER_BODIES = [
+    ('portal_admin_account_create', 502, {
+        'error': 'account was not provisioned',
+        'message': f'The Cognito account {TARGET} was created but its portal registry '
+                   'entry was not written, so it has no portal access; delete the account '
+                   'and retry'}, 'backend_failure'),
+    ('portal_admin_account_disable', 502, {
+        'error': 'disable incomplete',
+        'message': f'The account {TARGET} was disabled in the user pool but its portal '
+                   'registry entry was not updated, so its portal access is unchanged; '
+                   'retry the disable'}, 'backend_failure'),
+    ('portal_admin_account_enable', 502, {
+        'error': 'enable incomplete',
+        'message': f'The account {TARGET} was enabled in the user pool but its portal '
+                   'registry entry was not updated, so its portal access is unchanged; '
+                   'retry the enable'}, 'backend_failure'),
+    ('portal_admin_account_delete', 502, {
+        'error': 'partial deletion',
+        'message': f'The account {TARGET} was deleted but its verifier record was not '
+                   'removed; it will be removed on a subsequent attempt'}, 'backend_failure'),
+    ('portal_admin_account_delete', 409, {
+        'error': 'Deletion rejected', 'message': GUARD_REASON}, 'conflict'),
+]
+
+
+@pytest.mark.parametrize('name,status,body,category', HANDLER_BODIES,
+                         ids=[f'{b[0]}-{b[2]["error"]}' for b in HANDLER_BODIES])
+def test_account_tool_errors_carry_the_handler_message(name, status, body, category):
+    spec = BY_NAME[name]
+    args = {'account_username': TARGET}
+    failure = shaping.shape(spec, args, response(status, body)).failure
+    assert failure.category == category and failure.status == status
+    assert failure.message == f"{body['error']}: {body['message']}"
+    assert failure.effect is None
+    # Without the row's detail key only the error label would reach the caller.
+    plain = dataclasses.replace(spec, error_detail_key=None)
+    assert shaping.shape(plain, args, response(status, body)).failure.message == body['error']
+
+
+@pytest.fixture
+def portal(aws_stack, monkeypatch):
+    shared = sys.modules['shared_utils']
+    monkeypatch.setattr(shared.rbac_manager, 'has_permission', lambda *_a, **_k: True)
+    monkeypatch.delenv('PORTAL_REGISTRY_ENFORCED', raising=False)
+    fake = h.install(monkeypatch, phases=h.ALL_PHASES, mutating=True)
+    fake.stack = aws_stack
+    return fake
+
+
+def account_call(portal, name, status, body):
+    """One confirmed account-tool call through `on_call_tool`, the fake
+    Lambda answering `(status, body)`; (structured content, audit entries)."""
+    portal.answer = lambda _arn, _event: (status, body)
+    token = h.access_token()
+    result = h.in_memory('admin', lambda client: client.call_tool(
+        name, {'account_username': TARGET, 'confirm': TARGET}), token)
+    items = portal.stack.tables.audit_log.scan(
+        FilterExpression=Attr('user_id').eq(token.subject))['Items']
+    assert result.is_error is True and len(portal.calls) == 1
+    return result.structured_content, items
+
+
+def test_a_partial_state_502_carries_the_recovery_step(portal):
+    body = dict(HANDLER_BODIES[1][2])
+    content, items = account_call(portal, 'portal_admin_account_disable', 502, body)
+    assert content['category'] == 'backend_failure' and content['status'] == 502
+    assert 'retry the disable' in content['message']
+    assert 'effect' not in content and 'status_tool' not in content
+    [envelope] = items
+    assert envelope['details']['status'] == 502 and envelope['resource_id'] == TARGET
+
+
+def test_the_last_portal_admin_guard_409_carries_the_reason(portal):
+    content, items = account_call(portal, 'portal_admin_account_delete', 409,
+                                  {'error': 'Deletion rejected', 'message': GUARD_REASON})
+    assert content['category'] == 'conflict' and content['status'] == 409
+    assert content['message'] == f'Deletion rejected: {GUARD_REASON}'
+    [envelope] = items
+    assert envelope['details']['error_category'] == 'conflict'
+
+
+def test_the_handler_catch_all_500_is_a_backend_failure(portal):
+    content, items = account_call(portal, 'portal_admin_account_enable', 500,
+                                  {'error': 'Internal server error'})
+    assert content['category'] == 'backend_failure' and content['status'] == 500
+    assert content['message'] == 'Internal server error'
+    assert 'effect' not in content and 'status_tool' not in content
+    [envelope] = items
+    assert envelope['action'] == 'mcp_tool_call' and envelope['result'] == 'failure'
+    assert envelope['details']['status'] == 500

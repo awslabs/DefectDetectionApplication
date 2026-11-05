@@ -33,6 +33,10 @@
  *    events, scoped to the portal pool), its User-Manager-role exclusion,
  *    and the five attribution fields on the SNS target.
  *
+ * The last block belongs to the mcp-user-operations spec (design A4, tasks.md
+ * 2.15): it pins the two user-pool facts the MCP self-protection rule relies
+ * on, reusing the AuthStack template synthesized here.
+ *
  * Conventions follow `user-admin-audit-grant.test.ts` /
  * `synthetic-data-s3-permissions.test.ts`: synthesize once in `beforeAll`
  * with a generous timeout (Lambda/layer asset staging is expensive), locate
@@ -713,5 +717,25 @@ describe('Requirement 6: out-of-band Cognito administration is detected', () => 
     };
     expect(ruleOf('off').Properties.State).toBe('ENABLED');
     expect(ruleOf('on')).toEqual(ruleOf('off'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcp-user-operations (design A4, tasks.md 2.15): the two user-pool facts the
+// MCP self-protection rule relies on when it compares an account name with
+// the caller's username and email address exactly
+// ---------------------------------------------------------------------------
+describe('mcp-user-operations: the user pool premise of the exact self-protection comparison', () => {
+  test('sign-in names are case-sensitive and email is a sign-in alias of the pool', () => {
+    const pools = Object.values(
+      authTemplate.findResources('AWS::Cognito::UserPool'),
+    ) as any[];
+    expect(pools).toHaveLength(1);
+    const properties = pools[0].Properties;
+    // A differently-cased string names another account or none, never the
+    // caller's (no UsernameConfiguration with CaseSensitive: false).
+    expect(properties.UsernameConfiguration?.CaseSensitive).not.toBe(false);
+    // An email address is the alias of at most one account.
+    expect(properties.AliasAttributes).toContain('email');
   });
 });

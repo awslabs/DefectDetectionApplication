@@ -110,7 +110,7 @@ export const MCP_BACKEND_FUNCTIONS_PARAMETER_NAME = '/dda-portal/mcp/backend-fun
 export const MCP_LOG_GROUP_NAME = '/dda-portal/mcp-server';
 export const MCP_SCOPE_NAME = 'portal.tools';
 /** mcp_portal.__version__ */
-export const MCP_SERVER_VERSION = '1.2.0';
+export const MCP_SERVER_VERSION = '1.3.0';
 /** Per-route throttle of the six MCP endpoint routes (N6). */
 export const MCP_ENDPOINT_ROUTE_KEYS = [
   'POST /mcp', 'GET /mcp', 'DELETE /mcp',

@@ -4,10 +4,13 @@
 `call_tool` runs one already-looked-up `ToolSpec` for an authenticated
 `Principal`: validate the arguments and the destructive `confirm` rule, apply
 the mutating gate, authorize (the denial / unavailability entry is written by
-`authz.authorize`), dispatch (or answer `portal_admin_whoami` locally), shape,
-write the audit envelope and emit the telemetry line. It returns a plain
-`ToolOutcome`; the caller renders it for its transport - `server.py` as an
-MCP `CallToolResult`, the Portal assistant as a Bedrock `toolResult`.
+`authz.authorize`), apply the self-protection rule of a spec with
+`self_protect_arg` (step 5b: a principal cannot disable or delete its own
+account; mcp-user-operations design A4), dispatch (or answer
+`portal_admin_whoami` locally), shape, write the audit envelope and emit the
+telemetry line. It returns a plain `ToolOutcome`; the caller renders it for
+its transport - `server.py` as an MCP `CallToolResult`, the Portal assistant
+as a Bedrock `toolResult`. Both run step 5b, because both call `call_tool`.
 
 This module imports no `mcp` SDK symbol, so a Lambda without the MCP layer
 can use it. Its behaviour is the MCP server's own: `server.on_call_tool`
@@ -24,9 +27,15 @@ import jsonschema
 
 from mcp_portal import audit, authz, catalog, dispatch, shaping, telemetry
 from mcp_portal.dispatch import BackendResponse, McpContext
-from mcp_portal.errors import ToolFailure
+from mcp_portal.errors import BUDGET_MESSAGE, ToolFailure
+from mcp_portal.principal import EmailLookup, refresh_email
 
 logger = logging.getLogger(__name__)
+
+# Step 5b, the Self_Protection_Rule (mcp-user-operations design A4).
+SELF_PROTECTION_MESSAGE = 'a principal cannot disable or delete its own account'
+EMAIL_UNRESOLVED_MESSAGE = ("the caller's account email could not be resolved, so the "
+                            'self-protection rule cannot be evaluated; retry')
 
 
 @dataclass(frozen=True)
@@ -133,6 +142,34 @@ def confirmation_failure(spec, args: dict) -> Optional[ToolFailure]:
     return None
 
 
+def self_protection_failure(spec, args, principal,
+                            lookup: EmailLookup) -> Optional[ToolFailure]:
+    """Step 5b: the refusal of a call whose target names the caller's own
+    account, or None. Pure; never raises; makes no call.
+
+    None for a spec without `self_protect_arg` and for an absent or
+    non-string target. Otherwise, in this order: the target equal to
+    `principal.username` or `principal.sub` is `conflict` (409); a failed
+    lookup is `backend_failure` (retryable: the failure was not cached); the
+    target equal to the address the lookup returned is `conflict`; else
+    None, which includes an account without an email attribute (`'unknown'`
+    with `failed` False). Every comparison is exact; `principal.email`, the
+    cached step-1 value, is not consulted.
+    """
+    if not spec.self_protect_arg:
+        return None
+    target = (args or {}).get(spec.self_protect_arg)
+    if not isinstance(target, str):
+        return None
+    if target == principal.username or target == principal.sub:
+        return ToolFailure('conflict', SELF_PROTECTION_MESSAGE, status=409)
+    if lookup.failed:
+        return ToolFailure('backend_failure', EMAIL_UNRESOLVED_MESSAGE)
+    if lookup.email != 'unknown' and target == lookup.email:
+        return ToolFailure('conflict', SELF_PROTECTION_MESSAGE, status=409)
+    return None
+
+
 # ------------------------------------------------------------- local spec
 
 def whoami(principal):
@@ -166,13 +203,16 @@ def whoami(principal):
 def call_tool(spec, args: dict, principal, ctx: McpContext, *,
               mutating_enabled: bool, view: Optional[str] = None,
               server_version: str = '', event_name: str = telemetry.EVENT) -> ToolOutcome:
-    """Steps 3-9 of the pipeline for one spec (design §4 of mcp-servers).
+    """Steps 3-9 of the pipeline for one spec (design §4 of mcp-servers), with
+    step 5b between authorization and dispatch (mcp-user-operations).
 
     `ctx` carries the request identity and the marker block (`channel`,
     `server`, `client`, `request_id`); its `identity_source` is filled here
-    from the authorization decision. `mutating_enabled` is the caller's
-    switch (the MCP deployment flag, or the assistant's Actions_Switch).
-    `view`, `server_version` and `event_name` only shape the telemetry line.
+    from the authorization decision. Step 5b does not rebind it, so its
+    `principal_email` stays the value the caller set. `mutating_enabled` is
+    the caller's switch (the MCP deployment flag, or the assistant's
+    Actions_Switch). `view`, `server_version` and `event_name` only shape
+    the telemetry line.
     """
     started = time.monotonic()
     args = dict(args or {})
@@ -231,6 +271,19 @@ def call_tool(spec, args: dict, principal, ctx: McpContext, *,
             shaped=None, status=None, dispatched=False, identity_source=None,
             duration_ms=int(elapsed_ms()))
     identity_source = decision.identity_source
+    # 5b. self-protection (disable and delete): first the dispatcher's own
+    # time-budget rule (no read without the time a dispatch needs), then the
+    # caller's address read from the User_Pool on this call, then the decision
+    if spec.self_protect_arg:
+        remaining = dispatch._remaining_ms()
+        if remaining is not None and remaining < dispatch.MIN_DISPATCH_BUDGET_MS:
+            return finish(ToolFailure('timeout', BUDGET_MESSAGE), dispatched=False,
+                          identity_source=identity_source)
+        lookup = refresh_email(principal)
+        failure = self_protection_failure(spec, args, principal, lookup)
+        if failure is not None:
+            logger.info('%s for %s: %s', failure.category, spec.name, failure.message)
+            return finish(failure, dispatched=False, identity_source=identity_source)
     # 6. dispatch
     if spec.backend is None:
         response = whoami(principal)

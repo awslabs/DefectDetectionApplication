@@ -39,6 +39,12 @@ PORTAL = frozenset({'PortalAdmin'})
 # the set the handler serves every entry to (PortalAdmin); other roles get a
 # view filtered to their own Use_Cases, which Requirement 3.7 does not cover.
 HANDLER_ROLES = {
+    # Phase 4 (mcp-user-operations): every route function is decorated with
+    # @require_portal_admin.
+    'portal_admin_account_create': PORTAL,
+    'portal_admin_account_delete': PORTAL,
+    'portal_admin_account_disable': PORTAL,
+    'portal_admin_account_enable': PORTAL,
     'portal_admin_account_role_change': PORTAL,
     'portal_admin_accounts_list': PORTAL,
     'portal_admin_audit_logs_query': PORTAL,
@@ -298,6 +304,10 @@ def test_declared_roles_are_a_subset_of_the_handler_set(spec, role_permissions):
     # branch base: provision_components requires PortalAdmin on the Use_Case
     ('portal_devices_shared_components_provision', 'system_admin', 'update_usecases',
      {'UseCaseAdmin'}),
+    # Phase 4: create_account is @require_portal_admin; view_usecases is held
+    # by four more roles (DataLabeler holds labeling_tasks_self only)
+    ('portal_admin_account_create', 'manage_users', 'view_usecases',
+     {'Viewer', 'Operator', 'DataScientist', 'UseCaseAdmin'}),
 ])
 def test_former_permission_fails_with_the_extra_roles_named(
         name, declared, former, extra, role_permissions):

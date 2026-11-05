@@ -4,6 +4,18 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Added - MCP server account tools, Phase 4 (2026-11-04)
+
+The Portal MCP server (`EdgeCVPortalMcpStack`, server version `1.3.0`) delivers Phase 4: four account tools in the `admin` view, `portal_admin_account_create`, `portal_admin_account_disable`, `portal_admin_account_enable` and `portal_admin_account_delete`. They create, disable, enable and delete Portal accounts through the same handler as the User Manager page. The edge MCP server is unchanged. Nothing changes for an existing deployment until an administrator turns the switch on.
+
+- **Off by default.** The four tools are mutating, so they are listed and accepted only while the CDK context `mcpMutatingToolsEnabled` is `true`. With the switch off, the portal's `/mcp` still lists 89 tools (Phase 4 adds no read-only tool); with it on, 187, and `/mcp/admin` lists 19.
+- **PortalAdmin only.** Each tool needs `manage_users`, which only PortalAdmin holds; other roles are refused `not_authorized`.
+- **Disable, enable and delete need `confirm`.** They are destructive and are accepted only with a `confirm` argument equal to `account_username`. A call without `confirm`, or with another value, answers `confirmation_required`.
+- **No disabling or deleting your own account.** A PortalAdmin that names its own account in a disable or delete call is refused `conflict` before anything runs. The server compares the target with the caller's username, user ID (`sub`) and the email address it reads from the user pool on that call; when that read fails, the call answers `backend_failure` and can be retried.
+- **The last enabled PortalAdmin stays.** The User Manager's rule applies unchanged: disabling or deleting the last enabled PortalAdmin account answers `conflict` with its reason.
+- **Create sends the invitation.** The user pool emails the new account's temporary password to `account_email`; no tool returns a password.
+- **Audit entries.** The handler writes `account_create`, `account_disable`, `account_enable` and `account_delete` as it does for the User Manager page, with the MCP markers (`channel=mcp`). The MCP server writes `mcp_tool_call` for every disable and enable call and for every create or delete call that does not succeed; a call refused for a missing permission is recorded as `unauthorized_access` instead. The Admin Guide "MCP tools" section lists the entries and their fields.
+
 ### Added - MCP server mutating tools, Phase 3 (2026-11-02)
 
 The Portal MCP server (`EdgeCVPortalMcpStack`, server version `1.2.0`) and the edge MCP server of the LocalServer deliver Phase 3 of the MCP tool catalog, the last phase: the high-consequence mutating tools, beside the read-only tools of Phase 1 and the low-consequence mutating tools of Phase 2 (server version `1.1.0`, 2026-11-01). Phase 3 adds 43 portal mutating tools (use case and role administration and edge sync; device flags, shared components, deployments and the removal of devices, cameras, components and registrations; model packaging and publishing; data configuration, labeling jobs, reviews and teams, synthetic-data retraining and pre-labeled dataset removal; workflow packaging and removal, test datasets, the plugin lifecycle, custom node types, builds, build servers and the build configuration) and 17 edge mutating tools (LocalServer restart; workflow create, run, update, retry and delete; registration trigger and continuous pause and resume; result removal; camera feature apply and disconnect; image source add, update and delete; model start and stop). Nothing changes for an existing deployment until an administrator turns the switch on.

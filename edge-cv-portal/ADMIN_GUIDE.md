@@ -1719,7 +1719,7 @@ the portal's existing Cognito user pool, dispatches each tool call to the
 existing handler Lambda of the matching REST route, applies the same role and
 permission checks as the web UI, and writes every call to the Audit_Log.
 
-Phases 1, 2 and 3 are delivered: the server lists and accepts every row of the
+Phases 1 to 4 are delivered: the server lists and accepts every row of the
 [tool tables](#mcp-tools). Its mutating tools are listed and accepted only
 while `mcpMutatingToolsEnabled` is on, which it is not by default
 ([Settings](#settings-cdk-context)). The edge devices have their own
@@ -1819,7 +1819,7 @@ Set these in the `context` block of `infrastructure/cdk.json` (which
 | Context key | Default | Effect |
 |---|---|---|
 | `mcpRedirectUris` | empty | Extra OAuth callback URLs (comma-separated) beside `http://localhost:7899/oauth/callback`, for a client on another port. Each must be `http://localhost[:port]/path` or `https://…`: Cognito registers plain-HTTP callbacks for `localhost` only, and the synth refuses anything else. |
-| `mcpMutatingToolsEnabled` | `false` | Lists and accepts mutating tools: the Phase-2 and Phase-3 rows classified MUTATING in the [tool tables](#mcp-tools). Each still needs the permission its row names, and a DESTRUCTIVE one also needs `confirm`. |
+| `mcpMutatingToolsEnabled` | `false` | Lists and accepts mutating tools: the Phase-2, Phase-3 and Phase-4 rows classified MUTATING in the [tool tables](#mcp-tools). Each still needs the permission its row names, and a DESTRUCTIVE one also needs `confirm`. |
 | `mcpAllowedOrigins` | empty | `Origin` values (`http(s)://host[:port]`, no path) the endpoints accept. Empty by default: any request carrying an `Origin` header is refused. Set it only if the deployed-stack smoke check shows your client sending an `Origin` header. |
 
 ### Timeout alarm
@@ -1992,7 +1992,7 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
 |---|---|
 | Supported MCP protocol revisions | `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26` |
 | `mcp` Python SDK | `2.3.0` (Lambda layer, with `mangum` `0.22.0`) |
-| Portal_MCP_Server version | `1.2.0` (Phases 1, 2 and 3, released 2026-11-02; `1.1.0` was Phases 1 and 2, released 2026-11-01; `1.0.0` was Phase 1, released 2026-10-25). The edge MCP server reports `deliveredPhases` `[1, 2, 3]` from LocalServer `arm64JP5` 1.0.61 and `arm64JP6` 1.0.83 (built 2026-11-02) on, and `[1, 2]` from `arm64JP5` 1.0.60 and `arm64JP6` 1.0.82 (built 2026-11-01); Phases 2 and 3 were each verified on a JP5 and a JP6 device |
+| Portal_MCP_Server version | `1.3.0` (Phases 1 to 4, released 2026-11-04; `1.2.0` was Phases 1, 2 and 3, released 2026-11-02; `1.1.0` was Phases 1 and 2, released 2026-11-01; `1.0.0` was Phase 1, released 2026-10-25). Phase 4 is portal-only, so the edge MCP server is unchanged: it reports `deliveredPhases` `[1, 2, 3]` from LocalServer `arm64JP5` 1.0.61 and `arm64JP6` 1.0.83 (built 2026-11-02) on, and `[1, 2]` from `arm64JP5` 1.0.60 and `arm64JP6` 1.0.82 (built 2026-11-01); Phases 2 and 3 were each verified on a JP5 and a JP6 device |
 | Tested Kiro IDE and CLI versions | Kiro IDE 1.4.26 (OAuth sign-in, tool calls, token refresh and a view endpoint observed 2026-10-25/26); Kiro CLI 2.27.0 (OAuth sign-in and a tool call observed 2026-10-26); both negotiated MCP protocol `2026-07-28` |
 | Kiro and MCP documentation checked | 2026-10-18 and 2026-10-19 |
 
@@ -2067,16 +2067,17 @@ Each tool's description ends with its classification. List tools take
 `limit` (50 by default, at most 200, unless the tool's schema states
 other bounds). Tools of the `usecase` scope take
 `usecase_id` and are authorized in that Use_Case; `global` tools are
-authorized at the account level. Phases 1, 2 and 3 are delivered. The
+authorized at the account level. Phases 1 to 4 are delivered. The
 read-only tools, among them the Phase-2 `portal_devices_logs_analyze` and
 `portal_workflows_plugin_generate_status_get`, are always listed; the
-Phase-2 and Phase-3 mutating tools only while `mcpMutatingToolsEnabled` is
-on. A DESTRUCTIVE tool also needs `confirm` with the value its row names.
-The tables list the 43 delivered Phase-3 tools. A 44th, `portal_models_delete`,
+Phase-2, Phase-3 and Phase-4 mutating tools only while
+`mcpMutatingToolsEnabled` is on. A DESTRUCTIVE tool also needs `confirm` with
+the value its row names. The tables list the 43 delivered Phase-3 tools and
+the four Phase-4 account tools. A 44th Phase-3 tool, `portal_models_delete`,
 is not offered yet: deleting a model is destructive, so the tool is held for a
 later release with its own `confirm` rule.
 
-**`admin` view** (15 tools, `…/mcp/admin`)
+**`admin` view** (19 tools, `…/mcp/admin`)
 
 | Tool | Phase | Classification | Permission | Scope |
 |---|---|---|---|---|
@@ -2095,6 +2096,42 @@ later release with its own `confirm` rule.
 | `portal_admin_usecase_create` | 3 | MUTATING. | `create_usecases` | global |
 | `portal_admin_usecase_delete` | 3 | MUTATING, DESTRUCTIVE — requires confirm=usecase_id. | `delete_usecases` | usecase |
 | `portal_admin_usecase_update` | 3 | MUTATING. | `update_usecases` | usecase |
+| `portal_admin_account_create` | 4 | MUTATING. | `manage_users` | global |
+| `portal_admin_account_delete` | 4 | MUTATING, DESTRUCTIVE — requires confirm=account_username. | `manage_users` | global |
+| `portal_admin_account_disable` | 4 | MUTATING, DESTRUCTIVE — requires confirm=account_username. | `manage_users` | global |
+| `portal_admin_account_enable` | 4 | MUTATING, DESTRUCTIVE — requires confirm=account_username. | `manage_users` | global |
+
+The four account tools run the same handler as the User Manager page, with
+these rules and effects:
+
+- They are for PortalAdmins only (`manage_users`). Disable, enable and delete
+  also need `confirm` set to the `account_username` they name.
+- A PortalAdmin cannot disable or delete its own account through MCP. The
+  server refuses the call with `conflict` when the target equals the caller's
+  username or user ID (`sub`), or the caller's email address as read from the
+  user pool at the time of the call. When the user pool cannot be read for
+  that address, disable and delete answer `backend_failure`, and the call can
+  be retried.
+- The last enabled PortalAdmin cannot be disabled or deleted: the User Manager
+  answers `conflict` with its reason.
+- Create makes the user pool send its invitation email, with a temporary
+  password, to `account_email`. No tool returns a password.
+- Disable and enable change the account's standing on synced devices at the
+  next sync.
+- A disabled account's existing MCP session keeps the tools that need no
+  permission until its access token expires, up to 60 minutes later
+  ([Sign-in and authentication](#sign-in-and-authentication)). Under registry
+  enforcement, its permission-gated tools are denied from the next call on,
+  because the disable sets the account's registry row to disabled.
+- In the Audit Logs, all with `channel=mcp`: the handler records each change
+  it makes as `account_create` (with the new account's `username`, `email`,
+  `role`, `created_user_id` and `registry_entry`), `account_disable` or
+  `account_enable` (with `enabled`), or `account_delete` (with `email` and
+  `role`). The MCP server adds `mcp_tool_call` for every disable and enable
+  call, including one that finds the account already in that state and changes
+  nothing, and for every create or delete call that does not succeed. A call
+  from a principal without `manage_users` is recorded as `unauthorized_access`
+  instead.
 
 **`devices` view** (34 tools, `…/mcp/devices`)
 

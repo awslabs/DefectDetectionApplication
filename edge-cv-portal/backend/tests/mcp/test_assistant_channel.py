@@ -107,7 +107,8 @@ def test_marked_channels_constant():
 
 def test_principal_from_claims_uses_the_id_token_email(monkeypatch):
     calls = []
-    monkeypatch.setattr(principal, 'lookup_email', lambda s, u: calls.append((s, u)) or 'x')
+    monkeypatch.setattr(principal, 'lookup_email', lambda s, u, refresh=False:
+                        calls.append((s, u)) or principal.EmailLookup('x', False))
     claims = _claims(sub='sub-1')
     p = principal.principal_from_claims(claims)
     assert (p.sub, p.username, p.email) == ('sub-1', 'alice', 'alice@example.com')
@@ -118,7 +119,8 @@ def test_principal_from_claims_uses_the_id_token_email(monkeypatch):
 
 
 def test_principal_from_claims_falls_back_to_the_lookup_without_an_email(monkeypatch):
-    monkeypatch.setattr(principal, 'lookup_email', lambda s, u: f'{u}@looked.up')
+    monkeypatch.setattr(principal, 'lookup_email', lambda s, u, refresh=False:
+                        principal.EmailLookup(f'{u}@looked.up', False))
     p = principal.principal_from_claims(_claims(sub='sub-2', email='  '))
     assert p.email == 'alice@looked.up'
     p = principal.principal_from_claims({'sub': 'sub-3'})

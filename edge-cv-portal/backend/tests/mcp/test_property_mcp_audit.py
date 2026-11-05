@@ -21,6 +21,13 @@ authorization unavailable, pre-dispatch failure, and for the
 * a handler-side failure leaves at least one entry;
 * a D36 refusal leaves `k + 1`, the extra one the `denied` envelope with
   `details.reason='usecase_binding'`, whatever `handler_audits` says.
+
+Extended by .kiro/specs/mcp-user-operations/ (Property 4, tasks.md 2.10;
+**Feature: mcp-user-operations, Property 4: Marked audit entries per
+Phase-4 completion**): the pinned-spec clause - a 2xx of a spec whose
+`handler_audits` is False (pinned, as the account disable and enable rows
+are) leaves `k + 1` entries, its envelope always present with
+`details.status` 200. Half the draws keep the catalog's own flags.
 """
 import dataclasses
 import io
@@ -140,8 +147,12 @@ def cases(draw):
         base = BIND_SPEC
     else:
         base = draw(st.sampled_from(DISPATCHABLE if outcome in DISPATCHED else cat.CATALOG))
-    spec = dataclasses.replace(base, handler_audits=draw(st.booleans()),
-                               handler_audits_denials=draw(st.booleans()))
+    if draw(st.booleans()):
+        # the catalog's own flags, the pinned ones among them
+        spec = base
+    else:
+        spec = dataclasses.replace(base, handler_audits=draw(st.booleans()),
+                                   handler_audits_denials=draw(st.booleans()))
     args = draw(arguments(base))
     k = draw(st.integers(0, 2))
     status = draw(st.sampled_from(ERROR_STATUSES)) if outcome == 'backend_error' else 200
@@ -243,6 +254,14 @@ def test_marked_audit_entries_per_completion(env, case):
         else:
             assert len(items) == k + (0 if spec.handler_audits else 1)
         assert all(e['result'] == 'success' for e in envelopes)
+        if not spec.handler_audits:
+            # The pinned-spec clause (mcp-user-operations Property 4): a spec
+            # pinned handler_audits=False, as the account disable and enable
+            # rows are, always gets its envelope, so a 2xx leaves k + 1 and a
+            # handler that wrote nothing (the no-op) leaves exactly one.
+            assert len(items) == k + 1
+            [envelope] = envelopes
+            assert envelope['details']['status'] == 200
     elif case.outcome in ('denied', 'unavailable', 'pre_dispatch'):
         assert len(items) == 1
         expected = {'denied': authz.UNAUTHORIZED_ACTION,

@@ -361,3 +361,38 @@ def test_at_least_one_flags_group_is_an_any_of():
     # devices.update_device_flags: at least one of the flag fields.
     spec = BY_NAME['portal_devices_flags_update']
     assert spec.input_schema.get('anyOf')
+
+
+# ---------------------------- Phase-4 account tools (mcp-user-operations)
+
+ACCOUNT_CREATE = BY_NAME['portal_admin_account_create']
+ACCOUNT_PATH_ROWS = [BY_NAME[name] for name in ('portal_admin_account_disable',
+                                                'portal_admin_account_enable',
+                                                'portal_admin_account_delete')]
+
+
+def test_create_account_reads_username_email_and_role_from_the_body():
+    r = route('user_admin', 'create_account')
+    assert {(h.BODY, key) for key in ('username', 'email', 'role')} <= r.reads
+    assert ACCOUNT_CREATE.param_map == {'account_username': 'username',
+                                        'account_email': 'email'}
+    for argument in ('account_username', 'account_email', 'role'):
+        assert ACCOUNT_CREATE.location_of(argument) == 'body', argument
+
+
+@pytest.mark.parametrize('spec', ACCOUNT_PATH_ROWS, ids=lambda s: s.name)
+def test_account_path_rows_fill_the_username_segment(spec):
+    assert spec.path_parameters == ('username',)
+    assert spec.param_map == {'account_username': 'username'}
+    assert spec.location_of('account_username') == 'path'
+    # `confirm` is consumed by the server and never forwarded
+    assert 'confirm' in SERVER_CONSUMED_ARGS and 'confirm' not in spec.param_map
+    assert argument_problems(spec) == []
+
+
+def test_create_variant_with_an_argument_the_route_does_not_read_fails():
+    props = dict(ACCOUNT_CREATE.input_schema['properties'],
+                 send_invitation={'type': 'boolean'})
+    variant = dataclasses.replace(ACCOUNT_CREATE, input_schema=dict(
+        ACCOUNT_CREATE.input_schema, properties=props))
+    assert any("'send_invitation' is not read" in p for p in argument_problems(variant))

@@ -138,14 +138,56 @@ def test_email_lookup_failure_is_unknown_and_not_cached(cognito, caplog):
         p = principal.principal_from_access_token(token_for(claims))
     assert p.email == 'unknown'
     assert any('Email lookup failed' in r.getMessage() for r in caplog.records)
+    sub, username = claims['sub'], claims['username']
+    assert principal.lookup_email(sub, username) == principal.EmailLookup('unknown', True)
     cognito.fail = False
+    assert principal.lookup_email(sub, username) == \
+        principal.EmailLookup('person@example.com', False)
     assert principal.principal_from_access_token(token_for(claims)).email == 'person@example.com'
-    assert len(cognito.calls) == 2
+    assert len(cognito.calls) == 3
 
 
 def test_account_without_email_is_unknown(cognito):
     cognito.email = None
-    assert principal.principal_from_access_token(token_for(claims_for())).email == 'unknown'
+    claims = claims_for()
+    assert principal.principal_from_access_token(token_for(claims)).email == 'unknown'
+    # A successful read without the attribute is cached like any other.
+    assert principal.lookup_email(claims['sub'], claims['username']) == \
+        principal.EmailLookup('unknown', False)
+    assert len(cognito.calls) == 1
+
+
+def test_refresh_reads_the_pool_and_rewrites_the_cache(cognito):
+    # mcp-user-operations design A4: step 5b reads the caller's address on
+    # the call (`refresh=True` never reads the cache).
+    claims = claims_for()
+    sub, username = claims['sub'], claims['username']
+    cognito.email = 'old@example.com'
+    assert principal.lookup_email(sub, username) == principal.EmailLookup('old@example.com', False)
+    cognito.email = 'new@example.com'
+    assert principal.lookup_email(sub, username) == principal.EmailLookup('old@example.com', False)
+    assert len(cognito.calls) == 1
+    assert principal.lookup_email(sub, username, refresh=True) == \
+        principal.EmailLookup('new@example.com', False)
+    assert len(cognito.calls) == 2
+    assert principal.lookup_email(sub, username) == principal.EmailLookup('new@example.com', False)
+    assert len(cognito.calls) == 2
+    cognito.fail = True
+    assert principal.lookup_email(sub, username, refresh=True) == \
+        principal.EmailLookup('unknown', True)
+    assert len(cognito.calls) == 3
+    assert principal.lookup_email(sub, username) == principal.EmailLookup('new@example.com', False)
+    assert len(cognito.calls) == 3
+    # refresh_email passes the sub (the cache key) and the username (the
+    # AdminGetUser Username) through.
+    cognito.fail = False
+    cognito.email = 'third@example.com'
+    p = principal.Principal(sub=sub, username=username, email='old@example.com', claims=claims)
+    assert principal.refresh_email(p) == principal.EmailLookup('third@example.com', False)
+    assert cognito.calls[-1] == {'UserPoolId': 'us-east-1_pool', 'Username': username}
+    assert principal.lookup_email(sub, 'another-name') == \
+        principal.EmailLookup('third@example.com', False)
+    assert len(cognito.calls) == 4
 
 
 # ----------------------------------------------------------------- authz
