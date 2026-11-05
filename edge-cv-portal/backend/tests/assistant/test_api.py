@@ -6,9 +6,9 @@ import json
 import pytest
 from boto3.dynamodb.conditions import Attr
 
-from assistant import api, settings, store
+from assistant import api, settings, store, worker
 
-from conftest import api_event, call_api, claims_for
+from conftest import api_event, call_api, claims_for, tool_use_events
 
 CONVS = '/assistant/conversations'
 CONV = '/assistant/conversations/{cid}'
@@ -34,7 +34,8 @@ def start_turn(claims, cid, prompt='What is this page?', route='/devices'):
 def test_state_for_a_regular_user(assistant_env):
     status, body = call_api(api_event('GET', '/assistant/state', claims_for()))
     assert status == 200
-    assert body == {'enabled': True, 'actions_enabled': False, 'version': api.__version__}
+    # Phase 2: actions are delivered and the Actions_Switch defaults to on (Requirement 10.4)
+    assert body == {'enabled': True, 'actions_enabled': True, 'version': api.__version__}
 
 
 def test_state_when_disabled_and_for_labelers(assistant_env):
@@ -84,20 +85,35 @@ def test_settings_require_portal_admin_and_are_audited(assistant_env):
                                       lambda *_a, **_k: True)
     admin = claims_for(role='PortalAdmin')
     status, body = call_api(api_event('GET', '/assistant/settings', admin))
-    assert status == 200 and body['actions_delivered'] is False
+    assert status == 200 and body['actions_delivered'] is True
+    assert body['destructive_allowlist'] == sorted(api.DESTRUCTIVE_ALLOWLIST)
     assert body['model']['model_id'] and body['limits']['turns_per_hour'] == 60
     status, body = call_api(api_event('PUT', '/assistant/settings', admin,
                                       body={'retention_days': 14, 'guardrail_id': 'abc123',
                                             'guardrail_version': '2'}))
     assert status == 200 and body['retention_days'] == 14 and body['guardrail_version'] == '2'
+    # the Actions_Switch (Phase 2): off hides every mutating tool from the model
+    status, body = call_api(api_event('PUT', '/assistant/settings', admin,
+                                      body={'actions_enabled': False}))
+    assert status == 200 and body['actions_enabled'] is False
+    status, state = call_api(api_event('GET', '/assistant/state', claims_for()))
+    assert state['actions_enabled'] is False
+    status, body = call_api(api_event('PUT', '/assistant/settings', admin, body={'actions_enabled': True}))
+    assert status == 200 and body['actions_enabled'] is True
+    # while actions are undelivered the switch is refused (the Phase 1 posture)
+    assistant_env.monkeypatch.setattr(api, 'ACTIONS_DELIVERED', False)
     status, body = call_api(api_event('PUT', '/assistant/settings', admin,
                                       body={'actions_enabled': True}))
     assert status == 400 and body['error']['code'] == 'actions_not_delivered'
+    assistant_env.monkeypatch.setattr(api, 'ACTIONS_DELIVERED', True)
     status, body = call_api(api_event('PUT', '/assistant/settings', admin, body={'retention_days': 0}))
     assert status == 400 and body['error']['details']['field'] == 'retention_days'
     audited = assistant_env.shared.dynamodb.Table(assistant_env.shared.AUDIT_LOG_TABLE).scan(
         FilterExpression=Attr('user_id').eq(admin['sub']))['Items']
-    assert sorted(a['details']['setting'] for a in audited) == ['guardrail_id', 'guardrail_version',
+    # one entry per changed field: the three fields of the first PUT plus the
+    # two Actions_Switch writes (off, then on)
+    assert sorted(a['details']['setting'] for a in audited) == ['actions_enabled', 'actions_enabled',
+                                                                'guardrail_id', 'guardrail_version',
                                                                 'retention_days']
 
 
@@ -297,17 +313,35 @@ def test_confirmation_route(assistant_env):
     assert status == 409 and body['error']['code'] == 'binding_used'
 
 
+def assert_conversation_shows_the_stopped_turn(claims, cid, tid, last_event):
+    """Requirements 8.2 and 8.5: a Turn the API closes stays in the
+    Conversation (the panel re-reads it when the Turn ends), marked stopped,
+    with the text produced so far."""
+    status, body = call_api(api_event('GET', CONV, claims, params={'cid': cid}))
+    assert status == 200 and body['turn_count'] == 1 and body['live_turn_id'] is None
+    user, assistant = body['messages']
+    assert user['turn_id'] == tid and user['blocks'] == [{'type': 'user', 'text': 'What is this page?'}]
+    [block] = assistant['blocks']
+    assert block['status'] == 'stopped' and block['text'] == 'I will create the team.'
+    assert block['events'][-1]['type'] == last_event
+
+
 def test_expired_confirmation_stops_the_turn(assistant_env):
     alice = claims_for()
     cid = create_conversation(alice)
     status, body = start_turn(alice, cid)
     tid = body['turn_id']
     binding = store.create_binding(sub=alice['sub'], cid=cid, tid=tid, tool='x', args={}, seconds=600)
-    store.update_turn(cid, tid, status='awaiting_confirmation',
+    store.update_turn(cid, tid, status='awaiting_confirmation', text='I will create the team.',
                       confirmation={'binding_id': binding['binding_id'], 'tool': 'x', 'expires_at': 1})
+    stale = store.get_turn(cid, tid)
     status, body = call_api(api_event('GET', TURN, alice, params={'cid': cid, 'tid': tid}))
     assert body['status'] == 'stopped' and body['events'][-1]['type'] == 'confirmation_expired'
     assert store.get_meta(cid)['live_turn_id'] is None
+    assert_conversation_shows_the_stopped_turn(alice, cid, tid, 'confirmation_expired')
+    # a concurrent reap that read the Turn before the close writes nothing more
+    assert api._reap(stale, api.limits_module.limits())['status'] == 'stopped'
+    assert store.get_meta(cid)['turn_count'] == 1 and len(store.list_messages(cid)) == 2
 
 
 def test_stop_while_awaiting_confirmation_closes_the_turn(assistant_env):
@@ -315,11 +349,82 @@ def test_stop_while_awaiting_confirmation_closes_the_turn(assistant_env):
     cid = create_conversation(alice)
     status, body = start_turn(alice, cid)
     tid = body['turn_id']
-    store.update_turn(cid, tid, status='awaiting_confirmation',
+    store.update_turn(cid, tid, status='awaiting_confirmation', text='I will create the team.',
                       confirmation={'binding_id': store.new_id(), 'tool': 'x',
                                     'expires_at': store.now_s() + 600})
     status, body = call_api(api_event('POST', TURN + '/stop', alice, params={'cid': cid, 'tid': tid}))
     assert status == 202 and body['status'] == 'stopped'
     assert store.get_meta(cid)['live_turn_id'] is None
+    assert_conversation_shows_the_stopped_turn(alice, cid, tid, 'stopped')
     status, body = call_api(api_event('DELETE', CONV, alice, params={'cid': cid}))
     assert status == 204
+
+
+def test_a_stop_that_closes_the_turn_first_wins_over_the_decision(assistant_env):
+    """A Stop that closes the awaiting Turn while a decision is being recorded
+    wins: the decision is refused, no worker resumes, the Turn counts once."""
+    alice = claims_for()
+    cid = create_conversation(alice)
+    status, body = start_turn(alice, cid)
+    tid = body['turn_id']
+    binding = store.create_binding(sub=alice['sub'], cid=cid, tid=tid, tool='x', args={}, seconds=600)
+    store.update_turn(cid, tid, status='awaiting_confirmation',
+                      confirmation={'binding_id': binding['binding_id'], 'tool': 'x',
+                                    'expires_at': binding['expires_at']})
+    consume = store.consume_binding
+
+    def stopped_meanwhile(*args, **kwargs):
+        consumed = consume(*args, **kwargs)
+        call_api(api_event('POST', TURN + '/stop', alice, params={'cid': cid, 'tid': tid}))
+        return consumed
+
+    assistant_env.monkeypatch.setattr(store, 'consume_binding', stopped_meanwhile)
+    status, body = call_api(api_event('POST', TURN + '/confirmation', alice,
+                                      params={'cid': cid, 'tid': tid},
+                                      body={'binding_id': binding['binding_id'], 'decision': 'confirm'}))
+    assert status == 409 and body['error']['code'] == 'not_awaiting_confirmation'
+    assert store.get_turn(cid, tid)['status'] == 'stopped'
+    assert [i for i in assistant_env.invoked if 'resume' in i] == []
+    assert store.get_meta(cid)['turn_count'] == 1
+
+
+@pytest.mark.parametrize('after_load', [False, True], ids=['stop_before_load', 'stop_after_load'])
+def test_a_stop_after_the_decision_stops_the_confirmed_change(assistant_env, fake_bedrock, after_load):
+    """Requirement 8.2, design §8.4: a Stop pressed after Confirm, before the
+    resuming worker runs the change, invokes nothing; the Turn ends stopped
+    and stays in the Conversation. The Stop lands before the worker loads
+    the Turn, or after it did (the worker reads `stop_requested` again)."""
+    client = fake_bedrock(tool_use_events(
+        [('tu-1', 'portal_data_labeling_team_create', {'usecase_id': 'uc-1', 'team_name': 'night shift'})],
+        text='I will create the team.'))
+    alice = claims_for()
+    cid = create_conversation(alice)
+    status, body = start_turn(alice, cid, route='/labeling')
+    tid = body['turn_id']
+    assert worker.handler(assistant_env.invoked[-1], None)['status'] == 'awaiting_confirmation'
+    card = store.get_turn(cid, tid)['confirmation']
+    status, body = call_api(api_event('POST', TURN + '/confirmation', alice,
+                                      params={'cid': cid, 'tid': tid},
+                                      body={'binding_id': card['binding_id'], 'decision': 'confirm'}))
+    assert status == 202, body
+
+    def stop():
+        status, body = call_api(api_event('POST', TURN + '/stop', alice, params={'cid': cid, 'tid': tid}))
+        assert status == 202 and body['status'] == 'running'
+
+    if after_load:  # the worker already loaded the Turn and claimed the binding
+        claim = store.claim_binding
+
+        def stopped_meanwhile(*args, **kwargs):
+            claimed = claim(*args, **kwargs)
+            stop()
+            return claimed
+
+        assistant_env.monkeypatch.setattr(store, 'claim_binding', stopped_meanwhile)
+    else:
+        stop()
+    assert worker.handler(assistant_env.invoked[-1], None)['status'] == 'stopped'
+    assert assistant_env.fake_lambda.calls == [] and len(client.requests) == 1
+    assert [e['type'] for e in store.get_turn(cid, tid)['events']] == [
+        'confirmation_requested', 'confirmation_resolved', 'stopped']
+    assert_conversation_shows_the_stopped_turn(alice, cid, tid, 'stopped')

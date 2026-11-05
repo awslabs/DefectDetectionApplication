@@ -102,6 +102,8 @@ export interface AssistantSettingsView {
   enabled: boolean;
   actions_enabled: boolean;
   actions_delivered: boolean;
+  /** Destructive catalog tools the assistant may propose (the Phase 2 allow-list; a code constant). */
+  destructive_allowlist: string[];
   retention_days: number;
   guardrail_id: string | null;
   guardrail_version: string | null;

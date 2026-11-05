@@ -100,6 +100,12 @@ export default function AssistantSettings() {
                 >
                   {view.actions_enabled ? 'Enabled' : 'Disabled'}
                 </Toggle>
+                <Box color="text-body-secondary" fontSize="body-s" padding={{ top: 'xs' }} data-testid="assistant-allowlist">
+                  {view.destructive_allowlist.length === 0
+                    ? 'Destructive tools (deletions, cancellations, stops, removals, deployments and the like) are never proposed: the allow-list is empty. Users do those on the Portal pages.'
+                    : <>Destructive tools the assistant may propose, each behind its confirmation card: {view.destructive_allowlist.map((name) => <code key={name} style={{ marginRight: 6 }}>{name}</code>)}</>}
+                  {' '}The list is part of the assistant code; changing it takes a code change and a deploy.
+                </Box>
               </FormField>
             )}
             <ColumnLayout columns={2}>

@@ -22,6 +22,7 @@ const view: AssistantSettingsView = {
   enabled: true,
   actions_enabled: false,
   actions_delivered: false,
+  destructive_allowlist: [],
   retention_days: 30,
   guardrail_id: null,
   guardrail_version: null,
@@ -66,6 +67,31 @@ describe('AssistantSettings', () => {
     apiMock.settings.mockResolvedValue({ ...view, actions_delivered: true, actions_enabled: true });
     render(<AssistantSettings />);
     await waitFor(() => expect(toggleInput('assistant-actions-toggle')).toBeChecked());
+    expect(screen.getByTestId('assistant-allowlist').textContent).toContain('never proposed');
+  });
+
+  it('lists the allow-listed destructive tools under the Actions switch (15.2)', async () => {
+    apiMock.settings.mockResolvedValue({
+      ...view, actions_delivered: true, actions_enabled: true,
+      destructive_allowlist: ['portal_devices_deployment_cancel', 'portal_workflows_build_cancel'],
+    });
+    render(<AssistantSettings />);
+    await waitFor(() => expect(toggleInput('assistant-actions-toggle')).toBeChecked());
+    const text = screen.getByTestId('assistant-allowlist').textContent ?? '';
+    expect(text).toContain('portal_devices_deployment_cancel');
+    expect(text).toContain('portal_workflows_build_cancel');
+    expect(text).not.toContain('never proposed');
+  });
+
+  it('turning actions off sends {actions_enabled: false} (10.4)', async () => {
+    apiMock.settings.mockResolvedValue({ ...view, actions_delivered: true, actions_enabled: true });
+    apiMock.updateSettings.mockResolvedValue({ ...view, actions_delivered: true, actions_enabled: false });
+    render(<AssistantSettings />);
+    await waitFor(() => expect(toggleInput('assistant-actions-toggle')).toBeChecked());
+    fireEvent.click(toggleInput('assistant-actions-toggle'));
+    await waitFor(() => expect(apiMock.updateSettings).toHaveBeenCalledWith({ actions_enabled: false }));
+    await waitFor(() => expect(screen.getByText('Actions disabled')).toBeInTheDocument());
+    expect(toggleInput('assistant-actions-toggle')).not.toBeChecked();
   });
 
   it('turning the assistant off sends {enabled: false} and confirms it (12.2, 12.6)', async () => {

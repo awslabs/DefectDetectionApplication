@@ -25,7 +25,7 @@ from typing import Any, Dict, Optional
 
 import boto3
 
-from assistant import ACTIONS_DELIVERED, __version__
+from assistant import ACTIONS_DELIVERED, DESTRUCTIVE_ALLOWLIST, __version__
 from assistant import errors, limits as limits_module, schemas, settings, store
 from assistant.errors import AssistantError
 
@@ -232,13 +232,34 @@ def _reap(turn: Dict[str, Any], limits: Dict[str, int]) -> Dict[str, Any]:
     elif status == 'awaiting_confirmation':
         confirmation = turn.get('confirmation') or {}
         if int(confirmation.get('expires_at') or 0) * 1000 < now_ms:
-            turn = store.append_progress(
-                turn['conversation_id'], turn['turn_id'],
-                events=[{'seq': len(turn.get('events') or []) + 1, 'ts': now_ms,
-                         'type': 'confirmation_expired', 'text_offset': len(turn.get('text') or '')}],
-                status='stopped', confirmation=None, finished_at=now_ms)
-            _release(turn)
+            turn = _close(turn, 'confirmation_expired')
     return turn
+
+
+def _close(turn: Dict[str, Any], event_type: str) -> Dict[str, Any]:
+    """Close an awaiting Turn here, where no worker runs (its card expired, or
+    Stop): status `stopped` with `event_type`, then the Conversation's final
+    messages and counters as the worker's `_finish` writes them (design §8.2;
+    Requirements 8.2, 8.5), then the live quota. Conditional on the Turn
+    still awaiting, so a concurrent close or decision counts it once."""
+    cid, tid = turn['conversation_id'], turn['turn_id']
+    now_ms = store.now_ms()
+    closed = store.append_progress(
+        cid, tid, events=[{'seq': len(turn.get('events') or []) + 1, 'ts': now_ms,
+                           'type': event_type, 'text_offset': len(turn.get('text') or '')}],
+        status='stopped', confirmation=None, finished_at=now_ms,
+        expect_status='awaiting_confirmation')
+    if closed is None:
+        return store.get_turn(cid, tid) or turn
+    config = settings.read_configuration(cache_seconds=30)
+    store.write_turn_messages(
+        sub=closed['sub'], cid=cid, tid=tid, prompt=closed.get('prompt') or '',
+        text=closed.get('text') or '', status='stopped', failure=None,
+        events=closed.get('events') or [],
+        activity=list((closed.get('pending') or {}).get('activity') or []),
+        meta=store.get_meta(cid) or {}, retention_days=int(config.get('retention_days') or 30))
+    store.release_live(closed['sub'])
+    return closed
 
 
 def _release(turn: Dict[str, Any]) -> None:
@@ -280,6 +301,7 @@ def _settings_view(config: Dict[str, Any]) -> Dict[str, Any]:
         'enabled': bool(config.get('enabled', True)),
         'actions_enabled': bool(config.get('actions_enabled', True)),
         'actions_delivered': ACTIONS_DELIVERED,
+        'destructive_allowlist': sorted(DESTRUCTIVE_ALLOWLIST),
         'retention_days': int(config.get('retention_days') or 30),
         'guardrail_id': config.get('guardrail_id'),
         'guardrail_version': config.get('guardrail_version'),
@@ -370,6 +392,7 @@ def handle_turn_start(event, user, params, body):
         turn = store.get_turn(meta['conversation_id'], live)
         if turn and _reap(turn, limits).get('status') in store.LIVE_STATUSES:
             raise errors.turn_in_progress(live)
+        meta = store.get_meta(meta['conversation_id']) or meta  # a reap counts the Turn it closed
     if int(meta.get('turn_count') or 0) >= limits['conversation_turns'] \
             or int(meta.get('size_bytes') or 0) >= limits['conversation_bytes']:
         raise errors.conversation_full()
@@ -442,7 +465,10 @@ def handle_turn_confirmation(event, user, params, body):
         if unusable.reason == 'expired':
             raise errors.binding_expired() from unusable
         raise errors.binding_invalid() from unusable
-    store.update_turn(meta['conversation_id'], turn['turn_id'], status='running')
+    # a Stop that closed the Turn since it was read wins: nothing runs
+    if store.update_turn(meta['conversation_id'], turn['turn_id'], status='running',
+                         expect_status='awaiting_confirmation') is None:
+        raise errors.not_awaiting_confirmation()
     _invoke_worker({'conversation_id': meta['conversation_id'], 'turn_id': turn['turn_id'],
                     'resume': {'binding_id': data['binding_id']}})
     return _response(202, {'turn_id': turn['turn_id'], 'decision': data['decision']})
@@ -457,14 +483,7 @@ def handle_turn_stop(event, user, params, body):
     if turn.get('status') in store.LIVE_STATUSES:
         turn = store.request_stop(meta['conversation_id'], turn['turn_id'])
         if turn.get('status') == 'awaiting_confirmation':
-            # nothing is running: close the Turn here
-            now_ms = store.now_ms()
-            turn = store.append_progress(
-                meta['conversation_id'], turn['turn_id'],
-                events=[{'seq': len(turn.get('events') or []) + 1, 'ts': now_ms, 'type': 'stopped',
-                         'text_offset': len(turn.get('text') or '')}],
-                status='stopped', confirmation=None, finished_at=now_ms)
-            _release(turn)
+            turn = _close(turn, 'stopped')  # nothing is running: close the Turn here
     return _response(202, {'turn_id': turn['turn_id'], 'status': turn['status']})
 
 

@@ -75,8 +75,8 @@ Standing rule: implementation and local tests run autonomously; a live AWS chang
 
 ### Phase 2 — actions (after the owner's allow-list sign-off)
 
-- [ ] 7.1 `ACTIONS_DELIVERED = True`; `DESTRUCTIVE_ALLOWLIST` from the sign-off; Actions_Switch in Settings (default on); the Phase-2 eval cases.
-- [ ] 7.2 Deploy gate, smoke check with a confirmed and a rejected action in a test Use_Case, push gate; `verification-notes.md` updated.
+- [x] 7.1 `ACTIONS_DELIVERED = True`; `DESTRUCTIVE_ALLOWLIST` from the sign-off; Actions_Switch in Settings (default on); the Phase-2 eval cases.
+- [x] 7.2 Deploy gate, smoke check with a confirmed and a rejected action in a test Use_Case, push gate; `verification-notes.md` updated.
 
 ## Requirement coverage
 

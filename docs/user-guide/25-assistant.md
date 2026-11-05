@@ -1,8 +1,8 @@
 # 25. The assistant
 
-**Who:** every signed-in Portal user except accounts whose only role is DataLabeler; each look-up the assistant makes runs with your own permissions, so it can see only what you can see in the web UI. **Reference:** [Administrator Guide, Portal assistant](../../edge-cv-portal/ADMIN_GUIDE.md#portal-assistant), [24. MCP support](24-mcp-support.md).
+**Who:** every signed-in Portal user except accounts whose only role is DataLabeler; each look-up and each change the assistant makes runs with your own permissions, so it can see and do only what you can in the web UI. **Reference:** [Administrator Guide, Portal assistant](../../edge-cv-portal/ADMIN_GUIDE.md#portal-assistant), [24. MCP support](24-mcp-support.md).
 
-The assistant is a chat panel on every Portal page. Ask it what a page or a field does, where you are on the path from a new use case to a running station, or to look something up for you ("which devices are offline?", "what is the status of the last training job?"). It answers from this user guide and from the Portal's own data, using the same tool catalog an MCP client such as Kiro uses ([24.4](24-mcp-support.md#244-what-the-tools-can-read)), as you, with your permissions.
+The assistant is a chat panel on every Portal page. Ask it what a page or a field does, where you are on the path from a new use case to a running station, to look something up for you ("which devices are offline?", "what is the status of the last training job?"), or to make a change for you ("create a labeling team named night shift"), which you confirm first. It answers from this user guide and from the Portal's own data, using the same tool catalog an MCP client such as Kiro uses ([24.4](24-mcp-support.md#244-what-the-tools-can-read)), as you, with your permissions.
 
 ## 25.1 Opening and hiding the panel
 
@@ -24,20 +24,21 @@ Responses cite the user guide section they used as a link such as "§ 15.2 Regis
 |--------|-----------|
 | Explain pages, fields, values and procedures from this guide | Invent fields or procedures; when the guide and the Portal's data do not answer, it says so |
 | Tell you the next step on the end-to-end path for the selected use case, from what that use case already has | See another user's use cases, or anything your role cannot read |
-| Look things up through the Portal's tool catalog: devices, deployments, models, training jobs, workflows, builds, labeling jobs, datasets, audit logs (PortalAdmin) | Change anything in this release: creating, deploying, deleting and other state changes are not available through the assistant yet. Ask it where to do it and it opens the page for you |
+| Look things up through the Portal's tool catalog: devices, deployments, models, training jobs, workflows, builds, labeling jobs, datasets, audit logs (PortalAdmin) | Delete, cancel, stop, remove or deploy anything, or make another change the catalog marks destructive (such as promoting a plugin): those stay on the Portal's pages. Ask it where to do one and it links the page |
+| Make other changes for you through the same catalog, such as creating a labeling team, a workflow or a camera, each one only after you confirm it | Change anything without your confirmation, or while an administrator has turned **Actions** off |
 | Keep your conversations, so you can continue later or on another browser | Answer questions unrelated to operating DDA |
 
-When an administrator enables **actions** in a later release, a state change the assistant proposes appears as a card naming the tool, every argument and the use case; nothing happens until you confirm that card, and a confirmation is valid for ten minutes and for that exact proposal only.
+A change the assistant proposes appears as a card naming the tool, every argument and the use case it applies to; nothing happens until you select **Confirm** on that card. **Decline** tells the assistant not to do it, and it does not propose the same change again in that turn. Each change has its own card, so a request for two changes shows two cards. A confirmation is valid for ten minutes and for that exact proposal only; an unanswered card expires and the turn ends. After a change, the assistant reports what it created or changed and can check its status for you. With **Actions** turned off in Settings, the assistant only looks things up and points you to the page where you make the change.
 
 ## 25.4 Conversations
 
-The **+** control starts a new conversation; the clock control lists your earlier ones, with reopen and delete. Conversations belong to you: no other user, PortalAdmins included, can read them. They are kept for the retention period the administrator sets (30 days of inactivity by default) and then deleted. Deleting a conversation removes its content at once; the audit log keeps the record of the look-ups the assistant made on your behalf ([25.5](#255-the-assistant-in-the-audit-logs)).
+The **+** control starts a new conversation; the clock control lists your earlier ones, with reopen and delete. Conversations belong to you: no other user, PortalAdmins included, can read them. They are kept for the retention period the administrator sets (30 days of inactivity by default) and then deleted. Deleting a conversation removes its content at once; the audit log keeps the record of the look-ups and changes the assistant made on your behalf ([25.5](#255-the-assistant-in-the-audit-logs)).
 
 A conversation holds up to 60 turns; after that, start a new one.
 
 ## 25.5 The assistant in the Audit Logs
 
-Every look-up the assistant performs is written to the Audit Logs like a Portal action, under the channel **Assistant** ([21. Audit Logs](21-audit-logs.md)). The entry names the tool, the use case and you as the acting user, and carries the turn id, so an administrator can tell assistant activity from your own clicks and from external MCP clients. Your prompts and the assistant's answers are not in the audit log.
+Every look-up and every confirmed change the assistant performs is written to the Audit Logs like a Portal action, under the channel **Assistant** ([21. Audit Logs](21-audit-logs.md)); a declined or expired card runs nothing. The entry names the tool, the use case and you as the acting user, and carries the turn id, so an administrator can tell assistant activity from your own clicks and from external MCP clients. Your prompts and the assistant's answers are not in the audit log.
 
 ## 25.6 Limits and errors
 

@@ -228,6 +228,36 @@ def list_messages(cid: str) -> List[Dict[str, Any]]:
     return items
 
 
+def write_turn_messages(*, sub: str, cid: str, tid: str, prompt: str, text: str, status: str,
+                        failure: Optional[Dict[str, str]], events: List[Dict[str, Any]],
+                        activity: List[str], meta: Dict[str, Any], retention_days: int) -> None:
+    """A finished Turn's `MSG` items and Conversation counters (design §8.2,
+    `finish()`): the prompt, then one assistant message carrying the text, a
+    summary of the tools used and the browser's `display` form; then
+    `turn_count`, `size_bytes`, the title of a first Turn and
+    `live_turn_id = null`. The worker's `_finish` and the API's close of an
+    awaiting Turn (card expired, Stop) both write them."""
+    turn_count = int(meta.get('turn_count') or 0)
+    answer = text.strip()
+    if not answer:
+        answer = '[The assistant did not answer: ' + (failure['code'] if failure else status) + ']'
+    content: List[Dict[str, Any]] = [{'text': answer}]
+    if activity:
+        content.append({'text': '(Tools used in this turn: ' + '; '.join(activity[-12:]) + ')'})
+    messages = [
+        {'role': 'user', 'content': [{'text': prompt}]},
+        {'role': 'assistant', 'content': content,
+         'display': {'text': text, 'events': events, 'status': status, 'failure': failure,
+                     'turn_id': tid}},
+    ]
+    append_messages(cid, messages, first_seq=turn_count * 2, turn_id=tid,
+                    retention_days=retention_days)
+    touch_conversation(
+        sub, cid, retention_days=retention_days,
+        title=(prompt.strip()[:80] if turn_count == 0 and not meta.get('title') else None),
+        turn_delta=1, size_delta=size_of(messages), live_turn_id=None)
+
+
 # -------------------------------------------------------------------- turns
 
 def _turn_key(cid: str, tid: str) -> Dict[str, str]:
@@ -261,9 +291,30 @@ def get_turn(cid: str, tid: str) -> Optional[Dict[str, Any]]:
     return plain(item) if item else None
 
 
-def update_turn(cid: str, tid: str, **attrs: Any) -> Dict[str, Any]:
+def _write_turn(cid: str, tid: str, sets: List[str], names: Dict[str, str],
+                values: Dict[str, Any], expect_status: Optional[str]) -> Optional[Dict[str, Any]]:
+    kwargs: Dict[str, Any] = {
+        'Key': _turn_key(cid, tid), 'UpdateExpression': 'SET ' + ', '.join(sets),
+        'ExpressionAttributeNames': names, 'ExpressionAttributeValues': values,
+        'ReturnValues': 'ALL_NEW'}
+    if expect_status is not None:
+        names['#expected'] = 'status'
+        values[':expected'] = expect_status
+        kwargs['ConditionExpression'] = '#expected = :expected'
+    try:
+        response = table().update_item(**kwargs)
+    except ClientError as error:
+        if expect_status is None or error.response['Error']['Code'] != 'ConditionalCheckFailedException':
+            raise
+        return None
+    return plain(response['Attributes'])
+
+
+def update_turn(cid: str, tid: str, *, expect_status: Optional[str] = None,
+                **attrs: Any) -> Optional[Dict[str, Any]]:
     """SET the given attributes, bump `version` and `updated_at`; returns the
-    new item (so the worker reads `stop_requested` back for free)."""
+    new item (so the worker reads `stop_requested` back for free). With
+    `expect_status`, only while the Turn has that status: None otherwise."""
     names = {'#v': 'version', '#u': 'updated_at'}
     values: Dict[str, Any] = {':one': 1, ':u': now_ms()}
     sets = ['#v = #v + :one', '#u = :u']
@@ -271,16 +322,14 @@ def update_turn(cid: str, tid: str, **attrs: Any) -> Dict[str, Any]:
         names[f'#a{index}'] = key
         values[f':a{index}'] = _numbers(value)
         sets.append(f'#a{index} = :a{index}')
-    response = table().update_item(
-        Key=_turn_key(cid, tid), UpdateExpression='SET ' + ', '.join(sets),
-        ExpressionAttributeNames=names, ExpressionAttributeValues=values,
-        ReturnValues='ALL_NEW')
-    return plain(response['Attributes'])
+    return _write_turn(cid, tid, sets, names, values, expect_status)
 
 
 def append_progress(cid: str, tid: str, *, text: Optional[str] = None,
-                    events: Optional[List[Dict[str, Any]]] = None, **attrs: Any) -> Dict[str, Any]:
-    """Replace `text`, append `events`, SET other attributes; bump version."""
+                    events: Optional[List[Dict[str, Any]]] = None,
+                    expect_status: Optional[str] = None, **attrs: Any) -> Optional[Dict[str, Any]]:
+    """Replace `text`, append `events`, SET other attributes; bump version.
+    With `expect_status`, only while the Turn has that status: None otherwise."""
     names = {'#v': 'version', '#u': 'updated_at'}
     values: Dict[str, Any] = {':one': 1, ':u': now_ms()}
     sets = ['#v = #v + :one', '#u = :u']
@@ -297,11 +346,7 @@ def append_progress(cid: str, tid: str, *, text: Optional[str] = None,
         names[f'#a{index}'] = key
         values[f':a{index}'] = _numbers(value)
         sets.append(f'#a{index} = :a{index}')
-    response = table().update_item(
-        Key=_turn_key(cid, tid), UpdateExpression='SET ' + ', '.join(sets),
-        ExpressionAttributeNames=names, ExpressionAttributeValues=values,
-        ReturnValues='ALL_NEW')
-    return plain(response['Attributes'])
+    return _write_turn(cid, tid, sets, names, values, expect_status)
 
 
 def request_stop(cid: str, tid: str) -> Dict[str, Any]:
@@ -361,6 +406,23 @@ def consume_binding(sub: str, bid: str, decision: str, now: Optional[int] = None
             raise BindingUnusable('used') from error
         raise BindingUnusable('expired') from error
     return plain(response['Attributes'])
+
+
+def claim_binding(sub: str, bid: str) -> bool:
+    """Record that a worker resumes its Turn from this consumed binding (one
+    conditional write, design §8.3). True for the first claim; False when the
+    binding was claimed before, i.e. Lambda delivered the same resume event
+    again, so a decision is acted on once (Requirements 5.5, 5.8)."""
+    try:
+        table().update_item(
+            Key=_binding_key(sub, bid), UpdateExpression='SET resumed_at = :n',
+            ConditionExpression='attribute_exists(pk) AND attribute_not_exists(resumed_at)',
+            ExpressionAttributeValues={':n': now_ms()})
+    except ClientError as error:
+        if error.response['Error']['Code'] != 'ConditionalCheckFailedException':
+            raise
+        return False
+    return True
 
 
 # ------------------------------------------------------------------- quotas

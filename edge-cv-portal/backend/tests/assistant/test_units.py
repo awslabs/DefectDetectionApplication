@@ -8,7 +8,7 @@ import logging
 import pytest
 from hypothesis import given, settings as hsettings, strategies as st
 
-from assistant import ACTIONS_DELIVERED, bedrock, guide, journey, limits, prompts, schemas, telemetry, tools
+from assistant import ACTIONS_DELIVERED, DESTRUCTIVE_ALLOWLIST, bedrock, guide, journey, limits, prompts, schemas, telemetry, tools
 from assistant.errors import AssistantError
 from mcp_portal.catalog import CATALOG
 
@@ -170,8 +170,28 @@ def test_property_bedrock_tool_specs_match_the_catalog():
         assert re.match(r'^[a-zA-Z0-9_-]{1,64}$', rendered['name'])
 
 
-def test_exposure_is_read_only_while_actions_are_undelivered():
-    assert ACTIONS_DELIVERED is False
+def test_phase_2_delivers_actions_with_the_signed_off_allowlist():
+    """Requirement 15.2: actions delivered; every allow-listed name is a
+    destructive tool of the delivered catalog; nothing destructive outside the
+    list is ever exposed, with the switch on or off."""
+    assert ACTIONS_DELIVERED is True
+    destructive = {s.name for s in tools.delivered_specs() if s.destructive}
+    assert set(DESTRUCTIVE_ALLOWLIST) <= destructive, set(DESTRUCTIVE_ALLOWLIST) - destructive
+    assert len(set(DESTRUCTIVE_ALLOWLIST)) == len(DESTRUCTIVE_ALLOWLIST)
+    for domain in ('admin', 'data', 'devices', 'models', 'workflows'):
+        exposed = {s.name for s in tools.exposed_specs(domain, True, set())}
+        offered_destructive = exposed & destructive
+        assert offered_destructive <= set(DESTRUCTIVE_ALLOWLIST), offered_destructive
+        # the page's non-destructive mutating tools are offered with the switch on
+        domain_mutating = {s.name for s in tools.delivered_specs()
+                           if s.domain == domain and not s.read_only and not s.destructive}
+        assert domain_mutating <= exposed
+        # and nothing mutating with the switch off
+        assert all(s.read_only for s in tools.exposed_specs(domain, False, set()))
+
+
+def test_exposure_is_read_only_while_actions_are_undelivered(monkeypatch):
+    monkeypatch.setattr(tools, 'ACTIONS_DELIVERED', False)
     specs = tools.exposed_specs('devices', True, {'portal_devices_deployment_create'})
     assert all(s.read_only for s in specs)
     assert len(specs) == sum(1 for s in tools.delivered_specs() if s.read_only)
