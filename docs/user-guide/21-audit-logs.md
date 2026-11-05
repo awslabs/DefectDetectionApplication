@@ -25,7 +25,7 @@ Every action a user takes through the Portal API is recorded: who did it, in whi
 | **Date Range** | Limits the table to a time window. |
 | **Use Case** | **All use cases**, or one use case. A UseCaseAdmin sees only their use cases; a PortalAdmin sees everything. |
 | **Action** | **All actions**, or one action type from the list. |
-| **Channel** | **All channels**, **Web & API**, or **MCP** for tool calls from AI assistants ([24. MCP support](24-mcp-support.md#245-mcp-calls-in-the-audit-logs)). |
+| **Channel** | **All channels**, **Web & API**, **MCP** for tool calls from AI assistants connected over MCP ([24. MCP support](24-mcp-support.md#245-mcp-calls-in-the-audit-logs)), or **Assistant** for those of the Portal's own assistant panel ([25.5](25-assistant.md#255-the-assistant-in-the-audit-logs)). |
 | **Search** | Free text matched against the user and the resource. |
 
 **Refresh** reloads with the current filters; **Load More** pages further back in time. The viewer is read-only; audit records cannot be edited or deleted from the Portal.

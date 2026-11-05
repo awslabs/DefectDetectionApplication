@@ -2,7 +2,7 @@
 
 **Who:** every Portal user. **Video:** [Overview](https://youtu.be/w9OQLEbeSf0).
 
-The Portal is a web application served from the CloudFront URL printed at the end of the Portal deployment (the `FrontendUrl` output). This section covers signing in, the dashboard, the side navigation, the use case selector, and the user menu.
+The Portal is a web application served from the CloudFront URL printed at the end of the Portal deployment (the `FrontendUrl` output). This section covers signing in, the dashboard, the side navigation, the use case selector, the user menu, and the assistant panel.
 
 ## 1.1 Sign in
 
@@ -77,3 +77,7 @@ To change your password enter the **Current Password**, a **New Password** that 
 ## 1.6 Footer
 
 The thin bar at the bottom of the window shows the Portal's version, the git commit it was built from and the build date. Quote these when you report a problem.
+
+## 1.7 The assistant
+
+The sparkle icon in the drawer bar at the right edge of every page opens the assistant, a chat panel that explains the page you are on, tells you the next step for the selected use case, looks things up for you, and can make changes for you, each one only after you confirm it. It works with your own permissions. It is not shown when the Portal was deployed without it, while a PortalAdmin has turned it off, or to accounts whose only role is DataLabeler. See [25. The assistant](25-assistant.md).
