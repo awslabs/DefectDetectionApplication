@@ -8,7 +8,7 @@ The Defect Detection Application (DDA) is an edge-deployed computer vision solut
 
 > **New to DDA?** Watch the [overview video](https://youtu.be/w9OQLEbeSf0), then follow the [video tutorial series](#video-tutorials).
 >
-> **Agentic operations.** DDA has a built-in Portal assistant and MCP servers for the Portal and the edge devices, so AI agents such as Kiro can work with it as the signed-in user: see [Agentic Operations](#agentic-operations).
+> **Agentic operations.** DDA has a built-in Portal assistant and MCP servers for the Portal and the edge devices, so AI agents such as Kiro can work with it under the same permission checks as its web pages: see [Agentic Operations](#agentic-operations).
 
 ## Table of Contents
 
@@ -56,7 +56,7 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 - **ML Model Flexibility**: Compatible with various computer vision models
 - **Manufacturing Integration**: RESTful APIs for integration with existing systems
 - **Portal Management**: Centralized multi-tenant admin portal for managing all deployments
-- **Agentic Operations**: A built-in Portal assistant and MCP servers for the Portal and the edge devices let AI agents work with DDA, with the signed-in user's permissions
+- **Agentic Operations**: A built-in Portal assistant and MCP servers for the Portal and the edge devices let AI agents work with DDA under the same permission checks as its web pages
 
 ### Portal Features
 
@@ -82,22 +82,22 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 
 > **Video:** [Module 14: MCP support](https://youtu.be/8CWPi96EpcY) · **User guide:** [24. MCP support](docs/user-guide/24-mcp-support.md), [25. The assistant](docs/user-guide/25-assistant.md)
 
-DDA can be operated by AI agents as well as through its web pages. The Portal has a built-in assistant and serves a Model Context Protocol (MCP) endpoint for MCP clients such as Kiro IDE and Kiro CLI, and the LocalServer on an edge device can serve one too. An agent works with the credential of the user it acts for: every tool call goes through the same role and permission checks as the matching web page, and nothing changes without that user's confirmation or an administrator's opt-in.
+DDA can be operated by AI agents as well as through its web pages. The Portal has a built-in assistant and serves a Model Context Protocol (MCP) endpoint for MCP clients such as Kiro IDE and Kiro CLI, and the LocalServer on an edge device can serve one too. On the Portal, and on an edge device with local login or token authentication, an agent works with the credential of the user it acts for. Every tool call goes through the same role and permission checks as the matching web page, and nothing changes without the user's confirmation or an administrator's opt-in.
 
 | | Portal assistant | Portal MCP server | Edge MCP server |
 |---|---|---|---|
 | **What it is** | A chat panel on every Portal page, for every role except DataLabeler-only accounts | An MCP endpoint of the Portal: one URL for every tool, and one per view (data, models, devices, workflows, admin) | An MCP endpoint (`POST /mcp`) of the LocalServer on an edge device |
-| **How you use it** | Open the panel and ask; it answers with the Bedrock model chosen under Settings → Bedrock Configuration | Connect an MCP client and sign in with your Portal account through the Portal's Cognito user pool (remote OAuth; no stdio package) | Connect an MCP client on the device's network or through a port forward |
+| **How you use it** | Open the panel and ask; it answers with the Bedrock model chosen under Settings → Bedrock Configuration | Connect an MCP client and sign in with your Portal account through the Portal's Cognito user pool (remote OAuth; no stdio package) | Connect an MCP client through a port forward, which works on every device, or, if the device has token authentication (TLS on port 5443), over the device's network ([Connect to the device](docs/edge-mcp-server.md#connect-to-the-device)) |
 | **Tools** | The Portal MCP server's tool catalog, called inside the Portal as you, plus the User Guide (answers cite the section used) and the next step on the end-to-end path | 187: 89 read-only and 98 mutating (they create, change or delete something), 31 of them destructive | 73: 47 read-only and 26 mutating, 14 of them destructive |
-| **Changes** | Non-destructive changes only, each shown as a card you confirm before it runs; destructive tools (deletions, cancellations, deployments and the like) are never proposed | Mutating tools are listed and accepted only while an administrator has `mcpMutatingToolsEnabled` on; a destructive one also needs its target repeated in `confirm` | Mutating tools are listed and accepted only while `McpMutatingToolsEnabled` is on, and only for a local sign-in with the Operator, UseCaseAdmin or PortalAdmin role; a destructive one also needs `confirm` |
+| **Changes** | Non-destructive changes only, each shown as a card you confirm before it runs; destructive tools (deletions, cancellations, deployments and the like) are never proposed | Mutating tools are listed and accepted only while an administrator has `mcpMutatingToolsEnabled` on; a destructive one also needs its target repeated in `confirm` | Mutating tools are listed and accepted only while `McpMutatingToolsEnabled` is on, and accepted only for a local sign-in with the Operator, UseCaseAdmin or PortalAdmin role; a destructive one also needs `confirm` |
 | **By default** | On, with its actions on | Deployed with the Portal, mutating tools off | Off on every device |
 | **Recorded in** | Portal Audit Logs, channel **Assistant** | Portal Audit Logs, channel **MCP** | The device's LocalServer log (`mcp.access` records) |
 
 Each of them can be switched off through configuration:
 
-- **Portal assistant.** A PortalAdmin turns the assistant, or only its actions, off under Settings → Assistant, without a deploy ([19.4](docs/user-guide/19-settings.md#194-assistant)). To remove it from a deployed Portal, destroy `EdgeCVPortalAssistantStack` and deploy again with `DEPLOY_ASSISTANT=false` (CDK context `deployAssistant=false`), the two steps in [Deploying and removing the assistant stack](edge-cv-portal/ADMIN_GUIDE.md#deploying-and-removing-the-assistant-stack).
+- **Portal assistant.** A PortalAdmin turns the assistant, or only its actions, off under Settings → Assistant, without a deploy ([19.4](docs/user-guide/19-settings.md#194-assistant)). To remove it from a deployed Portal, destroy `EdgeCVPortalAssistantStack`, deploy again with `DEPLOY_ASSISTANT=false` (CDK context `deployAssistant=false`), then run `./deploy-frontend.sh` so the frontend no longer shows the panel, as described in [Deploying and removing the assistant stack](edge-cv-portal/ADMIN_GUIDE.md#deploying-and-removing-the-assistant-stack).
 - **Portal MCP server.** Its mutating tools stay off until an administrator sets the CDK context `mcpMutatingToolsEnabled`. To remove the server, destroy `EdgeCVPortalMcpStack` and deploy again with `DEPLOY_MCP_SERVER=false`, the two steps in [Enabling and disabling the MCP stack](edge-cv-portal/ADMIN_GUIDE.md#enabling-and-disabling-the-mcp-stack).
-- **Edge MCP server.** `McpServerEnabled` turns the server on for one device and `McpMutatingToolsEnabled` its mutating tools. Both are LocalServer component settings, `"false"` by default, changed through a deployment ([Enable it on a device](docs/edge-mcp-server.md#enable-it-on-a-device)).
+- **Edge MCP server.** `McpServerEnabled` turns the server on for one device and `McpMutatingToolsEnabled` its mutating tools. Both are LocalServer component settings, `"false"` by default, changed through a deployment ([Enable it on a device](docs/edge-mcp-server.md#enable-it-on-a-device)). On a device with neither token authentication nor local login (off by default), the read-only tools need no sign-in, like the device's own API, so turn on local login before the MCP server if reads should need one ([Open-access devices](docs/edge-mcp-server.md#open-access-devices)).
 
 No assistant runs on the edge device. Its MCP server provides tools, and an MCP client, such as Kiro on your computer, calls them.
 
