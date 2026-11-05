@@ -1,6 +1,6 @@
 # 25. The assistant
 
-**Who:** every signed-in Portal user except accounts whose only role is DataLabeler; each look-up and each change the assistant makes runs with your own permissions, so it can see and do only what you can in the web UI. **Reference:** [Administrator Guide, Portal assistant](../../edge-cv-portal/ADMIN_GUIDE.md#portal-assistant), [24. MCP support](24-mcp-support.md).
+**Who:** every signed-in Portal user except accounts whose only role is DataLabeler; each look-up and each change the assistant makes runs with your own permissions, so it can see and do only what you can in the web UI. **Video:** [Module 14: MCP support](https://youtu.be/8CWPi96EpcY). **Reference:** [Administrator Guide, Portal assistant](../../edge-cv-portal/ADMIN_GUIDE.md#portal-assistant), [24. MCP support](24-mcp-support.md).
 
 The assistant is a chat panel on every Portal page. Ask it what a page or a field does, where you are on the path from a new use case to a running station, to look something up for you ("which devices are offline?", "what is the status of the last training job?"), or to make a change for you ("create a labeling team named night shift"), which you confirm first. It answers from this user guide and from the Portal's own data, using the same tool catalog an MCP client such as Kiro uses ([24.4](24-mcp-support.md#244-what-the-tools-can-read)), as you, with your permissions.
 
@@ -28,7 +28,7 @@ Responses cite the user guide section they used as a link such as "§ 15.2 Regis
 | Make other changes for you through the same catalog, such as creating a labeling team, a workflow or a camera, each one only after you confirm it | Change anything without your confirmation, or while an administrator has turned **Actions** off |
 | Keep your conversations, so you can continue later or on another browser | Answer questions unrelated to operating DDA |
 
-A change the assistant proposes appears as a card naming the tool, every argument and the use case it applies to; nothing happens until you select **Confirm** on that card. **Decline** tells the assistant not to do it, and it does not propose the same change again in that turn. Each change has its own card, so a request for two changes shows two cards. A confirmation is valid for ten minutes and for that exact proposal only; an unanswered card expires and the turn ends. After a change, the assistant reports what it created or changed and can check its status for you. With **Actions** turned off in Settings, the assistant only looks things up and points you to the page where you make the change.
+A change the assistant proposes appears as a card naming the tool, every argument and the use case it applies to; nothing happens until you select **Confirm** on that card. **Decline** tells the assistant not to do it, and it does not propose the same change again in that turn. Each change has its own card, so a request for two changes shows two cards. A confirmation is valid for ten minutes and for that exact proposal only; an unanswered card expires and the turn ends. After a change, the assistant reports what it created or changed and can check its status for you. With **Actions** turned off in Settings ([19.4](19-settings.md#194-assistant)), the assistant only looks things up and points you to the page where you make the change.
 
 ## 25.4 Conversations
 

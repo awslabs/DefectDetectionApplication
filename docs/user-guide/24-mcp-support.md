@@ -1,8 +1,8 @@
 # 24. MCP support
 
-**Who:** every signed-in Portal user; each tool needs the same permission as the matching Portal page, so an assistant can read only what you can read in the web UI. **Video:** [Module 14: MCP support](https://youtu.be/4rWMVBdDABM). **Reference:** [Administrator Guide, MCP server (AI assistants)](../../edge-cv-portal/ADMIN_GUIDE.md#mcp-server-ai-assistants), [Edge MCP server](../edge-mcp-server.md).
+**Who:** every signed-in Portal user; each tool needs the same permission as the matching Portal page, so an assistant can read only what you can read in the web UI. **Video:** [Module 14: MCP support](https://youtu.be/8CWPi96EpcY). **Reference:** [Administrator Guide, MCP server (AI assistants)](../../edge-cv-portal/ADMIN_GUIDE.md#mcp-server-ai-assistants), [Edge MCP server](../edge-mcp-server.md).
 
-The Model Context Protocol (MCP) lets an AI assistant such as Kiro work with DDA through tools: "list the devices of the cookies use case", "show the last training job's logs", "which workflows are deployed to this station". The assistant calls the tools as you, with the credentials you already have, and every call goes through the same role and permission checks as the Portal. By default every tool is read-only: an assistant can look things up, but it cannot create, change, deploy or delete anything. Tools that make changes are off unless an administrator turns them on ([24.4](#244-what-the-tools-can-read)).
+The Model Context Protocol (MCP) lets an AI assistant such as Kiro work with DDA through tools: "list the devices of the cookies use case", "show the last training job's logs", "which workflows are deployed to this station". The assistant calls the tools as you, with the credentials you already have, and every call goes through the same role and permission checks as the Portal. By default every tool is read-only: an assistant can look things up, but it cannot create, change, deploy or delete anything. Tools that make changes are off unless an administrator turns them on ([24.4](#244-what-the-tools-can-read)). The Portal's built-in assistant panel calls the same Portal tools with no MCP client to set up, and proposes changes only for you to confirm ([25. The assistant](25-assistant.md)). Whether it can make changes depends on its own **Actions** setting ([19.4](19-settings.md#194-assistant), on by default), not on the MCP server's switch.
 
 ## 24.1 The two MCP servers
 
@@ -75,7 +75,7 @@ Tools that create or change something, for example creating a dataset folder, st
 
 ## 24.5 MCP calls in the Audit Logs
 
-Every Portal MCP tool call is recorded in the audit trail, like the actions you take in the web UI. In **Audit Logs** ([21](21-audit-logs.md)), set **Channel** to **MCP** to see only those entries; **Web & API** shows the rest.
+Every Portal MCP tool call is recorded in the audit trail, like the actions you take in the web UI. In **Audit Logs** ([21](21-audit-logs.md)), set **Channel** to **MCP** to see only those entries. **Assistant** shows the calls of the Portal's own assistant panel ([25.5](25-assistant.md#255-the-assistant-in-the-audit-logs)), and **Web & API** the rest.
 
 | Field | MCP entry |
 |-------|-----------|

@@ -2,7 +2,7 @@
 
 **Who:** PortalAdmin only (the page is reached from the navigation or the user menu). **Video:** [Module 0: Portal Setup](https://youtu.be/HtH_4zT23Fo). **Reference:** README [Step 4.1](../../README.md#41-one-time-setup) and [Step 5.2](../../README.md#52-data-account-optional-for-multi-account).
 
-**Portal Settings** holds the installation-wide configuration: the registered data accounts for multi-account setups, the Bedrock model used for AI generation, and the compute parameters for component builds. It has four tabs.
+**Portal Settings** holds the installation-wide configuration: the registered data accounts for multi-account setups, the Bedrock model used for AI generation and the assistant, the compute parameters for component builds, and the assistant's own settings. It has four tabs, and a fifth, **Assistant**, when the Portal is deployed with the assistant.
 
 ## 19.1 Data Accounts
 
@@ -30,7 +30,7 @@ Click **Register**. Buckets in the data account still need to be tagged `dda-por
 
 ![Bedrock Configuration](images/16-settings-bedrock.png)
 
-The Amazon Bedrock model the Portal calls for prompt-based generation: the Workflow Builder's **Gen** panel ([8.6](08-workflows.md#86-generate-a-workflow-from-a-description)) and the Node Designer's **Generate with AI** and code assistant ([10.3](10-node-designer.md#103-generate-a-custom-node-with-ai)).
+The Amazon Bedrock model the Portal calls for prompt-based generation: the Workflow Builder's **Gen** panel ([8.6](08-workflows.md#86-generate-a-workflow-from-a-description)), the Node Designer's **Generate with AI** and code assistant ([10.3](10-node-designer.md#103-generate-a-custom-node-with-ai)), and the assistant panel ([25](25-assistant.md)).
 
 | Field | What to enter | Default |
 |-------|---------------|---------|
@@ -63,6 +63,21 @@ Compute parameters for Portal component builds, used by dedicated server launche
 
 Click **Save Configuration**.
 
-## 19.4 General
+## 19.4 Assistant
+
+The settings of the assistant panel ([25. The assistant](25-assistant.md)). The tab is shown only when the Portal is deployed with the assistant.
+
+| Field | Meaning | Default |
+|-------|---------|---------|
+| **Assistant** | **Enabled** shows the panel to every user except accounts whose only role is DataLabeler. **Disabled** hides it in every browser within a minute, stops turns in progress and refuses new ones; conversations are kept and come back when it is enabled again. | Enabled |
+| **Actions** | Lets the assistant propose changes, each of which the user confirms on a card before it runs. **Disabled**: the assistant only looks things up and points to the page for a change. The note under the switch lists the destructive tools the assistant may propose; in this release there are none. | Enabled |
+| **Conversation retention (days)** | Inactive conversations are deleted after this many days, 1 to 365. | `30` |
+| **Model** | Read-only: the model and region of **Bedrock Configuration** (19.2), and whether the model accepted tool definitions. A model that rejects them leaves the assistant in guidance-only mode: it answers from this guide and runs no look-ups. | – |
+| **Bedrock guardrail id (optional)**, **Guardrail version (optional)** | An Amazon Bedrock guardrail applied to every model call; the version is `DRAFT` or a version number. | none |
+| **Limits** | Read-only: the per-user and per-turn limits, which the deployment sets. | – |
+
+The two switches apply as soon as they are changed; **Save** stores the retention and guardrail fields. Every change is recorded in the Audit Logs as `assistant_settings_changed`. The limits and how to deploy or remove the assistant are in the [Administrator Guide, Portal assistant](../../edge-cv-portal/ADMIN_GUIDE.md#portal-assistant).
+
+## 19.5 General
 
 Reserved for general portal settings; it currently shows "General settings coming soon".

@@ -6,11 +6,14 @@
 
 The Defect Detection Application (DDA) is an edge-deployed computer vision solution for quality assurance in discrete manufacturing environments. Originally developed by the AWS EdgeML service team, DDA is now available as an open-source project under the stewardship of the AWS Manufacturing TFC and Auto/Manufacturing IBU.
 
-> **New to DDA?** Watch the [overview video](https://youtu.be/viPfq9Awbd8), then follow the [video tutorial series](#video-tutorials).
+> **New to DDA?** Watch the [overview video](https://youtu.be/w9OQLEbeSf0), then follow the [video tutorial series](#video-tutorials).
+>
+> **Agentic operations.** DDA has a built-in Portal assistant and MCP servers for the Portal and the edge devices, so AI agents such as Kiro can work with it under the same permission checks as its web pages: see [Agentic Operations](#agentic-operations).
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [Agentic Operations](#agentic-operations)
 - [Video Tutorials](#video-tutorials)
 - [User Guide](#user-guide)
 - [Deployment](#deployment)
@@ -53,6 +56,7 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 - **ML Model Flexibility**: Compatible with various computer vision models
 - **Manufacturing Integration**: RESTful APIs for integration with existing systems
 - **Portal Management**: Centralized multi-tenant admin portal for managing all deployments
+- **Agentic Operations**: A built-in Portal assistant and MCP servers for the Portal and the edge devices let AI agents work with DDA under the same permission checks as its web pages
 
 ### Portal Features
 
@@ -70,7 +74,32 @@ DDA provides real-time defect detection capabilities for manufacturing quality c
 | **Deployments** | Deploy LocalServer, models, and workflows to edge devices, revise a device's deployment, optional Inference Uploader |
 | **Inference Uploader** | Automatically upload inference results from edge devices to S3 |
 | **Devices** | Register devices with a one-line setup command (Add Device) and monitor IoT Greengrass devices |
-| **Settings** | Portal configuration, Data Accounts, and Build Infrastructure settings (PortalAdmin only) |
+| **Settings** | Portal configuration, Data Accounts, Build Infrastructure and Assistant settings (PortalAdmin only) |
+| **Assistant** | Chat panel on every page: answers from the User Guide, looks things up and proposes changes that the user confirms, as the signed-in user |
+| **MCP Server** | Model Context Protocol endpoint for MCP clients such as Kiro: 187 tools, of which the 98 mutating ones are offered only after an administrator turns them on |
+
+## Agentic Operations
+
+> **Video:** [Module 14: MCP support](https://youtu.be/8CWPi96EpcY) · **User guide:** [24. MCP support](docs/user-guide/24-mcp-support.md), [25. The assistant](docs/user-guide/25-assistant.md)
+
+DDA can be operated by AI agents as well as through its web pages. The Portal has a built-in assistant and serves a Model Context Protocol (MCP) endpoint for MCP clients such as Kiro IDE and Kiro CLI, and the LocalServer on an edge device can serve one too. On the Portal, and on an edge device with local login or token authentication, an agent works with the credential of the user it acts for. Every tool call goes through the same role and permission checks as the matching web page, and nothing changes without the user's confirmation or an administrator's opt-in.
+
+| | Portal assistant | Portal MCP server | Edge MCP server |
+|---|---|---|---|
+| **What it is** | A chat panel on every Portal page, for every role except DataLabeler-only accounts | An MCP endpoint of the Portal: one URL for every tool, and one per view (data, models, devices, workflows, admin) | An MCP endpoint (`POST /mcp`) of the LocalServer on an edge device |
+| **How you use it** | Open the panel and ask; it answers with the Bedrock model chosen under Settings → Bedrock Configuration | Connect an MCP client and sign in with your Portal account through the Portal's Cognito user pool (remote OAuth; no stdio package) | Connect an MCP client through a port forward, which works on every device, or, if the device has token authentication (TLS on port 5443), over the device's network ([Connect to the device](docs/edge-mcp-server.md#connect-to-the-device)) |
+| **Tools** | The Portal MCP server's tool catalog, called inside the Portal as you, plus the User Guide (answers cite the section used) and the next step on the end-to-end path | 187: 89 read-only and 98 mutating (they create, change or delete something), 31 of them destructive | 73: 47 read-only and 26 mutating, 14 of them destructive |
+| **Changes** | Non-destructive changes only, each shown as a card you confirm before it runs; destructive tools (deletions, cancellations, deployments and the like) are never proposed | Mutating tools are listed and accepted only while an administrator has `mcpMutatingToolsEnabled` on; a destructive one also needs its target repeated in `confirm` | Mutating tools are listed and accepted only while `McpMutatingToolsEnabled` is on, and accepted only for a local sign-in with the Operator, UseCaseAdmin or PortalAdmin role; a destructive one also needs `confirm` |
+| **By default** | On, with its actions on | Deployed with the Portal, mutating tools off | Off on every device |
+| **Recorded in** | Portal Audit Logs, channel **Assistant** | Portal Audit Logs, channel **MCP** | The device's LocalServer log (`mcp.access` records) |
+
+Each of them can be switched off through configuration:
+
+- **Portal assistant.** A PortalAdmin turns the assistant, or only its actions, off under Settings → Assistant, without a deploy ([19.4](docs/user-guide/19-settings.md#194-assistant)). To remove it from a deployed Portal, destroy `EdgeCVPortalAssistantStack`, deploy again with `DEPLOY_ASSISTANT=false` (CDK context `deployAssistant=false`), then run `./deploy-frontend.sh` so the frontend no longer shows the panel, as described in [Deploying and removing the assistant stack](edge-cv-portal/ADMIN_GUIDE.md#deploying-and-removing-the-assistant-stack).
+- **Portal MCP server.** Its mutating tools stay off until an administrator sets the CDK context `mcpMutatingToolsEnabled`. To remove the server, destroy `EdgeCVPortalMcpStack` and deploy again with `DEPLOY_MCP_SERVER=false`, the two steps in [Enabling and disabling the MCP stack](edge-cv-portal/ADMIN_GUIDE.md#enabling-and-disabling-the-mcp-stack).
+- **Edge MCP server.** `McpServerEnabled` turns the server on for one device and `McpMutatingToolsEnabled` its mutating tools. Both are LocalServer component settings, `"false"` by default, changed through a deployment ([Enable it on a device](docs/edge-mcp-server.md#enable-it-on-a-device)). On a device with neither token authentication nor local login (off by default), the read-only tools need no sign-in, like the device's own API, so turn on local login before the MCP server if reads should need one ([Open-access devices](docs/edge-mcp-server.md#open-access-devices)).
+
+No assistant runs on the edge device. Its MCP server provides tools, and an MCP client, such as Kiro on your computer, calls them.
 
 ## Video Tutorials
 
@@ -80,7 +109,7 @@ Watch the full playlist: [Defect Detection Application - Learning Series](https:
 
 | Module | Video | Related README section | User guide |
 |--------|-------|------------------------|------------|
-| Overview | [Overview](https://youtu.be/viPfq9Awbd8) | [Overview](#overview) | [1. Getting started](docs/user-guide/01-getting-started.md) |
+| Overview | [Overview](https://youtu.be/w9OQLEbeSf0) | [Overview](#overview) | [1. Getting started](docs/user-guide/01-getting-started.md) |
 | Module 0 | [Portal Setup](https://youtu.be/HtH_4zT23Fo) | [Step 1: Deploy Portal Infrastructure](#step-1-deploy-portal-infrastructure-portal-account) | [2. Use Cases](docs/user-guide/02-use-cases.md), [19. Settings](docs/user-guide/19-settings.md) |
 | Module 1 | [Device Setup](https://youtu.be/PFdFycCQXA0) | [Step 7: Set Up Edge Devices (Add Device)](#step-7-set-up-edge-devices-add-device) | [15. Devices](docs/user-guide/15-devices.md) |
 | Module 2 | [Labeling](https://youtu.be/pxSoAIOLp18) | [Labeling](#labeling) | [4. Labeling](docs/user-guide/04-labeling.md) |
@@ -95,7 +124,7 @@ Watch the full playlist: [Defect Detection Application - Learning Series](https:
 | Module 11 | [User Access](https://youtu.be/_HDKtKvft3c) | [3.2 Create Portal Admin User](#32-create-portal-admin-user) | [20. User Manager](docs/user-guide/20-user-manager.md) |
 | Module 12 | [Edge Software](https://youtu.be/pInKqoADn2c) | [Edge Device Management](#edge-device-management) | [22. Device web UI](docs/user-guide/22-device-web-ui.md), [23. Quality Station HMI](docs/user-guide/23-station-hmi.md) |
 | Module 13 | [Dashboards](https://youtu.be/wTwUSNUQbac) | - | [14. Workflow dashboards](docs/user-guide/14-workflow-dashboards.md) |
-| Module 14 | [MCP support](https://youtu.be/4rWMVBdDABM) | [Documentation](#documentation) | [24. MCP support](docs/user-guide/24-mcp-support.md) |
+| Module 14 | [MCP support](https://youtu.be/8CWPi96EpcY) | [Agentic Operations](#agentic-operations) | [24. MCP support](docs/user-guide/24-mcp-support.md), [25. The assistant](docs/user-guide/25-assistant.md) |
 
 ## User Guide
 
@@ -1773,24 +1802,14 @@ defect-detection-application/
 
 ## Documentation
 
-**MCP servers (AI assistants).** The portal and the LocalServer each serve a
-Model Context Protocol endpoint, so an assistant such as Kiro can work with
-them as the signed-in user, read-only in this release. The portal server is
-deployed with the portal and connects through Cognito sign-in (remote OAuth;
-no stdio package is distributed): see the
-[Administrator Guide: MCP server (AI assistants)](edge-cv-portal/ADMIN_GUIDE.md#mcp-server-ai-assistants).
-The edge server is off by default and enabled per device: see
-[docs/edge-mcp-server.md](docs/edge-mcp-server.md).
-
-**Portal assistant.** The portal has a built-in assistant panel on every
-signed-in page. It explains pages and the end-to-end path from the user
-guide, tells users what to do next, and looks things up for them through the
-same tool catalog and permission checks as the MCP server, as the signed-in
-user; state-changing actions are reserved for a later release. It is
-deployed with the portal (`EdgeCVPortalAssistantStack`), uses the portal's
-Bedrock configuration, and can be turned off by a PortalAdmin in Settings:
-see the [Administrator Guide: Portal assistant](edge-cv-portal/ADMIN_GUIDE.md#portal-assistant)
-and the user guide chapter [25. The assistant](docs/user-guide/25-assistant.md).
+**MCP servers and the Portal assistant.** [Agentic Operations](#agentic-operations)
+compares the Portal assistant, the Portal MCP server and the edge MCP server,
+with their defaults and switches. The full documentation is in the
+[Administrator Guide: MCP server (AI assistants)](edge-cv-portal/ADMIN_GUIDE.md#mcp-server-ai-assistants)
+and [Portal assistant](edge-cv-portal/ADMIN_GUIDE.md#portal-assistant) sections,
+[docs/edge-mcp-server.md](docs/edge-mcp-server.md), and the user guide chapters
+[24. MCP support](docs/user-guide/24-mcp-support.md) and
+[25. The assistant](docs/user-guide/25-assistant.md).
 
 | Document | Description |
 |----------|-------------|
