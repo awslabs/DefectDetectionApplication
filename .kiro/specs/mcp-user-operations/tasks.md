@@ -337,11 +337,16 @@ Baselines are those of the implementation branch's base `3fa572f5` (the merge of
       - The target address remains only in the run's state file (mode 0600), outside the repository; no other copy exists. The worktree stayed clean at `20cfa66e` through the exercise, and nothing was committed or pushed during it
     - _Requirements: 8.4, 9.6, 9.7_
 
-- [ ] 6. Record the Phase-4 evidence and finish the documentation
+- [x] 6. Record the Phase-4 evidence and finish the documentation
   - Write the records of tasks 5.1–5.5 into this document as Phases 1–3 recorded theirs (the deploy and its proof, the pre-checks, the per-row observations, the Property 6 match of row 16, the closing deploy, the teardown; every deviation with its reason, including a row-2 fallback, a row-7 case-insensitive answer or a row-14 partial-cleanup 502 if one occurred); tick tasks 1–5
   - Reconcile the dates: the ADMIN_GUIDE Versions row ("released <date>") and the CHANGELOG heading carry the deploy date of task 5.1; the mcp-servers design annotation of task 4.2 is in place. If a row-7 deviation sent A4 back to the design, that revision and its review come before gate 3; otherwise no design change
   - Files: `.kiro/specs/mcp-user-operations/tasks.md`, `edge-cv-portal/ADMIN_GUIDE.md`, `edge-cv-portal/CHANGELOG.md` (dates only)
   - Verify: `DOCS_CHECK` PASS 187/73/260; `RECOUNT` both lines unchanged; the evidence commit with `HYGIENE` PASS (the records name no host path, pool, client, account or address — the throwaway usernames and the hashes of the deployed code are the only identifiers)
+  - Done (2026-11-05): the evidence commit `8dd151f9`, HYGIENE PASS (3 files). It carries the records of tasks 5.1–5.5 above and ticks tasks 5 and 5.1–5.5; tasks 1–4 were ticked by their own records. The ADMIN_GUIDE Versions row reads "released 2026-11-04" and the CHANGELOG heading "Phase 4 (2026-11-04)", the deploy date of task 5.1. The two mcp-servers design annotations of task 4.2 are in place (the admin-view exclusion note and Backlog 31)
+    - No deviation occurred, so no design change comes before gate 3: row 2 created the target without the fallback, row 7 answered 404 and not a case-insensitive 200, and row 14 deleted the account without a partial-cleanup 502. Task 5.3 records the one change of order (row 16 after the closing deploy) with its reason
+    - `DOCS_CHECK` PASS: portal 187, edge 73, 260 documented rows
+    - `RECOUNT`, both outputs identical to the task-4.3 run. Over the mcp-servers design: 161 rows; portal 184 = 87/53/44 (89 RO / 66 M / 29 M!); edge 73 = 47/9/17; per-tool list identical; path scan clean. Over this design: 4 rows × 6 cells; phase 4; 0 RO / 1 M / 3 M!; path scan clean
+    - The records name no host path, user pool, app client, AWS account or email address. The throwaway usernames and the hashes of the deployed code are the only identifiers
   - _Requirements: 7.9, 9.7, 10.2, 10.5_
 
 - [ ] 7. Release Phase 4 (owner gate 3)
@@ -355,6 +360,16 @@ Baselines are those of the implementation branch's base `3fa572f5` (the merge of
   - Re-run on the release tree, before the push of task 7: `PORTAL_MCP_PYTEST tests/mcp -q` (the task-2.17 count, 0 failed); `tests/assistant` 107; `PORTAL_TRUNK_PYTEST` 49; `CDK_TEST` 45 suites / 545 tests; `IAM_GATE` 40; `DOCS_CHECK` PASS (portal 187, edge 73, 260 documented rows, every tool with its catalog phase); `RECOUNT` mcp-servers 161 rows unchanged (portal 184 = 87/53/44, edge 73 = 47/9/17, per-tool list identical) and this design 4 rows (1 M / 3 M!)
   - Record the counts; list the follow-ups carried forward (this design's Backlog 1–7: the rule in the User Manager path, a single-account read tool, the canonical username in the handler's `resource_id`, the listing as `status_tool` on a large pool, the audit scan, the attribution-only cache staleness, and the `cognito-idp:AdminGetUser` grant the Portal assistant's worker role needs if its destructive allow-list ever names `portal_admin_account_disable` or `portal_admin_account_delete`; and the mcp-servers items that stay open)
   - Ensure all tests pass, ask the user if questions arise
+  - Run on the release tree (2026-11-05, before the push of task 7; this task is ticked after the merge). The suites ran on the tree of the evidence commit `8dd151f9`. The commit that carries this record changes only this document, which no suite reads. `main` was still at the branch's base `3fa572f5`
+    - `PORTAL_MCP_PYTEST tests/mcp`: **4,056 passed**, 0 failed (the task-2.17 count)
+    - `tests/assistant` 107 passed; `PORTAL_TRUNK_PYTEST` 49 passed
+    - `CDK_TEST`: `npm run build` exit code 0, then 45 suites / 545 tests, 2 snapshots. `IAM_GATE` 40 passed
+    - `DOCS_CHECK` PASS: portal 187, edge 73, 260 documented rows, every tool with its catalog phase
+    - `RECOUNT` over the mcp-servers design: 161 rows; portal 184 = 87/53/44 (89 RO / 66 M / 29 M!); edge 73 = 47/9/17; per-tool list identical. Over this design: 4 rows × 6 cells; phase 4; 0 RO / 1 M / 3 M!. Both outputs are identical to the task-2.17 and task-4.3 runs
+    - No question is open for the owner before gate 3
+  - Follow-ups carried forward:
+    - This design's Backlog 1–7: (1) the Self_Protection_Rule in the User Manager web path; (2) a single-account read tool, which needs a REST route first; (3) the canonical username in the handler's `resource_id` on calls that address an account by its email alias; (4) `portal_admin_accounts_list` as the `status_tool`, which lists the whole pool and can reach the 20 s read timeout on a large pool; (5) the audit-log channel filter, which runs as a scan, so the live exercise cross-checked it with a direct read; (6) the attribution-only staleness of the per-container email cache; (7) the `cognito-idp:AdminGetUser` grant the Portal assistant's worker role needs if its destructive allow-list ever names `portal_admin_account_disable` or `portal_admin_account_delete`
+    - The mcp-servers items that stay open: design Backlog 1's `deployed_devices` guard note, and the `portal_models_delete` tool, which waits for an owner decision now that its route's role check is resolved (the catalog absence test stands); Backlog 29 (the default `max_depth` of `portal_data_datasets_list`); Backlog 30 (the channel filter's table scan; the row-16 query read 366 pages, and each page wrote its own envelope); and the Existing_Token_Auth device check noted under mcp-servers 23.2 and 28.2. Backlog 31 is delivered by this spec, and the out-of-view refusal test (mcp-servers 18.2 finding 6) is in `test_mcp_view_refusal.py`
   - _Requirements: 9.1, 8.6_
 
 ## Notes
