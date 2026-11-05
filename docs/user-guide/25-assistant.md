@@ -1,6 +1,6 @@
 # 25. The assistant
 
-**Who:** every signed-in Portal user except accounts whose only role is DataLabeler; each look-up and each change the assistant makes runs with your own permissions, so it can see and do only what you can in the web UI. **Reference:** [Administrator Guide, Portal assistant](../../edge-cv-portal/ADMIN_GUIDE.md#portal-assistant), [24. MCP support](24-mcp-support.md).
+**Who:** every signed-in Portal user except accounts whose only role is DataLabeler; each look-up and each change the assistant makes runs with your own permissions, so it can see and do only what you can in the web UI. **Video:** [Module 14: MCP support](https://youtu.be/8CWPi96EpcY). **Reference:** [Administrator Guide, Portal assistant](../../edge-cv-portal/ADMIN_GUIDE.md#portal-assistant), [24. MCP support](24-mcp-support.md).
 
 The assistant is a chat panel on every Portal page. Ask it what a page or a field does, where you are on the path from a new use case to a running station, to look something up for you ("which devices are offline?", "what is the status of the last training job?"), or to make a change for you ("create a labeling team named night shift"), which you confirm first. It answers from this user guide and from the Portal's own data, using the same tool catalog an MCP client such as Kiro uses ([24.4](24-mcp-support.md#244-what-the-tools-can-read)), as you, with your permissions.
 
