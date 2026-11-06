@@ -7,6 +7,8 @@ Requirement 4.6.
 `channel=api` keeps entries written before the MCP_Audit_Marker existed
 (no `channel` attribute) visible; `channel=mcp` selects marked entries;
 `mcp_tool=<name>` selects one tool's entries. No table or GSI change.
+The MCP tool `portal_admin_audit_logs_query` forwards `channel` to the
+route and accepts each value the route filters on.
 """
 import json
 import sys
@@ -14,6 +16,8 @@ import uuid
 
 import boto3
 import pytest
+
+import _portal_harness as h
 
 REGION = "us-east-1"
 # A table of this module's own, so the scan's Limit never meets entries the
@@ -171,3 +175,31 @@ def test_available_actions_name_the_mcp_actions(as_admin):
     for action in ("mcp_tool_call", "authentication_failed",
                    "authorization_unavailable"):
         assert action in body["available_actions"]
+
+
+@pytest.fixture
+def mcp_backend(as_admin, monkeypatch):
+    """The MCP server dispatching to this module's handler and table."""
+    shared = sys.modules["shared_utils"]
+    monkeypatch.setattr(shared.rbac_manager, "has_permission",
+                        lambda *_a, **_k: True)
+    monkeypatch.delenv("PORTAL_REGISTRY_ENFORCED", raising=False)
+
+    def run_handler(_arn, event):
+        response = as_admin.handler(event, None)
+        return response["statusCode"], json.loads(response["body"])
+
+    return h.install(monkeypatch, h.FakeLambda(run_handler))
+
+
+@pytest.mark.parametrize("channel", ["api", "mcp", "assistant"])
+def test_mcp_tool_filters_each_channel_like_the_route(mcp_backend, as_admin,
+                                                      channel):
+    result = h.in_memory("admin", lambda client: client.call_tool(
+        "portal_admin_audit_logs_query", {"channel": channel}), h.access_token())
+    assert result.is_error is False, result.structured_content
+    [event] = mcp_backend.events
+    assert event["queryStringParameters"] == {"channel": channel}
+    logs = result.structured_content["result"]["logs"]
+    _, expected = call(as_admin, channel=channel)
+    assert sorted(log["event_id"] for log in logs) == expected

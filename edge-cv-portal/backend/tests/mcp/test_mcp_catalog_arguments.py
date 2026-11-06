@@ -14,6 +14,7 @@ comprehensions (review-9 N3). Path-mapped targets are checked against the
 guarded by a `400` branch on `not <var>` for a read that is not reassigned
 in between (review-8 N1), or listed in `validate_required_fields`.
 """
+import ast
 import dataclasses
 
 import pytest
@@ -342,6 +343,27 @@ def test_usecase_not_forwarded_cases():
     # the injected body keys do not count as required of the caller
     assert not any(key in ('usecase_id', 'dataset_manifest_s3') for _k, key in r.required)
     assert {'model_name', 'model_type', 'model_version'} <= {k for _x, k in r.required}
+
+
+def test_audit_logs_channel_enum_matches_the_handler():
+    # get_audit_logs filters on the values it compares `channel` with; any
+    # other value adds no filter. The tool offers exactly those values.
+    uni = h.universe()
+    node = uni.node(uni.find_function('audit_logs', 'get_audit_logs'))
+    [variable] = [target.id for stmt in ast.walk(node) if isinstance(stmt, ast.Assign)
+                  and isinstance(stmt.value, ast.Call)
+                  and getattr(stmt.value.func, 'attr', None) == 'get'
+                  and [h.literal(a) for a in stmt.value.args[:1]] == ['channel']
+                  for target in stmt.targets if isinstance(target, ast.Name)]
+    compared = set()
+    for cmp in ast.walk(node):
+        if isinstance(cmp, ast.Compare) and isinstance(cmp.left, ast.Name) \
+                and cmp.left.id == variable:
+            for op, value in zip(cmp.ops, map(h.literal, cmp.comparators)):
+                if isinstance(op, (ast.Eq, ast.In)) and value is not None:
+                    compared.update((value,) if isinstance(value, str) else value)
+    enum = BY_NAME['portal_admin_audit_logs_query'].input_schema['properties']['channel']['enum']
+    assert compared and set(enum) == compared, (enum, compared)
 
 
 def test_stale_usecase_not_forwarded_fails():
