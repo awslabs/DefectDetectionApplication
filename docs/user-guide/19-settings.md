@@ -58,8 +58,8 @@ Compute parameters for Portal component builds, used by dedicated server launche
 | **Ephemeral runners** | Use Spot capacity for ephemeral builds. Spot is cheaper but can be interrupted; interrupted jobs can be retried. | off |
 | **Source ref** | Git branch, tag or commit built from when a build request leaves **Branch or ref** empty; blank means the repository's default branch. | blank |
 | **Default Ubuntu flavor** | The flavor applied when a server launch omits the choice; set **Ubuntu Pro** to mandate compliance fleet-wide. | Standard |
-| **Per-target volume sizes** | **Add per-target volume size** to give a **Build target** (JP5, JP6, JP7, AMD64, AMD64_NVIDIA) its own volume size; JP6 needs at least 200 GB. |
-| **Runtime budgets (per target and mode)** | **Add runtime budget** to give a target and **Mode** (ephemeral, dedicated, or blank for both) its own limits: **Hard runtime (hours)** (a non-extendable ceiling), **Heartbeat lease (min)** and **Progress stall (min)** (liveness leases), **Queue wait (hours)** and **Provisioning (min)**. Raise the JP7 budget if Thor builds hit the limit. |
+| **Per-target volume sizes** | **Add per-target volume size** to give a **Build target** (JP5, JP6, JP7, AMD64, AMD64_NVIDIA) its own volume size; JP6 needs at least 200 GB. | none; every target uses **Volume size (GB)** |
+| **Runtime budgets (per target and mode)** | **Add runtime budget** to give a target and **Mode** (ephemeral, dedicated, or blank for both) its own limits: **Hard runtime (hours)** (a non-extendable ceiling), **Heartbeat lease (min)** and **Progress stall (min)** (liveness leases), **Queue wait (hours)** and **Provisioning (min)**. Raise the JP7 budget if Thor builds hit the limit. | none; every build is limited by **Max runtime (hours)** |
 
 Click **Save Configuration**.
 

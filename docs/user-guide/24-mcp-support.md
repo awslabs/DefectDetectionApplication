@@ -89,8 +89,9 @@ Calls to the edge MCP server are logged on the device, not in the Portal's Audit
 
 Each edge device can also serve its own MCP server from the LocalServer, so an assistant can read that station's state: cameras and image sources, workflows and their runs, results and images, and the system's health. It is off until it is enabled for the device through a deployment configuration change. It offers read-only tools; tools that change the station, for example pinning a static image or rescanning the cameras, are listed only when they are also turned on for the device.
 
-- Connect to it on the device's local network, or through a port forward to the device ([Connect to an edge device](../connect-to-device.md#forward-the-localserver-port-for-mcp)).
+- Connect to it through a port forward to the device, which works on every device ([Connect to an edge device](../connect-to-device.md#forward-the-localserver-port-for-mcp)), or on the device's local network if the device has token authentication (TLS on port 5443).
 - On a device with local login enabled, sign in with your Portal account synced to the device ([20.3](20-user-manager.md#203-edge-account-sync)), through the login helper the edge guide describes.
-- Every call is checked by the device with your own credential, as in the device web UI ([22](22-device-web-ui.md)).
+- On a device with local login or token authentication, every call is checked by the device with your own credential, as in the device web UI ([22](22-device-web-ui.md)).
+- On a device with neither (local login is off by default), the read-only tools need no sign-in, like the device's own API, and tools that change the station are refused. Turn on local login before the MCP server if reads should need a sign-in ([Open-access devices](../edge-mcp-server.md#open-access-devices)).
 
 Enabling the server, the connection addresses, the Kiro configuration and the tool list are in [Edge MCP server](../edge-mcp-server.md).
