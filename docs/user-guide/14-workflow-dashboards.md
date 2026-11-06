@@ -15,7 +15,7 @@ Telemetry is off until a UseCaseAdmin or PortalAdmin turns it on. Open **Workflo
 | **Telemetry enabled** | On to have the use case's devices publish summaries. | off |
 | **Summary interval (seconds)** | How often each device sends one summary per workflow, 5–60. | `10` |
 | **Idle heartbeat (seconds)** | How often a device sends a heartbeat for a workflow that has had no run for 5 minutes, 30–300. | `60` |
-| **Media location** (read-only) | The use case's inference-results bucket under `dda-telemetry/`, where clips and live frames are stored, with its region. |
+| **Media location** (read-only) | The use case's inference-results bucket under `dda-telemetry/`, where clips and live frames are stored, with its region. | – |
 
 **Save** writes the settings and pushes them to the telemetry shadow of every device registered for the use case; the result lists each device's outcome. The **Readiness checklist** below tells you what still blocks data from arriving: ingestion resources, region, device records (every device must have a record naming this use case; set the device's target architecture on its device page to create one), a telemetry source (a LocalServer release with the telemetry agent must be deployed), the media location and its retention rules, registry enforcement, and whether every device accepted the shadow.
 
