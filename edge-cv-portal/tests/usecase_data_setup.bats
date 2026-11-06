@@ -137,3 +137,56 @@ npm_ci_before_first_npx() {
   stub_call_has_pair "$deploy" -c dataBucketNames=bucket-a,bucket-b
   [ "$(regions)" = eu-west-1 ]
 }
+
+# --- the permissions boundary of the account's CDK bootstrap --------------------
+# iam/setup-account.sh usecase|data bootstraps with dda-<kind>-permissions-
+# boundary on the execution role; deploy-account-role.sh reads it from the
+# CDKToolkit stack (scripts/portal-permissions-boundary.sh, answered by the stub
+# with STUB_CDKTOOLKIT_BOUNDARY) and passes it to the stack's app. Without a
+# bootstrap boundary nothing is passed (the exact deploy arguments above).
+
+@test "deploy-account-role.sh usecase passes the bootstrap's boundary to cdk deploy" {
+  local deploy
+  export AWS_REGION=eu-west-1
+  set_bootstrap_version 21
+  export STUB_CDKTOOLKIT_BOUNDARY=dda-usecase-permissions-boundary
+  account_role usecase "$USECASE_FEED"
+  [ "$status" -eq 0 ]
+  deploy="$(stub_call_index npx '^cdk deploy DDAPortalUseCaseAccountStack')"
+  [ -n "$deploy" ]
+  stub_call_has_pair "$deploy" -c ddaPermissionsBoundary=dda-usecase-permissions-boundary
+  stub_call_has_pair "$deploy" -c portalAccountId=222222222222
+  [ "$(stub_call_count_matching aws '^cloudformation describe-stacks --stack-name CDKToolkit --region eu-west-1 ')" -eq 1 ]
+  [[ "$output" == *"Permissions boundary: dda-usecase-permissions-boundary (from the CDK bootstrap)"* ]]
+}
+
+@test "deploy-account-role.sh data passes the bootstrap's boundary to cdk deploy, not to the bootstrap" {
+  local boot deploy
+  export AWS_REGION=eu-west-1
+  unset_bootstrap_version
+  export STUB_CDKTOOLKIT_BOUNDARY=dda-data-permissions-boundary
+  account_role data "$DATA_FEED"
+  [ "$status" -eq 0 ]
+  boot="$(stub_call_index npx '^cdk bootstrap')"
+  deploy="$(stub_call_index npx '^cdk deploy DDAPortalDataAccountStack')"
+  [ -n "$boot" ]
+  [ -n "$deploy" ]
+  [[ "$(stub_call_args_n "$boot")" != *ddaPermissionsBoundary* ]]
+  stub_call_has_pair "$deploy" -c ddaPermissionsBoundary=dda-data-permissions-boundary
+  stub_call_has_pair "$deploy" -c dataBucketNames=bucket-a,bucket-b
+}
+
+@test "deploy-account-role.sh usecase and data stop before cdk deploy when the bootstrap cannot be read" {
+  local topology feed
+  export AWS_REGION=eu-west-1
+  set_bootstrap_version 21
+  deny_describe_stacks CDKToolkit
+  for topology in usecase data; do
+    feed="$USECASE_FEED"
+    [ "$topology" = data ] && feed="$DATA_FEED"
+    account_role "$topology" "$feed"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not read the CDKToolkit stack"* ]]
+    [ -z "$(stub_call_index npx '^cdk deploy')" ]
+  done
+}

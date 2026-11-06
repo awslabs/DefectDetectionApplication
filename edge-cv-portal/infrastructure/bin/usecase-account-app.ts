@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
+import { applyDdaPermissionsBoundary } from '../lib/permissions-boundary';
 import { UseCaseAccountStack } from '../lib/usecase-account-stack';
 
 /**
@@ -56,5 +57,9 @@ new UseCaseAccountStack(app, 'DDAPortalUseCaseAccountStack', {
     region: process.env.CDK_DEFAULT_REGION,
   },
 });
+
+// With -c ddaPermissionsBoundary=<name> (deploy-account-role.sh passes the
+// boundary of the account's CDK bootstrap), every role carries that boundary.
+applyDdaPermissionsBoundary(app);
 
 app.synth();

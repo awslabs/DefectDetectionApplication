@@ -17,14 +17,14 @@
 #      the execution policies require (an earlier deploy left them untagged);
 #   2. creates the policies, or adds a new default version when one exists and
 #      its document changed: the CloudFormation execution policies
-#      (dda-cfn-exec-*), the installer policy (dda-installer-*) and, for the
-#      Portal Account, the DDASageMakerExecutionRole permissions boundary
-#      (dda-sagemaker-execution-boundary);
+#      (dda-cfn-exec-*), the installer policy (dda-installer-*), the
+#      account's permissions boundary (dda-<portal|usecase|data>-permissions-
+#      boundary) and, for the Portal Account, the DDASageMakerExecutionRole
+#      permissions boundary (dda-sagemaker-execution-boundary);
 #   3. runs `cdk bootstrap` with the execution policies instead of
-#      AdministratorAccess (from this directory, which has no cdk.json); in the
-#      Portal Account also with the permissions boundary
-#      dda-portal-permissions-boundary on the execution role, which every role
-#      the portal app creates must then carry as well;
+#      AdministratorAccess (from this directory, which has no cdk.json), and
+#      with the account's permissions boundary on the execution role, which
+#      every role the account's CDK app creates must then carry as well;
 #   4. creates the installer role trusting --installer-principal, unless it
 #      exists or --no-installer-role is given, and attaches the installer
 #      policy.
@@ -201,7 +201,11 @@ case "$KIND" in
         ;;
 esac
 INSTALLER_FILE="${KIND}-installer-policy.json"
-PORTAL_PERMISSIONS_BOUNDARY=dda-portal-permissions-boundary
+# The permissions boundary of the CloudFormation execution role and of every
+# role the account's CDK app creates. No --name-suffix: the policy names itself
+# in its Deny, and IAM is global, so there is one per account.
+PERMISSIONS_BOUNDARY="dda-${KIND}-permissions-boundary"
+PERMISSIONS_BOUNDARY_FILE="${KIND}-permissions-boundary-policy.json"
 INSTALLER_NAME="dda-installer-${KIND}${NAME_SUFFIX}"
 
 echo "DDA least-privilege setup: $KIND account $ACCOUNT_ID, region $REGION"
@@ -261,9 +265,11 @@ if [ "$KIND" = "portal" ]; then
     # IAM is global and the boundary names no region: one per account.
     BOUNDARY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/dda-sagemaker-execution-boundary"
     upsert_policy dda-sagemaker-execution-boundary "$(fill sagemaker-execution-boundary-policy.json)"
-    # The permissions boundary of the CloudFormation execution role and of
-    # every role the portal app creates (one per account: it names no region).
-    upsert_policy "$PORTAL_PERMISSIONS_BOUNDARY" "$(fill portal-permissions-boundary-policy.json)"
+fi
+# The permissions boundary of the CloudFormation execution role and of every
+# role the account's CDK app creates (one per account: it names no region).
+upsert_policy "$PERMISSIONS_BOUNDARY" "$(fill "$PERMISSIONS_BOUNDARY_FILE")"
+if [ "$KIND" = "portal" ]; then
     # A DDASageMakerExecutionRole from an earlier install has no boundary, and
     # the installer may write its inline policies only once it has one.
     if CURRENT_BOUNDARY="$(aws iam get-role --role-name DDASageMakerExecutionRole \
@@ -297,12 +303,10 @@ BOOTSTRAP_ARGS=(bootstrap "aws://${ACCOUNT_ID}/${REGION}")
 for arn in "${EXEC_ARNS[@]}"; do
     BOOTSTRAP_ARGS+=(--cloudformation-execution-policies "$arn")
 done
-if [ "$KIND" = "portal" ]; then
-    # The execution role gets the boundary, and with it may create a role only
-    # if the role carries the boundary too: the deploy scripts read it from
-    # the bootstrap and pass it to the CDK app (scripts/portal-permissions-boundary.sh).
-    BOOTSTRAP_ARGS+=(--custom-permissions-boundary "$PORTAL_PERMISSIONS_BOUNDARY")
-fi
+# The execution role gets the boundary, and with it may create a role only if
+# the role carries the boundary too: the deploy scripts read it from the
+# bootstrap and pass it to the CDK app (scripts/portal-permissions-boundary.sh).
+BOOTSTRAP_ARGS+=(--custom-permissions-boundary "$PERMISSIONS_BOUNDARY")
 echo "  Every CDK app in this account and region that uses the default bootstrap qualifier"
 echo "  shares this execution role, so after this step those apps get only these policies."
 ( cd "$SCRIPT_DIR" && run "${CDK[@]}" "${BOOTSTRAP_ARGS[@]}" )

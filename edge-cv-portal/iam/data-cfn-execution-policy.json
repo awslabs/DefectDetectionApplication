@@ -56,6 +56,26 @@
       ]
     },
     {
+      "Sid": "DdaRolesGetOnlyTheDdaBoundary",
+      "Effect": "Allow",
+      "Action": "iam:PutRolePermissionsBoundary",
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/DDAPortalDataAccessRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerDataAccessRole"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::ACCOUNT_ID:policy/dda-data-permissions-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "ReadTheDdaBoundary",
+      "Effect": "Allow",
+      "Action": "iam:GetPolicy",
+      "Resource": "arn:aws:iam::ACCOUNT_ID:policy/dda-data-permissions-boundary"
+    },
+    {
       "Sid": "PreconfiguredDataBucketPolicies",
       "Effect": "Allow",
       "Action": [
