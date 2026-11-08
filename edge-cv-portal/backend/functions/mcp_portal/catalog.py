@@ -695,7 +695,7 @@ ADMIN: Tuple[ToolSpec, ...] = (
         input_schema=schema({
             'action': identifier(),
             'user_id': identifier('Filter: entries written for this user id.'),
-            'channel': enum('api', 'mcp'),
+            'channel': enum('api', 'mcp', 'assistant'),
             'mcp_tool': identifier(),
             'start_time': integer(minimum=0, description='Epoch milliseconds.'),
             'end_time': integer(minimum=0, description='Epoch milliseconds.'),

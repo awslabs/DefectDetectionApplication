@@ -69,7 +69,7 @@ def test_discover_fields(portal, view):
     info, instructions = h.in_memory(view, go, h.access_token())
     assert info.name == server.server_name(view)
     assert info.name == ('dda-portal-mcp' if view is None else f'dda-portal-mcp/{view}')
-    assert info.version == '1.3.0'
+    assert info.version == '1.3.1'
     assert instructions == server.instructions_for(view)
 
 
@@ -244,14 +244,14 @@ def test_read_only_call_dispatches_once(portal):
     assert event['requestContext']['authorizer']['claims'] == token.claims
     assert event['mcp']['channel'] == 'mcp'
     assert event['mcp']['tool'] == 'portal_devices_list'
-    assert event['mcp']['server'] == 'dda-portal-mcp/devices@1.3.0'
+    assert event['mcp']['server'] == 'dda-portal-mcp/devices@1.3.1'
     assert event['mcp']['principal_email'] == h.EMAIL
 
 
 def test_aggregate_endpoint_serves_every_view(portal):
     result = call(None, 'portal_devices_list', {'usecase_id': USECASE})
     assert result.is_error is False
-    assert portal.events[-1]['mcp']['server'] == 'dda-portal-mcp@1.3.0'
+    assert portal.events[-1]['mcp']['server'] == 'dda-portal-mcp@1.3.1'
 
 
 # ---------------------------------------------------------------- M call

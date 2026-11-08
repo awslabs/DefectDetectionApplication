@@ -1992,7 +1992,7 @@ workspace) or `~/.kiro/settings/mcp.json` (the user). No secret is involved:
 |---|---|
 | Supported MCP protocol revisions | `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26` |
 | `mcp` Python SDK | `2.3.0` (Lambda layer, with `mangum` `0.22.0`) |
-| Portal_MCP_Server version | `1.3.0` (Phases 1 to 4, released 2026-11-04; `1.2.0` was Phases 1, 2 and 3, released 2026-11-02; `1.1.0` was Phases 1 and 2, released 2026-11-01; `1.0.0` was Phase 1, released 2026-10-25). Phase 4 is portal-only, so the edge MCP server is unchanged: it reports `deliveredPhases` `[1, 2, 3]` from LocalServer `arm64JP5` 1.0.61 and `arm64JP6` 1.0.83 (built 2026-11-02) on, and `[1, 2]` from `arm64JP5` 1.0.60 and `arm64JP6` 1.0.82 (built 2026-11-01); Phases 2 and 3 were each verified on a JP5 and a JP6 device |
+| Portal_MCP_Server version | `1.3.1` (Phases 1 to 4, with `channel` `assistant` accepted by `portal_admin_audit_logs_query`; `1.3.0` was Phases 1 to 4, released 2026-11-04; `1.2.0` was Phases 1, 2 and 3, released 2026-11-02; `1.1.0` was Phases 1 and 2, released 2026-11-01; `1.0.0` was Phase 1, released 2026-10-25). Phase 4 is portal-only, so the edge MCP server is unchanged: it reports `deliveredPhases` `[1, 2, 3]` from LocalServer `arm64JP5` 1.0.61 and `arm64JP6` 1.0.83 (built 2026-11-02) on, and `[1, 2]` from `arm64JP5` 1.0.60 and `arm64JP6` 1.0.82 (built 2026-11-01); Phases 2 and 3 were each verified on a JP5 and a JP6 device |
 | Tested Kiro IDE and CLI versions | Kiro IDE 1.4.26 (OAuth sign-in, tool calls, token refresh and a view endpoint observed 2026-10-25/26); Kiro CLI 2.27.0 (OAuth sign-in and a tool call observed 2026-10-26); both negotiated MCP protocol `2026-07-28` |
 | Kiro and MCP documentation checked | 2026-10-18 and 2026-10-19 |
 

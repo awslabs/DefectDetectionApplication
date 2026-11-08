@@ -123,6 +123,25 @@ def test_envelope_entries_carry_the_assistant_marker(assistant_env, fake_bedrock
                      'dda-portal-frontend/abc1234')]
 
 
+def test_audit_log_tool_filters_to_the_assistant_channel(assistant_env, fake_bedrock):
+    # The model is offered channel 'assistant' and its call reaches the route.
+    client = fake_bedrock(
+        tool_use_events([('tu-1', 'portal_admin_audit_logs_query', {'channel': 'assistant'})]),
+        text_events('No entries yet.'))
+    _, cid, tid = make_turn(assistant_env, prompt='What did you look up?', route='/audit')
+    run_worker(cid, tid)
+    assert store.get_turn(cid, tid)['status'] == 'completed'
+    [offered] = [t['toolSpec'] for t in client.requests[0]['toolConfig']['tools']
+                 if t.get('toolSpec', {}).get('name') == 'portal_admin_audit_logs_query']
+    assert 'assistant' in offered['inputSchema']['json']['properties']['channel']['enum']
+    result = client.requests[1]['messages'][-1]['content'][0]['toolResult']
+    assert result['status'] == 'success', result
+    [(_arn, event)] = assistant_env.fake_lambda.calls
+    assert (event['resource'], event['queryStringParameters']) == (
+        '/audit-logs', {'channel': 'assistant'})
+    assert event['mcp']['channel'] == 'assistant'
+
+
 def test_journey_status_local_tool(assistant_env, fake_bedrock):
     fake_bedrock(tool_use_events([('tu-1', 'journey_status', {'usecase_id': USECASE})]),
                  text_events('Next: label your images.'))

@@ -4,6 +4,10 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed - MCP audit-log tool: filter to the assistant channel (2026-11-06)
+
+`portal_admin_audit_logs_query` accepts `channel` `assistant` beside `api` and `mcp`, the values `GET /audit-logs` and the Audit Logs page already filter on, so MCP clients and the Portal assistant, which runs the same tool catalog, can list the assistant's entries. Calls with `api` or `mcp` are unchanged. The Portal MCP server (`EdgeCVPortalMcpStack`) reports server version `1.3.1`.
+
 ### Added - MCP server account tools, Phase 4 (2026-11-04)
 
 The Portal MCP server (`EdgeCVPortalMcpStack`, server version `1.3.0`) delivers Phase 4: four account tools in the `admin` view, `portal_admin_account_create`, `portal_admin_account_disable`, `portal_admin_account_enable` and `portal_admin_account_delete`. They create, disable, enable and delete Portal accounts through the same handler as the User Manager page. The edge MCP server is unchanged. Nothing changes for an existing deployment until an administrator turns the switch on.

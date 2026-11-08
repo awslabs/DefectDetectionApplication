@@ -6,7 +6,7 @@ Lambda of the matching REST route (spec: .kiro/specs/mcp-servers/).
 """
 
 # Semver of this package; also the default of MCP_SERVER_VERSION.
-__version__ = '1.3.0'
+__version__ = '1.3.1'
 
 # The only phase gate: a catalog spec whose phase is not listed here is neither
 # listed nor accepted. Bumped to (1, 2), (1, 2, 3) and (1, 2, 3, 4) by the
