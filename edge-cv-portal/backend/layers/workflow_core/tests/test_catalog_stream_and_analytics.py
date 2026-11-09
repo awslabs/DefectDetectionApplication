@@ -123,16 +123,26 @@ class TestCatalogAppendIsAdditive:
 
     def test_new_types_are_appended_after_every_pre_existing_entry(self):
         # Requirement 1.7: the five new descriptors follow `metadata`, the
-        # last pre-feature entry, in the order the design fixes.
+        # last pre-feature entry, in the order the design fixes. Later
+        # additive features (e.g. s3_upload) may only append *after* them,
+        # so the durable assertion is positional (the same form
+        # test_catalog_modbus_write.py uses): the five occupy the slice
+        # right after the pre-feature prefix.
         order = tuple(d.type_id for d in NODE_CATALOG)
-        assert order[len(PRE_FEATURE_TYPE_ID_ORDER):] == APPENDED_TYPE_IDS
+        start = len(PRE_FEATURE_TYPE_ID_ORDER)
+        assert order[start:start + len(APPENDED_TYPE_IDS)] == APPENDED_TYPE_IDS
         assert order.index("rtsp_camera_source") == order.index("metadata") + 1
         for type_id in APPENDED_TYPE_IDS:
             assert order.count(type_id) == 1, type_id
 
     def test_catalog_is_exactly_the_pre_feature_set_plus_the_new_types(self):
-        assert {d.type_id for d in NODE_CATALOG} == \
+        # The feature's slice of the catalog is exactly its set; anything a
+        # later feature appended sits after it (positional additivity).
+        order = tuple(d.type_id for d in NODE_CATALOG)
+        feature_slice = order[:len(PRE_FEATURE_TYPE_ID_ORDER) + len(APPENDED_TYPE_IDS)]
+        assert set(feature_slice) == \
             set(PRE_FEATURE_TYPE_ID_ORDER) | set(APPENDED_TYPE_IDS)
+        assert len(feature_slice) == len(set(feature_slice))
 
     def test_every_pre_existing_descriptor_content_is_byte_identical(self):
         # Requirements 1.7, 18.1: content additivity. Every descriptor that

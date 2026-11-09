@@ -124,6 +124,15 @@ BINDING_MQTT_PUBLISH = "mqtt_publish"
 BINDING_OPCUA_WRITE = "opcua_write"
 BINDING_MODBUS_WRITE = "modbus_write"
 BINDING_DIGITAL_INPUT = "digital_input"
+#: The s3_upload output node: uploads the JPEG the compiled pipeline
+#: captured on the node's input branch (the binding's ``{work_dir}``-rooted
+#: ``capturePaths["in"]``, the bedrock_inference capture mechanism) to an
+#: ``s3://bucket/key`` destination with the device's credential chain or
+#: by HTTP PUT to a presigned ``https://`` URL. Runs in the output loop
+#: like every other output binding (gated, conditioned, contained per
+#: Requirement 13.7); needs the run's ``work_dir`` (threaded by the
+#: executor through ``process``/``process_subset``) to find the frame.
+BINDING_S3_UPLOAD = "s3_upload"
 #: Handled by BedrockInferenceProcessor BEFORE the output bindings run
 #: (the pipeline executor merges its result into the tag values this
 #: processor gates on); skipped here.
@@ -1132,6 +1141,154 @@ def _default_modbus_writer(
     else:
         raise ValueError(
             "Unknown Modbus register type {0!r}".format(register_type))
+
+
+# ---------------------------------------------------------------------------
+# S3 / presigned-URL upload (s3_upload bindings)
+# ---------------------------------------------------------------------------
+
+#: The placeholder the compiler leaves in capture paths for the executor
+#: to resolve per run (mirrors ``WorkflowExecutor._WORK_DIR_TOKEN``).
+S3_UPLOAD_WORK_DIR_TOKEN = "{work_dir}"
+S3_UPLOAD_SCHEME_S3 = "s3://"
+S3_UPLOAD_SCHEME_HTTPS = "https://"
+S3_UPLOAD_DEFAULT_CONTENT_TYPE = "image/jpeg"
+
+
+class UploadRejected(RuntimeError):
+    """An upload attempt the destination rejected for good (an HTTP 4xx or
+    an S3 client error below 500): retrying cannot succeed, so the default
+    uploader raises it without consuming the remaining attempts."""
+
+
+def _mask_destination(destination: Any) -> str:
+    """The destination with every signed query value (``X-Amz-*``) masked,
+    for details and log lines (Item 5 Layer A). Imported lazily: the
+    trigger runtime imports this module inside its own functions."""
+    from workflow_engine.trigger_runtime import redact_signed_query
+    return str(redact_signed_query(str(destination)))
+
+
+def _split_s3_destination(destination: str) -> Tuple[str, str]:
+    """``s3://bucket/key`` -> ``(bucket, key)``; both parts required."""
+    bucket, _, key = destination[len(S3_UPLOAD_SCHEME_S3):].partition("/")
+    if not bucket or not key:
+        raise ValueError(
+            "s3_upload destination must be s3://<bucket>/<key>, got {0!r}".format(
+                _mask_destination(destination)))
+    return bucket, key
+
+
+def _s3_client(region: Optional[str], timeout_s: int):
+    """A boto3 S3 client with SDK retries off (the binding owns the retry
+    budget) and both timeouts at ``timeout_s``; the device's credential
+    chain (on Greengrass the token exchange role) authenticates. Imported
+    lazily like the paho/opcua clients so this module stays importable
+    everywhere."""
+    import boto3
+    from botocore.config import Config
+    # max_attempts counts retries AFTER the initial request (botocore
+    # normalizes it to total_max_attempts = max_attempts + 1), so 0 is
+    # "exactly one request".
+    return boto3.client(
+        "s3",
+        region_name=region or None,
+        config=Config(
+            connect_timeout=timeout_s,
+            read_timeout=timeout_s,
+            retries={"mode": "standard", "max_attempts": 0},
+        ),
+    )
+
+
+def _put_s3_object(client, bucket: str, key: str, body: bytes,
+                   content_type: str) -> None:
+    """One PutObject; a client error below HTTP 500 (AccessDenied,
+    NoSuchBucket, ...) is final."""
+    from botocore.exceptions import ClientError
+    try:
+        client.put_object(
+            Bucket=bucket, Key=key, Body=body, ContentType=content_type)
+    except ClientError as exc:
+        status = int(
+            (exc.response.get("ResponseMetadata") or {}).get("HTTPStatusCode") or 0)
+        code = (exc.response.get("Error") or {}).get("Code") or "ClientError"
+        message = "PutObject to s3://{0}/{1} failed: {2} (HTTP {3})".format(
+            bucket, key, code, status)
+        if 0 < status < 500:
+            raise UploadRejected(message) from exc
+        raise RuntimeError(message) from exc
+
+
+def _put_presigned_url(url: str, body: bytes, content_type: str,
+                       timeout_s: int) -> None:
+    """One HTTP PUT of ``body`` to the presigned ``url`` with the standard
+    library; 2xx succeeds, a 4xx is final, anything else may be retried.
+    Error text carries the masked URL only (no ``X-Amz-*`` values)."""
+    import urllib.error
+    import urllib.request
+    masked = _mask_destination(url)
+    request = urllib.request.Request(
+        url, data=body, method="PUT",
+        headers={"Content-Type": content_type,
+                 "Content-Length": str(len(body))},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            status = int(response.status)
+    except urllib.error.HTTPError as exc:
+        message = "HTTP PUT to {0} failed with status {1}".format(masked, exc.code)
+        if 400 <= exc.code < 500:
+            raise UploadRejected(message) from exc
+        raise RuntimeError(message) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            "HTTP PUT to {0} failed: {1}".format(masked, exc.reason)) from exc
+    if not 200 <= status < 300:
+        raise RuntimeError(
+            "HTTP PUT to {0} returned status {1}".format(masked, status))
+
+
+def _default_s3_uploader(
+    destination: str,
+    body: bytes,
+    content_type: str,
+    timeout_s: int,
+    retries: int,
+    region: Optional[str] = None,
+) -> None:
+    """Upload ``body`` to ``destination`` (production default for the
+    :class:`OutputBindingProcessor` ``s3_uploader`` seam).
+
+    ``s3://bucket/key`` is one PutObject with the device's credential chain;
+    ``https://...`` is one HTTP PUT to the presigned URL, no credentials.
+    A failed attempt is retried up to ``retries`` times (so ``retries + 1``
+    attempts in all) unless the destination rejected it for good
+    (:class:`UploadRejected`); the last error is raised. Log lines carry
+    the masked destination only."""
+    attempts = max(0, int(retries)) + 1
+    masked = _mask_destination(destination)
+    last_error: Optional[Exception] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            if destination.startswith(S3_UPLOAD_SCHEME_S3):
+                bucket, key = _split_s3_destination(destination)
+                _put_s3_object(
+                    _s3_client(region, timeout_s), bucket, key, body,
+                    content_type)
+            else:
+                _put_presigned_url(destination, body, content_type, timeout_s)
+            return
+        except UploadRejected:
+            raise
+        except Exception as exc:  # noqa: BLE001 - retried, then re-raised
+            last_error = exc
+            logger.warning(
+                "s3_upload attempt %d/%d to %s failed: %s",
+                attempt, attempts, masked, exc,
+            )
+    assert last_error is not None
+    raise last_error
 
 
 # ---------------------------------------------------------------------------
@@ -3473,6 +3630,7 @@ class OutputBindingProcessor:
         modbus_writer: Optional[Callable] = None,
         event_gate_store=None,
         clock_ms: Optional[Callable[[], int]] = None,
+        s3_uploader: Optional[Callable] = None,
     ) -> None:
         self._dio_actuator = dio_actuator or _default_dio_actuator
         self._mqtt_publisher = mqtt_publisher or _default_mqtt_publisher
@@ -3481,6 +3639,10 @@ class OutputBindingProcessor:
             greengrass_publisher or _default_greengrass_publisher
         )
         self._modbus_writer = modbus_writer or _default_modbus_writer
+        # s3_upload bindings: ``(destination, body, content_type,
+        # timeout_s, retries, region)``; injectable so tests run without
+        # S3 or a presigned endpoint.
+        self._s3_uploader = s3_uploader or _default_s3_uploader
         # Event gates (rtsp-rtmp-stream-cameras Requirement 15): their
         # per-registration state, in memory, and the clock their
         # repeat interval reads. Injectable for tests.
@@ -3497,17 +3659,22 @@ class OutputBindingProcessor:
         tag_values: dict,
         detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
         duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
+        work_dir: Optional[str] = None,
     ) -> None:
         # Forward duration_sink only when one was provided AND the (possibly
         # overridden) process() signature accepts it, so subclasses that
         # override process() without the new keyword keep working unchanged
         # (default None -> behavior byte-identical to today;
-        # node-execution-timing R5.2 backward compatibility).
+        # node-execution-timing R5.2 backward compatibility). ``work_dir``
+        # (the run's capture directory, needed by s3_upload) is forwarded
+        # under the same rule.
         kwargs: Dict[str, Any] = {"detail_sink": detail_sink}
         if duration_sink is not None and _accepts_keyword(
             self.process, "duration_sink"
         ):
             kwargs["duration_sink"] = duration_sink
+        if work_dir is not None and _accepts_keyword(self.process, "work_dir"):
+            kwargs["work_dir"] = work_dir
         self.process(registration, document, tag_values, **kwargs)
 
     def _gate_store(self):
@@ -3548,6 +3715,7 @@ class OutputBindingProcessor:
         tag_values: dict,
         detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
         duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
+        work_dir: Optional[str] = None,
     ) -> None:
         """Process every output binding independently (Requirement 13.7).
 
@@ -3566,6 +3734,11 @@ class OutputBindingProcessor:
         condition-skipped bindings and filter/conditional evaluations report
         nothing (node-execution-timing Requirements 1.3, 1.7).
 
+        ``work_dir`` (optional; default None) is the run's per-run capture
+        directory: ``s3_upload`` bindings resolve their ``{work_dir}``-rooted
+        capture path against it. Without it an s3_upload binding fails
+        (contained); every other binding ignores it.
+
         Delegates to :meth:`process_subset` with the full binding list
         (detection-guided-bedrock-inspection Requirement 5.7): the
         pre-refactor body lives there unchanged, so behavior is
@@ -3577,6 +3750,7 @@ class OutputBindingProcessor:
             [binding.get("nodeId") for binding in bindings],
             detail_sink=detail_sink,
             duration_sink=duration_sink,
+            work_dir=work_dir,
         )
 
     def process_subset(
@@ -3586,6 +3760,7 @@ class OutputBindingProcessor:
         binding_ids: List[Any],
         detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
         duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
+        work_dir: Optional[str] = None,
     ) -> None:
         """Process only the executor bindings named by ``binding_ids``
         (detection-guided-bedrock-inspection, Requirement 5.7).
@@ -3604,7 +3779,7 @@ class OutputBindingProcessor:
         completion path calls it with one branch's binding ids so each
         inspection's outputs publish as its result lands.
 
-        ``detail_sink`` / ``duration_sink`` are documented on
+        ``detail_sink`` / ``duration_sink`` / ``work_dir`` are documented on
         :meth:`process` and behave identically here."""
         wanted = set(binding_ids or [])
         bindings = [
@@ -3673,6 +3848,8 @@ class OutputBindingProcessor:
                     runner = self._run_opcua_write
                 elif kind == BINDING_MODBUS_WRITE:
                     runner = self._run_modbus_write
+                elif kind == BINDING_S3_UPLOAD:
+                    runner = self._run_s3_upload
                 else:
                     logger.debug(
                         "Skipping unknown executor binding %r (node %s)",
@@ -3722,6 +3899,10 @@ class OutputBindingProcessor:
                         # modbus_write / digital_output write scalars and gain
                         # no automatic embedding.
                         detail = runner(parameters, effective, attached)
+                    elif kind == BINDING_S3_UPLOAD:
+                        # The upload reads the frame named by the binding's
+                        # capturePaths, resolved against the run's work_dir.
+                        detail = runner(parameters, effective, binding, work_dir)
                     else:
                         detail = runner(parameters, effective)
                 finally:
@@ -4074,6 +4255,78 @@ class OutputBindingProcessor:
         flags = "{0}, retained".format(path) if retain else path
         return "sent to topic '{0}' (qos {1}, {2}): {3}".format(
             topic, qos, flags, _preview(payload_text))
+
+    def _run_s3_upload(
+        self,
+        parameters: Dict[str, Any],
+        metadata: Dict[str, Any],
+        binding: dict,
+        work_dir: Optional[str],
+    ) -> Optional[str]:
+        """Upload the frame captured on the node's input branch.
+
+        The ``destination`` template renders over the run metadata (flat
+        and dotted placeholders, e.g. ``{trigger.payload_json.body.key}``);
+        a placeholder left unresolved, an empty result, or a scheme other
+        than ``s3://`` / ``https://`` fails the binding loudly rather than
+        uploading to a mistyped target. ``strip_suffix`` / ``append_suffix``
+        rewrite the rendered ``s3://`` key only (an https:// presigned URL is
+        signed for one exact key). The frame is the binding's
+        ``capturePaths["in"]`` file with ``{work_dir}`` resolved against the
+        run's work directory. Returns the sent-message detail
+        ``uploaded <masked destination> (<n> bytes)``."""
+        rendered = render_template(
+            str(parameters.get("destination") or ""), metadata)
+        destination = str(rendered).strip()
+        if not destination:
+            raise ValueError("s3_upload destination rendered empty")
+        if "{" in destination or "}" in destination:
+            raise ValueError(
+                "s3_upload destination has unresolved placeholder(s): "
+                "{0}".format(_mask_destination(destination)))
+        if destination.startswith(S3_UPLOAD_SCHEME_S3):
+            bucket, key = _split_s3_destination(destination)
+            strip_suffix = parameters.get("strip_suffix")
+            if strip_suffix and key.endswith(str(strip_suffix)):
+                key = key[:-len(str(strip_suffix))]
+            append_suffix = parameters.get("append_suffix")
+            if append_suffix:
+                key += str(append_suffix)
+            if not key:
+                raise ValueError(
+                    "s3_upload key is empty after the suffix rewrite")
+            destination = S3_UPLOAD_SCHEME_S3 + bucket + "/" + key
+        elif not destination.startswith(S3_UPLOAD_SCHEME_HTTPS):
+            raise ValueError(
+                "s3_upload destination must start with s3:// or https://, "
+                "got {0!r}".format(_mask_destination(destination)[:40]))
+
+        capture_path = (binding.get("capturePaths") or {}).get("in")
+        if not isinstance(capture_path, str) or not capture_path:
+            raise ValueError(
+                "s3_upload node has no captured input frame (the compiled "
+                "binding carries no capturePaths['in'])")
+        if S3_UPLOAD_WORK_DIR_TOKEN in capture_path:
+            if not work_dir:
+                raise ValueError(
+                    "s3_upload needs the run's work directory to resolve "
+                    "{work_dir} in its capture path, but none was supplied")
+            capture_path = capture_path.replace(S3_UPLOAD_WORK_DIR_TOKEN, work_dir)
+        if not os.path.isfile(capture_path):
+            raise FileNotFoundError(
+                "s3_upload input frame was not captured: {0}".format(capture_path))
+        with open(capture_path, "rb") as handle:
+            body = handle.read()
+
+        content_type = str(
+            parameters.get("content_type") or S3_UPLOAD_DEFAULT_CONTENT_TYPE)
+        timeout_s = int(parameters.get("timeout_s") or 10)
+        retries = int(parameters.get("retries") if parameters.get("retries") is not None else 1)
+        region = parameters.get("region") or None
+        self._s3_uploader(
+            destination, body, content_type, timeout_s, retries, region)
+        return "uploaded {0} ({1} bytes)".format(
+            _mask_destination(destination), len(body))
 
     def _run_opcua_write(
         self, parameters: Dict[str, Any], metadata: Dict[str, Any]

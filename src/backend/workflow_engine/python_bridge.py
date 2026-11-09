@@ -1316,6 +1316,13 @@ class CustomPythonBridge:
 # ---------------------------------------------------------------------------
 
 
+#: Element argument carrying the node's configured per-invocation wall
+#: clock (the catalog's ``wall_clock_limit_s`` parameter, compiled onto
+#: the emlpython element). Optional: an absent, non-numeric or
+#: non-positive value leaves the bridge at its caller's default.
+WALL_CLOCK_LIMIT_ARG = "wall-clock-limit-sec"
+
+
 class BridgeSpec(NamedTuple):
     """One emlpython element found in the compiled document."""
 
@@ -1323,6 +1330,24 @@ class BridgeSpec(NamedTuple):
     handler_path: str  # relative to the component artifact directory
     sink_name: str
     src_name: str
+    #: Per-node wall-clock limit from the element, or None (= default).
+    wall_clock_limit_sec: Optional[float] = None
+
+
+def _wall_clock_limit_from_args(args: Dict) -> Optional[float]:
+    """The element's ``wall-clock-limit-sec`` as a positive float, or None
+    when absent, unparseable or not positive (the executor default then
+    applies, so a pre-feature document behaves exactly as before)."""
+    raw = (args or {}).get(WALL_CLOCK_LIMIT_ARG)
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value
 
 
 def bridge_specs(document: Dict) -> List[BridgeSpec]:
@@ -1333,14 +1358,14 @@ def bridge_specs(document: Dict) -> List[BridgeSpec]:
             if element.get("factory") != BRIDGE_FACTORY:
                 continue
             node_id = element.get("nodeId")
+            args = element.get("args", {})
             specs.append(
                 BridgeSpec(
                     node_id=node_id,
-                    handler_path=element.get("args", {}).get(
-                        HANDLER_PATH_ARG
-                    ),
+                    handler_path=args.get(HANDLER_PATH_ARG),
                     sink_name=sink_name(node_id),
                     src_name=src_name(node_id),
+                    wall_clock_limit_sec=_wall_clock_limit_from_args(args),
                 )
             )
     return specs
@@ -1493,7 +1518,9 @@ def build_bridges(
 ) -> List[CustomPythonBridge]:
     """One CustomPythonBridge per spec, handler paths joined onto the
     component artifact directory and confined to it
-    (:func:`_artifact_handler_path`)."""
+    (:func:`_artifact_handler_path`). A spec carrying its own
+    ``wall_clock_limit_sec`` (the node's compiled ``wall-clock-limit-sec``
+    argument) overrides ``wall_clock_limit_sec`` for that bridge only."""
     bridges = []
     for spec in specs:
         if not spec.handler_path:
@@ -1509,7 +1536,9 @@ def build_bridges(
                 handler_path=_artifact_handler_path(
                     spec.node_id, artifact_path, spec.handler_path
                 ),
-                wall_clock_limit_sec=wall_clock_limit_sec,
+                wall_clock_limit_sec=(
+                    spec.wall_clock_limit_sec or wall_clock_limit_sec
+                ),
                 memory_limit_bytes=memory_limit_bytes,
             )
         )

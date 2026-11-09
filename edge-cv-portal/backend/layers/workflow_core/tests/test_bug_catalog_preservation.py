@@ -138,6 +138,16 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: regenerated per the same maintenance path (ONLY those six element
 #: chains moved); every other recording, ``mqtt_publish`` included, is
 #: untouched.
+#:
+#: The s3-upload output node appended one descriptor (``s3_upload``) and
+#: additively extended the two bridged Custom Python descriptors
+#: (``custom_python``, ``custom_python_preprocess``): the optional
+#: ``wall_clock_limit_s`` parameter was appended (default = the executor's
+#: built-in 10 s limit) and their shared ``emlpython`` element gained the
+#: ``wall-clock-limit-sec`` argument. Only those three entries were
+#: regenerated per the same maintenance path; every other recording,
+#: ``mqtt_publish`` included, is untouched, and the additivity is pinned by
+#: ``test_catalog_custom_python_wall_clock.py`` / ``test_catalog_s3_upload.py``.
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",

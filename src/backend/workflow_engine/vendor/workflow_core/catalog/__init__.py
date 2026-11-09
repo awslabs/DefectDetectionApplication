@@ -68,6 +68,13 @@ from .custom import (
     descriptor_from_declaration,
     resolve_catalog,
 )
+from .platforms import (
+    BUILD_PLATFORMS,
+    PLATFORMS_WITH_SUBPROJECT_FALLBACK,
+    describe_build_platforms,
+    platform_gstreamer_versions,
+    platform_labels,
+)
 
 __all__ = [
     # models
@@ -125,4 +132,10 @@ __all__ = [
     "DeclarationError",
     "descriptor_from_declaration",
     "resolve_catalog",
+    # plugin build platforms
+    "BUILD_PLATFORMS",
+    "PLATFORMS_WITH_SUBPROJECT_FALLBACK",
+    "describe_build_platforms",
+    "platform_gstreamer_versions",
+    "platform_labels",
 ]

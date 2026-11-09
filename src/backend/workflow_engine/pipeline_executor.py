@@ -107,6 +107,7 @@ from workflow_engine.stream_feed import (
 from workflow_engine.output_bindings import (
     BINDING_BEDROCK_INFERENCE,
     BINDING_LLM_INFERENCE,
+    BINDING_S3_UPLOAD,
     BedrockInferenceProcessor,
     LlmInferenceProcessor,
     OutputBindingError,
@@ -2522,6 +2523,9 @@ class WorkflowExecutor:
             # the exclusion set is empty on every non-concurrent run.
             # Capture-phase outputs (capture-phase-outputs) already ran
             # right after the frame grab and are excluded the same way.
+            # The run's work_dir travels along so s3_upload bindings can
+            # read the frames the pipeline captured there (None when the
+            # document needs no work dir).
             try:
                 self._run_post_run_handler(
                     registration, document, tag_values,
@@ -2533,6 +2537,7 @@ class WorkflowExecutor:
                         self._branch_scoped_binding_ids(document)
                         | set(capture_phase_ids)
                     ),
+                    work_dir=work_dir,
                 )
                 # Mid-run node-status snapshot after the post-run handler
                 # returned (node-execution-timing R2.5). Contained
@@ -3358,12 +3363,13 @@ class WorkflowExecutor:
         work dir into the run's artifact directory, contained
         (vlm-parity-run-results Requirements 2.2, 2.4, 4.4).
 
-        For every ``bedrock_inference``/``llm_inference`` executor
-        binding carrying ``capturePaths``, each existing resolved frame
-        file is copied to ``{output_dir}/{capture_id}.node.
+        For every ``bedrock_inference``/``llm_inference``/``s3_upload``
+        executor binding carrying ``capturePaths``, each existing resolved
+        frame file is copied to ``{output_dir}/{capture_id}.node.
         {sanitized_nodeId}.{port}.jpg`` BEFORE the ``finally`` block
         removes the work dir — so the results view can show what the
-        model actually saw. Absent paths/files are skipped silently
+        model actually saw (or what was uploaded). Absent paths/files are
+        skipped silently
         (old packages have no llm capturePaths — Requirement 4.4; the
         compiler emits ``reference: None`` for unfed ports). When at
         least one frame was persisted the run is marked as having
@@ -3381,6 +3387,7 @@ class WorkflowExecutor:
                 if binding.get("binding") not in (
                     BINDING_BEDROCK_INFERENCE,
                     BINDING_LLM_INFERENCE,
+                    BINDING_S3_UPLOAD,
                 ):
                     continue
                 node_id = str(binding.get("nodeId") or "")
@@ -4192,6 +4199,7 @@ class WorkflowExecutor:
         detail_sink: Optional[Callable] = None,
         duration_sink: Optional[Callable] = None,
         exclude_node_ids: Optional[set] = None,
+        work_dir: Optional[str] = None,
     ) -> None:
         """Invoke the output-binding hook (task 12.4).
 
@@ -4226,7 +4234,12 @@ class WorkflowExecutor:
         exclusion set — and, like the branch ids, they are only ever
         non-empty when the handler has ``process_subset`` (the executor
         runs nothing early otherwise), so a plain-callable handler keeps
-        receiving the full document exactly as before."""
+        receiving the full document exactly as before.
+
+        ``work_dir`` (the run's capture directory) is passed only when the
+        handler accepts the keyword (the same guard as ``duration_sink``),
+        so s3_upload bindings can read their captured frame; handlers
+        predating it are invoked exactly as before."""
         if self._post_run_handler is None:
             return
         try:
@@ -4246,11 +4259,15 @@ class WorkflowExecutor:
                     kwargs["detail_sink"] = detail_sink
                 if duration_sink is not None:
                     kwargs["duration_sink"] = duration_sink
+                if work_dir is not None and self._handler_accepts_keyword(
+                    handler_subset, "work_dir"
+                ):
+                    kwargs["work_dir"] = work_dir
                 handler_subset(document, tag_values, remaining, **kwargs)
             else:
                 self._invoke_post_run_handler(
                     registration, document, tag_values, detail_sink,
-                    duration_sink,
+                    duration_sink, work_dir,
                 )
         except OutputBindingError:
             raise
@@ -4268,15 +4285,16 @@ class WorkflowExecutor:
         tag_values: dict,
         detail_sink: Optional[Callable],
         duration_sink: Optional[Callable] = None,
+        work_dir: Optional[str] = None,
     ) -> None:
-        """Call the post-run handler, passing ``detail_sink`` and
-        ``duration_sink`` only when the handler accepts them (backward
-        compatibility).
+        """Call the post-run handler, passing ``detail_sink``,
+        ``duration_sink`` and ``work_dir`` only when the handler accepts
+        them (backward compatibility).
 
         The generic ``PostRunHandler`` signature is ``(registration,
         document, tag_values) -> None``; :class:`OutputBindingProcessor`
-        additionally accepts ``detail_sink`` and ``duration_sink``
-        keywords. Handlers that do not (plain lambdas, other
+        additionally accepts ``detail_sink``, ``duration_sink`` and
+        ``work_dir`` keywords. Handlers that do not (plain lambdas, other
         implementations) are invoked without the keywords they don't
         accept and keep working unchanged."""
         handler = self._post_run_handler
@@ -4289,6 +4307,10 @@ class WorkflowExecutor:
             handler, "duration_sink"
         ):
             kwargs["duration_sink"] = duration_sink
+        if work_dir is not None and self._handler_accepts_keyword(
+            handler, "work_dir"
+        ):
+            kwargs["work_dir"] = work_dir
         if kwargs:
             handler(registration, document, tag_values, **kwargs)
         else:
