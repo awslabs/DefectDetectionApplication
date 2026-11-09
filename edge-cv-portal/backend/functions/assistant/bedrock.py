@@ -3,7 +3,9 @@ Requirements 7.1, 7.4, 7.6, 7.7, 11.1).
 
 `stream` drives `converse_stream`, calls `on_text` with every text delta and
 returns a `ModelResponse` with the assistant message content (text and
-toolUse blocks), the stop reason and the usage. Errors are classified into
+toolUse blocks), the stop reason and the usage. A configured temperature or
+top_p that the model refuses is dropped and the request sent again
+(`bedrock_common.send_dropping_refused_options`). Errors are classified into
 the assistant's failure codes; two `ValidationException` messages are
 recognized as capability signals (tool use, cache points unsupported).
 """
@@ -145,7 +147,8 @@ def stream(bedrock_client, request: Dict[str, Any],
     or `ModelError`."""
     response = ModelResponse()
     try:
-        output = bedrock_client.converse_stream(**request)
+        output = bedrock_common.send_dropping_refused_options(
+            bedrock_client.converse_stream, request)
         _consume(output['stream'], response, on_text)
     except (ClientError, BotoCoreError) as error:
         signal = _capability_signal(error)

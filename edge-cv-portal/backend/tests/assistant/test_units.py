@@ -12,7 +12,7 @@ from assistant import ACTIONS_DELIVERED, DESTRUCTIVE_ALLOWLIST, bedrock, guide, 
 from assistant.errors import AssistantError
 from mcp_portal.catalog import CATALOG
 
-from conftest import client_error, text_events, tool_use_events
+from conftest import FakeBedrock, client_error, text_events, tool_use_events
 
 
 # ------------------------------------------------------------------ schemas
@@ -298,6 +298,26 @@ def test_stream_errors_are_classified():
     with pytest.raises(bedrock.ModelError) as info:
         bedrock.stream(failing(client_error('ValidationException', 'maxTokens too large')), {})
     assert info.value.code == 'bedrock_model_access'
+
+
+def test_stream_resends_without_a_refused_sampling_option():
+    """A configured temperature the model refuses (Claude Opus 5.5) is
+    dropped and the request sent again; a model that accepts it gets the
+    one request."""
+    refusal = client_error('ValidationException', 'The model returned the following errors: '
+                           '`temperature` is deprecated for this model.')
+    request = {'modelId': 'global.anthropic.claude-opus-5-5', 'system': [{'text': 'S1'}],
+               'messages': [{'role': 'user', 'content': [{'text': 'hi'}]}],
+               'inferenceConfig': {'maxTokens': 4096, 'temperature': 0.2}}
+    refusing = FakeBedrock([refusal, text_events('Hello')])
+    response = bedrock.stream(refusing, request)
+    assert response.text == 'Hello'
+    assert [r['inferenceConfig'] for r in refusing.requests] == [
+        {'maxTokens': 4096, 'temperature': 0.2}, {'maxTokens': 4096}]
+    assert refusing.requests[1]['messages'] == request['messages']
+    accepting = FakeBedrock([text_events('Hello')])
+    bedrock.stream(accepting, request)
+    assert accepting.requests == [request]
 
 
 def test_cache_point_support_and_request_assembly(monkeypatch):

@@ -489,3 +489,68 @@ class TestHappyPath:
             "contract": "process_frame_or_handle",
         }
         assert bedrock.client.converse.call_count == 1
+
+
+# ===========================================================================
+# 6. A model that refuses a request option (Claude Opus 5.5)
+# ===========================================================================
+
+TOOL_CHOICE_REFUSAL = ('The model returned the following errors: tool_choice: '
+                       'type "tool" and "any" are not supported for this model.')
+TEMPERATURE_REFUSAL = ('The model returned the following errors: `temperature` '
+                       'is deprecated for this model.')
+
+
+def validation_error(message):
+    return ClientError({"Error": {"Code": "ValidationException",
+                                  "Message": message}}, "Converse")
+
+
+class TestRefusedRequestOptions:
+
+    def test_refused_forced_tool_and_temperature_are_sent_again_without(
+            self, ca, bedrock, ctx):
+        """The model refuses the forced provide_code choice, then the
+        configured temperature: each is dropped in turn, the last request
+        still offers the tool, and the returned code is used."""
+        put_bedrock_config(ca, model_id="global.anthropic.claude-opus-5-5",
+                           temperature=0.2)
+        bedrock.client.converse.side_effect = [
+            validation_error(TOOL_CHOICE_REFUSAL),
+            validation_error(TEMPERATURE_REFUSAL),
+            tool_response(VALID_CODE),
+        ]
+
+        status, payload = post_code_assist(ca, ctx.user,
+                                           request_body(ctx.usecase_id))
+
+        assert status == 200
+        assert payload["code"] == VALID_CODE
+        assert payload["model_id"] == "global.anthropic.claude-opus-5-5"
+        first, second, third = [
+            call.kwargs for call in bedrock.client.converse.call_args_list]
+        assert first["toolConfig"]["toolChoice"] == {
+            "tool": {"name": TOOL_NAME}}
+        assert first["inferenceConfig"] == {"maxTokens": 4096,
+                                            "temperature": 0.2}
+        assert "toolChoice" not in second["toolConfig"]
+        assert second["inferenceConfig"] == first["inferenceConfig"]
+        assert third["toolConfig"] == {"tools": first["toolConfig"]["tools"]}
+        assert third["inferenceConfig"] == {"maxTokens": 4096}
+        assert (third["system"], third["messages"]) == (first["system"],
+                                                        first["messages"])
+
+    def test_model_accepting_the_options_gets_one_unchanged_request(
+            self, ca, bedrock, ctx):
+        put_bedrock_config(ca, temperature=0.2)
+
+        status, _ = post_code_assist(ca, ctx.user,
+                                     request_body(ctx.usecase_id))
+
+        assert status == 200
+        assert bedrock.client.converse.call_count == 1
+        kwargs = bedrock.client.converse.call_args.kwargs
+        assert kwargs["toolConfig"]["toolChoice"] == {
+            "tool": {"name": TOOL_NAME}}
+        assert kwargs["inferenceConfig"] == {"maxTokens": 4096,
+                                             "temperature": 0.2}

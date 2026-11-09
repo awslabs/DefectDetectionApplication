@@ -2448,11 +2448,12 @@ valid for 600 seconds (`binding_seconds`).
 
 ### Cost
 
-See [COST_ESTIMATE.md](COST_ESTIMATE.md): about $0.07 per one-call guidance
-turn at Claude Sonnet 4.5 list prices (less with a warm prompt cache), about
-$0.11 for a turn with tool look-ups, about $25/month at 10 turns a day. The
-per-user daily token quota caps one user at about $5/day. Turning the
-assistant off in Settings stops the Bedrock cost.
+See [COST_ESTIMATE.md](COST_ESTIMATE.md): about $0.09 per one-call guidance
+turn at the list prices of the default model, Claude Opus 5.5 through its
+global inference profile (less with a warm prompt cache), about $0.14 for a
+turn with tool look-ups, about $35/month at 10 turns a day. The per-user
+daily token quota caps one user at about $6/day. Turning the assistant off
+in Settings stops the Bedrock cost.
 
 ### Troubleshooting the assistant
 

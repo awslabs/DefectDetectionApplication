@@ -128,6 +128,7 @@ from bedrock_common import (
     build_inference_config,
     get_bedrock_client,
     get_bedrock_configuration,
+    send_dropping_refused_options,
 )
 
 # Code_Assist_Generator (custom-node-code-assist Requirement 2.1):
@@ -452,13 +453,16 @@ def invoke_generation(config: Dict, messages: List[Dict],
     # (bedrock_common.build_inference_config, Requirements 4.2, 4.3).
     inference_config = build_inference_config(config)
     try:
-        response = client.converse(
+        # A model that refuses the forced tool choice, the temperature or
+        # top_p is sent the request again without it (the tool stays
+        # offered); a model that accepts them gets this request unchanged.
+        response = send_dropping_refused_options(client.converse, dict(
             modelId=config['model_id'],
             system=[{'text': build_system_prompt(catalog)}],
             messages=messages,
             inferenceConfig=inference_config,
             toolConfig=build_tool_config()
-        )
+        ))
     except (ReadTimeoutError, ConnectTimeoutError):
         logger.error(f"Bedrock invocation exceeded the configured timeout "
                      f"({config['timeout_seconds']}s, model {config['model_id']})")

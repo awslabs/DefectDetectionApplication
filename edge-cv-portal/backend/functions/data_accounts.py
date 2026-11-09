@@ -113,7 +113,7 @@ MAX_BEDROCK_TIMEOUT_SECONDS = 240
 # Must mirror workflow_generator.DEFAULT_BEDROCK_CONFIG so reads return
 # the effective configuration even before anything is stored.
 DEFAULT_BEDROCK_CONFIG = {
-    'model_id': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+    'model_id': 'global.anthropic.claude-opus-5-5',
     'region': os.environ.get('AWS_REGION', 'us-east-1'),
     'max_tokens': 4096,
     # Sampling parameters are unset by default: they are sent to Bedrock

@@ -105,6 +105,7 @@ from bedrock_common import (
     build_inference_config,
     get_bedrock_client,
     get_bedrock_configuration,
+    send_dropping_refused_options,
 )
 # The one implementation of the `llm:` family model invocation, shared
 # with the Prompt_Tuning_Preview (llm-autolabel-prompt-tuning Req 3.1,
@@ -660,12 +661,15 @@ def _generate_bedrock_prelabel(message: Dict, job: Dict,
     prompt = _build_prompt(modality, label_set, dimensions, per_label_prompts)
 
     # Client via bedrock_common: read timeout equals the invocation
-    # timeout capped at 120 s, retries disabled (Req 8.5).
+    # timeout capped at 120 s, retries disabled (Req 8.5). A model that
+    # refuses the configured temperature or top_p is sent the request
+    # again without it; a model that accepts it gets this request
+    # unchanged.
     config = get_bedrock_configuration()
     timeout = min(int(config['timeout_seconds']), BEDROCK_MAX_TIMEOUT_SECONDS)
     client = get_bedrock_client(config['region'], timeout)
     try:
-        response = client.converse(
+        response = send_dropping_refused_options(client.converse, dict(
             modelId=model_id,
             messages=[{
                 'role': 'user',
@@ -676,7 +680,7 @@ def _generate_bedrock_prelabel(message: Dict, job: Dict,
                 ],
             }],
             inferenceConfig=build_inference_config(config),
-        )
+        ))
     except Exception as exc:  # noqa: BLE001 — model error/timeout (Req 8.5)
         raise GenerationFailure(f'Bedrock invocation failed: {exc}') from exc
 

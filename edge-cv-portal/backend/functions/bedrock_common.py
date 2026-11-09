@@ -17,14 +17,19 @@ feature (workflow generation, custom node code assist) reads the same
 - build_inference_config emits maxTokens plus at most ONE sampling
   parameter: temperature when set, else topP when set (recent Anthropic
   models reject requests specifying both).
+- send_dropping_refused_options sends a Converse request and, when the
+  model refuses a forced tool choice, a temperature or a topP, sends it
+  again without the refused option; a model that accepts them gets the
+  request unchanged.
 
 This module lives in the same Lambda bundle as its consumers
 (backend/functions is one code asset), so they import it directly.
 """
 import logging
 import os
+import re
 from decimal import Decimal
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -50,11 +55,14 @@ BEDROCK_CONFIG_SETTING_KEY = 'bedrock_configuration'
 MAX_TIMEOUT_SECONDS = 240
 
 DEFAULT_BEDROCK_CONFIG = {
-    # Cross-region inference profile: current Anthropic models on Bedrock
-    # are invokable only through inference profiles (the bare
-    # foundation-model ids are not directly invokable, and older direct
-    # ids like claude-3-5-sonnet have reached end of life).
-    'model_id': 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+    # Global cross-region inference profile of Claude Opus 5.5: current
+    # Anthropic models on Bedrock are invokable only through inference
+    # profiles (the bare foundation-model ids are not directly invokable,
+    # and older direct ids like claude-3-5-sonnet have reached end of
+    # life). A global profile may serve a request in any commercial
+    # region; a regional profile (e.g. us.) set in the Bedrock
+    # configuration keeps requests in its geography.
+    'model_id': 'global.anthropic.claude-opus-5-5',
     'region': os.environ.get('AWS_REGION', 'us-east-1'),
     'max_tokens': 4096,
     # Sampling parameters are unset by default: they are sent to Bedrock
@@ -193,3 +201,65 @@ def build_inference_config(config: Dict) -> Dict:
     elif top_p is not None:
         inference_config['topP'] = float(top_p)
     return inference_config
+
+
+# Request options a model can refuse while it accepts the rest of the
+# request: (request section, key, how Bedrock's ValidationException names
+# the option). Claude Opus 5.5, for example, answers a forced tool with
+# 'tool_choice: type "tool" and "any" are not supported for this model.'
+# and a temperature with '`temperature` is deprecated for this model.'
+# (likewise `top_p`).
+REFUSABLE_REQUEST_OPTIONS: Tuple[Tuple[str, str, Any], ...] = (
+    ('toolConfig', 'toolChoice', re.compile(r'\btool[_ ]?choice\b')),
+    ('inferenceConfig', 'temperature', re.compile(r'\btemperature\b')),
+    ('inferenceConfig', 'topP', re.compile(r'\btop[_ ]?p\b')),
+)
+
+
+def refused_request_options(error: Exception,
+                            request: Dict) -> List[Tuple[str, str]]:
+    """The (section, key) options of ``request`` that ``error``, a
+    ValidationException, names as refused. Empty for any other error and
+    for options the request does not carry."""
+    if not isinstance(error, ClientError):
+        return []
+    details = error.response.get('Error', {})
+    if details.get('Code') != 'ValidationException':
+        return []
+    message = str(details.get('Message') or '').lower()
+    return [(section, key)
+            for section, key, pattern in REFUSABLE_REQUEST_OPTIONS
+            if key in (request.get(section) or {}) and pattern.search(message)]
+
+
+def send_dropping_refused_options(send: Callable[..., Dict],
+                                  request: Dict) -> Dict:
+    """
+    ``send(**request)``, where ``send`` is a bedrock-runtime client's
+    ``converse`` or ``converse_stream``; when the model refuses one of the
+    request's options, the request is sent again without it.
+
+    The options are those in REFUSABLE_REQUEST_OPTIONS: a forced tool
+    choice (the tools stay offered, the model is no longer required to
+    call one), a temperature and a topP. The first request is always the
+    caller's request unchanged, so a model that accepts these options
+    gets exactly one request, as before. Bedrock answers a refusal before
+    the model generates anything, and each new request drops at least
+    one more option, so at most three more requests are sent. Any other
+    error reaches the caller unchanged; ``request`` is never modified.
+    """
+    while True:
+        try:
+            return send(**request)
+        except ClientError as error:
+            refused = refused_request_options(error, request)
+            if not refused:
+                raise
+        names = ', '.join(key for _section, key in refused)
+        logger.warning(f"Model {request.get('modelId')} refused {names}; "
+                       f"sending the request again without it")
+        request = dict(request)
+        for section, key in refused:
+            request[section] = {name: value
+                                for name, value in request[section].items()
+                                if name != key}

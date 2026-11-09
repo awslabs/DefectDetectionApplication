@@ -67,6 +67,7 @@ from bedrock_common import (  # noqa: F401 - BEDROCK_ERROR_CATEGORIES/categorize
     categorize_bedrock_error,
     get_bedrock_client,
     get_bedrock_configuration,
+    send_dropping_refused_options,
 )
 # Build platform table and scaffold layout constants (workflow_core layer):
 # the Node_Designer prompts describe the per-architecture toolchain and
@@ -744,20 +745,24 @@ def generate_code(contract: str, system_prompt: str, user_message: str,
     400/403/404 settles without Bedrock traffic (Requirement 6.3). The
     Bedrock_Configuration is resolved fresh per invocation through the
     shared module (Requirement 4.1); the client-side read timeout equals
-    the clamped configured timeout and retries are disabled, so wall time
-    cannot exceed it (Requirement 4.4). Success returns
+    the clamped configured timeout and retries are disabled, so the
+    request the model answers cannot exceed it (Requirement 4.4). A model
+    that refuses the forced tool choice, or a configured temperature or
+    top_p, is sent the request again without it
+    (bedrock_common.send_dropping_refused_options); a refusal comes back
+    before the model generates anything. Success returns
     {code, notes, model_id, contract} and persists nothing (2.7, 6.4).
     """
     config = get_bedrock_configuration()
     client = get_bedrock_client(config['region'], config['timeout_seconds'])
     try:
-        response = client.converse(
+        response = send_dropping_refused_options(client.converse, dict(
             modelId=config['model_id'],
             system=[{'text': system_prompt}],
             messages=[{'role': 'user', 'content': [{'text': user_message}]}],
             inferenceConfig=build_inference_config(config),
             toolConfig=build_tool_config()
-        )
+        ))
     except (ReadTimeoutError, ConnectTimeoutError):
         logger.error(f"Code assist invocation exceeded the configured timeout "
                      f"({config['timeout_seconds']}s, model {config['model_id']})")
