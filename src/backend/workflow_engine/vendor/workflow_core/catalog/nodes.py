@@ -552,6 +552,33 @@ FORMAT_CONVERT = NodeTypeDescriptor(
     hardware_dependent=False,
 )
 
+#: The per-invocation wall-clock limit shared by the two bridged Custom
+#: Python node types (``custom_python`` and ``custom_python_preprocess``,
+#: whose emlpython element chains are pinned identical by
+#: custom-python-frames Requirement 1.4). The default is the executor's
+#: built-in limit (``python_bridge.DEFAULT_WALL_CLOCK_LIMIT_SEC``), so a
+#: node that does not set it behaves exactly as before.
+_WALL_CLOCK_LIMIT_PARAMETER = ParameterDescriptor(
+    "wall_clock_limit_s", "int", required=False, default=10,
+    constraints={"min": 1, "max": 120},
+    description="Seconds one handler invocation may take before the run "
+                "fails with a timeout for this node (1-120, default 10). "
+                "Raise it when the handler calls a remote service, e.g. a "
+                "cloud model, inside the run.",
+    examples=[10, 18],
+)
+
+#: The emlpython bridge element both bridged Custom Python node types
+#: compile to. ``wall-clock-limit-sec`` is read by the executor's
+#: Python_Bridge (``bridge_specs``) and dropped with the rest of the
+#: element when it is rewritten into the appsink/appsrc pair, so launch
+#: strings never carry it.
+_EMLPYTHON_ELEMENT = _element(
+    "emlpython",
+    **{"handler-path": "{python_handler_path}",
+       "wall-clock-limit-sec": "{wall_clock_limit_s}"}
+)
+
 CUSTOM_PYTHON_PREPROCESS = NodeTypeDescriptor(
     type_id="custom_python_preprocess",
     category=CATEGORY_PREPROCESSING,
@@ -579,6 +606,11 @@ CUSTOM_PYTHON_PREPROCESS = NodeTypeDescriptor(
                                         "one per line in requirements.txt "
                                         "form.",
                             examples=["scikit-image==0.24.0"]),
+        # Same wall clock as custom_python: the element chains of the two
+        # node types are pinned identical (Requirement 1.4), so the
+        # `wall-clock-limit-sec` argument needs a resolving parameter here
+        # too. Default = today's limit; existing workflows are unchanged.
+        _WALL_CLOCK_LIMIT_PARAMETER,
     ],
     # Same emlpython bridge element as the custom_python post-processing
     # node (Requirement 1.4); the compiler derives {python_handler_path}
@@ -587,9 +619,7 @@ CUSTOM_PYTHON_PREPROCESS = NodeTypeDescriptor(
     # Like custom_python, NO plugin dependency is declared: the executor's
     # Python_Bridge replaces the `emlpython` element with an appsink/appsrc
     # pair, so there is no `.so` to deliver. See the note on CUSTOM_PYTHON.
-    mappings=_same_on_all_archs(
-        element_chain=[_element("emlpython", **{"handler-path": "{python_handler_path}"})],
-    ),
+    mappings=_same_on_all_archs(element_chain=[_EMLPYTHON_ELEMENT]),
     hardware_dependent=False,
 )
 
@@ -1138,6 +1168,15 @@ CUSTOM_PYTHON = NodeTypeDescriptor(
                                         "output port: VideoFrames, "
                                         "InferenceMeta, or EventSignal.",
                             examples=[PORT_TYPE_INFERENCE_META]),
+        # Per-invocation wall clock of the handler subprocess (additive).
+        # The default equals the executor's built-in limit
+        # (python_bridge.DEFAULT_WALL_CLOCK_LIMIT_SEC), so every existing
+        # workflow keeps today's behaviour; a handler that calls a remote
+        # service (a cloud model, an upload) can widen it per node.
+        # Carried on the emlpython element as `wall-clock-limit-sec`,
+        # which the executor's Python_Bridge reads before it rewrites the
+        # element away (launch strings are unchanged).
+        _WALL_CLOCK_LIMIT_PARAMETER,
     ],
     # emlpython bridge element invoking user code (appsink/appsrc pair
     # managed by the executor).
@@ -1154,9 +1193,7 @@ CUSTOM_PYTHON = NodeTypeDescriptor(
     # for any architecture — every workflow containing a Custom Python node
     # failed packaging with "Plugin artifact 'dda-emlpython' ... was not
     # found in the plugin library". Do NOT re-add it.
-    mappings=_same_on_all_archs(
-        element_chain=[_element("emlpython", **{"handler-path": "{python_handler_path}"})],
-    ),
+    mappings=_same_on_all_archs(element_chain=[_EMLPYTHON_ELEMENT]),
     hardware_dependent=False,
 )
 
@@ -1585,6 +1622,112 @@ CAPTURE = NodeTypeDescriptor(
         plugin_dependencies=["jpeg", "emlcapture"],
     ),
     hardware_dependent=False,
+)
+
+# --------------------------------------------------------------------------
+# S3 upload output node (additive). Uploads the run's frame on the node's
+# input branch as a JPEG object: to s3://bucket/key with the device's AWS
+# credential chain (on a Greengrass device the token exchange role), or
+# by HTTP PUT to a presigned https:// URL supplied per run (no
+# credentials on the device). Like bedrock_inference, the node is an
+# executor binding whose VideoFrames input branch TERMINATES in the
+# compiler's synthetic frame-capture sink chain; the emitted binding
+# carries the capture file path (``capturePaths``) the executor reads and
+# uploads after the run. Simulation: recording binding, no network.
+# --------------------------------------------------------------------------
+
+S3_UPLOAD = NodeTypeDescriptor(
+    type_id="s3_upload",
+    category=CATEGORY_OUTPUT,
+    display_name="S3 Upload",
+    # VideoFrames input; InferenceMeta outputs also connect here via the
+    # declared InferenceMeta -> VideoFrames coercion (as for capture).
+    inputs=[PortDescriptor("in", PORT_TYPE_VIDEO_FRAMES)],
+    outputs=[],
+    parameters=[
+        ParameterDescriptor("destination", "string", required=True, default=None,
+                            constraints={"min_length": 1},
+                            description="Where the frame is uploaded: "
+                                        "s3://<bucket>/<key> (PutObject "
+                                        "with the device's AWS credentials, "
+                                        "e.g. its Greengrass token exchange "
+                                        "role) or an https:// presigned URL "
+                                        "(HTTP PUT, no credentials needed). "
+                                        "Placeholders in curly braces are "
+                                        "replaced from the run metadata, "
+                                        "including dotted trigger payload "
+                                        "paths such as "
+                                        "{trigger.payload_json.body.image_key}"
+                                        ".",
+                            examples=["s3://example-bucket/captures/"
+                                      "{trigger.payload_json.body.image_key}",
+                                      "{trigger.payload_json.body.upload_url}"]),
+        ParameterDescriptor("content_type", "string", required=False,
+                            default="image/jpeg",
+                            constraints={"min_length": 1},
+                            description="Content-Type stored with the object "
+                                        "(s3://) or sent with the PUT "
+                                        "(https://), e.g. image/jpeg.",
+                            examples=["image/jpeg"]),
+        ParameterDescriptor("strip_suffix", "string", required=False, default=None,
+                            constraints={},
+                            description="Suffix removed from the end of the "
+                                        "rendered s3:// key before "
+                                        "append_suffix is added, e.g. .jpg. "
+                                        "Ignored when the key does not end "
+                                        "with it and for https:// "
+                                        "destinations.",
+                            examples=[".jpg"]),
+        ParameterDescriptor("append_suffix", "string", required=False, default=None,
+                            constraints={},
+                            description="Suffix appended to the rendered "
+                                        "s3:// key (after strip_suffix), "
+                                        "e.g. .annotated.jpg, so one key "
+                                        "from the trigger names both the raw "
+                                        "and the annotated upload. Ignored "
+                                        "for https:// destinations.",
+                            examples=[".annotated.jpg"]),
+        # Optional rule over the run metadata gating the upload (the
+        # shared condition grammar; dotted trigger paths resolve).
+        ParameterDescriptor("condition", "string", required=False, default=None,
+                            constraints={},
+                            description="Optional: the upload happens only "
+                                        "while this condition holds; dotted "
+                                        "paths reach the trigger payload, "
+                                        "e.g. trigger.payload_json.body.stage "
+                                        "== 'final'. "
+                            + CONDITION_LANGUAGE_DESCRIPTION,
+                            examples=list(CONDITION_EXAMPLES)
+                            + ["trigger.payload_json.body.stage == 'final'"]),
+        ParameterDescriptor("timeout_s", "int", required=False, default=10,
+                            constraints={"min": 1, "max": 60},
+                            description="Seconds allowed for one upload "
+                                        "attempt (1-60), e.g. 10.",
+                            examples=[10]),
+        ParameterDescriptor("retries", "int", required=False, default=1,
+                            constraints={"min": 0, "max": 3},
+                            description="How many times a failed attempt is "
+                                        "retried (0-3), e.g. 1 for two "
+                                        "attempts in all.",
+                            examples=[1, 0]),
+        ParameterDescriptor("region", "string", required=False, default=None,
+                            constraints={"min_length": 1},
+                            description="AWS region of the bucket for s3:// "
+                                        "destinations, e.g. us-east-1; "
+                                        "empty uses the device's default "
+                                        "region. Ignored for https:// "
+                                        "destinations.",
+                            examples=["us-east-1"]),
+    ],
+    # Executor-level upload after the run (boto3 for s3://, the standard
+    # library for https://); boto3 is the same runtime package
+    # bedrock_inference declares. Simulation: recording binding, no
+    # network (Requirement 12.6).
+    mappings=_same_on_device_archs(
+        executor_binding="s3_upload",
+        plugin_dependencies=["python:boto3"],
+    ) + [_recording_binding("s3_upload")],
+    hardware_dependent=True,
 )
 
 # --------------------------------------------------------------------------
@@ -2618,6 +2761,9 @@ NODE_CATALOG = (
     DETECTION_COUNTER,
     OBJECT_ASSOCIATION,
     EVENT_GATE,
+    # Appended (additive — s3 upload output node): every pre-existing
+    # descriptor keeps its position and content.
+    S3_UPLOAD,
 )
 
 _CATALOG_BY_ID = {descriptor.type_id: descriptor for descriptor in NODE_CATALOG}
