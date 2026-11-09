@@ -82,7 +82,9 @@ DEBUG_LOG_MAX_BYTES = 64 * MIB
 DEBUG_LOG_KEEP_BYTES = 8 * MIB
 
 #: The executor binding kinds that send something off the device.
-OUTPUT_BINDING_KINDS = ("digital_output", "mqtt_publish", "opcua_write", "modbus_write")
+OUTPUT_BINDING_KINDS = (
+    "digital_output", "mqtt_publish", "opcua_write", "modbus_write", "s3_upload",
+)
 #: The node-status detail prefix of a skipped output (``not sent: ...``).
 NOT_SENT_PREFIX = "not sent"
 #: The Event_Gate transitions that make a run notable.
