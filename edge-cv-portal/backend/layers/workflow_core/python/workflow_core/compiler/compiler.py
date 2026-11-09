@@ -116,6 +116,18 @@ BINDING_BEDROCK_INFERENCE = "bedrock_inference"
 #: ``_build_segments``'s existing feeder-capture fan-out.
 BINDING_LLM_INFERENCE = "llm_inference"
 
+#: The S3 upload output executor binding (the s3_upload node on device
+#: architectures). Its single VideoFrames input branch TERMINATES in the
+#: pipeline exactly like a bedrock_inference input: the compiler appends
+#: the same synthetic frame-capture sink chain to the feeding GStreamer
+#: branch and the emitted binding carries the capture file path
+#: (``capturePaths["in"]``, ``{work_dir}``-rooted) the LocalServer
+#: executor reads and uploads after the run. The node is opaque (it has
+#: no outputs, so nothing can be downstream of it); a feeder shared with
+#: a bedrock/llm node or a second s3_upload node shares one capture
+#: file. In simulation the node resolves to its recording stub.
+BINDING_S3_UPLOAD = "s3_upload"
+
 #: The metadata-attachment executor binding (the metadata node,
 #: workflow-manager-gaps Requirement 6.6). The node has an empty
 #: element_chain, so it flows through the existing executor-level
@@ -365,7 +377,14 @@ def compile(
         n.id for n in graph.nodes
         if mappings[n.id].executor_binding == BINDING_LLM_INFERENCE
     ]
-    opaque = set(bedrock_node_ids)
+    #: s3_upload nodes join the frame-capture plan and are opaque like
+    #: Bedrock nodes: their input branch terminates at the capture sink
+    #: (the node has no output port, so no stream can continue past it).
+    s3_upload_node_ids = [
+        n.id for n in graph.nodes
+        if mappings[n.id].executor_binding == BINDING_S3_UPLOAD
+    ]
+    opaque = set(bedrock_node_ids) | set(s3_upload_node_ids)
     stream_out = {
         node_id: _stream_successors(node_id, successors, gst_set, opaque)
         for node_id in gst_node_ids
@@ -404,7 +423,8 @@ def compile(
     # shared path_for(feeder) map — a feeder serving both kinds of node
     # shares a single capture sink and file.
     feeder_captures, capture_paths = _bedrock_capture_plan(
-        graph, bedrock_node_ids + llm_node_ids, gst_set, opaque, descriptors_by_id
+        graph, bedrock_node_ids + llm_node_ids + s3_upload_node_ids,
+        gst_set, opaque, descriptors_by_id,
     )
 
     # 4./5. Emit tagged element chains linearized into segments.
@@ -473,6 +493,10 @@ def compile(
         # the captured frame to the inference request. The node itself
         # stays a non-opaque pass-through in the stream.
         if mappings[node_id].executor_binding == BINDING_LLM_INFERENCE:
+            entry["capturePaths"] = capture_paths.get(node_id, {})
+        # S3 upload bindings carry the capture file path of their single
+        # input port, so the executor can read the frame it uploads.
+        if mappings[node_id].executor_binding == BINDING_S3_UPLOAD:
             entry["capturePaths"] = capture_paths.get(node_id, {})
         # Subscribe-side trigger bindings carry the ordered activation
         # targets extracted into the activation plan; no other binding
