@@ -99,10 +99,11 @@ preservation property.
    entry exactly as committed.
 3. Assert the recorded type-id set still equals the live catalog's type-id set
    (this catches an accidentally added or dropped node type).
-4. Re-dump with `json.dumps(baseline, indent=2, sort_keys=True)` plus a
-   trailing newline (`ensure_ascii` left at its default). This matches the
-   committed file's formatting byte-for-byte, so the diff shows only your
-   intended descriptor delta.
+4. Re-dump with `json.dumps(baseline, indent=2, sort_keys=True, ensure_ascii=False)`
+   plus a trailing newline. The committed file stores non-ASCII characters
+   (em dashes in descriptions) raw, so `ensure_ascii=False` matches its
+   formatting byte-for-byte and the diff shows only your intended descriptor
+   delta; the default `ensure_ascii=True` would rewrite every such line.
 5. Review the diff. Any delta outside the descriptors you edited means stop
    and investigate — do not commit it.
 
