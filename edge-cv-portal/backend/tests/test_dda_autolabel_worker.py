@@ -65,6 +65,7 @@ from types import SimpleNamespace
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 
 REGION = "us-east-1"
 DATASET_BUCKET = "test-autolabel-data"
@@ -951,3 +952,54 @@ class TestStorageFailureScoping:
         assert task["prelabel_status"] == "Pending"
         assert "prelabel_error" not in task
         assert "prelabel_s3_key" not in task
+
+
+# ------------------------------------- a model that refuses a sampling option
+
+TEMPERATURE_REFUSAL = ('The model returned the following errors: `temperature` '
+                       'is deprecated for this model.')
+
+
+class TemperatureRefusingClient(FakeBedrockClient):
+    """Refuses any request carrying a temperature, as Claude Opus 5.5
+    does, and answers the others like FakeBedrockClient."""
+
+    def converse(self, **kwargs):
+        if "temperature" in kwargs["inferenceConfig"]:
+            self.calls.append(kwargs)
+            raise ClientError({"Error": {"Code": "ValidationException",
+                                         "Message": TEMPERATURE_REFUSAL}},
+                              "Converse")
+        return super().converse(**kwargs)
+
+
+class TestBedrockRefusedSamplingOption:
+    def test_refused_temperature_is_sent_again_without_it(self, env):
+        """A configured temperature the model refuses is dropped and the
+        same image request sent again; the pre-label is stored."""
+        model = "bedrock:global.anthropic.claude-opus-5-5"
+        job_id = env.make_job(task_type="Classification", model=model)
+        image_uri = env.put_image(f"imgs/{uuid.uuid4()}.png")
+        task_id = env.make_task(job_id, image_uri)
+        fake = TemperatureRefusingClient(replies=['{"label": "anomaly"}'])
+        env.monkeypatch.setattr(env.worker, "get_bedrock_client",
+                                lambda region, timeout_seconds: fake)
+        env.monkeypatch.setattr(env.worker, "get_bedrock_configuration",
+                                lambda: {"model_id": "unused",
+                                         "region": REGION,
+                                         "max_tokens": 4096,
+                                         "temperature": 0.2, "top_p": None,
+                                         "timeout_seconds": 240})
+
+        result = env.run([env.record(job_id, task_id, image_uri,
+                                     "Classification", ["normal", "anomaly"],
+                                     model)])
+
+        assert result == {"batchItemFailures": []}
+        assert env.get_task(job_id, task_id)["prelabel_status"] == "Available"
+        assert env.prelabel_json(job_id, task_id) == {
+            "modality": "Classification", "label": "anomaly"}
+        assert [call["inferenceConfig"] for call in fake.calls] == [
+            {"maxTokens": 4096, "temperature": 0.2}, {"maxTokens": 4096}]
+        assert fake.calls[1]["modelId"] == "global.anthropic.claude-opus-5-5"
+        assert fake.calls[1]["messages"] == fake.calls[0]["messages"]

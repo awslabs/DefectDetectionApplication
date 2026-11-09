@@ -142,7 +142,7 @@ The **Gen** tab opens **Generate workflow**: describe the pipeline in plain lang
 | Field | What to enter |
 |-------|---------------|
 | **Prompt** | For example "Read from the camera, run the defect model, and raise a digital output on detections". |
-| **Temperature** (optional) | Lower values (0–0.2) make generation more precise and reduce invented nodes; higher values are more creative. |
+| **Temperature** (optional) | Lower values (0–0.2) make generation more precise and reduce invented nodes; higher values are more creative. A model that does not accept a temperature, such as Claude Opus 5.5, generates without it. |
 
 Click **Generate** (or **Send** in the chat history to refine). The panel reports **Generation validation findings**; structural errors that could be fixed automatically are listed under **Automatic correction applied**, and a result the Portal cannot make valid is shown as **Generation rejected**. Check the generated nodes' parameters before saving.
 

@@ -4,6 +4,21 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Changed - Default Bedrock model: Claude Opus 5.5 (2026-11-09)
+
+A Portal whose settings hold no Bedrock configuration now calls Claude Opus 5.5 through its global cross-region inference profile, `global.anthropic.claude-opus-5-5`, instead of `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Bedrock lists Claude Sonnet 4.5 as a legacy model and refuses it in an account that has not used it recently, so on a fresh deployment the assistant, code assist, workflow generation and **Generate with AI** failed until a PortalAdmin chose a model under Settings → Bedrock Configuration. A Portal with a saved Bedrock configuration keeps its model, and a deployed Portal changes only when its backend is next deployed.
+
+- **Settings → Bedrock Configuration** shows the new model identifier when nothing is saved, and saving the form stores it.
+- **Options a model refuses.** Claude Opus 5.5 accepts neither a forced tool choice nor a temperature or Top P. Code assist, workflow generation (the Gen panel, `portal_workflows_generate` and the repair pass) and **Generate with AI** require the model to answer through one tool. The assistant, those three features and both auto-labeling families, including the prompt tuning preview, send the temperature or Top P set under Settings, and the Gen panel sends its own temperature. When Bedrock refuses one of these options, the Portal sends the same request again without it: the tool stays offered but is no longer required, and the model's own sampling defaults apply. Each refusal adds one round trip, which Bedrock answers before the model generates anything. A model that accepts these options gets the same single request as before.
+- **Cost.** The assistant estimate in `COST_ESTIMATE.md` and the Administrator Guide uses the Claude Opus 5.5 global list prices: about $35/month at 10 turns a day (about $25 at the Claude Sonnet 4.5 prices).
+
+**Is this a breaking change?** Only for a Portal without a saved Bedrock configuration:
+
+| Flow | Before | After | Remedy |
+|---|---|---|---|
+| Where Bedrock serves a request | US regions (`us.` profile) | Any commercial region (`global.` profile) | Choose a regional profile, for example `us.anthropic.claude-opus-5-5`, under Settings → Bedrock Configuration |
+| A temperature entered in the Gen panel | Sent to Claude Sonnet 4.5 | Refused by Claude Opus 5.5, so the workflow is generated without it | Choose a model that accepts a temperature under Settings → Bedrock Configuration |
+
 ### Fixed - MCP audit-log tool: filter to the assistant channel (2026-11-06)
 
 `portal_admin_audit_logs_query` accepts `channel` `assistant` beside `api` and `mcp`, the values `GET /audit-logs` and the Audit Logs page already filter on, so MCP clients and the Portal assistant, which runs the same tool catalog, can list the assistant's entries. Calls with `api` or `mcp` are unchanged. The Portal MCP server (`EdgeCVPortalMcpStack`) reports server version `1.3.1`.

@@ -77,11 +77,12 @@ NODE_TOOL_CONFIG = {"tools": []}
 # Written from literals only — never from the modules under test.
 # ---------------------------------------------------------------------------
 
-# bedrock_common.DEFAULT_BEDROCK_CONFIG as it stood before this feature.
+# bedrock_common.DEFAULT_BEDROCK_CONFIG as it stood before this feature,
+# except model_id, which follows the later change of the default model.
 # The region default is os.environ['AWS_REGION'], which conftest pins to
 # us-east-1 (= conftest.REGION) before anything imports.
 PINNED_DEFAULTS = {
-    "model_id": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "model_id": "global.anthropic.claude-opus-5-5",
     "region": REGION,
     "max_tokens": 4096,
     "temperature": None,

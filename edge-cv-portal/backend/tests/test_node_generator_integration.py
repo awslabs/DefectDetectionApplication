@@ -662,3 +662,47 @@ class TestTimeoutAndFailure:
         assert session_after["messages"] == session_before["messages"]
         assert read_snapshot(gen_env, ctx.usecase_id, session_id) == \
             gen_env.reference_files
+
+
+# ===========================================================================
+# 6. A model that refuses a request option (Claude Opus 5.5)
+# ===========================================================================
+
+TOOL_CHOICE_REFUSAL = ('The model returned the following errors: tool_choice: '
+                       'type "tool" and "any" are not supported for this model.')
+TOP_P_REFUSAL = ('The model returned the following errors: `top_p` is '
+                 'deprecated for this model.')
+
+
+def validation_error(message):
+    return ClientError({"Error": {"Code": "ValidationException",
+                                  "Message": message}}, "Converse")
+
+
+class TestRefusedRequestOptions:
+
+    def test_refused_forced_tool_and_top_p_are_sent_again_without(
+            self, gen_env, bedrock, ctx):
+        """The model refuses the forced create_plugin_scaffold choice,
+        then the configured top_p: each is dropped in turn, the last
+        request still offers the tool, and the scaffold is accepted."""
+        put_bedrock_config(gen_env, temperature=None, top_p=0.9)
+        bedrock.client.converse.side_effect = [
+            validation_error(TOOL_CHOICE_REFUSAL),
+            validation_error(TOP_P_REFUSAL),
+            converse_tool_response({"files": dict(gen_env.reference_files)}),
+        ]
+
+        status, payload = generate(gen_env, ctx, "Blur frames")
+
+        assert status == 200
+        assert payload["files"] == gen_env.reference_files
+        first, second, third = [
+            call.kwargs for call in bedrock.client.converse.call_args_list]
+        assert first["toolConfig"]["toolChoice"] == {
+            "tool": {"name": TOOL_NAME}}
+        assert first["inferenceConfig"] == {"maxTokens": 4096, "topP": 0.9}
+        assert "toolChoice" not in second["toolConfig"]
+        assert second["inferenceConfig"] == first["inferenceConfig"]
+        assert third["toolConfig"] == {"tools": first["toolConfig"]["tools"]}
+        assert third["inferenceConfig"] == {"maxTokens": 4096}

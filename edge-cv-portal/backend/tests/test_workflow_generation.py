@@ -986,3 +986,71 @@ class TestGenerationJobStatus:
         assert status == 500
         assert payload["error"]["code"] == "INTERNAL_ERROR"
         assert job_record(gen_env, body["job_id"]) == job
+
+
+# ===========================================================================
+# 7. A model that refuses a request option (Claude Opus 5.5)
+# ===========================================================================
+
+TOOL_CHOICE_REFUSAL = ('The model returned the following errors: tool_choice: '
+                       'type "tool" and "any" are not supported for this model.')
+TEMPERATURE_REFUSAL = ('The model returned the following errors: `temperature` '
+                       'is deprecated for this model.')
+
+
+def validation_error(message):
+    return ClientError({"Error": {"Code": "ValidationException",
+                                  "Message": message}}, "Converse")
+
+
+class TestRefusedRequestOptions:
+    """The forced create_workflow choice and the Gen panel temperature are
+    dropped, one per refusal, when the model refuses them; a model that
+    accepts them gets the single request the classes above assert."""
+
+    def test_gen_panel_temperature_and_forced_tool_refused(self, gen_env,
+                                                           bedrock, ctx):
+        bedrock.client.converse.side_effect = [
+            validation_error(TOOL_CHOICE_REFUSAL),
+            validation_error(TEMPERATURE_REFUSAL),
+            converse_tool_response(VALID_DEFINITION,
+                                   text="Here is the workflow."),
+        ]
+
+        status, payload = generate(gen_env, ctx, "Camera to capture",
+                                   temperature=0.2)
+
+        assert status == 200
+        assert payload["validation_passed"] is True
+        requests = [call.kwargs
+                    for call in bedrock.client.converse.call_args_list]
+        assert len(requests) == 3
+        assert requests[0]["toolConfig"]["toolChoice"] == {
+            "tool": {"name": TOOL_NAME}}
+        assert requests[0]["inferenceConfig"]["temperature"] == 0.2
+        assert "toolChoice" not in requests[1]["toolConfig"]
+        assert requests[1]["inferenceConfig"]["temperature"] == 0.2
+        assert requests[2]["toolConfig"] == {
+            "tools": requests[0]["toolConfig"]["tools"]}
+        assert requests[2]["inferenceConfig"] == {"maxTokens": 4096}
+
+    def test_repair_pass_also_sends_the_tool_unforced(self, gen_env,
+                                                      bedrock, ctx):
+        """The Repair_Pass is a second invocation of the same request
+        builder, so it adapts the same way."""
+        bedrock.client.converse.side_effect = [
+            validation_error(TOOL_CHOICE_REFUSAL),
+            converse_tool_response(REPAIRABLE_DEFINITION),
+            validation_error(TOOL_CHOICE_REFUSAL),
+            converse_tool_response(VALID_DEFINITION),
+        ]
+
+        status, payload = generate(gen_env, ctx, "Camera to capture")
+
+        assert status == 200
+        assert payload["gate"]["repaired"] is True
+        requests = [call.kwargs
+                    for call in bedrock.client.converse.call_args_list]
+        assert ["toolChoice" in r["toolConfig"] for r in requests] == [
+            True, False, True, False]
+        assert len(requests[3]["messages"]) == len(requests[1]["messages"]) + 1

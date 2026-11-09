@@ -884,3 +884,48 @@ class TestDownscaleRefusals:
             "few-shot example image at position 1 could not be resized "
             "to a longer edge of 512 pixels: ")
         assert client.calls == []
+
+
+# ------------------------------------- a model that refuses a sampling option
+
+TOP_P_REFUSAL = ('The model returned the following errors: `top_p` is '
+                 'deprecated for this model.')
+
+
+class TopPRefusingClient(RecordingConverseClient):
+    """Refuses any request carrying a topP, as Claude Opus 5.5 does."""
+
+    def converse(self, **kwargs):
+        if "topP" in kwargs["inferenceConfig"]:
+            self.calls.append(kwargs)
+            raise client_error("ValidationException", TOP_P_REFUSAL)
+        return super().converse(**kwargs)
+
+
+class TestRefusedSamplingOption:
+    """The one exception to a single request per image: a sampling option
+    the model refuses (Bedrock answers before the model runs) is dropped
+    and the request sent once more, so the preview and the Auto_Labeler
+    still label the image."""
+
+    def test_refused_top_p_is_sent_again_without_it(self, prelabel,
+                                                    monkeypatch):
+        client = TopPRefusingClient(reply=guidance([BOX]))
+        bind_client(prelabel, monkeypatch, client, top_p=0.9)
+
+        result = invoke(prelabel, token_budget_selection=20000)
+
+        assert [box["class"] for box in result.prelabel["boxes"]] == ["scratch"]
+        assert [call["inferenceConfig"] for call in client.calls] == [
+            {"maxTokens": 20000, "topP": 0.9}, {"maxTokens": 20000}]
+        assert client.calls[1]["messages"] == client.calls[0]["messages"]
+
+    def test_model_accepting_top_p_gets_one_request(self, prelabel,
+                                                   monkeypatch):
+        client = RecordingConverseClient(reply=guidance([BOX]))
+        bind_client(prelabel, monkeypatch, client, top_p=0.9)
+
+        invoke(prelabel, token_budget_selection=20000)
+
+        assert [call["inferenceConfig"] for call in client.calls] == [
+            {"maxTokens": 20000, "topP": 0.9}]

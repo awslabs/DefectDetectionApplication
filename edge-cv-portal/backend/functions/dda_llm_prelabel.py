@@ -6,9 +6,10 @@ invocation, shared by the Auto_Labeler and the Prompt_Tuning_Preview
 
 This is the literal extraction of `dda_autolabel_worker`'s
 `_generate_llm_prelabel` body from prompt construction through Pre_Label
-conversion: build the Converse request, issue exactly one invocation,
-then strictly parse the Coordinate_Guidance and convert it to the
-modality's Pre_Label. Because both callers run this code, a Preview_Run
+conversion: build the Converse request, issue exactly one invocation
+(sent again only without a sampling option the model refuses; see
+`generate_llm_prelabel`), then strictly parse the Coordinate_Guidance
+and convert it to the modality's Pre_Label. Because both callers run this code, a Preview_Run
 is a faithful predictor of labeling-time behavior (Req 3.1, 3.2) —
 faithfulness is a property of there being one implementation, not of two
 implementations agreeing.
@@ -46,6 +47,7 @@ from bedrock_common import (
     build_inference_config,
     get_bedrock_client,
     get_bedrock_configuration,
+    send_dropping_refused_options,
 )
 
 # Shared layer (Lambda layer path)
@@ -275,7 +277,12 @@ def generate_llm_prelabel(*, model_identifier: str, modality: str,
     comes from `bedrock_common.get_bedrock_client` with the read timeout
     clamped to `min(config['timeout_seconds'], 120)` and retries
     disabled, so total wall time cannot exceed the bound and no
-    re-invocation can happen (Req 3.1, 3.3).
+    re-invocation can happen (Req 3.1, 3.3). The one exception is a
+    model that refuses the configured temperature or top_p: Bedrock
+    answers that refusal before the model generates anything, and the
+    request is sent once more without the refused option
+    (`bedrock_common.send_dropping_refused_options`). A model that
+    accepts them gets exactly one request.
 
     Only image bytes and derived prompt text reach the model — no
     dataset credentials and no portal secrets (Req 3.4).
@@ -372,7 +379,8 @@ def generate_llm_prelabel(*, model_identifier: str, modality: str,
 
     # Client via bedrock_common: read timeout equals the invocation
     # timeout capped at 120 s, retries disabled — so exactly one request
-    # per image and no re-invocation (Req 3.1, 3.3).
+    # per image and no re-invocation (Req 3.1, 3.3), apart from the resend
+    # without a sampling option the model refuses (docstring above).
     config = get_bedrock_configuration()
     timeout = min(int(config['timeout_seconds']), LLM_MAX_TIMEOUT_SECONDS)
     client = get_bedrock_client(config['region'], timeout)
@@ -386,11 +394,11 @@ def generate_llm_prelabel(*, model_identifier: str, modality: str,
     inference_config['maxTokens'] = resolve_token_budget(
         model_identifier, token_budget_selection, model_token_limits)
     try:
-        response = client.converse(
+        response = send_dropping_refused_options(client.converse, dict(
             modelId=model_identifier,
             messages=request['messages'],
             inferenceConfig=inference_config,
-        )
+        ))
     except (ReadTimeoutError, ConnectTimeoutError) as exc:
         # Req 3.10, 9.2: timeout is distinguishable from a model error.
         raise LlmPrelabelError(

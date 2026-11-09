@@ -264,7 +264,7 @@ export default function BedrockConfigurationSettings() {
               <Input
                 value={form.model_id}
                 onChange={setField('model_id')}
-                placeholder="us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                placeholder="global.anthropic.claude-opus-5-5"
                 ariaLabel="Model identifier"
               />
             )}

@@ -34,10 +34,10 @@ The Amazon Bedrock model the Portal calls for prompt-based generation: the Workf
 
 | Field | What to enter | Default |
 |-------|---------------|---------|
-| **Model identifier** | A Bedrock model or inference profile id, chosen from the list or typed, for example `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. The account must have access to the model in the chosen region. | – |
+| **Model identifier** | A Bedrock model or inference profile id, chosen from the list or typed. The account must have access to the model in the chosen region. The default, Claude Opus 5.5 through its global inference profile, may serve a request in any commercial region; a regional profile such as `us.anthropic.claude-opus-5-5` keeps requests in its geography. | `global.anthropic.claude-opus-5-5` |
 | **Region** | The region for Bedrock invocation. | `us-east-1` |
 | **Max tokens** | Maximum tokens generated per response. | – |
-| **Temperature** / **Top P** | 0 to 1; leave blank to let the model use its default (the parameter is omitted). Lower temperature gives more literal, predictable generations. | blank |
+| **Temperature** / **Top P** | 0 to 1; leave blank to let the model use its default (the parameter is omitted). Lower temperature gives more literal, predictable generations. A model that does not accept one of them, such as Claude Opus 5.5, is sent the request without it. | blank |
 | **Timeout (seconds)** | How long a generation may take before the request is abandoned. | – |
 
 Click **Save Configuration**.

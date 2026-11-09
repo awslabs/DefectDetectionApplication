@@ -25,12 +25,12 @@ The DDA Portal uses a multi-account architecture:
 | **CloudWatch Logs** | Application logs | 10GB ingestion, 5GB storage | $5.50 |
 | **Route53** | DNS hosting | 1 hosted zone, 1M queries | $1.50 |
 | **ACM** | SSL certificates | 1 certificate | $0 (free) |
-| **Portal assistant** | Bedrock (Claude Sonnet 4.5 list prices) | 10 assistant turns/day: ≈ 20k input tokens per model call, 1-3 calls per turn, prompt caching on | ~$25 |
+| **Portal assistant** | Bedrock (Claude Opus 5.5 list prices, global inference profile) | 10 assistant turns/day: ≈ 20k input tokens per model call, 1-3 calls per turn, prompt caching on | ~$35 |
 | **Portal assistant** | Lambda, DynamoDB, API Gateway, KMS | 10 turns/day: two Lambdas, one table, one Regional API, one key | ~$2 |
 
-**Portal Account Subtotal: ~$148/month (without the assistant); ~$175/month with 10 assistant turns a day**
+**Portal Account Subtotal: ~$148/month (without the assistant); ~$185/month with 10 assistant turns a day**
 
-The assistant's Bedrock cost scales with use: a one-call guidance turn is about $0.07 ($0.03 with a warm prompt cache), a turn with three model calls and tool look-ups about $0.11; 100 turns a day are about $250/month. The per-user daily token quota (1.5M tokens by default, cache reads weighted at one tenth as Bedrock bills them) caps one user at about $5/day. Turn the assistant off in Settings → Assistant to stop the Bedrock cost; the fixed part is the KMS key ($1/month) and the retained table.
+The assistant's Bedrock cost scales with use: a one-call guidance turn is about $0.09 ($0.04 with a warm prompt cache), a turn with three model calls and tool look-ups about $0.14; 100 turns a day are about $350/month. A regional inference profile (for example `us.`) is billed 10% above the global one. The per-user daily token quota (1.5M tokens by default, cache reads weighted at one tenth as Bedrock bills them) caps one user at about $6/day. Turn the assistant off in Settings → Assistant to stop the Bedrock cost; the fixed part is the KMS key ($1/month) and the retained table.
 
 ---
 
