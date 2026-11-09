@@ -949,6 +949,10 @@ class TestCatalogCoverage:
         # test_catalog_stream_and_analytics.py.
         "rtsp_camera_source", "rtmp_stream_source",
         "detection_counter", "object_association", "event_gate",
+        # s3-upload output node: the S3 / presigned-URL upload output
+        # appended last. Its descriptor content and the additivity of the
+        # append are pinned by test_catalog_s3_upload.py.
+        "s3_upload",
     }
 
     def test_catalog_contains_exactly_the_expected_types(self):

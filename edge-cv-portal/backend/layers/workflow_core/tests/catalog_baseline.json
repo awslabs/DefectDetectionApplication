@@ -1393,7 +1393,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1406,7 +1407,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1419,7 +1421,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1432,7 +1435,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1445,7 +1449,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1458,7 +1463,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1471,7 +1477,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1554,6 +1561,23 @@
         "name": "output_port_type",
         "param_type": "enum",
         "required": true
+      },
+      {
+        "constraints": {
+          "max": 120,
+          "min": 1
+        },
+        "default": 10,
+        "depends_on": null,
+        "description": "Seconds one handler invocation may take before the run fails with a timeout for this node (1-120, default 10). Raise it when the handler calls a remote service, e.g. a cloud model, inside the run.",
+        "examples": [
+          10,
+          18
+        ],
+        "multiline": false,
+        "name": "wall_clock_limit_s",
+        "param_type": "int",
+        "required": false
       }
     ],
     "type_id": "custom_python"
@@ -1574,7 +1598,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1587,7 +1612,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1600,7 +1626,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1613,7 +1640,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1626,7 +1654,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1639,7 +1668,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1652,7 +1682,8 @@
         "element_chain": [
           {
             "args_template": {
-              "handler-path": "{python_handler_path}"
+              "handler-path": "{python_handler_path}",
+              "wall-clock-limit-sec": "{wall_clock_limit_s}"
             },
             "factory": "emlpython"
           }
@@ -1694,6 +1725,23 @@
         "multiline": false,
         "name": "requirements",
         "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 120,
+          "min": 1
+        },
+        "default": 10,
+        "depends_on": null,
+        "description": "Seconds one handler invocation may take before the run fails with a timeout for this node (1-120, default 10). Raise it when the handler calls a remote service, e.g. a cloud model, inside the run.",
+        "examples": [
+          10,
+          18
+        ],
+        "multiline": false,
+        "name": "wall_clock_limit_s",
+        "param_type": "int",
         "required": false
       }
     ],
@@ -6120,6 +6168,199 @@
       }
     ],
     "type_id": "rtsp_camera_source"
+  },
+  "s3_upload": {
+    "category": "output",
+    "display_name": "S3 Upload",
+    "hardware_dependent": true,
+    "inputs": [
+      {
+        "name": "in",
+        "port_type": "VideoFrames"
+      }
+    ],
+    "mappings": [
+      {
+        "arch": "x86_64",
+        "element_chain": [],
+        "executor_binding": "s3_upload",
+        "plugin_dependencies": [
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "x86_64_nvidia",
+        "element_chain": [],
+        "executor_binding": "s3_upload",
+        "plugin_dependencies": [
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "arm64_cpu",
+        "element_chain": [],
+        "executor_binding": "s3_upload",
+        "plugin_dependencies": [
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "arm64_jp5",
+        "element_chain": [],
+        "executor_binding": "s3_upload",
+        "plugin_dependencies": [
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "arm64_jp6",
+        "element_chain": [],
+        "executor_binding": "s3_upload",
+        "plugin_dependencies": [
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "arm64_jp7",
+        "element_chain": [],
+        "executor_binding": "s3_upload",
+        "plugin_dependencies": [
+          "python:boto3"
+        ]
+      },
+      {
+        "arch": "sim",
+        "element_chain": [],
+        "executor_binding": "recording_s3_upload",
+        "plugin_dependencies": []
+      }
+    ],
+    "outputs": [],
+    "parameters": [
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Where the frame is uploaded: s3://<bucket>/<key> (PutObject with the device's AWS credentials, e.g. its Greengrass token exchange role) or an https:// presigned URL (HTTP PUT, no credentials needed). Placeholders in curly braces are replaced from the run metadata, including dotted trigger payload paths such as {trigger.payload_json.body.image_key}.",
+        "examples": [
+          "s3://example-bucket/captures/{trigger.payload_json.body.image_key}",
+          "{trigger.payload_json.body.upload_url}"
+        ],
+        "multiline": false,
+        "name": "destination",
+        "param_type": "string",
+        "required": true
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": "image/jpeg",
+        "depends_on": null,
+        "description": "Content-Type stored with the object (s3://) or sent with the PUT (https://), e.g. image/jpeg.",
+        "examples": [
+          "image/jpeg"
+        ],
+        "multiline": false,
+        "name": "content_type",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Suffix removed from the end of the rendered s3:// key before append_suffix is added, e.g. .jpg. Ignored when the key does not end with it and for https:// destinations.",
+        "examples": [
+          ".jpg"
+        ],
+        "multiline": false,
+        "name": "strip_suffix",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Suffix appended to the rendered s3:// key (after strip_suffix), e.g. .annotated.jpg, so one key from the trigger names both the raw and the annotated upload. Ignored for https:// destinations.",
+        "examples": [
+          ".annotated.jpg"
+        ],
+        "multiline": false,
+        "name": "append_suffix",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": null,
+        "depends_on": null,
+        "description": "Optional: the upload happens only while this condition holds; dotted paths reach the trigger payload, e.g. trigger.payload_json.body.stage == 'final'. Rule expression over the inference metadata fields is_anomalous (true/false; for object-detection models true when at least one object was detected) and confidence (number; the model's confidence score, for object detection the top detection's confidence). Supports the comparisons ==, !=, >=, <=, >, <, the logic operators && (and), || (or), ! (not), and parentheses; values are numbers (e.g. 0.8), 'quoted strings', or true/false; a bare field name is tested for truth. E.g. is_anomalous == true && confidence >= 0.8",
+        "examples": [
+          "is_anomalous == true",
+          "confidence >= 0.8 && is_anomalous == true",
+          "is_anomalous == true || confidence < 0.5",
+          "!(is_anomalous == true)",
+          "trigger.payload_json.body.stage == 'final'"
+        ],
+        "multiline": false,
+        "name": "condition",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 60,
+          "min": 1
+        },
+        "default": 10,
+        "depends_on": null,
+        "description": "Seconds allowed for one upload attempt (1-60), e.g. 10.",
+        "examples": [
+          10
+        ],
+        "multiline": false,
+        "name": "timeout_s",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 3,
+          "min": 0
+        },
+        "default": 1,
+        "depends_on": null,
+        "description": "How many times a failed attempt is retried (0-3), e.g. 1 for two attempts in all.",
+        "examples": [
+          1,
+          0
+        ],
+        "multiline": false,
+        "name": "retries",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "min_length": 1
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "AWS region of the bucket for s3:// destinations, e.g. us-east-1; empty uses the device's default region. Ignored for https:// destinations.",
+        "examples": [
+          "us-east-1"
+        ],
+        "multiline": false,
+        "name": "region",
+        "param_type": "string",
+        "required": false
+      }
+    ],
+    "type_id": "s3_upload"
   },
   "unified_input": {
     "category": "input",
