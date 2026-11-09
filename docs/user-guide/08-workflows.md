@@ -103,7 +103,7 @@ Every trigger-driven input also has concurrency settings: `concurrency_policy` (
 | **Detection Counter** | Counts detections per class, optionally inside a `zone`. | `classes`, `min_confidence`, `zone`, `zone_rule` (`center` or `overlap`). |
 | **Object Association** | Checks that every subject detection (for example `person`) has the required classes overlapping it (`hardhat, vest`). | `subject_class`, `required_classes`, `min_overlap`, `min_confidence`, `zone`. |
 | **Event Gate** | Turns per-run verdicts into events with hysteresis: active after `activate_after` consecutive true runs, cleared after `clear_after` false ones. | `condition`, `activate_after`, `clear_after`, `emit` (`on_activate`, `on_change`, `while_active`), `repeat_interval_ms`. |
-| **Custom Python** | Your own code on the metadata (or frames/events; the port types are configurable). | `code`, `requirements`, `input_port_type`, `output_port_type`. |
+| **Custom Python** | Your own code on the metadata (or frames/events; the port types are configurable). | `code`, `requirements`, `input_port_type`, `output_port_type`, `wall_clock_limit_s` (seconds one handler call may take, 1–120, default 10; raise it when the code calls a cloud service). |
 
 **Output** (`InferenceMeta` in)
 
@@ -114,8 +114,9 @@ Every trigger-driven input also has concurrency settings: `concurrency_policy` (
 | **OPC UA Write** | A PLC or SCADA node. | `endpoint`, `node_id`, `value_template` (`{is_anomalous}`), optional security. |
 | **Modbus TCP Write** | A PLC coil or holding register. | `host`, `port` (502), `unit_id`, `register_type` (`coil` or `holding_register`), `address`, `value_template`, `pulse_ms`, `phase`. |
 | **Capture to File System** | JPEG files on the device (takes `VideoFrames`). | `output_path` (`/aws_dda/captures`), `interval` (every Nth frame), `quality` (1–100). |
+| **S3 Upload** | An S3 object (takes `VideoFrames`): the run's frame on this branch is uploaded as a JPEG after the run, to `s3://bucket/key` with the device's AWS credentials (its Greengrass token exchange role) or by HTTP PUT to a presigned `https://` URL. | `destination` (a template; placeholders such as `{trigger.payload_json.body.image_key}` come from the trigger payload), `content_type` (`image/jpeg`), `strip_suffix`/`append_suffix` (rewrite the `s3://` key, e.g. `.jpg` → `.annotated.jpg`), optional `condition`, `timeout_s`, `retries`, `region`. |
 
-The condition language used by Inference Filter, Conditional, Digital Output and Event Gate compares fields of the result (`is_anomalous`, `confidence`, and dotted paths into analytics nodes such as `counter.people.total > 5` or `association.ppe.violations > 0`).
+The condition language used by Inference Filter, Conditional, Digital Output, S3 Upload and Event Gate compares fields of the result (`is_anomalous`, `confidence`, and dotted paths into analytics nodes such as `counter.people.total > 5` or `association.ppe.violations > 0`).
 
 ## 8.5 Validate and package
 
