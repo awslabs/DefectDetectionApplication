@@ -790,6 +790,7 @@ class WorkflowExecutor:
         stream_camera_resolver: Optional[Callable] = None,
         capture_root_for: Optional[Callable] = None,
         frame_handoff=None,
+        overrides_config=None,
     ) -> None:
         if session_factory is None:
             # Imported lazily so the module is importable without the
@@ -798,6 +799,12 @@ class WorkflowExecutor:
 
             session_factory = SessionLocal
         self._session_factory = session_factory
+        # The ``WorkflowOverridesConfig`` (``config_overrides``) whose
+        # ``WorkflowNodeOverrides`` are written into the run's private copy
+        # of the compiled document at run start (bedrock-inspection-chain);
+        # None (tests, hosts without the IPC reader) = every run executes
+        # the deployed parameters exactly as before.
+        self._overrides_config = overrides_config
         self._pipeline_manager_factory = (
             pipeline_manager_factory or _default_pipeline_manager_factory
         )
@@ -1778,6 +1785,15 @@ class WorkflowExecutor:
                 getattr(resolution, "document", None), dict
             ):
                 document = copy.deepcopy(resolution.document)
+            # Configuration overrides (bedrock-inspection-chain): the
+            # component configuration's WorkflowNodeOverrides for this
+            # workflow id, written into the run's private copy only — the
+            # on-disk artifact and the watcher's cache are never mutated.
+            # Without a config object or without overrides for this
+            # workflow the document is the very same object as before.
+            document = self._apply_configuration_overrides(
+                document, registration
+            )
 
             # Aravis frame feed (Requirements 6.4, 6.5, 6.6): plan the
             # document's Aravis feed, grab its frame through the camera
@@ -3060,6 +3076,37 @@ class WorkflowExecutor:
                 "Capture-phase node-status replay ignored an error",
                 exc_info=True,
             )
+
+    def _apply_configuration_overrides(
+        self, document: dict, registration: WorkflowRegistration
+    ) -> dict:
+        """The run's document with the component configuration's
+        ``WorkflowNodeOverrides`` for ``registration.workflow_id`` applied
+        (``config_overrides.WorkflowOverridesConfig.apply_overrides``: a
+        modified deep copy), or ``document`` itself when there is no
+        config object or nothing to apply. Node types come from the
+        registration's graph document, read only when an override exists.
+        Best-effort and contained: any failure keeps the deployed values."""
+        config = self._overrides_config
+        if config is None:
+            return document
+        try:
+            workflow_id = getattr(registration, "workflow_id", None)
+            if not config.has_overrides(workflow_id):
+                return document
+            from workflow_engine.config_overrides import node_types_from_graph
+
+            node_types = node_types_from_graph(
+                self._load_graph_document(registration)
+            )
+            return config.apply_overrides(document, workflow_id, node_types)
+        except Exception:  # noqa: BLE001 - overrides never fail a run
+            logger.exception(
+                "Could not apply the configuration overrides for workflow %s; "
+                "running the deployed parameters",
+                getattr(registration, "workflow_id", None),
+            )
+            return document
 
     @staticmethod
     def _load_graph_document(
@@ -4372,13 +4419,16 @@ def register_workflow_executor(
     post_run_handler: Optional[PostRunHandler] = None,
     binding_resolution_provider: Optional[Callable] = None,
     capture_root_for: Optional[Callable] = None,
+    overrides_config=None,
 ) -> WorkflowExecutor:
     """Create a WorkflowExecutor and register it as THE executor hook.
 
     Called from ``runtime.start_workflow_engine`` so triggered runs stop
     staying pending once the engine is up. ``capture_root_for`` (the run
-    retention's staging-root choice) is optional; without it every run
-    writes to the capture root exactly as before.
+    retention's staging-root choice) and ``overrides_config`` (the
+    ``WorkflowNodeOverrides`` poller, bedrock-inspection-chain) are
+    optional; without them every run writes to the capture root and
+    executes the deployed parameters exactly as before.
     """
     instance = WorkflowExecutor(
         session_factory=session_factory,
@@ -4386,6 +4436,7 @@ def register_workflow_executor(
         post_run_handler=post_run_handler,
         binding_resolution_provider=binding_resolution_provider,
         capture_root_for=capture_root_for,
+        overrides_config=overrides_config,
     )
     executor_hook.set_executor(instance.execute)
     logger.info("WorkflowExecutor registered as the workflow executor")

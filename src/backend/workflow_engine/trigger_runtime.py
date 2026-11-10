@@ -240,6 +240,12 @@ class TriggerPolicy:
     #: Reconnect_Limit — bounds the reconnect engine's attempts
     #: (Requirement 8.1); ``0`` = retry forever.
     retry_limit: int = DEFAULT_RETRY_LIMIT
+    #: ``mqtt_subscribe.payload_condition`` (bedrock-inspection-chain): a
+    #: rule in the shared condition grammar evaluated on EVERY delivery
+    #: against ``{"trigger": {"topic", "payload", "payload_json"}}`` before
+    #: the Concurrency_Policy; ``None`` (empty or whitespace-only, the
+    #: default) = every delivery activates, exactly as before.
+    payload_condition: Optional[str] = None
 
     @classmethod
     def from_parameters(
@@ -248,6 +254,8 @@ class TriggerPolicy:
         """Policy from a Trigger_Binding's ``parameters`` dict; missing or
         malformed values fall back to the catalog defaults."""
         parameters = parameters or {}
+        condition = parameters.get("payload_condition")
+        condition = str(condition).strip() if condition is not None else ""
         return cls(
             trigger_node_id=trigger_node_id,
             concurrency_policy=str(
@@ -263,6 +271,7 @@ class TriggerPolicy:
             retry_limit=_coerce_int(
                 parameters.get("retry_limit"), DEFAULT_RETRY_LIMIT
             ),
+            payload_condition=condition or None,
         )
 
 
@@ -271,6 +280,43 @@ def _coerce_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+#: ``payload_condition`` WARNING rate limit per gate (one per interval for
+#: a definition error, one per interval while an unresolvable streak lasts;
+#: DEBUG in between). A timestamp, not a latch: the rule is evaluated again
+#: on every delivery.
+PAYLOAD_CONDITION_WARNING_INTERVAL_SECONDS = 300.0
+#: Consecutive per-message ``ConditionFieldError`` discards after which the
+#: gate warns that the rule may name a field path that never resolves (a
+#: typo below a valid root is indistinguishable from a malformed message
+#: per delivery). Any True/False evaluation resets the streak.
+PAYLOAD_CONDITION_UNRESOLVABLE_STREAK = 10
+#: The ``trigger`` root of the evaluation document ``admits`` builds.
+PAYLOAD_CONDITION_ROOT = "trigger"
+
+
+def payload_condition_document(context: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``{"trigger": {"topic", "payload", "payload_json"}}`` document a
+    ``payload_condition`` is evaluated against; ``payload_json`` is the
+    payload parsed by the executor's own ``parse_trigger_payload`` (lazily
+    imported: ``pipeline_executor`` imports this module's siblings), so a
+    rule sees the same object the run's ``trigger.payload_json`` carries;
+    ``None`` for a non-JSON payload."""
+    from workflow_engine.pipeline_executor import parse_trigger_payload
+
+    payload = context.get("payload")
+    if payload is None:
+        payload = ""
+    elif not isinstance(payload, str):
+        payload = str(payload)
+    return {
+        PAYLOAD_CONDITION_ROOT: {
+            "topic": context.get("topic"),
+            "payload": payload,
+            "payload_json": parse_trigger_payload(payload),
+        }
+    }
 
 
 class TriggerGate:
@@ -318,6 +364,118 @@ class TriggerGate:
         self._debounce_timer = None
         self._debounce_context: Optional[Dict[str, Any]] = None
         self._closed = False
+        # payload_condition bookkeeping (bedrock-inspection-chain): the two
+        # rate-limit timestamps, the consecutive-unresolvable counter and
+        # the node's optional Trigger_Health handle (its ``detail``).
+        self._health: Optional["TriggerHealth"] = None
+        self._definition_warned_at: Optional[float] = None
+        self._streak_warned_at: Optional[float] = None
+        self._unresolvable_streak = 0
+
+    def attach_health(self, health: "TriggerHealth") -> None:
+        """The node's Trigger_Health record, for ``payload_condition``
+        definition errors (``detail``)."""
+        self._health = health
+
+    @property
+    def unresolvable_streak(self) -> int:
+        """Consecutive per-message unresolvable discards so far."""
+        return self._unresolvable_streak
+
+    def admits(self, context: Dict[str, Any]) -> bool:
+        """Evaluate the node's ``payload_condition`` on ONE delivery (no
+        state carried between deliveries but the streak counter). True when
+        the delivery may proceed to the Concurrency_Policy; False when it is
+        discarded. Three failure kinds (design 8.1): (i) a False result, or
+        a ``ConditionFieldError`` whose field root IS a key of the
+        evaluation document (no such field in THIS message, a non-JSON
+        payload, a path typo below the root) — DEBUG, health untouched, the
+        error case counts toward the streak backstop; (ii) any other
+        ``ValueError`` (syntax), or a ``ConditionFieldError`` with a foreign
+        root (unquoted literal, wrong root — can never resolve) — a
+        rate-limited WARNING and the health ``detail``; (iii) any other
+        exception — rate-limited WARNING, no health change. (ii) and (iii)
+        leave the streak counter unchanged."""
+        condition = self.policy.payload_condition
+        if condition is None:
+            return True
+        from workflow_engine.output_bindings import (
+            ConditionFieldError,
+            evaluate_condition,
+        )
+
+        node_id = self.policy.trigger_node_id
+        document = payload_condition_document(context)
+        try:
+            matched = evaluate_condition(condition, document)
+        except ConditionFieldError as error:
+            if str(error.field).split(".")[0] in document:
+                self._unresolvable_streak += 1
+                logger.debug(
+                    "Trigger '%s' discarded a delivery: payload_condition "
+                    "could not resolve %r for this message (%s)",
+                    node_id, error.field, error,
+                )
+                self._note_unresolvable_streak(error)
+                return False
+            self._definition_error(error)
+            return False
+        except ValueError as error:
+            self._definition_error(error)
+            return False
+        except Exception as error:  # noqa: BLE001 - containment per delivery
+            self._warn_rate_limited(
+                "_definition_warned_at",
+                "Trigger '%s' on workflow %s discarded a delivery: "
+                "payload_condition %r raised %s: %s",
+                node_id, self._registration_id, condition,
+                type(error).__name__, error,
+            )
+            return False
+        self._unresolvable_streak = 0
+        if not matched:
+            logger.debug(
+                "Trigger '%s' discarded a delivery: payload_condition did "
+                "not match", node_id,
+            )
+            return False
+        return True
+
+    def _definition_error(self, error: BaseException) -> None:
+        condition = self.policy.payload_condition
+        self._warn_rate_limited(
+            "_definition_warned_at",
+            "Trigger '%s' on workflow %s discards every delivery: "
+            "payload_condition %r has a definition error: %s",
+            self.policy.trigger_node_id, self._registration_id, condition,
+            error,
+        )
+        if self._health is not None:
+            self._health.set_detail(
+                "payload_condition definition error: {0}".format(error))
+
+    def _note_unresolvable_streak(self, error: BaseException) -> None:
+        if self._unresolvable_streak < PAYLOAD_CONDITION_UNRESOLVABLE_STREAK:
+            return
+        self._warn_rate_limited(
+            "_streak_warned_at",
+            "Trigger '%s' on workflow %s: payload_condition discarded %d "
+            "consecutive deliveries as unresolvable (last: %s); check the "
+            "rule's field paths",
+            self.policy.trigger_node_id, self._registration_id,
+            self._unresolvable_streak, error,
+        )
+
+    def _warn_rate_limited(self, stamp: str, message: str, *args: Any) -> None:
+        """WARNING once per PAYLOAD_CONDITION_WARNING_INTERVAL_SECONDS per
+        timestamp slot (``stamp`` names the attribute), DEBUG in between."""
+        now = self._clock()
+        last = getattr(self, stamp)
+        if last is not None and now - last < PAYLOAD_CONDITION_WARNING_INTERVAL_SECONDS:
+            logger.debug(message, *args)
+            return
+        setattr(self, stamp, now)
+        logger.warning(message, *args)
 
     def fire(self, context: Dict[str, Any]) -> bool:
         """Apply the node's Concurrency_Policy to one firing.
@@ -675,8 +833,17 @@ class WorkflowActivationCore:
         clock: Callable[[], float] = time.monotonic,
         timer_factory: Callable = threading.Timer,
         dispatch_poll_timeout: float = DEFAULT_DISPATCH_POLL_TIMEOUT_SECONDS,
+        workflow_id: Optional[str] = None,
+        overrides_config: Any = None,
     ) -> None:
         self.registration_id = registration_id
+        # The Portal workflow id (``WorkflowRegistration.workflow_id``) the
+        # ``WorkflowDisabled`` configuration key names, and the
+        # ``WorkflowOverridesConfig`` to ask (``is_disabled``, an in-memory
+        # snapshot read). ``None`` for either = never disabled, the state
+        # of every pre-feature caller (bedrock-inspection-chain).
+        self.workflow_id = workflow_id
+        self._overrides_config = overrides_config
         self.queue = ActivationQueue()
         self._sequence = FiringSequence()
         self._clock = clock
@@ -710,10 +877,34 @@ class WorkflowActivationCore:
     def gate(self, trigger_node_id: str) -> Optional[TriggerGate]:
         return self._gates.get(trigger_node_id)
 
+    def attach_health(self, trigger_node_id: str, health: "TriggerHealth") -> None:
+        """Hand a trigger node's Trigger_Health record to its gate (for the
+        ``payload_condition`` definition-error ``detail``)."""
+        gate = self._gates.get(trigger_node_id)
+        if gate is not None:
+            gate.attach_health(health)
+
+    def is_disabled(self) -> bool:
+        """True when the configuration's ``WorkflowDisabled`` switches this
+        workflow off (snapshot read; never IPC)."""
+        if self._overrides_config is None or self.workflow_id is None:
+            return False
+        try:
+            return bool(self._overrides_config.is_disabled(self.workflow_id))
+        except Exception:  # noqa: BLE001 - a config fault never blocks a firing
+            logger.exception(
+                "WorkflowDisabled check failed for workflow %s; treating it "
+                "as enabled", self.workflow_id,
+            )
+            return False
+
     def fire(self, trigger_node_id: str, context: Dict[str, Any]) -> bool:
         """One trigger firing (OR semantics — any single trigger activates
         a run, Requirement 7.1). Returns True when the firing was accepted
-        by the node's Concurrency_Policy."""
+        by the node's Concurrency_Policy. Before the policy: a disabled
+        workflow (``WorkflowDisabled``) discards the firing at INFO, and the
+        node's ``payload_condition``, when set, must admit the delivery
+        (bedrock-inspection-chain; legacy documents set neither)."""
         gate = self._gates.get(trigger_node_id)
         if gate is None:
             logger.warning(
@@ -721,6 +912,15 @@ class WorkflowActivationCore:
                 trigger_node_id,
                 self.registration_id,
             )
+            return False
+        if self.is_disabled():
+            logger.info(
+                "Trigger '%s' firing discarded: workflow %s (registration %s) "
+                "is disabled by the WorkflowDisabled configuration",
+                trigger_node_id, self.workflow_id, self.registration_id,
+            )
+            return False
+        if not gate.admits(context):
             return False
         return gate.fire(context)
 
@@ -852,8 +1052,23 @@ class TriggerHealth:
         self._auto_fallback = False
         self._reconnect_attempts = 0
         self._last_error: Optional[str] = None
+        # Optional free-text detail independent of ``state`` (which stays
+        # the worker's): today only a ``payload_condition`` definition
+        # error (bedrock-inspection-chain). Emitted by ``to_wire`` as
+        # ``detail`` only when set, so legacy records are byte-identical.
+        self._detail: Optional[str] = None
 
     # -- worker-facing updates ------------------------------------------
+
+    def set_detail(self, detail: Optional[str]) -> None:
+        """Set (or clear with ``None``) the record's ``detail`` text."""
+        with self._lock:
+            self._detail = detail
+
+    @property
+    def detail(self) -> Optional[str]:
+        with self._lock:
+            return self._detail
 
     def set_state(self, state: str, error: Optional[str] = None) -> None:
         """Record a state transition; a non-None ``error`` replaces the
@@ -916,6 +1131,8 @@ class TriggerHealth:
             }
             if self._mechanism is not None:
                 record["mechanism"] = self._mechanism
+            if self._detail is not None:
+                record["detail"] = self._detail
             return record
 
 
@@ -1355,6 +1572,7 @@ class TriggerSubscriptionManager:
         ] = None,
         clock: Callable[[], float] = time.monotonic,
         timer_factory: Callable = threading.Timer,
+        overrides_config: Any = None,
     ) -> None:
         self._session_factory = session_factory
         self._mqtt_transport_factory = mqtt_transport_factory
@@ -1364,8 +1582,14 @@ class TriggerSubscriptionManager:
         self._run_starter_factory = run_starter_factory
         self._clock = clock
         self._timer_factory = timer_factory
+        # The ``WorkflowOverridesConfig`` (``config_overrides``) every core
+        # asks for ``WorkflowDisabled``; None = nothing is ever disabled.
+        self._overrides_config = overrides_config
         self._lock = threading.Lock()
         self._groups: Dict[str, WorkflowTriggerGroup] = {}
+        # registration id -> Portal workflow id, refreshed by every
+        # ``_load_trigger_bindings`` (what ``WorkflowDisabled`` keys on).
+        self._workflow_ids: Dict[str, Optional[str]] = {}
         self._stopped = False
 
     # ------------------------------------------------------------------
@@ -1472,6 +1696,7 @@ class TriggerSubscriptionManager:
                 .all()
             )
             registrations = [(row.id, row.artifact_path) for row in rows]
+            self._workflow_ids = {row.id: row.workflow_id for row in rows}
         finally:
             session.close()
 
@@ -1509,12 +1734,15 @@ class TriggerSubscriptionManager:
             run_starter=self._run_starter_factory(registration_id),
             clock=self._clock,
             timer_factory=self._timer_factory,
+            workflow_id=self._workflow_ids.get(registration_id),
+            overrides_config=self._overrides_config,
         )
         group = WorkflowTriggerGroup(
             registration_id, bindings_fingerprint(bindings), core
         )
         for binding in bindings:
             health = self._make_health(binding)
+            core.attach_health(binding.node_id, health)
             worker, engine = self._make_worker(
                 registration_id, core, binding, health
             )

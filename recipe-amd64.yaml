@@ -38,6 +38,10 @@ ComponentConfiguration:
     McpMutatingToolsEnabled: "false"
     # Self-heal is on by default; merge "false" to opt a device out (triton-model-cleanup-wedge).
     ModelLoadSelfHealEnabled: "true"
+    # Workflow switches (merge a configuration revision; never reference these from Lifecycle/SetEnv): WorkflowDisabled {"<workflow id>"|"*": "true"}
+    # discards a workflow's trigger firings; WorkflowNodeOverrides {"<workflow id>"|"*": {"<nodeId>": {"<parameter>": value}}} overrides allow-listed node parameters per run.
+    WorkflowNodeOverrides: {}
+    WorkflowDisabled: {}
     accessControl:
       aws.greengrass.ShadowManager:
         'aws.edgeml.dda.LocalServer.amd64:shadow:1':

@@ -103,6 +103,20 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
                 "Tuning sample export could not be configured; workflow "
                 "runs proceed without exporting tuning samples"
             )
+        # Configuration-only switches (bedrock-inspection-chain): the
+        # WorkflowNodeOverrides / WorkflowDisabled poller, handed to the
+        # executor and the trigger manager below. Its own contained block:
+        # without it (or where the IPC reader is unavailable the poller's
+        # snapshot simply stays empty) both consumers behave exactly as
+        # before the feature. The poller alone touches IPC, on its thread.
+        overrides_config = None
+        try:
+            overrides_config = _start_overrides_config()
+        except Exception:  # noqa: BLE001 - feature isolation
+            logger.exception(
+                "Workflow configuration overrides unavailable; runs execute "
+                "the deployed parameters and no workflow is disabled"
+            )
         # One-shot backfill of the samples derivable from the runs this
         # device has already performed (Requirement 2.7). Its own
         # contained block, on a daemon thread so startup never waits for
@@ -182,6 +196,7 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
                 capture_root_for=(
                     retention.capture_root_for if retention is not None else None
                 ),
+                overrides_config=overrides_config,
             )
         except Exception:  # noqa: BLE001 - never take LocalServer down
             logger.exception(
@@ -208,6 +223,7 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
             manager = TriggerSubscriptionManager(
                 mqtt_transport_factory=default_mqtt_transport_factory,
                 opcua_transport_factory=default_opcua_transport_factory,
+                overrides_config=overrides_config,
             )
             # Watcher notifications after every sync_once drive the
             # start-within-10s guarantee (Requirement 6.1); the immediate
@@ -299,6 +315,21 @@ def _configure_sample_export():
     configuration = reader.get_component_config(
         reader.get_local_server_component_name())
     return configure_sample_exporter(configuration)
+
+
+def _start_overrides_config():
+    """Create and start the ``WorkflowNodeOverrides`` / ``WorkflowDisabled``
+    poller (``config_overrides.WorkflowOverridesConfig``,
+    bedrock-inspection-chain): one immediate read, then a daemon re-poll
+    every 5 s, all on the poller's thread. The default reader opens the
+    IPC configuration client lazily, so where it is unavailable the first
+    read fails (one WARNING per minute) and the snapshot stays empty —
+    nothing overridden, nothing disabled."""
+    from workflow_engine.config_overrides import WorkflowOverridesConfig
+
+    config = WorkflowOverridesConfig()
+    config.start()
+    return config
 
 
 def _start_job_runner(exporter):

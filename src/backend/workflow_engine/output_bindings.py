@@ -235,6 +235,20 @@ def _tokenize(condition: str) -> List[str]:
     return tokens
 
 
+class ConditionFieldError(ValueError):
+    """``evaluate_condition`` met an identifier that is not a field of the
+    metadata (bedrock-inspection-chain). A ``ValueError`` subclass, so
+    every existing ``except ValueError`` keeps catching it unchanged;
+    ``field`` is the offending identifier token, which lets the trigger
+    runtime tell a field missing from THIS message (root segment is a key
+    of the evaluation document) from a rule that can never resolve."""
+
+    def __init__(self, field: str) -> None:
+        super().__init__(
+            "Unknown metadata field {0!r} in condition".format(field))
+        self.field = field
+
+
 class _Parser:
     """Tiny recursive-descent parser: or-expr / and-expr / comparison."""
 
@@ -323,8 +337,7 @@ class _Parser:
                 found, value = resolve_field_path(self.metadata, token)
                 if found:
                     return _coerce(value)
-            raise ValueError(
-                "Unknown metadata field {0!r} in condition".format(token))
+            raise ConditionFieldError(token)
         return self.metadata[token]
 
 
