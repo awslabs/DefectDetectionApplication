@@ -100,15 +100,21 @@ from workflow_engine.tuning.sample_export import (
 # transports themselves — stays here.
 from workflow_engine import scene_analytics
 from workflow_engine.vendor.workflow_core.anomaly_invocation import (
+    ANSWER_FORMAT_INSPECTION,
+    BEDROCK_CONNECT_TIMEOUT_SEC,
     BEDROCK_DEFAULT_MODEL,
     BEDROCK_JSON_INSTRUCTION,
     BEDROCK_READ_TIMEOUT_SEC,
+    BOX_SCALE_NORMALIZED_1000,
+    BOX_SCALE_PIXELS,
     DEFAULT_MAX_TOKENS,
     LLM_GENERATION_PARAMETERS,
+    NORMALIZED_BOX_MAX,
     BedrockInvocation,
     LlmInvocation,
     build_bedrock_invocation,
     build_llm_invocation,
+    parse_inspection_answer,
     parse_verdict,
     resolve_max_image_dimension,
     resolve_output_token_budget,
@@ -1347,6 +1353,8 @@ parse_bedrock_answer = parse_verdict
 def _default_bedrock_invoker(
     model: str, prompt: str, images: List, region: str, max_tokens: int,
     system_prompt: Optional[str] = None,
+    timeouts: Optional[Tuple[int, int]] = None,
+    retries: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Invoke the Bedrock runtime converse API and return the model's
     text answer. ``images`` is a list of ``(label, image_bytes)`` pairs
@@ -1356,6 +1364,13 @@ def _default_bedrock_invoker(
     pre-feature invocation (json-trigger-metadata-pipeline Requirements
     7.2, 7.3). boto3 is imported lazily so this module stays importable
     everywhere (Requirement 13.7).
+
+    ``timeouts`` / ``retries`` (bedrock-inspection-chain; both default
+    None → today's client, byte-identical kwargs) are set together by
+    the attempt/budget policy of an ``answer_format: inspection`` node:
+    ``timeouts=(connect_timeout, read_timeout)`` seconds and the
+    botocore ``retries`` mapping (``{"total_max_attempts": 1, "mode":
+    "standard"}`` — SDK retries off, the node owns the budget).
 
     The kwargs themselves come from
     :meth:`BedrockInvocation.converse_kwargs` — the shared
@@ -1367,13 +1382,24 @@ def _default_bedrock_invoker(
     import boto3
     from botocore.config import Config as BotoConfig
 
+    if timeouts is None and retries is None:
+        config = BotoConfig(
+            read_timeout=BEDROCK_READ_TIMEOUT_SEC,
+            retries={"max_attempts": 1},
+        )
+    else:
+        connect_timeout, read_timeout = (
+            timeouts if timeouts is not None
+            else (BEDROCK_CONNECT_TIMEOUT_SEC, BEDROCK_READ_TIMEOUT_SEC))
+        config = BotoConfig(
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            retries=retries if retries is not None else {"max_attempts": 1},
+        )
     client = boto3.client(
         "bedrock-runtime",
         region_name=region,
-        config=BotoConfig(
-            read_timeout=BEDROCK_READ_TIMEOUT_SEC,
-            retries={"max_attempts": 1},
-        ),
+        config=config,
     )
     invocation = BedrockInvocation(
         model=model,
@@ -1686,6 +1712,39 @@ def draw_defect_objects(
     return drawn
 
 
+#: Verdict banner geometry of an ``answer_format: inspection`` overlay
+#: (bedrock-inspection-chain): ``OK``/``NOK`` at the top-left corner,
+#: FONT_HERSHEY_SIMPLEX scale 1.5, thickness 3.
+VERDICT_BANNER_ORIGIN = (20, 50)
+VERDICT_BANNER_SCALE = 1.5
+VERDICT_BANNER_THICKNESS = 3
+VERDICT_BANNER_PASS_TEXT = "OK"
+VERDICT_BANNER_FAIL_TEXT = "NOK"
+
+
+def draw_verdict_banner(frame: Any, verdict: Any) -> None:
+    """Write the inspection verdict onto ``frame`` in place: ``OK`` in
+    green (:data:`_DEFECT_OK_COLOR`) for ``pass``, ``NOK`` in red
+    (:data:`_DEFECT_NOK_COLOR`) for anything else, at
+    :data:`VERDICT_BANNER_ORIGIN` (bedrock-inspection-chain). Drawn
+    after :func:`draw_defect_objects`, also when the answer carries no
+    drawable box — the verdict is never lost over a picture."""
+    import cv2
+
+    if frame is None:
+        return
+    passed = str(verdict).strip().lower() == "pass"
+    cv2.putText(
+        frame,
+        VERDICT_BANNER_PASS_TEXT if passed else VERDICT_BANNER_FAIL_TEXT,
+        VERDICT_BANNER_ORIGIN,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        VERDICT_BANNER_SCALE,
+        _DEFECT_OK_COLOR if passed else _DEFECT_NOK_COLOR,
+        VERDICT_BANNER_THICKNESS,
+    )
+
+
 def compute_crop_box(
     box: Tuple[float, float, float, float],
     frame_width: int,
@@ -1849,6 +1908,190 @@ class RunContext:
 BEDROCK_MAX_POOL_WORKERS = 4
 
 
+# ---------------------------------------------------------------------------
+# answer_format: inspection (bedrock-inspection-chain)
+#
+# Helpers of the structured inspection path of BedrockInferenceProcessor:
+# per-run prompt rendering, the expected-count rule, the box_scale
+# convention, the attempt/budget policy and the error classification. A
+# binding with answer_format absent/legacy never reaches any of them.
+# ---------------------------------------------------------------------------
+
+#: A ``{json:<dotted.path>}`` token of a rendered prompt — the compact
+#: JSON of the run-metadata value replaces it (:func:`render_prompt_text`).
+_JSON_TOKEN_RE = re.compile(r"\{json:([A-Za-z_][A-Za-z0-9_.]*)\}")
+
+#: ``on_error`` values of a bedrock_inference node.
+BEDROCK_ON_ERROR_FAIL_RUN = "fail_run"
+BEDROCK_ON_ERROR_RECORD = "record"
+
+#: ``error_verdict`` value that exposes a failure as a ``fail`` verdict.
+BEDROCK_ERROR_VERDICT_FAIL = "fail"
+
+#: Catalog defaults of the attempt/budget policy; all three at their
+#: defaults = today's single call through the unchanged client.
+BEDROCK_DEFAULT_ATTEMPTS = 1
+BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC = BEDROCK_READ_TIMEOUT_SEC
+BEDROCK_DEFAULT_BUDGET_SEC = 0
+
+#: botocore ``ClientError`` codes that end the attempt loop at once
+#: (retrying cannot succeed); every other failure is retryable.
+BEDROCK_TERMINAL_ERROR_CODES = frozenset((
+    "ValidationException",
+    "AccessDeniedException",
+    "ResourceNotFoundException",
+))
+
+#: Recorded error text of a node with ``enabled: false``.
+BEDROCK_DISABLED_MESSAGE = "bedrock check disabled by configuration"
+
+#: Run-artifact filename of the bytes actually sent to Bedrock when
+#: ``max_image_dimension`` downscaled the captured frame.
+INPUT_FRAME_ARTIFACT_TEMPLATE = "{capture_id}.node.{safe_node_id}.input.jpg"
+
+
+def render_prompt_text(template: str, values: Dict[str, Any]) -> str:
+    """Render an ``answer_format: inspection`` prompt against the run
+    metadata, segment-wise so no substituted text is ever scanned again.
+
+    The raw template is split at its ``{json:<dotted.path>}`` tokens;
+    each literal segment is rendered with the LLM node's strict
+    :func:`workflow_engine.llm_inference.render_prompt` (``{identifier}``
+    / ``{dotted.path}`` substitution, ``{{``/``}}`` → one brace, other
+    braces literal); each token becomes the compact
+    ``json.dumps(value, ensure_ascii=False, separators=(",", ":"))`` of
+    the value :func:`resolve_field_path` finds. Raises
+    :class:`UnresolvedPlaceholderError` (``name`` = the identifier, or
+    ``json:<path>``) on the first value that does not resolve.
+    """
+    text = str(template or "")
+    pieces: List[str] = []
+    position = 0
+    for match in _JSON_TOKEN_RE.finditer(text):
+        pieces.append(render_prompt(text[position:match.start()], values))
+        found, value = resolve_field_path(values, match.group(1))
+        if not found:
+            raise UnresolvedPlaceholderError("json:" + match.group(1))
+        pieces.append(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        position = match.end()
+    pieces.append(render_prompt(text[position:], values))
+    return "".join(pieces)
+
+
+def resolve_box_scale(raw: Any, model: Any) -> str:
+    """The coordinate convention of the answer's bounding boxes:
+    ``auto`` (or absent) → ``normalized_1000`` when the effective model id
+    contains ``amazon.nova`` (the 0-1000 grid Nova answers on), else
+    ``pixels``; an explicit convention is returned unchanged."""
+    value = str(raw or "auto").strip() or "auto"
+    if value != "auto":
+        return value
+    if "amazon.nova" in str(model or "").lower():
+        return BOX_SCALE_NORMALIZED_1000
+    return BOX_SCALE_PIXELS
+
+
+def resolve_expected_count(found: bool, value: Any) -> Optional[int]:
+    """The ONE expected-count rule: a list → its length, an int (not a
+    bool) → itself, and the result must be >= 1; anything else (path not
+    found, other type, empty list, 0, negative) is ``None``."""
+    if not found:
+        return None
+    if isinstance(value, list):
+        count = len(value)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        count = value
+    else:
+        return None
+    return count if count >= 1 else None
+
+
+def _truthy(value: Any) -> bool:
+    """A boolean node parameter as the compiled document or a
+    configuration override spells it (``True``/``"false"``/``0``...)."""
+    return bool(_coerce(value))
+
+
+def _bool_parameter(raw: Any, default: bool) -> bool:
+    """A boolean node parameter: absent/blank → ``default``."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return default
+    return _truthy(raw)
+
+
+def _records_errors(binding: dict) -> bool:
+    """True when the bedrock_inference ``binding`` has ``on_error:
+    record`` (its branch outputs run on a recorded error)."""
+    parameters = binding.get("parameters") or {}
+    return (str(parameters.get("on_error") or BEDROCK_ON_ERROR_FAIL_RUN)
+            == BEDROCK_ON_ERROR_RECORD)
+
+
+def _policy_int(raw: Any, default: int, minimum: int) -> int:
+    """An integer policy parameter: absent/blank/invalid → ``default``,
+    never below ``minimum``."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+def image_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
+    """``(width, height)`` of an encoded image, or ``None`` when the
+    bytes do not decode (Pillow header read, imported lazily)."""
+    import io
+
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            width, height = image.size
+    except Exception:  # noqa: BLE001 - "undecodable" is the answer
+        return None
+    return int(width), int(height)
+
+
+def bedrock_error_code(error: BaseException) -> Optional[str]:
+    """The ``Error.Code`` of a botocore ``ClientError``-shaped exception,
+    else ``None`` (no botocore import: classified by shape)."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        return None
+    detail = response.get("Error")
+    if not isinstance(detail, dict):
+        return None
+    code = detail.get("Code")
+    return str(code) if code is not None else None
+
+
+def is_terminal_bedrock_error(error: BaseException) -> bool:
+    """True for the ``ClientError`` codes the attempt loop never retries
+    (:data:`BEDROCK_TERMINAL_ERROR_CODES`); transport errors, throttling,
+    5xx, unknown codes and every other exception are retryable."""
+    return bedrock_error_code(error) in BEDROCK_TERMINAL_ERROR_CODES
+
+
+def scale_box_to_pixels(
+    box: Dict[str, Any], box_scale: str, width: int, height: int,
+) -> Dict[str, Any]:
+    """A ``bounding_box`` in the pixel space of the ``width`` x ``height``
+    image sent: ``normalized_1000`` coordinates are rescaled with
+    ``round(x * width / 1000)`` / ``round(y * height / 1000)``; ``pixels``
+    boxes are copied unchanged."""
+    if box_scale != BOX_SCALE_NORMALIZED_1000:
+        return dict(box)
+    return {
+        "x_min": int(round(box["x_min"] * width / float(NORMALIZED_BOX_MAX))),
+        "y_min": int(round(box["y_min"] * height / float(NORMALIZED_BOX_MAX))),
+        "x_max": int(round(box["x_max"] * width / float(NORMALIZED_BOX_MAX))),
+        "y_max": int(round(box["y_max"] * height / float(NORMALIZED_BOX_MAX))),
+    }
+
+
 class BedrockInferenceProcessor:
     """Runs a compiled document's ``bedrock_inference`` bindings.
 
@@ -1871,9 +2114,13 @@ class BedrockInferenceProcessor:
         self,
         invoker: Optional[Callable] = None,
         output_processor: Optional["OutputBindingProcessor"] = None,
+        clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self._invoker = invoker or _default_bedrock_invoker
         self._output_processor = output_processor
+        #: Monotonic clock of the attempt/budget policy (bedrock-
+        #: inspection-chain); injectable so tests drive the budget.
+        self._clock = clock or time.monotonic
 
     def bindings(self, document: dict) -> List[dict]:
         return [
@@ -2106,23 +2353,37 @@ class BedrockInferenceProcessor:
                     and isinstance(nested.get(node_id), dict)
                     and "error" in nested[node_id]
                 )
-                if errored:
+                if errored and not _records_errors(binding):
                     # Recorded error outcome: the branch's output
                     # bindings are skipped entirely (the node status was
                     # set by _recorded_error); siblings proceed
-                    # (Requirements 5.4, 5.5).
+                    # (Requirements 5.4, 5.5). With ``on_error: record``
+                    # (bedrock-inspection-chain) the branch runs its
+                    # outputs instead, the error visible to them.
                     logger.info(
                         "Bedrock branch %s recorded an error; skipping "
                         "its %d branch output binding(s)",
                         node_id, len(plan.binding_ids),
                     )
                     return
+                if errored:
+                    logger.info(
+                        "Bedrock branch %s recorded an error; running its "
+                        "%d branch output binding(s) with the error visible "
+                        "(on_error: record)", node_id, len(plan.binding_ids),
+                    )
                 snapshot = dict(metadata)
                 subset_kwargs: Dict[str, Any] = {}
                 if detail_sink is not None:
                     subset_kwargs["detail_sink"] = detail_sink
                 if duration_sink is not None:
                     subset_kwargs["duration_sink"] = duration_sink
+                if work_dir is not None:
+                    # The run's work directory, so a branch-member
+                    # s3_upload can resolve ``{work_dir}`` in its capture
+                    # path exactly as the post-run path does
+                    # (bedrock-inspection-chain; design review finding 1).
+                    subset_kwargs["work_dir"] = work_dir
                 try:
                     self._output_processor.process_subset(
                         document, snapshot, list(plan.binding_ids),
@@ -2194,6 +2455,33 @@ class BedrockInferenceProcessor:
         node_id = binding.get("nodeId")
         parameters = dict(binding.get("parameters") or {})
         capture_paths = binding.get("capturePaths") or {}
+
+        # bedrock-inspection-chain: ``enabled: false`` (the booth's off
+        # switch) makes no Bedrock call and ALWAYS records the
+        # unconditional error, whatever ``on_error``/``error_verdict``
+        # say; ``answer_format: inspection`` takes the structured path.
+        # Both parameters default to today's behaviour.
+        inspection = (
+            str(parameters.get("answer_format") or "")
+            == ANSWER_FORMAT_INSPECTION)
+        if not _bool_parameter(parameters.get("enabled"), True):
+            logger.info(
+                "Bedrock inference node '%s' is disabled by configuration; "
+                "recording the error outcome without a Bedrock call", node_id)
+            if inspection:
+                model = str(parameters.get("model") or BEDROCK_DEFAULT_MODEL)
+                return self._inspection_failure(
+                    node_id, BEDROCK_DISABLED_MESSAGE, run_context,
+                    entry={
+                        "attempts": 0, "latency_ms": 0, "model": model,
+                        "box_scale": resolve_box_scale(
+                            parameters.get("box_scale"), model),
+                    },
+                    record=True, fail_verdict=False)
+            return self._recorded_error(
+                node_id, BEDROCK_DISABLED_MESSAGE, run_context)
+        if inspection:
+            return self._run_inspection(binding, work_dir, run_context)
 
         # Detection crop (Requirement 2): a binding carrying
         # ``crop_detection_index`` sends the Detection_Crop as its
@@ -2400,11 +2688,331 @@ class BedrockInferenceProcessor:
             run_context, node_id, crop_bytes, answer)
         return result
 
+    def _run_inspection(
+        self,
+        binding: dict,
+        work_dir: Optional[str],
+        run_context: Optional[RunContext],
+    ) -> Dict[str, Any]:
+        """The ``answer_format: inspection`` path (bedrock-inspection-
+        chain): whole-frame, single-image; the frame read, the optional
+        downscale, the expected-count rule and the per-run prompt
+        rendering happen BEFORE the Converse call (each a terminal
+        pre-call failure); the call runs under the attempt/budget policy
+        (:meth:`_invoke_with_policy`); the accepted answer is the
+        structured verdict of ``parse_inspection_answer``; the OK/NOK
+        overlay is drawn on the whole frame. Every failure goes through
+        :meth:`_inspection_failure` (recorded, or raised, per
+        ``on_error``)."""
+        node_id = binding.get("nodeId")
+        parameters = dict(binding.get("parameters") or {})
+        capture_paths = binding.get("capturePaths") or {}
+        record = (str(parameters.get("on_error") or BEDROCK_ON_ERROR_FAIL_RUN)
+                  == BEDROCK_ON_ERROR_RECORD)
+        fail_verdict = (str(parameters.get("error_verdict") or "")
+                        == BEDROCK_ERROR_VERDICT_FAIL)
+        model = str(parameters.get("model") or BEDROCK_DEFAULT_MODEL)
+        box_scale = resolve_box_scale(parameters.get("box_scale"), model)
+        # The error-path key set accumulates here: attempts/latency_ms
+        # are overwritten once the loop ran; expected_count/input_* land
+        # as soon as they are known (design §3.3 error body).
+        entry: Dict[str, Any] = {
+            "attempts": 0, "latency_ms": 0, "model": model,
+            "box_scale": box_scale,
+        }
+        run_metadata: Dict[str, Any] = dict(
+            (run_context.tag_values if run_context is not None else None)
+            or {})
+
+        def failure(message: str, answer_text: Optional[str] = None):
+            return self._inspection_failure(
+                node_id, message, run_context, entry=entry, record=record,
+                fail_verdict=fail_verdict, answer_text=answer_text)
+
+        # 1. The captured 'in' frame (whole-frame path only: the validator
+        #    rejects crop_detection_index / a connected reference port).
+        path = capture_paths.get("in")
+        if not path:
+            return failure(
+                "no captured frame for the 'in' input (the port is not fed "
+                "by any video source)")
+        if work_dir:
+            path = str(path).replace("{work_dir}", work_dir)
+        try:
+            with open(path, "rb") as frame_file:
+                input_image = frame_file.read()
+        except OSError as error:
+            return failure(
+                "could not read the captured 'in' frame from {0}: {1}".format(
+                    path, error))
+        input_path = path
+
+        # 2. max_image_dimension > 0: downscale the bytes actually sent
+        #    and keep them as a sibling artifact the s3_upload
+        #    ``source: input_image`` can take.
+        raw_max_dim = parameters.get("max_image_dimension")
+        max_dim = None
+        if raw_max_dim not in (None, 0, False, ""):
+            max_dim, notice = resolve_max_image_dimension(raw_max_dim)
+            if notice:
+                logger.warning(
+                    "Bedrock inference node '%s': %s", node_id, notice)
+        if max_dim:
+            try:
+                sent_image = downscale_image_bytes(input_image, max_dim)
+            except Exception as error:  # noqa: BLE001 - undecodable frame
+                return failure(
+                    "could not decode the captured 'in' frame from {0} for "
+                    "downscaling: {1}".format(path, error))
+            if sent_image is not input_image:
+                written = self._persist_input_frame(
+                    run_context, node_id, sent_image)
+                if written is not None:
+                    input_path = written
+        else:
+            sent_image = input_image
+        dimensions = image_dimensions(sent_image)
+        if dimensions is None:
+            return failure(
+                "could not decode the captured 'in' frame from {0}".format(
+                    path))
+        width, height = dimensions
+        entry["input_image_path"] = input_path
+        entry["input_width"] = width
+        entry["input_height"] = height
+        return self._run_inspection_call(
+            node_id, parameters, run_metadata, sent_image, width, height,
+            box_scale, entry, failure, run_context)
+
+    def _run_inspection_call(
+        self,
+        node_id: Optional[str],
+        parameters: Dict[str, Any],
+        run_metadata: Dict[str, Any],
+        sent_image: bytes,
+        width: int,
+        height: int,
+        box_scale: str,
+        entry: Dict[str, Any],
+        failure: Callable[..., Dict[str, Any]],
+        run_context: Optional[RunContext],
+    ) -> Dict[str, Any]:
+        """Second half of :meth:`_run_inspection`: the expected-count rule,
+        the per-run prompt rendering, the Converse call under the attempt
+        policy, the pixel-space boxes, the overlay and the metadata."""
+        # 3. expected_count_path, resolved BEFORE the call by the one rule
+        #    (list → len, non-bool int → itself, >= 1).
+        expected_count: Optional[int] = None
+        count_path = str(parameters.get("expected_count_path") or "").strip()
+        if count_path:
+            found, value = resolve_field_path(run_metadata, count_path)
+            expected_count = resolve_expected_count(found, value)
+            if expected_count is None:
+                return failure(
+                    "expected count path {0} did not resolve to a positive "
+                    "count".format(count_path))
+            entry["expected_count"] = expected_count
+
+        # 4. render_prompt: prompt and system_prompt rendered per run
+        #    against the run metadata + the size of the image sent.
+        invocation_parameters = parameters
+        if _bool_parameter(parameters.get("render_prompt"), False):
+            values = dict(run_metadata)
+            values["image"] = {"width": width, "height": height}
+            rendered = dict(parameters)
+            try:
+                rendered["prompt"] = render_prompt_text(
+                    str(parameters.get("prompt") or ""), values)
+                system_prompt = parameters.get("system_prompt")
+                if system_prompt is not None and str(system_prompt).strip():
+                    rendered["system_prompt"] = render_prompt_text(
+                        str(system_prompt), values)
+            except UnresolvedPlaceholderError as error:
+                return failure(
+                    "unresolved prompt placeholder {0}".format(error.name))
+            invocation_parameters = rendered
+        invocation = build_bedrock_invocation(
+            invocation_parameters, sent_image, None)
+
+        # 5. The Converse call under the attempt/budget policy.
+        outcome = self._invoke_with_policy(
+            node_id, invocation, parameters,
+            lambda text: parse_inspection_answer(
+                text, expected_count, box_scale))
+        entry["attempts"] = outcome["attempts"]
+        entry["latency_ms"] = outcome["latency_ms"]
+        if outcome.get("parsed") is None:
+            return failure(outcome["failure"], outcome.get("malformed_text"))
+        parsed = outcome["parsed"]
+        answer = outcome["answer"]
+
+        # 6. Pixel-space boxes (box_scale) — clamping stays in the drawer.
+        objects_px = [
+            {
+                "name": obj.get("name"), "qc": obj.get("qc"),
+                "reason": obj.get("reason"),
+                "bounding_box": scale_box_to_pixels(
+                    obj["bounding_box"], box_scale, width, height),
+            }
+            for obj in parsed["objects"]
+        ]
+        # 7. The OK/NOK overlay on the whole frame sent.
+        annotated_path = self._persist_annotated_frame(
+            run_context, node_id, sent_image, answer,
+            objects=objects_px, verdict=parsed["verdict"])
+        # 8. Metadata: nested bedrock.<nodeId>.* plus the flat
+        #    compatibility keys (is_anomalous = verdict is fail).
+        verdict = parsed["verdict"]
+        entry.update({
+            "outcome": verdict, "verdict": verdict,
+            "confidence": parsed["confidence"], "reason": parsed["reason"],
+            "objects": parsed["objects"], "objects_px": objects_px,
+            "text": answer,
+        })
+        if annotated_path is not None:
+            entry["annotated_image_path"] = annotated_path
+        return {
+            "is_anomalous": verdict == "fail",
+            "confidence": parsed["confidence"],
+            "bedrock_text": answer,
+            "bedrock": {node_id: entry},
+        }
+
+    def _invoke_with_policy(
+        self,
+        node_id: Optional[str],
+        invocation: BedrockInvocation,
+        parameters: Dict[str, Any],
+        parse: Callable[[str], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """The attempt/budget policy around ``self._invoker`` (design
+        §3.5). ``attempts``/``attempt_timeout_s``/``budget_s`` all at
+        their defaults → one call through the unchanged client (today's
+        invoker arities); otherwise the invoker gets
+        ``timeouts=(BEDROCK_CONNECT_TIMEOUT_SEC, attempt_timeout_s)`` and
+        ``retries={"total_max_attempts": 1, "mode": "standard"}``. Attempt
+        k >= 2 starts only while ``attempts`` allows and, with a budget,
+        only if ``deadline - now >= attempt_timeout_s``. Terminal
+        ``ClientError`` codes end the loop at once; everything else,
+        including a malformed answer (``ValueError`` from ``parse``), is
+        one failed attempt. Returns ``{"attempts", "latency_ms"}`` plus
+        either ``"answer"``/``"parsed"`` (accepted) or ``"failure"`` (the
+        text) and, when the last failure was a malformed answer, its
+        ``"malformed_text"``."""
+        attempts = _policy_int(
+            parameters.get("attempts"), BEDROCK_DEFAULT_ATTEMPTS, 1)
+        attempt_timeout_s = _policy_int(
+            parameters.get("attempt_timeout_s"),
+            BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC, 1)
+        budget_s = _policy_int(
+            parameters.get("budget_s"), BEDROCK_DEFAULT_BUDGET_SEC, 0)
+        default_policy = (
+            attempts == BEDROCK_DEFAULT_ATTEMPTS
+            and attempt_timeout_s == BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC
+            and budget_s == BEDROCK_DEFAULT_BUDGET_SEC)
+        client_options: Dict[str, Any] = {} if default_policy else {
+            "timeouts": (BEDROCK_CONNECT_TIMEOUT_SEC, attempt_timeout_s),
+            "retries": {"total_max_attempts": 1, "mode": "standard"},
+        }
+        invoker_args = (
+            invocation.model, invocation.prompt,
+            [(label, data) for label, data in invocation.images],
+            invocation.region, invocation.max_tokens,
+        )
+        if invocation.system_prompt is not None:
+            invoker_args = invoker_args + (invocation.system_prompt,)
+        started = self._clock()
+        deadline = started + budget_s if budget_s > 0 else None
+        outcome: Dict[str, Any] = {"attempts": 0, "latency_ms": 0}
+        attempt = 0
+        while True:
+            attempt += 1
+            outcome["attempts"] = attempt
+            outcome.pop("malformed_text", None)
+            terminal = False
+            try:
+                answer = self._invoker(*invoker_args, **client_options)
+            except Exception as error:  # noqa: BLE001 - classified below
+                outcome["failure"] = "{0}: {1}".format(
+                    type(error).__name__, error)[:300]
+                terminal = is_terminal_bedrock_error(error)
+            else:
+                try:
+                    parsed = parse(answer)
+                except ValueError as error:
+                    outcome["failure"] = "malformed Bedrock answer: {0}".format(
+                        error)
+                    outcome["malformed_text"] = answer
+                else:
+                    outcome["answer"] = answer
+                    outcome["parsed"] = parsed
+                    outcome.pop("failure", None)
+                    break
+            logger.warning(
+                "Bedrock inference node '%s': attempt %d of %d failed: %s",
+                node_id, attempt, attempts, outcome["failure"])
+            if terminal or attempt >= attempts:
+                break
+            if deadline is not None and (
+                    deadline - self._clock() < attempt_timeout_s):
+                logger.warning(
+                    "Bedrock inference node '%s': budget of %d s leaves no "
+                    "room for attempt %d (attempt timeout %d s)",
+                    node_id, budget_s, attempt + 1, attempt_timeout_s)
+                break
+        outcome["latency_ms"] = int(round((self._clock() - started) * 1000.0))
+        return outcome
+
+    def _inspection_failure(
+        self,
+        node_id: Optional[str],
+        message: str,
+        run_context: Optional[RunContext],
+        entry: Dict[str, Any],
+        record: bool,
+        fail_verdict: bool,
+        answer_text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Every failure of the inspection path. ``on_error: fail_run``
+        (``record`` False) raises :class:`BedrockInferenceError` as the
+        legacy path does; ``record`` returns the recorded outcome through
+        :meth:`_recorded_error`: ``outcome: "error"`` plus the accumulated
+        ``entry`` keys and either the ``error`` text (``error_verdict:
+        error``) or ``verdict: "fail"``, ``confidence: 0.0``, ``reason``
+        with the flat ``is_anomalous: True`` / ``confidence: 0.0``
+        (``error_verdict: fail`` — the only path that writes the flat
+        keys). ``text`` / flat ``bedrock_text`` are written only when a
+        malformed answer text was received. Never ``verdict``/``objects``/
+        ``annotated_image_path`` on the ``error`` body."""
+        if not record:
+            raise BedrockInferenceError(
+                node_id,
+                "Bedrock inference node '{0}' failed: {1}".format(
+                    node_id, message))
+        nested = dict(entry)
+        nested["outcome"] = "error"
+        flat: Dict[str, Any] = {}
+        if fail_verdict:
+            nested["verdict"] = "fail"
+            nested["confidence"] = 0.0
+            nested["reason"] = message
+            flat["is_anomalous"] = True
+            flat["confidence"] = 0.0
+        else:
+            nested["error"] = message
+        if answer_text is not None:
+            nested["text"] = answer_text
+            flat["bedrock_text"] = answer_text
+        return self._recorded_error(
+            node_id, message, run_context, entry=nested, flat=flat)
+
     def _recorded_error(
         self,
         node_id: Optional[str],
         message: str,
         run_context: Optional[RunContext],
+        entry: Optional[Dict[str, Any]] = None,
+        flat: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Record a per-node error outcome and return the result dict
         (Requirements 2.4, 4.2).
@@ -2414,7 +3022,12 @@ class BedrockInferenceProcessor:
         run's node status (gating semantics identical to a failed
         condition: the node is marked failed, its downstream outputs are
         gated, and the run and the sibling bindings proceed — this path
-        NEVER raises ``BedrockInferenceError``)."""
+        NEVER raises ``BedrockInferenceError``).
+
+        ``entry`` / ``flat`` (bedrock-inspection-chain; default None →
+        today's ``{"error": message}`` entry, byte-identical) replace the
+        nested entry and add flat result keys for the inspection path's
+        error bodies (:meth:`_inspection_failure`)."""
         logger.error("Bedrock inference recorded error: %s", message)
         if run_context is not None and run_context.node_status is not None:
             try:
@@ -2424,7 +3037,10 @@ class BedrockInferenceProcessor:
                     "Could not record the node status failure for node %s",
                     node_id, exc_info=True,
                 )
-        return {"bedrock": {node_id: {"error": message}}}
+        result: Dict[str, Any] = dict(flat or {})
+        result["bedrock"] = {
+            node_id: {"error": message} if entry is None else entry}
+        return result
 
     def _payload_reference(
         self,
@@ -2802,17 +3418,60 @@ class BedrockInferenceProcessor:
                 "the run status are unaffected", node_id, exc_info=True)
 
     @staticmethod
+    def _persist_input_frame(
+        run_context: Optional[RunContext],
+        node_id: Optional[str],
+        sent_bytes: bytes,
+    ) -> Optional[str]:
+        """bedrock-inspection-chain: persist the downscaled bytes actually
+        sent to Bedrock as ``{capture_id}.node.{safeNodeId}.input.jpg``
+        beside the run's other node artifacts and return the path, or
+        ``None`` (no output_dir/capture_id, or a write failure — logged,
+        never affecting the inspection)."""
+        try:
+            output_dir = run_context.output_dir if run_context else None
+            capture_id = run_context.capture_id if run_context else None
+            if not output_dir or not capture_id:
+                return None
+            path = os.path.join(
+                output_dir,
+                INPUT_FRAME_ARTIFACT_TEMPLATE.format(
+                    capture_id=capture_id,
+                    safe_node_id=sanitize_node_id_for_artifact(node_id),
+                ),
+            )
+            with open(path, "wb") as frame_file:
+                frame_file.write(sent_bytes)
+            return path
+        except Exception:  # noqa: BLE001 - contained; never affects the run
+            logger.warning(
+                "Bedrock inference node '%s': could not persist the "
+                "downscaled input image; the inspection proceeds on the "
+                "bytes in memory", node_id, exc_info=True)
+            return None
+
+    @staticmethod
     def _persist_annotated_frame(
         run_context: Optional[RunContext],
         node_id: Optional[str],
         crop_bytes: Optional[bytes],
         answer_text: Optional[str],
-    ) -> None:
+        objects: Optional[List[Any]] = None,
+        verdict: Optional[str] = None,
+    ) -> Optional[str]:
         """ADDITIVE (imts-triple-inspection-hmi Requirements 4.4, 4.12):
         persist the Inspection's Annotated_Image as
         ``{capture_id}.node.{sanitizedNodeId}.annotated.jpg`` — the crop
         sent to Bedrock with the answer's Defect_Object boxes drawn on
-        it.
+        it. Returns the written path (bedrock-inspection-chain; ``None``
+        whenever nothing was written — legacy callers ignore it).
+
+        ``objects`` / ``verdict`` (bedrock-inspection-chain; default None
+        → the legacy crop-only behaviour below, byte-identical): the
+        inspection path passes the whole frame it sent, its pixel-space
+        ``objects_px`` list (so no extraction from the answer text) and
+        the verdict, which :func:`draw_verdict_banner` writes after the
+        boxes — also for ``objects: []`` and after a box-drawing failure.
 
         Called after the Bedrock invocation returns and after the
         existing ``is_anomalous``/``confidence`` parse, once the answer
@@ -2844,8 +3503,9 @@ class BedrockInferenceProcessor:
                     "Bedrock inference node '%s': no output_dir/capture_id "
                     "or no crop bytes; the Inspection's Annotated_Image "
                     "was not persisted", node_id)
-                return
-            objects = extract_defect_objects(answer_text or "")
+                return None
+            if objects is None:
+                objects = extract_defect_objects(answer_text or "")
             if objects is None:
                 # No parseable ``objects`` list: no Annotated_Image is
                 # produced for this Inspection (Requirements 4.10, 4.12).
@@ -2853,7 +3513,7 @@ class BedrockInferenceProcessor:
                     "Bedrock inference node '%s': the answer carries no "
                     "parseable objects list; no Annotated_Image was "
                     "persisted", node_id)
-                return
+                return None
 
             import cv2
             import numpy as np
@@ -2865,8 +3525,19 @@ class BedrockInferenceProcessor:
                 logger.warning(
                     "Bedrock inference node '%s': could not decode the crop "
                     "bytes for the Inspection's Annotated_Image", node_id)
-                return
-            drawn = draw_defect_objects(frame, objects)
+                return None
+            try:
+                drawn = draw_defect_objects(frame, objects)
+            except Exception:  # noqa: BLE001 - the banner still carries the verdict
+                if verdict is None:
+                    raise
+                logger.warning(
+                    "Bedrock inference node '%s': could not draw the answer's "
+                    "boxes; the verdict banner is still written", node_id,
+                    exc_info=True)
+                drawn = []
+            if verdict is not None:
+                draw_verdict_banner(frame, verdict)
             ok, encoded = cv2.imencode(
                 ".jpg", frame,
                 [int(cv2.IMWRITE_JPEG_QUALITY), CROP_JPEG_QUALITY])
@@ -2874,7 +3545,7 @@ class BedrockInferenceProcessor:
                 logger.warning(
                     "Bedrock inference node '%s': could not encode the "
                     "Inspection's Annotated_Image", node_id)
-                return
+                return None
             path = os.path.join(
                 output_dir,
                 ANNOTATED_FRAME_ARTIFACT_TEMPLATE.format(
@@ -2888,11 +3559,13 @@ class BedrockInferenceProcessor:
                 "Bedrock inference node '%s': persisted the Inspection's "
                 "Annotated_Image with %d defect box(es) of %d answer "
                 "object(s)", node_id, len(drawn), len(objects))
+            return path
         except Exception:  # noqa: BLE001 - contained; never affects the run
             logger.warning(
                 "Bedrock inference node '%s': could not persist the "
                 "Inspection's Annotated_Image; the inspection outcome and "
                 "the run status are unaffected", node_id, exc_info=True)
+            return None
 
 
 # ---------------------------------------------------------------------------
