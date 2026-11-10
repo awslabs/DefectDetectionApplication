@@ -5,7 +5,9 @@
  * timeout bound (<= 240 seconds, Requirement 10.7) client-side, and
  * offers the model identifier as a dropdown of invokable models (with a
  * free-text fallback when the model list is unavailable). Max tokens shows
- * the selected model's default until the admin enters another value.
+ * the selected model's default until the admin enters another value; when
+ * the form lacks a model's default, a model change saved with max tokens
+ * unchanged leaves max_tokens out, and the form shows the stored values.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -335,6 +337,93 @@ describe('BedrockConfigurationSettings', () => {
       await waitFor(() => {
         expect(updateBedrockConfiguration).toHaveBeenCalledWith(
           expect.objectContaining({ model_id: OPUS, max_tokens: 128000, timeout_seconds: 120 }),
+        );
+      });
+    });
+
+    // The form lacks a default for a typed model id, and for a loaded model
+    // the list does not include. A model change saved with max tokens
+    // unchanged then leaves max_tokens out, so the backend stores the new
+    // model's default (here 4096) instead of Claude Opus 5.5's 128000.
+    async function saveAndExpectMaxTokensLeftOut(modelId: string) {
+      updateBedrockConfiguration.mockResolvedValue({
+        message: 'ok',
+        bedrock_configuration: { ...NOTHING_STORED, model_id: modelId, max_tokens: 4096 },
+      });
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(128000);
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      expect(await screen.findByText('Bedrock configuration saved')).toBeInTheDocument();
+      expect(updateBedrockConfiguration).toHaveBeenCalledTimes(1);
+      const body = updateBedrockConfiguration.mock.calls[0][0];
+      expect(body).not.toHaveProperty('max_tokens');
+      expect(body).toEqual({
+        model_id: modelId,
+        region: 'us-east-1',
+        temperature: null,
+        top_p: null,
+        timeout_seconds: 240,
+      });
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(4096);
+    }
+
+    it.each([
+      ['fails to load', () => getBedrockModels.mockRejectedValue(new Error('boom'))],
+      [
+        'is empty',
+        () =>
+          getBedrockModels.mockResolvedValue({
+            models: [],
+            region: 'us-east-1',
+            permissions: 'Missing bedrock list permissions',
+          }),
+      ],
+    ])('leaves max tokens out for a typed model when the model list %s', async (_case, mockModelList) => {
+      mockModelList();
+      const { container } = render(<BedrockConfigurationSettings />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Model identifier')).toHaveValue(OPUS);
+      });
+      expect(createWrapper(container).findSelect()).toBeNull();
+
+      fireEvent.change(screen.getByLabelText('Model identifier'), { target: { value: NOVA } });
+
+      await saveAndExpectMaxTokensLeftOut(NOVA);
+    });
+
+    it('leaves max tokens out when the list lacks the loaded model', async () => {
+      const NOVA_FOUNDATION = 'amazon.nova-pro-v1:0';
+      getBedrockModels.mockResolvedValue({
+        models: [{ id: NOVA_FOUNDATION, label: 'Nova Pro', default_max_tokens: 4096 }],
+        region: 'us-east-1',
+      });
+      const { container } = render(<BedrockConfigurationSettings />);
+      await waitFor(() => {
+        const select = createWrapper(container).findSelect();
+        expect(select).not.toBeNull();
+        // The loaded model is shown as an extra option, labelled with its id.
+        expect(select!.findTrigger().getElement()).toHaveTextContent(OPUS);
+      });
+
+      choose(createWrapper(container).findSelect()!, NOVA_FOUNDATION);
+
+      await saveAndExpectMaxTokensLeftOut(NOVA_FOUNDATION);
+    });
+
+    it('sends a max tokens value the admin entered for a typed model', async () => {
+      getBedrockModels.mockRejectedValue(new Error('boom'));
+      render(<BedrockConfigurationSettings />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Model identifier')).toHaveValue(OPUS);
+      });
+
+      fireEvent.change(screen.getByLabelText('Model identifier'), { target: { value: NOVA } });
+      fireEvent.change(screen.getByLabelText('Max tokens'), { target: { value: '10000' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      await waitFor(() => {
+        expect(updateBedrockConfiguration).toHaveBeenCalledWith(
+          expect.objectContaining({ model_id: NOVA, max_tokens: 10000 }),
         );
       });
     });

@@ -10,7 +10,12 @@
  * The default max tokens depends on the model: choosing another model in
  * the dropdown while max tokens holds the previous model's default
  * replaces it with the new model's default (`default_max_tokens` of the
- * model list); a value the admin entered is kept.
+ * model list); a value the admin entered is kept. When the form lacks the
+ * previous or the new model's default (a typed model id, or a model
+ * missing from the list), a model change saved with max tokens unchanged
+ * leaves max_tokens out of the save, so the backend stores the new
+ * model's default when none is stored and keeps a stored max tokens
+ * otherwise. After a save the form shows the stored values.
  */
 import { useEffect, useState } from 'react';
 import {
@@ -42,6 +47,29 @@ interface BedrockFormState {
 }
 
 type FieldErrors = Partial<Record<keyof BedrockFormState, string>>;
+
+// The Bedrock_Configuration as GET returns it and PUT echoes it back.
+interface BedrockConfiguration {
+  model_id: string;
+  region: string;
+  max_tokens: number;
+  temperature: number | null;
+  top_p: number | null;
+  timeout_seconds: number;
+}
+
+function formFromConfiguration(config: BedrockConfiguration): BedrockFormState {
+  return {
+    model_id: config.model_id,
+    region: config.region,
+    max_tokens: String(config.max_tokens),
+    // A null/undefined sampling parameter is "unset" and renders as
+    // a blank field (never the literal string "null").
+    temperature: config.temperature == null ? '' : String(config.temperature),
+    top_p: config.top_p == null ? '' : String(config.top_p),
+    timeout_seconds: String(config.timeout_seconds),
+  };
+}
 
 function validate(form: BedrockFormState): FieldErrors {
   const errors: FieldErrors = {};
@@ -90,6 +118,21 @@ function maxTokensForModelChange(maxTokens: string, previousDefault?: number, ne
   return Number(maxTokens) === previousDefault ? String(nextDefault) : maxTokens;
 }
 
+// Whether a save leaves max_tokens out: the model changed, max tokens
+// still holds the loaded value, and the form lacks the loaded or the new
+// model's default, so it cannot tell whether that value fits the new
+// model. The backend then stores the new model's default when no max
+// tokens is stored, and keeps a stored one.
+function leavesMaxTokensOut(
+  modelId: string,
+  maxTokens: number,
+  loaded: BedrockConfiguration | null,
+  defaults: Record<string, number>,
+): boolean {
+  if (loaded === null || modelId === loaded.model_id || maxTokens !== loaded.max_tokens) return false;
+  return defaults[loaded.model_id] === undefined || defaults[modelId] === undefined;
+}
+
 export default function BedrockConfigurationSettings() {
   const { user } = useAuth();
   const isPortalAdmin = user?.role === 'PortalAdmin';
@@ -114,6 +157,9 @@ export default function BedrockConfigurationSettings() {
   const [modelsLoading, setModelsLoading] = useState(false);
   // Default max tokens per listed model id.
   const [modelDefaults, setModelDefaults] = useState<Record<string, number>>({});
+  // The configuration the form was last loaded with: the GET response,
+  // then each save's response.
+  const [loadedConfig, setLoadedConfig] = useState<BedrockConfiguration | null>(null);
 
   useEffect(() => {
     if (!isPortalAdmin) return;
@@ -153,16 +199,8 @@ export default function BedrockConfigurationSettings() {
       .then((response) => {
         if (cancelled) return;
         const config = response.bedrock_configuration;
-        setForm({
-          model_id: config.model_id,
-          region: config.region,
-          max_tokens: String(config.max_tokens),
-          // A null/undefined sampling parameter is "unset" and renders as
-          // a blank field (never the literal string "null").
-          temperature: config.temperature == null ? '' : String(config.temperature),
-          top_p: config.top_p == null ? '' : String(config.top_p),
-          timeout_seconds: String(config.timeout_seconds),
-        });
+        setLoadedConfig(config);
+        setForm(formFromConfiguration(config));
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(getErrorMessage(err, 'Failed to load Bedrock configuration'));
@@ -194,12 +232,15 @@ export default function BedrockConfigurationSettings() {
     setFieldErrors(errors);
     if (Object.keys(errors).length > 0) return;
 
+    const modelId = form.model_id.trim();
+    const maxTokens = Number(form.max_tokens);
+    const leaveOutMaxTokens = leavesMaxTokensOut(modelId, maxTokens, loadedConfig, modelDefaults);
     setSaving(true);
     try {
-      await apiService.updateBedrockConfiguration({
-        model_id: form.model_id.trim(),
+      const response = await apiService.updateBedrockConfiguration({
+        model_id: modelId,
         region: form.region.trim(),
-        max_tokens: Number(form.max_tokens),
+        ...(leaveOutMaxTokens ? {} : { max_tokens: maxTokens }),
         // A blank field is sent as an explicit null: the backend merges
         // provided keys over the current configuration, so omitting the
         // key would keep the old value instead of unsetting it.
@@ -207,6 +248,10 @@ export default function BedrockConfigurationSettings() {
         top_p: form.top_p.trim() === '' ? null : Number(form.top_p),
         timeout_seconds: Number(form.timeout_seconds),
       });
+      // Show what was stored: with max_tokens left out, the stored max
+      // tokens can differ from the form's.
+      setLoadedConfig(response.bedrock_configuration);
+      setForm(formFromConfiguration(response.bedrock_configuration));
       setSuccess('Bedrock configuration saved');
     } catch (err: unknown) {
       setError(getErrorMessage(err, 'Failed to save Bedrock configuration'));
