@@ -4709,12 +4709,16 @@ class ApiService {
   // backend resolves for the model with no selection applied — the value the
   // wizard pre-fills into the Token_Budget_Selection control
   // (llm-model-token-and-image-sizing Requirements 1.6, 3.1).
+  // `default_max_tokens` is the max tokens a request to the model carries
+  // when the Bedrock configuration stores none; the settings form shows it
+  // for the selected model.
   async getBedrockModels(): Promise<{
     models: {
       id: string;
       label: string;
       image_limit?: number;
       token_limit?: number;
+      default_max_tokens?: number;
       // Image_Input_Capability tri-state (llm-model-picker-search-and-image-filter
       // Requirement 1.4): true = the model accepts image input, false = the
       // model is positively known text-only, absent = unknown capability —

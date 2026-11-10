@@ -364,6 +364,71 @@ class TestBedrockClassification:
         assert "model exploded" in task["prelabel_error"]
 
 
+class _StubSettingsResource:
+    """A DynamoDB resource whose settings table holds one given item
+    (None: no item)."""
+
+    def __init__(self, item):
+        self.item = item
+
+    def Table(self, name):
+        item = self.item
+
+        class _Table:
+            def get_item(self, **kwargs):
+                return {"Item": item} if item else {}
+
+        return _Table()
+
+
+class TestBedrockDefaultMaxTokens:
+    """With no max_tokens stored, a `bedrock:` request carries the default
+    of the job's model, not of the configured model; a stored max_tokens
+    is sent as stored."""
+
+    def _max_tokens_sent(self, env, model_id, stored_item):
+        # The settings read of the worker's own get_bedrock_configuration.
+        settings = env.worker.get_bedrock_configuration.__globals__
+        env.monkeypatch.setitem(settings, "SETTINGS_TABLE", "test-settings")
+        env.monkeypatch.setitem(settings, "dynamodb",
+                                _StubSettingsResource(stored_item))
+        job_id = env.make_job(task_type="Classification",
+                              model=f"bedrock:{model_id}")
+        image_uri = env.put_image(f"imgs/{uuid.uuid4()}.png")
+        task_id = env.make_task(job_id, image_uri)
+        bedrock, _ = env.use_bedrock(replies=['{"label": "normal"}'])
+        result = env.run([env.record(
+            job_id, task_id, image_uri, "Classification",
+            ["normal", "anomaly"], f"bedrock:{model_id}")])
+        assert result == {"batchItemFailures": []}
+        assert env.get_task(job_id, task_id)["prelabel_status"] == "Available"
+        assert [call["modelId"] for call in bedrock.calls] == [model_id]
+        return bedrock.calls[0]["inferenceConfig"]["maxTokens"]
+
+    @pytest.mark.parametrize("model_id, expected", [
+        ("global.anthropic.claude-opus-5-5", 128000),
+        ("us.anthropic.claude-opus-5-5", 128000),
+        ("us.amazon.nova-pro-v1:0", 4096),
+        ("test-model-id", 4096),
+    ])
+    def test_no_stored_max_tokens_sends_the_job_model_default(
+            self, env, model_id, expected):
+        assert self._max_tokens_sent(env, model_id, None) == expected
+
+    def test_configured_model_without_max_tokens_does_not_set_it(self, env):
+        item = {"setting_key": "bedrock_configuration",
+                "value": {"model_id": "global.anthropic.claude-opus-5-5"}}
+        assert self._max_tokens_sent(
+            env, "us.amazon.nova-pro-v1:0", item) == 4096
+
+    def test_stored_max_tokens_is_sent_as_stored(self, env):
+        item = {"setting_key": "bedrock_configuration",
+                "value": {"model_id": "global.anthropic.claude-opus-5-5",
+                          "max_tokens": 2048}}
+        assert self._max_tokens_sent(
+            env, "us.anthropic.claude-opus-5-5", item) == 2048
+
+
 class TestBedrockObjectDetection:
     LABELS = ["scratch", "dent"]
 
@@ -985,11 +1050,12 @@ class TestBedrockRefusedSamplingOption:
         env.monkeypatch.setattr(env.worker, "get_bedrock_client",
                                 lambda region, timeout_seconds: fake)
         env.monkeypatch.setattr(env.worker, "get_bedrock_configuration",
-                                lambda: {"model_id": "unused",
-                                         "region": REGION,
-                                         "max_tokens": 4096,
-                                         "temperature": 0.2, "top_p": None,
-                                         "timeout_seconds": 240})
+                                lambda request_model_id=None: {
+                                    "model_id": "unused",
+                                    "region": REGION,
+                                    "max_tokens": 4096,
+                                    "temperature": 0.2, "top_p": None,
+                                    "timeout_seconds": 240})
 
         result = env.run([env.record(job_id, task_id, image_uri,
                                      "Classification", ["normal", "anomaly"],

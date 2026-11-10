@@ -131,6 +131,17 @@ def pinned_token_budget(model_id, limits):
     return PINNED_TOKEN_LIMIT_DEFAULT
 
 
+def pinned_default_max_tokens(model_id):
+    """The later `default_max_tokens` annotation, from literals: 128000 for
+    Claude Opus 5.5 and its inference profiles (any prefix before the first
+    '.'), 4096 for every other id."""
+    model_id = model_id.strip()
+    fronted = model_id.split(".", 1)[1] if "." in model_id else None
+    if "anthropic.claude-opus-5-5" in (model_id, fronted):
+        return 128000
+    return 4096
+
+
 def pinned_sort_key(option):
     """Pre-feature ordering: anthropic-first (by the id or the portion
     after the first '.'), then case-insensitive label, then id."""
@@ -145,8 +156,9 @@ def pinned_pre_feature_payload(profiles, models, profiles_denied,
                                models_denied, region, image_limits_raw,
                                token_limits):
     """The whole pre-feature 200 payload for one set of inputs: option
-    membership, order, per-option id / label / image_limit / token_limit,
-    region, and the permissions hint — and nothing else."""
+    membership, order, per-option id / label / image_limit / token_limit
+    (plus the later default_max_tokens), region, and the permissions hint
+    — and nothing else."""
     access_denied = False
 
     profile_options = []
@@ -201,6 +213,7 @@ def pinned_pre_feature_payload(profiles, models, profiles_denied,
         option["image_limit"] = pinned_image_limit(option["id"], limits)
         option["token_limit"] = pinned_token_budget(option["id"],
                                                     token_limits)
+        option["default_max_tokens"] = pinned_default_max_tokens(option["id"])
 
     payload = {"models": options, "region": region}
     if access_denied:
@@ -367,7 +380,9 @@ def invoke_models(options_env, region_override=None):
 # profile-fronting join, and configuration-key hits frequent.
 # ---------------------------------------------------------------------------
 
-MODEL_NAMES = ("m1", "claude-x", "titan-y", "nova-z:1", "Embed-G1")
+# claude-opus-5-5 reaches the listed branch of default_max_tokens.
+MODEL_NAMES = ("m1", "claude-x", "titan-y", "nova-z:1", "Embed-G1",
+               "claude-opus-5-5")
 VENDORS = ("anthropic", "amazon", "meta", "ai21")
 PROFILE_PREFIXES = ("us", "eu", "global")
 

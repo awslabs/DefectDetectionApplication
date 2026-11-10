@@ -531,12 +531,13 @@ class TestRefusedRequestOptions:
             call.kwargs for call in bedrock.client.converse.call_args_list]
         assert first["toolConfig"]["toolChoice"] == {
             "tool": {"name": TOOL_NAME}}
-        assert first["inferenceConfig"] == {"maxTokens": 4096,
+        # No max_tokens stored: Claude Opus 5.5's default, 128000.
+        assert first["inferenceConfig"] == {"maxTokens": 128000,
                                             "temperature": 0.2}
         assert "toolChoice" not in second["toolConfig"]
         assert second["inferenceConfig"] == first["inferenceConfig"]
         assert third["toolConfig"] == {"tools": first["toolConfig"]["tools"]}
-        assert third["inferenceConfig"] == {"maxTokens": 4096}
+        assert third["inferenceConfig"] == {"maxTokens": 128000}
         assert (third["system"], third["messages"]) == (first["system"],
                                                         first["messages"])
 
@@ -552,5 +553,5 @@ class TestRefusedRequestOptions:
         kwargs = bedrock.client.converse.call_args.kwargs
         assert kwargs["toolConfig"]["toolChoice"] == {
             "tool": {"name": TOOL_NAME}}
-        assert kwargs["inferenceConfig"] == {"maxTokens": 4096,
+        assert kwargs["inferenceConfig"] == {"maxTokens": 128000,
                                              "temperature": 0.2}

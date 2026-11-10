@@ -6,6 +6,11 @@
  * (max tokens, temperature, top_p), and the invocation timeout
  * (at most 240 seconds, Requirement 10.7). Users without the PortalAdmin
  * role see an access notice instead of the form.
+ *
+ * The default max tokens depends on the model: choosing another model in
+ * the dropdown while max tokens holds the previous model's default
+ * replaces it with the new model's default (`default_max_tokens` of the
+ * model list); a value the admin entered is kept.
  */
 import { useEffect, useState } from 'react';
 import {
@@ -77,6 +82,14 @@ function validate(form: BedrockFormState): FieldErrors {
   return errors;
 }
 
+// Max tokens after a model change: a value equal to the previous model's
+// default becomes the new model's default; any other value is kept, and so
+// is every value when either model's default is unknown.
+function maxTokensForModelChange(maxTokens: string, previousDefault?: number, nextDefault?: number): string {
+  if (previousDefault === undefined || nextDefault === undefined) return maxTokens;
+  return Number(maxTokens) === previousDefault ? String(nextDefault) : maxTokens;
+}
+
 export default function BedrockConfigurationSettings() {
   const { user } = useAuth();
   const isPortalAdmin = user?.role === 'PortalAdmin';
@@ -99,6 +112,8 @@ export default function BedrockConfigurationSettings() {
   // permissions) and the form falls back to free-text entry.
   const [modelOptions, setModelOptions] = useState<SelectProps.Option[] | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
+  // Default max tokens per listed model id.
+  const [modelDefaults, setModelDefaults] = useState<Record<string, number>>({});
 
   useEffect(() => {
     if (!isPortalAdmin) return;
@@ -110,6 +125,11 @@ export default function BedrockConfigurationSettings() {
         if (cancelled) return;
         if (response.models.length > 0) {
           setModelOptions(response.models.map((m) => ({ value: m.id, label: m.label })));
+          const defaults: Record<string, number> = {};
+          for (const m of response.models) {
+            if (typeof m.default_max_tokens === 'number') defaults[m.id] = m.default_max_tokens;
+          }
+          setModelDefaults(defaults);
         }
       })
       .catch(() => {
@@ -252,7 +272,16 @@ export default function BedrockConfigurationSettings() {
                 selectedOption={selectedModelOption}
                 options={displayedModelOptions}
                 onChange={({ detail }) => {
-                  setForm((current) => ({ ...current, model_id: detail.selectedOption.value ?? '' }));
+                  const modelId = detail.selectedOption.value ?? '';
+                  setForm((current) => ({
+                    ...current,
+                    model_id: modelId,
+                    max_tokens: maxTokensForModelChange(
+                      current.max_tokens,
+                      modelDefaults[current.model_id],
+                      modelDefaults[modelId],
+                    ),
+                  }));
                 }}
                 filteringType="auto"
                 statusType={modelsLoading ? 'loading' : 'finished'}
@@ -276,7 +305,7 @@ export default function BedrockConfigurationSettings() {
 
           <FormField
             label="Max tokens"
-            constraintText="Maximum tokens generated per response"
+            constraintText="Maximum tokens generated per response. The default depends on the model."
             errorText={fieldErrors.max_tokens}
           >
             <Input

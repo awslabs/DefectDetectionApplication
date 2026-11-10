@@ -36,9 +36,9 @@ The Amazon Bedrock model the Portal calls for prompt-based generation: the Workf
 |-------|---------------|---------|
 | **Model identifier** | A Bedrock model or inference profile id, chosen from the list or typed. The account must have access to the model in the chosen region. The default, Claude Opus 5.5 through its global inference profile, may serve a request in any commercial region; a regional profile such as `us.anthropic.claude-opus-5-5` keeps requests in its geography. | `global.anthropic.claude-opus-5-5` |
 | **Region** | The region for Bedrock invocation. | `us-east-1` |
-| **Max tokens** | Maximum tokens generated per response. | – |
+| **Max tokens** | Maximum tokens generated per response, including any thinking the model does. The default depends on the model: Claude Opus 5.5 gets its maximum output, 128000; any other model gets 4096. Choosing another model while the field shows the previous model's default changes it to the new model's default. Bedrock bills the tokens a response uses, not this limit, but it reserves the limit against the account's tokens-per-minute quota when a request starts and returns the unused part when the request ends. Auto-labeling with a **Bedrock:** model uses this value too, or that model's default when none is saved. | `128000` for Claude Opus 5.5 |
 | **Temperature** / **Top P** | 0 to 1; leave blank to let the model use its default (the parameter is omitted). Lower temperature gives more literal, predictable generations. A model that does not accept one of them, such as Claude Opus 5.5, is sent the request without it. | blank |
-| **Timeout (seconds)** | How long a generation may take before the request is abandoned. | – |
+| **Timeout (seconds)** | How long a generation may take before the request is abandoned. | `240` |
 
 Click **Save Configuration**.
 

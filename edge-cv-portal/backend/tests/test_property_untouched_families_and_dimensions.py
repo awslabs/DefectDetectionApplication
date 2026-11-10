@@ -618,7 +618,7 @@ def test_property_bedrock_request_and_prelabel_unchanged_with_planted_sizing(
         downscale_calls = _spy_on_downscaler(patcher, prelabel)
         # The ambient global configuration with the poison max_tokens.
         patcher.setattr(worker, "get_bedrock_configuration",
-                        lambda: dict(BEDROCK_CONFIG))
+                        lambda request_model_id=None: dict(BEDROCK_CONFIG))
 
         job_id = env.make_job(task_type=case.modality,
                               label_set=case.label_set, model=BEDROCK_MODEL)

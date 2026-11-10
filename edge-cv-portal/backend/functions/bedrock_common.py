@@ -9,6 +9,9 @@ feature (workflow generation, custom node code assist) reads the same
 - Defaults overridden by stored values; sampling parameters
   (temperature / top_p) honor an explicitly stored null (the parameter
   stays unset and is omitted from the invocation).
+- With no max_tokens stored, a request's max_tokens is
+  default_max_tokens() of the model it goes to: the model's maximum
+  output when MODEL_MAX_OUTPUT_TOKENS lists it, else 4096.
 - The invocation timeout is coerced to an int (junk -> 240) and clamped
   to [1, 240] seconds.
 - bedrock-runtime clients are cached per (region, timeout) with a
@@ -29,7 +32,7 @@ import logging
 import os
 import re
 from decimal import Decimal
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -54,6 +57,21 @@ BEDROCK_CONFIG_SETTING_KEY = 'bedrock_configuration'
 # with high max_tokens models) regularly exceed 60 s.
 MAX_TIMEOUT_SECONDS = 240
 
+# Default max_tokens per model, for a request when the Bedrock
+# configuration stores no max_tokens (default_max_tokens()). A listed
+# model gets its documented maximum output. Any other model gets
+# UNLISTED_MODEL_MAX_TOKENS, the single default every model got before
+# this table, so its requests are unchanged. Keys are model ids; an
+# inference profile id resolves through the model it fronts.
+MODEL_MAX_OUTPUT_TOKENS: Dict[str, int] = {
+    # Claude Opus 5.5, the default model: "Max output tokens: 128K" on its
+    # Amazon Bedrock model card. Its adaptive thinking is always on and
+    # counts toward max_tokens, so at 4096 Node Designer scaffolds were cut
+    # off.
+    'anthropic.claude-opus-5-5': 128000,
+}
+UNLISTED_MODEL_MAX_TOKENS = 4096
+
 DEFAULT_BEDROCK_CONFIG = {
     # Global cross-region inference profile of Claude Opus 5.5: current
     # Anthropic models on Bedrock are invokable only through inference
@@ -64,7 +82,10 @@ DEFAULT_BEDROCK_CONFIG = {
     # configuration keeps requests in its geography.
     'model_id': 'global.anthropic.claude-opus-5-5',
     'region': os.environ.get('AWS_REGION', 'us-east-1'),
-    'max_tokens': 4096,
+    # default_max_tokens() of the default model. With no max_tokens
+    # stored, get_bedrock_configuration() resolves it for the model the
+    # request goes to.
+    'max_tokens': 128000,
     # Sampling parameters are unset by default: they are sent to Bedrock
     # only when explicitly configured in the settings (or overridden
     # per-request). Recent Anthropic models reject requests that set
@@ -91,7 +112,29 @@ def _decimal_to_native(obj):
     return obj
 
 
-def get_bedrock_configuration() -> Dict:
+def default_max_tokens(model_id: Any) -> int:
+    """
+    The max_tokens of a request to ``model_id`` when the Bedrock
+    configuration stores none: the model's maximum output when
+    MODEL_MAX_OUTPUT_TOKENS lists it, else UNLISTED_MODEL_MAX_TOKENS.
+
+    An inference profile id (``global.``, ``us.``, ``eu.`` ... followed by
+    a model id) resolves through the model it fronts, the id after the
+    first '.', as the settings model listing derives it. Every key starts
+    with its provider, so a model id's own tail never matches. Total: any
+    other value, including a non-string, gives UNLISTED_MODEL_MAX_TOKENS.
+    """
+    if not isinstance(model_id, str):
+        return UNLISTED_MODEL_MAX_TOKENS
+    model_id = model_id.strip()
+    fronted = model_id.split('.', 1)[1] if '.' in model_id else None
+    for candidate in (model_id, fronted):
+        if candidate in MODEL_MAX_OUTPUT_TOKENS:
+            return MODEL_MAX_OUTPUT_TOKENS[candidate]
+    return UNLISTED_MODEL_MAX_TOKENS
+
+
+def get_bedrock_configuration(request_model_id: Optional[str] = None) -> Dict:
     """
     Load the Bedrock_Configuration from the portal settings table, falling
     back to sensible defaults for any missing value.
@@ -102,9 +145,16 @@ def get_bedrock_configuration() -> Dict:
                  timeout_seconds}}
     A flat item (attributes directly on the item) is also accepted.
 
+    With no max_tokens stored (no item, no value or null), max_tokens is
+    default_max_tokens() of the model the request goes to:
+    ``request_model_id`` when given (the auto-labeler's ``bedrock:``
+    family, which sends the labeling job's model), else the resolved
+    model_id. A stored max_tokens is returned as stored.
+
     The timeout is clamped to at most 240 seconds.
     """
     config = dict(DEFAULT_BEDROCK_CONFIG)
+    max_tokens_stored = False
     if SETTINGS_TABLE:
         try:
             response = dynamodb.Table(SETTINGS_TABLE).get_item(
@@ -124,8 +174,14 @@ def get_bedrock_configuration() -> Dict:
                             config[key] = stored[key]
                     elif stored.get(key) is not None:
                         config[key] = stored[key]
+                max_tokens_stored = stored.get('max_tokens') is not None
         except ClientError as e:
             logger.warning(f"Could not read Bedrock configuration, using defaults: {str(e)}")
+
+    if not max_tokens_stored:
+        config['max_tokens'] = default_max_tokens(
+            config['model_id'] if request_model_id is None
+            else request_model_id)
 
     try:
         timeout = int(config['timeout_seconds'])

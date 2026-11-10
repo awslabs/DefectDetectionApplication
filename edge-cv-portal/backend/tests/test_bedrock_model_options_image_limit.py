@@ -246,11 +246,11 @@ def test_absent_or_malformed_configuration_defaults_every_model(
 
 def test_rest_of_the_option_payload_is_unchanged(options_env, fake_bedrock,
                                                  monkeypatch):
-    """Only the additive per-model limits are added (`image_limit`, and
-    `token_limit` since llm-model-token-and-image-sizing task 5.1): each
-    option keeps its exact id and label, the ordering is unchanged, and the
-    payload's other keys are untouched, so consumers that ignore the fields
-    are unaffected."""
+    """Only the additive per-model limits are added (`image_limit`,
+    `token_limit` since llm-model-token-and-image-sizing task 5.1, and
+    `default_max_tokens`): each option keeps its exact id and label, the
+    ordering is unchanged, and the payload's other keys are untouched, so
+    consumers that ignore the fields are unaffected."""
     monkeypatch.delenv("LLM_MODEL_IMAGE_LIMITS", raising=False)
     status, before = invoke_models(options_env)
     assert status == 200
@@ -263,11 +263,13 @@ def test_rest_of_the_option_payload_is_unchanged(options_env, fake_bedrock,
     # Pre-feature shape: nothing but id, label and the additive fields.
     for option in after["models"]:
         assert set(option) == PRE_FEATURE_FIELDS | {"image_limit",
-                                                    "token_limit"}
+                                                    "token_limit",
+                                                    "default_max_tokens"}
 
     def without_limit(payload):
         return [{k: v for k, v in option.items()
-                 if k not in ("image_limit", "token_limit")}
+                 if k not in ("image_limit", "token_limit",
+                              "default_max_tokens")}
                 for option in payload["models"]]
 
     # id/label pairs and their order survive the configuration change.
@@ -513,6 +515,7 @@ def test_image_capable_model_carries_image_input_true(options_env,
     option = options_by_id(payload)["amazon.nova-pro-v1:0"]
     assert option["image_input"] is True
     assert set(option) == PRE_FEATURE_FIELDS | {"image_limit", "token_limit",
+                                                "default_max_tokens",
                                                 "image_input"}
 
 
@@ -530,6 +533,7 @@ def test_text_only_model_carries_image_input_false(options_env, monkeypatch):
     option = options_by_id(payload)["amazon.titan-text-express-v1"]
     assert option["image_input"] is False
     assert set(option) == PRE_FEATURE_FIELDS | {"image_limit", "token_limit",
+                                                "default_max_tokens",
                                                 "image_input"}
 
 
@@ -589,8 +593,43 @@ def test_partial_denial_keeps_every_profile_option_without_the_key(
         "us.amazon.nova-pro-v1:0",
     ]
     # No option carries the key; the key shape is exactly pre-feature plus
-    # the earlier additive limits.
+    # the additive limits.
     for option in payload["models"]:
         assert "image_input" not in option
         assert set(option) == PRE_FEATURE_FIELDS | {"image_limit",
-                                                    "token_limit"}
+                                                    "token_limit",
+                                                    "default_max_tokens"}
+
+
+# ===========================================================================
+# 5. default_max_tokens: the max_tokens a request to the model carries when
+#    the Bedrock configuration stores none (bedrock_common.default_max_tokens)
+# ===========================================================================
+
+def test_default_max_tokens_is_reported_per_option(options_env, monkeypatch):
+    """Claude Opus 5.5, through either profile, reports its 128000 maximum
+    output; every model the Portal does not list reports 4096, whatever its
+    other per-model limits."""
+    monkeypatch.setenv("LLM_MODEL_IMAGE_LIMITS",
+                       json.dumps({"us.amazon.nova-pro-v1:0": 4}))
+    use_listings(
+        options_env, monkeypatch,
+        profiles=PROFILES + [
+            {"inferenceProfileId": "global.anthropic.claude-opus-5-5",
+             "inferenceProfileName": "Global Anthropic Claude Opus 5.5"},
+            {"inferenceProfileId": "us.anthropic.claude-opus-5-5",
+             "inferenceProfileName": "US Anthropic Claude Opus 5.5"},
+        ],
+        models=FOUNDATION_MODELS,
+    )
+
+    status, payload = invoke_models(options_env)
+    assert status == 200
+    assert {option["id"]: option["default_max_tokens"]
+            for option in payload["models"]} == {
+        "global.anthropic.claude-opus-5-5": 128000,
+        "us.anthropic.claude-opus-5-5": 128000,
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0": 4096,
+        "us.amazon.nova-pro-v1:0": 4096,
+        "amazon.titan-text-express-v1": 4096,
+    }

@@ -197,7 +197,8 @@ def stored_bedrock_items(draw):
 @given(case=stored_bedrock_items())
 def test_bedrock_configuration_resolution(config_env, case):
     """For any stored configuration item, the resolved configuration equals
-    the defaults overridden by the present non-null stored values, with
+    the defaults overridden by the present non-null stored values (the
+    max_tokens default being the resolved model's), with
     explicit-null sampling parameters unset, and a timeout that is an
     integer in [1, 240], equal to 240 whenever the stored value is missing
     or uninterpretable (Requirements 4.1, 4.4, 4.6, 4.7)."""
@@ -212,6 +213,10 @@ def test_bedrock_configuration_resolution(config_env, case):
 
     native = ({key: expected_native(value)
                for key, value in stored.items()} if stored else {})
+
+    # The max_tokens default is the resolved model's default.
+    defaults["max_tokens"] = config_env.bedrock_common.default_max_tokens(
+        resolved["model_id"])
 
     # Non-sampling keys: a present non-null stored value overrides the
     # default; a missing key or explicit null keeps the default (Req 4.1).

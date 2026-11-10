@@ -4,7 +4,8 @@
  * only for PortalAdmin, loads the stored configuration, validates the
  * timeout bound (<= 240 seconds, Requirement 10.7) client-side, and
  * offers the model identifier as a dropdown of invokable models (with a
- * free-text fallback when the model list is unavailable).
+ * free-text fallback when the model list is unavailable). Max tokens shows
+ * the selected model's default until the admin enters another value.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -245,6 +246,98 @@ describe('BedrockConfigurationSettings', () => {
     expect(screen.queryByText('Temperature must be between 0 and 1')).toBeNull();
     expect(screen.queryByText('Top P must be between 0 and 1')).toBeNull();
     expect(await screen.findByText('Bedrock configuration saved')).toBeInTheDocument();
+  });
+
+  describe('default max tokens per model', () => {
+    const OPUS = 'global.anthropic.claude-opus-5-5';
+    const NOVA = 'us.amazon.nova-pro-v1:0';
+    // What GET returns with nothing stored.
+    const NOTHING_STORED = {
+      model_id: OPUS,
+      region: 'us-east-1',
+      max_tokens: 128000,
+      temperature: null,
+      top_p: null,
+      timeout_seconds: 240,
+    };
+
+    beforeEach(() => {
+      setAuthRole('PortalAdmin');
+      getBedrockConfiguration.mockResolvedValue({
+        bedrock_configuration: NOTHING_STORED,
+        defaults: NOTHING_STORED,
+        max_timeout_seconds: 240,
+      });
+      getBedrockModels.mockResolvedValue({
+        models: [
+          { id: OPUS, label: 'Global Anthropic Claude Opus 5.5', default_max_tokens: 128000 },
+          { id: NOVA, label: 'US Amazon Nova Pro', default_max_tokens: 4096 },
+        ],
+        region: 'us-east-1',
+      });
+    });
+
+    async function renderLoaded() {
+      const { container } = render(<BedrockConfigurationSettings />);
+      await waitFor(() => {
+        const select = createWrapper(container).findSelect();
+        expect(select).not.toBeNull();
+        expect(select!.findTrigger().getElement()).toHaveTextContent('Global Anthropic Claude Opus 5.5');
+      });
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(128000);
+      return createWrapper(container).findSelect()!;
+    }
+
+    type SelectWrapper = NonNullable<ReturnType<ReturnType<typeof createWrapper>['findSelect']>>;
+
+    function choose(select: SelectWrapper, value: string) {
+      select.openDropdown();
+      select.selectOptionByValue(value);
+    }
+
+    it("replaces the previous model's default with the selected model's and saves it", async () => {
+      const select = await renderLoaded();
+
+      choose(select, NOVA);
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(4096);
+      choose(select, OPUS);
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(128000);
+      choose(select, NOVA);
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      await waitFor(() => {
+        expect(updateBedrockConfiguration).toHaveBeenCalledWith({
+          model_id: NOVA,
+          region: 'us-east-1',
+          max_tokens: 4096,
+          temperature: null,
+          top_p: null,
+          timeout_seconds: 240,
+        });
+      });
+    });
+
+    it('keeps a max tokens value the admin entered when the model changes', async () => {
+      const select = await renderLoaded();
+
+      fireEvent.change(screen.getByLabelText('Max tokens'), { target: { value: '20000' } });
+      choose(select, NOVA);
+
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(20000);
+    });
+
+    it('saves the shown default unchanged when only other fields change', async () => {
+      await renderLoaded();
+
+      fireEvent.change(screen.getByLabelText('Timeout seconds'), { target: { value: '120' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      await waitFor(() => {
+        expect(updateBedrockConfiguration).toHaveBeenCalledWith(
+          expect.objectContaining({ model_id: OPUS, max_tokens: 128000, timeout_seconds: 120 }),
+        );
+      });
+    });
   });
 
   it('keeps rejecting a non-blank out-of-range temperature and top_p without calling the API', async () => {
