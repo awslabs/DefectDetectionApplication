@@ -554,15 +554,18 @@ def _redact_leaves(value):
 
 
 def redacted_run_view(tag_values):
-    """A copy of ``tag_values`` whose ``trigger`` section has every signed
-    query value masked. Never mutates ``tag_values``: its ``trigger`` entry is
-    the run's live Trigger_Context, seeded by reference. A mapping without a
-    ``trigger`` key (or a non-mapping) is returned unchanged."""
-    if not isinstance(tag_values, dict) or "trigger" not in tag_values:
+    """A copy of ``tag_values`` with every signed query value masked in every
+    top-level section -- ``trigger`` (the run's live Trigger_Context, seeded
+    by reference) and, since output bindings expose their results in the run
+    metadata (``s3_upload.<id>.presigned_url``, bedrock-inspection-chain),
+    every other section too. Never mutates ``tag_values``; string leaves,
+    dicts, lists and tuples are copied, every other leaf is kept (so a view
+    without a signed value serializes byte-identically). A non-mapping is
+    returned unchanged. ``redact_signed_query`` is a fixed point, so a value
+    already masked by another sink is unchanged."""
+    if not isinstance(tag_values, dict):
         return tag_values
-    view = dict(tag_values)
-    view["trigger"] = _redact_leaves(tag_values["trigger"])
-    return view
+    return {key: _redact_leaves(value) for key, value in tag_values.items()}
 
 
 def default_run_starter(

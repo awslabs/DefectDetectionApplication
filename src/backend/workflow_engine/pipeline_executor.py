@@ -113,6 +113,7 @@ from workflow_engine.output_bindings import (
     OutputBindingError,
     RunContext,
     _capture_record_source_dimensions,
+    merge_binding_outputs,
 )
 from workflow_engine import scene_analytics
 from workflow_engine.discovery import (
@@ -4239,7 +4240,13 @@ class WorkflowExecutor:
         ``work_dir`` (the run's capture directory) is passed only when the
         handler accepts the keyword (the same guard as ``duration_sink``),
         so s3_upload bindings can read their captured frame; handlers
-        predating it are invoked exactly as before."""
+        predating it are invoked exactly as before.
+
+        A handler returning the bindings' outputs (``{"<binding kind>":
+        {"<nodeId>": {...}}}``, what ``OutputBindingProcessor`` returns;
+        bedrock-inspection-chain) has them merged into ``tag_values`` so
+        the run metadata file and ``/metadata`` carry e.g.
+        ``s3_upload.<id>.*``; a handler returning None changes nothing."""
         if self._post_run_handler is None:
             return
         try:
@@ -4263,13 +4270,22 @@ class WorkflowExecutor:
                     handler_subset, "work_dir"
                 ):
                     kwargs["work_dir"] = work_dir
-                handler_subset(document, tag_values, remaining, **kwargs)
+                produced = handler_subset(
+                    document, tag_values, remaining, **kwargs)
             else:
-                self._invoke_post_run_handler(
+                produced = self._invoke_post_run_handler(
                     registration, document, tag_values, detail_sink,
                     duration_sink, work_dir,
                 )
-        except OutputBindingError:
+            if isinstance(produced, dict) and produced \
+                    and isinstance(tag_values, dict):
+                merge_binding_outputs(tag_values, produced)
+        except OutputBindingError as error:
+            # The bindings that succeeded before the failure still expose
+            # their outputs (the run metadata file is persisted on the
+            # failure path too).
+            if getattr(error, "outputs", None) and isinstance(tag_values, dict):
+                merge_binding_outputs(tag_values, error.outputs)
             raise
         except Exception:  # noqa: BLE001 - contained per 13.7
             logger.exception(
@@ -4286,10 +4302,12 @@ class WorkflowExecutor:
         detail_sink: Optional[Callable],
         duration_sink: Optional[Callable] = None,
         work_dir: Optional[str] = None,
-    ) -> None:
+    ) -> Any:
         """Call the post-run handler, passing ``detail_sink``,
         ``duration_sink`` and ``work_dir`` only when the handler accepts
-        them (backward compatibility).
+        them (backward compatibility). Returns whatever the handler
+        returns (the bindings' outputs for ``OutputBindingProcessor``,
+        None for a plain handler).
 
         The generic ``PostRunHandler`` signature is ``(registration,
         document, tag_values) -> None``; :class:`OutputBindingProcessor`
@@ -4312,9 +4330,8 @@ class WorkflowExecutor:
         ):
             kwargs["work_dir"] = work_dir
         if kwargs:
-            handler(registration, document, tag_values, **kwargs)
-        else:
-            handler(registration, document, tag_values)
+            return handler(registration, document, tag_values, **kwargs)
+        return handler(registration, document, tag_values)
 
     @staticmethod
     def _handler_accepts_keyword(handler: Callable, name: str) -> bool:

@@ -35,6 +35,7 @@ URL by HTTP PUT. This module pins:
 
 import json
 import os
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -693,3 +694,374 @@ class TestExecutorIntegration:
         _, row = run_executor(session_factory, document, tmp_path, legacy)
         assert row.status == EXECUTION_STATUS_COMPLETED
         assert len(seen) == 1
+
+    def test_run_metadata_and_metadata_view_carry_the_outputs_masked(
+        self, tmp_path, session_factory, capture_root, presign
+    ):
+        """design 6.1 rule 2 / 4.4: the post-run path merges the returned
+        outputs into the run metadata; the persisted file and ``/metadata``
+        carry ``s3_upload.upload.*`` with the signed query values masked."""
+        uploader = RecordingUploader()
+        document = make_document([upload_binding(presign_get_expiry_s=900)],
+                                 [capture_segment()])
+        _, row = run_executor(
+            session_factory, document, tmp_path,
+            OutputBindingProcessor(s3_uploader=uploader))
+        assert row.status == EXECUTION_STATUS_COMPLETED
+        with open(os.path.join(row.output_dir, row.capture_id + ".json"),
+                  encoding="utf-8") as handle:
+            persisted = json.load(handle)
+        upload = persisted["s3_upload"]["upload"]
+        assert upload["key"] == "images/o/u.jpg"
+        assert upload["uri"] == "s3://example-bucket/images/o/u.jpg"
+        assert upload["https_url"] == \
+            "https://example-bucket.s3.example.invalid/images/o/u.jpg"
+        assert_signed_get_url(upload["presigned_url"], "images/o/u.jpg")
+        assert "X-Amz-Signature=***" in upload["presigned_url"]
+        assert "X-Amz-Credential=***" in upload["presigned_url"]
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from workflow_engine import api as workflow_engine_api
+        app = FastAPI()
+        app.include_router(workflow_engine_api.router)
+
+        def override_get_db():
+            db = session_factory()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[workflow_engine_api.get_db] = override_get_db
+        served = TestClient(app).get("/workflows/executions/exec-1/metadata")
+        assert served.status_code == 200
+        assert served.json()["s3_upload"]["upload"]["key"] == "images/o/u.jpg"
+        assert "X-Amz-Signature=***" in served.json()["s3_upload"]["upload"]["presigned_url"]
+        assert "testing" not in served.text  # the fake access key id never leaves
+
+
+# ---------------------------------------------------------------------------
+# Outputs, presigned GET URL and ``source`` (bedrock-inspection-chain)
+# ---------------------------------------------------------------------------
+
+def assert_signed_get_url(url, key):
+    """A presigned GET for ``key`` on the neutral test endpoint: botocore
+    signs a custom endpoint path-style, the real endpoint virtual-hosted, so
+    only the host suffix, the key and the signature are asserted."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    assert parsed.scheme == "https"
+    assert parsed.netloc.endswith("s3.example.invalid")
+    assert parsed.path.endswith("/" + key)
+    assert "X-Amz-Signature=" in parsed.query
+    assert "X-Amz-Algorithm=" in parsed.query
+
+
+def _presign_client():
+    """A real client with fake credentials and a neutral endpoint; signing
+    is local, no request is made."""
+    import boto3
+    from botocore.config import Config
+    return boto3.client(
+        "s3", region_name="us-east-1", endpoint_url="https://s3.example.invalid",
+        aws_access_key_id="testing", aws_secret_access_key="testing",
+        config=Config(signature_version="s3v4"))
+
+
+@pytest.fixture
+def presign():
+    with patch.object(output_bindings, "_s3_presign_client",
+                      side_effect=lambda region, timeout_s: _presign_client()):
+        yield
+
+
+def run_with_outputs(processor, document, meta, work_dir, details=None):
+    sink = (lambda node_id, detail: details.append((node_id, detail))) \
+        if details is not None else None
+    return processor.process_subset(
+        document, meta, [b["nodeId"] for b in document["executorBindings"]],
+        detail_sink=sink, work_dir=work_dir)
+
+
+class TestS3UploadOutputs:
+    def test_s3_destination_exposes_the_result_without_a_presigned_url(
+        self, processor, uploader, work_dir, presign
+    ):
+        details = []
+        produced = run_with_outputs(
+            processor, make_document([upload_binding(region="us-east-1")]),
+            metadata(), work_dir, details)
+        assert produced == {"s3_upload": {"upload": {
+            "bucket": "example-bucket", "key": "images/o/u.jpg",
+            "uri": "s3://example-bucket/images/o/u.jpg", "bytes": len(JPEG_BYTES),
+            "content_type": "image/jpeg", "destination_kind": "s3",
+            "https_url": "https://example-bucket.s3.example.invalid/images/o/u.jpg",
+            "region": "us-east-1",
+        }}}
+        assert details == [("upload", "uploaded s3://example-bucket/images/o/u.jpg "
+                                      "({0} bytes)".format(len(JPEG_BYTES)))]
+
+    def test_presign_get_expiry_adds_a_signed_get_url_the_detail_never_shows(
+        self, processor, uploader, work_dir, presign
+    ):
+        from datetime import datetime, timedelta, timezone
+        details = []
+        before = datetime.now(timezone.utc)
+        produced = run_with_outputs(
+            processor, make_document([upload_binding(
+                presign_get_expiry_s=900, strip_suffix=".jpg",
+                append_suffix=".annotated.jpg")]),
+            metadata(), work_dir, details)
+        outputs = produced["s3_upload"]["upload"]
+        url = outputs["presigned_url"]
+        assert_signed_get_url(url, "images/o/u.annotated.jpg")
+        assert re.search(r"X-Amz-Signature=[0-9a-f]{64}", url)
+        assert "X-Amz-Expires=900" in url
+        expires_at = datetime.fromisoformat(outputs["presigned_url_expires_at"])
+        assert expires_at.tzinfo is not None
+        assert timedelta(seconds=895) <= expires_at - before <= timedelta(seconds=905)
+        assert "X-Amz" not in details[0][1]
+        assert details[0][1].startswith(
+            "uploaded s3://example-bucket/images/o/u.annotated.jpg")
+
+    def test_zero_expiry_exposes_no_url_keys(self, processor, work_dir, presign):
+        produced = run_with_outputs(
+            processor, make_document([upload_binding(presign_get_expiry_s=0)]),
+            metadata(), work_dir)
+        assert not {"presigned_url", "presigned_url_expires_at"} & \
+            set(produced["s3_upload"]["upload"])
+
+    def test_https_destination_exposes_kind_masked_url_and_bytes(
+        self, processor, uploader, work_dir, presign
+    ):
+        produced = run_with_outputs(
+            processor,
+            make_document([upload_binding(destination=SIGNED_URL)]),
+            metadata(), work_dir)
+        outputs = produced["s3_upload"]["upload"]
+        assert set(outputs) == {"destination_kind", "masked_url", "bytes"}
+        assert outputs["destination_kind"] == "https"
+        assert outputs["bytes"] == len(JPEG_BYTES)
+        assert "X-Amz-Signature=***" in outputs["masked_url"]
+        assert "deadbeef" not in outputs["masked_url"]
+
+    def test_presign_failure_is_a_warning_and_the_upload_stands(
+        self, processor, uploader, work_dir, caplog
+    ):
+        details = []
+        with patch.object(output_bindings, "_s3_presign_client",
+                          side_effect=RuntimeError("no region")):
+            with caplog.at_level("WARNING", logger="workflow_engine.output_bindings"):
+                produced = run_with_outputs(
+                    processor, make_document([upload_binding(presign_get_expiry_s=900)]),
+                    metadata(), work_dir, details)
+        outputs = produced["s3_upload"]["upload"]
+        assert set(outputs) == {"bucket", "key", "uri", "bytes", "content_type",
+                                "destination_kind"}
+        assert len(uploader.calls) == 1
+        assert details[0][1].startswith("uploaded ")
+        assert any("could not derive the result URL" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_https_url_is_built_from_the_client_endpoint_and_quotes_the_key(
+        self, processor, work_dir
+    ):
+        import boto3
+        from botocore.config import Config
+        client = boto3.client(
+            "s3", region_name="eu-central-1",
+            endpoint_url="https://objects.example.invalid:9443",
+            aws_access_key_id="testing", aws_secret_access_key="testing",
+            config=Config(signature_version="s3v4"))
+        with patch.object(output_bindings, "_s3_presign_client", return_value=client):
+            produced = run_with_outputs(
+                processor, make_document([upload_binding(
+                    destination="s3://example-bucket/images/o/part 1.jpg")]),
+                metadata(), work_dir)
+        outputs = produced["s3_upload"]["upload"]
+        assert outputs["https_url"] == \
+            "https://example-bucket.objects.example.invalid:9443/images/o/part%201.jpg"
+        assert outputs["region"] == "eu-central-1"
+        assert outputs["key"] == "images/o/part 1.jpg"
+
+    def test_outputs_of_the_successful_sibling_survive_a_failed_binding(
+        self, work_dir, tmp_path, session_factory, capture_root, presign
+    ):
+        """One upload fails, the other succeeds: the raised error carries
+        the successful outputs and the executor still persists them."""
+        class FailFirst(RecordingUploader):
+            def __call__(self, destination, *args, **kwargs):
+                self.calls.append(destination)
+                if destination.endswith("/u.jpg"):
+                    raise RuntimeError("PutObject failed")
+
+        processor = OutputBindingProcessor(s3_uploader=FailFirst())
+        document = make_document([
+            upload_binding(), upload_binding(node_id="upload2", append_suffix=".2")])
+        with pytest.raises(OutputBindingError) as excinfo:
+            run_with_outputs(processor, document, metadata(), work_dir)
+        assert excinfo.value.node_ids == ["upload"]
+        assert excinfo.value.outputs == {"s3_upload": {"upload2": {
+            "bucket": "example-bucket", "key": "images/o/u.jpg.2",
+            "uri": "s3://example-bucket/images/o/u.jpg.2", "bytes": len(JPEG_BYTES),
+            "content_type": "image/jpeg", "destination_kind": "s3",
+            "https_url": "https://example-bucket.s3.example.invalid/images/o/u.jpg.2",
+            "region": "us-east-1"}}}
+        document = make_document([
+            upload_binding(), upload_binding(node_id="upload2", append_suffix=".2")],
+            [capture_segment()])
+        _, row = run_executor(session_factory, document, tmp_path,
+                              OutputBindingProcessor(s3_uploader=FailFirst()))
+        assert row.status == EXECUTION_STATUS_FAILED
+        with open(os.path.join(row.output_dir, row.capture_id + ".json"),
+                  encoding="utf-8") as handle:
+            persisted = json.load(handle)
+        assert list(persisted["s3_upload"]) == ["upload2"]
+        assert persisted["s3_upload"]["upload2"]["key"] == "images/o/u.jpg.2"
+
+    def test_presign_client_is_built_like_the_upload_client_plus_sigv4(self):
+        client = output_bindings._s3_presign_client("us-east-1", 7)
+        assert client.meta.region_name == "us-east-1"
+        assert client.meta.config.connect_timeout == 7
+        assert client.meta.config.read_timeout == 7
+        assert client.meta.config.retries == {"mode": "standard", "total_max_attempts": 1}
+        assert client.meta.config.signature_version == "s3v4"
+        # Same region/timeouts/retries as the (unchanged) upload client.
+        upload_client = output_bindings._s3_client("us-east-1", 7)
+        for field in ("region_name", "connect_timeout", "read_timeout", "retries"):
+            assert getattr(client.meta.config, field) == \
+                getattr(upload_client.meta.config, field)
+
+
+class KeywordRecordingUploader(RecordingUploader):
+    """A fake accepting the optional ``expected_bucket_owner`` keyword."""
+
+    def __call__(self, destination, body, content_type, timeout_s, retries,
+                 region, **kwargs):
+        self.calls.append((destination, body, content_type, timeout_s,
+                           retries, region, kwargs))
+
+
+class TestExpectedBucketOwner:
+    def test_unset_owner_keeps_the_pre_feature_uploader_call(self, work_dir, presign):
+        uploader = KeywordRecordingUploader()
+        processor = OutputBindingProcessor(s3_uploader=uploader)
+        for owner in (None, ""):
+            run_with_outputs(processor, make_document([upload_binding(
+                expected_bucket_owner=owner)]), metadata(), work_dir)
+        assert [call[6] for call in uploader.calls] == [{}, {}]
+
+    def test_set_owner_reaches_the_uploader_for_s3_only(self, work_dir, presign):
+        uploader = KeywordRecordingUploader()
+        processor = OutputBindingProcessor(s3_uploader=uploader)
+        run_with_outputs(processor, make_document([
+            upload_binding(expected_bucket_owner="123456789012"),
+            upload_binding(node_id="put", destination=SIGNED_URL,
+                           expected_bucket_owner="123456789012"),
+        ]), metadata(), work_dir)
+        assert uploader.calls[0][6] == {"expected_bucket_owner": "123456789012"}
+        assert uploader.calls[1][6] == {}
+
+    def test_default_uploader_sends_expected_bucket_owner_to_put_object(self):
+        client, stubber = _stubbed_client()
+        stubber.add_response("put_object", {}, {
+            "Bucket": "example-bucket", "Key": "images/o/u.jpg",
+            "Body": JPEG_BYTES, "ContentType": "image/jpeg",
+            "ExpectedBucketOwner": "123456789012"})
+        with patch.object(output_bindings, "_s3_client", return_value=client):
+            _default_s3_uploader(
+                "s3://example-bucket/images/o/u.jpg", JPEG_BYTES, "image/jpeg",
+                10, 0, "us-east-1", expected_bucket_owner="123456789012")
+        stubber.assert_no_pending_responses()
+
+
+def bedrock_fed_upload(source, node_id="upload_annotated", upstream=("check",)):
+    binding = upload_binding(node_id=node_id, source=source, strip_suffix=".jpg",
+                             append_suffix=".annotated.jpg", region="us-east-1")
+    binding["upstreamNodeIds"] = list(upstream)
+    return binding
+
+
+def metadata_with_images(tmp_path, **paths):
+    meta = metadata()
+    entry = {"outcome": "pass", "verdict": "pass"}
+    for key, content in paths.items():
+        path = tmp_path / (key + ".jpg")
+        path.write_bytes(content)
+        entry[key] = str(path)
+    meta["bedrock"] = {"check": entry}
+    return meta
+
+
+class TestS3UploadSource:
+    @pytest.mark.parametrize("source, key", [
+        ("annotated_image", "annotated_image_path"),
+        ("input_image", "input_image_path"),
+    ])
+    def test_image_sources_upload_the_bedrock_image_not_the_capture(
+        self, processor, uploader, work_dir, tmp_path, presign, source, key
+    ):
+        content = b"\xff\xd8" + source.encode() + b"\xff\xd9"
+        meta = metadata_with_images(tmp_path, **{key: content})
+        produced = run_with_outputs(
+            processor, make_document([bedrock_fed_upload(source)]), meta, work_dir)
+        (destination, body, *_), = uploader.calls
+        assert destination == "s3://example-bucket/images/o/u.annotated.jpg"
+        assert body == content
+        assert produced["s3_upload"]["upload_annotated"]["bytes"] == len(content)
+
+    def test_frame_source_default_reads_the_capture_file(
+        self, processor, uploader, work_dir, tmp_path, presign
+    ):
+        meta = metadata_with_images(tmp_path, annotated_image_path=b"other")
+        run_with_outputs(processor, make_document([
+            bedrock_fed_upload("frame"), bedrock_fed_upload(None, node_id="plain")]),
+            meta, work_dir)
+        assert [call[1] for call in uploader.calls] == [JPEG_BYTES, JPEG_BYTES]
+
+    @pytest.mark.parametrize("source", ["annotated_image", "input_image"])
+    def test_missing_image_skips_with_a_detail_and_no_outputs(
+        self, processor, uploader, work_dir, tmp_path, presign, source
+    ):
+        details = []
+        meta = metadata_with_images(tmp_path)  # error path: no image written
+        produced = run_with_outputs(
+            processor, make_document([bedrock_fed_upload(source)]), meta, work_dir,
+            details)
+        assert uploader.calls == []
+        assert produced == {}
+        assert details == [("upload_annotated",
+                            "not uploaded: no {0} image for this run".format(source))]
+
+    def test_missing_bedrock_section_skips_too(self, processor, uploader, work_dir, presign):
+        details = []
+        produced = run_with_outputs(
+            processor, make_document([bedrock_fed_upload("annotated_image")]),
+            metadata(), work_dir, details)
+        assert uploader.calls == [] and produced == {}
+        assert details[0][1] == "not uploaded: no annotated_image image for this run"
+
+    def test_source_without_exactly_one_upstream_fails_the_node(
+        self, processor, uploader, work_dir, tmp_path, presign
+    ):
+        meta = metadata_with_images(tmp_path, annotated_image_path=b"x")
+        with pytest.raises(OutputBindingError) as excinfo:
+            run_with_outputs(processor, make_document([
+                bedrock_fed_upload("annotated_image", upstream=())]), meta, work_dir)
+        assert "exactly one upstream" in str(excinfo.value)
+        assert uploader.calls == []
+
+    def test_skipped_source_leaves_the_run_completed_in_the_executor(
+        self, tmp_path, session_factory, capture_root, presign
+    ):
+        uploader = RecordingUploader()
+        document = make_document([bedrock_fed_upload("annotated_image", node_id="upload")],
+                                 [capture_segment()])
+        _, row = run_executor(
+            session_factory, document, tmp_path,
+            OutputBindingProcessor(s3_uploader=uploader))
+        assert row.status == EXECUTION_STATUS_COMPLETED
+        assert uploader.calls == []
+        status = json.loads(row.node_status_json)
+        assert status["upload"]["detail"] == \
+            "not uploaded: no annotated_image image for this run"

@@ -260,6 +260,41 @@ class TestMqttSentDetail:
         )
         assert "greengrass" in sink.detail_for("m1")
 
+    def test_mqtt_detail_masks_signed_query_values_but_publishes_them(
+        self, processor, clients
+    ):
+        """bedrock-inspection-chain (design 4.4): the sent-message detail
+        previews the payload with every ``X-Amz-*`` value masked; the
+        publisher still receives the payload unmasked."""
+        sink = RecordingSink()
+        signed = ("https://example-bucket.s3.example.invalid/images/o/u.jpg"
+                  "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE"
+                  "%2F20250101%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date="
+                  "20250101T000000Z&X-Amz-Expires=900&X-Amz-SignedHeaders=host"
+                  "&X-Amz-Signature=" + "ab" * 32)
+        metadata = {"s3_upload": {"up": {"presigned_url": signed}}}
+        params = {"topic": "t", "qos": 1, "greengrass": True,
+                  "payload_format": "json",
+                  "payload_template": '{"url": "{s3_upload.up.presigned_url}"}'}
+        processor.process(
+            None, document(binding("m1", "mqtt_publish", params)),
+            metadata, detail_sink=sink,
+        )
+        (topic, payload_text, qos), = clients["greengrass"].calls
+        assert json.loads(payload_text) == {"url": signed}
+        detail = sink.detail_for("m1")
+        for value in ("AKIAEXAMPLE", "20250101T000000Z", "ab" * 32, "AWS4-HMAC-SHA256"):
+            assert value not in detail
+        assert "X-Amz-Signature=***" in detail
+        assert "X-Amz-Credential=***" in detail
+        assert "images/o/u.jpg" in detail
+
+    def test_mqtt_detail_without_a_signed_query_is_byte_identical(self):
+        detail = OutputBindingProcessor._mqtt_detail(
+            "t", 1, "plain", '{"url": "https://dummy.invalid/a.jpg?x=1&y=2"}')
+        assert detail == ("sent to topic 't' (qos 1, plain): "
+                          '{"url": "https://dummy.invalid/a.jpg?x=1&y=2"}')
+
 
 class TestOpcuaSentDetail:
     @settings(max_examples=40, deadline=None)
