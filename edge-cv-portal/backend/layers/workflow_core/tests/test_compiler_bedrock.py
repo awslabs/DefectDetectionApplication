@@ -131,6 +131,35 @@ class TestDeviceCompilation:
         assert binding["upstreamNodeIds"] == ["cam", "ref"]
         assert binding["downstreamNodeIds"] == ["mqtt"]
 
+    def test_two_source_graph_carries_the_inspection_defaults_unchanged_otherwise(self):
+        # bedrock-inspection-chain: the appended parameters land on the binding
+        # at their defaults (the declared-default emission) and nothing
+        # else about the two-source document moves — segments, capture
+        # paths and the pre-existing parameters are as before.
+        document = _compile_ok(two_source_graph())
+        binding = _bedrock_binding(document)
+        parameters = binding["parameters"]
+        assert {k: parameters[k] for k in (
+            "answer_format", "render_prompt", "expected_count_path",
+            "attempts", "attempt_timeout_s", "budget_s", "box_scale",
+            "on_error", "error_verdict", "enabled", "max_image_dimension",
+            "annotate")} == {
+            "answer_format": "legacy", "render_prompt": False,
+            "expected_count_path": "", "attempts": 1,
+            "attempt_timeout_s": 30, "budget_s": 0, "box_scale": "auto",
+            "on_error": "fail_run", "error_verdict": "error",
+            "enabled": True, "max_image_dimension": 0, "annotate": False,
+        }
+        assert binding["capturePaths"] == {
+            "in": "{work_dir}/bedrock_frame_cam.jpg",
+            "reference": "{work_dir}/bedrock_frame_ref.jpg",
+        }
+        assert len(_capture_sinks(document)) == 2
+        (mqtt,) = [b for b in document.executor_bindings
+                   if b["binding"] == "mqtt_publish"]
+        assert mqtt["parameters"]["payload_format"] == "text"
+        assert mqtt["upstreamNodeIds"] == ["bedrock"]
+
     def test_binding_carries_explicit_freeform_anomaly_mode(self):
         # A node configured with anomaly_mode unchecked (freeform mode)
         # compiles to a binding carrying the explicit False — the

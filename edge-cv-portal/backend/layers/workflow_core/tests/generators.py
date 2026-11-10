@@ -463,6 +463,23 @@ def node_parameters_strategy(draw, descriptor, forced: Optional[Dict[str, Any]] 
     if getattr(descriptor, "type_id", None) == "bedrock_inference":
         parameters.pop("crop_detection_index", None)
         parameters.pop("reference_payload_path", None)
+        # bedrock-inspection-chain: the same reasoning for the inspection
+        # parameters whose validator rules depend on OTHER nodes —
+        # answer_format=inspection with the always-wired 'reference' port
+        # is a BEDROCK_INSPECTION_INPUTS error, expected_count_path
+        # without a trigger a warning, and 0 < budget_s < attempt_timeout_s
+        # a warning. Their defaults (legacy, "", 0) never fire a rule;
+        # test_validator_inspection_mode.py exercises them directly.
+        parameters.pop("answer_format", None)
+        parameters.pop("expected_count_path", None)
+        parameters.pop("budget_s", None)
+
+    # bedrock-inspection-chain: payload_format=json requires a
+    # payload_template that parses as a JSON object/array
+    # (MQTT_PAYLOAD_TEMPLATE_JSON), which a freely drawn template is not;
+    # valid-graph generation keeps the text default (today's rendering).
+    if getattr(descriptor, "type_id", None) == "mqtt_publish":
+        parameters.pop("payload_format", None)
     return parameters
 
 

@@ -719,6 +719,13 @@ BEDROCK_DEFAULT_PROMPT = (
     "true when the input meaningfully differs from the reference."
 )
 
+#: Shape of a Bedrock ``model`` value (bedrock-inspection-chain): any Converse
+#: model id, inference profile id or ARN — letters, digits and ``._:/-``
+#: only, so whitespace and quotes are rejected at validation while a model
+#: the catalog has never heard of needs no catalog release. An unknown id
+#: surfaces as a recorded Bedrock error at run time.
+BEDROCK_MODEL_ID_REGEX = r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+
 BEDROCK_INFERENCE = NodeTypeDescriptor(
     type_id="bedrock_inference",
     category=CATEGORY_INFERENCE,
@@ -731,20 +738,24 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
     ],
     outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
     parameters=[
-        ParameterDescriptor("model", "enum", required=False,
+        # Free-form model id (bedrock-inspection-chain): formerly an enum of
+        # four ids, now any Converse model id, inference profile id or
+        # ARN matching BEDROCK_MODEL_ID_REGEX; the former enum members
+        # stay as examples. Default unchanged.
+        ParameterDescriptor("model", "string", required=False,
                             default="us.amazon.nova-lite-v1:0",
-                            constraints={"values": [
-                                "us.amazon.nova-pro-v1:0",
-                                "us.amazon.nova-lite-v1:0",
-                                "qwen.qwen3-vl-235b-a22b",
-                                "moonshotai.kimi-k2.5",
-                            ]},
+                            constraints={"regex": BEDROCK_MODEL_ID_REGEX},
                             description="Bedrock multimodal model invoked "
                                         "with the input frame and the "
-                                        "reference image, e.g. "
+                                        "reference image: any Converse "
+                                        "model id, inference profile id or "
+                                        "ARN, e.g. "
                                         "us.amazon.nova-lite-v1:0.",
-                            examples=["us.amazon.nova-lite-v1:0",
-                                      "us.amazon.nova-pro-v1:0"]),
+                            examples=["us.amazon.nova-pro-v1:0",
+                                      "us.amazon.nova-lite-v1:0",
+                                      "qwen.qwen3-vl-235b-a22b",
+                                      "moonshotai.kimi-k2.5",
+                                      "us.anthropic.claude-opus-5-5"]),
         ParameterDescriptor("prompt", "string", required=True,
                             default=BEDROCK_DEFAULT_PROMPT,
                             constraints={"min_length": 1},
@@ -892,6 +903,138 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                                         "use is recommended.",
                             examples=["s3://plant-images/\nhttps://mes.local/",
                                       "file:///aws_dda/reference-images/"]),
+        # Appended (additive — bedrock-inspection-chain inspection mode): every
+        # pre-existing parameter keeps its position and content, and
+        # every default below reproduces today's single legacy Converse
+        # call byte for byte. The compiler copies them onto the executor
+        # binding; the LocalServer executor interprets them.
+        ParameterDescriptor("answer_format", "enum", required=False,
+                            default="legacy",
+                            constraints={"values": ["legacy", "inspection"]},
+                            description="legacy: the answer is governed by "
+                                        "anomaly_mode exactly as before. "
+                                        "inspection: the model must answer "
+                                        "with one structured verdict object "
+                                        "(verdict pass|fail, confidence, "
+                                        "reason, objects[] with name, qc "
+                                        "OK|NOK, reason and bounding_box); "
+                                        "the executor appends that "
+                                        "instruction instead of the anomaly "
+                                        "one, ignores anomaly_mode and "
+                                        "exposes the parsed answer as "
+                                        "bedrock.{nodeId}.* metadata.",
+                            examples=["legacy", "inspection"]),
+        ParameterDescriptor("render_prompt", "bool", required=False,
+                            default=False,
+                            constraints={},
+                            description="Render prompt and system_prompt "
+                                        "per run before the call: "
+                                        "{identifier} / {dotted.path} "
+                                        "placeholders resolve against the "
+                                        "run metadata (trigger.*, "
+                                        "image.width, image.height), "
+                                        "{json:<dotted.path>} inserts the "
+                                        "compact JSON of a payload value, "
+                                        "doubled braces are literal; an "
+                                        "unresolved placeholder fails the "
+                                        "node before any Bedrock call. "
+                                        "Unchecked sends the texts as-is.",
+                            examples=[True, False]),
+        ParameterDescriptor("expected_count_path", "string", required=False,
+                            default="",
+                            constraints={},
+                            description="Optional dotted run-metadata path "
+                                        "resolved before the call to the "
+                                        "minimum number of objects a pass "
+                                        "answer must carry: a list counts "
+                                        "its length, an integer counts "
+                                        "itself, the result must be at "
+                                        "least 1; anything else is an "
+                                        "error outcome with no Bedrock "
+                                        "call. Empty sets no minimum.",
+                            examples=["trigger.payload_json.body.order.items"]),
+        ParameterDescriptor("attempts", "int", required=False, default=1,
+                            constraints={"min": 1, "max": 3},
+                            description="Maximum Converse attempts per run "
+                                        "(1-3); a transport failure or a "
+                                        "malformed answer counts as one "
+                                        "attempt. 1 is today's single call.",
+                            examples=[1, 2]),
+        ParameterDescriptor("attempt_timeout_s", "int", required=False,
+                            default=30,
+                            constraints={"min": 1, "max": 120},
+                            description="Read timeout of one attempt in "
+                                        "seconds (1-120), e.g. 6; 30 is "
+                                        "today's client timeout.",
+                            examples=[30, 6]),
+        ParameterDescriptor("budget_s", "int", required=False, default=0,
+                            constraints={"min": 0, "max": 120},
+                            description="Wall-clock budget for all attempts "
+                                        "in seconds (0-120): a further "
+                                        "attempt starts only while at least "
+                                        "attempt_timeout_s of the budget "
+                                        "remains. 0 sets no budget.",
+                            examples=[0, 11]),
+        ParameterDescriptor("box_scale", "enum", required=False,
+                            default="auto",
+                            constraints={"values": ["auto", "pixels",
+                                                    "normalized_1000"]},
+                            description="Coordinate convention of the "
+                                        "objects[].bounding_box values in "
+                                        "an inspection answer: pixels of "
+                                        "the image sent, normalized_1000 "
+                                        "(the 0-1000 grid Amazon Nova "
+                                        "answers on), or auto = "
+                                        "normalized_1000 for amazon.nova "
+                                        "models and pixels otherwise.",
+                            examples=["auto", "pixels", "normalized_1000"]),
+        ParameterDescriptor("on_error", "enum", required=False,
+                            default="fail_run",
+                            constraints={"values": ["fail_run", "record"]},
+                            description="fail_run: a Bedrock failure fails "
+                                        "the run and nothing downstream "
+                                        "publishes (today). record: the "
+                                        "failure is recorded as "
+                                        "bedrock.{nodeId}.outcome = error "
+                                        "and the node's downstream outputs "
+                                        "still run.",
+                            examples=["fail_run", "record"]),
+        ParameterDescriptor("error_verdict", "enum", required=False,
+                            default="error",
+                            constraints={"values": ["error", "fail"]},
+                            description="What a recorded error exposes: "
+                                        "error leaves verdict unset and "
+                                        "sets bedrock.{nodeId}.error; fail "
+                                        "exposes verdict fail with "
+                                        "confidence 0 and the failure text "
+                                        "as reason.",
+                            examples=["error", "fail"]),
+        ParameterDescriptor("enabled", "bool", required=False, default=True,
+                            constraints={},
+                            description="Unchecked: no Bedrock call is made "
+                                        "and the node records the error "
+                                        "outcome 'bedrock check disabled by "
+                                        "configuration' (an off switch for "
+                                        "configuration overrides).",
+                            examples=[True, False]),
+        ParameterDescriptor("max_image_dimension", "int", required=False,
+                            default=0,
+                            constraints={"min": 0, "max": 8000},
+                            description="Downscale the input image so its "
+                                        "longer edge is at most this many "
+                                        "pixels before sending and drawing "
+                                        "(0-8000), e.g. 1280. 0 sends the "
+                                        "frame unmodified.",
+                            examples=[0, 1280]),
+        ParameterDescriptor("annotate", "bool", required=False, default=False,
+                            constraints={},
+                            description="Draw the verdict banner and the "
+                                        "per-object boxes on the whole "
+                                        "input image and expose the file as "
+                                        "bedrock.{nodeId}.annotated_image_"
+                                        "path (implied by answer_format "
+                                        "inspection).",
+                            examples=[True, False]),
     ],
     # Executor-level on every physical device architecture: the node has
     # no GStreamer element of its own. The compiler terminates each
@@ -1480,6 +1623,23 @@ MQTT_PUBLISH = NodeTypeDescriptor(
                                         "the device, e.g. "
                                         "/greengrass/v2/privKey.key.",
                             examples=["/greengrass/v2/privKey.key"]),
+        # Appended (additive — bedrock-inspection-chain JSON payload mode): every
+        # pre-existing parameter keeps its position and content; the
+        # default keeps today's text rendering byte for byte.
+        ParameterDescriptor("payload_format", "enum", required=False,
+                            default="text",
+                            constraints={"values": ["text", "json"]},
+                            description="text: payload_template is rendered "
+                                        "as text exactly as before. json: "
+                                        "payload_template must be a JSON "
+                                        "object or array; a string that is "
+                                        "exactly one placeholder becomes "
+                                        "the value with its native type, "
+                                        "{ulid}, {now_iso} and {latency_ms} "
+                                        "are generated, and a key or list "
+                                        "element whose placeholder is "
+                                        "unresolved is omitted.",
+                            examples=["text", "json"]),
     ],
     # Executor-level MQTT client publish on pipeline completion. paho-mqtt
     # serves the plain-broker and aws_iot paths; awsiotsdk provides the
@@ -1643,7 +1803,14 @@ S3_UPLOAD = NodeTypeDescriptor(
     # VideoFrames input; InferenceMeta outputs also connect here via the
     # declared InferenceMeta -> VideoFrames coercion (as for capture).
     inputs=[PortDescriptor("in", PORT_TYPE_VIDEO_FRAMES)],
-    outputs=[],
+    # Result port (bedrock-inspection-chain): a connection s3_upload.out ->
+    # mqtt_publish.in declares that the publish depends on the upload,
+    # so the executor runs the upload first and the publish can carry
+    # the s3_upload.{nodeId}.* outputs (bucket, key, uri, ...). The node
+    # stays opaque for the frame stream; the validator does not warn
+    # when the port is left unconnected (an output node's result port
+    # is optional by nature).
+    outputs=[PortDescriptor("out", PORT_TYPE_INFERENCE_META)],
     parameters=[
         ParameterDescriptor("destination", "string", required=True, default=None,
                             constraints={"min_length": 1},
@@ -1718,6 +1885,46 @@ S3_UPLOAD = NodeTypeDescriptor(
                                         "region. Ignored for https:// "
                                         "destinations.",
                             examples=["us-east-1"]),
+        # Appended (additive — bedrock-inspection-chain): every pre-existing
+        # parameter keeps its position and content; the defaults keep
+        # today's capture-file upload with no presigned URL and no
+        # bucket-owner check.
+        ParameterDescriptor("source", "enum", required=False,
+                            default="frame",
+                            constraints={"values": ["frame", "input_image",
+                                                    "annotated_image"]},
+                            description="Which image is uploaded: frame "
+                                        "(the captured frame, as before), "
+                                        "input_image (the image the "
+                                        "directly upstream bedrock_inference "
+                                        "node sent to the model) or "
+                                        "annotated_image (that node's drawn "
+                                        "overlay). The last two require the "
+                                        "node to be fed by exactly one "
+                                        "bedrock_inference node; a missing "
+                                        "image skips the upload.",
+                            examples=["frame", "annotated_image"]),
+        ParameterDescriptor("presign_get_expiry_s", "int", required=False,
+                            default=0,
+                            constraints={"min": 0, "max": 43200},
+                            description="Lifetime in seconds (0-43200) of "
+                                        "a presigned GET URL generated for "
+                                        "the uploaded s3:// object and "
+                                        "exposed as "
+                                        "s3_upload.{nodeId}.presigned_url, "
+                                        "e.g. 900. 0 generates no URL.",
+                            examples=[0, 900]),
+        ParameterDescriptor("expected_bucket_owner", "string", required=False,
+                            default=None,
+                            constraints={"regex": "^[0-9]{12}$"},
+                            description="Optional AWS account id (12 "
+                                        "digits) sent as ExpectedBucketOwner "
+                                        "with the s3:// PutObject, so an "
+                                        "upload to a bucket owned by any "
+                                        "other account fails instead of "
+                                        "succeeding; empty sends no check. "
+                                        "Ignored for https:// destinations.",
+                            examples=["123456789012"]),
     ],
     # Executor-level upload after the run (boto3 for s3://, the standard
     # library for https://); boto3 is the same runtime package
@@ -2148,6 +2355,29 @@ MQTT_SUBSCRIBE = NodeTypeDescriptor(
                                         "/greengrass/v2/privKey.key.",
                             examples=["/greengrass/v2/privKey.key"]),
         *_trigger_policy_parameters(),
+        # Appended (additive — bedrock-inspection-chain trigger filter): every
+        # pre-existing parameter keeps its position and content; the empty
+        # default activates on every message as before. Evaluated by the
+        # executor on every delivery before the concurrency gate; there is
+        # no layer-side syntax check (the grammar lives in the executor).
+        ParameterDescriptor("payload_condition", "string", required=False,
+                            default="",
+                            constraints={},
+                            description="Optional: a message starts a run "
+                                        "only while this rule holds for it, "
+                                        "evaluated against trigger.topic, "
+                                        "trigger.payload and "
+                                        "trigger.payload_json (the parsed "
+                                        "JSON payload), e.g. "
+                                        "trigger.payload_json.body.stage == "
+                                        "'final'. A message the rule "
+                                        "rejects or cannot evaluate is "
+                                        "discarded. Empty activates on "
+                                        "every message. "
+                            + CONDITION_LANGUAGE_DESCRIPTION,
+                            examples=["trigger.payload_json.body.stage == "
+                                      "'final'",
+                                      "trigger.topic == 'plant/line1/evaluate'"]),
     ],
     # Executor-level MQTT subscription held by the device's trigger
     # subscription manager. paho-mqtt serves the plain-broker and aws_iot

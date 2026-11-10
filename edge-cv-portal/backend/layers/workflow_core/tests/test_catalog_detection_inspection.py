@@ -193,6 +193,12 @@ class TestCatalogAdditivity:
             "crop_margin_percent",
             "reference_payload_path",
             "allowed_uri_prefixes",
+            # bedrock-inspection-chain: appended after the four above, so
+            # both features' additions remain a strict suffix.
+            "answer_format", "render_prompt", "expected_count_path",
+            "attempts", "attempt_timeout_s", "budget_s", "box_scale",
+            "on_error", "error_verdict", "enabled", "max_image_dimension",
+            "annotate",
         ]
 
     def test_ports_and_identity_are_untouched(self):

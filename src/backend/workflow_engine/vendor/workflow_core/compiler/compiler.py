@@ -122,10 +122,13 @@ BINDING_LLM_INFERENCE = "llm_inference"
 #: the same synthetic frame-capture sink chain to the feeding GStreamer
 #: branch and the emitted binding carries the capture file path
 #: (``capturePaths["in"]``, ``{work_dir}``-rooted) the LocalServer
-#: executor reads and uploads after the run. The node is opaque (it has
-#: no outputs, so nothing can be downstream of it); a feeder shared with
-#: a bedrock/llm node or a second s3_upload node shares one capture
-#: file. In simulation the node resolves to its recording stub.
+#: executor reads and uploads after the run. The node is opaque for the
+#: frame stream (its only output, the InferenceMeta result port added by
+#: bedrock-inspection-chain, carries no frames — it orders executor bindings);
+#: a feeder shared with a bedrock/llm node or a second s3_upload node
+#: shares one capture file, and an upload wired behind a Bedrock node
+#: takes that node's own capture path (``_bedrock_capture_plan``). In
+#: simulation the node resolves to its recording stub.
 BINDING_S3_UPLOAD = "s3_upload"
 
 #: The metadata-attachment executor binding (the metadata node,
@@ -379,7 +382,8 @@ def compile(
     ]
     #: s3_upload nodes join the frame-capture plan and are opaque like
     #: Bedrock nodes: their input branch terminates at the capture sink
-    #: (the node has no output port, so no stream can continue past it).
+    #: (the node's InferenceMeta result port carries no frames, so no
+    #: stream can continue past it).
     s3_upload_node_ids = [
         n.id for n in graph.nodes
         if mappings[n.id].executor_binding == BINDING_S3_UPLOAD
@@ -686,11 +690,15 @@ def _frame_feeders(
     port_name: str,
     gst_set: set,
     opaque: set,
+    terminators: Optional[List[str]] = None,
 ) -> List[str]:
     """The GStreamer nodes whose frames reach input port ``port_name``
     of ``node_id``, looking upstream through executor-level nodes (the
     buffer stream passes through them) but never through other opaque
-    frame-terminating nodes."""
+    frame-terminating nodes. When ``terminators`` is a list, the opaque
+    nodes the search stopped at are appended to it (connection order,
+    deduplicated) so the caller can tell "nothing feeds this port" from
+    "an opaque node sits between this port and the stream"."""
     frontier = [
         connection.source.node for connection in graph.connections
         if connection.target.node == node_id
@@ -711,7 +719,18 @@ def _frame_feeders(
                 connection.source.node for connection in graph.connections
                 if connection.target.node == current
             )
+        elif terminators is not None and current not in terminators:
+            terminators.append(current)
     return feeders
+
+
+def _binds(graph: WorkflowGraph, node_id: str, binding: str,
+           descriptors_by_id: Dict[str, NodeTypeDescriptor]) -> bool:
+    """True when ``node_id``'s descriptor is realized by executor binding
+    ``binding`` on any architecture."""
+    descriptor = descriptors_by_id[graph.node_by_id(node_id).type]
+    return any(mapping.executor_binding == binding
+               for mapping in descriptor.mappings)
 
 
 def _bedrock_capture_plan(
@@ -737,6 +756,14 @@ def _bedrock_capture_plan(
       branches feed one port, the first (connection-ordered) feeder's
       file is used.
 
+    An ``s3_upload`` node wired BEHIND an opaque ``bedrock_inference``
+    node (bedrock-inspection-chain: the uploads of an inspection branch are fed
+    by the Bedrock node so they run inside its branch) has no stream
+    feeder of its own — the search stops at the Bedrock node — so it
+    takes that Bedrock node's own ``in`` capture path: the very JPEG the
+    pipeline captured for the check. Only graphs with such an upload are
+    affected; every other node keeps ``None`` for an unfed port.
+
     Paths are rooted at the ``{work_dir}`` placeholder the LocalServer
     executor resolves per run; feeder node ids are sanitized to a safe
     file-name form (collisions disambiguated with a numeric suffix).
@@ -759,12 +786,32 @@ def _bedrock_capture_plan(
             )
         return feeder_captures[feeder_id]
 
+    def bedrock_donor_path(terminators: List[str]) -> Optional[str]:
+        """The ``in`` capture path of the first opaque bedrock_inference
+        node the feeder search stopped at (its own feeder's shared file),
+        or None when no such node — or no stream above it — exists."""
+        for terminator in terminators:
+            if _binds(graph, terminator, BINDING_BEDROCK_INFERENCE,
+                      descriptors_by_id):
+                donor_feeders = _frame_feeders(
+                    graph, terminator, "in", gst_set, opaque)
+                return path_for(donor_feeders[0]) if donor_feeders else None
+        return None
+
     for node_id in capture_node_ids:
         descriptor = descriptors_by_id[graph.node_by_id(node_id).type]
         ports: Dict[str, Optional[str]] = {}
         for port in descriptor.inputs:
-            feeders = _frame_feeders(graph, node_id, port.name, gst_set, opaque)
-            ports[port.name] = path_for(feeders[0]) if feeders else None
+            terminators: List[str] = []
+            feeders = _frame_feeders(graph, node_id, port.name, gst_set,
+                                     opaque, terminators)
+            if feeders:
+                ports[port.name] = path_for(feeders[0])
+            elif terminators and _binds(graph, node_id, BINDING_S3_UPLOAD,
+                                        descriptors_by_id):
+                ports[port.name] = bedrock_donor_path(terminators)
+            else:
+                ports[port.name] = None
         capture_paths_by_node[node_id] = ports
 
     return feeder_captures, capture_paths_by_node

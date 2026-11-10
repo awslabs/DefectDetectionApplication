@@ -20,7 +20,10 @@ references, capturePaths, the fail-closed rules), ``render_prompt``,
 artifact persistence, metadata assembly and the transports themselves.
 
 Pure module: standard library only — no boto3, no HTTP, no filesystem,
-no logging, and no imports outside this package. Callers that need to
+no logging, and no imports outside this package (the inspection answer
+schema is enforced by the small standard-library interpreter
+``_validate_schema``, cross-checked against ``jsonschema`` by the layer
+tests, so this rule still holds). Callers that need to
 report the parameter-substitution notices this module applies pass a
 ``notice_sink``; callers that need image downscaling pass a
 ``downscaler`` (the executor's contained Pillow helper on the device).
@@ -126,6 +129,78 @@ BEDROCK_JSON_INSTRUCTION = (
 #: Separator between the operator's prompt and the Verdict_Instruction.
 ANOMALY_INSTRUCTION_SEPARATOR = "\n\n"
 
+#: The two ``answer_format`` values of a ``bedrock_inference`` node
+#: (bedrock-inspection-chain). ``legacy`` (default/absent) is the Anomaly_Mode /
+#: freeform behaviour above, byte for byte; ``inspection`` is the
+#: structured verdict answer of :data:`INSPECTION_ANSWER_SCHEMA`.
+ANSWER_FORMAT_LEGACY = "legacy"
+ANSWER_FORMAT_INSPECTION = "inspection"
+
+#: Canonical instruction appended (after ANOMALY_INSTRUCTION_SEPARATOR,
+#: INSTEAD of the Verdict_Instruction) to the user prompt of an
+#: ``answer_format: inspection`` node — one sentence naming the exact
+#: answer shape :func:`parse_inspection_answer` accepts.
+INSPECTION_JSON_INSTRUCTION = (
+    "Respond with exactly one JSON object and nothing else: "
+    '{"verdict": "pass"|"fail", "confidence": 0..1, "reason": "<one '
+    'sentence>", "objects": [{"name": "<part>", "qc": "OK"|"NOK", '
+    '"reason": "<short>", "bounding_box": {"x_min": <int>, "y_min": '
+    '<int>, "x_max": <int>, "y_max": <int>}}, ...]} with one entry in '
+    "objects per expected part."
+)
+
+#: Coordinate conventions of ``objects[].bounding_box`` in an inspection
+#: answer; the caller resolves the node's ``auto`` by model id before
+#: calling :func:`parse_inspection_answer`.
+BOX_SCALE_PIXELS = "pixels"
+BOX_SCALE_NORMALIZED_1000 = "normalized_1000"
+BOX_SCALES = (BOX_SCALE_PIXELS, BOX_SCALE_NORMALIZED_1000)
+
+#: Upper bound (inclusive) of a ``normalized_1000`` coordinate.
+NORMALIZED_BOX_MAX = 1000
+
+#: The structured inspection answer contract as a JSON Schema (draft-07)
+#: dict: ``verdict`` is the pass|fail vocabulary, ``qc`` the per-part
+#: OK|NOK drawn on the overlay, every object is closed
+#: (``additionalProperties: false``); anything that does not validate is
+#: a malformed answer. Enforced by :func:`_validate_schema`.
+INSPECTION_ANSWER_SCHEMA: Dict[str, Any] = {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["verdict", "confidence", "reason", "objects"],
+    "additionalProperties": False,
+    "properties": {
+        "verdict": {"enum": ["pass", "fail"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "reason": {"type": "string"},
+        "objects": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "required": ["name", "qc", "reason", "bounding_box"],
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "qc": {"enum": ["OK", "NOK"]},
+                    "reason": {"type": "string"},
+                    "bounding_box": {
+                        "type": "object",
+                        "required": ["x_min", "y_min", "x_max", "y_max"],
+                        "additionalProperties": False,
+                        "properties": {
+                            "x_min": {"type": "integer"},
+                            "y_min": {"type": "integer"},
+                            "x_max": {"type": "integer"},
+                            "y_max": {"type": "integer"},
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
 #: Default model when the binding parameter is absent (catalog default).
 BEDROCK_DEFAULT_MODEL = "us.amazon.nova-lite-v1:0"
 
@@ -147,6 +222,13 @@ REFERENCE_IMAGE_LABEL = "Reference image"
 #: (Requirement 6.3).
 BEDROCK_READ_TIMEOUT_SEC = 30
 
+#: Client-side connect timeout of a Bedrock runtime invocation when the
+#: node owns its attempt/budget policy (``attempts``, ``attempt_timeout_s``
+#: or ``budget_s`` off their defaults): an in-Region TCP connect either
+#: completes well under a second or the network is down. The default
+#: single-call client is untouched by this constant.
+BEDROCK_CONNECT_TIMEOUT_SEC = 2
+
 #: Image format of every attached content block.
 BEDROCK_IMAGE_FORMAT = "jpeg"
 
@@ -157,8 +239,11 @@ class BedrockInvocation:
 
     ``images`` is the ordered ``(label, jpeg_bytes)`` sequence the
     request attaches; ``prompt`` already carries the appended
-    Verdict_Instruction in Anomaly_Mode; ``system_prompt`` is ``None``
-    when no system parameter is sent.
+    Verdict_Instruction in Anomaly_Mode (or the inspection instruction
+    when ``answer_format`` is ``inspection``); ``system_prompt`` is
+    ``None`` when no system parameter is sent. ``answer_format`` tells
+    the caller how to parse the answer; ``anomaly_mode`` is ``False`` in
+    inspection format because the legacy verdict parser does not apply.
     """
 
     model: str
@@ -168,6 +253,7 @@ class BedrockInvocation:
     max_tokens: int
     system_prompt: Optional[str] = None
     anomaly_mode: bool = True
+    answer_format: str = ANSWER_FORMAT_LEGACY
 
     def converse_kwargs(self) -> Dict[str, Any]:
         """The exact ``client.converse(**kwargs)`` keyword arguments.
@@ -224,13 +310,23 @@ def build_bedrock_invocation(
       "Input image"; the reference image, when present, follows labelled
       "Reference image". A ``None`` reference means single-image
       inference.
+    - ``answer_format`` (bedrock-inspection-chain): absent, empty or ``legacy``
+      keeps every rule above byte for byte; ``inspection`` appends
+      :data:`INSPECTION_JSON_INSTRUCTION` (same separator) INSTEAD of the
+      Verdict_Instruction and ignores ``anomaly_mode``.
     """
-    anomaly_mode = is_anomaly_mode(
-        NODE_TYPE_BEDROCK_INFERENCE, parameters.get("anomaly_mode"))
+    answer_format = str(parameters.get("answer_format") or ANSWER_FORMAT_LEGACY)
     prompt = str(parameters.get("prompt") or "")
-    if anomaly_mode:
+    if answer_format == ANSWER_FORMAT_INSPECTION:
+        anomaly_mode = False
         prompt = (prompt + ANOMALY_INSTRUCTION_SEPARATOR
-                  + BEDROCK_JSON_INSTRUCTION)
+                  + INSPECTION_JSON_INSTRUCTION)
+    else:
+        anomaly_mode = is_anomaly_mode(
+            NODE_TYPE_BEDROCK_INFERENCE, parameters.get("anomaly_mode"))
+        if anomaly_mode:
+            prompt = (prompt + ANOMALY_INSTRUCTION_SEPARATOR
+                      + BEDROCK_JSON_INSTRUCTION)
     images: List[Tuple[str, bytes]] = [(INPUT_IMAGE_LABEL, input_image)]
     if reference_image is not None:
         images.append((REFERENCE_IMAGE_LABEL, reference_image))
@@ -242,6 +338,7 @@ def build_bedrock_invocation(
         max_tokens=int(parameters.get("max_tokens") or DEFAULT_MAX_TOKENS),
         system_prompt=normalize_system_prompt(parameters.get("system_prompt")),
         anomaly_mode=anomaly_mode,
+        answer_format=answer_format,
     )
 
 
@@ -505,6 +602,175 @@ def parse_verdict(text: str) -> Dict[str, Any]:
         "Bedrock response did not contain the expected JSON object "
         "{{\"is_anomalous\": ..., \"confidence\": ...}}: {0!r}".format(
             (text or "")[:200]))
+
+
+# ---------------------------------------------------------------------------
+# Inspection answer contract (bedrock-inspection-chain, answer_format: inspection)
+# ---------------------------------------------------------------------------
+
+_BOX_KEYS = ("x_min", "y_min", "x_max", "y_max")
+
+
+def _single_json_object(text: str) -> Dict[str, Any]:
+    """Exactly one JSON object: the whole text, or the content of the
+    single fenced block. Prose around a bare object, a second object or
+    a second fenced block is malformed (``ValueError``). Deliberately NOT
+    :func:`parse_verdict`, which tolerates prose around the object."""
+    candidate = (text or "").strip()
+    fenced = _FENCED_BLOCK.findall(candidate)
+    if len(fenced) > 1:
+        raise ValueError("more than one fenced block")
+    if len(fenced) == 1:
+        candidate = fenced[0].strip()
+    if not candidate:
+        raise ValueError("empty answer")
+    try:
+        parsed = json.loads(candidate)
+    except ValueError as exc:
+        raise ValueError("not a single JSON object ({0})".format(exc))
+    if not isinstance(parsed, dict):
+        raise ValueError("JSON value is not an object")
+    return parsed
+
+
+def _schema_type_ok(instance: Any, type_name: str) -> bool:
+    """Draft-07 type semantics for the types the answer schema uses:
+    booleans are never numbers/integers, a float with no fractional part
+    is an integer."""
+    if type_name == "object":
+        return isinstance(instance, dict)
+    if type_name == "array":
+        return isinstance(instance, list)
+    if type_name == "string":
+        return isinstance(instance, str)
+    if type_name == "boolean":
+        return isinstance(instance, bool)
+    if type_name == "null":
+        return instance is None
+    if isinstance(instance, bool) or not isinstance(instance, (int, float)):
+        return False
+    if type_name == "integer":
+        return isinstance(instance, int) or float(instance).is_integer()
+    if type_name == "number":
+        return True
+    raise ValueError("unsupported schema type {0!r}".format(type_name))
+
+
+def _validate_schema(instance: Any, schema: Mapping[str, Any], path: str) -> None:
+    """Validate ``instance`` against the JSON Schema subset the inspection
+    answer contract uses — ``type``, ``enum``, ``required``,
+    ``properties``, ``additionalProperties: false``, ``items``,
+    ``minItems``, ``minLength``, ``minimum``, ``maximum`` — with draft-07
+    semantics (standard library only, so this module stays pure; the
+    layer tests cross-check it against ``jsonschema``). Raises
+    ``ValueError`` naming the offending path."""
+    declared = schema.get("type")
+    if declared is not None:
+        types = declared if isinstance(declared, list) else [declared]
+        if not any(_schema_type_ok(instance, t) for t in types):
+            raise ValueError("schema: {0} is not of type {1}".format(
+                path, "/".join(types)))
+    if "enum" in schema and not any(
+            instance == option
+            and isinstance(instance, bool) == isinstance(option, bool)
+            for option in schema["enum"]):
+        raise ValueError("schema: {0} is not one of {1!r}".format(
+            path, list(schema["enum"])))
+    if isinstance(instance, dict):
+        for key in schema.get("required", ()):
+            if key not in instance:
+                raise ValueError("schema: {0} is missing required property "
+                                 "{1!r}".format(path, key))
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            extra = [key for key in instance if key not in properties]
+            if extra:
+                raise ValueError("schema: {0} has unexpected property(ies) "
+                                 "{1!r}".format(path, sorted(extra)))
+        for key, subschema in properties.items():
+            if key in instance:
+                _validate_schema(instance[key], subschema,
+                                 "{0}.{1}".format(path, key))
+    if isinstance(instance, list):
+        if len(instance) < schema.get("minItems", 0):
+            raise ValueError("schema: {0} has fewer than {1} item(s)".format(
+                path, schema["minItems"]))
+        if "items" in schema:
+            for index, element in enumerate(instance):
+                _validate_schema(element, schema["items"],
+                                 "{0}[{1}]".format(path, index))
+    if isinstance(instance, str) and len(instance) < schema.get("minLength", 0):
+        raise ValueError("schema: {0} is shorter than {1} character(s)".format(
+            path, schema["minLength"]))
+    if isinstance(instance, (int, float)) and not isinstance(instance, bool):
+        if "minimum" in schema and instance < schema["minimum"]:
+            raise ValueError("schema: {0} is below the minimum {1}".format(
+                path, schema["minimum"]))
+        if "maximum" in schema and instance > schema["maximum"]:
+            raise ValueError("schema: {0} is above the maximum {1}".format(
+                path, schema["maximum"]))
+
+
+def parse_inspection_answer(
+    text: str,
+    expected_count: Optional[int] = None,
+    box_scale: str = BOX_SCALE_PIXELS,
+) -> Dict[str, Any]:
+    """Parse a structured inspection answer; any ``ValueError`` is a
+    malformed answer (one failed attempt, never a pass).
+
+    Rules, in order: exactly one JSON object (:func:`_single_json_object`);
+    :data:`INSPECTION_ANSWER_SCHEMA` validation (:func:`_validate_schema`,
+    draft-07 semantics); a ``pass`` with any object
+    ``qc != "OK"`` is malformed; a ``pass`` carrying fewer than
+    ``expected_count`` objects is malformed (a ``fail`` with fewer objects
+    stays a ``fail``; extra objects are accepted); under
+    ``box_scale="normalized_1000"`` every coordinate must lie in
+    0..1000. A box with ``x_min >= x_max`` or ``y_min >= y_max`` does not
+    invalidate the answer: its index is listed under
+    ``dropped_box_indices`` so the caller skips it when drawing.
+
+    Returns ``{"verdict", "confidence" (float), "reason", "objects" (the
+    validated list, raw coordinates), "dropped_box_indices",
+    "box_scale", "expected_count"}``.
+    """
+    if box_scale not in BOX_SCALES:
+        raise ValueError("unsupported box_scale {0!r}".format(box_scale))
+    answer = _single_json_object(text)
+    _validate_schema(answer, INSPECTION_ANSWER_SCHEMA, "answer")
+    verdict = answer["verdict"]
+    objects = answer["objects"]
+    if verdict == "pass":
+        not_ok = [obj["name"] for obj in objects if obj["qc"] != "OK"]
+        if not_ok:
+            raise ValueError(
+                "verdict pass with NOK object(s): {0}".format(", ".join(not_ok)))
+        if expected_count is not None and len(objects) < int(expected_count):
+            raise ValueError(
+                "verdict pass with {0} object(s), expected at least {1}".format(
+                    len(objects), int(expected_count)))
+    dropped: List[int] = []
+    for index, obj in enumerate(objects):
+        box = obj["bounding_box"]
+        if box_scale == BOX_SCALE_NORMALIZED_1000:
+            for key in _BOX_KEYS:
+                if not 0 <= box[key] <= NORMALIZED_BOX_MAX:
+                    raise ValueError(
+                        "bounding_box.{0} = {1} outside 0..{2} for "
+                        "box_scale normalized_1000 (object {3!r})".format(
+                            key, box[key], NORMALIZED_BOX_MAX, obj["name"]))
+        if box["x_min"] >= box["x_max"] or box["y_min"] >= box["y_max"]:
+            dropped.append(index)
+    return {
+        "verdict": verdict,
+        "confidence": float(answer["confidence"]),
+        "reason": answer["reason"],
+        "objects": objects,
+        "dropped_box_indices": dropped,
+        "box_scale": box_scale,
+        "expected_count": (None if expected_count is None
+                           else int(expected_count)),
+    }
 
 
 # ---------------------------------------------------------------------------

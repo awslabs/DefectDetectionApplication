@@ -31,6 +31,7 @@ callers) omit the argument and the resolution check is skipped.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -267,6 +268,31 @@ CODE_BEDROCK_REFERENCE_CONFLICT = "BEDROCK_REFERENCE_CONFLICT"
 CODE_BEDROCK_CROP_NO_MODEL = "BEDROCK_CROP_NO_MODEL"
 CODE_BEDROCK_PAYLOAD_NO_TRIGGER = "BEDROCK_PAYLOAD_NO_TRIGGER"
 
+# Built-in inspection chain checks (bedrock-inspection-chain): every rule fires
+# only on a node that sets one of the NEW parameters off its default, so
+# every pre-existing graph produces identical findings.
+# - MQTT_PAYLOAD_TEMPLATE_JSON (error): ``mqtt_publish`` with
+#   ``payload_format: json`` whose ``payload_template`` is not a JSON
+#   object or array — the executor renders that template structurally.
+# - S3_UPLOAD_SOURCE_NO_BEDROCK (error): ``s3_upload`` with ``source``
+#   other than ``frame`` whose ``in`` port is not fed by exactly one
+#   ``bedrock_inference`` node — the image comes from that node's run
+#   metadata, so there is nothing to upload otherwise.
+# - BEDROCK_EXPECTED_COUNT_PATH (warning): ``expected_count_path`` set in
+#   a graph with no CATEGORY_TRIGGER node (mirrors
+#   BEDROCK_PAYLOAD_NO_TRIGGER: no trigger payload to resolve against).
+# - BEDROCK_INSPECTION_INPUTS (error): ``answer_format: inspection`` with
+#   ``crop_detection_index`` set or a connected ``reference`` port — the
+#   inspection path is whole-frame, single-image by design.
+# - BEDROCK_BUDGET_TOO_SMALL (warning): ``0 < budget_s <
+#   attempt_timeout_s`` — the first attempt would always overrun the
+#   budget. Range violations stay with V4 (descriptor min/max).
+CODE_MQTT_PAYLOAD_TEMPLATE_JSON = "MQTT_PAYLOAD_TEMPLATE_JSON"
+CODE_S3_UPLOAD_SOURCE_NO_BEDROCK = "S3_UPLOAD_SOURCE_NO_BEDROCK"
+CODE_BEDROCK_EXPECTED_COUNT_PATH = "BEDROCK_EXPECTED_COUNT_PATH"
+CODE_BEDROCK_INSPECTION_INPUTS = "BEDROCK_INSPECTION_INPUTS"
+CODE_BEDROCK_BUDGET_TOO_SMALL = "BEDROCK_BUDGET_TOO_SMALL"
+
 # Model-reference resolution against a registry snapshot
 # (vllm-triton-inference Requirements 6.5, 6.12): the reference names no
 # record in the snapshot, or the record's model type does not match the
@@ -312,6 +338,22 @@ TYPE_MODEL_INFERENCE = "model_inference"
 #: reference port and ``reference_payload_path`` are mutually exclusive
 #: reference sources (Requirement 3.6).
 BEDROCK_REFERENCE_PORT = "reference"
+
+#: Output node type uploading an image to S3 (bedrock-inspection-chain): the
+#: ``source`` check fires only on nodes of this type, and its frame input
+#: port is ``in``.
+TYPE_S3_UPLOAD = "s3_upload"
+S3_UPLOAD_IN_PORT = "in"
+
+#: The ``s3_upload.source`` value that uploads the captured frame (the
+#: default; needs no Bedrock feeder).
+S3_UPLOAD_SOURCE_FRAME = "frame"
+
+#: The ``bedrock_inference.answer_format`` value engaging the inspection
+#: path, and the ``mqtt_publish.payload_format`` value engaging the JSON
+#: payload mode.
+BEDROCK_ANSWER_FORMAT_INSPECTION = "inspection"
+MQTT_PAYLOAD_FORMAT_JSON = "json"
 
 #: The subscription trigger node types whose presence engages the V9
 #: mixed-activation-model rule (``digital_input`` is deliberately absent:
@@ -467,6 +509,7 @@ def validate(
     findings.extend(_check_v12_continuous_activation(graph, typed_nodes))
     findings.extend(_check_v13_analytics_config(graph, typed_nodes))
     findings.extend(_check_w3_analytics_no_detector(graph))
+    findings.extend(_check_inspection_chain(graph, typed_nodes))
     if model_registry is not None:
         findings.extend(_check_model_references(graph, typed_nodes, model_registry))
 
@@ -1147,6 +1190,14 @@ def _check_w1(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) 
                 node_id=node.id,
             ))
 
+        # An output node's result port (s3_upload.out, bedrock-inspection-chain)
+        # is optional by nature: leaving it unconnected is the normal
+        # shape, so no unused-port warning is raised for CATEGORY_OUTPUT
+        # descriptors. No output-category descriptor had an output port
+        # before, so no pre-existing finding changes.
+        if descriptor.category == CATEGORY_OUTPUT:
+            continue
+
         _, outputs = _resolved_ports(node, descriptor)
         for port_name in outputs:
             if (node.id, port_name) not in used_output_ports:
@@ -1346,6 +1397,149 @@ def _check_bedrock_inspection(graph: WorkflowGraph, typed_nodes: Dict[str, NodeT
                 "runtime".format(node.id),
                 node_id=node.id,
             ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# Built-in inspection chain checks (bedrock-inspection-chain)
+# --------------------------------------------------------------------------
+
+def _effective_values(node: Node, descriptor: NodeTypeDescriptor) -> Dict[str, Any]:
+    """Every declared parameter's V4 effective value (explicit, else the
+    descriptor default)."""
+    return {
+        parameter.name: _effective_value(node, parameter)
+        for parameter in descriptor.parameters
+    }
+
+
+def _as_int(value: Any) -> Optional[int]:
+    """``value`` as an int when it is one (bools excluded), else None —
+    type violations are V4's concern, not this check's."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _check_inspection_chain(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """The five rules of the built-in inspection chain (see the code
+    comments above): MQTT_PAYLOAD_TEMPLATE_JSON, S3_UPLOAD_SOURCE_NO_BEDROCK,
+    BEDROCK_EXPECTED_COUNT_PATH, BEDROCK_INSPECTION_INPUTS and
+    BEDROCK_BUDGET_TOO_SMALL — at most one finding per rule per node.
+
+    Every rule needs one of the new parameters off its default, so a
+    graph that sets none of them produces no finding here (the legacy
+    finding set is byte-identical). ``payload_condition`` has no layer-side
+    syntax check: its grammar lives in the executor, which fails closed.
+    """
+    nodes_by_id = {node.id: node for node in graph.nodes}
+    fed_reference_nodes = {
+        connection.target.node
+        for connection in graph.connections
+        if connection.target.port == BEDROCK_REFERENCE_PORT
+    }
+    has_trigger = any(
+        descriptor.category == CATEGORY_TRIGGER
+        for descriptor in typed_nodes.values()
+    )
+
+    findings = []
+    for node in graph.nodes:
+        descriptor = typed_nodes.get(node.id)
+        if descriptor is None:
+            continue
+
+        if node.type == TYPE_MQTT_PUBLISH:
+            values = _effective_values(node, descriptor)
+            if values.get("payload_format") == MQTT_PAYLOAD_FORMAT_JSON:
+                template = values.get("payload_template")
+                parsed = None
+                if isinstance(template, str):
+                    try:
+                        parsed = json.loads(template)
+                    except ValueError:
+                        parsed = None
+                if not isinstance(parsed, (dict, list)):
+                    findings.append(ValidationFinding(
+                        SEVERITY_ERROR,
+                        CODE_MQTT_PAYLOAD_TEMPLATE_JSON,
+                        "Node '{0}': 'payload_format' is json but "
+                        "'payload_template' is not a JSON object or array "
+                        "(write the template as JSON with placeholders "
+                        "inside string values)".format(node.id),
+                        node_id=node.id,
+                    ))
+
+        elif node.type == TYPE_S3_UPLOAD:
+            values = _effective_values(node, descriptor)
+            source = values.get("source")
+            if source not in (None, "", S3_UPLOAD_SOURCE_FRAME):
+                feeders = [
+                    connection.source.node for connection in graph.connections
+                    if connection.target.node == node.id
+                    and connection.target.port == S3_UPLOAD_IN_PORT
+                ]
+                fed_by_one_bedrock = (
+                    len(feeders) == 1
+                    and feeders[0] in nodes_by_id
+                    and nodes_by_id[feeders[0]].type == TYPE_BEDROCK_INFERENCE
+                )
+                if not fed_by_one_bedrock:
+                    findings.append(ValidationFinding(
+                        SEVERITY_ERROR,
+                        CODE_S3_UPLOAD_SOURCE_NO_BEDROCK,
+                        "Node '{0}': 'source' is {1!r} but the 'in' port is "
+                        "not fed by exactly one 'bedrock_inference' node, "
+                        "which is where that image comes from".format(
+                            node.id, source),
+                        node_id=node.id,
+                    ))
+
+        elif node.type == TYPE_BEDROCK_INFERENCE:
+            values = _effective_values(node, descriptor)
+            count_path = values.get("expected_count_path")
+            if isinstance(count_path, str) and count_path.strip() != "" \
+                    and not has_trigger:
+                findings.append(ValidationFinding(
+                    SEVERITY_WARNING,
+                    CODE_BEDROCK_EXPECTED_COUNT_PATH,
+                    "Node '{0}': 'expected_count_path' is set but the "
+                    "workflow has no trigger node, so no trigger payload "
+                    "will exist to resolve the path against at "
+                    "runtime".format(node.id),
+                    node_id=node.id,
+                ))
+
+            if values.get("answer_format") == BEDROCK_ANSWER_FORMAT_INSPECTION:
+                conflicts = []
+                if values.get("crop_detection_index") is not None:
+                    conflicts.append("'crop_detection_index' is set")
+                if node.id in fed_reference_nodes:
+                    conflicts.append("the 'reference' input port is connected")
+                if conflicts:
+                    findings.append(ValidationFinding(
+                        SEVERITY_ERROR,
+                        CODE_BEDROCK_INSPECTION_INPUTS,
+                        "Node '{0}': 'answer_format' is inspection but {1} "
+                        "— the inspection answer is a whole-frame, "
+                        "single-image check".format(
+                            node.id, " and ".join(conflicts)),
+                        node_id=node.id,
+                    ))
+
+            budget = _as_int(values.get("budget_s"))
+            attempt_timeout = _as_int(values.get("attempt_timeout_s"))
+            if budget is not None and attempt_timeout is not None \
+                    and 0 < budget < attempt_timeout:
+                findings.append(ValidationFinding(
+                    SEVERITY_WARNING,
+                    CODE_BEDROCK_BUDGET_TOO_SMALL,
+                    "Node '{0}': 'budget_s' ({1}) is smaller than "
+                    "'attempt_timeout_s' ({2}), so the first attempt would "
+                    "always overrun the budget".format(
+                        node.id, budget, attempt_timeout),
+                    node_id=node.id,
+                ))
     return findings
 
 

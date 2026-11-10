@@ -333,23 +333,21 @@
     "parameters": [
       {
         "constraints": {
-          "values": [
-            "us.amazon.nova-pro-v1:0",
-            "us.amazon.nova-lite-v1:0",
-            "qwen.qwen3-vl-235b-a22b",
-            "moonshotai.kimi-k2.5"
-          ]
+          "regex": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
         },
         "default": "us.amazon.nova-lite-v1:0",
         "depends_on": null,
-        "description": "Bedrock multimodal model invoked with the input frame and the reference image, e.g. us.amazon.nova-lite-v1:0.",
+        "description": "Bedrock multimodal model invoked with the input frame and the reference image: any Converse model id, inference profile id or ARN, e.g. us.amazon.nova-lite-v1:0.",
         "examples": [
+          "us.amazon.nova-pro-v1:0",
           "us.amazon.nova-lite-v1:0",
-          "us.amazon.nova-pro-v1:0"
+          "qwen.qwen3-vl-235b-a22b",
+          "moonshotai.kimi-k2.5",
+          "us.anthropic.claude-opus-5-5"
         ],
         "multiline": false,
         "name": "model",
-        "param_type": "enum",
+        "param_type": "string",
         "required": false
       },
       {
@@ -487,6 +485,207 @@
         "multiline": false,
         "name": "allowed_uri_prefixes",
         "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "legacy",
+            "inspection"
+          ]
+        },
+        "default": "legacy",
+        "depends_on": null,
+        "description": "legacy: the answer is governed by anomaly_mode exactly as before. inspection: the model must answer with one structured verdict object (verdict pass|fail, confidence, reason, objects[] with name, qc OK|NOK, reason and bounding_box); the executor appends that instruction instead of the anomaly one, ignores anomaly_mode and exposes the parsed answer as bedrock.{nodeId}.* metadata.",
+        "examples": [
+          "legacy",
+          "inspection"
+        ],
+        "multiline": false,
+        "name": "answer_format",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": false,
+        "depends_on": null,
+        "description": "Render prompt and system_prompt per run before the call: {identifier} / {dotted.path} placeholders resolve against the run metadata (trigger.*, image.width, image.height), {json:<dotted.path>} inserts the compact JSON of a payload value, doubled braces are literal; an unresolved placeholder fails the node before any Bedrock call. Unchecked sends the texts as-is.",
+        "examples": [
+          true,
+          false
+        ],
+        "multiline": false,
+        "name": "render_prompt",
+        "param_type": "bool",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional dotted run-metadata path resolved before the call to the minimum number of objects a pass answer must carry: a list counts its length, an integer counts itself, the result must be at least 1; anything else is an error outcome with no Bedrock call. Empty sets no minimum.",
+        "examples": [
+          "trigger.payload_json.body.order.items"
+        ],
+        "multiline": false,
+        "name": "expected_count_path",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 3,
+          "min": 1
+        },
+        "default": 1,
+        "depends_on": null,
+        "description": "Maximum Converse attempts per run (1-3); a transport failure or a malformed answer counts as one attempt. 1 is today's single call.",
+        "examples": [
+          1,
+          2
+        ],
+        "multiline": false,
+        "name": "attempts",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 120,
+          "min": 1
+        },
+        "default": 30,
+        "depends_on": null,
+        "description": "Read timeout of one attempt in seconds (1-120), e.g. 6; 30 is today's client timeout.",
+        "examples": [
+          30,
+          6
+        ],
+        "multiline": false,
+        "name": "attempt_timeout_s",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 120,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Wall-clock budget for all attempts in seconds (0-120): a further attempt starts only while at least attempt_timeout_s of the budget remains. 0 sets no budget.",
+        "examples": [
+          0,
+          11
+        ],
+        "multiline": false,
+        "name": "budget_s",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "auto",
+            "pixels",
+            "normalized_1000"
+          ]
+        },
+        "default": "auto",
+        "depends_on": null,
+        "description": "Coordinate convention of the objects[].bounding_box values in an inspection answer: pixels of the image sent, normalized_1000 (the 0-1000 grid Amazon Nova answers on), or auto = normalized_1000 for amazon.nova models and pixels otherwise.",
+        "examples": [
+          "auto",
+          "pixels",
+          "normalized_1000"
+        ],
+        "multiline": false,
+        "name": "box_scale",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "fail_run",
+            "record"
+          ]
+        },
+        "default": "fail_run",
+        "depends_on": null,
+        "description": "fail_run: a Bedrock failure fails the run and nothing downstream publishes (today). record: the failure is recorded as bedrock.{nodeId}.outcome = error and the node's downstream outputs still run.",
+        "examples": [
+          "fail_run",
+          "record"
+        ],
+        "multiline": false,
+        "name": "on_error",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "error",
+            "fail"
+          ]
+        },
+        "default": "error",
+        "depends_on": null,
+        "description": "What a recorded error exposes: error leaves verdict unset and sets bedrock.{nodeId}.error; fail exposes verdict fail with confidence 0 and the failure text as reason.",
+        "examples": [
+          "error",
+          "fail"
+        ],
+        "multiline": false,
+        "name": "error_verdict",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": true,
+        "depends_on": null,
+        "description": "Unchecked: no Bedrock call is made and the node records the error outcome 'bedrock check disabled by configuration' (an off switch for configuration overrides).",
+        "examples": [
+          true,
+          false
+        ],
+        "multiline": false,
+        "name": "enabled",
+        "param_type": "bool",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 8000,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Downscale the input image so its longer edge is at most this many pixels before sending and drawing (0-8000), e.g. 1280. 0 sends the frame unmodified.",
+        "examples": [
+          0,
+          1280
+        ],
+        "multiline": false,
+        "name": "max_image_dimension",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {},
+        "default": false,
+        "depends_on": null,
+        "description": "Draw the verdict banner and the per-object boxes on the whole input image and expose the file as bedrock.{nodeId}.annotated_image_path (implied by answer_format inspection).",
+        "examples": [
+          true,
+          false
+        ],
+        "multiline": false,
+        "name": "annotate",
+        "param_type": "bool",
         "required": false
       }
     ],
@@ -4770,6 +4969,20 @@
         "name": "priority",
         "param_type": "int",
         "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional: a message starts a run only while this rule holds for it, evaluated against trigger.topic, trigger.payload and trigger.payload_json (the parsed JSON payload), e.g. trigger.payload_json.body.stage == 'final'. A message the rule rejects or cannot evaluate is discarded. Empty activates on every message. Rule expression over the inference metadata fields is_anomalous (true/false; for object-detection models true when at least one object was detected) and confidence (number; the model's confidence score, for object detection the top detection's confidence). Supports the comparisons ==, !=, >=, <=, >, <, the logic operators && (and), || (or), ! (not), and parentheses; values are numbers (e.g. 0.8), 'quoted strings', or true/false; a bare field name is tested for truth. E.g. is_anomalous == true && confidence >= 0.8",
+        "examples": [
+          "trigger.payload_json.body.stage == 'final'",
+          "trigger.topic == 'plant/line1/evaluate'"
+        ],
+        "multiline": false,
+        "name": "payload_condition",
+        "param_type": "string",
+        "required": false
       }
     ],
     "type_id": "mqtt_subscribe"
@@ -6235,7 +6448,12 @@
         "plugin_dependencies": []
       }
     ],
-    "outputs": [],
+    "outputs": [
+      {
+        "name": "out",
+        "port_type": "InferenceMeta"
+      }
+    ],
     "parameters": [
       {
         "constraints": {
@@ -6356,6 +6574,58 @@
         ],
         "multiline": false,
         "name": "region",
+        "param_type": "string",
+        "required": false
+      },
+      {
+        "constraints": {
+          "values": [
+            "frame",
+            "input_image",
+            "annotated_image"
+          ]
+        },
+        "default": "frame",
+        "depends_on": null,
+        "description": "Which image is uploaded: frame (the captured frame, as before), input_image (the image the directly upstream bedrock_inference node sent to the model) or annotated_image (that node's drawn overlay). The last two require the node to be fed by exactly one bedrock_inference node; a missing image skips the upload.",
+        "examples": [
+          "frame",
+          "annotated_image"
+        ],
+        "multiline": false,
+        "name": "source",
+        "param_type": "enum",
+        "required": false
+      },
+      {
+        "constraints": {
+          "max": 43200,
+          "min": 0
+        },
+        "default": 0,
+        "depends_on": null,
+        "description": "Lifetime in seconds (0-43200) of a presigned GET URL generated for the uploaded s3:// object and exposed as s3_upload.{nodeId}.presigned_url, e.g. 900. 0 generates no URL.",
+        "examples": [
+          0,
+          900
+        ],
+        "multiline": false,
+        "name": "presign_get_expiry_s",
+        "param_type": "int",
+        "required": false
+      },
+      {
+        "constraints": {
+          "regex": "^[0-9]{12}$"
+        },
+        "default": null,
+        "depends_on": null,
+        "description": "Optional AWS account id (12 digits) sent as ExpectedBucketOwner with the s3:// PutObject, so an upload to a bucket owned by any other account fails instead of succeeding; empty sends no check. Ignored for https:// destinations.",
+        "examples": [
+          "123456789012"
+        ],
+        "multiline": false,
+        "name": "expected_bucket_owner",
         "param_type": "string",
         "required": false
       }

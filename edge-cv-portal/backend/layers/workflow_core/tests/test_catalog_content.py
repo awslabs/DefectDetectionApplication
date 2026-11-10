@@ -610,13 +610,19 @@ class TestBedrockInferenceNodeType:
 
     def test_bedrock_inference_parameterization(self):
         params = _params_by_name(get_node_type("bedrock_inference"))
-        assert params["model"].param_type == "enum"
-        assert set(params["model"].constraints["values"]) == {
+        # Free-form model id (bedrock-inspection-chain): the former enum of four
+        # ids became a regex-constrained string whose examples list those
+        # four plus the bake-off candidate; the default is unchanged.
+        assert params["model"].param_type == "string"
+        assert params["model"].constraints == {
+            "regex": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"}
+        assert params["model"].examples == [
             "us.amazon.nova-pro-v1:0",
             "us.amazon.nova-lite-v1:0",
             "qwen.qwen3-vl-235b-a22b",
             "moonshotai.kimi-k2.5",
-        }
+            "us.anthropic.claude-opus-5-5",
+        ]
         assert params["model"].default == "us.amazon.nova-lite-v1:0"
         assert params["prompt"].required is True
         assert params["prompt"].param_type == "string"
