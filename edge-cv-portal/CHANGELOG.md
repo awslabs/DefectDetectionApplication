@@ -4,6 +4,12 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed - Browser uploads to a single-account use case bucket (2026-11-11)
+
+**Data Management** uploads and model uploads failed in the browser with "Failed to fetch" when the use case bucket had no CORS rule for the Portal: S3 refused the browser's preflight request. Before it signs an upload URL, the Portal adds that rule itself. For a single-account use case it does so with its own Lambda role, which could read and write CORS rules only on the portal artifacts bucket, so the bucket never got the rule. The Data Management and Model Converter roles may now read and write the CORS rules of a bucket tagged `dda-portal:managed=true` with ABAC on, the buckets they already list. The rule the Portal adds allows only its CloudFront domain.
+
+- **Buckets in a UseCase Account** are unchanged: the role the Portal assumes there cannot change CORS rules, so add the rule by hand as the Administrator Guide describes (Configure S3 Bucket CORS).
+
 ### Fixed - Bedrock max tokens above the model's maximum (2026-11-11)
 
 A Bedrock request whose max tokens is above its model's maximum output is now sent again with that maximum. Bedrock refuses such a request before the model generates anything, and its refusal states the maximum: Amazon Nova Pro, for example, refuses 128000 and states 10000. With 128000 saved under Settings → Bedrock Configuration, every image of a **Bedrock:** auto-labeling job on a model with a lower maximum failed, and so did code assist, workflow generation and **Generate with AI** when such a model was configured. A request within its model's maximum is sent exactly as before, and the saved value does not change.

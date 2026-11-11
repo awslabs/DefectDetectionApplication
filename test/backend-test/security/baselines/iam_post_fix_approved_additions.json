@@ -95,6 +95,13 @@
         "statements": 3,
         "status": "Recorded with the fix on branch fix/portal-describe-job-execution; the repository owner reviews it with the PR.",
         "reviewed": "Purely additive: 3 added, 0 removed. EdgeCVPortalComputeStack: 2, iot:DescribeJobExecution on arn:aws:iot:*:*:job/* and thing/* for DevicesRole and DeploymentsRole, the two handlers that call greengrass:ListEffectiveDeployments (devices.get_device, deployments.py), which the base role already grants but which is denied without this dependent read. DDAPortalUseCaseAccountStack: 1, iot:DescribeJobExecution joins the IoTJobs Sid on DDAPortalAccessRole, so it also covers that Sid's thinggroup/* resource, a no-op for this action. One read-only action; no new wildcard account beyond the patterns these roles already use."
+      },
+      {
+        "spec": "none (fix/bucket-cors-grant: browser uploads to a single-account use case bucket failed its CORS preflight)",
+        "added_on": "2026-11-11",
+        "statements": 2,
+        "status": "Recorded with the fix on branch fix/bucket-cors-grant; the repository owner reviews it with the PR.",
+        "reviewed": "Purely additive: 2 added, 0 removed. EdgeCVPortalComputeStack: Sid UploadBucketCors, s3:GetBucketCors and s3:PutBucketCors on arn:aws:s3:::* conditioned on StringEquals aws:ResourceTag/dda-portal:managed = true, for DataManagementRole and ModelConverterRole, the two handlers that sign browser PUT URLs into a use case bucket (data_management upload URLs, model_converter POST /models/upload-url). Before signing, s3_cors.ensure_bucket_cors reads the bucket's CORS rules and adds one for the portal origin; a single-account use case reaches its buckets with these roles, whose factory grants both actions on the portal artifacts bucket only, so the read was denied and the bucket kept no CORS rule. The resources and condition are the roles' bucket-level data-plane scope (dataPlaneGrant). No object action, no other bucket configuration action, no new iam:PassRole or sts:AssumeRole."
       }
     ]
   },
@@ -178,7 +185,9 @@
         "{\"Action\": [\"iam:GetRolePolicy\", \"iam:PutRolePolicy\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:iam::\", {\"Ref\": \"AWS::AccountId\"}, \":role/GreengrassV2TokenExchangeRole\"]]}, \"Sid\": \"DeviceRoleInlinePolicyGrants\"}",
         "{\"Action\": [\"iam:GetRolePolicy\", \"iam:PutRolePolicy\"], \"Effect\": \"Allow\", \"Resource\": {\"Fn::Join\": [\"\", [\"arn:aws:iam::\", {\"Ref\": \"AWS::AccountId\"}, \":role/GreengrassV2TokenExchangeRole\"]]}, \"Sid\": \"DeviceRoleInlinePolicyGrants\"}",
         "{\"Action\": \"iot:DescribeJobExecution\", \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:iot:*:*:job/*\", \"arn:aws:iot:*:*:thing/*\"]}",
-        "{\"Action\": \"iot:DescribeJobExecution\", \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:iot:*:*:job/*\", \"arn:aws:iot:*:*:thing/*\"]}"
+        "{\"Action\": \"iot:DescribeJobExecution\", \"Effect\": \"Allow\", \"Resource\": [\"arn:aws:iot:*:*:job/*\", \"arn:aws:iot:*:*:thing/*\"]}",
+        "{\"Action\": [\"s3:GetBucketCors\", \"s3:PutBucketCors\"], \"Condition\": {\"StringEquals\": {\"aws:ResourceTag/dda-portal:managed\": \"true\"}}, \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*\", \"Sid\": \"UploadBucketCors\"}",
+        "{\"Action\": [\"s3:GetBucketCors\", \"s3:PutBucketCors\"], \"Condition\": {\"StringEquals\": {\"aws:ResourceTag/dda-portal:managed\": \"true\"}}, \"Effect\": \"Allow\", \"Resource\": \"arn:aws:s3:::*\", \"Sid\": \"UploadBucketCors\"}"
       ]
     },
     "DDAPortalUseCaseAccountStack": {
