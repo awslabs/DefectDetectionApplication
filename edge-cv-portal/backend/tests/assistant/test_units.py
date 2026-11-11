@@ -320,6 +320,24 @@ def test_stream_resends_without_a_refused_sampling_option():
     assert accepting.requests == [request]
 
 
+def test_stream_lowers_max_tokens_above_the_model_limit():
+    """The turn's 6000 to a model whose maximum is 2048 (Llama 3 70B
+    Instruct): Bedrock's refusal states the limit and the request is sent
+    again with it; everything else is the same request."""
+    refusal = client_error('ValidationException', 'The maximum tokens you requested exceeds '
+                           'the model limit of 2048. Try again with a maximum tokens value '
+                           'that is lower than 2048.')
+    request = {'modelId': 'meta.llama3-70b-instruct-v1:0', 'system': [{'text': 'S1'}],
+               'messages': [{'role': 'user', 'content': [{'text': 'hi'}]}],
+               'inferenceConfig': {'maxTokens': 6000}}
+    limited = FakeBedrock([refusal, text_events('Hello')])
+    response = bedrock.stream(limited, request)
+    assert response.text == 'Hello'
+    assert [r['inferenceConfig'] for r in limited.requests] == [
+        {'maxTokens': 6000}, {'maxTokens': 2048}]
+    assert limited.requests[1] == dict(request, inferenceConfig={'maxTokens': 2048})
+
+
 def test_cache_point_support_and_request_assembly(monkeypatch):
     assert bedrock.supports_cache_points('us.anthropic.claude-sonnet-4-5-20250929-v1:0')
     assert bedrock.supports_cache_points('anthropic.claude-3-7-sonnet-20250219-v1:0')

@@ -748,7 +748,8 @@ def generate_code(contract: str, system_prompt: str, user_message: str,
     the clamped configured timeout and retries are disabled, so the
     request the model answers cannot exceed it (Requirement 4.4). A model
     that refuses the forced tool choice, or a configured temperature or
-    top_p, is sent the request again without it
+    top_p, is sent the request again without it, and a maxTokens above
+    the model's maximum is sent again as that maximum
     (bedrock_common.send_dropping_refused_options); a refusal comes back
     before the model generates anything. Success returns
     {code, notes, model_id, contract} and persists nothing (2.7, 6.4).

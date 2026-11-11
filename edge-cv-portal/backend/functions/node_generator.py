@@ -102,7 +102,8 @@ from workflow_core.scaffold import (
 # generator (workflow_generator.py lives in the same Lambda bundle):
 # settings-table configuration, timeout clamped <= 240 s, cached client
 # with a client-side read timeout and no retries (Requirement 2.7), and
-# the resend without an option the model refuses.
+# the resend without an option the model refuses or with the model's
+# maximum in place of a larger maxTokens.
 from workflow_generator import (
     get_bedrock_client,
     get_bedrock_configuration,
@@ -531,7 +532,9 @@ def invoke_generation(config: Dict, system_prompt: str, messages: List[Dict],
     try:
         # A model that refuses the forced tool choice, the temperature or
         # top_p is sent the request again without it (the tool stays
-        # offered); a model that accepts them gets this request unchanged.
+        # offered), and a maxTokens above the model's maximum is sent
+        # again as that maximum; a model that accepts this request gets
+        # it unchanged.
         response = send_dropping_refused_options(client.converse, dict(
             modelId=config['model_id'],
             system=[{'text': system_prompt}],

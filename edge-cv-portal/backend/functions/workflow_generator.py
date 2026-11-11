@@ -455,7 +455,9 @@ def invoke_generation(config: Dict, messages: List[Dict],
     try:
         # A model that refuses the forced tool choice, the temperature or
         # top_p is sent the request again without it (the tool stays
-        # offered); a model that accepts them gets this request unchanged.
+        # offered), and a maxTokens above the model's maximum is sent
+        # again as that maximum; a model that accepts this request gets
+        # it unchanged.
         response = send_dropping_refused_options(client.converse, dict(
             modelId=config['model_id'],
             system=[{'text': build_system_prompt(catalog)}],

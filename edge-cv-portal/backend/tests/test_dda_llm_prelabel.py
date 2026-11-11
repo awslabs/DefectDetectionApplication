@@ -929,3 +929,32 @@ class TestRefusedSamplingOption:
 
         assert [call["inferenceConfig"] for call in client.calls] == [
             {"maxTokens": 20000, "topP": 0.9}]
+
+
+# ------------------------------- a token budget above the model's maximum
+
+# Bedrock's refusal of a maxTokens above Amazon Nova Pro's maximum output.
+MAX_TOKENS_REFUSAL = ('The maximum tokens you requested exceeds the model '
+                      'limit of 10000. Try again with a maximum tokens value '
+                      'that is lower than 10000.')
+
+
+class TestTokenBudgetAboveModelLimit:
+    """llm-model-token-and-image-sizing Req 9.4, 9.7: the family keeps its
+    budget. A budget above the model's maximum is not lowered: the image
+    fails with the refusal, which states the model's limit, after one
+    request."""
+
+    def test_refused_budget_fails_the_image_with_the_stated_limit(
+            self, prelabel, monkeypatch):
+        error = client_error("ValidationException", MAX_TOKENS_REFUSAL)
+        client = RecordingConverseClient(error=error)
+        bind_client(prelabel, monkeypatch, client)
+
+        with pytest.raises(prelabel.LlmPrelabelError) as excinfo:
+            invoke(prelabel, token_budget_selection=128000)
+
+        assert excinfo.value.category == prelabel.CATEGORY_MODEL_ERROR
+        assert excinfo.value.reason == f"model error: {error}"
+        assert [call["inferenceConfig"]["maxTokens"]
+                for call in client.calls] == [128000]
