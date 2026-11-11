@@ -51,8 +51,8 @@ from dda_llm_request import (
     MODEL_TOKEN_LIMIT_DEFAULT, MODEL_TOKEN_LIMIT_CEILING,
 )
 # The default max_tokens per model (bedrock_common is in the same Lambda
-# bundle), so the settings API shows and stores the default the Bedrock
-# callers use.
+# bundle), so the settings API shows the default the Bedrock callers use
+# and leaves an unchanged default unstored.
 from bedrock_common import default_max_tokens
 
 logger = logging.getLogger()
@@ -746,8 +746,10 @@ def update_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
     configuration, the merged result is validated, and the complete
     value is written in the exact shape workflow_generator.py reads:
         {setting_key: 'bedrock_configuration', value: {...}}
-    With no max_tokens stored and none provided, the written max_tokens is
-    the default of the merged model_id.
+    With no max_tokens stored, a max_tokens that is not provided or equals
+    the default of the merged model_id is written as null, so it stays
+    unstored and each request keeps the default of its own model; the
+    response carries that default.
     """
     try:
         if not SETTINGS_TABLE:
@@ -782,10 +784,20 @@ def update_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
         value['model_id'] = value['model_id'].strip()
         value['region'] = value['region'].strip()
 
+        # With no max_tokens stored, the model's default (the settings
+        # form's unchanged value, or none provided) stays unstored, so each
+        # request keeps the default of the model it goes to: a `bedrock:`
+        # labeling job on another model does not get this model's maximum.
+        # The response still carries the number the form shows.
+        stored_value = dict(value)
+        if (not max_tokens_stored
+                and value['max_tokens'] == default_max_tokens(value['model_id'])):
+            stored_value['max_tokens'] = None
+
         timestamp = int(datetime.utcnow().timestamp() * 1000)
         dynamodb.Table(SETTINGS_TABLE).put_item(Item={
             'setting_key': BEDROCK_CONFIG_SETTING_KEY,
-            'value': _native_to_dynamo(value),
+            'value': _native_to_dynamo(stored_value),
             'updated_at': timestamp,
             'updated_by': user['user_id'],
         })
@@ -796,7 +808,7 @@ def update_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
             resource_type='setting',
             resource_id=BEDROCK_CONFIG_SETTING_KEY,
             result='success',
-            details=_native_to_dynamo(value),
+            details=_native_to_dynamo(stored_value),
         )
 
         return create_response(200, {

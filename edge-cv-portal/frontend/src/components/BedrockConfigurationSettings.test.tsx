@@ -7,7 +7,8 @@
  * free-text fallback when the model list is unavailable). Max tokens shows
  * the selected model's default until the admin enters another value; when
  * the form lacks a model's default, a model change saved with max tokens
- * unchanged leaves max_tokens out, and the form shows the stored values.
+ * unchanged leaves max_tokens out, and the form shows the configuration
+ * the save returns.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -343,7 +344,7 @@ describe('BedrockConfigurationSettings', () => {
 
     // The form lacks a default for a typed model id, and for a loaded model
     // the list does not include. A model change saved with max tokens
-    // unchanged then leaves max_tokens out, so the backend stores the new
+    // unchanged then leaves max_tokens out, so the backend applies the new
     // model's default (here 4096) instead of Claude Opus 5.5's 128000.
     async function saveAndExpectMaxTokensLeftOut(modelId: string) {
       updateBedrockConfiguration.mockResolvedValue({

@@ -13,9 +13,10 @@
  * model list); a value the admin entered is kept. When the form lacks the
  * previous or the new model's default (a typed model id, or a model
  * missing from the list), a model change saved with max tokens unchanged
- * leaves max_tokens out of the save, so the backend stores the new
+ * leaves max_tokens out of the save, so the backend applies the new
  * model's default when none is stored and keeps a stored max tokens
- * otherwise. After a save the form shows the stored values.
+ * otherwise. After a save the form shows the configuration the save
+ * returns.
  */
 import { useEffect, useState } from 'react';
 import {
@@ -121,7 +122,7 @@ function maxTokensForModelChange(maxTokens: string, previousDefault?: number, ne
 // Whether a save leaves max_tokens out: the model changed, max tokens
 // still holds the loaded value, and the form lacks the loaded or the new
 // model's default, so it cannot tell whether that value fits the new
-// model. The backend then stores the new model's default when no max
+// model. The backend then applies the new model's default when no max
 // tokens is stored, and keeps a stored one.
 function leavesMaxTokensOut(
   modelId: string,
@@ -248,8 +249,8 @@ export default function BedrockConfigurationSettings() {
         top_p: form.top_p.trim() === '' ? null : Number(form.top_p),
         timeout_seconds: Number(form.timeout_seconds),
       });
-      // Show what was stored: with max_tokens left out, the stored max
-      // tokens can differ from the form's.
+      // Show the configuration the save returns: with max_tokens left
+      // out, its max tokens can differ from the form's.
       setLoadedConfig(response.bedrock_configuration);
       setForm(formFromConfiguration(response.bedrock_configuration));
       setSuccess('Bedrock configuration saved');

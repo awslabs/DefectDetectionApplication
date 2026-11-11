@@ -713,9 +713,10 @@ def test_partial_put_merges_over_effective_values_with_no_ceiling(
     fields over the current effective configuration, validates the merged
     whole with the pre-feature rules, leaves every omitted field at its
     current effective value (an unstored max_tokens is the persisted
-    model's default instead), applies no ceiling to max_tokens (values
-    above 128000 persist and resolve unclamped), and persists nothing when
-    the merged result is invalid (Requirements 4.5, 4.6)."""
+    model's default instead, and stays unstored while it equals that
+    default), applies no ceiling to max_tokens (values above 128000
+    persist and resolve unclamped), and persists nothing when the merged
+    result is invalid (Requirements 4.5, 4.6)."""
     env = preservation_env
     shape, stored = case
     apply_store_state(env, shape, stored)
@@ -769,6 +770,18 @@ def test_partial_put_merges_over_effective_values_with_no_ceiling(
     if default_follows_model:
         assert body["bedrock_configuration"]["max_tokens"] == \
             pinned_default_max_tokens(expected_persisted["model_id"])
+
+    # With no max_tokens stored, a merged max_tokens equal to the persisted
+    # model's default is persisted as null (it stays unstored, so each
+    # request keeps its own model's default); any other value, and every
+    # value over a stored max_tokens, is persisted as merged.
+    persisted_max_tokens = raw_config_item(env)["value"]["max_tokens"]
+    if (not max_tokens_stored(native_stored(stored))
+            and expected_persisted["max_tokens"] == pinned_default_max_tokens(
+                expected_persisted["model_id"])):
+        assert persisted_max_tokens is None
+    else:
+        assert persisted_max_tokens == expected_persisted["max_tokens"]
 
     # No ceiling applied to any field: the persisted value resolves back
     # exactly — max_tokens above 128000 included (Req 4.5).
