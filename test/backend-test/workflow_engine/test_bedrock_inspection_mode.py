@@ -4,10 +4,12 @@
 Covers ``render_prompt_text``, the expected-count rule, ``box_scale``,
 the metadata key set on the pass/fail/error paths, ``on_error``,
 ``error_verdict``, ``enabled: false``, ``max_image_dimension``, the OK/NOK
-overlay, and the Bedrock-branch regressions (``work_dir`` forwarding; a
-recorded error still running the branch's outputs). Fake invoker,
+overlay, ``annotate: true`` on a legacy-format node, and the Bedrock-branch
+regressions (``work_dir`` forwarding; a recorded error still running the
+branch's outputs). Fake invoker,
 uploader and publisher; a real JPEG fixture; no network, no AWS.
 """
+import dataclasses
 import json
 import os
 
@@ -677,6 +679,113 @@ class TestMaxImageDimension:
         assert invoker.calls == []
         assert entry["outcome"] == "error"
         assert entry["error"].startswith("could not decode the captured 'in' frame")
+
+    def test_unwritable_sibling_artifact_leaves_input_image_path_unset(
+            self, tmp_path):
+        """When the downscaled bytes could not be persisted, no file holds
+        what was sent: ``input_image_path`` is absent (an ``s3_upload`` with
+        ``source: input_image`` then skips) instead of naming the
+        full-resolution capture, while ``input_width``/``input_height``
+        still describe the bytes sent (code review finding 2)."""
+        write_frame(tmp_path, width=1280, height=720)
+        context, _ = make_context(tmp_path)
+        context = dataclasses.replace(
+            context, output_dir=os.path.join(str(tmp_path), "missing-dir"))
+        invoker = ScriptedInvoker(answer())
+        entry = entry_of(run(
+            invoker, make_binding(max_image_dimension=640), tmp_path, context))
+        assert entry["outcome"] == "pass"
+        assert "input_image_path" not in entry
+        assert (entry["input_width"], entry["input_height"]) == (640, 360)
+        assert "annotated_image_path" not in entry
+        assert not os.path.exists(
+            os.path.join(str(tmp_path), "cap-1.node.check.input.jpg"))
+
+
+# ---------------------------------------------------------------------------
+# annotate: true on a legacy-format node (§3.6; code review finding 1): the
+# overlay on the whole frame sent, the banner only in anomaly mode, the
+# path exposed; annotate off keeps the legacy whole-frame path unchanged
+# ---------------------------------------------------------------------------
+
+def legacy_answer(is_anomalous=False, objects=None):
+    body = {"is_anomalous": is_anomalous, "confidence": 0.8}
+    if objects is not None:
+        body["objects"] = objects
+    return json.dumps(body)
+
+
+def legacy_binding(**parameters):
+    params = {"answer_format": "legacy"}
+    params.update(parameters)
+    return make_binding(**params)
+
+
+class TestLegacyAnnotate:
+    ANNOTATED = "cap-1.node.check.annotated.jpg"
+    BOX = (150, 70, 230, 110)
+
+    # BGR channel index of the colour the verdict paints (green 1, red 2).
+    @pytest.mark.parametrize("is_anomalous, qc, on, off", [
+        (False, "OK", 1, 2), (True, "NOK", 2, 1)], ids=["pass", "fail"])
+    def test_anomaly_mode_draws_boxes_and_banner_on_the_whole_frame(
+            self, tmp_path, is_anomalous, qc, on, off):
+        write_frame(tmp_path, width=240, height=120)
+        context, _ = make_context(tmp_path)
+        invoker = ScriptedInvoker(legacy_answer(
+            is_anomalous, objects=[obj(qc=qc, box=self.BOX)]))
+        metadata = run(invoker, legacy_binding(annotate=True), tmp_path, context)
+        entry = entry_of(metadata)
+        path = os.path.join(str(tmp_path), self.ANNOTATED)
+        assert entry["annotated_image_path"] == path
+        assert set(entry) == {
+            "text", "is_anomalous", "confidence", "annotated_image_path"}
+        assert metadata["is_anomalous"] is is_anomalous
+        frame = cv2.imread(path)
+        assert frame.shape[:2] == (120, 240)  # the whole frame, not a crop
+        band = frame[8:56, 18:140]  # the banner's text band
+        assert band[:, :, on].max() > 150 and band[:, :, off].max() < 100
+        assert frame[66:74, 150:230, on].max() > 150  # the box's top edge
+
+    def test_freeform_mode_draws_boxes_only_without_a_banner(self, tmp_path):
+        write_frame(tmp_path, width=240, height=120)
+        context, _ = make_context(tmp_path)
+        invoker = ScriptedInvoker(json.dumps(
+            {"notes": "x", "objects": [obj(qc="NOK", box=self.BOX)]}))
+        metadata = run(invoker, legacy_binding(annotate=True, anomaly_mode=False),
+                       tmp_path, context)
+        entry = entry_of(metadata)
+        assert set(entry) == {"text", "annotated_image_path"}
+        assert "is_anomalous" not in metadata
+        frame = cv2.imread(entry["annotated_image_path"])
+        assert frame.shape[:2] == (120, 240)
+        assert frame[66:74, 150:230, 2].max() > 150  # the NOK box
+        # No banner: the text band left of the box's label stays unpainted.
+        assert frame[0:60, 0:140, 1:].max() < 40
+
+    def test_answer_without_objects_still_writes_the_frame(self, tmp_path):
+        write_frame(tmp_path, width=240, height=120)
+        context, _ = make_context(tmp_path)
+        invoker = ScriptedInvoker(legacy_answer(True))
+        entry = entry_of(run(
+            invoker, legacy_binding(annotate=True), tmp_path, context))
+        frame = cv2.imread(entry["annotated_image_path"])
+        assert frame.shape[:2] == (120, 240)
+        assert frame[8:56, 18:140, 2].max() > 150  # the NOK banner
+        assert frame[60:, :, 1:].max() < 40  # and no boxes
+
+    @pytest.mark.parametrize("parameters", [{}, {"annotate": False}],
+                             ids=["absent", "false"])
+    def test_annotate_off_keeps_the_legacy_whole_frame_path_unchanged(
+            self, tmp_path, parameters):
+        write_frame(tmp_path, width=240, height=120)
+        context, _ = make_context(tmp_path)
+        invoker = ScriptedInvoker(legacy_answer(
+            True, objects=[obj(qc="NOK", box=self.BOX)]))
+        metadata = run(invoker, legacy_binding(**parameters), tmp_path, context)
+        assert set(entry_of(metadata)) == {"text", "is_anomalous", "confidence"}
+        assert metadata["is_anomalous"] is True
+        assert not os.path.exists(os.path.join(str(tmp_path), self.ANNOTATED))
 
 
 # ---------------------------------------------------------------------------

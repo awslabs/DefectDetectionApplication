@@ -3045,6 +3045,25 @@ class BedrockInferenceProcessor:
                 "bedrock_text": answer,
                 "bedrock": {node_id: nested_entry},
             }
+        # bedrock-inspection-chain ``annotate: true`` on a legacy-format
+        # node (design §3.6; default false → the crop-only behaviour
+        # below, byte-identical): the overlay is drawn on the whole image
+        # sent — the answer's ``objects`` boxes (none when the answer
+        # carries no list) and, in anomaly mode, the OK/NOK verdict
+        # banner — and its path is exposed as
+        # ``bedrock.<nodeId>.annotated_image_path`` (what an ``s3_upload``
+        # with ``source: annotated_image`` takes). Freeform mode has no
+        # verdict: boxes only, no banner.
+        if _bool_parameter(parameters.get("annotate"), False):
+            objects = extract_defect_objects(answer or "")
+            annotated_path = self._persist_annotated_frame(
+                run_context, node_id, input_image, answer,
+                objects=objects if objects is not None else [],
+                verdict=(("fail" if result["is_anomalous"] else "pass")
+                         if anomaly_mode else None))
+            if annotated_path is not None:
+                nested_entry["annotated_image_path"] = annotated_path
+            return result
         # ADDITIVE (imts-triple-inspection-hmi Requirements 4.4, 4.12):
         # the Inspection's Annotated_Image, drawn from the answer's
         # Defect_Objects onto a copy of the crop. Runs AFTER the existing
@@ -3132,10 +3151,14 @@ class BedrockInferenceProcessor:
                     "could not decode the captured 'in' frame from {0} for "
                     "downscaling: {1}".format(path, error))
             if sent_image is not input_image:
-                written = self._persist_input_frame(
+                # The sibling artifact is the only file holding the bytes
+                # actually sent: when it could not be written (logged by
+                # _persist_input_frame) ``input_image_path`` stays unset —
+                # an ``s3_upload`` with ``source: input_image`` then skips
+                # — instead of naming the full-resolution capture beside
+                # the downscaled ``input_width``/``input_height``.
+                input_path = self._persist_input_frame(
                     run_context, node_id, sent_image)
-                if written is not None:
-                    input_path = written
         else:
             sent_image = input_image
         dimensions = image_dimensions(sent_image)
@@ -3144,7 +3167,8 @@ class BedrockInferenceProcessor:
                 "could not decode the captured 'in' frame from {0}".format(
                     path))
         width, height = dimensions
-        entry["input_image_path"] = input_path
+        if input_path is not None:
+            entry["input_image_path"] = input_path
         entry["input_width"] = width
         entry["input_height"] = height
         return self._run_inspection_call(
