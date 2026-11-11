@@ -989,13 +989,17 @@ class TestGenerationJobStatus:
 
 
 # ===========================================================================
-# 7. A model that refuses a request option (Claude Opus 5.5)
+# 7. A model that refuses a request option (Claude Opus 5.5), or a
+#    maxTokens above its maximum (Amazon Nova Pro)
 # ===========================================================================
 
 TOOL_CHOICE_REFUSAL = ('The model returned the following errors: tool_choice: '
                        'type "tool" and "any" are not supported for this model.')
 TEMPERATURE_REFUSAL = ('The model returned the following errors: `temperature` '
                        'is deprecated for this model.')
+MAX_TOKENS_REFUSAL = ('The maximum tokens you requested exceeds the model limit '
+                      'of 10000. Try again with a maximum tokens value that is '
+                      'lower than 10000.')
 
 
 def validation_error(message):
@@ -1055,3 +1059,48 @@ class TestRefusedRequestOptions:
         assert ["toolChoice" in r["toolConfig"] for r in requests] == [
             True, False, True, False]
         assert len(requests[3]["messages"]) == len(requests[1]["messages"]) + 1
+
+    def test_max_tokens_above_the_model_limit_is_sent_again_with_the_limit(
+            self, gen_env, bedrock, ctx):
+        """128000 saved, Amazon Nova Pro configured (maximum 10000): the
+        refused request is sent again with 10000, forced tool and all."""
+        put_bedrock_config(gen_env, model_id="us.amazon.nova-pro-v1:0",
+                           max_tokens=128000)
+        bedrock.client.converse.side_effect = [
+            validation_error(MAX_TOKENS_REFUSAL),
+            converse_tool_response(VALID_DEFINITION),
+        ]
+
+        status, payload = generate(gen_env, ctx, "Camera to capture")
+
+        assert status == 200
+        assert payload["validation_passed"] is True
+        first, second = [call.kwargs
+                         for call in bedrock.client.converse.call_args_list]
+        assert [first["inferenceConfig"], second["inferenceConfig"]] == [
+            {"maxTokens": 128000}, {"maxTokens": 10000}]
+        assert first["toolConfig"]["toolChoice"] == {
+            "tool": {"name": TOOL_NAME}}
+        assert ({k: v for k, v in second.items() if k != "inferenceConfig"}
+                == {k: v for k, v in first.items() if k != "inferenceConfig"})
+
+    def test_repair_pass_is_lowered_again(self, gen_env, bedrock, ctx):
+        """Nothing is remembered between requests: the Repair_Pass sends
+        the saved 128000 again and is lowered again."""
+        put_bedrock_config(gen_env, model_id="us.amazon.nova-pro-v1:0",
+                           max_tokens=128000)
+        bedrock.client.converse.side_effect = [
+            validation_error(MAX_TOKENS_REFUSAL),
+            converse_tool_response(REPAIRABLE_DEFINITION),
+            validation_error(MAX_TOKENS_REFUSAL),
+            converse_tool_response(VALID_DEFINITION),
+        ]
+
+        status, payload = generate(gen_env, ctx, "Camera to capture")
+
+        assert status == 200
+        assert payload["gate"]["repaired"] is True
+        requests = [call.kwargs
+                    for call in bedrock.client.converse.call_args_list]
+        assert [r["inferenceConfig"]["maxTokens"] for r in requests] == [
+            128000, 10000, 128000, 10000]

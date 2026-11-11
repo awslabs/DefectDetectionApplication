@@ -282,7 +282,10 @@ def generate_llm_prelabel(*, model_identifier: str, modality: str,
     answers that refusal before the model generates anything, and the
     request is sent once more without the refused option
     (`bedrock_common.send_dropping_refused_options`). A model that
-    accepts them gets exactly one request.
+    accepts them gets exactly one request. A token budget above the
+    model's maximum output is not lowered: Bedrock's refusal, which
+    states the model's limit, is the image's model error
+    (llm-model-token-and-image-sizing Req 9.4, 9.7).
 
     Only image bytes and derived prompt text reach the model — no
     dataset credentials and no portal secrets (Req 3.4).
@@ -394,11 +397,14 @@ def generate_llm_prelabel(*, model_identifier: str, modality: str,
     inference_config['maxTokens'] = resolve_token_budget(
         model_identifier, token_budget_selection, model_token_limits)
     try:
+        # A budget above the model's maximum is not lowered: the refusal
+        # states the model's limit and fails the image
+        # (llm-model-token-and-image-sizing Req 9.4, 9.7).
         response = send_dropping_refused_options(client.converse, dict(
             modelId=model_identifier,
             messages=request['messages'],
             inferenceConfig=inference_config,
-        ))
+        ), lower_max_tokens=False)
     except (ReadTimeoutError, ConnectTimeoutError) as exc:
         # Req 3.10, 9.2: timeout is distinguishable from a model error.
         raise LlmPrelabelError(

@@ -1069,3 +1069,83 @@ class TestBedrockRefusedSamplingOption:
             {"maxTokens": 4096, "temperature": 0.2}, {"maxTokens": 4096}]
         assert fake.calls[1]["modelId"] == "global.anthropic.claude-opus-5-5"
         assert fake.calls[1]["messages"] == fake.calls[0]["messages"]
+
+
+# ---------------------------- a max tokens above the job's model's maximum
+
+def max_tokens_refusal(limit):
+    """Bedrock's refusal of a maxTokens above the model's maximum output
+    (Amazon Nova Pro's answer to 128000 states 10000)."""
+    return (f"The maximum tokens you requested exceeds the model limit of "
+            f"{limit}. Try again with a maximum tokens value that is lower "
+            f"than {limit}.")
+
+
+class MaxTokensLimitClient(FakeBedrockClient):
+    """A model whose maximum output is ``limit``: refuses a larger
+    maxTokens as Bedrock does, and answers the others like
+    FakeBedrockClient."""
+
+    def __init__(self, limit, replies=None):
+        super().__init__(replies=replies)
+        self.limit = limit
+
+    def converse(self, **kwargs):
+        if kwargs["inferenceConfig"]["maxTokens"] > self.limit:
+            self.calls.append(kwargs)
+            raise ClientError({"Error": {"Code": "ValidationException",
+                                         "Message": max_tokens_refusal(self.limit)}},
+                              "Converse")
+        return super().converse(**kwargs)
+
+
+class TestBedrockMaxTokensAboveModelMaximum:
+    """The saved configuration of a Portal that stores Claude Opus 5.5
+    with 128000: a `bedrock:` job on a model with a lower maximum (Amazon
+    Nova Pro, 10000) has each image's request sent again with that
+    maximum; a job on Opus 5.5 sends the one request as stored."""
+
+    STORED = {"setting_key": "bedrock_configuration",
+              "value": {"model_id": "global.anthropic.claude-opus-5-5",
+                        "region": REGION, "max_tokens": 128000,
+                        "temperature": None, "top_p": None,
+                        "timeout_seconds": 240}}
+
+    def _label(self, env, model_id, limit):
+        # The settings read of the worker's own get_bedrock_configuration.
+        settings = env.worker.get_bedrock_configuration.__globals__
+        env.monkeypatch.setitem(settings, "SETTINGS_TABLE", "test-settings")
+        env.monkeypatch.setitem(settings, "dynamodb",
+                                _StubSettingsResource(self.STORED))
+        fake = MaxTokensLimitClient(limit, replies=['{"label": "anomaly"}'])
+        env.monkeypatch.setattr(env.worker, "get_bedrock_client",
+                                lambda region, timeout_seconds: fake)
+        model = f"bedrock:{model_id}"
+        job_id = env.make_job(task_type="Classification", model=model)
+        image_uri = env.put_image(f"imgs/{uuid.uuid4()}.png")
+        task_id = env.make_task(job_id, image_uri)
+
+        result = env.run([env.record(job_id, task_id, image_uri,
+                                     "Classification", ["normal", "anomaly"],
+                                     model)])
+
+        assert result == {"batchItemFailures": []}
+        assert env.get_task(job_id, task_id)["prelabel_status"] == "Available"
+        assert env.prelabel_json(job_id, task_id) == {
+            "modality": "Classification", "label": "anomaly"}
+        assert [call["modelId"] for call in fake.calls] == [model_id] * len(fake.calls)
+        return fake.calls
+
+    def test_nova_pro_job_with_128000_saved_is_sent_again_with_10000(self, env):
+        calls = self._label(env, "us.amazon.nova-pro-v1:0", 10000)
+
+        assert [call["inferenceConfig"] for call in calls] == [
+            {"maxTokens": 128000}, {"maxTokens": 10000}]
+        assert ({k: v for k, v in calls[1].items() if k != "inferenceConfig"}
+                == {k: v for k, v in calls[0].items() if k != "inferenceConfig"})
+
+    def test_opus_job_with_128000_saved_is_sent_once_as_stored(self, env):
+        calls = self._label(env, "global.anthropic.claude-opus-5-5", 128000)
+
+        assert [call["inferenceConfig"] for call in calls] == [
+            {"maxTokens": 128000}]

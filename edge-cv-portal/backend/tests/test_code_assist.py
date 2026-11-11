@@ -492,13 +492,17 @@ class TestHappyPath:
 
 
 # ===========================================================================
-# 6. A model that refuses a request option (Claude Opus 5.5)
+# 6. A model that refuses a request option (Claude Opus 5.5), or a
+#    maxTokens above its maximum (Amazon Nova Pro)
 # ===========================================================================
 
 TOOL_CHOICE_REFUSAL = ('The model returned the following errors: tool_choice: '
                        'type "tool" and "any" are not supported for this model.')
 TEMPERATURE_REFUSAL = ('The model returned the following errors: `temperature` '
                        'is deprecated for this model.')
+MAX_TOKENS_REFUSAL = ('The maximum tokens you requested exceeds the model limit '
+                      'of 10000. Try again with a maximum tokens value that is '
+                      'lower than 10000.')
 
 
 def validation_error(message):
@@ -555,3 +559,28 @@ class TestRefusedRequestOptions:
             "tool": {"name": TOOL_NAME}}
         assert kwargs["inferenceConfig"] == {"maxTokens": 128000,
                                              "temperature": 0.2}
+
+    def test_max_tokens_above_the_model_limit_is_sent_again_with_the_limit(
+            self, ca, bedrock, ctx):
+        """128000 saved, Amazon Nova Pro configured (maximum 10000): the
+        refused request is sent again with 10000, and the code is used."""
+        put_bedrock_config(ca, model_id="us.amazon.nova-pro-v1:0",
+                           max_tokens=128000)
+        bedrock.client.converse.side_effect = [
+            validation_error(MAX_TOKENS_REFUSAL),
+            tool_response(VALID_CODE),
+        ]
+
+        status, payload = post_code_assist(ca, ctx.user,
+                                           request_body(ctx.usecase_id))
+
+        assert status == 200
+        assert payload["code"] == VALID_CODE
+        first, second = [
+            call.kwargs for call in bedrock.client.converse.call_args_list]
+        assert [first["inferenceConfig"], second["inferenceConfig"]] == [
+            {"maxTokens": 128000}, {"maxTokens": 10000}]
+        assert first["toolConfig"]["toolChoice"] == {
+            "tool": {"name": TOOL_NAME}}
+        assert ({k: v for k, v in second.items() if k != "inferenceConfig"}
+                == {k: v for k, v in first.items() if k != "inferenceConfig"})

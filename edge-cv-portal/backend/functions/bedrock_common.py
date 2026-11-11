@@ -16,14 +16,18 @@ feature (workflow generation, custom node code assist) reads the same
   to [1, 240] seconds.
 - bedrock-runtime clients are cached per (region, timeout) with a
   client-side read timeout equal to the configured invocation timeout
-  and retries disabled, so total wall time cannot exceed the timeout.
+  and retries disabled, so a request's wall time cannot exceed the
+  timeout.
 - build_inference_config emits maxTokens plus at most ONE sampling
   parameter: temperature when set, else topP when set (recent Anthropic
   models reject requests specifying both).
 - send_dropping_refused_options sends a Converse request and, when the
   model refuses a forced tool choice, a temperature or a topP, sends it
-  again without the refused option; a model that accepts them gets the
-  request unchanged.
+  again without the refused option. When the model refuses a maxTokens
+  above its maximum output, it sends the request again once, with the
+  maximum that Bedrock's refusal states (lower_max_tokens=False leaves
+  that refusal to the caller). A model that accepts the request gets it
+  unchanged.
 
 This module lives in the same Lambda bundle as its consumers
 (backend/functions is one code asset), so they import it directly.
@@ -195,8 +199,8 @@ def get_bedrock_client(region: str, timeout_seconds: int):
     """
     bedrock-runtime client with a client-side read timeout equal to the
     configured invocation timeout (the Lambda invokes with a client-side
-    timeout equal to the configured value). Retries are disabled so the
-    total wall time cannot exceed the configured timeout.
+    timeout equal to the configured value). Retries are disabled so a
+    request's wall time cannot exceed the configured timeout.
     """
     cache_key = (region, timeout_seconds)
     client = _bedrock_clients.get(cache_key)
@@ -288,34 +292,93 @@ def refused_request_options(error: Exception,
             if key in (request.get(section) or {}) and pattern.search(message)]
 
 
+# Bedrock refuses a maxTokens above the model's maximum output with a
+# ValidationException that states the maximum. Amazon Nova Pro, for
+# example, answers 128000 with 'The maximum tokens you requested exceeds
+# the model limit of 10000. Try again with a maximum tokens value that is
+# lower than 10000.' The wording was the same for every model family
+# tried (Amazon, Anthropic, Meta, Mistral, DeepSeek, OpenAI and others).
+# A number written with a separator ('10,000') does not match, so a
+# limit is never misread.
+MAX_TOKENS_LIMIT_PATTERN = re.compile(
+    r'\bmaximum tokens you requested exceeds the model limit of (\d+)\b(?![.,]\d)',
+    re.IGNORECASE)
+
+
+def refused_max_tokens_limit(error: Exception,
+                             request: Dict) -> Optional[int]:
+    """The model's maximum output that ``error``, a ValidationException
+    refusing ``request``'s maxTokens, states. None for any other error,
+    for a request without an integer maxTokens, and for a stated maximum
+    that is not a positive number below the request's maxTokens."""
+    if not isinstance(error, ClientError):
+        return None
+    details = error.response.get('Error', {})
+    if details.get('Code') != 'ValidationException':
+        return None
+    match = MAX_TOKENS_LIMIT_PATTERN.search(str(details.get('Message') or ''))
+    max_tokens = (request.get('inferenceConfig') or {}).get('maxTokens')
+    if match is None or isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
+        return None
+    limit = int(match.group(1))
+    return limit if 1 <= limit < max_tokens else None
+
+
 def send_dropping_refused_options(send: Callable[..., Dict],
-                                  request: Dict) -> Dict:
+                                  request: Dict, *,
+                                  lower_max_tokens: bool = True) -> Dict:
     """
     ``send(**request)``, where ``send`` is a bedrock-runtime client's
-    ``converse`` or ``converse_stream``; when the model refuses one of the
-    request's options, the request is sent again without it.
+    ``converse`` or ``converse_stream``; when the model refuses part of
+    the request, the request is sent again without that part, or with
+    the model's maximum.
 
-    The options are those in REFUSABLE_REQUEST_OPTIONS: a forced tool
-    choice (the tools stay offered, the model is no longer required to
-    call one), a temperature and a topP. The first request is always the
-    caller's request unchanged, so a model that accepts these options
-    gets exactly one request, as before. Bedrock answers a refusal before
-    the model generates anything, and each new request drops at least
-    one more option, so at most three more requests are sent. Any other
-    error reaches the caller unchanged; ``request`` is never modified.
+    Two kinds of refusal are handled:
+
+    - One of the options in REFUSABLE_REQUEST_OPTIONS: a forced tool
+      choice (the tools stay offered, the model is no longer required to
+      call one), a temperature or a topP. The request is sent again
+      without the refused option.
+    - A maxTokens above the model's maximum output, which the refusal
+      states (refused_max_tokens_limit). The request is sent again with
+      maxTokens set to that maximum, at most once per call. With
+      ``lower_max_tokens=False`` the refusal reaches the caller instead:
+      the ``llm:`` auto-labeling family fails the image with the stated
+      limit (llm-model-token-and-image-sizing Requirements 9.4, 9.7).
+
+    The first request is always the caller's request unchanged, so a
+    request the model accepts, including one whose maxTokens is within
+    the model's maximum, is sent exactly once, as before. Bedrock answers
+    a refusal before the model generates anything. Each new request
+    drops at least one more option or is the one lowering, so at most
+    four more requests are sent. A second maxTokens refusal (for example
+    from a model whose stated maximum also counts the prompt) and any
+    other error reach the caller unchanged; ``request`` is never
+    modified.
     """
+    lowered = not lower_max_tokens
     while True:
         try:
             return send(**request)
         except ClientError as error:
             refused = refused_request_options(error, request)
-            if not refused:
+            limit = None if lowered else refused_max_tokens_limit(error, request)
+            if not refused and limit is None:
                 raise
-        names = ', '.join(key for _section, key in refused)
-        logger.warning(f"Model {request.get('modelId')} refused {names}; "
-                       f"sending the request again without it")
         request = dict(request)
-        for section, key in refused:
-            request[section] = {name: value
-                                for name, value in request[section].items()
-                                if name != key}
+        if limit is not None:
+            logger.warning(f"Model {request.get('modelId')} refused maxTokens "
+                           f"{request['inferenceConfig']['maxTokens']} above its "
+                           f"limit of {limit}; sending the request again with "
+                           f"maxTokens {limit}")
+            request['inferenceConfig'] = dict(request['inferenceConfig'],
+                                              maxTokens=limit)
+            lowered = True
+        if refused:
+            names = ', '.join(key for _section, key in refused)
+            logger.warning(f"Model {request.get('modelId')} refused {names}; "
+                           f"sending the request again without it")
+            for section, key in refused:
+                request[section] = {name: value
+                                    for name, value in request[section].items()
+                                    if name != key}

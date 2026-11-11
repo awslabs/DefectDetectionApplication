@@ -663,9 +663,10 @@ def _generate_bedrock_prelabel(message: Dict, job: Dict,
     # Client via bedrock_common: read timeout equals the invocation
     # timeout capped at 120 s, retries disabled (Req 8.5). A model that
     # refuses the configured temperature or top_p is sent the request
-    # again without it; a model that accepts it gets this request
-    # unchanged. With no max_tokens stored, the default is the job's
-    # model's, not the configured model's.
+    # again without it, and a maxTokens above the job's model's maximum
+    # is sent again as that maximum; a model that accepts this request
+    # gets it unchanged. With no max_tokens stored, the default is the
+    # job's model's, not the configured model's.
     config = get_bedrock_configuration(request_model_id=model_id)
     timeout = min(int(config['timeout_seconds']), BEDROCK_MAX_TIMEOUT_SECONDS)
     client = get_bedrock_client(config['region'], timeout)
