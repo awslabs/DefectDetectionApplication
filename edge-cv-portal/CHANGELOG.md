@@ -14,7 +14,7 @@ A Bedrock request whose max tokens is above its model's maximum output is now se
 
 ### Changed - Default Bedrock max tokens follows the model (2026-11-10)
 
-With no max tokens saved under Settings → Bedrock Configuration, a Bedrock request now carries a default chosen for its model instead of 4096 for every model. Claude Opus 5.5, the default model, gets its maximum output, 128000 tokens; every other model keeps 4096. On a Portal with nothing saved, Node Designer **Generate with AI** returned 422 `GENERATED_SCAFFOLD_INVALID` on Claude Opus 5.5: its thinking counts toward max tokens, and together with the scaffold it passed 4096, so the scaffold was cut off. A saved max tokens is sent as before.
+With no max tokens saved under Settings → Bedrock Configuration, a Bedrock request now carries a default chosen for its model instead of 4096 for every model. Claude Opus 5.5, the default model, gets its maximum output, 128000 tokens; every other model keeps 4096. On a Portal with nothing saved, Node Designer **Generate with AI** returned 422 `GENERATED_SCAFFOLD_INVALID` on Claude Opus 5.5: its thinking counts toward max tokens, and together with the scaffold it passed 4096, so the scaffold was cut off. A saved max tokens is sent as before, up to each model's maximum.
 
 - **Which model's default.** Code assist, workflow generation, **Generate with AI** and the assistant use the configured model's default. Auto-labeling with a **Bedrock:** model uses that model's default. The prompt-guided auto-labeling family and the prompt tuning preview keep their own per-model token budget.
 - **The assistant** keeps its limit of 6,000 output tokens per turn (the default; `ASSISTANT_LIMITS_JSON` overrides it), so its first model call sends 6,000 where it sent 4,096.
