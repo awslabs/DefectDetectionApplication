@@ -4,6 +4,21 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Changed - Default Bedrock max tokens follows the model (2026-11-10)
+
+With no max tokens saved under Settings → Bedrock Configuration, a Bedrock request now carries a default chosen for its model instead of 4096 for every model. Claude Opus 5.5, the default model, gets its maximum output, 128000 tokens; every other model keeps 4096. On a Portal with nothing saved, Node Designer **Generate with AI** returned 422 `GENERATED_SCAFFOLD_INVALID` on Claude Opus 5.5: its thinking counts toward max tokens, and together with the scaffold it passed 4096, so the scaffold was cut off. A saved max tokens is sent as before.
+
+- **Which model's default.** Code assist, workflow generation, **Generate with AI** and the assistant use the configured model's default. Auto-labeling with a **Bedrock:** model uses that model's default. The prompt-guided auto-labeling family and the prompt tuning preview keep their own per-model token budget.
+- **The assistant** keeps its limit of 6,000 output tokens per turn (the default; `ASSISTANT_LIMITS_JSON` overrides it), so its first model call sends 6,000 where it sent 4,096.
+- **Settings → Bedrock Configuration** shows 128000 for Claude Opus 5.5 when nothing is saved. While no max tokens is saved, saving the form with Max tokens at the model's default keeps it unsaved, so every request, including auto-labeling with a **Bedrock:** model, keeps the default of the model it calls. Any other value is saved and, as before, used whatever the model. Choosing another model while Max tokens shows the previous model's default changes the field to the new model's default; a value you entered stays. With no max tokens saved, a `PUT /data-accounts/bedrock-configuration` whose max tokens is missing or equals its model's default saves none, and its response shows that default. The form relies on this when it does not know one of the two models' defaults (a typed model id, or a model the list does not include): a model change saved with Max tokens unchanged leaves max tokens out, so the new model's default applies when none is saved and a saved max tokens is kept otherwise. After a save, the form shows the values in effect. The model list reports each model's default as `default_max_tokens`.
+- **Cost and time.** Bedrock bills the tokens a response uses, not the limit. It reserves the limit against the account's tokens-per-minute quota when a request starts and returns the unused part when the request ends. A response that stopped at 4,096 tokens before now runs until it is complete or the request times out (240 seconds by default, at most 120 seconds for auto-labeling).
+
+**Is this a breaking change?** Only for a Portal without a saved max tokens:
+
+| Flow | Before | After | Remedy |
+|---|---|---|---|
+| Longest Claude Opus 5.5 response | 4,096 output tokens, then cut off | Up to 128,000 output tokens, or until the request times out | Save a lower Max tokens under Settings → Bedrock Configuration. A saved value is used whatever the model, auto-labeling with a **Bedrock:** model included, so choose one that each of those models accepts |
+
 ### Changed - Default Bedrock model: Claude Opus 5.5 (2026-11-09)
 
 A Portal whose settings hold no Bedrock configuration now calls Claude Opus 5.5 through its global cross-region inference profile, `global.anthropic.claude-opus-5-5`, instead of `us.anthropic.claude-sonnet-4-5-20250929-v1:0`. Bedrock lists Claude Sonnet 4.5 as a legacy model and refuses it in an account that has not used it recently, so on a fresh deployment the assistant, code assist, workflow generation and **Generate with AI** failed until a PortalAdmin chose a model under Settings → Bedrock Configuration. A Portal with a saved Bedrock configuration keeps its model, and a deployed Portal changes only when its backend is next deployed.

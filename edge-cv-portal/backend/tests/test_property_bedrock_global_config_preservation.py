@@ -78,17 +78,38 @@ NODE_TOOL_CONFIG = {"tools": []}
 # ---------------------------------------------------------------------------
 
 # bedrock_common.DEFAULT_BEDROCK_CONFIG as it stood before this feature,
-# except model_id, which follows the later change of the default model.
+# except model_id and the max_tokens default, which follow the later
+# changes of the default model and of the default max_tokens (now per
+# model: pinned_default_max_tokens below).
 # The region default is os.environ['AWS_REGION'], which conftest pins to
 # us-east-1 (= conftest.REGION) before anything imports.
 PINNED_DEFAULTS = {
     "model_id": "global.anthropic.claude-opus-5-5",
     "region": REGION,
-    "max_tokens": 4096,
+    "max_tokens": 128000,
     "temperature": None,
     "top_p": None,
     "timeout_seconds": 240,
 }
+
+
+def pinned_default_max_tokens(model_id):
+    """The default max_tokens of a model, from literals: 128000 for Claude
+    Opus 5.5 and its inference profiles (any prefix before the first '.'),
+    4096 for every other value."""
+    if not isinstance(model_id, str):
+        return 4096
+    model_id = model_id.strip()
+    fronted = model_id.split(".", 1)[1] if "." in model_id else None
+    if "anthropic.claude-opus-5-5" in (model_id, fronted):
+        return 128000
+    return 4096
+
+
+def max_tokens_stored(stored_native):
+    """Whether a store state holds a max_tokens (present and non-null)."""
+    return (stored_native is not None
+            and stored_native.get("max_tokens") is not None)
 
 
 def pinned_resolved_configuration(stored_native):
@@ -99,7 +120,9 @@ def pinned_resolved_configuration(stored_native):
     when null); extra stored keys never leak through; timeout_seconds
     coerced with int() (booleans coerce: True -> 1, False -> 0) and
     clamped into [1, 240], with 240 substituted when the stored value is
-    absent, null, or cannot be coerced to an integer.
+    absent, null, or cannot be coerced to an integer. With no max_tokens
+    stored, max_tokens is the resolved model's default (the later per-model
+    default).
     """
     config = dict(PINNED_DEFAULTS)
     if stored_native is not None:
@@ -109,6 +132,8 @@ def pinned_resolved_configuration(stored_native):
                     config[key] = stored_native[key]
             elif stored_native.get(key) is not None:
                 config[key] = stored_native[key]
+    if not max_tokens_stored(stored_native):
+        config["max_tokens"] = pinned_default_max_tokens(config["model_id"])
     try:
         timeout = int(config["timeout_seconds"])
     except (TypeError, ValueError):
@@ -447,8 +472,14 @@ stored_timeouts = st.one_of(
     st.lists(st.integers(min_value=0, max_value=9), min_size=0, max_size=3),
 )
 
+# Model ids: arbitrary strings plus real ids on both sides of the per-model
+# max_tokens default.
+model_ids = st.one_of(storable_strings, st.sampled_from((
+    "global.anthropic.claude-opus-5-5", "us.anthropic.claude-opus-5-5",
+    "us.amazon.nova-pro-v1:0")))
+
 NON_SAMPLING_KEY_VALUES = {
-    "model_id": st.one_of(st.none(), storable_strings),
+    "model_id": st.one_of(st.none(), model_ids),
     "region": st.one_of(st.none(), storable_strings),
     "max_tokens": stored_max_tokens,
     "timeout_seconds": stored_timeouts,
@@ -512,7 +543,8 @@ def valid_partial_changes(draw):
     for key in draw(st.lists(st.sampled_from(KNOWN_KEYS), unique=True)):
         if key in ("model_id", "region"):
             padding = st.sampled_from(["", " ", "  "])
-            change[key] = (draw(padding) + draw(storable_strings)
+            values = model_ids if key == "model_id" else storable_strings
+            change[key] = (draw(padding) + draw(values)
                            + draw(padding))
         elif key == "max_tokens":
             change[key] = draw(st.one_of(
@@ -680,9 +712,11 @@ def test_partial_put_merges_over_effective_values_with_no_ceiling(
     with field-wise valid values, the settings PUT merges the submitted
     fields over the current effective configuration, validates the merged
     whole with the pre-feature rules, leaves every omitted field at its
-    current effective value, applies no ceiling to max_tokens (values
-    above 128000 persist and resolve unclamped), and persists nothing when
-    the merged result is invalid (Requirements 4.5, 4.6)."""
+    current effective value (an unstored max_tokens is the persisted
+    model's default instead, and stays unstored while it equals that
+    default), applies no ceiling to max_tokens (values above 128000
+    persist and resolve unclamped), and persists nothing when the merged
+    result is invalid (Requirements 4.5, 4.6)."""
     env = preservation_env
     shape, stored = case
     apply_store_state(env, shape, stored)
@@ -691,6 +725,12 @@ def test_partial_put_merges_over_effective_values_with_no_ceiling(
     effective_before = pinned_resolved_configuration(native_stored(stored))
     merged = dict(effective_before)
     merged.update(change)
+    # An unstored max_tokens is the model's default, so with none submitted
+    # it follows a model_id the change sets (the later per-model default).
+    default_follows_model = (not max_tokens_stored(native_stored(stored))
+                             and "max_tokens" not in change)
+    if default_follows_model:
+        merged["max_tokens"] = pinned_default_max_tokens(merged["model_id"])
     expected_errors = pinned_validation_errors(merged)
     raw_before = raw_config_item(env)
 
@@ -717,14 +757,31 @@ def test_partial_put_merges_over_effective_values_with_no_ceiling(
     expected_persisted["region"] = expected_persisted["region"].strip()
 
     # The response is the merged configuration: submitted fields applied,
-    # every omitted field at its current effective value (Req 4.6).
+    # every omitted field at its current effective value (Req 4.6), except
+    # an unstored max_tokens, which is the persisted model's default.
     assert body["bedrock_configuration"] == expected_persisted
     for key in KNOWN_KEYS:
-        if key not in change:
+        if key not in change and not (key == "max_tokens"
+                                      and default_follows_model):
             assert body["bedrock_configuration"][key] == \
                 effective_before[key], (
                 f"omitted field {key} must keep its current effective "
                 f"value {effective_before[key]!r}")
+    if default_follows_model:
+        assert body["bedrock_configuration"]["max_tokens"] == \
+            pinned_default_max_tokens(expected_persisted["model_id"])
+
+    # With no max_tokens stored, a merged max_tokens equal to the persisted
+    # model's default is persisted as null (it stays unstored, so each
+    # request keeps its own model's default); any other value, and every
+    # value over a stored max_tokens, is persisted as merged.
+    persisted_max_tokens = raw_config_item(env)["value"]["max_tokens"]
+    if (not max_tokens_stored(native_stored(stored))
+            and expected_persisted["max_tokens"] == pinned_default_max_tokens(
+                expected_persisted["model_id"])):
+        assert persisted_max_tokens is None
+    else:
+        assert persisted_max_tokens == expected_persisted["max_tokens"]
 
     # No ceiling applied to any field: the persisted value resolves back
     # exactly — max_tokens above 128000 included (Req 4.5).

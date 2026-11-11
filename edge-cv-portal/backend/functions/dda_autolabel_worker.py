@@ -664,8 +664,9 @@ def _generate_bedrock_prelabel(message: Dict, job: Dict,
     # timeout capped at 120 s, retries disabled (Req 8.5). A model that
     # refuses the configured temperature or top_p is sent the request
     # again without it; a model that accepts it gets this request
-    # unchanged.
-    config = get_bedrock_configuration()
+    # unchanged. With no max_tokens stored, the default is the job's
+    # model's, not the configured model's.
+    config = get_bedrock_configuration(request_model_id=model_id)
     timeout = min(int(config['timeout_seconds']), BEDROCK_MAX_TIMEOUT_SECONDS)
     client = get_bedrock_client(config['region'], timeout)
     try:

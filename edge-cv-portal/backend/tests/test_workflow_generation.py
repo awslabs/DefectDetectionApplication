@@ -1032,7 +1032,8 @@ class TestRefusedRequestOptions:
         assert requests[1]["inferenceConfig"]["temperature"] == 0.2
         assert requests[2]["toolConfig"] == {
             "tools": requests[0]["toolConfig"]["tools"]}
-        assert requests[2]["inferenceConfig"] == {"maxTokens": 4096}
+        # No max_tokens stored: Claude Opus 5.5's default, 128000.
+        assert requests[2]["inferenceConfig"] == {"maxTokens": 128000}
 
     def test_repair_pass_also_sends_the_tool_unforced(self, gen_env,
                                                       bedrock, ctx):

@@ -50,6 +50,10 @@ from dda_llm_request import (
     resolve_model_image_limit, resolve_token_budget,
     MODEL_TOKEN_LIMIT_DEFAULT, MODEL_TOKEN_LIMIT_CEILING,
 )
+# The default max_tokens per model (bedrock_common is in the same Lambda
+# bundle), so the settings API shows the default the Bedrock callers use
+# and leaves an unchanged default unstored.
+from bedrock_common import default_max_tokens
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -115,7 +119,9 @@ MAX_BEDROCK_TIMEOUT_SECONDS = 240
 DEFAULT_BEDROCK_CONFIG = {
     'model_id': 'global.anthropic.claude-opus-5-5',
     'region': os.environ.get('AWS_REGION', 'us-east-1'),
-    'max_tokens': 4096,
+    # The default model's default; with no max_tokens stored, reads
+    # resolve default_max_tokens() of the effective model instead.
+    'max_tokens': 128000,
     # Sampling parameters are unset by default: they are sent to Bedrock
     # only when explicitly configured (or overridden per-request). Recent
     # Anthropic models reject requests setting temperature at all, and
@@ -577,7 +583,17 @@ def read_stored_bedrock_configuration() -> Dict:
     workflow_generator.get_bedrock_configuration() so the settings UI
     shows exactly what the Workflow_Generator will use.
     """
+    return _effective_bedrock_configuration()[0]
+
+
+def _effective_bedrock_configuration():
+    """
+    (effective configuration, whether a max_tokens is stored). With no
+    max_tokens stored, max_tokens is default_max_tokens() of the effective
+    model, as in bedrock_common.get_bedrock_configuration().
+    """
     config = dict(DEFAULT_BEDROCK_CONFIG)
+    max_tokens_stored = False
     if SETTINGS_TABLE:
         try:
             response = dynamodb.Table(SETTINGS_TABLE).get_item(
@@ -598,15 +614,19 @@ def read_stored_bedrock_configuration() -> Dict:
                             config[key] = stored[key]
                     elif stored.get(key) is not None:
                         config[key] = stored[key]
+                max_tokens_stored = stored.get('max_tokens') is not None
         except ClientError as e:
             logger.warning(f"Could not read Bedrock configuration, using defaults: {str(e)}")
+
+    if not max_tokens_stored:
+        config['max_tokens'] = default_max_tokens(config['model_id'])
 
     try:
         timeout = int(config['timeout_seconds'])
     except (TypeError, ValueError):
         timeout = MAX_BEDROCK_TIMEOUT_SECONDS
     config['timeout_seconds'] = max(1, min(timeout, MAX_BEDROCK_TIMEOUT_SECONDS))
-    return config
+    return config, max_tokens_stored
 
 
 def _is_number(value) -> bool:
@@ -726,6 +746,10 @@ def update_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
     configuration, the merged result is validated, and the complete
     value is written in the exact shape workflow_generator.py reads:
         {setting_key: 'bedrock_configuration', value: {...}}
+    With no max_tokens stored, a max_tokens that is not provided or equals
+    the default of the merged model_id is written as null, so it stays
+    unstored and each request keeps the default of its own model; the
+    response carries that default.
     """
     try:
         if not SETTINGS_TABLE:
@@ -740,10 +764,14 @@ def update_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
 
         # Merge provided keys over the current effective configuration;
         # unknown keys are ignored.
-        config = read_stored_bedrock_configuration()
+        config, max_tokens_stored = _effective_bedrock_configuration()
         for key in DEFAULT_BEDROCK_CONFIG:
             if key in body:
                 config[key] = body[key]
+        if not max_tokens_stored and 'max_tokens' not in body:
+            # An unstored max_tokens is the model's default, so it follows
+            # a model_id this change sets.
+            config['max_tokens'] = default_max_tokens(config['model_id'])
 
         errors = validate_bedrock_configuration(config)
         if errors:
@@ -756,10 +784,20 @@ def update_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
         value['model_id'] = value['model_id'].strip()
         value['region'] = value['region'].strip()
 
+        # With no max_tokens stored, the model's default (the settings
+        # form's unchanged value, or none provided) stays unstored, so each
+        # request keeps the default of the model it goes to: a `bedrock:`
+        # labeling job on another model does not get this model's maximum.
+        # The response still carries the number the form shows.
+        stored_value = dict(value)
+        if (not max_tokens_stored
+                and value['max_tokens'] == default_max_tokens(value['model_id'])):
+            stored_value['max_tokens'] = None
+
         timestamp = int(datetime.utcnow().timestamp() * 1000)
         dynamodb.Table(SETTINGS_TABLE).put_item(Item={
             'setting_key': BEDROCK_CONFIG_SETTING_KEY,
-            'value': _native_to_dynamo(value),
+            'value': _native_to_dynamo(stored_value),
             'updated_at': timestamp,
             'updated_by': user['user_id'],
         })
@@ -770,7 +808,7 @@ def update_bedrock_configuration_setting(event: Dict, user: Dict) -> Dict:
             resource_type='setting',
             resource_id=BEDROCK_CONFIG_SETTING_KEY,
             result='success',
-            details=_native_to_dynamo(value),
+            details=_native_to_dynamo(stored_value),
         )
 
         return create_response(200, {
@@ -1277,6 +1315,11 @@ def list_bedrock_model_options(event: Dict, user: Dict) -> Dict:
     10000), which is what the labeling-job wizard pre-fills
     (llm-model-token-and-image-sizing Requirements 1.6, 3.1).
 
+    And an additive 'default_max_tokens': the max_tokens a request to the
+    model carries when the Bedrock_Configuration stores none
+    (bedrock_common.default_max_tokens), so the settings form can show
+    the selected model's default.
+
     And an additive 'image_input' (OMITTED when unknown): the model's
     Image_Input_Capability resolved from the inputModalities of the
     bedrock:ListFoundationModels summaries - True (Image_Capable) when the
@@ -1402,6 +1445,7 @@ def list_bedrock_model_options(event: Dict, user: Dict) -> Dict:
                 option['id'], image_limits)
             option['token_limit'] = resolve_token_budget(
                 option['id'], None, token_limits)
+            option['default_max_tokens'] = default_max_tokens(option['id'])
             if option['id'] in profile_option_ids:
                 modalities = (
                     model_modalities.get(option['id'].split('.', 1)[1])

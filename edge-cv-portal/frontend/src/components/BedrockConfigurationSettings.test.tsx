@@ -4,7 +4,11 @@
  * only for PortalAdmin, loads the stored configuration, validates the
  * timeout bound (<= 240 seconds, Requirement 10.7) client-side, and
  * offers the model identifier as a dropdown of invokable models (with a
- * free-text fallback when the model list is unavailable).
+ * free-text fallback when the model list is unavailable). Max tokens shows
+ * the selected model's default until the admin enters another value; when
+ * the form lacks a model's default, a model change saved with max tokens
+ * unchanged leaves max_tokens out, and the form shows the configuration
+ * the save returns.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -245,6 +249,185 @@ describe('BedrockConfigurationSettings', () => {
     expect(screen.queryByText('Temperature must be between 0 and 1')).toBeNull();
     expect(screen.queryByText('Top P must be between 0 and 1')).toBeNull();
     expect(await screen.findByText('Bedrock configuration saved')).toBeInTheDocument();
+  });
+
+  describe('default max tokens per model', () => {
+    const OPUS = 'global.anthropic.claude-opus-5-5';
+    const NOVA = 'us.amazon.nova-pro-v1:0';
+    // What GET returns with nothing stored.
+    const NOTHING_STORED = {
+      model_id: OPUS,
+      region: 'us-east-1',
+      max_tokens: 128000,
+      temperature: null,
+      top_p: null,
+      timeout_seconds: 240,
+    };
+
+    beforeEach(() => {
+      setAuthRole('PortalAdmin');
+      getBedrockConfiguration.mockResolvedValue({
+        bedrock_configuration: NOTHING_STORED,
+        defaults: NOTHING_STORED,
+        max_timeout_seconds: 240,
+      });
+      getBedrockModels.mockResolvedValue({
+        models: [
+          { id: OPUS, label: 'Global Anthropic Claude Opus 5.5', default_max_tokens: 128000 },
+          { id: NOVA, label: 'US Amazon Nova Pro', default_max_tokens: 4096 },
+        ],
+        region: 'us-east-1',
+      });
+    });
+
+    async function renderLoaded() {
+      const { container } = render(<BedrockConfigurationSettings />);
+      await waitFor(() => {
+        const select = createWrapper(container).findSelect();
+        expect(select).not.toBeNull();
+        expect(select!.findTrigger().getElement()).toHaveTextContent('Global Anthropic Claude Opus 5.5');
+      });
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(128000);
+      return createWrapper(container).findSelect()!;
+    }
+
+    type SelectWrapper = NonNullable<ReturnType<ReturnType<typeof createWrapper>['findSelect']>>;
+
+    function choose(select: SelectWrapper, value: string) {
+      select.openDropdown();
+      select.selectOptionByValue(value);
+    }
+
+    it("replaces the previous model's default with the selected model's and saves it", async () => {
+      const select = await renderLoaded();
+
+      choose(select, NOVA);
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(4096);
+      choose(select, OPUS);
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(128000);
+      choose(select, NOVA);
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      await waitFor(() => {
+        expect(updateBedrockConfiguration).toHaveBeenCalledWith({
+          model_id: NOVA,
+          region: 'us-east-1',
+          max_tokens: 4096,
+          temperature: null,
+          top_p: null,
+          timeout_seconds: 240,
+        });
+      });
+    });
+
+    it('keeps a max tokens value the admin entered when the model changes', async () => {
+      const select = await renderLoaded();
+
+      fireEvent.change(screen.getByLabelText('Max tokens'), { target: { value: '20000' } });
+      choose(select, NOVA);
+
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(20000);
+    });
+
+    it('saves the shown default unchanged when only other fields change', async () => {
+      await renderLoaded();
+
+      fireEvent.change(screen.getByLabelText('Timeout seconds'), { target: { value: '120' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      await waitFor(() => {
+        expect(updateBedrockConfiguration).toHaveBeenCalledWith(
+          expect.objectContaining({ model_id: OPUS, max_tokens: 128000, timeout_seconds: 120 }),
+        );
+      });
+    });
+
+    // The form lacks a default for a typed model id, and for a loaded model
+    // the list does not include. A model change saved with max tokens
+    // unchanged then leaves max_tokens out, so the backend applies the new
+    // model's default (here 4096) instead of Claude Opus 5.5's 128000.
+    async function saveAndExpectMaxTokensLeftOut(modelId: string) {
+      updateBedrockConfiguration.mockResolvedValue({
+        message: 'ok',
+        bedrock_configuration: { ...NOTHING_STORED, model_id: modelId, max_tokens: 4096 },
+      });
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(128000);
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      expect(await screen.findByText('Bedrock configuration saved')).toBeInTheDocument();
+      expect(updateBedrockConfiguration).toHaveBeenCalledTimes(1);
+      const body = updateBedrockConfiguration.mock.calls[0][0];
+      expect(body).not.toHaveProperty('max_tokens');
+      expect(body).toEqual({
+        model_id: modelId,
+        region: 'us-east-1',
+        temperature: null,
+        top_p: null,
+        timeout_seconds: 240,
+      });
+      expect(screen.getByLabelText('Max tokens')).toHaveValue(4096);
+    }
+
+    it.each([
+      ['fails to load', () => getBedrockModels.mockRejectedValue(new Error('boom'))],
+      [
+        'is empty',
+        () =>
+          getBedrockModels.mockResolvedValue({
+            models: [],
+            region: 'us-east-1',
+            permissions: 'Missing bedrock list permissions',
+          }),
+      ],
+    ])('leaves max tokens out for a typed model when the model list %s', async (_case, mockModelList) => {
+      mockModelList();
+      const { container } = render(<BedrockConfigurationSettings />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Model identifier')).toHaveValue(OPUS);
+      });
+      expect(createWrapper(container).findSelect()).toBeNull();
+
+      fireEvent.change(screen.getByLabelText('Model identifier'), { target: { value: NOVA } });
+
+      await saveAndExpectMaxTokensLeftOut(NOVA);
+    });
+
+    it('leaves max tokens out when the list lacks the loaded model', async () => {
+      const NOVA_FOUNDATION = 'amazon.nova-pro-v1:0';
+      getBedrockModels.mockResolvedValue({
+        models: [{ id: NOVA_FOUNDATION, label: 'Nova Pro', default_max_tokens: 4096 }],
+        region: 'us-east-1',
+      });
+      const { container } = render(<BedrockConfigurationSettings />);
+      await waitFor(() => {
+        const select = createWrapper(container).findSelect();
+        expect(select).not.toBeNull();
+        // The loaded model is shown as an extra option, labelled with its id.
+        expect(select!.findTrigger().getElement()).toHaveTextContent(OPUS);
+      });
+
+      choose(createWrapper(container).findSelect()!, NOVA_FOUNDATION);
+
+      await saveAndExpectMaxTokensLeftOut(NOVA_FOUNDATION);
+    });
+
+    it('sends a max tokens value the admin entered for a typed model', async () => {
+      getBedrockModels.mockRejectedValue(new Error('boom'));
+      render(<BedrockConfigurationSettings />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Model identifier')).toHaveValue(OPUS);
+      });
+
+      fireEvent.change(screen.getByLabelText('Model identifier'), { target: { value: NOVA } });
+      fireEvent.change(screen.getByLabelText('Max tokens'), { target: { value: '10000' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Configuration' }));
+
+      await waitFor(() => {
+        expect(updateBedrockConfiguration).toHaveBeenCalledWith(
+          expect.objectContaining({ model_id: NOVA, max_tokens: 10000 }),
+        );
+      });
+    });
   });
 
   it('keeps rejecting a non-blank out-of-range temperature and top_p without calling the API', async () => {
