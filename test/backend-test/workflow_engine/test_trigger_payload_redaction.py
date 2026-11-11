@@ -488,3 +488,81 @@ class TestItem5NoSigV4ByteIdentity:
         log = client.get("/workflows/executions/exec-nosig/log")
         assert log.status_code == 200
         assert log.text == _NO_SIGV4_LOG_BODY
+
+
+# ---- appended for bedrock-inspection-chain (design 4.4): whole-tree masking ----
+# Output bindings now expose their results in the run metadata
+# (``s3_upload.<id>.presigned_url`` carries a SigV4 query), so
+# ``redacted_run_view`` masks every top-level section, not only ``trigger``.
+
+class TestWholeTreeMasking:
+    def test_redacted_run_view_masks_every_section(self):
+        context = {
+            "is_anomalous": False,
+            "trigger": _context(_NO_SIGV4_URL),
+            "s3_upload": {"upload_annotated": {
+                "key": "images/o/u.annotated.jpg",
+                "presigned_url": _SIGNED_URL,
+                "pair": (_SIGNED_URL, 3)}},
+            "bedrock": {"check": {"reason": "see " + _SIGNED_URL}},
+            "links": [_SIGNED_URL, 7],
+        }
+        snapshot = copy.deepcopy(context)
+        view = redacted_run_view(context)
+        assert context == snapshot
+        text = json.dumps(view, default=str)
+        for value in _SIGNED_VALUES:
+            assert value not in text
+        assert view["s3_upload"]["upload_annotated"]["key"] == "images/o/u.annotated.jpg"
+        assert "X-Amz-Signature=***" in view["s3_upload"]["upload_annotated"]["presigned_url"]
+        assert isinstance(view["s3_upload"]["upload_annotated"]["pair"], tuple)
+        assert view["links"][1] == 7 and "***" in view["links"][0]
+        assert view["is_anomalous"] is False
+        # Fixed point: masking the view again changes nothing.
+        assert redacted_run_view(view) == view
+
+    def test_view_without_trigger_is_still_masked_and_non_mapping_passes(self):
+        view = redacted_run_view({"s3_upload": {"u": {"presigned_url": _SIGNED_URL}}})
+        assert "***" in view["s3_upload"]["u"]["presigned_url"]
+        assert redacted_run_view(["x"]) == ["x"]
+        assert redacted_run_view(None) is None
+
+    def test_persisted_file_and_tags_line_mask_an_upload_url(
+        self, tmp_path, session_factory, caplog
+    ):
+        """The pipeline's tag values stand in for the merged upload outputs:
+        the run metadata file and the ``tags:`` log line are both masked."""
+        artifact_path = write_artifact_set(tmp_path)
+        execution_id = _seed_run(
+            session_factory, artifact_path, json.dumps(_context(_NO_SIGV4_URL)))
+        capture_root = os.path.join(str(tmp_path), "captures")
+        import logging as _logging
+        tags = {"is_anomalous": False,
+                "s3_upload": {"upload": {"key": "images/o/u.jpg",
+                                         "presigned_url": _SIGNED_URL}}}
+        with caplog.at_level(_logging.INFO, logger="workflow_engine.pipeline_executor"):
+            with patch.object(pipeline_executor, "_WORKFLOW_CAPTURE_ROOT", capture_root):
+                WorkflowExecutor(
+                    session_factory=session_factory,
+                    pipeline_manager_factory=lambda: _FakePipelineManager(tags),
+                ).execute(execution_id)
+        session = session_factory()
+        try:
+            row = session.get(WorkflowExecution, execution_id)
+            assert row.status == EXECUTION_STATUS_COMPLETED
+            output_dir, capture_id = row.output_dir, row.capture_id
+        finally:
+            session.close()
+        with open(os.path.join(output_dir, "{0}.json".format(capture_id)),
+                  encoding="utf-8") as handle:
+            persisted = handle.read()
+        tags_lines = [r.getMessage() for r in caplog.records
+                      if r.name == "workflow_engine.pipeline_executor"
+                      and "completed; tags:" in str(r.msg)]
+        assert tags_lines
+        for value in _SIGNED_VALUES:
+            assert value not in persisted
+            assert value not in tags_lines[-1]
+        assert json.loads(persisted)["s3_upload"]["upload"]["key"] == "images/o/u.jpg"
+        assert "X-Amz-Signature=***" in persisted
+        assert "X-Amz-Signature=***" in tags_lines[-1]

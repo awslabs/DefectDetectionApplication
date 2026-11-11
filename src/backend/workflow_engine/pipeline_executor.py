@@ -113,6 +113,7 @@ from workflow_engine.output_bindings import (
     OutputBindingError,
     RunContext,
     _capture_record_source_dimensions,
+    merge_binding_outputs,
 )
 from workflow_engine import scene_analytics
 from workflow_engine.discovery import (
@@ -789,6 +790,7 @@ class WorkflowExecutor:
         stream_camera_resolver: Optional[Callable] = None,
         capture_root_for: Optional[Callable] = None,
         frame_handoff=None,
+        overrides_config=None,
     ) -> None:
         if session_factory is None:
             # Imported lazily so the module is importable without the
@@ -797,6 +799,12 @@ class WorkflowExecutor:
 
             session_factory = SessionLocal
         self._session_factory = session_factory
+        # The ``WorkflowOverridesConfig`` (``config_overrides``) whose
+        # ``WorkflowNodeOverrides`` are written into the run's private copy
+        # of the compiled document at run start (bedrock-inspection-chain);
+        # None (tests, hosts without the IPC reader) = every run executes
+        # the deployed parameters exactly as before.
+        self._overrides_config = overrides_config
         self._pipeline_manager_factory = (
             pipeline_manager_factory or _default_pipeline_manager_factory
         )
@@ -1777,6 +1785,15 @@ class WorkflowExecutor:
                 getattr(resolution, "document", None), dict
             ):
                 document = copy.deepcopy(resolution.document)
+            # Configuration overrides (bedrock-inspection-chain): the
+            # component configuration's WorkflowNodeOverrides for this
+            # workflow id, written into the run's private copy only — the
+            # on-disk artifact and the watcher's cache are never mutated.
+            # Without a config object or without overrides for this
+            # workflow the document is the very same object as before.
+            document = self._apply_configuration_overrides(
+                document, registration
+            )
 
             # Aravis frame feed (Requirements 6.4, 6.5, 6.6): plan the
             # document's Aravis feed, grab its frame through the camera
@@ -3060,6 +3077,37 @@ class WorkflowExecutor:
                 exc_info=True,
             )
 
+    def _apply_configuration_overrides(
+        self, document: dict, registration: WorkflowRegistration
+    ) -> dict:
+        """The run's document with the component configuration's
+        ``WorkflowNodeOverrides`` for ``registration.workflow_id`` applied
+        (``config_overrides.WorkflowOverridesConfig.apply_overrides``: a
+        modified deep copy), or ``document`` itself when there is no
+        config object or nothing to apply. Node types come from the
+        registration's graph document, read only when an override exists.
+        Best-effort and contained: any failure keeps the deployed values."""
+        config = self._overrides_config
+        if config is None:
+            return document
+        try:
+            workflow_id = getattr(registration, "workflow_id", None)
+            if not config.has_overrides(workflow_id):
+                return document
+            from workflow_engine.config_overrides import node_types_from_graph
+
+            node_types = node_types_from_graph(
+                self._load_graph_document(registration)
+            )
+            return config.apply_overrides(document, workflow_id, node_types)
+        except Exception:  # noqa: BLE001 - overrides never fail a run
+            logger.exception(
+                "Could not apply the configuration overrides for workflow %s; "
+                "running the deployed parameters",
+                getattr(registration, "workflow_id", None),
+            )
+            return document
+
     @staticmethod
     def _load_graph_document(
         registration: WorkflowRegistration,
@@ -4239,7 +4287,13 @@ class WorkflowExecutor:
         ``work_dir`` (the run's capture directory) is passed only when the
         handler accepts the keyword (the same guard as ``duration_sink``),
         so s3_upload bindings can read their captured frame; handlers
-        predating it are invoked exactly as before."""
+        predating it are invoked exactly as before.
+
+        A handler returning the bindings' outputs (``{"<binding kind>":
+        {"<nodeId>": {...}}}``, what ``OutputBindingProcessor`` returns;
+        bedrock-inspection-chain) has them merged into ``tag_values`` so
+        the run metadata file and ``/metadata`` carry e.g.
+        ``s3_upload.<id>.*``; a handler returning None changes nothing."""
         if self._post_run_handler is None:
             return
         try:
@@ -4263,13 +4317,22 @@ class WorkflowExecutor:
                     handler_subset, "work_dir"
                 ):
                     kwargs["work_dir"] = work_dir
-                handler_subset(document, tag_values, remaining, **kwargs)
+                produced = handler_subset(
+                    document, tag_values, remaining, **kwargs)
             else:
-                self._invoke_post_run_handler(
+                produced = self._invoke_post_run_handler(
                     registration, document, tag_values, detail_sink,
                     duration_sink, work_dir,
                 )
-        except OutputBindingError:
+            if isinstance(produced, dict) and produced \
+                    and isinstance(tag_values, dict):
+                merge_binding_outputs(tag_values, produced)
+        except OutputBindingError as error:
+            # The bindings that succeeded before the failure still expose
+            # their outputs (the run metadata file is persisted on the
+            # failure path too).
+            if getattr(error, "outputs", None) and isinstance(tag_values, dict):
+                merge_binding_outputs(tag_values, error.outputs)
             raise
         except Exception:  # noqa: BLE001 - contained per 13.7
             logger.exception(
@@ -4286,10 +4349,12 @@ class WorkflowExecutor:
         detail_sink: Optional[Callable],
         duration_sink: Optional[Callable] = None,
         work_dir: Optional[str] = None,
-    ) -> None:
+    ) -> Any:
         """Call the post-run handler, passing ``detail_sink``,
         ``duration_sink`` and ``work_dir`` only when the handler accepts
-        them (backward compatibility).
+        them (backward compatibility). Returns whatever the handler
+        returns (the bindings' outputs for ``OutputBindingProcessor``,
+        None for a plain handler).
 
         The generic ``PostRunHandler`` signature is ``(registration,
         document, tag_values) -> None``; :class:`OutputBindingProcessor`
@@ -4312,9 +4377,8 @@ class WorkflowExecutor:
         ):
             kwargs["work_dir"] = work_dir
         if kwargs:
-            handler(registration, document, tag_values, **kwargs)
-        else:
-            handler(registration, document, tag_values)
+            return handler(registration, document, tag_values, **kwargs)
+        return handler(registration, document, tag_values)
 
     @staticmethod
     def _handler_accepts_keyword(handler: Callable, name: str) -> bool:
@@ -4355,13 +4419,16 @@ def register_workflow_executor(
     post_run_handler: Optional[PostRunHandler] = None,
     binding_resolution_provider: Optional[Callable] = None,
     capture_root_for: Optional[Callable] = None,
+    overrides_config=None,
 ) -> WorkflowExecutor:
     """Create a WorkflowExecutor and register it as THE executor hook.
 
     Called from ``runtime.start_workflow_engine`` so triggered runs stop
     staying pending once the engine is up. ``capture_root_for`` (the run
-    retention's staging-root choice) is optional; without it every run
-    writes to the capture root exactly as before.
+    retention's staging-root choice) and ``overrides_config`` (the
+    ``WorkflowNodeOverrides`` poller, bedrock-inspection-chain) are
+    optional; without them every run writes to the capture root and
+    executes the deployed parameters exactly as before.
     """
     instance = WorkflowExecutor(
         session_factory=session_factory,
@@ -4369,6 +4436,7 @@ def register_workflow_executor(
         post_run_handler=post_run_handler,
         binding_resolution_provider=binding_resolution_provider,
         capture_root_for=capture_root_for,
+        overrides_config=overrides_config,
     )
     executor_hook.set_executor(instance.execute)
     logger.info("WorkflowExecutor registered as the workflow executor")

@@ -9,6 +9,8 @@
       "ModelLoadSelfHealEnabled": "true",
       "StationName": "DDA_Station_ARM64_JP5",
       "StreamShadowName": "streamConfigurationShadow",
+      "WorkflowDisabled": {},
+      "WorkflowNodeOverrides": {},
       "accessControl": {
         "aws.greengrass.Cli": {
           "aws.edgeml.dda.LocalServer.arm64JP5:cli:1": {

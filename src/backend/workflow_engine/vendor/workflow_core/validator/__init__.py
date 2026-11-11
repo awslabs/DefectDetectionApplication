@@ -6,7 +6,12 @@ the complete list of ValidationFinding records.
 """
 
 from .checks import (
+    CODE_BEDROCK_BUDGET_TOO_SMALL,
+    CODE_BEDROCK_EXPECTED_COUNT_PATH,
+    CODE_BEDROCK_INSPECTION_INPUTS,
     CODE_MODEL_REF_UNRESOLVED,
+    CODE_MQTT_PAYLOAD_TEMPLATE_JSON,
+    CODE_S3_UPLOAD_SOURCE_NO_BEDROCK,
     CODE_UNKNOWN_NODE_TYPE,
     CODE_V1_NO_INPUT_NODE,
     CODE_V1_NO_OUTPUT_NODE,
@@ -90,6 +95,12 @@ __all__ = [
     "MODEL_TYPE_VLLM",
     "TYPE_LLM_INFERENCE",
     "TYPE_MQTT_PUBLISH",
+    # bedrock-inspection-chain: built-in inspection chain checks
+    "CODE_MQTT_PAYLOAD_TEMPLATE_JSON",
+    "CODE_S3_UPLOAD_SOURCE_NO_BEDROCK",
+    "CODE_BEDROCK_EXPECTED_COUNT_PATH",
+    "CODE_BEDROCK_INSPECTION_INPUTS",
+    "CODE_BEDROCK_BUDGET_TOO_SMALL",
     # parameter predicate
     "ParameterViolation",
     "check_parameter_value",

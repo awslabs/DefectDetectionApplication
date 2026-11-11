@@ -140,6 +140,37 @@ class TestRunMetadataEndpoint:
         assert response.status_code == 200
         assert response.json() == _METADATA
 
+    def test_signed_url_under_an_output_section_is_served_masked(
+        self, client, session_factory, tmp_path
+    ):
+        """bedrock-inspection-chain (design 4.4): a pre-masking metadata
+        file with ``s3_upload.<id>.presigned_url`` is served with every
+        ``X-Amz-*`` value masked; every other field is unchanged."""
+        signed = ("https://example-bucket.s3.example.invalid/images/o/u.jpg"
+                  "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE"
+                  "%2F20250101%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date="
+                  "20250101T000000Z&X-Amz-Expires=900&X-Amz-SignedHeaders=host"
+                  "&X-Amz-Signature=" + "cd" * 32)
+        metadata = dict(_METADATA)
+        metadata["s3_upload"] = {"upload_annotated": {
+            "key": "images/o/u.jpg", "bytes": 10, "presigned_url": signed}}
+        _write_metadata(str(tmp_path), "cap-1", json.dumps(metadata))
+        _seed_execution(
+            session_factory, output_dir=str(tmp_path), capture_id="cap-1"
+        )
+        response = client.get("/workflows/executions/exec-1/metadata")
+        assert response.status_code == 200
+        served = response.json()
+        for value in ("AKIAEXAMPLE", "20250101T000000Z", "cd" * 32, "AWS4-HMAC-SHA256"):
+            assert value not in response.text
+        upload = served["s3_upload"]["upload_annotated"]
+        assert upload["key"] == "images/o/u.jpg" and upload["bytes"] == 10
+        assert upload["presigned_url"].startswith(
+            "https://example-bucket.s3.example.invalid/images/o/u.jpg?")
+        assert "X-Amz-Signature=***" in upload["presigned_url"]
+        assert served["llm"] == _METADATA["llm"]
+        assert served["is_anomalous"] is False
+
     def test_missing_artifacts_yield_empty_object_200(
         self, client, session_factory, tmp_path
     ):

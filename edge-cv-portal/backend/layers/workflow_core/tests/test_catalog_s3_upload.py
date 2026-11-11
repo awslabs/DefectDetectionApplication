@@ -1,10 +1,12 @@
 """Unit tests for the ``s3_upload`` catalog descriptor.
 
-Asserts the descriptor's identity, ports (one VideoFrames input, no
-outputs), every parameter's shape (``destination`` required; the
-``content_type`` default; the optional suffix rewrite pair; the optional
-``condition`` in the shared grammar; ``timeout_s`` / ``retries`` /
-``region`` bounds), the device architecture mappings (executor binding
+Asserts the descriptor's identity, ports (one VideoFrames input, one
+InferenceMeta result port — bedrock-inspection-chain), every parameter's shape
+(``destination`` required; the ``content_type`` default; the optional
+suffix rewrite pair; the optional ``condition`` in the shared grammar;
+``timeout_s`` / ``retries`` / ``region`` bounds; the appended ``source``,
+``presign_get_expiry_s`` and ``expected_bucket_owner`` whose defaults keep
+today's upload), the device architecture mappings (executor binding
 ``s3_upload`` with the ``python:boto3`` runtime dependency), the ``sim``
 recording stub (``recording_s3_upload``), ``hardware_dependent``, the
 appended catalog position, and the baseline delta scope (the recorded
@@ -23,6 +25,7 @@ from workflow_core.catalog import (
     CONDITION_LANGUAGE_DESCRIPTION,
     DEVICE_ARCHITECTURES,
     NODE_CATALOG,
+    PORT_TYPE_INFERENCE_META,
     PORT_TYPE_VIDEO_FRAMES,
     SIM_RECORDING_BINDING_PREFIX,
     get_node_type,
@@ -48,22 +51,29 @@ class TestS3UploadIdentityAndPorts:
         assert descriptor.category == CATEGORY_OUTPUT
         assert descriptor.display_name == "S3 Upload"
 
-    def test_exactly_one_video_frames_input_and_zero_outputs(self):
+    def test_exactly_one_video_frames_input_and_one_result_port(self):
         # VideoFrames like ``capture``: InferenceMeta outputs connect via
         # the declared coercion, and the compiler terminates the branch in
-        # its synthetic frame-capture sink chain.
+        # its synthetic frame-capture sink chain. The single InferenceMeta
+        # result port (bedrock-inspection-chain) lets an mqtt_publish depend on
+        # the upload; it carries no frames.
         descriptor = _descriptor()
         assert len(descriptor.inputs) == 1
         assert descriptor.inputs[0].name == "in"
         assert descriptor.inputs[0].port_type == PORT_TYPE_VIDEO_FRAMES
-        assert descriptor.outputs == []
+        assert len(descriptor.outputs) == 1
+        assert descriptor.outputs[0].name == "out"
+        assert descriptor.outputs[0].port_type == PORT_TYPE_INFERENCE_META
 
 
 class TestS3UploadParameters:
     def test_parameter_names_in_order(self):
+        # The three bedrock-inspection-chain parameters are appended last, so
+        # every pre-existing parameter keeps its position.
         assert [p.name for p in _descriptor().parameters] == [
             "destination", "content_type", "strip_suffix", "append_suffix",
             "condition", "timeout_s", "retries", "region",
+            "source", "presign_get_expiry_s", "expected_bucket_owner",
         ]
 
     def test_destination(self):
@@ -129,6 +139,36 @@ class TestS3UploadParameters:
         assert param.required is False
         assert param.default is None
         assert param.constraints == {"min_length": 1}
+
+    def test_source_defaults_to_the_captured_frame(self):
+        # bedrock-inspection-chain: frame (today's capture file) is the default;
+        # the other two name the upstream Bedrock node's images.
+        param = _params_by_name(_descriptor())["source"]
+        assert param.param_type == "enum"
+        assert param.required is False
+        assert param.default == "frame"
+        assert param.constraints == {
+            "values": ["frame", "input_image", "annotated_image"]}
+        assert "bedrock_inference" in param.description
+
+    def test_presign_get_expiry_s_is_off_by_default(self):
+        param = _params_by_name(_descriptor())["presign_get_expiry_s"]
+        assert param.param_type == "int"
+        assert param.required is False
+        assert param.default == 0
+        assert param.constraints == {"min": 0, "max": 43200}
+        assert "presigned_url" in param.description
+
+    def test_expected_bucket_owner_is_an_optional_account_id(self):
+        # Passed as PutObject ExpectedBucketOwner by the executor; absent
+        # (None) sends no check, exactly as before.
+        param = _params_by_name(_descriptor())["expected_bucket_owner"]
+        assert param.param_type == "string"
+        assert param.required is False
+        assert param.default is None
+        assert param.constraints == {"regex": "^[0-9]{12}$"}
+        assert param.examples == ["123456789012"]
+        assert "ExpectedBucketOwner" in param.description
 
     def test_no_parameter_is_gated(self):
         for param in _descriptor().parameters:

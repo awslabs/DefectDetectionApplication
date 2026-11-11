@@ -63,9 +63,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
+from workflow_engine import template_functions
 from workflow_engine.branching import bedrock_branches
 from workflow_engine.detections import METADATA_KEY_DETECTIONS
 from workflow_engine.llm_inference import (
@@ -100,15 +102,21 @@ from workflow_engine.tuning.sample_export import (
 # transports themselves — stays here.
 from workflow_engine import scene_analytics
 from workflow_engine.vendor.workflow_core.anomaly_invocation import (
+    ANSWER_FORMAT_INSPECTION,
+    BEDROCK_CONNECT_TIMEOUT_SEC,
     BEDROCK_DEFAULT_MODEL,
     BEDROCK_JSON_INSTRUCTION,
     BEDROCK_READ_TIMEOUT_SEC,
+    BOX_SCALE_NORMALIZED_1000,
+    BOX_SCALE_PIXELS,
     DEFAULT_MAX_TOKENS,
     LLM_GENERATION_PARAMETERS,
+    NORMALIZED_BOX_MAX,
     BedrockInvocation,
     LlmInvocation,
     build_bedrock_invocation,
     build_llm_invocation,
+    parse_inspection_answer,
     parse_verdict,
     resolve_max_image_dimension,
     resolve_output_token_budget,
@@ -152,6 +160,43 @@ BINDING_LLM_INFERENCE = "llm_inference"
 #: binding itself performs no action in the output loop.
 BINDING_METADATA = "metadata"
 
+#: The runner-backed output kinds ``process_subset`` dispatches. Among them
+#: (and only among them) the loop honours ``upstreamNodeIds`` edges as a
+#: run-order dependency (bedrock-inspection-chain: an ``mqtt_publish`` fed
+#: by ``s3_upload.out`` runs after the upload and renders against its
+#: outputs). No output node had an output port before, so every legacy
+#: document has no such edge and keeps emission order.
+OUTPUT_RUNNER_BINDINGS = frozenset({
+    BINDING_DIGITAL_OUTPUT, BINDING_MQTT_PUBLISH, BINDING_OPCUA_WRITE,
+    BINDING_MODBUS_WRITE, BINDING_S3_UPLOAD,
+})
+
+#: ``mqtt_publish`` ``payload_format`` values (bedrock-inspection-chain).
+#: ``text`` is today's ``render_template`` path, byte-identical; ``json``
+#: parses ``payload_template`` as JSON and renders it structurally with
+#: :func:`render_json_template`.
+MQTT_PAYLOAD_FORMAT_TEXT = "text"
+MQTT_PAYLOAD_FORMAT_JSON = "json"
+
+#: ``s3_upload`` ``source`` values (bedrock-inspection-chain). ``frame`` is
+#: today's captured file; the other two name the direct upstream
+#: ``bedrock_inference`` node's ``input_image_path`` / ``annotated_image_path``
+#: in the run metadata.
+S3_UPLOAD_SOURCE_FRAME = "frame"
+S3_UPLOAD_SOURCE_INPUT_IMAGE = "input_image"
+S3_UPLOAD_SOURCE_ANNOTATED_IMAGE = "annotated_image"
+S3_UPLOAD_SOURCE_METADATA_KEYS = {
+    S3_UPLOAD_SOURCE_INPUT_IMAGE: "input_image_path",
+    S3_UPLOAD_SOURCE_ANNOTATED_IMAGE: "annotated_image_path",
+}
+#: Outputs an ``s3_upload`` binding exposes under ``s3_upload.<nodeId>``
+#: after a successful ``s3://`` upload (``presigned_url`` and
+#: ``presigned_url_expires_at`` only with ``presign_get_expiry_s`` > 0);
+#: an ``https://`` destination exposes ``destination_kind``, ``masked_url``
+#: and ``bytes`` only.
+S3_UPLOAD_DESTINATION_KIND_S3 = "s3"
+S3_UPLOAD_DESTINATION_KIND_HTTPS = "https"
+
 
 # ---------------------------------------------------------------------------
 # Condition evaluation ("is_anomalous == true && confidence >= 0.8")
@@ -188,6 +233,20 @@ def _tokenize(condition: str) -> List[str]:
         tokens.append(match.group(match.lastgroup))
         position = match.end()
     return tokens
+
+
+class ConditionFieldError(ValueError):
+    """``evaluate_condition`` met an identifier that is not a field of the
+    metadata (bedrock-inspection-chain). A ``ValueError`` subclass, so
+    every existing ``except ValueError`` keeps catching it unchanged;
+    ``field`` is the offending identifier token, which lets the trigger
+    runtime tell a field missing from THIS message (root segment is a key
+    of the evaluation document) from a rule that can never resolve."""
+
+    def __init__(self, field: str) -> None:
+        super().__init__(
+            "Unknown metadata field {0!r} in condition".format(field))
+        self.field = field
 
 
 class _Parser:
@@ -278,8 +337,7 @@ class _Parser:
                 found, value = resolve_field_path(self.metadata, token)
                 if found:
                     return _coerce(value)
-            raise ValueError(
-                "Unknown metadata field {0!r} in condition".format(token))
+            raise ConditionFieldError(token)
         return self.metadata[token]
 
 
@@ -396,6 +454,112 @@ def render_template(template: Any, metadata: Dict[str, Any]) -> Any:
 
     template = _DOTTED_PLACEHOLDER.sub(_resolve_dotted, template)
     return template.format_map(_LenientDict(values))
+
+
+#: A flat or dotted placeholder inside a JSON-mode template string
+#: (bedrock-inspection-chain): ``{name}`` or ``{a.b.c}``.
+_JSON_PLACEHOLDER = re.compile(
+    r"\{([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\}")
+
+#: The three functions of ``payload_format: json`` (design 5.1): each maps
+#: the render values to ``(found, value)``. ``latency_ms`` is unresolved
+#: without a numeric ``trigger.timestamp`` (the trigger receipt time).
+JSON_TEMPLATE_FUNCTIONS: Dict[str, Callable[[Dict[str, Any]], Tuple[bool, Any]]] = {
+    "ulid": lambda values: (True, template_functions.ulid()),
+    "now_iso": lambda values: (True, template_functions.now_iso()),
+    "latency_ms": lambda values: _latency_ms_function(values),
+}
+
+
+def _latency_ms_function(values: Dict[str, Any]) -> Tuple[bool, Any]:
+    found, timestamp = resolve_field_path(values, "trigger.timestamp")
+    latency = template_functions.latency_ms(timestamp) if found else None
+    return (latency is not None), latency
+
+
+def _resolve_json_placeholder(
+    name: str, values: Dict[str, Any]
+) -> Tuple[bool, Any]:
+    """One JSON-mode placeholder name -> ``(found, value)``: an exact key of
+    ``values`` wins, then the dotted traversal (``resolve_field_path``),
+    then one of the :data:`JSON_TEMPLATE_FUNCTIONS`."""
+    if name in values:
+        return True, values[name]
+    found, value = resolve_field_path(values, name)
+    if found:
+        return True, value
+    function = JSON_TEMPLATE_FUNCTIONS.get(name)
+    if function is not None:
+        return function(values)
+    return False, None
+
+
+def _render_json_string(text: str, values: Dict[str, Any]) -> Tuple[bool, Any]:
+    """Render one template string of a JSON-mode template: a string that is
+    exactly one placeholder yields the resolved value with its native type;
+    embedded placeholders substitute as text (``str(value)``); a string
+    without placeholders is returned verbatim. ``(False, None)`` when ANY
+    placeholder did not resolve (the caller omits the enclosing key or list
+    element -- nothing is ever published with a literal ``{...}``)."""
+    whole = _JSON_PLACEHOLDER.fullmatch(text)
+    if whole:
+        return _resolve_json_placeholder(whole.group(1), values)
+    unresolved = []
+
+    def _substitute(match: "re.Match") -> str:
+        found, value = _resolve_json_placeholder(match.group(1), values)
+        if not found:
+            unresolved.append(match.group(1))
+            return ""
+        return str(value)
+
+    rendered = _JSON_PLACEHOLDER.sub(_substitute, text)
+    if unresolved:
+        return False, None
+    return True, rendered
+
+
+def render_json_template(obj: Any, values: Dict[str, Any]) -> Any:
+    """Render a parsed JSON template structurally over ``values``
+    (``mqtt_publish`` ``payload_format: json``, bedrock-inspection-chain).
+
+    - a string that is exactly one placeholder (``{name}``, ``{a.b.c}`` or
+      one of the functions ``{ulid}`` / ``{now_iso}`` / ``{latency_ms}``)
+      becomes the resolved value with its native type (object, list,
+      number, bool, string, null);
+    - a string with embedded placeholders renders as text (every value
+      substituted as ``str(value)``); other scalars pass through;
+    - objects and lists recurse;
+    - omission rule: when ANY placeholder of a string does not resolve, the
+      enclosing object key (or list element) is OMITTED. A top-level string
+      that does not resolve renders as ``None``.
+
+    Substituted values are never re-scanned for placeholders.
+    """
+    if isinstance(obj, dict):
+        rendered: Dict[Any, Any] = {}
+        for key, value in obj.items():
+            found, item = _render_json_item(value, values)
+            if found:
+                rendered[key] = item
+        return rendered
+    if isinstance(obj, list):
+        items = []
+        for value in obj:
+            found, item = _render_json_item(value, values)
+            if found:
+                items.append(item)
+        return items
+    found, item = _render_json_item(obj, values)
+    return item if found else None
+
+
+def _render_json_item(value: Any, values: Dict[str, Any]) -> Tuple[bool, Any]:
+    if isinstance(value, str):
+        return _render_json_string(value, values)
+    if isinstance(value, (dict, list)):
+        return True, render_json_template(value, values)
+    return True, value
 
 
 #: Bound on the payload/value preview recorded into a node's sent-message
@@ -1201,14 +1365,43 @@ def _s3_client(region: Optional[str], timeout_s: int):
     )
 
 
+def _s3_presign_client(region: Optional[str], timeout_s: int):
+    """The client ``s3_upload`` reads its result endpoint/region from and
+    signs presigned GET URLs with (bedrock-inspection-chain): built like
+    :func:`_s3_client` (which stays the upload client, byte-identical) plus
+    ``signature_version="s3v4"``. Signing is a local computation; the
+    client makes no request."""
+    import boto3
+    from botocore.config import Config
+    return boto3.client(
+        "s3",
+        region_name=region or None,
+        config=Config(
+            connect_timeout=timeout_s,
+            read_timeout=timeout_s,
+            retries={"mode": "standard", "max_attempts": 0},
+            signature_version="s3v4",
+        ),
+    )
+
+
 def _put_s3_object(client, bucket: str, key: str, body: bytes,
-                   content_type: str) -> None:
+                   content_type: str,
+                   expected_bucket_owner: Optional[str] = None) -> None:
     """One PutObject; a client error below HTTP 500 (AccessDenied,
-    NoSuchBucket, ...) is final."""
+    NoSuchBucket, ...) is final. ``expected_bucket_owner`` (the node's
+    ``expected_bucket_owner`` parameter, bedrock-inspection-chain) is sent
+    as ``ExpectedBucketOwner`` only when set, so the call for every other
+    node is today's exactly."""
     from botocore.exceptions import ClientError
+    owner_kwargs = (
+        {"ExpectedBucketOwner": str(expected_bucket_owner)}
+        if expected_bucket_owner else {}
+    )
     try:
         client.put_object(
-            Bucket=bucket, Key=key, Body=body, ContentType=content_type)
+            Bucket=bucket, Key=key, Body=body, ContentType=content_type,
+            **owner_kwargs)
     except ClientError as exc:
         status = int(
             (exc.response.get("ResponseMetadata") or {}).get("HTTPStatusCode") or 0)
@@ -1256,6 +1449,7 @@ def _default_s3_uploader(
     timeout_s: int,
     retries: int,
     region: Optional[str] = None,
+    expected_bucket_owner: Optional[str] = None,
 ) -> None:
     """Upload ``body`` to ``destination`` (production default for the
     :class:`OutputBindingProcessor` ``s3_uploader`` seam).
@@ -1265,7 +1459,9 @@ def _default_s3_uploader(
     A failed attempt is retried up to ``retries`` times (so ``retries + 1``
     attempts in all) unless the destination rejected it for good
     (:class:`UploadRejected`); the last error is raised. Log lines carry
-    the masked destination only."""
+    the masked destination only. ``expected_bucket_owner`` (passed as a
+    keyword only when the node sets it) reaches PutObject as
+    ``ExpectedBucketOwner``."""
     attempts = max(0, int(retries)) + 1
     masked = _mask_destination(destination)
     last_error: Optional[Exception] = None
@@ -1275,7 +1471,7 @@ def _default_s3_uploader(
                 bucket, key = _split_s3_destination(destination)
                 _put_s3_object(
                     _s3_client(region, timeout_s), bucket, key, body,
-                    content_type)
+                    content_type, expected_bucket_owner)
             else:
                 _put_presigned_url(destination, body, content_type, timeout_s)
             return
@@ -1289,6 +1485,173 @@ def _default_s3_uploader(
             )
     assert last_error is not None
     raise last_error
+
+
+def s3_upload_source_path(
+    parameters: Dict[str, Any], binding: dict, metadata: Dict[str, Any]
+) -> Tuple[str, Optional[str]]:
+    """``(source, path)`` for an ``s3_upload`` binding (bedrock-inspection-
+    chain ``source`` parameter). ``frame`` -> ``(frame, None)``: the binding
+    reads its captured file. ``input_image`` / ``annotated_image`` -> the
+    direct upstream ``bedrock_inference`` node's ``input_image_path`` /
+    ``annotated_image_path`` under ``bedrock.<upstream>`` of the metadata
+    (``<upstream>`` = the binding's single ``upstreamNodeIds`` entry), or
+    ``None`` when that node wrote no such image this run (its error path,
+    nothing drawn): the caller SKIPS the upload, it is not a failure."""
+    source = str(parameters.get("source") or S3_UPLOAD_SOURCE_FRAME)
+    if source == S3_UPLOAD_SOURCE_FRAME:
+        return source, None
+    key = S3_UPLOAD_SOURCE_METADATA_KEYS.get(source)
+    if key is None:
+        raise ValueError(
+            "s3_upload source must be one of frame, input_image, "
+            "annotated_image, got {0!r}".format(source))
+    upstream = [
+        node_id for node_id in (binding.get("upstreamNodeIds") or [])
+        if node_id is not None
+    ]
+    if len(upstream) != 1:
+        raise ValueError(
+            "s3_upload source {0!r} needs exactly one upstream "
+            "bedrock_inference node, found {1}".format(source, len(upstream)))
+    entry = (metadata.get("bedrock") or {}).get(upstream[0]) \
+        if isinstance(metadata.get("bedrock"), dict) else None
+    path = entry.get(key) if isinstance(entry, dict) else None
+    if not isinstance(path, str) or not path:
+        return source, None
+    return source, path
+
+
+def s3_upload_skip_detail(source: str) -> str:
+    """The skipped-outcome detail of an ``s3_upload`` whose ``source`` image
+    does not exist this run."""
+    return "not uploaded: no {0} image for this run".format(source)
+
+
+def _s3_upload_outputs(
+    destination: str, body: bytes, content_type: str, timeout_s: int,
+    region: Optional[str], presign_expiry_s: int,
+) -> Dict[str, Any]:
+    """The outputs an ``s3_upload`` exposes after a successful upload
+    (bedrock-inspection-chain; design 4.1). ``https://`` destination:
+    ``destination_kind``, ``masked_url``, ``bytes``. ``s3://``: ``bucket``,
+    ``key``, ``uri``, ``bytes``, ``content_type``, ``destination_kind``,
+    plus -- from a client built by :func:`_s3_presign_client` -- ``https_url``
+    (``https://<bucket>.<endpoint host>/<key>``; the host is the client's
+    endpoint, never a literal domain) and ``region`` (the client's effective
+    region), and with ``presign_expiry_s`` > 0 ``presigned_url`` (a GET
+    signed locally, SigV4) and ``presigned_url_expires_at`` (RFC 3339 =
+    signing time + expiry). A client/presign failure is a WARNING and leaves
+    those keys unset; the upload stands."""
+    if not destination.startswith(S3_UPLOAD_SCHEME_S3):
+        return {
+            "destination_kind": S3_UPLOAD_DESTINATION_KIND_HTTPS,
+            "masked_url": _mask_destination(destination),
+            "bytes": len(body),
+        }
+    bucket, key = _split_s3_destination(destination)
+    outputs: Dict[str, Any] = {
+        "bucket": bucket,
+        "key": key,
+        "uri": destination,
+        "bytes": len(body),
+        "content_type": content_type,
+        "destination_kind": S3_UPLOAD_DESTINATION_KIND_S3,
+    }
+    try:
+        client = _s3_presign_client(region, timeout_s)
+        host = urlparse(str(client.meta.endpoint_url)).netloc
+        if host:
+            outputs["https_url"] = "https://{0}.{1}/{2}".format(
+                bucket, host, quote(key, safe="/"))
+        if client.meta.region_name:
+            outputs["region"] = str(client.meta.region_name)
+        if presign_expiry_s > 0:
+            signed_at = datetime.now(timezone.utc)
+            outputs["presigned_url"] = client.generate_presigned_url(
+                "get_object", Params={"Bucket": bucket, "Key": key},
+                ExpiresIn=presign_expiry_s)
+            outputs["presigned_url_expires_at"] = (
+                signed_at + timedelta(seconds=presign_expiry_s)
+            ).isoformat(timespec="seconds")
+    except Exception as exc:  # noqa: BLE001 - the upload stands
+        logger.warning(
+            "s3_upload could not derive the result URL(s) for %s: %s",
+            _mask_destination(destination), exc,
+        )
+    return outputs
+
+
+def merge_binding_outputs(
+    target: Dict[str, Any], outputs: Dict[str, Dict[Any, Any]]
+) -> None:
+    """Merge ``{"<binding kind>": {"<nodeId>": {...}}}`` (what
+    ``OutputBindingProcessor.process_subset`` returns) into ``target`` so
+    ``<kind>.<nodeId>.<output>`` resolves in templates and conditions. Each
+    kind's map is REPLACED by a fresh merged dict (never mutated), so a
+    shallow snapshot taken earlier stays stable."""
+    for kind, by_node in (outputs or {}).items():
+        if not isinstance(by_node, dict):
+            continue
+        current = target.get(kind)
+        merged = dict(current) if isinstance(current, dict) else {}
+        merged.update(by_node)
+        target[kind] = merged
+
+
+def order_output_bindings(bindings: List[dict]) -> List[dict]:
+    """``bindings`` with the runner-backed output bindings
+    (:data:`OUTPUT_RUNNER_BINDINGS`) permuted into dependency order
+    (bedrock-inspection-chain; design 6.1): an ``upstreamNodeIds`` entry
+    naming another output binding of the list is an edge "that one runs
+    first". Kahn's algorithm seeded in emission order, ties broken by
+    emission order; every other entry keeps its position. A list without
+    such an edge (every legacy document) is returned in emission order,
+    and so is one with a cycle (impossible for a validated graph), with a
+    WARNING."""
+    outputs = [
+        binding for binding in bindings
+        if binding.get("binding") in OUTPUT_RUNNER_BINDINGS
+    ]
+    position = {id(binding): index for index, binding in enumerate(outputs)}
+    by_id: Dict[Any, dict] = {}
+    for binding in outputs:
+        by_id.setdefault(binding.get("nodeId"), binding)
+    indegree = {id(binding): 0 for binding in outputs}
+    dependants: Dict[int, List[dict]] = {id(binding): [] for binding in outputs}
+    for binding in outputs:
+        for upstream_id in binding.get("upstreamNodeIds") or []:
+            upstream = by_id.get(upstream_id)
+            if upstream is None or upstream is binding:
+                continue
+            indegree[id(binding)] += 1
+            dependants[id(upstream)].append(binding)
+    if not any(indegree.values()):
+        return list(bindings)
+    ready = [binding for binding in outputs if indegree[id(binding)] == 0]
+    ordered: List[dict] = []
+    while ready:
+        ready.sort(key=lambda binding: position[id(binding)])
+        current = ready.pop(0)
+        ordered.append(current)
+        for dependant in dependants[id(current)]:
+            indegree[id(dependant)] -= 1
+            if indegree[id(dependant)] == 0:
+                ready.append(dependant)
+    if len(ordered) != len(outputs):
+        logger.warning(
+            "Output bindings %s form a dependency cycle; running them in "
+            "emission order",
+            [binding.get("nodeId") for binding in outputs
+             if binding not in ordered],
+        )
+        return list(bindings)
+    queue = iter(ordered)
+    return [
+        next(queue) if binding.get("binding") in OUTPUT_RUNNER_BINDINGS
+        else binding
+        for binding in bindings
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1347,6 +1710,8 @@ parse_bedrock_answer = parse_verdict
 def _default_bedrock_invoker(
     model: str, prompt: str, images: List, region: str, max_tokens: int,
     system_prompt: Optional[str] = None,
+    timeouts: Optional[Tuple[int, int]] = None,
+    retries: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Invoke the Bedrock runtime converse API and return the model's
     text answer. ``images`` is a list of ``(label, image_bytes)`` pairs
@@ -1356,6 +1721,13 @@ def _default_bedrock_invoker(
     pre-feature invocation (json-trigger-metadata-pipeline Requirements
     7.2, 7.3). boto3 is imported lazily so this module stays importable
     everywhere (Requirement 13.7).
+
+    ``timeouts`` / ``retries`` (bedrock-inspection-chain; both default
+    None → today's client, byte-identical kwargs) are set together by
+    the attempt/budget policy of an ``answer_format: inspection`` node:
+    ``timeouts=(connect_timeout, read_timeout)`` seconds and the
+    botocore ``retries`` mapping (``{"total_max_attempts": 1, "mode":
+    "standard"}`` — SDK retries off, the node owns the budget).
 
     The kwargs themselves come from
     :meth:`BedrockInvocation.converse_kwargs` — the shared
@@ -1367,13 +1739,24 @@ def _default_bedrock_invoker(
     import boto3
     from botocore.config import Config as BotoConfig
 
+    if timeouts is None and retries is None:
+        config = BotoConfig(
+            read_timeout=BEDROCK_READ_TIMEOUT_SEC,
+            retries={"max_attempts": 1},
+        )
+    else:
+        connect_timeout, read_timeout = (
+            timeouts if timeouts is not None
+            else (BEDROCK_CONNECT_TIMEOUT_SEC, BEDROCK_READ_TIMEOUT_SEC))
+        config = BotoConfig(
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+            retries=retries if retries is not None else {"max_attempts": 1},
+        )
     client = boto3.client(
         "bedrock-runtime",
         region_name=region,
-        config=BotoConfig(
-            read_timeout=BEDROCK_READ_TIMEOUT_SEC,
-            retries={"max_attempts": 1},
-        ),
+        config=config,
     )
     invocation = BedrockInvocation(
         model=model,
@@ -1686,6 +2069,39 @@ def draw_defect_objects(
     return drawn
 
 
+#: Verdict banner geometry of an ``answer_format: inspection`` overlay
+#: (bedrock-inspection-chain): ``OK``/``NOK`` at the top-left corner,
+#: FONT_HERSHEY_SIMPLEX scale 1.5, thickness 3.
+VERDICT_BANNER_ORIGIN = (20, 50)
+VERDICT_BANNER_SCALE = 1.5
+VERDICT_BANNER_THICKNESS = 3
+VERDICT_BANNER_PASS_TEXT = "OK"
+VERDICT_BANNER_FAIL_TEXT = "NOK"
+
+
+def draw_verdict_banner(frame: Any, verdict: Any) -> None:
+    """Write the inspection verdict onto ``frame`` in place: ``OK`` in
+    green (:data:`_DEFECT_OK_COLOR`) for ``pass``, ``NOK`` in red
+    (:data:`_DEFECT_NOK_COLOR`) for anything else, at
+    :data:`VERDICT_BANNER_ORIGIN` (bedrock-inspection-chain). Drawn
+    after :func:`draw_defect_objects`, also when the answer carries no
+    drawable box — the verdict is never lost over a picture."""
+    import cv2
+
+    if frame is None:
+        return
+    passed = str(verdict).strip().lower() == "pass"
+    cv2.putText(
+        frame,
+        VERDICT_BANNER_PASS_TEXT if passed else VERDICT_BANNER_FAIL_TEXT,
+        VERDICT_BANNER_ORIGIN,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        VERDICT_BANNER_SCALE,
+        _DEFECT_OK_COLOR if passed else _DEFECT_NOK_COLOR,
+        VERDICT_BANNER_THICKNESS,
+    )
+
+
 def compute_crop_box(
     box: Tuple[float, float, float, float],
     frame_width: int,
@@ -1849,6 +2265,190 @@ class RunContext:
 BEDROCK_MAX_POOL_WORKERS = 4
 
 
+# ---------------------------------------------------------------------------
+# answer_format: inspection (bedrock-inspection-chain)
+#
+# Helpers of the structured inspection path of BedrockInferenceProcessor:
+# per-run prompt rendering, the expected-count rule, the box_scale
+# convention, the attempt/budget policy and the error classification. A
+# binding with answer_format absent/legacy never reaches any of them.
+# ---------------------------------------------------------------------------
+
+#: A ``{json:<dotted.path>}`` token of a rendered prompt — the compact
+#: JSON of the run-metadata value replaces it (:func:`render_prompt_text`).
+_JSON_TOKEN_RE = re.compile(r"\{json:([A-Za-z_][A-Za-z0-9_.]*)\}")
+
+#: ``on_error`` values of a bedrock_inference node.
+BEDROCK_ON_ERROR_FAIL_RUN = "fail_run"
+BEDROCK_ON_ERROR_RECORD = "record"
+
+#: ``error_verdict`` value that exposes a failure as a ``fail`` verdict.
+BEDROCK_ERROR_VERDICT_FAIL = "fail"
+
+#: Catalog defaults of the attempt/budget policy; all three at their
+#: defaults = today's single call through the unchanged client.
+BEDROCK_DEFAULT_ATTEMPTS = 1
+BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC = BEDROCK_READ_TIMEOUT_SEC
+BEDROCK_DEFAULT_BUDGET_SEC = 0
+
+#: botocore ``ClientError`` codes that end the attempt loop at once
+#: (retrying cannot succeed); every other failure is retryable.
+BEDROCK_TERMINAL_ERROR_CODES = frozenset((
+    "ValidationException",
+    "AccessDeniedException",
+    "ResourceNotFoundException",
+))
+
+#: Recorded error text of a node with ``enabled: false``.
+BEDROCK_DISABLED_MESSAGE = "bedrock check disabled by configuration"
+
+#: Run-artifact filename of the bytes actually sent to Bedrock when
+#: ``max_image_dimension`` downscaled the captured frame.
+INPUT_FRAME_ARTIFACT_TEMPLATE = "{capture_id}.node.{safe_node_id}.input.jpg"
+
+
+def render_prompt_text(template: str, values: Dict[str, Any]) -> str:
+    """Render an ``answer_format: inspection`` prompt against the run
+    metadata, segment-wise so no substituted text is ever scanned again.
+
+    The raw template is split at its ``{json:<dotted.path>}`` tokens;
+    each literal segment is rendered with the LLM node's strict
+    :func:`workflow_engine.llm_inference.render_prompt` (``{identifier}``
+    / ``{dotted.path}`` substitution, ``{{``/``}}`` → one brace, other
+    braces literal); each token becomes the compact
+    ``json.dumps(value, ensure_ascii=False, separators=(",", ":"))`` of
+    the value :func:`resolve_field_path` finds. Raises
+    :class:`UnresolvedPlaceholderError` (``name`` = the identifier, or
+    ``json:<path>``) on the first value that does not resolve.
+    """
+    text = str(template or "")
+    pieces: List[str] = []
+    position = 0
+    for match in _JSON_TOKEN_RE.finditer(text):
+        pieces.append(render_prompt(text[position:match.start()], values))
+        found, value = resolve_field_path(values, match.group(1))
+        if not found:
+            raise UnresolvedPlaceholderError("json:" + match.group(1))
+        pieces.append(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        position = match.end()
+    pieces.append(render_prompt(text[position:], values))
+    return "".join(pieces)
+
+
+def resolve_box_scale(raw: Any, model: Any) -> str:
+    """The coordinate convention of the answer's bounding boxes:
+    ``auto`` (or absent) → ``normalized_1000`` when the effective model id
+    contains ``amazon.nova`` (the 0-1000 grid Nova answers on), else
+    ``pixels``; an explicit convention is returned unchanged."""
+    value = str(raw or "auto").strip() or "auto"
+    if value != "auto":
+        return value
+    if "amazon.nova" in str(model or "").lower():
+        return BOX_SCALE_NORMALIZED_1000
+    return BOX_SCALE_PIXELS
+
+
+def resolve_expected_count(found: bool, value: Any) -> Optional[int]:
+    """The ONE expected-count rule: a list → its length, an int (not a
+    bool) → itself, and the result must be >= 1; anything else (path not
+    found, other type, empty list, 0, negative) is ``None``."""
+    if not found:
+        return None
+    if isinstance(value, list):
+        count = len(value)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        count = value
+    else:
+        return None
+    return count if count >= 1 else None
+
+
+def _truthy(value: Any) -> bool:
+    """A boolean node parameter as the compiled document or a
+    configuration override spells it (``True``/``"false"``/``0``...)."""
+    return bool(_coerce(value))
+
+
+def _bool_parameter(raw: Any, default: bool) -> bool:
+    """A boolean node parameter: absent/blank → ``default``."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return default
+    return _truthy(raw)
+
+
+def _records_errors(binding: dict) -> bool:
+    """True when the bedrock_inference ``binding`` has ``on_error:
+    record`` (its branch outputs run on a recorded error)."""
+    parameters = binding.get("parameters") or {}
+    return (str(parameters.get("on_error") or BEDROCK_ON_ERROR_FAIL_RUN)
+            == BEDROCK_ON_ERROR_RECORD)
+
+
+def _policy_int(raw: Any, default: int, minimum: int) -> int:
+    """An integer policy parameter: absent/blank/invalid → ``default``,
+    never below ``minimum``."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+def image_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
+    """``(width, height)`` of an encoded image, or ``None`` when the
+    bytes do not decode (Pillow header read, imported lazily)."""
+    import io
+
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            width, height = image.size
+    except Exception:  # noqa: BLE001 - "undecodable" is the answer
+        return None
+    return int(width), int(height)
+
+
+def bedrock_error_code(error: BaseException) -> Optional[str]:
+    """The ``Error.Code`` of a botocore ``ClientError``-shaped exception,
+    else ``None`` (no botocore import: classified by shape)."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        return None
+    detail = response.get("Error")
+    if not isinstance(detail, dict):
+        return None
+    code = detail.get("Code")
+    return str(code) if code is not None else None
+
+
+def is_terminal_bedrock_error(error: BaseException) -> bool:
+    """True for the ``ClientError`` codes the attempt loop never retries
+    (:data:`BEDROCK_TERMINAL_ERROR_CODES`); transport errors, throttling,
+    5xx, unknown codes and every other exception are retryable."""
+    return bedrock_error_code(error) in BEDROCK_TERMINAL_ERROR_CODES
+
+
+def scale_box_to_pixels(
+    box: Dict[str, Any], box_scale: str, width: int, height: int,
+) -> Dict[str, Any]:
+    """A ``bounding_box`` in the pixel space of the ``width`` x ``height``
+    image sent: ``normalized_1000`` coordinates are rescaled with
+    ``round(x * width / 1000)`` / ``round(y * height / 1000)``; ``pixels``
+    boxes are copied unchanged."""
+    if box_scale != BOX_SCALE_NORMALIZED_1000:
+        return dict(box)
+    return {
+        "x_min": int(round(box["x_min"] * width / float(NORMALIZED_BOX_MAX))),
+        "y_min": int(round(box["y_min"] * height / float(NORMALIZED_BOX_MAX))),
+        "x_max": int(round(box["x_max"] * width / float(NORMALIZED_BOX_MAX))),
+        "y_max": int(round(box["y_max"] * height / float(NORMALIZED_BOX_MAX))),
+    }
+
+
 class BedrockInferenceProcessor:
     """Runs a compiled document's ``bedrock_inference`` bindings.
 
@@ -1871,9 +2471,13 @@ class BedrockInferenceProcessor:
         self,
         invoker: Optional[Callable] = None,
         output_processor: Optional["OutputBindingProcessor"] = None,
+        clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self._invoker = invoker or _default_bedrock_invoker
         self._output_processor = output_processor
+        #: Monotonic clock of the attempt/budget policy (bedrock-
+        #: inspection-chain); injectable so tests drive the budget.
+        self._clock = clock or time.monotonic
 
     def bindings(self, document: dict) -> List[dict]:
         return [
@@ -2106,31 +2710,55 @@ class BedrockInferenceProcessor:
                     and isinstance(nested.get(node_id), dict)
                     and "error" in nested[node_id]
                 )
-                if errored:
+                if errored and not _records_errors(binding):
                     # Recorded error outcome: the branch's output
                     # bindings are skipped entirely (the node status was
                     # set by _recorded_error); siblings proceed
-                    # (Requirements 5.4, 5.5).
+                    # (Requirements 5.4, 5.5). With ``on_error: record``
+                    # (bedrock-inspection-chain) the branch runs its
+                    # outputs instead, the error visible to them.
                     logger.info(
                         "Bedrock branch %s recorded an error; skipping "
                         "its %d branch output binding(s)",
                         node_id, len(plan.binding_ids),
                     )
                     return
+                if errored:
+                    logger.info(
+                        "Bedrock branch %s recorded an error; running its "
+                        "%d branch output binding(s) with the error visible "
+                        "(on_error: record)", node_id, len(plan.binding_ids),
+                    )
                 snapshot = dict(metadata)
                 subset_kwargs: Dict[str, Any] = {}
                 if detail_sink is not None:
                     subset_kwargs["detail_sink"] = detail_sink
                 if duration_sink is not None:
                     subset_kwargs["duration_sink"] = duration_sink
+                if work_dir is not None:
+                    # The run's work directory, so a branch-member
+                    # s3_upload can resolve ``{work_dir}`` in its capture
+                    # path exactly as the post-run path does
+                    # (bedrock-inspection-chain; design review finding 1).
+                    subset_kwargs["work_dir"] = work_dir
                 try:
-                    self._output_processor.process_subset(
+                    produced = self._output_processor.process_subset(
                         document, snapshot, list(plan.binding_ids),
                         **subset_kwargs)
+                    # The branch's output-binding results (e.g.
+                    # ``s3_upload.<id>.*``, bedrock-inspection-chain) join
+                    # the run metadata, still under the merge lock, so the
+                    # run's metadata file and /metadata carry them.
+                    if isinstance(produced, dict) and produced:
+                        merge_binding_outputs(metadata, produced)
                 except OutputBindingError as error:
                     # process_subset already aggregated this branch's
                     # binding failures (every branch binding was still
                     # attempted); collect for the post-join surfacing.
+                    # What the branch's other bindings produced stays
+                    # visible in the run metadata.
+                    if getattr(error, "outputs", None):
+                        merge_binding_outputs(metadata, error.outputs)
                     output_failures.append(
                         (list(error.node_ids), str(error)))
                 except Exception as error:  # noqa: BLE001 - contained
@@ -2194,6 +2822,33 @@ class BedrockInferenceProcessor:
         node_id = binding.get("nodeId")
         parameters = dict(binding.get("parameters") or {})
         capture_paths = binding.get("capturePaths") or {}
+
+        # bedrock-inspection-chain: ``enabled: false`` (the booth's off
+        # switch) makes no Bedrock call and ALWAYS records the
+        # unconditional error, whatever ``on_error``/``error_verdict``
+        # say; ``answer_format: inspection`` takes the structured path.
+        # Both parameters default to today's behaviour.
+        inspection = (
+            str(parameters.get("answer_format") or "")
+            == ANSWER_FORMAT_INSPECTION)
+        if not _bool_parameter(parameters.get("enabled"), True):
+            logger.info(
+                "Bedrock inference node '%s' is disabled by configuration; "
+                "recording the error outcome without a Bedrock call", node_id)
+            if inspection:
+                model = str(parameters.get("model") or BEDROCK_DEFAULT_MODEL)
+                return self._inspection_failure(
+                    node_id, BEDROCK_DISABLED_MESSAGE, run_context,
+                    entry={
+                        "attempts": 0, "latency_ms": 0, "model": model,
+                        "box_scale": resolve_box_scale(
+                            parameters.get("box_scale"), model),
+                    },
+                    record=True, fail_verdict=False)
+            return self._recorded_error(
+                node_id, BEDROCK_DISABLED_MESSAGE, run_context)
+        if inspection:
+            return self._run_inspection(binding, work_dir, run_context)
 
         # Detection crop (Requirement 2): a binding carrying
         # ``crop_detection_index`` sends the Detection_Crop as its
@@ -2390,6 +3045,25 @@ class BedrockInferenceProcessor:
                 "bedrock_text": answer,
                 "bedrock": {node_id: nested_entry},
             }
+        # bedrock-inspection-chain ``annotate: true`` on a legacy-format
+        # node (design §3.6; default false → the crop-only behaviour
+        # below, byte-identical): the overlay is drawn on the whole image
+        # sent — the answer's ``objects`` boxes (none when the answer
+        # carries no list) and, in anomaly mode, the OK/NOK verdict
+        # banner — and its path is exposed as
+        # ``bedrock.<nodeId>.annotated_image_path`` (what an ``s3_upload``
+        # with ``source: annotated_image`` takes). Freeform mode has no
+        # verdict: boxes only, no banner.
+        if _bool_parameter(parameters.get("annotate"), False):
+            objects = extract_defect_objects(answer or "")
+            annotated_path = self._persist_annotated_frame(
+                run_context, node_id, input_image, answer,
+                objects=objects if objects is not None else [],
+                verdict=(("fail" if result["is_anomalous"] else "pass")
+                         if anomaly_mode else None))
+            if annotated_path is not None:
+                nested_entry["annotated_image_path"] = annotated_path
+            return result
         # ADDITIVE (imts-triple-inspection-hmi Requirements 4.4, 4.12):
         # the Inspection's Annotated_Image, drawn from the answer's
         # Defect_Objects onto a copy of the crop. Runs AFTER the existing
@@ -2400,11 +3074,336 @@ class BedrockInferenceProcessor:
             run_context, node_id, crop_bytes, answer)
         return result
 
+    def _run_inspection(
+        self,
+        binding: dict,
+        work_dir: Optional[str],
+        run_context: Optional[RunContext],
+    ) -> Dict[str, Any]:
+        """The ``answer_format: inspection`` path (bedrock-inspection-
+        chain): whole-frame, single-image; the frame read, the optional
+        downscale, the expected-count rule and the per-run prompt
+        rendering happen BEFORE the Converse call (each a terminal
+        pre-call failure); the call runs under the attempt/budget policy
+        (:meth:`_invoke_with_policy`); the accepted answer is the
+        structured verdict of ``parse_inspection_answer``; the OK/NOK
+        overlay is drawn on the whole frame. Every failure goes through
+        :meth:`_inspection_failure` (recorded, or raised, per
+        ``on_error``)."""
+        node_id = binding.get("nodeId")
+        parameters = dict(binding.get("parameters") or {})
+        capture_paths = binding.get("capturePaths") or {}
+        record = (str(parameters.get("on_error") or BEDROCK_ON_ERROR_FAIL_RUN)
+                  == BEDROCK_ON_ERROR_RECORD)
+        fail_verdict = (str(parameters.get("error_verdict") or "")
+                        == BEDROCK_ERROR_VERDICT_FAIL)
+        model = str(parameters.get("model") or BEDROCK_DEFAULT_MODEL)
+        box_scale = resolve_box_scale(parameters.get("box_scale"), model)
+        # The error-path key set accumulates here: attempts/latency_ms
+        # are overwritten once the loop ran; expected_count/input_* land
+        # as soon as they are known (design §3.3 error body).
+        entry: Dict[str, Any] = {
+            "attempts": 0, "latency_ms": 0, "model": model,
+            "box_scale": box_scale,
+        }
+        run_metadata: Dict[str, Any] = dict(
+            (run_context.tag_values if run_context is not None else None)
+            or {})
+
+        def failure(message: str, answer_text: Optional[str] = None):
+            return self._inspection_failure(
+                node_id, message, run_context, entry=entry, record=record,
+                fail_verdict=fail_verdict, answer_text=answer_text)
+
+        # 1. The captured 'in' frame (whole-frame path only: the validator
+        #    rejects crop_detection_index / a connected reference port).
+        path = capture_paths.get("in")
+        if not path:
+            return failure(
+                "no captured frame for the 'in' input (the port is not fed "
+                "by any video source)")
+        if work_dir:
+            path = str(path).replace("{work_dir}", work_dir)
+        try:
+            with open(path, "rb") as frame_file:
+                input_image = frame_file.read()
+        except OSError as error:
+            return failure(
+                "could not read the captured 'in' frame from {0}: {1}".format(
+                    path, error))
+        input_path = path
+
+        # 2. max_image_dimension > 0: downscale the bytes actually sent
+        #    and keep them as a sibling artifact the s3_upload
+        #    ``source: input_image`` can take.
+        raw_max_dim = parameters.get("max_image_dimension")
+        max_dim = None
+        if raw_max_dim not in (None, 0, False, ""):
+            max_dim, notice = resolve_max_image_dimension(raw_max_dim)
+            if notice:
+                logger.warning(
+                    "Bedrock inference node '%s': %s", node_id, notice)
+        if max_dim:
+            try:
+                sent_image = downscale_image_bytes(input_image, max_dim)
+            except Exception as error:  # noqa: BLE001 - undecodable frame
+                return failure(
+                    "could not decode the captured 'in' frame from {0} for "
+                    "downscaling: {1}".format(path, error))
+            if sent_image is not input_image:
+                # The sibling artifact is the only file holding the bytes
+                # actually sent: when it could not be written (logged by
+                # _persist_input_frame) ``input_image_path`` stays unset —
+                # an ``s3_upload`` with ``source: input_image`` then skips
+                # — instead of naming the full-resolution capture beside
+                # the downscaled ``input_width``/``input_height``.
+                input_path = self._persist_input_frame(
+                    run_context, node_id, sent_image)
+        else:
+            sent_image = input_image
+        dimensions = image_dimensions(sent_image)
+        if dimensions is None:
+            return failure(
+                "could not decode the captured 'in' frame from {0}".format(
+                    path))
+        width, height = dimensions
+        if input_path is not None:
+            entry["input_image_path"] = input_path
+        entry["input_width"] = width
+        entry["input_height"] = height
+        return self._run_inspection_call(
+            node_id, parameters, run_metadata, sent_image, width, height,
+            box_scale, entry, failure, run_context)
+
+    def _run_inspection_call(
+        self,
+        node_id: Optional[str],
+        parameters: Dict[str, Any],
+        run_metadata: Dict[str, Any],
+        sent_image: bytes,
+        width: int,
+        height: int,
+        box_scale: str,
+        entry: Dict[str, Any],
+        failure: Callable[..., Dict[str, Any]],
+        run_context: Optional[RunContext],
+    ) -> Dict[str, Any]:
+        """Second half of :meth:`_run_inspection`: the expected-count rule,
+        the per-run prompt rendering, the Converse call under the attempt
+        policy, the pixel-space boxes, the overlay and the metadata."""
+        # 3. expected_count_path, resolved BEFORE the call by the one rule
+        #    (list → len, non-bool int → itself, >= 1).
+        expected_count: Optional[int] = None
+        count_path = str(parameters.get("expected_count_path") or "").strip()
+        if count_path:
+            found, value = resolve_field_path(run_metadata, count_path)
+            expected_count = resolve_expected_count(found, value)
+            if expected_count is None:
+                return failure(
+                    "expected count path {0} did not resolve to a positive "
+                    "count".format(count_path))
+            entry["expected_count"] = expected_count
+
+        # 4. render_prompt: prompt and system_prompt rendered per run
+        #    against the run metadata + the size of the image sent.
+        invocation_parameters = parameters
+        if _bool_parameter(parameters.get("render_prompt"), False):
+            values = dict(run_metadata)
+            values["image"] = {"width": width, "height": height}
+            rendered = dict(parameters)
+            try:
+                rendered["prompt"] = render_prompt_text(
+                    str(parameters.get("prompt") or ""), values)
+                system_prompt = parameters.get("system_prompt")
+                if system_prompt is not None and str(system_prompt).strip():
+                    rendered["system_prompt"] = render_prompt_text(
+                        str(system_prompt), values)
+            except UnresolvedPlaceholderError as error:
+                return failure(
+                    "unresolved prompt placeholder {0}".format(error.name))
+            invocation_parameters = rendered
+        invocation = build_bedrock_invocation(
+            invocation_parameters, sent_image, None)
+
+        # 5. The Converse call under the attempt/budget policy.
+        outcome = self._invoke_with_policy(
+            node_id, invocation, parameters,
+            lambda text: parse_inspection_answer(
+                text, expected_count, box_scale))
+        entry["attempts"] = outcome["attempts"]
+        entry["latency_ms"] = outcome["latency_ms"]
+        if outcome.get("parsed") is None:
+            return failure(outcome["failure"], outcome.get("malformed_text"))
+        parsed = outcome["parsed"]
+        answer = outcome["answer"]
+
+        # 6. Pixel-space boxes (box_scale) — clamping stays in the drawer.
+        objects_px = [
+            {
+                "name": obj.get("name"), "qc": obj.get("qc"),
+                "reason": obj.get("reason"),
+                "bounding_box": scale_box_to_pixels(
+                    obj["bounding_box"], box_scale, width, height),
+            }
+            for obj in parsed["objects"]
+        ]
+        # 7. The OK/NOK overlay on the whole frame sent.
+        annotated_path = self._persist_annotated_frame(
+            run_context, node_id, sent_image, answer,
+            objects=objects_px, verdict=parsed["verdict"])
+        # 8. Metadata: nested bedrock.<nodeId>.* plus the flat
+        #    compatibility keys (is_anomalous = verdict is fail).
+        verdict = parsed["verdict"]
+        entry.update({
+            "outcome": verdict, "verdict": verdict,
+            "confidence": parsed["confidence"], "reason": parsed["reason"],
+            "objects": parsed["objects"], "objects_px": objects_px,
+            "text": answer,
+        })
+        if annotated_path is not None:
+            entry["annotated_image_path"] = annotated_path
+        return {
+            "is_anomalous": verdict == "fail",
+            "confidence": parsed["confidence"],
+            "bedrock_text": answer,
+            "bedrock": {node_id: entry},
+        }
+
+    def _invoke_with_policy(
+        self,
+        node_id: Optional[str],
+        invocation: BedrockInvocation,
+        parameters: Dict[str, Any],
+        parse: Callable[[str], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """The attempt/budget policy around ``self._invoker`` (design
+        §3.5). ``attempts``/``attempt_timeout_s``/``budget_s`` all at
+        their defaults → one call through the unchanged client (today's
+        invoker arities); otherwise the invoker gets
+        ``timeouts=(BEDROCK_CONNECT_TIMEOUT_SEC, attempt_timeout_s)`` and
+        ``retries={"total_max_attempts": 1, "mode": "standard"}``. Attempt
+        k >= 2 starts only while ``attempts`` allows and, with a budget,
+        only if ``deadline - now >= attempt_timeout_s``. Terminal
+        ``ClientError`` codes end the loop at once; everything else,
+        including a malformed answer (``ValueError`` from ``parse``), is
+        one failed attempt. Returns ``{"attempts", "latency_ms"}`` plus
+        either ``"answer"``/``"parsed"`` (accepted) or ``"failure"`` (the
+        text) and, when the last failure was a malformed answer, its
+        ``"malformed_text"``."""
+        attempts = _policy_int(
+            parameters.get("attempts"), BEDROCK_DEFAULT_ATTEMPTS, 1)
+        attempt_timeout_s = _policy_int(
+            parameters.get("attempt_timeout_s"),
+            BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC, 1)
+        budget_s = _policy_int(
+            parameters.get("budget_s"), BEDROCK_DEFAULT_BUDGET_SEC, 0)
+        default_policy = (
+            attempts == BEDROCK_DEFAULT_ATTEMPTS
+            and attempt_timeout_s == BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC
+            and budget_s == BEDROCK_DEFAULT_BUDGET_SEC)
+        client_options: Dict[str, Any] = {} if default_policy else {
+            "timeouts": (BEDROCK_CONNECT_TIMEOUT_SEC, attempt_timeout_s),
+            "retries": {"total_max_attempts": 1, "mode": "standard"},
+        }
+        invoker_args = (
+            invocation.model, invocation.prompt,
+            [(label, data) for label, data in invocation.images],
+            invocation.region, invocation.max_tokens,
+        )
+        if invocation.system_prompt is not None:
+            invoker_args = invoker_args + (invocation.system_prompt,)
+        started = self._clock()
+        deadline = started + budget_s if budget_s > 0 else None
+        outcome: Dict[str, Any] = {"attempts": 0, "latency_ms": 0}
+        attempt = 0
+        while True:
+            attempt += 1
+            outcome["attempts"] = attempt
+            outcome.pop("malformed_text", None)
+            terminal = False
+            try:
+                answer = self._invoker(*invoker_args, **client_options)
+            except Exception as error:  # noqa: BLE001 - classified below
+                outcome["failure"] = "{0}: {1}".format(
+                    type(error).__name__, error)[:300]
+                terminal = is_terminal_bedrock_error(error)
+            else:
+                try:
+                    parsed = parse(answer)
+                except ValueError as error:
+                    outcome["failure"] = "malformed Bedrock answer: {0}".format(
+                        error)
+                    outcome["malformed_text"] = answer
+                else:
+                    outcome["answer"] = answer
+                    outcome["parsed"] = parsed
+                    outcome.pop("failure", None)
+                    break
+            logger.warning(
+                "Bedrock inference node '%s': attempt %d of %d failed: %s",
+                node_id, attempt, attempts, outcome["failure"])
+            if terminal or attempt >= attempts:
+                break
+            if deadline is not None and (
+                    deadline - self._clock() < attempt_timeout_s):
+                logger.warning(
+                    "Bedrock inference node '%s': budget of %d s leaves no "
+                    "room for attempt %d (attempt timeout %d s)",
+                    node_id, budget_s, attempt + 1, attempt_timeout_s)
+                break
+        outcome["latency_ms"] = int(round((self._clock() - started) * 1000.0))
+        return outcome
+
+    def _inspection_failure(
+        self,
+        node_id: Optional[str],
+        message: str,
+        run_context: Optional[RunContext],
+        entry: Dict[str, Any],
+        record: bool,
+        fail_verdict: bool,
+        answer_text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Every failure of the inspection path. ``on_error: fail_run``
+        (``record`` False) raises :class:`BedrockInferenceError` as the
+        legacy path does; ``record`` returns the recorded outcome through
+        :meth:`_recorded_error`: ``outcome: "error"`` plus the accumulated
+        ``entry`` keys and either the ``error`` text (``error_verdict:
+        error``) or ``verdict: "fail"``, ``confidence: 0.0``, ``reason``
+        with the flat ``is_anomalous: True`` / ``confidence: 0.0``
+        (``error_verdict: fail`` — the only path that writes the flat
+        keys). ``text`` / flat ``bedrock_text`` are written only when a
+        malformed answer text was received. Never ``verdict``/``objects``/
+        ``annotated_image_path`` on the ``error`` body."""
+        if not record:
+            raise BedrockInferenceError(
+                node_id,
+                "Bedrock inference node '{0}' failed: {1}".format(
+                    node_id, message))
+        nested = dict(entry)
+        nested["outcome"] = "error"
+        flat: Dict[str, Any] = {}
+        if fail_verdict:
+            nested["verdict"] = "fail"
+            nested["confidence"] = 0.0
+            nested["reason"] = message
+            flat["is_anomalous"] = True
+            flat["confidence"] = 0.0
+        else:
+            nested["error"] = message
+        if answer_text is not None:
+            nested["text"] = answer_text
+            flat["bedrock_text"] = answer_text
+        return self._recorded_error(
+            node_id, message, run_context, entry=nested, flat=flat)
+
     def _recorded_error(
         self,
         node_id: Optional[str],
         message: str,
         run_context: Optional[RunContext],
+        entry: Optional[Dict[str, Any]] = None,
+        flat: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Record a per-node error outcome and return the result dict
         (Requirements 2.4, 4.2).
@@ -2414,7 +3413,12 @@ class BedrockInferenceProcessor:
         run's node status (gating semantics identical to a failed
         condition: the node is marked failed, its downstream outputs are
         gated, and the run and the sibling bindings proceed — this path
-        NEVER raises ``BedrockInferenceError``)."""
+        NEVER raises ``BedrockInferenceError``).
+
+        ``entry`` / ``flat`` (bedrock-inspection-chain; default None →
+        today's ``{"error": message}`` entry, byte-identical) replace the
+        nested entry and add flat result keys for the inspection path's
+        error bodies (:meth:`_inspection_failure`)."""
         logger.error("Bedrock inference recorded error: %s", message)
         if run_context is not None and run_context.node_status is not None:
             try:
@@ -2424,7 +3428,10 @@ class BedrockInferenceProcessor:
                     "Could not record the node status failure for node %s",
                     node_id, exc_info=True,
                 )
-        return {"bedrock": {node_id: {"error": message}}}
+        result: Dict[str, Any] = dict(flat or {})
+        result["bedrock"] = {
+            node_id: {"error": message} if entry is None else entry}
+        return result
 
     def _payload_reference(
         self,
@@ -2802,17 +3809,60 @@ class BedrockInferenceProcessor:
                 "the run status are unaffected", node_id, exc_info=True)
 
     @staticmethod
+    def _persist_input_frame(
+        run_context: Optional[RunContext],
+        node_id: Optional[str],
+        sent_bytes: bytes,
+    ) -> Optional[str]:
+        """bedrock-inspection-chain: persist the downscaled bytes actually
+        sent to Bedrock as ``{capture_id}.node.{safeNodeId}.input.jpg``
+        beside the run's other node artifacts and return the path, or
+        ``None`` (no output_dir/capture_id, or a write failure — logged,
+        never affecting the inspection)."""
+        try:
+            output_dir = run_context.output_dir if run_context else None
+            capture_id = run_context.capture_id if run_context else None
+            if not output_dir or not capture_id:
+                return None
+            path = os.path.join(
+                output_dir,
+                INPUT_FRAME_ARTIFACT_TEMPLATE.format(
+                    capture_id=capture_id,
+                    safe_node_id=sanitize_node_id_for_artifact(node_id),
+                ),
+            )
+            with open(path, "wb") as frame_file:
+                frame_file.write(sent_bytes)
+            return path
+        except Exception:  # noqa: BLE001 - contained; never affects the run
+            logger.warning(
+                "Bedrock inference node '%s': could not persist the "
+                "downscaled input image; the inspection proceeds on the "
+                "bytes in memory", node_id, exc_info=True)
+            return None
+
+    @staticmethod
     def _persist_annotated_frame(
         run_context: Optional[RunContext],
         node_id: Optional[str],
         crop_bytes: Optional[bytes],
         answer_text: Optional[str],
-    ) -> None:
+        objects: Optional[List[Any]] = None,
+        verdict: Optional[str] = None,
+    ) -> Optional[str]:
         """ADDITIVE (imts-triple-inspection-hmi Requirements 4.4, 4.12):
         persist the Inspection's Annotated_Image as
         ``{capture_id}.node.{sanitizedNodeId}.annotated.jpg`` — the crop
         sent to Bedrock with the answer's Defect_Object boxes drawn on
-        it.
+        it. Returns the written path (bedrock-inspection-chain; ``None``
+        whenever nothing was written — legacy callers ignore it).
+
+        ``objects`` / ``verdict`` (bedrock-inspection-chain; default None
+        → the legacy crop-only behaviour below, byte-identical): the
+        inspection path passes the whole frame it sent, its pixel-space
+        ``objects_px`` list (so no extraction from the answer text) and
+        the verdict, which :func:`draw_verdict_banner` writes after the
+        boxes — also for ``objects: []`` and after a box-drawing failure.
 
         Called after the Bedrock invocation returns and after the
         existing ``is_anomalous``/``confidence`` parse, once the answer
@@ -2844,8 +3894,9 @@ class BedrockInferenceProcessor:
                     "Bedrock inference node '%s': no output_dir/capture_id "
                     "or no crop bytes; the Inspection's Annotated_Image "
                     "was not persisted", node_id)
-                return
-            objects = extract_defect_objects(answer_text or "")
+                return None
+            if objects is None:
+                objects = extract_defect_objects(answer_text or "")
             if objects is None:
                 # No parseable ``objects`` list: no Annotated_Image is
                 # produced for this Inspection (Requirements 4.10, 4.12).
@@ -2853,7 +3904,7 @@ class BedrockInferenceProcessor:
                     "Bedrock inference node '%s': the answer carries no "
                     "parseable objects list; no Annotated_Image was "
                     "persisted", node_id)
-                return
+                return None
 
             import cv2
             import numpy as np
@@ -2865,8 +3916,19 @@ class BedrockInferenceProcessor:
                 logger.warning(
                     "Bedrock inference node '%s': could not decode the crop "
                     "bytes for the Inspection's Annotated_Image", node_id)
-                return
-            drawn = draw_defect_objects(frame, objects)
+                return None
+            try:
+                drawn = draw_defect_objects(frame, objects)
+            except Exception:  # noqa: BLE001 - the banner still carries the verdict
+                if verdict is None:
+                    raise
+                logger.warning(
+                    "Bedrock inference node '%s': could not draw the answer's "
+                    "boxes; the verdict banner is still written", node_id,
+                    exc_info=True)
+                drawn = []
+            if verdict is not None:
+                draw_verdict_banner(frame, verdict)
             ok, encoded = cv2.imencode(
                 ".jpg", frame,
                 [int(cv2.IMWRITE_JPEG_QUALITY), CROP_JPEG_QUALITY])
@@ -2874,7 +3936,7 @@ class BedrockInferenceProcessor:
                 logger.warning(
                     "Bedrock inference node '%s': could not encode the "
                     "Inspection's Annotated_Image", node_id)
-                return
+                return None
             path = os.path.join(
                 output_dir,
                 ANNOTATED_FRAME_ARTIFACT_TEMPLATE.format(
@@ -2888,11 +3950,13 @@ class BedrockInferenceProcessor:
                 "Bedrock inference node '%s': persisted the Inspection's "
                 "Annotated_Image with %d defect box(es) of %d answer "
                 "object(s)", node_id, len(drawn), len(objects))
+            return path
         except Exception:  # noqa: BLE001 - contained; never affects the run
             logger.warning(
                 "Bedrock inference node '%s': could not persist the "
                 "Inspection's Annotated_Image; the inspection outcome and "
                 "the run status are unaffected", node_id, exc_info=True)
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -3604,12 +4668,18 @@ class OutputBindingError(Exception):
 
     ``node_ids`` carries every failing node id; ``node_id`` is the first
     of them so the executor's existing ``getattr(e, "node_id", None)``
-    pattern surfaces a node id (Requirements 2.3, 2.4)."""
+    pattern surfaces a node id (Requirements 2.3, 2.4). ``outputs`` is
+    what the bindings that DID succeed in the same call produced
+    (``{"<binding kind>": {"<nodeId>": {...}}}``, bedrock-inspection-chain)
+    so the callers can still fold it into the run metadata; empty when
+    none did."""
 
-    def __init__(self, node_ids: List[str], message: str) -> None:
+    def __init__(self, node_ids: List[str], message: str,
+                 outputs: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(message)
         self.node_ids: List[str] = list(node_ids)
         self.node_id: Optional[str] = self.node_ids[0] if self.node_ids else None
+        self.outputs: Dict[str, Any] = dict(outputs or {})
 
 
 class OutputBindingProcessor:
@@ -3660,14 +4730,16 @@ class OutputBindingProcessor:
         detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
         duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
         work_dir: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[Dict[str, Any]]:
         # Forward duration_sink only when one was provided AND the (possibly
         # overridden) process() signature accepts it, so subclasses that
         # override process() without the new keyword keep working unchanged
         # (default None -> behavior byte-identical to today;
         # node-execution-timing R5.2 backward compatibility). ``work_dir``
         # (the run's capture directory, needed by s3_upload) is forwarded
-        # under the same rule.
+        # under the same rule. The return value is what ``process`` returns
+        # (the bindings' outputs, bedrock-inspection-chain; None from a
+        # subclass that returns nothing).
         kwargs: Dict[str, Any] = {"detail_sink": detail_sink}
         if duration_sink is not None and _accepts_keyword(
             self.process, "duration_sink"
@@ -3675,7 +4747,7 @@ class OutputBindingProcessor:
             kwargs["duration_sink"] = duration_sink
         if work_dir is not None and _accepts_keyword(self.process, "work_dir"):
             kwargs["work_dir"] = work_dir
-        self.process(registration, document, tag_values, **kwargs)
+        return self.process(registration, document, tag_values, **kwargs)
 
     def _gate_store(self):
         # getattr: subclasses predating event gates may skip __init__.
@@ -3716,7 +4788,7 @@ class OutputBindingProcessor:
         detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
         duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
         work_dir: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[Dict[str, Any]]:
         """Process every output binding independently (Requirement 13.7).
 
         ``detail_sink`` (optional; default None → behavior byte-identical to
@@ -3742,9 +4814,10 @@ class OutputBindingProcessor:
         Delegates to :meth:`process_subset` with the full binding list
         (detection-guided-bedrock-inspection Requirement 5.7): the
         pre-refactor body lives there unchanged, so behavior is
-        byte-identical to the pre-refactor ``process``."""
+        byte-identical to the pre-refactor ``process``. Returns what
+        ``process_subset`` returns (the bindings' outputs)."""
         bindings = document.get("executorBindings") or []
-        self.process_subset(
+        return self.process_subset(
             document,
             tag_values,
             [binding.get("nodeId") for binding in bindings],
@@ -3761,7 +4834,7 @@ class OutputBindingProcessor:
         detail_sink: Optional[Callable[[Optional[str], str], None]] = None,
         duration_sink: Optional[Callable[[Optional[str], float], None]] = None,
         work_dir: Optional[str] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Process only the executor bindings named by ``binding_ids``
         (detection-guided-bedrock-inspection, Requirement 5.7).
 
@@ -3769,7 +4842,18 @@ class OutputBindingProcessor:
         binding list: the named bindings run through the exact same
         gating (inference filters, conditionals), metadata attachment,
         condition evaluation, template rendering, and runner dispatch
-        code paths, in ``executorBindings`` emission order.
+        code paths, in ``executorBindings`` emission order -- except that
+        output bindings fed by other output bindings of the subset run
+        after them (:func:`order_output_bindings`; no legacy document has
+        such an edge, bedrock-inspection-chain).
+
+        A runner may return ``(detail, outputs)``: ``outputs`` is merged
+        into this call's metadata under ``<binding kind>.<nodeId>`` at once
+        (later bindings render against it) and into the returned dict
+        ``{"<binding kind>": {"<nodeId>": outputs}}`` -- empty when no
+        binding produced outputs; callers ignoring the value are
+        unaffected (``merge_binding_outputs`` folds it into a run's
+        metadata).
 
         ``binding_ids`` are ``nodeId`` values; a binding whose node id is
         not named is not evaluated at all — a branch's filter/conditional
@@ -3787,8 +4871,9 @@ class OutputBindingProcessor:
             for binding in (document.get("executorBindings") or [])
             if binding.get("nodeId") in wanted
         ]
+        produced: Dict[str, Any] = {}
         if not bindings:
-            return
+            return produced
         metadata = {
             key: _coerce(value) for key, value in dict(tag_values or {}).items()
         }
@@ -3822,7 +4907,7 @@ class OutputBindingProcessor:
         # gated-out or condition-skipped binding is NOT a failure (it
         # ``continue``s before the runner and never reaches the except).
         failed: List[tuple] = []
-        for binding in bindings:
+        for binding in order_output_bindings(bindings):
             kind = binding.get("binding")
             node_id = binding.get("nodeId")
             try:
@@ -3885,12 +4970,27 @@ class OutputBindingProcessor:
                     if skip_detail is not None:
                         self._emit_detail(detail_sink, node_id, skip_detail)
                     continue
+                parameters = dict(binding.get("parameters") or {})
+                if kind == BINDING_S3_UPLOAD:
+                    # bedrock-inspection-chain: a ``source`` image the
+                    # upstream Bedrock node did not write this run skips
+                    # the upload exactly like a false condition (detail,
+                    # no runner, outputs unset); not a failure.
+                    source, source_path = s3_upload_source_path(
+                        parameters, binding, effective)
+                    if source != S3_UPLOAD_SOURCE_FRAME and source_path is None:
+                        logger.info(
+                            "Output binding %s (node %s) has no %s image "
+                            "this run; not uploading", kind, node_id, source,
+                        )
+                        self._emit_detail(
+                            detail_sink, node_id, s3_upload_skip_detail(source))
+                        continue
 
                 # Record the SUCCESS detail ONLY after the runner returns
                 # successfully; on a runner exception nothing new is recorded
                 # (mark_failure already captured the error and set_detail
                 # refuses to overwrite failure details, Requirement 3.3).
-                parameters = dict(binding.get("parameters") or {})
                 started = time.monotonic()
                 try:
                     if kind == BINDING_MQTT_PUBLISH:
@@ -3910,11 +5010,22 @@ class OutputBindingProcessor:
                         duration_sink, node_id,
                         (time.monotonic() - started) * 1000.0,
                     )
+                # A runner returning ``(detail, outputs)`` exposes its
+                # results (bedrock-inspection-chain): merged at once under
+                # ``<kind>.<nodeId>`` so the bindings ordered after it
+                # render against them, and into the returned dict.
+                outputs = None
+                if isinstance(detail, tuple):
+                    detail, outputs = detail
                 logger.info(
                     "Output binding %s (node %s) processed", kind, node_id
                 )
                 if detail:
                     self._emit_detail(detail_sink, node_id, detail)
+                if isinstance(outputs, dict) and outputs:
+                    merge_binding_outputs(
+                        metadata, {kind: {node_id: dict(outputs)}})
+                    produced.setdefault(kind, {})[node_id] = dict(outputs)
             except Exception as e:  # noqa: BLE001 - contained per 13.7
                 logger.exception(
                     "Output binding %s (node %s) failed; other bindings "
@@ -3929,7 +5040,8 @@ class OutputBindingProcessor:
             summary = "Output binding(s) failed: " + "; ".join(
                 "node {0}: {1}".format(nid, err) for nid, err in failed
             )
-            raise OutputBindingError(node_ids, summary)
+            raise OutputBindingError(node_ids, summary, produced)
+        return produced
 
     # ------------------------------------------------------------------
     # Gating
@@ -4131,15 +5243,29 @@ class OutputBindingProcessor:
         it (every pre-feature workflow) makes the exact pre-feature
         publisher call; the sent-message detail then carries
         ``, retained`` after the path name.
+
+        ``payload_format`` (bedrock-inspection-chain) ``json`` parses
+        ``payload_template`` as JSON once and renders it structurally
+        (:func:`render_json_template`: native types, the ``{ulid}`` /
+        ``{now_iso}`` / ``{latency_ms}`` functions, unresolved keys
+        omitted), serialized with ``ensure_ascii=False``; ``text`` (the
+        default) is the pre-feature rendering, byte-identical.
         """
-        payload = render_template(
-            str(parameters.get("payload_template") or "{inference_json}"),
-            metadata,
-        )
-        payload_text = (
-            payload if isinstance(payload, str)
-            else json.dumps(payload, default=str)
-        )
+        if str(parameters.get("payload_format") or MQTT_PAYLOAD_FORMAT_TEXT) \
+                == MQTT_PAYLOAD_FORMAT_JSON:
+            payload_text = self._render_json_payload(
+                str(parameters.get("payload_template") or "{inference_json}"),
+                metadata,
+            )
+        else:
+            payload = render_template(
+                str(parameters.get("payload_template") or "{inference_json}"),
+                metadata,
+            )
+            payload_text = (
+                payload if isinstance(payload, str)
+                else json.dumps(payload, default=str)
+            )
         if attached is not None:
             payload_text = self._embed_attached_metadata(
                 payload_text, attached)
@@ -4243,6 +5369,27 @@ class OutputBindingProcessor:
             {"payload": payload_text, "metadata": attached}, default=str)
 
     @staticmethod
+    def _render_json_payload(template: str, metadata: Dict[str, Any]) -> str:
+        """The ``payload_format: json`` payload text: ``template`` parsed as
+        JSON (a non-JSON template fails the binding loudly; the validator
+        rejects it upstream), rendered by :func:`render_json_template` over
+        the metadata (plus ``inference_json`` as in text mode) and
+        serialized with ``ensure_ascii=False``."""
+        try:
+            parsed = json.loads(template)
+        except ValueError as exc:
+            raise ValueError(
+                "mqtt_publish payload_template is not valid JSON "
+                "(payload_format json): {0}".format(exc)) from exc
+        values = dict(metadata)
+        values.setdefault(
+            "inference_json", json.dumps(metadata, sort_keys=True, default=str)
+        )
+        return json.dumps(
+            render_json_template(parsed, values), ensure_ascii=False,
+            default=str)
+
+    @staticmethod
     def _mqtt_detail(
         topic: str, qos: int, path: str, payload_text: str,
         retain: bool = False,
@@ -4251,10 +5398,13 @@ class OutputBindingProcessor:
         topic, qos, publish path (plain/aws_iot/greengrass), and the rendered
         payload truncated to the preview bound (Requirement 2.3). A retained
         publish (mqtt-retained-publish) appends ``, retained`` to the path
-        segment; a non-retained one is the pre-feature string."""
+        segment; a non-retained one is the pre-feature string. Signed query
+        values (``X-Amz-*``) in the payload are masked in the preview
+        (bedrock-inspection-chain; unchanged bytes for any other payload)."""
+        from workflow_engine.trigger_runtime import redact_signed_query
         flags = "{0}, retained".format(path) if retain else path
         return "sent to topic '{0}' (qos {1}, {2}): {3}".format(
-            topic, qos, flags, _preview(payload_text))
+            topic, qos, flags, _preview(redact_signed_query(payload_text)))
 
     def _run_s3_upload(
         self,
@@ -4262,7 +5412,7 @@ class OutputBindingProcessor:
         metadata: Dict[str, Any],
         binding: dict,
         work_dir: Optional[str],
-    ) -> Optional[str]:
+    ) -> Tuple[Optional[str], Dict[str, Any]]:
         """Upload the frame captured on the node's input branch.
 
         The ``destination`` template renders over the run metadata (flat
@@ -4273,8 +5423,14 @@ class OutputBindingProcessor:
         rewrite the rendered ``s3://`` key only (an https:// presigned URL is
         signed for one exact key). The frame is the binding's
         ``capturePaths["in"]`` file with ``{work_dir}`` resolved against the
-        run's work directory. Returns the sent-message detail
-        ``uploaded <masked destination> (<n> bytes)``."""
+        run's work directory -- or, with ``source`` ``input_image`` /
+        ``annotated_image`` (bedrock-inspection-chain), the image the
+        upstream Bedrock node wrote (``s3_upload_source_path``; the caller
+        skips the binding when there is none). Returns ``(detail,
+        outputs)``: the sent-message detail ``uploaded <masked destination>
+        (<n> bytes)`` and the outputs of :func:`_s3_upload_outputs`
+        (``bucket``, ``key``, ``uri``, ``https_url``, ``presigned_url``,
+        ...), which ``process_subset`` exposes as ``s3_upload.<nodeId>``."""
         rendered = render_template(
             str(parameters.get("destination") or ""), metadata)
         destination = str(rendered).strip()
@@ -4301,17 +5457,24 @@ class OutputBindingProcessor:
                 "s3_upload destination must start with s3:// or https://, "
                 "got {0!r}".format(_mask_destination(destination)[:40]))
 
-        capture_path = (binding.get("capturePaths") or {}).get("in")
-        if not isinstance(capture_path, str) or not capture_path:
-            raise ValueError(
-                "s3_upload node has no captured input frame (the compiled "
-                "binding carries no capturePaths['in'])")
-        if S3_UPLOAD_WORK_DIR_TOKEN in capture_path:
-            if not work_dir:
+        source, source_path = s3_upload_source_path(parameters, binding, metadata)
+        if source != S3_UPLOAD_SOURCE_FRAME:
+            if source_path is None:
                 raise ValueError(
-                    "s3_upload needs the run's work directory to resolve "
-                    "{work_dir} in its capture path, but none was supplied")
-            capture_path = capture_path.replace(S3_UPLOAD_WORK_DIR_TOKEN, work_dir)
+                    "s3_upload has no {0} image for this run".format(source))
+            capture_path = source_path
+        else:
+            capture_path = (binding.get("capturePaths") or {}).get("in")
+            if not isinstance(capture_path, str) or not capture_path:
+                raise ValueError(
+                    "s3_upload node has no captured input frame (the compiled "
+                    "binding carries no capturePaths['in'])")
+            if S3_UPLOAD_WORK_DIR_TOKEN in capture_path:
+                if not work_dir:
+                    raise ValueError(
+                        "s3_upload needs the run's work directory to resolve "
+                        "{work_dir} in its capture path, but none was supplied")
+                capture_path = capture_path.replace(S3_UPLOAD_WORK_DIR_TOKEN, work_dir)
         if not os.path.isfile(capture_path):
             raise FileNotFoundError(
                 "s3_upload input frame was not captured: {0}".format(capture_path))
@@ -4323,10 +5486,23 @@ class OutputBindingProcessor:
         timeout_s = int(parameters.get("timeout_s") or 10)
         retries = int(parameters.get("retries") if parameters.get("retries") is not None else 1)
         region = parameters.get("region") or None
+        # ``expected_bucket_owner`` reaches the uploader as a keyword only
+        # when set (and only for an s3:// PutObject), so every other node
+        # makes today's exact uploader call.
+        owner = parameters.get("expected_bucket_owner")
+        owner_kwargs = (
+            {"expected_bucket_owner": str(owner)}
+            if owner and destination.startswith(S3_UPLOAD_SCHEME_S3) else {}
+        )
         self._s3_uploader(
-            destination, body, content_type, timeout_s, retries, region)
+            destination, body, content_type, timeout_s, retries, region,
+            **owner_kwargs)
+        presign_expiry_s = int(parameters.get("presign_get_expiry_s") or 0)
+        outputs = _s3_upload_outputs(
+            destination, body, content_type, timeout_s, region,
+            presign_expiry_s)
         return "uploaded {0} ({1} bytes)".format(
-            _mask_destination(destination), len(body))
+            _mask_destination(destination), len(body)), outputs
 
     def _run_opcua_write(
         self, parameters: Dict[str, Any], metadata: Dict[str, Any]

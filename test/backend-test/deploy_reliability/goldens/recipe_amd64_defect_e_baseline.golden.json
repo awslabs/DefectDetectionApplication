@@ -7,6 +7,8 @@
       "McpServerEnabled": "false",
       "ModelLoadSelfHealEnabled": "true",
       "StreamShadowName": "streamConfigurationShadow",
+      "WorkflowDisabled": {},
+      "WorkflowNodeOverrides": {},
       "accessControl": {
         "aws.greengrass.Cli": {
           "aws.edgeml.dda.LocalServer.amd64:cli:1": {

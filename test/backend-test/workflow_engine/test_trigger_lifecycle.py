@@ -24,6 +24,7 @@ Requirements: 6.1, 6.2, 7.6, 7.7, 12.4
 """
 import copy
 import json
+import logging
 import threading
 import time
 
@@ -37,6 +38,7 @@ from workflow_engine_test_utils import (
 )
 
 from workflow_engine import executor
+from workflow_engine.config_overrides import DISABLED_KEY, WorkflowOverridesConfig
 from workflow_engine.models import WorkflowExecution, WorkflowRegistration
 from workflow_engine.trigger_runtime import (
     HEALTH_SUBSCRIBED,
@@ -44,6 +46,7 @@ from workflow_engine.trigger_runtime import (
 )
 
 REGISTRATION_ID = "reg-trig-1"
+WORKFLOW_ID = "wf-1"
 TRIGGER_NODE_ID = "trig1"
 ACTIVATED_INPUT_ID = "input1"
 
@@ -85,13 +88,14 @@ def add_registration(
     registration_id=REGISTRATION_ID,
     artifact_path="",
     status="registered",
+    workflow_id=WORKFLOW_ID,
 ):
     session = session_factory()
     try:
         session.add(
             WorkflowRegistration(
                 id=registration_id,
-                workflow_id="wf-1",
+                workflow_id=workflow_id,
                 version="3",
                 arch=DEVICE_ARCH,
                 artifact_path=artifact_path,
@@ -191,12 +195,25 @@ def no_registered_executor():
     executor.set_executor(previous)
 
 
-def make_manager(session_factory, mqtt_factory=None, run_starter_factory=None):
+def make_manager(
+    session_factory, mqtt_factory=None, run_starter_factory=None, overrides_config=None
+):
     return TriggerSubscriptionManager(
         session_factory=session_factory,
         mqtt_transport_factory=mqtt_factory,
         run_starter_factory=run_starter_factory,
+        overrides_config=overrides_config,
     )
+
+
+def make_overrides_config(disabled):
+    """A ``WorkflowOverridesConfig`` whose one read carries the given
+    ``WorkflowDisabled`` map (bedrock-inspection-chain design 7)."""
+    config = WorkflowOverridesConfig(
+        read_config=lambda: {"ComponentName": "LocalServer", DISABLED_KEY: disabled}
+    )
+    config.refresh()
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -474,3 +491,66 @@ def test_reconcile_failure_is_contained(manager_stopper):
     manager.on_registrations_changed()
     assert factory.calls == []
     assert manager.health(REGISTRATION_ID) == []
+
+
+# ---------------------------------------------------------------------------
+# (e) WorkflowDisabled through the manager (bedrock-inspection-chain design
+#     7): the registration row's workflow_id reaches the started group's
+#     core, so a disabled workflow's delivery is discarded before any run
+# ---------------------------------------------------------------------------
+
+
+def start_manager_with_disabled(tmp_path, manager_stopper, disabled):
+    session_factory = make_session_factory()
+    version_dir = write_artifact_set(tmp_path, compiled=trigger_compiled())
+    add_registration(session_factory, artifact_path=version_dir, workflow_id=WORKFLOW_ID)
+    started = []
+    factory = StubTransportFactory()
+    manager = make_manager(
+        session_factory,
+        mqtt_factory=factory,
+        run_starter_factory=lambda registration_id: started.append,
+        overrides_config=make_overrides_config(disabled),
+    )
+    manager_stopper(manager)
+    manager.on_registrations_changed()
+    assert wait_for(lambda: len(factory.workers) == 1)
+    return factory.workers[0], started
+
+
+@pytest.mark.parametrize(
+    "disabled", [{WORKFLOW_ID: "true"}, {"*": "true"}], ids=["exact-id", "star"]
+)
+def test_disabled_workflow_delivery_is_discarded_by_the_started_group(
+    tmp_path, manager_stopper, caplog, disabled
+):
+    """The manager keeps ``row.workflow_id`` per registration and hands it to
+    ``WorkflowActivationCore``: with that id (or ``"*"``) in
+    ``WorkflowDisabled`` a delivery is discarded at INFO and no run starts."""
+    worker, started = start_manager_with_disabled(tmp_path, manager_stopper, disabled)
+    with caplog.at_level(logging.INFO, logger="workflow_engine.trigger_runtime"):
+        accepted = worker.on_delivery(
+            {"topic": "t", "payload": "1", "qos": 0, "timestamp": 1.0}
+        )
+    assert accepted is False
+    time.sleep(0.3)  # a dispatcher that still ran would have started by now
+    assert started == []
+    discarded = [
+        record for record in caplog.records
+        if "firing discarded: workflow wf-1 (registration reg-trig-1) is "
+        "disabled by the WorkflowDisabled configuration" in record.getMessage()
+    ]
+    assert len(discarded) == 1 and discarded[0].levelno == logging.INFO
+
+
+def test_workflow_disabled_naming_another_workflow_fires_normally(
+    tmp_path, manager_stopper
+):
+    """A ``WorkflowDisabled`` entry for a different workflow id leaves this
+    registration's deliveries accepted and dispatched."""
+    worker, started = start_manager_with_disabled(
+        tmp_path, manager_stopper, {"wf-other": "true"}
+    )
+    assert worker.on_delivery({"topic": "t", "payload": "1", "qos": 0, "timestamp": 1.0})
+    assert wait_for(lambda: len(started) == 1)
+    assert started[0].context["payload"] == "1"

@@ -80,9 +80,11 @@ MIRRORED_PACKAGE_FILENAMES = ("anomaly_invocation.py",)
 #     the Portal never would: it must stay an exact mirror
 #     (jpeg-folder-source-decode-ubuntu2204).
 #
-# Re-sync these with a per-file ``cp``, not with ``re_vendor.sh``: a wholesale
-# re-vendor would also copy the portal-only ``catalog/platforms.py``, which the
-# vendor tree deliberately omits.
+# Re-sync these with ``src/backend/workflow_engine/vendor/re_vendor.sh``,
+# which reproduces the layer package exactly (there is no portal-only module
+# the vendor tree omits), then confirm
+# ``diff -r edge-cv-portal/backend/layers/workflow_core/python/workflow_core
+# src/backend/workflow_engine/vendor/workflow_core -x __pycache__`` is empty.
 MIRRORED_SHARED_MODULE_RELPATHS = (
     "stream_url.py",
     "analytics/__init__.py",

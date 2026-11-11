@@ -170,6 +170,10 @@ class TestDeviceCompilation:
             "timeout_s": 10,
             "retries": 1,
             "region": None,
+            # bedrock-inspection-chain defaults (declared-default emission).
+            "source": "frame",
+            "presign_get_expiry_s": 0,
+            "expected_bucket_owner": None,
         }
         # No element is tagged with the upload node: it is executor-level.
         assert not [e for e in _all_elements(document) if e["nodeId"] == "upload"]
@@ -239,6 +243,81 @@ class TestDeviceCompilation:
         (emlpython,) = [e for e in _all_elements(document)
                         if e["factory"] == "emlpython"]
         assert emlpython["args"]["wall-clock-limit-sec"] == 10
+
+
+def bedrock_fed_graph(annotated_source="annotated_image"):
+    """The inspection chain (bedrock-inspection-chain): trigger -> camera ->
+    bedrock check -> two uploads fed by the check -> one publish fed by
+    both uploads' result ports."""
+    return _graph(
+        nodes=[
+            _node("trigger", "mqtt_subscribe", topic="plant/line1/evaluate",
+                  greengrass=True, qos=1),
+            _node("camera", "aravis_camera_source", camera_id="cam-01"),
+            _node("check", "bedrock_inference", answer_format="inspection",
+                  on_error="record"),
+            _upload("upload_raw", source="frame"),
+            _upload("upload_annotated", source=annotated_source,
+                    strip_suffix=".jpg", append_suffix=".annotated.jpg"),
+            _node("mqtt", "mqtt_publish", topic="plant/line1/result",
+                  greengrass=True, payload_format="json",
+                  payload_template='{"key": "{s3_upload.upload_raw.key}"}'),
+        ],
+        connections=[
+            _connect("c1", ("trigger", "out"), ("camera", "activation")),
+            _connect("c2", ("camera", "out"), ("check", "in")),
+            _connect("c3", ("check", "out"), ("upload_raw", "in")),
+            _connect("c4", ("check", "out"), ("upload_annotated", "in")),
+            _connect("c5", ("upload_raw", "out"), ("mqtt", "in")),
+            _connect("c6", ("upload_annotated", "out"), ("mqtt", "in")),
+        ],
+    )
+
+
+class TestBedrockFedUploads:
+    def test_uploads_behind_the_bedrock_node_share_its_capture_path(self):
+        # The feeder search of each upload stops at the opaque Bedrock
+        # node, so the plan hands both uploads the Bedrock node's own
+        # ``in`` capture path: one sink, one file, three readers.
+        document = _compile_ok(bedrock_fed_graph())
+        sinks = _capture_sinks(document)
+        assert [s["args"]["location"] for s in sinks] == \
+            ["{work_dir}/bedrock_frame_camera.jpg"]
+        (check,) = [b for b in document.executor_bindings
+                    if b["binding"] == "bedrock_inference"]
+        assert check["capturePaths"] == {
+            "in": "{work_dir}/bedrock_frame_camera.jpg", "reference": None}
+        by_id = {b["nodeId"]: b for b in _bindings(document)}
+        assert set(by_id) == {"upload_raw", "upload_annotated"}
+        for binding in by_id.values():
+            assert binding["capturePaths"] == {
+                "in": "{work_dir}/bedrock_frame_camera.jpg"}
+            assert binding["upstreamNodeIds"] == ["check"]
+            assert binding["downstreamNodeIds"] == ["mqtt"]
+        assert by_id["upload_raw"]["parameters"]["source"] == "frame"
+        assert by_id["upload_annotated"]["parameters"]["source"] == "annotated_image"
+
+    def test_input_image_source_gets_the_same_path(self):
+        document = _compile_ok(bedrock_fed_graph(annotated_source="input_image"))
+        by_id = {b["nodeId"]: b for b in _bindings(document)}
+        assert by_id["upload_annotated"]["capturePaths"] == {
+            "in": "{work_dir}/bedrock_frame_camera.jpg"}
+
+    def test_publish_fed_by_two_result_ports_lists_both_uploads_upstream(self):
+        document = _compile_ok(bedrock_fed_graph())
+        (mqtt,) = [b for b in document.executor_bindings
+                   if b["binding"] == "mqtt_publish"]
+        assert mqtt["upstreamNodeIds"] == ["upload_raw", "upload_annotated"]
+        assert mqtt["parameters"]["payload_format"] == "json"
+        # The result port carries no frames: no element follows an upload.
+        assert len(_capture_sinks(document)) == 1
+
+    def test_chain_compiles_on_every_device_architecture_and_validates(self):
+        for arch in DEVICE_ARCHITECTURES:
+            document = _compile_ok(bedrock_fed_graph(), arch=arch)
+            assert len(_bindings(document)) == 2, arch
+        errors = [f for f in validate(bedrock_fed_graph()) if f.severity == "error"]
+        assert errors == [], errors
 
 
 class TestSimulationCompilation:
