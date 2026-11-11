@@ -354,10 +354,12 @@ aws s3api put-bucket-abac --bucket YOUR_BUCKET_NAME --abac-status Status=Enabled
 
 ### Configure S3 Bucket CORS (Required for Uploads)
 
-**Important**: Tagging alone is not enough. To upload files from the portal, you must also configure CORS on each bucket.
+**Important**: Tagging alone is not enough. To upload files from the portal, each bucket also needs a CORS rule that allows the portal's CloudFront domain.
 
 #### Why CORS is Required
 The portal frontend (running in your browser) uploads files directly to S3 using presigned URLs. This is a "cross-origin" request (from CloudFront to S3), which S3 blocks by default.
+
+The portal adds the rule itself whenever an upload URL is requested and no rule allows its domain, for a bucket in the portal account (a single-account use case) and for a Data Account bucket. For a bucket in a UseCase Account, the role the portal assumes cannot change CORS rules: configure CORS there with one of the options below. They also work on any bucket ahead of the first upload.
 
 #### Option 1: AWS Console (Recommended for Non-Technical Users)
 
@@ -1149,7 +1151,7 @@ for another use case — a PortalAdmin can allow a shared bucket). See
 
 ### CORS Error When Uploading Files
 
-**Symptom**: Browser console shows `No 'Access-Control-Allow-Origin' header` error.
+**Symptom**: The upload shows **Failed to fetch**, and the browser console shows a `No 'Access-Control-Allow-Origin' header` error.
 
 **Cause**: S3 bucket CORS not configured for portal uploads.
 

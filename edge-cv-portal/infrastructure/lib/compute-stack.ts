@@ -558,8 +558,10 @@ export class ComputeStack extends cdk.Stack {
         ),
       }));
 
-      // S3 CORS on the portal artifacts bucket. Cross-account CORS on Data
-      // Account buckets is separately granted via the assumed role (unchanged).
+      // S3 CORS on the portal artifacts bucket. A use case bucket's CORS is
+      // granted only to the two roles that sign browser upload URLs
+      // (grantUploadBucketCors below); a Data Account bucket's, to the
+      // assumed Data Account role.
       role.addToPolicy(new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
@@ -1624,9 +1626,38 @@ export class ComputeStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(60), // 1 minute for component discovery and management
     });
 
+    // Bucket CORS for browser uploads. Before it signs a presigned PUT URL,
+    // s3_cors.ensure_bucket_cors (shared layer) reads the bucket's CORS rules
+    // and adds one for the portal origin when none allows it; without a rule
+    // the browser's preflight is refused and the upload fails with "Failed to
+    // fetch". A single-account use case reaches its buckets with the
+    // handler's own role, so the two handlers that sign upload URLs into use
+    // case buckets (data_management, model_converter) hold both actions on
+    // the role's bucket-level data-plane scope (dataPlaneGrant): under the
+    // default 'tag' scoping, a bucket tagged dda-portal:managed=true with ABAC
+    // on, the buckets they may already list. The Sid keeps the statement
+    // apart: CDK never merges a statement that has one, so the bucket-level
+    // data-plane statement keeps its own two actions on a split role policy.
+    const grantUploadBucketCors = (role: iam.Role) => {
+      role.addToPolicy(new iam.PolicyStatement({
+        sid: 'UploadBucketCors',
+        effect: iam.Effect.ALLOW,
+        actions: ['s3:GetBucketCors', 's3:PutBucketCors'],
+        resources: dataPlane.bucketLevel.resources,
+        conditions: dataPlane.bucketLevel.conditions,
+      }));
+    };
+    // The portal origin those two handlers allow in a bucket's CORS rules.
+    // Without it ensure_bucket_cors allows any origin on a bucket that has
+    // no CORS rules.
+    const uploadCorsEnvironment = {
+      ...(props.cloudFrontDomain && { CLOUDFRONT_DOMAIN: props.cloudFrontDomain }),
+    };
+
     // Data Management Lambda Handler for S3 bucket/folder management. Held in
-    // a local so the ABAC grant below lands on this role only.
+    // a local so the ABAC and CORS grants below land on this role only.
     const dataManagementRole = createLambdaRole('DataManagement');
+    grantUploadBucketCors(dataManagementRole);
     // POST /usecases/{id}/data/configure attaches a data bucket and, for a
     // tagged bucket in the portal account, enables ABAC on it through the
     // Attach_Step on this function's own role (portal-authorization-and-iam-
@@ -1649,7 +1680,7 @@ export class ComputeStack extends cdk.Stack {
       handler: 'data_management.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
       role: dataManagementRole,
-      environment: lambdaEnvironment,
+      environment: { ...lambdaEnvironment, ...uploadCorsEnvironment },
       layers: [sharedLayer],
       timeout: cdk.Duration.seconds(60),
     });
@@ -1760,14 +1791,19 @@ export class ComputeStack extends cdk.Stack {
       this.node.tryGetContext('detectorExportImage'),
     );
 
-    // Model Converter Lambda Handler for auto-generating DDA metadata
+    // Model Converter Lambda Handler for auto-generating DDA metadata. Its
+    // role carries the upload CORS grant: POST /models/upload-url signs a
+    // browser PUT URL into the use case bucket.
+    const modelConverterRole = createLambdaRole('ModelConverter');
+    grantUploadBucketCors(modelConverterRole);
     const modelConverterHandler = new lambda.Function(this, 'ModelConverterHandler', {
       runtime: lambda.Runtime.PYTHON_3_11,
       handler: 'model_converter.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../backend/functions')),
-      role: createLambdaRole('ModelConverter'),
+      role: modelConverterRole,
       environment: {
         ...lambdaEnvironment,
+        ...uploadCorsEnvironment,
         MODEL_IMPORT_FUNCTION_NAME: modelImportHandler.functionName,
         CODE_VERSION: '2025-01-10-converter',
         // detector-checkpoint-import: the pinned Export_Image; '' disables
