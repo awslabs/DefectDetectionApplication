@@ -119,8 +119,12 @@ beforeEach(() => {
   getStaticVideoUploadUrl.mockResolvedValue({
     deviceId: DEVICE_ID,
     uploadUrl: 'https://upload.example/staging-put',
+    // The presign signs x-amz-expected-bucket-owner (S3 bucket-squatting
+    // fix); the route hands the browser the header to send.
+    uploadHeaders: { 'x-amz-expected-bucket-owner': '111111111111' },
     stagingKey: 'static-image-pins/staging/v-1',
     bucket: 'dda-component-bucket',
+    expectedBucketOwner: '111111111111',
     expiresInSeconds: 900,
   });
   pinStaticVideo.mockReset();
@@ -325,9 +329,11 @@ describe('StaticVideoPanel', () => {
 
     await waitFor(() => expect(putFileWithProgress).toHaveBeenCalledTimes(1));
     expect(getStaticVideoUploadUrl).toHaveBeenCalledWith(DEVICE_ID, USECASE_ID);
-    const [url, uploaded] = putFileWithProgress.mock.calls[0];
+    const [url, uploaded, , headers] = putFileWithProgress.mock.calls[0];
     expect(url).toBe('https://upload.example/staging-put');
     expect(uploaded).toBe(file);
+    // The signed owner-assertion header travels with the upload.
+    expect(headers).toEqual({ 'x-amz-expected-bucket-owner': '111111111111' });
 
     // The progress bar follows the upload.
     act(() => reportProgress(42));

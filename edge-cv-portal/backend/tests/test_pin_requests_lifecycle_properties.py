@@ -72,13 +72,17 @@ def pin_env(aws_stack):
 
 class RecordingS3:
     """Records delete_object calls (the only Image_Transport effect the
-    lifecycle core performs)."""
+    lifecycle core performs), with the owner each call asserted (the S3
+    bucket-squatting fix: ExpectedBucketOwner on every component bucket
+    call)."""
 
     def __init__(self):
         self.deletes = []
+        self.asserted_owners = []
 
-    def delete_object(self, Bucket, Key):
+    def delete_object(self, Bucket, Key, ExpectedBucketOwner=None):
         self.deletes.append((Bucket, Key))
+        self.asserted_owners.append(ExpectedBucketOwner)
         return {}
 
 
@@ -235,3 +239,10 @@ def test_pin_request_lifecycle_and_supersede(pin_env, events):
         )
         assert sorted(s3.deletes) == expected_deletes
         assert len(s3.deletes) == len(set(s3.deletes))
+        # Every Image_Transport delete asserts the component bucket's owner
+        # (the S3 bucket-squatting fix): PORTAL_ACCOUNT_ID when set, else the
+        # caller's own account from (moto's) STS; never an unguarded call.
+        import shared_utils
+        owner = shared_utils.component_bucket_owner()
+        assert owner and owner.isdigit()
+        assert s3.asserted_owners == [owner] * len(s3.deletes)

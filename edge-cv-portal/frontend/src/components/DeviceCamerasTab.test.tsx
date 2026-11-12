@@ -698,8 +698,12 @@ describe('DeviceCamerasTab static image pin/replace/remove flows', () => {
     getStaticImageUploadUrl.mockResolvedValue({
       deviceId: DEVICE_ID,
       uploadUrl: 'https://upload.example/staging-put',
+      // The presign signs x-amz-expected-bucket-owner (S3 bucket-squatting
+      // fix); the route hands the browser the header to send.
+      uploadHeaders: { 'x-amz-expected-bucket-owner': '111111111111' },
       stagingKey: 'static-image-pins/staging/u-1',
       bucket: 'dda-component-bucket',
+      expectedBucketOwner: '111111111111',
       expiresInSeconds: 900,
     });
     pinStaticImage.mockResolvedValue({
@@ -739,10 +743,12 @@ describe('DeviceCamerasTab static image pin/replace/remove flows', () => {
       });
     });
     expect(getStaticImageUploadUrl).toHaveBeenCalledWith(DEVICE_ID, USECASE_ID);
-    // The image bytes went to the presigned URL, not the API.
+    // The image bytes went to the presigned URL, not the API, with the
+    // signed owner-assertion header the route handed back.
     expect(fetchMock).toHaveBeenCalledWith('https://upload.example/staging-put', {
       method: 'PUT',
       body: file,
+      headers: { 'x-amz-expected-bucket-owner': '111111111111' },
     });
     // The panel refreshes the provisioning status after the submit.
     await waitFor(() => {

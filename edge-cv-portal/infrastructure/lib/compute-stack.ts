@@ -2088,12 +2088,17 @@ export class ComputeStack extends cdk.Stack {
       Expiration: { Days: 1 },
       AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
     };
+    // Both configuration writes assert ExpectedBucketOwner: the bucket name
+    // is derived from this account's id, so a bucket of that name created by
+    // another account (S3 bucket squatting) must make the deploy fail (403)
+    // rather than receive the portal's configuration.
     const staticImagePinStagingLifecycle = new cr.AwsCustomResource(this, 'StaticImagePinStagingLifecycle', {
       onCreate: {
         service: 'S3',
         action: 'putBucketLifecycleConfiguration',
         parameters: {
           Bucket: componentBucketNameForPins,
+          ExpectedBucketOwner: cdk.Aws.ACCOUNT_ID,
           LifecycleConfiguration: { Rules: [stagingLifecycleRule] },
         },
         physicalResourceId: cr.PhysicalResourceId.of(
@@ -2105,6 +2110,7 @@ export class ComputeStack extends cdk.Stack {
         action: 'putBucketLifecycleConfiguration',
         parameters: {
           Bucket: componentBucketNameForPins,
+          ExpectedBucketOwner: cdk.Aws.ACCOUNT_ID,
           LifecycleConfiguration: { Rules: [stagingLifecycleRule] },
         },
         physicalResourceId: cr.PhysicalResourceId.of(
@@ -2147,6 +2153,7 @@ export class ComputeStack extends cdk.Stack {
       action: 'putBucketCors',
       parameters: {
         Bucket: componentBucketNameForPins,
+        ExpectedBucketOwner: cdk.Aws.ACCOUNT_ID,
         CORSConfiguration: { CORSRules: [pinUploadCorsRule] },
       },
       // The origin is part of the physical id so a domain change

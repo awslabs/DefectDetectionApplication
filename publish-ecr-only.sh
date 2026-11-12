@@ -8,6 +8,12 @@ set -o pipefail
 
 ARCH="aarch64"
 
+# The component bucket name is DERIVED from the account id and region
+# (dda-component-<region>-<account>), so every S3 call against it asserts
+# ExpectedBucketOwner and a bucket of that name under another account is a hard
+# error (see the guard's header for the bucket-squatting threat this closes).
+. "$(dirname "$0")/scripts/s3-bucket-owner-guard.sh"
+
 # Component selection. An explicit component name may be passed as $1 to publish a
 # pre-built image without rebuilding — required for JP6 (arm64JP6), JP7 (arm64JP7)
 # and the generic arm64 CPU component (the bare aws.edgeml.dda.LocalServer.arm64).
@@ -36,7 +42,12 @@ fi
 ECR_REGISTRY="${PUB_ACCOUNT_ID}.dkr.ecr.${PUB_REGION}.amazonaws.com"
 ECR_REPO_BACKEND="${ECR_REGISTRY}/dda/flask-app"
 ECR_REPO_FRONTEND="${ECR_REGISTRY}/dda/react-webapp"
-S3_BUCKET="dda-component-${PUB_REGION}-${PUB_ACCOUNT_ID}"
+S3_BUCKET="$(dda_component_bucket_name "$PUB_REGION" "$PUB_ACCOUNT_ID")" || exit 1
+
+# Verify this account owns the derived bucket BEFORE any image push or upload
+# (creating it only when S3 reports it absent, then re-verifying). A bucket of
+# this name under another account is a hard error.
+dda_ensure_owned_bucket "$S3_BUCKET" "$PUB_REGION" "$PUB_ACCOUNT_ID" || exit 1
 
 # Pre-flight: the images and staging dir must already exist (built, not rebuilt here).
 docker image inspect flask-app:latest >/dev/null 2>&1 || { echo "ERROR: flask-app:latest not found"; exit 1; }
@@ -104,7 +115,8 @@ zip -r -X "$APP_ZIP" "custom-build/${COMPONENT_NAME}" -x '*/.tmp-*'
 S3_KEY="${COMPONENT_NAME}/${COMPONENT_VERSION}/${COMPONENT_NAME}-${ARCH}.zip"
 S3_URI="s3://${S3_BUCKET}/${S3_KEY}"
 echo "Uploading scripts artifact to ${S3_URI} ($(numfmt --to=iec "$(stat --format=%s "$APP_ZIP")" 2>/dev/null || echo "?"))..."
-aws s3 cp "$APP_ZIP" "$S3_URI" --region "$PUB_REGION"
+# Owner-asserted PutObject (ExpectedBucketOwner=${PUB_ACCOUNT_ID}).
+dda_s3_put_object "$S3_BUCKET" "$S3_KEY" "$APP_ZIP" "$PUB_REGION" "$PUB_ACCOUNT_ID" || exit 1
 
 # Rewrite the recipe: docker image artifacts + S3 scripts artifact, add Docker/TES
 # deps, and swap the in-Install `docker load -i ...tar` for `docker tag <ecr> ...:latest`.

@@ -115,22 +115,40 @@ class FakeSTS:
 
 
 class FakeComponentS3:
-    """s3 in the portal account: the component bucket policy, per bucket."""
+    """s3 in the portal account: the component bucket policy, per bucket.
 
-    def __init__(self, log: OperationLog):
+    Models S3's ExpectedBucketOwner semantics (the S3 bucket-squatting fix):
+    every bucket is owned by `owner` (the portal account unless a test
+    re-points it to simulate a pre-created bucket in another account); a
+    call that asserts a different owner is refused with 403 AccessDenied
+    before anything is read or written, exactly as S3 does. The owner each
+    call asserted is recorded in `asserted_owners` so a suite can prove the
+    handlers never call without the assertion.
+    """
+
+    def __init__(self, log: OperationLog, owner: str = PORTAL):
         self.log = log
+        self.owner = owner
         self.calls: List[tuple] = []
+        self.asserted_owners: List[Optional[str]] = []
         self.policies: Dict[str, str] = {}
         self.put_error: Optional[Exception] = None
 
-    def get_bucket_policy(self, Bucket):
+    def _check_owner(self, operation: str, expected_owner: Optional[str]) -> None:
+        self.asserted_owners.append(expected_owner)
+        if expected_owner is not None and expected_owner != self.owner:
+            raise client_error("AccessDenied", "Access Denied", status=403, operation=operation)
+
+    def get_bucket_policy(self, Bucket, ExpectedBucketOwner=None):
         self.calls.append(("get_bucket_policy", Bucket))
+        self._check_owner("GetBucketPolicy", ExpectedBucketOwner)
         if Bucket not in self.policies:
             raise client_error("NoSuchBucketPolicy", status=404, operation="GetBucketPolicy")
         return {"Policy": self.policies[Bucket]}
 
-    def put_bucket_policy(self, Bucket, Policy):
+    def put_bucket_policy(self, Bucket, Policy, ExpectedBucketOwner=None):
         self.calls.append(("put_bucket_policy", Bucket))
+        self._check_owner("PutBucketPolicy", ExpectedBucketOwner)
         if self.put_error is not None:
             raise self.put_error
         document = json.loads(Policy)

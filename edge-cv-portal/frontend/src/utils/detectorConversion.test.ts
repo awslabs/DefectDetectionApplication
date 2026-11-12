@@ -361,6 +361,20 @@ describe('putFileWithProgress', () => {
     expect(progress).toEqual([25, 99, 100]);
   });
 
+  it('sends the headers the presigned URL signed (x-amz-expected-bucket-owner) verbatim', async () => {
+    vi.stubGlobal('XMLHttpRequest', FakeXhr);
+    const done = putFileWithProgress(
+      'https://bucket.example/put?sig',
+      new Blob(['x']),
+      undefined,
+      { 'x-amz-expected-bucket-owner': '123456789012' }
+    );
+    const xhr = FakeXhr.last!;
+    expect(xhr.headers).toEqual({ 'x-amz-expected-bucket-owner': '123456789012' });
+    xhr.status = 200;
+    xhr.onload!();
+    await expect(done).resolves.toBeUndefined();
+  });
   it('rejects with the HTTP status and the S3 error code', async () => {
     vi.stubGlobal('XMLHttpRequest', FakeXhr);
     const done = putFileWithProgress('https://bucket.example/put', new Blob(['x']));

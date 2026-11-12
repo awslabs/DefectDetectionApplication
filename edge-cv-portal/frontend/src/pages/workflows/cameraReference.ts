@@ -152,8 +152,17 @@ export interface StaticImageUploadUrlResponse {
   deviceId: string;
   /** Presigned PUT for the staging key (15-minute TTL). */
   uploadUrl: string;
+  /**
+   * Headers the presigned PUT signs and the browser must therefore send
+   * (`x-amz-expected-bucket-owner`: S3 rejects the upload unless the bucket
+   * is owned by the portal account, which closes bucket squatting on the
+   * account-derived bucket name).
+   */
+  uploadHeaders?: Record<string, string>;
   stagingKey: string;
   bucket: string;
+  /** The account that must own `bucket` (also carried in `uploadHeaders`). */
+  expectedBucketOwner?: string;
   expiresInSeconds: number;
 }
 

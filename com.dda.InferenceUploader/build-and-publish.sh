@@ -4,29 +4,39 @@ set -e
 COMPONENT_NAME="com.dda.InferenceUploader"
 COMPONENT_VERSION="1.0.0"
 
+# The component bucket name is DERIVED from the account id and region, so
+# every S3 call against it asserts ExpectedBucketOwner (see the guard's header
+# for the bucket-squatting threat this closes).
+. "$(dirname "$0")/../scripts/s3-bucket-owner-guard.sh"
+
 echo "Building and publishing ${COMPONENT_NAME} v${COMPONENT_VERSION}"
 
 # Get account and region info
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+if [ -z "$ACCOUNT_ID" ] || [ "$ACCOUNT_ID" = "None" ]; then
+    echo "ERROR: Could not resolve the AWS account id (aws sts get-caller-identity)." >&2
+    exit 1
+fi
 REGION=$(aws configure get region || echo "us-east-1")
-BUCKET_NAME="dda-component-${REGION}-${ACCOUNT_ID}"
+BUCKET_NAME="$(dda_component_bucket_name "$REGION" "$ACCOUNT_ID")" || exit 1
 
 echo "Using S3 bucket: $BUCKET_NAME"
 echo "Account ID: $ACCOUNT_ID"
 echo "Region: $REGION"
 
-# Create bucket if it doesn't exist
-if ! aws s3 ls "s3://${BUCKET_NAME}" 2>/dev/null; then
-    echo "Creating S3 bucket: ${BUCKET_NAME}"
-    aws s3 mb "s3://${BUCKET_NAME}" --region "${REGION}"
-fi
+# Verify this account owns the bucket (creating it only when S3 reports it
+# absent, then re-verifying). A bucket of this name under another account is
+# a hard error: the guard prints the conflict and we stop before any upload.
+dda_ensure_owned_bucket "$BUCKET_NAME" "$REGION" "$ACCOUNT_ID" || exit 1
 
-# Upload artifacts to S3
+# Upload artifacts to S3 with ExpectedBucketOwner asserted on each PutObject.
 ARTIFACT_PREFIX="${COMPONENT_NAME}/${COMPONENT_VERSION}"
 echo "Uploading artifacts to s3://${BUCKET_NAME}/${ARTIFACT_PREFIX}/"
 
-aws s3 cp artifacts/inference_uploader.py "s3://${BUCKET_NAME}/${ARTIFACT_PREFIX}/inference_uploader.py"
-aws s3 cp artifacts/requirements.txt "s3://${BUCKET_NAME}/${ARTIFACT_PREFIX}/requirements.txt"
+dda_s3_put_object "${BUCKET_NAME}" "${ARTIFACT_PREFIX}/inference_uploader.py" \
+    artifacts/inference_uploader.py "${REGION}" "${ACCOUNT_ID}" || exit 1
+dda_s3_put_object "${BUCKET_NAME}" "${ARTIFACT_PREFIX}/requirements.txt" \
+    artifacts/requirements.txt "${REGION}" "${ACCOUNT_ID}" || exit 1
 
 echo "Artifacts uploaded successfully"
 

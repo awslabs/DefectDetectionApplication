@@ -3004,6 +3004,67 @@ def component_bucket_name() -> str:
         f"{os.environ.get('AWS_REGION', 'us-east-1')}-{os.environ.get('PORTAL_ACCOUNT_ID', '')}")
 
 
+class BucketOwnerUnknown(Exception):
+    """The account that must own a derived-name bucket could not be determined
+    (PORTAL_ACCOUNT_ID unset and STS unreachable). Callers fail closed: no S3
+    call against a derived bucket name is made without ExpectedBucketOwner."""
+
+
+_caller_account_id_cache: Dict[str, str] = {}
+
+
+def component_bucket_owner() -> str:
+    """The AWS account that must own the Greengrass component bucket, for the
+    ExpectedBucketOwner parameter of every S3 call against it.
+
+    The bucket's name is derived from a public value (this account's id and
+    region), so anyone can pre-create that exact name in another account; S3
+    would otherwise resolve the name to the attacker's bucket and the portal
+    would read from / write to it (S3 bucket squatting). ExpectedBucketOwner
+    makes S3 answer 403 when the bucket is owned by any other account.
+
+    The owner is the portal's own account: PORTAL_ACCOUNT_ID (set by the
+    compute stack on every handler), else the caller identity from STS
+    (cached), which is the same account outside Lambda. Raises
+    BucketOwnerUnknown when neither is available, so callers never fall back
+    to an unguarded call.
+    """
+    configured = (os.environ.get('PORTAL_ACCOUNT_ID') or '').strip()
+    if configured:
+        return configured
+    cached = _caller_account_id_cache.get('account')
+    if cached:
+        return cached
+    try:
+        account = boto3.client('sts').get_caller_identity()['Account']
+    except Exception as exc:  # noqa: BLE001 — any STS failure means the owner is unknown
+        raise BucketOwnerUnknown(
+            'Cannot determine the account that must own the component bucket: '
+            f'PORTAL_ACCOUNT_ID is unset and STS GetCallerIdentity failed ({exc})') from exc
+    if not account:
+        raise BucketOwnerUnknown('STS GetCallerIdentity returned no account id')
+    _caller_account_id_cache['account'] = str(account)
+    return str(account)
+
+
+def is_bucket_owner_mismatch(error: Exception) -> bool:
+    """True when `error` is the ClientError S3 raises for an ExpectedBucketOwner
+    mismatch (HTTP 403 / AccessDenied): the derived-name bucket exists but is
+    owned by another account. Used to log and report a possible bucket-
+    squatting attempt distinctly from other failures."""
+    if not isinstance(error, ClientError):
+        return False
+    response = getattr(error, 'response', None) or {}
+    code = (response.get('Error') or {}).get('Code')
+    status = (response.get('ResponseMetadata') or {}).get('HTTPStatusCode')
+    return code in ('AccessDenied', '403', 'Forbidden') or status == 403
+
+
+BUCKET_OWNER_MISMATCH_MESSAGE = (
+    'S3 bucket ownership conflict: bucket {bucket} is not owned by account '
+    '{account} (possible S3 bucket squatting); refusing to use it')
+
+
 # Upper bound for a serialized component bucket policy (Requirement 3.3):
 # deliberately under S3's 20,480-byte bucket policy limit, so a writer refuses
 # before S3 would reject the PutBucketPolicy.

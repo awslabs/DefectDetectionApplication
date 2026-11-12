@@ -279,7 +279,9 @@ export default function StaticVideoPanel({
       // Presigned PUT to a staging key (shared with images), with progress
       // (Req 9.4); then the pin submit starts the Portal's validation.
       const upload = await apiService.getStaticVideoUploadUrl(deviceId, usecaseId);
-      await putFileWithProgress(upload.uploadUrl, selected, setUploadProgress);
+      // uploadHeaders carries x-amz-expected-bucket-owner, which the presign
+      // signs: S3 refuses the PUT unless the portal account owns the bucket.
+      await putFileWithProgress(upload.uploadUrl, selected, setUploadProgress, upload.uploadHeaders);
       setPhase('submitting');
       await apiService.pinStaticVideo(deviceId, usecaseId, {
         stagingKey: upload.stagingKey,
