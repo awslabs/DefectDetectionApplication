@@ -526,10 +526,15 @@ describe('static-image pin infrastructure (cloud-static-camera-provisioning task
     expect(create).toContain('static-image-pins/staging/');
     expect(create).toContain('\\"Days\\":1');
     expect(create).toContain('\\"Status\\":\\"Enabled\\"');
+    // The bucket name is derived from the account id, so the write asserts
+    // the owner: a squatted bucket of that name answers 403 and the deploy
+    // fails instead of configuring another account's bucket.
+    expect(create).toContain('\\"ExpectedBucketOwner\\":\\"');
+    expect(create).toContain('AWS::AccountId');
     // The update path re-asserts the same configuration.
-    expect(
-      JSON.stringify((customResources[0] as any).Properties.Update ?? '')
-    ).toContain('putBucketLifecycleConfiguration');
+    const update = JSON.stringify((customResources[0] as any).Properties.Update ?? '');
+    expect(update).toContain('putBucketLifecycleConfiguration');
+    expect(update).toContain('\\"ExpectedBucketOwner\\":\\"');
   });
 
   test('a browser CORS rule for the presigned pin upload is applied to the component bucket', () => {
@@ -552,9 +557,12 @@ describe('static-image pin infrastructure (cloud-static-camera-provisioning task
     expect(create).toContain('\\"ExposeHeaders\\":[\\"ETag\\"]');
     // No cloudFrontDomain context in this fixture -> any origin.
     expect(create).toContain('\\"AllowedOrigins\\":[\\"*\\"]');
-    expect(
-      JSON.stringify((customResources[0] as any).Properties.Update ?? '')
-    ).toContain('putBucketCors');
+    // Owner-asserted like the lifecycle write (derived bucket name).
+    expect(create).toContain('\\"ExpectedBucketOwner\\":\\"');
+    expect(create).toContain('AWS::AccountId');
+    const update = JSON.stringify((customResources[0] as any).Properties.Update ?? '');
+    expect(update).toContain('putBucketCors');
+    expect(update).toContain('\\"ExpectedBucketOwner\\":\\"');
     // The custom resource may only touch CORS on that one bucket.
     const policies = Object.values(computeTemplate.findResources('AWS::IAM::Policy'));
     const corsStatements = policies.flatMap((policy: any) =>

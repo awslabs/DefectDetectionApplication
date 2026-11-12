@@ -444,7 +444,13 @@ function StaticImagePanel({
       // Upload path (design Decision 2): presigned PUT to a staging key,
       // then the pin submit validates and copies the staged object.
       const upload = await apiService.getStaticImageUploadUrl(deviceId, usecaseId);
-      const put = await fetch(upload.uploadUrl, { method: 'PUT', body: file });
+      // uploadHeaders carries x-amz-expected-bucket-owner, which the presign
+      // signs: S3 refuses the PUT unless the portal account owns the bucket.
+      const put = await fetch(upload.uploadUrl, {
+        method: 'PUT',
+        body: file,
+        headers: upload.uploadHeaders ?? {},
+      });
       if (!put.ok) {
         throw new Error(`Image upload failed (HTTP ${put.status})`);
       }

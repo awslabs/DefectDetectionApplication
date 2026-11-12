@@ -6,27 +6,35 @@ set -e
 
 COMPONENT_NAME="aws.edgeml.dda.InferenceUploader"
 
+# The component bucket name is DERIVED from the account id and region, so
+# every S3 call against it asserts ExpectedBucketOwner (see the guard's header
+# for the bucket-squatting threat this closes).
+. "$(dirname "$0")/scripts/s3-bucket-owner-guard.sh"
+
 echo "Building and publishing ${COMPONENT_NAME}"
 echo ""
 
 # Get account and region info
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+if [ -z "$ACCOUNT_ID" ] || [ "$ACCOUNT_ID" = "None" ]; then
+    echo "❌ ERROR: Could not resolve the AWS account id (aws sts get-caller-identity)."
+    exit 1
+fi
 REGION=$(aws configure get region 2>/dev/null)
 if [ -z "$REGION" ]; then
     echo "❌ ERROR: No AWS region configured."
     echo "   Run: aws configure set region <your-region>"
     exit 1
 fi
-BUCKET_NAME="dda-component-${REGION}-${ACCOUNT_ID}"
+BUCKET_NAME="$(dda_component_bucket_name "$REGION" "$ACCOUNT_ID")" || exit 1
 
 echo "Using S3 bucket: $BUCKET_NAME"
 echo ""
 
-# Create bucket if it doesn't exist
-if ! aws s3 ls "s3://${BUCKET_NAME}" 2>/dev/null; then
-    echo "Creating S3 bucket: ${BUCKET_NAME}"
-    aws s3 mb "s3://${BUCKET_NAME}" --region "${REGION}"
-fi
+# Verify this account owns the bucket (creating it only when S3 reports it
+# absent, then re-verifying). A bucket of this name under another account is
+# a hard error: the guard prints the conflict and we stop before any upload.
+dda_ensure_owned_bucket "$BUCKET_NAME" "$REGION" "$ACCOUNT_ID" || exit 1
 
 # Determine the next available component version.
 # Find the latest published version and bump the minor number; if none exists, start at 1.0.0.
@@ -55,8 +63,12 @@ publish_version() {
     local artifact_prefix="${COMPONENT_NAME}/${version}"
 
     echo "Uploading artifacts to s3://${BUCKET_NAME}/${artifact_prefix}/"
-    aws s3 cp inference-uploader/artifacts/inference_uploader.py "s3://${BUCKET_NAME}/${artifact_prefix}/inference_uploader.py"
-    aws s3 cp inference-uploader/artifacts/requirements.txt "s3://${BUCKET_NAME}/${artifact_prefix}/requirements.txt"
+    # Owner-asserted PutObject (ExpectedBucketOwner=${ACCOUNT_ID}); the guard
+    # fails closed on a bucket owned by any other account.
+    dda_s3_put_object "${BUCKET_NAME}" "${artifact_prefix}/inference_uploader.py" \
+        inference-uploader/artifacts/inference_uploader.py "${REGION}" "${ACCOUNT_ID}" || return 1
+    dda_s3_put_object "${BUCKET_NAME}" "${artifact_prefix}/requirements.txt" \
+        inference-uploader/artifacts/requirements.txt "${REGION}" "${ACCOUNT_ID}" || return 1
     echo "Artifacts uploaded successfully"
     echo ""
 

@@ -217,11 +217,14 @@ class FakeS3:
         self.missing = missing and not self.rules
         self.get_calls = []
         self.put_calls = []
+        # The owner each call asserted (S3 bucket-squatting fix).
+        self.asserted_owners = []
         self.get_error = None
         self.put_error = None
 
-    def get_bucket_lifecycle_configuration(self, Bucket):
+    def get_bucket_lifecycle_configuration(self, Bucket, ExpectedBucketOwner=None):
         self.get_calls.append(Bucket)
+        self.asserted_owners.append(ExpectedBucketOwner)
         if self.get_error is not None:
             raise self.get_error
         if self.missing:
@@ -232,7 +235,9 @@ class FakeS3:
         return {"Rules": [dict(rule) for rule in self.rules]}
 
     def put_bucket_lifecycle_configuration(self, Bucket,
-                                           LifecycleConfiguration):
+                                           LifecycleConfiguration,
+                                           ExpectedBucketOwner=None):
+        self.asserted_owners.append(ExpectedBucketOwner)
         self.put_calls.append((Bucket, LifecycleConfiguration))
         if self.put_error is not None:
             raise self.put_error

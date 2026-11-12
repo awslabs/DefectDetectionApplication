@@ -7,6 +7,7 @@ Monitors /aws_dda/inference-results/ directory and uploads inference results
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -23,6 +24,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger('InferenceUploader')
 
+
+# The Portal names a use case's default results bucket from the use case's
+# account id (dda-inference-results-<account>) and nothing creates it for the
+# operator, so a third party who knows the account id can create that exact
+# name first and receive every inference image and metadata file this
+# component uploads (S3 bucket squatting). A bucket of that derived shape must
+# belong to the account its name encodes: every upload asserts it as
+# ExpectedBucketOwner and S3 answers 403 when another account owns the
+# bucket. An explicit `s3BucketOwner` (configuration key or S3_BUCKET_OWNER
+# environment variable) asserts the owner of any bucket, including an
+# administrator's override; without it an override carries no assertion.
+RESULTS_BUCKET_PATTERN = re.compile(r'^dda-inference-results-(\d{12})$')
+
+
+def expected_bucket_owner(bucket: str, configured_owner: str = '') -> str:
+    """The account that must own `bucket`: the configured owner when given,
+    else the account a derived dda-inference-results-<account> name encodes,
+    else '' (no assertion)."""
+    configured = str(configured_owner or '').strip()
+    if configured:
+        return configured
+    match = RESULTS_BUCKET_PATTERN.match(str(bucket or ''))
+    return match.group(1) if match else ''
+
 class InferenceUploader:
     def __init__(self, config: Dict):
         self.config = config
@@ -35,6 +60,9 @@ class InferenceUploader:
         self.s3_bucket = config.get('s3Bucket', '')
         self.s3_prefix = config.get('s3Prefix', '')
         self.aws_region = config.get('awsRegion', 'us-east-1')
+        # ExpectedBucketOwner of every upload (see expected_bucket_owner).
+        self.s3_bucket_owner = expected_bucket_owner(
+            self.s3_bucket, config.get('s3BucketOwner', ''))
         
         if not self.s3_bucket:
             raise ValueError("s3Bucket configuration is required")
@@ -50,6 +78,7 @@ class InferenceUploader:
         logger.info(f"InferenceUploader initialized")
         logger.info(f"  Monitoring: {self.inference_path}")
         logger.info(f"  S3 Bucket: {self.s3_bucket}")
+        logger.info(f"  S3 Bucket Owner (asserted): {self.s3_bucket_owner or 'not asserted'}")
         logger.info(f"  S3 Prefix: {self.s3_prefix}")
         logger.info(f"  Upload Interval: {self.upload_interval}s")
     
@@ -117,17 +146,21 @@ class InferenceUploader:
             elif local_path.endswith(('.json', '.jsonl')):
                 content_type = 'application/json'
             
-            self.s3_client.upload_file(
-                local_path,
-                self.s3_bucket,
-                s3_key,
-                ExtraArgs={
+            extra_args = {
                     'ContentType': content_type,
                     'Metadata': {
                         'uploaded-by': 'inference-uploader',
                         'upload-timestamp': datetime.utcnow().isoformat()
                     }
                 }
+            if self.s3_bucket_owner:
+                # Fails closed (403) on a bucket owned by any other account.
+                extra_args['ExpectedBucketOwner'] = self.s3_bucket_owner
+            self.s3_client.upload_file(
+                local_path,
+                self.s3_bucket,
+                s3_key,
+                ExtraArgs=extra_args
             )
             
             logger.info(f"Uploaded: {local_path} -> s3://{self.s3_bucket}/{s3_key}")
@@ -259,6 +292,7 @@ def load_configuration() -> Dict:
         'uploadMetadata': True,
         's3Bucket': '',
         's3Prefix': '',
+        's3BucketOwner': '',
         'awsRegion': 'us-east-1'
     }
     
@@ -283,6 +317,7 @@ def load_configuration() -> Dict:
         'UPLOAD_METADATA': 'uploadMetadata',
         'S3_BUCKET': 's3Bucket',
         'S3_PREFIX': 's3Prefix',
+        'S3_BUCKET_OWNER': 's3BucketOwner',
         'AWS_REGION': 'awsRegion'
     }
     

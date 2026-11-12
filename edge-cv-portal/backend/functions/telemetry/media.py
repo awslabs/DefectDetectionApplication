@@ -24,8 +24,8 @@ from typing import Any, Dict, Optional
 import shared_utils
 
 __all__ = [
-    "TELEMETRY_PREFIX", "CLIPS_PREFIX", "LIVE_PREFIX", "Binding", "results_bucket", "pair_prefix",
-    "bind_key", "bind", "media_location",
+    "TELEMETRY_PREFIX", "CLIPS_PREFIX", "LIVE_PREFIX", "Binding", "results_bucket", "owner_args",
+    "pair_prefix", "bind_key", "bind", "media_location",
 ]
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,17 @@ def results_bucket(usecase: Dict[str, Any]) -> str:
     account_id = str(usecase.get("account_id") or "")
     override = usecase.get("inference_uploader_s3_bucket")
     return str(override) if override else "dda-inference-results-{0}".format(account_id)
+
+
+def owner_args(usecase: Dict[str, Any], bucket: Any) -> Dict[str, str]:
+    """``{'ExpectedBucketOwner': <use case account>}`` when ``bucket`` is the
+    use case's DERIVED default Results_Bucket, else ``{}``. The default's
+    name is predictable from the account id and nothing creates the bucket
+    for the operator, so a bucket of that name may belong to another account
+    (S3 bucket squatting): every S3 call against it asserts the owner and S3
+    answers 403 instead of serving or storing that account's objects. An
+    override is admitted by the bucket allowlist, not by its name."""
+    return shared_utils.expected_owner_args(shared_utils.results_bucket_owner(usecase, bucket))
 
 
 def pair_prefix(kind: str, usecase_id: str, device_id: str, workflow_id: str) -> str:

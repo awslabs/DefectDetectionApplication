@@ -34,6 +34,9 @@ from shared_utils import (
     RegistryUnavailable, validate_account_id, validate_role_arn,
     account_trusted, TrustedAccountsNotConfigured,
     component_bucket_name, COMPONENT_BUCKET_POLICY_MAX_BYTES,
+    # The component bucket's name is derived from the account id, so every S3
+    # call against it asserts ExpectedBucketOwner (S3 bucket-squatting fix).
+    component_bucket_owner, is_bucket_owner_mismatch, BUCKET_OWNER_MISMATCH_MESSAGE,
     # The marker of the direct provisioning invoke (design I3).
     INTERNAL_MARKER_KEY, internal_marker,
     # The key-namespace check of the one tag list the portal writes (design I5).
@@ -797,11 +800,16 @@ def update_component_bucket_policy_for_greengrass(
         
         # Create S3 client in Portal Account (we're already in Portal Account context)
         s3_component = boto3.client('s3')
+        # The bucket name is derived from this account's id, so assert the
+        # owner on every call: a bucket of that name under another account
+        # (S3 bucket squatting) answers 403 instead of being adopted.
+        bucket_owner = component_bucket_owner()
         
         # Get existing bucket policy (if any)
         existing_policy = None
         try:
-            response = s3_component.get_bucket_policy(Bucket=component_bucket_name)
+            response = s3_component.get_bucket_policy(Bucket=component_bucket_name,
+                                                      ExpectedBucketOwner=bucket_owner)
             existing_policy = json.loads(response['Policy'])
             logger.info(f"Found existing bucket policy with {len(existing_policy.get('Statement', []))} statements")
         except ClientError as e:
@@ -883,7 +891,8 @@ def update_component_bucket_policy_for_greengrass(
         # write has returned, which keeps the two writers sequential.
         s3_component.put_bucket_policy(
             Bucket=component_bucket_name,
-            Policy=policy_document
+            Policy=policy_document,
+            ExpectedBucketOwner=bucket_owner
         )
         
         logger.info(f"Successfully updated component bucket policy for {component_bucket_name}")
@@ -900,10 +909,18 @@ def update_component_bucket_policy_for_greengrass(
         error_message = e.response['Error']['Message']
         logger.error(f"Failed to update component bucket policy: {error_code} - {error_message}")
         
-        if error_code == 'AccessDenied':
+        if is_bucket_owner_mismatch(e):
+            # 403 with ExpectedBucketOwner set: either the bucket belongs to
+            # another account or this role lacks the bucket-policy
+            # permissions. Name the ownership conflict first; it is the one
+            # that must never be worked around.
+            message = BUCKET_OWNER_MISMATCH_MESSAGE.format(
+                bucket=component_bucket_name, account=component_bucket_owner())
+            logger.error(message)
             return {
                 'status': 'failed',
-                'error': 'Access denied. Portal account needs s3:GetBucketPolicy and s3:PutBucketPolicy permissions.',
+                'error': message + ' (or the portal account lacks s3:GetBucketPolicy / '
+                         's3:PutBucketPolicy on it)',
                 'bucket': component_bucket_name
             }
         elif error_code == 'NoSuchBucket':
@@ -1062,8 +1079,12 @@ def _remove_component_bucket_grants(bucket: str, account_id: str) -> dict:
     policy is reported failed and nothing is written."""
     s3_component = boto3.client('s3')
     try:
+        # Derived bucket name: assert the owner on every call (see
+        # update_component_bucket_policy_for_greengrass).
+        bucket_owner = component_bucket_owner()
         try:
-            policy = json.loads(s3_component.get_bucket_policy(Bucket=bucket)['Policy'])
+            policy = json.loads(s3_component.get_bucket_policy(
+                Bucket=bucket, ExpectedBucketOwner=bucket_owner)['Policy'])
         except ClientError as e:
             if e.response.get('Error', {}).get('Code') == 'NoSuchBucketPolicy':
                 return {'status': 'not_present', 'bucket': bucket}
@@ -1103,10 +1124,14 @@ def _remove_component_bucket_grants(bucket: str, account_id: str) -> dict:
             return {'status': 'failed', 'bucket': bucket,
                     'error': 'removing the account would leave the component bucket policy empty'}
         policy['Statement'] = kept
-        s3_component.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy))
+        s3_component.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy),
+                                       ExpectedBucketOwner=bucket_owner)
         return {'status': 'success', 'bucket': bucket}
     except ClientError as e:
         error = e.response.get('Error', {})
+        if is_bucket_owner_mismatch(e):
+            logger.error(BUCKET_OWNER_MISMATCH_MESSAGE.format(
+                bucket=bucket, account=component_bucket_owner()))
         logger.warning(f"Could not remove account {account_id} from the policy of {bucket}: "
                        f"{error.get('Code')}")
         return {'status': 'failed', 'bucket': bucket,

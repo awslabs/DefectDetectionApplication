@@ -119,6 +119,21 @@ def get_inference_results_bucket_and_credentials(usecase):
     return bucket, credentials
 
 
+def results_bucket_owner_args(usecase, bucket: str) -> Dict[str, str]:
+    """``{'ExpectedBucketOwner': <use case account>}`` when `bucket` is the
+    use case's DERIVED default (``dda-inference-results-{account_id}``), else
+    ``{}``. The default's name is predictable from the account id and nothing
+    creates the bucket for the operator, so a bucket of that name may have
+    been pre-created by another account (S3 bucket squatting); asserting the
+    owner on every list and read makes S3 answer 403 instead of serving that
+    account's objects as the use case's captures. An admin-configured
+    override is not a derived name and is left to the bucket allowlist."""
+    account_id = str(usecase.get('account_id') or '').strip()
+    if account_id and bucket == f"dda-inference-results-{account_id}":
+        return {'ExpectedBucketOwner': account_id}
+    return {}
+
+
 def list_captures(event):
     """
     List inference-results captures under a prefix and return parsed metadata
@@ -181,8 +196,12 @@ def list_captures(event):
         all_keys = set()
         jsonl_keys = []
 
+        # Derived bucket name: the list and every read assert the owner.
+        # (The presigned GET URLs below carry no header the browser could
+        # send; they are only issued for a bucket this list has verified.)
+        owner_args = results_bucket_owner_args(usecase, bucket)
         paginator = s3.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=bucket, Prefix=search_prefix)
+        pages = paginator.paginate(Bucket=bucket, Prefix=search_prefix, **owner_args)
 
         for page in pages:
             for obj in page.get('Contents', []):
@@ -196,7 +215,7 @@ def list_captures(event):
             if len(captures) >= limit:
                 break
 
-            capture = _parse_capture(s3, bucket, jsonl_key, all_keys)
+            capture = _parse_capture(s3, bucket, jsonl_key, all_keys, owner_args)
             if capture:
                 captures.append(capture)
 
@@ -212,13 +231,15 @@ def list_captures(event):
         return handle_error(e, 'Failed to list captures')
 
 
-def _parse_capture(s3, bucket: str, jsonl_key: str, all_keys: set) -> Optional[Dict[str, Any]]:
+def _parse_capture(s3, bucket: str, jsonl_key: str, all_keys: set,
+                   owner_args: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
     """
     Parse a single capture's `.jsonl` metadata and build its response entry.
 
     Tolerates a missing/parse-failed metadata file (returns an entry with empty
     detections) and missing sibling artifacts (null URLs). Returns None only if
-    the metadata object cannot be fetched at all.
+    the metadata object cannot be fetched at all. `owner_args` is the
+    ExpectedBucketOwner assertion of `results_bucket_owner_args` for the read.
     """
     # capture_id and the sibling-artifact key base derive from the jsonl key,
     # e.g. "device/folder/<capture_id>.jsonl" -> base "device/folder/<capture_id>"
@@ -230,7 +251,7 @@ def _parse_capture(s3, bucket: str, jsonl_key: str, all_keys: set) -> Optional[D
     detections: List[Dict[str, Any]] = []
 
     try:
-        body = s3.get_object(Bucket=bucket, Key=jsonl_key)['Body'].read()
+        body = s3.get_object(Bucket=bucket, Key=jsonl_key, **(owner_args or {}))['Body'].read()
         # A capture .jsonl holds one metadata object per line; use the last
         # non-empty line as the capture's metadata.
         metadata = _load_last_metadata(body)

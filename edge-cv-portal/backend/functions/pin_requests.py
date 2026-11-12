@@ -444,7 +444,14 @@ def _delete_canonical_object_best_effort(s3_client, item: Dict[str, Any]):
     if not bucket or not key:
         return
     try:
-        s3_client.delete_object(Bucket=bucket, Key=key)
+        # The canonical object lives in the component bucket, whose name is
+        # derived from the portal account id: assert the owner so a bucket of
+        # that name under another account is never touched (S3 bucket-
+        # squatting fix). Imported here so this module's import surface stays
+        # the lifecycle core's own.
+        from shared_utils import component_bucket_owner
+        s3_client.delete_object(Bucket=bucket, Key=key,
+                                ExpectedBucketOwner=component_bucket_owner())
     except Exception:  # noqa: BLE001 — best-effort cleanup only
         logger.warning(
             "Best-effort delete of canonical pin object s3://%s/%s failed",

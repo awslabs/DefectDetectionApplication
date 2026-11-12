@@ -101,6 +101,7 @@ from botocore.exceptions import ClientError
 # Import shared utilities (Lambda layer)
 sys.path.append('/opt/python')
 from shared_utils import (  # noqa: E402
+    OwnerAssertingS3,
     Permission,
     create_response,
     get_usecase,
@@ -108,6 +109,7 @@ from shared_utils import (  # noqa: E402
     get_user_from_event,
     log_audit_event,
     rbac_manager,
+    results_bucket_owner,
 )
 from workflow_core.anomaly_invocation import (  # noqa: E402
     BEDROCK_DEFAULT_REGION,
@@ -677,7 +679,14 @@ def sample_store(usecase: Dict) -> Tuple[Any, str]:
             'No inference results bucket is configured for this use case, '
             'so no Sample_Store exists yet')
     client = get_usecase_client('s3', usecase, session_name='tuning-samples')
-    return client, bucket
+    # The default Sample_Store is the DERIVED dda-inference-results-<account>
+    # bucket, which nothing creates for the operator, so a bucket of that
+    # name may belong to another account (S3 bucket squatting). The proxy
+    # asserts the use case's account as the owner on every list, read and
+    # write the tuning helpers make through this client; S3 answers 403
+    # instead of serving or storing another account's objects. An override
+    # bucket is admitted by the allowlist, not by its name (no assertion).
+    return OwnerAssertingS3(client, bucket, results_bucket_owner(usecase, bucket)), bucket
 
 
 def workflow_samples_prefix(workflow_id: str) -> str:

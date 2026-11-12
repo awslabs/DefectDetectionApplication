@@ -15,6 +15,12 @@ if [ "${SKIP_BUILD:-0}" = "1" ] && [ "${SKIP_PUBLISH:-0}" = "1" ]; then
     exit 1
 fi
 
+# The component bucket name is DERIVED from the account id and region
+# (dda-component-<region>-<account>), so every S3 call against it asserts
+# ExpectedBucketOwner and a bucket of that name under another account is a hard
+# error (see the guard's header for the bucket-squatting threat this closes).
+. "$(dirname "$0")/scripts/s3-bucket-owner-guard.sh"
+
 # ── Pre-flight: verify AWS credentials before the (long) build ──────────────
 # Publishing needs valid credentials. Check them up front so an expired session
 # fails in seconds rather than after a full image build + packaging (which can
@@ -379,7 +385,12 @@ if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ] || [ -n "${COMPONENT_VERSION_OVERRIDE:-}" ]
     ECR_REGISTRY="${PUB_ACCOUNT_ID}.dkr.ecr.${PUB_REGION}.amazonaws.com"
     ECR_REPO_BACKEND="${ECR_REGISTRY}/dda/flask-app"
     ECR_REPO_FRONTEND="${ECR_REGISTRY}/dda/react-webapp"
-    S3_BUCKET="dda-component-${PUB_REGION}-${PUB_ACCOUNT_ID}"
+    S3_BUCKET="$(dda_component_bucket_name "$PUB_REGION" "$PUB_ACCOUNT_ID")" || exit 1
+
+    # Verify this account owns the derived bucket BEFORE any image push or
+    # upload (creating it only when S3 reports it absent, then re-verifying).
+    # A bucket of this name under another account is a hard error.
+    dda_ensure_owned_bucket "$S3_BUCKET" "$PUB_REGION" "$PUB_ACCOUNT_ID" || exit 1
 
     # Determine the next component version (bump patch; start at 1.0.0).
     LATEST_VERSION=$(aws greengrassv2 list-component-versions \
@@ -437,7 +448,8 @@ if [ "$TOTAL_SIZE" -gt "$GG_LIMIT" ] || [ -n "${COMPONENT_VERSION_OVERRIDE:-}" ]
     S3_KEY="${COMPONENT_NAME}/${COMPONENT_VERSION}/${COMPONENT_NAME}-${ARCH}.zip"
     S3_URI="s3://${S3_BUCKET}/${S3_KEY}"
     echo "Uploading scripts artifact to ${S3_URI} ($(numfmt --to=iec "$(stat --format=%s "$APP_ZIP")" 2>/dev/null || echo "?"))..."
-    aws s3 cp "$APP_ZIP" "$S3_URI" --region "$PUB_REGION"
+    # Owner-asserted PutObject (ExpectedBucketOwner=${PUB_ACCOUNT_ID}).
+    dda_s3_put_object "$S3_BUCKET" "$S3_KEY" "$APP_ZIP" "$PUB_REGION" "$PUB_ACCOUNT_ID" || exit 1
 
     # Rewrite the recipe: docker: image artifacts + S3 scripts artifact, add the
     # Docker/TES dependencies, and swap the in-Install `docker load -i ...tar`
@@ -507,6 +519,22 @@ PYEOF
     fi
 else
     # Under 2GB — standard GDK publish.
+    #
+    # GDK derives the same dda-component-<region>-<account> name from
+    # gdk-config.json and, finding a bucket of that name reachable, uploads
+    # into it with no ownership check of its own. So, before handing over to
+    # GDK: (1) verify the bucket exists in THIS account (creating it only when
+    # absent, re-verifying after), and (2) make GDK's own uploads assert
+    # ExpectedBucketOwner through publish.options.file_upload_args.
+    if [ -z "$PUB_ACCOUNT_ID" ] || [ "$PUB_ACCOUNT_ID" = "None" ]; then
+        echo "✗ Cannot verify component bucket ownership: the AWS account id is unresolved."
+        echo "  Refusing to publish (region='$GDK_REGION' account='$PUB_ACCOUNT_ID')."
+        exit 1
+    fi
+    GDK_BUCKET="$(dda_component_bucket_name "$GDK_REGION" "$PUB_ACCOUNT_ID")" || exit 1
+    dda_ensure_owned_bucket "$GDK_BUCKET" "$GDK_REGION" "$PUB_ACCOUNT_ID" || exit 1
+    dda_gdk_config_assert_owner gdk-config.json "$PUB_ACCOUNT_ID" || exit 1
+
     if gdk component publish 2>&1 | tee "$PUBLISH_LOG"; then
         echo ""
         echo "✓ Component published successfully"

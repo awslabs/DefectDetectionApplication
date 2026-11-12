@@ -29,7 +29,7 @@ from edge_telemetry_common import credentials
 from telemetry import retention
 
 __all__ = ["DEBUG_IMAGE_PREFIX", "PRESIGN_SECONDS", "RegionProbe", "ImagesReadiness", "results_bucket",
-           "probe_region", "images_ready", "head_image", "presign_image"]
+           "owner_args", "probe_region", "images_ready", "head_image", "presign_image"]
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,17 @@ ImagesReadiness = namedtuple("ImagesReadiness", ["ready", "reason", "rules"])
 def results_bucket(usecase: Dict[str, Any]) -> str:
     account_id = str(usecase.get("account_id") or "")
     return str(usecase.get("inference_uploader_s3_bucket") or "dda-inference-results-{0}".format(account_id))
+
+
+def owner_args(usecase: Dict[str, Any], bucket: Any) -> Dict[str, str]:
+    """``{'ExpectedBucketOwner': <use case account>}`` when ``bucket`` is the
+    use case's DERIVED default Results_Bucket, else ``{}``: the default's
+    name is predictable from the account id and nothing creates the bucket
+    for the operator, so every probe, HEAD and read asserts the owner and a
+    bucket of that name under another account answers 403 (S3 bucket-
+    squatting fix). The presigned GET carries no header a browser could
+    send; it is issued only after ``head_image`` has passed."""
+    return shared_utils.expected_owner_args(shared_utils.results_bucket_owner(usecase, bucket))
 
 
 def _header_region(response: Any) -> Optional[str]:
@@ -61,7 +72,7 @@ def probe_region(usecase: Dict[str, Any], bucket: str, *, client: Any = None) ->
     prefix = DEBUG_IMAGE_PREFIX + str(usecase["usecase_id"]) + "/"
     try:
         s3 = client if client is not None else credentials.client("s3", usecase, "image-read", bucket=bucket)
-        response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+        response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1, **owner_args(usecase, bucket))
         region = _header_region(response)
     except ClientError as error:
         region = _header_region(error.response)
@@ -81,7 +92,7 @@ def images_ready(usecase: Dict[str, Any], bucket: str, *, client: Any = None) ->
     """Whether the bucket carries the enabled ``DDATelemetryDebugImages`` rule."""
     try:
         s3 = client if client is not None else credentials.client("s3", usecase, "media-retention-read", bucket=bucket)
-        response = s3.get_bucket_lifecycle_configuration(Bucket=bucket)
+        response = s3.get_bucket_lifecycle_configuration(Bucket=bucket, **owner_args(usecase, bucket))
         rules = list(response.get("Rules") or [])
     except ClientError as error:
         code = str((error.response.get("Error") or {}).get("Code") or "")
@@ -101,7 +112,7 @@ def head_image(usecase: Dict[str, Any], bucket: str, key: str, *, client: Any = 
     """True when the object exists (``HeadObject``); False on 404 or 403."""
     s3 = client if client is not None else credentials.client("s3", usecase, "image-read", bucket=bucket)
     try:
-        s3.head_object(Bucket=bucket, Key=key)
+        s3.head_object(Bucket=bucket, Key=key, **owner_args(usecase, bucket))
         return True
     except ClientError as error:
         code = str((error.response.get("Error") or {}).get("Code") or "")

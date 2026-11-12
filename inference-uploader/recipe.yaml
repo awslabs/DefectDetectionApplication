@@ -14,6 +14,10 @@ ComponentConfiguration:
     inferenceResultsPath: '/aws_dda/inference-results'
     s3Bucket: ''
     s3Prefix: ''
+    # The account that must own s3Bucket (sent as ExpectedBucketOwner on every
+    # upload). Empty: a dda-inference-results-<account> bucket is asserted to
+    # belong to the account in its name; any other bucket is not asserted.
+    s3BucketOwner: ''
     awsRegion: 'us-east-1'
 
 ComponentDependencies:

@@ -72,6 +72,17 @@ from workflow_engine.tuning.job_runner import (
 from workflow_engine.tuning.sample_export import ExportConfig
 
 BUCKET = "dda-inference-results-000000000000"
+
+
+def _assert_owner(bucket, expected_owner):
+    """Model S3's ExpectedBucketOwner on the derived results bucket (S3
+    bucket-squatting fix): a call against ``dda-inference-results-<account>``
+    must assert exactly that account; anything else is refused as S3 would
+    refuse it (403), and an unasserted call is a regression."""
+    account = bucket.rsplit("-", 1)[-1] if bucket else None
+    assert expected_owner == account, (
+        "call against %s must assert ExpectedBucketOwner=%s, got %r"
+        % (bucket, account, expected_owner))
 PREFIX = "workflow-tuning/samples/"
 THING_NAME = "dda-edge-under-test"
 WORKFLOW_ID = "wf-24680"
@@ -113,13 +124,16 @@ class FakeS3:
         self.puts = []
         self.fail_keys = set(fail_keys)
 
-    def get_object(self, Bucket=None, Key=None):
+    def get_object(self, Bucket=None, Key=None, ExpectedBucketOwner=None):
+        _assert_owner(Bucket, ExpectedBucketOwner)
         self.gets.append(Key)
         if Key not in self.objects:
             raise RuntimeError("NoSuchKey: " + str(Key))
         return {"Body": _Body(self.objects[Key])}
 
-    def put_object(self, Bucket=None, Key=None, Body=None, ContentType=None):
+    def put_object(self, Bucket=None, Key=None, Body=None, ContentType=None,
+                   ExpectedBucketOwner=None):
+        _assert_owner(Bucket, ExpectedBucketOwner)
         self.puts.append(Key)
         if Key in self.fail_keys:
             raise RuntimeError("fake S3 rejected " + str(Key))
@@ -890,12 +904,13 @@ def test_a_batch_write_that_succeeds_on_retry_completes_the_job():
             self.failures = 2
 
         def put_object(self, Bucket=None, Key=None, Body=None,
-                       ContentType=None):
+                       ContentType=None, ExpectedBucketOwner=None):
             if Key == key and self.failures:
                 self.failures -= 1
                 self.puts.append(Key)
                 raise RuntimeError("transient")
             return super().put_object(Bucket=Bucket, Key=Key, Body=Body,
+                                      ExpectedBucketOwner=ExpectedBucketOwner,
                                       ContentType=ContentType)
 
     s3 = _FlakyS3(objects)

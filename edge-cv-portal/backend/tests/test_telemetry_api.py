@@ -801,6 +801,36 @@ class TestClips:
         ref2 = base64.urlsafe_b64encode(failed_sk.encode()).decode().rstrip("=")
         status, body = api.dashboard_route("GET", "/clips/{clip_ref}/media", dashboard_id, extra={"clip_ref": ref2})
         assert status == 409 and body["error_code"] == "clip_media_unavailable"
+    def test_media_route_verifies_the_derived_bucket_owner_before_presigning(self, api):
+        """The Results_Bucket is the derived dda-inference-results-<account>:
+        the route HEADs the clip with ExpectedBucketOwner before any URL is
+        minted (S3 bucket-squatting fix). S3 refusing the owner (the name
+        exists under another account) refuses the route, and no presigned URL
+        pointing at that account's object is issued; a missing object still
+        presigns as before."""
+        status, created = api.create()
+        dashboard_id = created["dashboard"]["dashboard_id"]
+        now_ms = int(api.module.time.time() * 1000)
+        sk, key = api.put_clip("clip-owned", now_ms - 60_000)
+        api.s3.objects[key] = {"ContentLength": 10, "ContentType": "video/mp4", "Metadata": {}}
+        clip_ref = base64.urlsafe_b64encode(sk.encode()).decode().rstrip("=")
+        status, body = api.dashboard_route("GET", "/clips/{clip_ref}/media", dashboard_id, extra={"clip_ref": clip_ref})
+        assert status == 200, body
+        heads = [c for c in api.s3.calls if c[0] == "head_object" and c[1]["Key"] == key]
+        assert heads and heads[-1][1]["ExpectedBucketOwner"] == PORTAL_ACCOUNT
+        presigns_before = len([c for c in api.s3.calls if c[0] == "generate_presigned_url"])
+
+        squatted_sk, squatted_key = api.put_clip("clip-squatted", now_ms - 30_000)
+        api.s3.head_raises[squatted_key] = client_error("403", "HeadObject", 403)
+        squatted_ref = base64.urlsafe_b64encode(squatted_sk.encode()).decode().rstrip("=")
+        status, body = api.dashboard_route("GET", "/clips/{clip_ref}/media", dashboard_id, extra={"clip_ref": squatted_ref})
+        assert status == 409 and body["error_code"] == "clip_media_unavailable" and body["reason"] == "bucket_owner_mismatch"
+        assert len([c for c in api.s3.calls if c[0] == "generate_presigned_url"]) == presigns_before
+
+        missing_sk, _missing_key = api.put_clip("clip-missing", now_ms - 20_000)
+        missing_ref = base64.urlsafe_b64encode(missing_sk.encode()).decode().rstrip("=")
+        status, body = api.dashboard_route("GET", "/clips/{clip_ref}/media", dashboard_id, extra={"clip_ref": missing_ref})
+        assert status == 200 and body["video_url"].startswith("https://")
 
 
 # --------------------------------------------------------------------------- live lease and frames

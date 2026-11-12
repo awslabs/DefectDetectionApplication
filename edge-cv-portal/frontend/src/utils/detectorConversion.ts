@@ -365,11 +365,16 @@ export function thresholdProblem(label: string, value: string | number | null | 
 export function putFileWithProgress(
   url: string,
   file: Blob,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  /** Headers the presigned URL signed (e.g. `x-amz-expected-bucket-owner`); sent verbatim. */
+  headers?: Record<string, string>
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('PUT', url);
+    for (const [name, value] of Object.entries(headers ?? {})) {
+      xhr.setRequestHeader(name, value);
+    }
     xhr.upload.onprogress = event => {
       if (onProgress && event.lengthComputable && event.total > 0) {
         onProgress(Math.min(100, Math.floor((event.loaded / event.total) * 100)));

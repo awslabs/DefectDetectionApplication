@@ -86,6 +86,17 @@ from workflow_engine.tuning.sample_export import (
 )
 
 BUCKET = "dda-inference-results-000000000000"
+
+
+def _assert_owner(bucket, expected_owner):
+    """Model S3's ExpectedBucketOwner on the derived results bucket (S3
+    bucket-squatting fix): a call against ``dda-inference-results-<account>``
+    must assert exactly that account; anything else is refused as S3 would
+    refuse it (403), and an unasserted call is a regression."""
+    account = bucket.rsplit("-", 1)[-1] if bucket else None
+    assert expected_owner == account, (
+        "call against %s must assert ExpectedBucketOwner=%s, got %r"
+        % (bucket, account, expected_owner))
 PREFIX = "workflow-tuning/samples/"
 THING_NAME = "dda-edge-under-test"
 WORKFLOW_ID = "wf-24680"
@@ -135,15 +146,18 @@ class FakeS3:
         self.puts = []
         self.gets = []
 
-    def put_object(self, Bucket=None, Key=None, Body=None, ContentType=None):
+    def put_object(self, Bucket=None, Key=None, Body=None, ContentType=None,
+                   ExpectedBucketOwner=None):
         assert Bucket == BUCKET
+        _assert_owner(Bucket, ExpectedBucketOwner)
         self.puts.append(Key)
         self.objects[Key] = Body
         self.content_types[Key] = ContentType
         return {}
 
-    def get_object(self, Bucket=None, Key=None):
+    def get_object(self, Bucket=None, Key=None, ExpectedBucketOwner=None):
         assert Bucket == BUCKET
+        _assert_owner(Bucket, ExpectedBucketOwner)
         self.gets.append(Key)
         if Key not in self.objects:
             raise RuntimeError("NoSuchKey: " + str(Key))

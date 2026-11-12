@@ -87,6 +87,7 @@ from workflow_engine.output_bindings import (
     _default_llm_invoker,
     _downscale_frame_or_original,
 )
+from workflow_engine.s3_bucket_owner import owner_args
 from workflow_engine.tuning.backfill import tunable_nodes
 from workflow_engine.tuning.sample_export import (
     THING_NAME_ENV,
@@ -949,9 +950,13 @@ class JobRunner:
         return self._client
 
     def _read_bytes(self, key: str) -> bytes:
-        """GET one object's body from the Use_Case bucket."""
+        """GET one object's body from the Use_Case bucket. A derived
+        dda-inference-results-<account> bucket must belong to the account in
+        its name (s3_bucket_owner), so a manifest or sample is never read from
+        another account's bucket of that name."""
         response = self._s3().get_object(
-            Bucket=self._config.bucket, Key=key)
+            Bucket=self._config.bucket, Key=key,
+            **owner_args(self._config.bucket))
         body = response["Body"]
         return body.read()
 
@@ -989,6 +994,7 @@ class JobRunner:
                     Key=key,
                     Body=body,
                     ContentType=JSON_CONTENT_TYPE,
+                    **owner_args(self._config.bucket),
                 )
                 logger.debug(
                     "Workflow-tuning job %s wrote outcome batch %s (%d "

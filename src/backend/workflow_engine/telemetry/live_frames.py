@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Deque, Dict, Optional, Tuple
 
 from workflow_engine import run_artifacts
+from workflow_engine.s3_bucket_owner import owner_args
 
 logger = logging.getLogger(__name__)
 
@@ -321,9 +322,12 @@ class LiveFrameSender:
         seq = pair.seq
         key = "{0}{1}.jpg".format(lease.prefix, seq % SLOTS)
         try:
+            # A derived dda-inference-results-<account> bucket must belong to
+            # the account in its name (s3_bucket_owner): S3 refuses the PUT
+            # with 403 when another account owns it.
             self._client(lease.bucket, lease.region).put_object(
                 Bucket=lease.bucket, Key=key, Body=jpeg, ContentType="image/jpeg",
-                Metadata={"seq": str(seq)},
+                Metadata={"seq": str(seq)}, **owner_args(lease.bucket),
             )
         except Exception:  # noqa: BLE001 - counted; nothing is published
             with self._lock:

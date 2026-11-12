@@ -34,6 +34,9 @@ from shared_utils import (
     create_boto3_client, get_usecase_region, caller_is_portal_admin,
     INTERNAL_MARKER_KEY, is_internal_invocation,
     component_bucket_name, COMPONENT_BUCKET_POLICY_MAX_BYTES,
+    # The component bucket's name is derived from the account id, so every S3
+    # call against it asserts ExpectedBucketOwner (S3 bucket-squatting fix).
+    component_bucket_owner, is_bucket_owner_mismatch, BUCKET_OWNER_MISMATCH_MESSAGE,
 )
 
 logger = logging.getLogger()
@@ -551,9 +554,15 @@ def add_usecase_to_component_bucket_policy(cross_account_role_arn: str) -> bool:
             f'arn:aws:iam::{account_id}:role/GreengrassV2TokenExchangeRole'  # Greengrass device role
         ]
         
+        # The bucket name is derived from the portal account id, so assert the
+        # owner on every call: a bucket of that name under another account (S3
+        # bucket squatting) answers 403 instead of being adopted.
+        bucket_owner = component_bucket_owner()
+
         # Get current bucket policy
         try:
-            response = s3.get_bucket_policy(Bucket=COMPONENT_BUCKET)
+            response = s3.get_bucket_policy(Bucket=COMPONENT_BUCKET,
+                                            ExpectedBucketOwner=bucket_owner)
             current_policy = json.loads(response['Policy'])
         except ClientError as e:
             if e.response['Error']['Code'] == 'NoSuchBucketPolicy':
@@ -685,13 +694,17 @@ def add_usecase_to_component_bucket_policy(cross_account_role_arn: str) -> bool:
         # Apply updated policy
         s3.put_bucket_policy(
             Bucket=COMPONENT_BUCKET,
-            Policy=policy_document
+            Policy=policy_document,
+            ExpectedBucketOwner=bucket_owner
         )
         
         logger.info(f"Successfully updated bucket policy for {COMPONENT_BUCKET}")
         return True
         
     except ClientError as e:
+        if is_bucket_owner_mismatch(e):
+            logger.error(BUCKET_OWNER_MISMATCH_MESSAGE.format(
+                bucket=COMPONENT_BUCKET, account=component_bucket_owner()))
         logger.error(f"Error updating component bucket policy: {str(e)}")
         return False
     except Exception as e:

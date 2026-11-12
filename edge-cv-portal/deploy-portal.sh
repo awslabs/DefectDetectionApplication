@@ -1182,15 +1182,33 @@ EOF
             --create-bucket-configuration "LocationConstraint=$region" 2>&1)" || create_rc=$?
     fi
 
-    if [ "$create_rc" -eq 0 ]; then
-        echo "✓ Created s3://$bucket"
-        return 0
-    fi
+    # Created, or already ours (a concurrent run or a racing GDK publish got
+    # there first). Either way, confirm ownership with --expected-bucket-owner
+    # BEFORE reporting success: the name is derived from a public account id,
+    # so a bucket that appeared between the HeadBucket above and this create
+    # may belong to another account (S3 bucket squatting), and the deploy must
+    # fail closed rather than hand the stack a bucket this account does not own.
+    if [ "$create_rc" -eq 0 ] || printf '%s' "$create_err" | grep -qi 'BucketAlreadyOwnedByYou'; then
+        if [ "$create_rc" -eq 0 ]; then
+            echo "✓ Created s3://$bucket"
+        else
+            echo "Component bucket: s3://$bucket already exists (owned by this account)"
+        fi
+        local verify_err verify_rc=0
+        verify_err="$(aws s3api head-bucket --bucket "$bucket" --region "$region" \
+            --expected-bucket-owner "$account" 2>&1)" || verify_rc=$?
+        if [ "$verify_rc" -ne 0 ]; then
+            cat >&2 <<EOF
+deploy-portal.sh: s3://$bucket exists but S3 did not confirm that account $account owns it.
 
-    # Already ours: a concurrent run or a racing GDK publish got there first.
-    # That is the desired end state, so treat it as success.
-    if printf '%s' "$create_err" | grep -qi 'BucketAlreadyOwnedByYou'; then
-        echo "Component bucket: s3://$bucket already exists (owned by this account)"
+  The bucket name is derived from the account id, so this may be an S3
+  bucket-squatting attempt by another account. Refusing to continue; nothing
+  was written to the bucket. The underlying error was:
+EOF
+            printf '%s\n' "$verify_err" | sed 's/^/    /' >&2
+            return 2
+        fi
+        echo "✓ Verified s3://$bucket is owned by account $account"
         return 0
     fi
 
@@ -1202,8 +1220,10 @@ deploy-portal.sh: the bucket name '$bucket' is already taken by another AWS acco
 
   S3 bucket names are globally unique, and EdgeCVPortalComputeStack derives
   this exact name from the account id and region, so it cannot be renamed from
-  here. This needs a decision about the component bucket naming before the
-  portal can deploy into this account/region.
+  here. Because the name is predictable from this account id, treat this as a
+  possible S3 bucket-squatting attempt and report it to your security contact;
+  never adopt or write to the existing bucket. The portal cannot deploy into
+  this account/region until the name is resolved.
 EOF
         return 2
     fi

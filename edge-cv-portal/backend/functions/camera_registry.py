@@ -116,6 +116,10 @@ from shared_utils import (
     get_usecase, get_usecase_client, get_usecase_region,
     assume_cross_account_role, create_boto3_client,
     rbac_manager, Permission,
+    # The component bucket's name is derived from the portal account id, so
+    # every S3 call against it asserts ExpectedBucketOwner (S3 bucket-
+    # squatting fix); a mismatch is logged as an ownership conflict.
+    component_bucket_owner, is_bucket_owner_mismatch, BUCKET_OWNER_MISMATCH_MESSAGE,
 )
 
 # The refresh route runs the exact same reduction as the SQS ingest path
@@ -2001,10 +2005,48 @@ def delete_staged_pin_object(s3, staging_key: str) -> None:
     """Best-effort staging cleanup (the 1-day lifecycle rule is the
     backstop)."""
     try:
-        s3.delete_object(Bucket=COMPONENT_BUCKET, Key=staging_key)
-    except Exception:  # noqa: BLE001 — best-effort cleanup only
+        s3.delete_object(Bucket=COMPONENT_BUCKET, Key=staging_key,
+                         ExpectedBucketOwner=component_bucket_owner())
+    except Exception as e:  # noqa: BLE001 — best-effort cleanup only
+        if is_bucket_owner_mismatch(e):
+            logger.error(BUCKET_OWNER_MISMATCH_MESSAGE.format(
+                bucket=COMPONENT_BUCKET, account=component_bucket_owner()))
         logger.warning(
             f"Best-effort delete of staged pin object {staging_key} failed")
+
+
+def log_possible_owner_conflict(error: Exception, operation: str) -> bool:
+    """Log a 403 from an owner-asserted Image_Transport call as a possible
+    ownership conflict; True when it was one. The pin role has no
+    s3:ListBucket on the component bucket, so S3 also answers HeadObject on a
+    missing staging key with 403: for that call the 403 is ambiguous and the
+    route keeps its usual response, but the conflict is on record (the
+    presigned staging PUT already refused a bucket owned by another account,
+    so an operator would have seen the upload fail first)."""
+    if not is_bucket_owner_mismatch(error):
+        return False
+    logger.error(
+        f"{BUCKET_OWNER_MISMATCH_MESSAGE.format(bucket=COMPONENT_BUCKET, account=component_bucket_owner())}"
+        f" — or the staged object is missing ({operation} answered 403)")
+    return True
+
+
+def transport_owner_error(error: Exception, operation: str) -> Optional[Dict]:
+    """The 502 for an S3 ExpectedBucketOwner mismatch on the Image_Transport
+    (the component bucket) after the staged object was found: the bucket of
+    the derived name is owned by another account, so the Portal refuses to
+    use it (fails closed) and says so. None when ``error`` is any other
+    failure, which keeps each route's own error mapping."""
+    if not is_bucket_owner_mismatch(error):
+        return None
+    message = BUCKET_OWNER_MISMATCH_MESSAGE.format(
+        bucket=COMPONENT_BUCKET, account=component_bucket_owner())
+    logger.error(f"{message} ({operation})")
+    return create_response(502, {
+        'error': 'Image transport bucket ownership conflict: the Portal '
+                 'component bucket is not owned by the portal account; '
+                 'refusing to use it. Contact the portal administrator.',
+    })
 
 
 def audit_pin_request(user: Dict, action: str, device_id: str,
@@ -2049,16 +2091,25 @@ def get_static_image_upload_url(device_id: str, user: Dict, event: Dict) -> Dict
         return create_response(500, {'error': 'Component bucket not configured'})
 
     staging_key = f"{STATIC_IMAGE_STAGING_PREFIX}{uuid.uuid4().hex}"
+    # ExpectedBucketOwner is a header member of PutObject, so the presign
+    # signs ``x-amz-expected-bucket-owner`` and the browser must send it
+    # (the response carries the exact headers as ``uploadHeaders``). S3 then
+    # refuses the staging PUT with 403 if the bucket of the derived name is
+    # owned by another account, instead of accepting the operator's image.
+    bucket_owner = component_bucket_owner()
     upload_url = pin_s3_client().generate_presigned_url(
         'put_object',
-        Params={'Bucket': COMPONENT_BUCKET, 'Key': staging_key},
+        Params={'Bucket': COMPONENT_BUCKET, 'Key': staging_key,
+                'ExpectedBucketOwner': bucket_owner},
         ExpiresIn=UPLOAD_URL_TTL_SECONDS,
     )
     return create_response(200, {
         'deviceId': device_id,
         'uploadUrl': upload_url,
+        'uploadHeaders': {'x-amz-expected-bucket-owner': bucket_owner},
         'stagingKey': staging_key,
         'bucket': COMPONENT_BUCKET,
+        'expectedBucketOwner': bucket_owner,
         'expiresInSeconds': UPLOAD_URL_TTL_SECONDS,
     })
 
@@ -2099,11 +2150,15 @@ def pin_static_image(device_id: str, user: Dict, event: Dict,
 
     s3 = pin_s3_client()
     limit = MAX_PIN_IMAGE_BYTES
+    # Derived bucket name: every call asserts the owner (bucket-squatting fix).
+    bucket_owner = component_bucket_owner()
 
     # HeadObject size check before downloading (design error table).
     try:
-        head = s3.head_object(Bucket=COMPONENT_BUCKET, Key=staging_key)
-    except ClientError:
+        head = s3.head_object(Bucket=COMPONENT_BUCKET, Key=staging_key,
+                              ExpectedBucketOwner=bucket_owner)
+    except ClientError as e:
+        log_possible_owner_conflict(e, 'HeadObject')
         return create_response(400, {
             'error': 'Staged upload not found; request a new upload URL '
                      'and upload the image again',
@@ -2112,8 +2167,16 @@ def pin_static_image(device_id: str, user: Dict, event: Dict,
         delete_staged_pin_object(s3, staging_key)
         return pin_size_limit_response(limit)
 
-    data = s3.get_object(Bucket=COMPONENT_BUCKET,
-                         Key=staging_key)['Body'].read()
+    try:
+        data = s3.get_object(Bucket=COMPONENT_BUCKET, Key=staging_key,
+                             ExpectedBucketOwner=bucket_owner)['Body'].read()
+    except ClientError as e:
+        # Found by HeadObject a moment ago, so a 403 here is the owner
+        # assertion refusing the bucket.
+        error = transport_owner_error(e, 'GetObject')
+        if error is None:
+            raise
+        return error
     if len(data) > limit:  # defense in depth over the HeadObject check
         delete_staged_pin_object(s3, staging_key)
         return pin_size_limit_response(limit)
@@ -2154,17 +2217,20 @@ def pin_static_image(device_id: str, user: Dict, event: Dict,
 
     # Content stored in the Image_Transport strictly BEFORE any
     # Sync_Channel write (Req 2.1). CopyObject after validation: the
-    # canonical object is never client-writable (Decision 2).
+    # canonical object is never client-writable (Decision 2). Both the
+    # destination and the copy source assert the owner.
     try:
         s3.copy_object(
             Bucket=COMPONENT_BUCKET, Key=canonical_key,
             CopySource={'Bucket': COMPONENT_BUCKET, 'Key': staging_key},
+            ExpectedBucketOwner=bucket_owner,
+            ExpectedSourceBucketOwner=bucket_owner,
         )
     except Exception as e:  # noqa: BLE001 — any store failure is Req 2.5
         logger.error(f"Pin canonical copy failed for {device_id}: {e}")
         fail_pin_request(table, item,
                          'image transport storage failed', s3)
-        return create_response(502, {
+        return transport_owner_error(e, 'CopyObject') or create_response(502, {
             'error': 'Failed to store the pin image content for device '
                      'delivery',
         })
@@ -2404,7 +2470,8 @@ def write_desired_video_pin(usecase_id: str, device_id: str,
 def _download_staged_video(s3, staging_key: str, limit: int, handle):
     """Stream the staged object into ``handle``; returns ``(size, sha256)``,
     or ``(size, None)`` as soon as the stream exceeds ``limit``."""
-    body = s3.get_object(Bucket=COMPONENT_BUCKET, Key=staging_key)['Body']
+    body = s3.get_object(Bucket=COMPONENT_BUCKET, Key=staging_key,
+                         ExpectedBucketOwner=component_bucket_owner())['Body']
     hasher = hashlib.sha256()
     size = 0
     while True:
@@ -2467,8 +2534,10 @@ def pin_static_video(device_id: str, user: Dict, event: Dict,
     s3 = pin_s3_client()
     limit = MAX_PIN_VIDEO_BYTES
     try:
-        head = s3.head_object(Bucket=COMPONENT_BUCKET, Key=staging_key)
-    except ClientError:
+        head = s3.head_object(Bucket=COMPONENT_BUCKET, Key=staging_key,
+                              ExpectedBucketOwner=component_bucket_owner())
+    except ClientError as e:
+        log_possible_owner_conflict(e, 'HeadObject')
         return create_response(400, {'error': STAGED_VIDEO_NOT_FOUND_MESSAGE})
     declared = int(head.get('ContentLength') or 0)
     if declared > limit:
@@ -2675,11 +2744,18 @@ def submit_validated_video(record: Dict[str, Any], info: Dict[str, Any],
     pin_requests.insert_pin_request(table, item)
 
     try:
+        # Both the destination and the copy source assert the owner.
+        bucket_owner = component_bucket_owner()
         s3.copy_object(
             Bucket=COMPONENT_BUCKET, Key=canonical_key,
             CopySource={'Bucket': COMPONENT_BUCKET, 'Key': staging_key},
+            ExpectedBucketOwner=bucket_owner,
+            ExpectedSourceBucketOwner=bucket_owner,
         )
     except Exception as e:  # noqa: BLE001 — any store failure fails the item
+        if is_bucket_owner_mismatch(e):
+            logger.error(BUCKET_OWNER_MISMATCH_MESSAGE.format(
+                bucket=COMPONENT_BUCKET, account=component_bucket_owner()))
         logger.error(f"Video pin canonical copy failed for {device_id}: {e}")
         fail_pin_request(table, item, 'image transport storage failed', s3)
         delete_staged_pin_object(s3, staging_key)

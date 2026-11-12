@@ -3004,6 +3004,159 @@ def component_bucket_name() -> str:
         f"{os.environ.get('AWS_REGION', 'us-east-1')}-{os.environ.get('PORTAL_ACCOUNT_ID', '')}")
 
 
+class BucketOwnerUnknown(Exception):
+    """The account that must own a derived-name bucket could not be determined
+    (PORTAL_ACCOUNT_ID unset and STS unreachable). Callers fail closed: no S3
+    call against a derived bucket name is made without ExpectedBucketOwner."""
+
+
+_caller_account_id_cache: Dict[str, str] = {}
+
+
+def component_bucket_owner() -> str:
+    """The AWS account that must own the Greengrass component bucket, for the
+    ExpectedBucketOwner parameter of every S3 call against it.
+
+    The bucket's name is derived from a public value (this account's id and
+    region), so anyone can pre-create that exact name in another account; S3
+    would otherwise resolve the name to the attacker's bucket and the portal
+    would read from / write to it (S3 bucket squatting). ExpectedBucketOwner
+    makes S3 answer 403 when the bucket is owned by any other account.
+
+    The owner is the portal's own account: PORTAL_ACCOUNT_ID (set by the
+    compute stack on every handler), else the caller identity from STS
+    (cached), which is the same account outside Lambda. Raises
+    BucketOwnerUnknown when neither is available, so callers never fall back
+    to an unguarded call.
+    """
+    configured = (os.environ.get('PORTAL_ACCOUNT_ID') or '').strip()
+    if configured:
+        return configured
+    cached = _caller_account_id_cache.get('account')
+    if cached:
+        return cached
+    try:
+        account = boto3.client('sts').get_caller_identity()['Account']
+    except Exception as exc:  # noqa: BLE001 — any STS failure means the owner is unknown
+        raise BucketOwnerUnknown(
+            'Cannot determine the account that must own the component bucket: '
+            f'PORTAL_ACCOUNT_ID is unset and STS GetCallerIdentity failed ({exc})') from exc
+    if not account:
+        raise BucketOwnerUnknown('STS GetCallerIdentity returned no account id')
+    _caller_account_id_cache['account'] = str(account)
+    return str(account)
+
+
+def is_bucket_owner_mismatch(error: Exception) -> bool:
+    """True when `error` is the ClientError S3 raises for an ExpectedBucketOwner
+    mismatch (HTTP 403 / AccessDenied): the derived-name bucket exists but is
+    owned by another account. Used to log and report a possible bucket-
+    squatting attempt distinctly from other failures."""
+    if not isinstance(error, ClientError):
+        return False
+    response = getattr(error, 'response', None) or {}
+    code = (response.get('Error') or {}).get('Code')
+    status = (response.get('ResponseMetadata') or {}).get('HTTPStatusCode')
+    return code in ('AccessDenied', '403', 'Forbidden') or status == 403
+
+
+BUCKET_OWNER_MISMATCH_MESSAGE = (
+    'S3 bucket ownership conflict: bucket {bucket} is not owned by account '
+    '{account} (possible S3 bucket squatting); refusing to use it')
+
+
+# The use case's default inference-results bucket is also a DERIVED name:
+# dda-inference-results-<use case account>. Nothing in the repository creates
+# it (the operator does), so the same pre-creation attack applies: the use
+# case's devices would upload inference results into another account's bucket
+# and the portal would read that account's objects back. Every portal call
+# against the derived default therefore asserts the use case's account as the
+# owner. An admin-configured override (`inference_uploader_s3_bucket`) is not
+# a derived name; its admission is the use-case bucket allowlist's concern.
+INFERENCE_RESULTS_BUCKET_PREFIX = 'dda-inference-results-'
+_RESULTS_BUCKET_NAME_RE = re.compile(r'^dda-inference-results-(\d{12})$')
+
+
+def results_bucket_owner(usecase: Any, bucket: Any) -> Optional[str]:
+    """The account that must own `bucket` when it is the use case's derived
+    default inference-results bucket: the use case's account id. None for an
+    override bucket (any other name) or when the account is unknown, in
+    which case callers pass no ExpectedBucketOwner."""
+    usecase = usecase if isinstance(usecase, dict) else {}
+    account = str(usecase.get('account_id') or '').strip()
+    if account and bucket == f'{INFERENCE_RESULTS_BUCKET_PREFIX}{account}':
+        return account
+    return None
+
+
+def derived_results_bucket_owner(bucket: Any) -> Optional[str]:
+    """The account a derived `dda-inference-results-<account>` name encodes,
+    else None. For the device-side writers (InferenceUploader, the
+    telemetry agent, the tuning exporter), which hold no use case record:
+    the bucket of that name must belong to the account in its name."""
+    match = _RESULTS_BUCKET_NAME_RE.match(str(bucket or ''))
+    return match.group(1) if match else None
+
+
+def expected_owner_args(owner: Optional[str]) -> Dict[str, str]:
+    """``{'ExpectedBucketOwner': owner}`` when an owner is known, else ``{}``,
+    for splatting into any boto3 S3 call."""
+    return {'ExpectedBucketOwner': owner} if owner else {}
+
+
+class OwnerAssertingS3:
+    """A proxy over a boto3 S3 client that asserts the owner of ONE bucket on
+    every operation addressed to it: a call with ``Bucket=<bucket>`` gets
+    ``ExpectedBucketOwner=<owner>`` (and a ``CopySource`` in that bucket gets
+    ``ExpectedSourceBucketOwner``) unless the caller set them; paginators
+    obtained through ``get_paginator`` assert the same way. Calls that name
+    no ``Bucket`` keyword pass through unchanged, which deliberately includes
+    ``generate_presigned_url`` (``Params`` is a dict; a presigned GET must not
+    sign a header a browser cannot send). With no owner the proxy is
+    transparent.
+
+    For code that hands one client to many helpers (``workflow_tuning``'s
+    Sample_Store), so the assertion cannot be forgotten at a call site."""
+
+    def __init__(self, client: Any, bucket: str, owner: Optional[str]):
+        self._client = client
+        self._bucket = bucket
+        self._owner = owner
+
+    def _assert(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        if not self._owner or kwargs.get('Bucket') != self._bucket:
+            return kwargs
+        asserted = dict(kwargs)
+        asserted.setdefault('ExpectedBucketOwner', self._owner)
+        source = asserted.get('CopySource')
+        if isinstance(source, dict) and source.get('Bucket') == self._bucket:
+            asserted.setdefault('ExpectedSourceBucketOwner', self._owner)
+        return asserted
+
+    def get_paginator(self, operation_name: str) -> Any:
+        paginator = self._client.get_paginator(operation_name)
+        proxy = self
+
+        class _Paginator:
+            def paginate(self, **kwargs):
+                return paginator.paginate(**proxy._assert(kwargs))
+
+            def __getattr__(self, name):
+                return getattr(paginator, name)
+
+        return _Paginator()
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._client, name)
+        if not callable(attribute) or name.startswith('_'):
+            return attribute
+
+        def call(*args, **kwargs):
+            return attribute(*args, **self._assert(kwargs))
+
+        return call
+
+
 # Upper bound for a serialized component bucket policy (Requirement 3.3):
 # deliberately under S3's 20,480-byte bucket policy limit, so a writer refuses
 # before S3 would reject the PutBucketPolicy.
