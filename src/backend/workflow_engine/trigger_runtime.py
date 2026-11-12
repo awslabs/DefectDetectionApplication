@@ -31,7 +31,12 @@ set's ``compiled_pipeline.json``), parses their Trigger_Bindings
 (``executorBindings`` entries whose binding is ``mqtt_subscribe`` /
 ``opcua_subscribe``), and starts/stops one :class:`WorkflowTriggerGroup`
 per registration — one :class:`WorkflowActivationCore` plus one transport
-worker per binding, built through the injected transport factories.
+worker per binding, built through the injected transport factories. A
+registration that is replaced within one reconcile (a new version, or a
+changed trigger surface) is quiesced, its replacement subscribed, and only
+then stopped, so a topic filter both versions subscribe never loses its
+last open Greengrass IPC stream (the nucleus unsubscribes the filter on the
+last close and a subscribe racing that unsubscribe is silently dead).
 Transport code itself lives in later tasks and plugs into the seams
 defined here:
 
@@ -60,9 +65,11 @@ Everything heavier than the standard library is imported lazily inside
 discipline as ``watcher.py``).
 """
 
+import functools
 import heapq
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -477,14 +484,34 @@ class TriggerGate:
         setattr(self, stamp, now)
         logger.warning(message, *args)
 
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`close` ran: the registration is stopping or
+        being replaced and every further firing is discarded."""
+        with self._lock:
+            return self._closed
+
     def fire(self, context: Dict[str, Any]) -> bool:
         """Apply the node's Concurrency_Policy to one firing.
 
         Returns True when the firing was accepted (enqueued, or coalesced
-        into the armed debounce window), False when it was discarded.
+        into the armed debounce window), False when it was discarded. A
+        closed gate discards for every policy (the registration is
+        stopping, or quiesced while its replacement subscribes).
         """
         node_id = self.policy.trigger_node_id
         policy = self.policy.concurrency_policy
+
+        with self._lock:
+            closed = self._closed
+        if closed:
+            logger.info(
+                "Trigger '%s' firing discarded: registration %s is stopping "
+                "or being replaced (gate closed)",
+                node_id,
+                self._registration_id,
+            )
+            return False
 
         if policy == POLICY_DEBOUNCE:
             return self._fire_debounce(context)
@@ -619,6 +646,14 @@ class ActivationDispatcher:
         )
         self._thread.start()
 
+    def request_stop(self) -> None:
+        """Stop dequeuing after the activation in flight (if any) without
+        joining the thread; ``stop()`` joins later. Idempotent. A
+        quiescing registration (:meth:`WorkflowActivationCore.quiesce`)
+        uses this so no queued activation starts while its replacement
+        subscribes."""
+        self._stop_event.set()
+
     def stop(self, timeout: float = 5.0) -> None:
         self._stop_event.set()
         if self._thread is not None:
@@ -659,6 +694,16 @@ class ActivationDispatcher:
             activation = self._queue.pop(timeout=self._poll_timeout)
             if activation is None:
                 continue
+            if self._stop_event.is_set():
+                # request_stop()/stop() landed while pop() was waiting: a
+                # stopping registration starts no further activation.
+                logger.info(
+                    "Trigger subscriptions for registration %s are stopping: "
+                    "queued activation of trigger '%s' not started",
+                    self._name,
+                    activation.trigger_node_id,
+                )
+                return
             self.run_activation(activation)
 
 
@@ -913,6 +958,10 @@ class WorkflowActivationCore:
                 self.registration_id,
             )
             return False
+        if gate.closed:
+            # Quiesced or stopping: the gate logs the discard once; neither
+            # the WorkflowDisabled check nor the payload_condition runs.
+            return gate.fire(context)
         if self.is_disabled():
             logger.info(
                 "Trigger '%s' firing discarded: workflow %s (registration %s) "
@@ -926,6 +975,16 @@ class WorkflowActivationCore:
 
     def start(self) -> None:
         self.dispatcher.start()
+
+    def quiesce(self) -> None:
+        """Refuse further firings and start no further activation: every
+        gate closes (idempotent) and the dispatcher stops dequeuing after
+        the run in flight. The transport workers keep running so their
+        subscription streams stay open; ``stop()`` completes the shutdown
+        (joins the dispatcher)."""
+        for gate in self._gates.values():
+            gate.close()
+        self.dispatcher.request_stop()
 
     def stop(self, timeout: float = 5.0) -> None:
         for gate in self._gates.values():
@@ -1477,6 +1536,13 @@ class WorkflowTriggerGroup:
                     ),
                 )
 
+    def quiesce(self) -> None:
+        """Refuse further firings and start no further activation while the
+        workers, their reconnect engines and their subscription streams
+        keep running (the registration's replacement subscribes meanwhile);
+        ``stop()`` completes the shutdown."""
+        self.core.quiesce()
+
     def stop(self, timeout: float = 5.0) -> None:
         # Engines first: cancel any in-progress backoff wait so a 60 s
         # delay never blocks shutdown, and refuse new reconnect loops.
@@ -1516,8 +1582,19 @@ class TriggerSubscriptionManager:
     and diffs them against the running groups: new trigger-driven
     registrations start a :class:`WorkflowTriggerGroup`, removed/invalid
     ones stop theirs, and a changed trigger surface (fingerprint)
-    restarts the group. With zero trigger-driven workflows registered the
-    manager starts no threads and opens no connections (Requirement 12.4).
+    replaces the group. Within one reconcile the departing groups (removed
+    rows and changed fingerprints alike) are quiesced first (gates closed,
+    no further activation started, streams still open), the arriving
+    groups are started and their subscriptions confirmed, and only then
+    are the departing groups stopped. The order matters for the Greengrass
+    IPC transport: the nucleus sends the cloud UNSUBSCRIBE when a
+    component's last ``SubscribeToIoTCore`` stream of a topic filter
+    closes but drops the filter from its map only on UNSUBACK, and a
+    subscribe issued inside that window is acknowledged without a cloud
+    SUBSCRIBE and never receives anything — so a replacement must hold the
+    filter before the old stream closes. With zero trigger-driven
+    workflows registered the manager starts no threads and opens no
+    connections (Requirement 12.4).
 
     **Transport factory contract** (Requirement 6.2 — injectable with
     production defaults; tasks 7.x/8.x supply the production
@@ -1613,18 +1690,43 @@ class TriggerSubscriptionManager:
         with self._lock:
             if self._stopped:
                 return
-            # Stop groups whose registration disappeared, turned invalid,
-            # or changed its trigger surface.
+            # 1. Groups whose registration disappeared, turned invalid, or
+            #    changed its trigger surface leave the map and stop
+            #    accepting/starting activations, but keep their streams
+            #    open so a topic filter never loses its last subscriber
+            #    while the replacement subscribes (see the class docstring).
+            departing: List[Tuple[str, WorkflowTriggerGroup]] = []
             for registration_id in list(self._groups):
                 bindings = desired.get(registration_id)
                 if bindings is not None:
                     fingerprint = bindings_fingerprint(bindings)
                     if fingerprint == self._groups[registration_id].fingerprint:
                         continue
-                self._stop_group_locked(registration_id)
+                group = self._groups.pop(registration_id)
+                try:
+                    group.quiesce()
+                except Exception:  # noqa: BLE001 - quiesce never blocks the swap
+                    logger.exception(
+                        "Trigger group for registration %s failed to quiesce",
+                        registration_id,
+                    )
+                if bindings is not None:
+                    reason = "trigger surface changed"
+                elif registration_id not in self._workflow_ids:
+                    reason = "registration removed or superseded"
+                else:
+                    reason = "no trigger bindings readable this cycle"
+                logger.info(
+                    "Trigger subscriptions for registration %s quiesced (%s); "
+                    "they stop after this cycle's new registrations have "
+                    "subscribed",
+                    registration_id,
+                    reason,
+                )
+                departing.append((registration_id, group))
 
-            # Start groups for new (or restarted) trigger-driven
-            # registrations.
+            # 2. Groups for new trigger-driven registrations — and the
+            #    replacements of the groups popped above — subscribe first.
             for registration_id, bindings in desired.items():
                 if registration_id in self._groups:
                     continue
@@ -1635,6 +1737,12 @@ class TriggerSubscriptionManager:
                         "Trigger group for registration %s failed to start",
                         registration_id,
                     )
+
+            # 3. The departing groups close; the Greengrass transport keeps
+            #    the last stream of a filter open for a grace period when
+            #    nothing else in the process holds that filter.
+            for registration_id, group in departing:
+                self._stop_group_object(registration_id, group)
 
     def stop(self, timeout: float = 5.0) -> None:
         """Stop every group (workers stopped, gates closed, dispatchers
@@ -1762,6 +1870,16 @@ class TriggerSubscriptionManager:
         group = self._groups.pop(registration_id, None)
         if group is None:
             return
+        self._stop_group_object(registration_id, group, timeout=timeout)
+
+    def _stop_group_object(
+        self,
+        registration_id: str,
+        group: WorkflowTriggerGroup,
+        timeout: float = 5.0,
+    ) -> None:
+        """Stop a group already taken out of the map (``stop()`` and the
+        departing groups of a reconcile)."""
         try:
             group.stop(timeout=timeout)
         except Exception:  # noqa: BLE001 - stop must always complete
@@ -1769,6 +1887,15 @@ class TriggerSubscriptionManager:
                 "Trigger group for registration %s failed to stop cleanly",
                 registration_id,
             )
+        if registration_id in self._groups:
+            # A same-id replacement (changed trigger surface) was started
+            # in this reconcile and holds the registration now.
+            logger.info(
+                "Trigger subscriptions stopped for registration %s (previous "
+                "group; the replacement started above stays subscribed)",
+                registration_id,
+            )
+            return
         logger.info(
             "Trigger subscriptions stopped for registration %s",
             registration_id,
@@ -1887,6 +2014,264 @@ GREENGRASS_MAX_QOS = 1
 #: ``get_response().result(timeout=10.0)``).
 GREENGRASS_SUBSCRIBE_TIMEOUT_SECONDS = 10.0
 
+#: Grace for the LAST open SubscribeToIoTCore stream of a topic filter after
+#: its worker stopped: the Greengrass nucleus (2.12.0 and current main) sends
+#: the cloud UNSUBSCRIBE when a component's last stream of a filter closes
+#: but drops the filter from its map only on UNSUBACK, and a
+#: SubscribeToIoTCore inside that window is acknowledged without a cloud
+#: SUBSCRIBE and never receives anything. Keeping the last stream open until
+#: another worker has subscribed the filter (or this grace expires) means a
+#: replacement always lands on a live filter. The reconcile's ordering
+#: (replacements subscribe before the departing streams close) makes this a
+#: safety net for a removal and a re-registration seen in separate watcher
+#: scans; nothing waits on it in the ordinary swap.
+GREENGRASS_STREAM_LINGER_SECONDS = 30.0
+
+
+def _close_ipc_quietly(*closables: Any) -> None:
+    """Close every closable that has a callable ``close``; a failing close
+    is logged at DEBUG and never raised (teardown must always finish)."""
+    for closable in closables:
+        close = getattr(closable, "close", None)
+        if not callable(close):
+            continue
+        try:
+            close()
+        except Exception:  # noqa: BLE001 - teardown must always finish
+            logger.debug(
+                "Quiet close of %r failed", closable, exc_info=True
+            )
+
+
+class _IpcStream:
+    """One open ``SubscribeToIoTCore`` operation and its IPC client. Owned
+    by the :class:`GreengrassIpcSubscriber` while it is subscribed, by the
+    :class:`GreengrassStreamRegistry` while it lingers; closed exactly once
+    by whoever owns it."""
+
+    __slots__ = ("topic", "node_id", "operation", "ipc_client")
+
+    def __init__(
+        self, topic: str, node_id: str, operation: Any, ipc_client: Any
+    ) -> None:
+        self.topic = topic
+        self.node_id = node_id
+        self.operation = operation
+        self.ipc_client = ipc_client
+
+    def close(self) -> None:
+        _close_ipc_quietly(self.operation, self.ipc_client)
+
+
+class GreengrassStreamRegistry:
+    """Process-wide bookkeeping of the open Greengrass IPC subscription
+    streams per exact topic-filter string — the nucleus's per-component
+    view, since one LocalServer process is one component.
+
+    :meth:`register` records a worker's confirmed stream as live;
+    :meth:`release` takes it back when the worker tears it down. A released
+    stream closes at once unless ``linger`` is requested (a stopped worker)
+    AND it is the filter's last live stream in the process: then it stays
+    open — its worker already drops every delivery — until another worker
+    registers a stream on the same filter (closed at once) or
+    ``linger_seconds`` elapse. At most one stream per filter lingers.
+    ``timer_factory`` (``(delay_seconds, callback) -> timer`` with
+    ``start()``/``cancel()``) is injectable, as for the policy gates.
+
+    Thread-safe: called from the reconcile thread, reconnect threads and its
+    own timer threads. It never calls back into a manager or worker and
+    closes streams outside its lock, so the only lock order is
+    worker → registry.
+    """
+
+    def __init__(
+        self,
+        linger_seconds: float = GREENGRASS_STREAM_LINGER_SECONDS,
+        timer_factory: Callable = threading.Timer,
+    ) -> None:
+        if (
+            isinstance(linger_seconds, bool)
+            or not isinstance(linger_seconds, (int, float))
+            or not math.isfinite(linger_seconds)
+            or linger_seconds < 0
+        ):
+            raise ValueError(
+                "linger_seconds must be a finite number >= 0, got "
+                f"{linger_seconds!r}"
+            )
+        if not callable(timer_factory):
+            raise TypeError("timer_factory must be callable")
+        self.linger_seconds = float(linger_seconds)
+        self._timer_factory = timer_factory
+        self._lock = threading.Lock()
+        self._live: Dict[str, List[_IpcStream]] = {}
+        self._lingering: Dict[str, Tuple[_IpcStream, Any]] = {}
+
+    def register(self, stream: _IpcStream) -> None:
+        """A worker's confirmed stream is live. A stream lingering on the
+        same filter closes now: the new stream holds the filter."""
+        with self._lock:
+            self._live.setdefault(stream.topic, []).append(stream)
+            entry = self._lingering.pop(stream.topic, None)
+        if entry is None:
+            return
+        lingering, timer = entry
+        self._cancel(timer)
+        lingering.close()
+        logger.info(
+            "Trigger subscriptions: lingering stream for topic filter '%s' "
+            "released: trigger '%s' holds the filter now",
+            stream.topic,
+            stream.node_id,
+        )
+
+    def release(self, stream: _IpcStream, linger: bool) -> None:
+        """Take a stream back from its worker. ``linger=False`` (a reconnect
+        tearing down a stream the SDK already reported lost) closes it now;
+        ``linger=True`` (a stopped worker) closes it now too unless it is
+        the filter's last live stream, which then lingers."""
+        topic = stream.topic
+        older: Optional[Tuple[_IpcStream, Any]] = None
+        timer: Any = None
+        error: Optional[BaseException] = None
+        with self._lock:
+            entry = self._lingering.get(topic)
+            if entry is not None and entry[0] is stream:
+                # The stream is the filter's lingering entry already (not
+                # reachable from a worker, whose handle is taken under its
+                # own lock; kept correct): release it now.
+                del self._lingering[topic]
+                outcome = "lingering-released"
+                timer = entry[1]
+            else:
+                live = self._live.get(topic)
+                was_live = False
+                if live is not None:
+                    for index, candidate in enumerate(live):
+                        if candidate is stream:
+                            del live[index]
+                            was_live = True
+                            break
+                    if not live:
+                        del self._live[topic]
+                if not linger or not was_live or topic in self._live:
+                    outcome = "closed"
+                else:
+                    # The filter's last live stream: linger. A previous
+                    # lingering entry cannot exist here (register() clears
+                    # it before a stream goes live) — closed defensively.
+                    older = self._lingering.pop(topic, None)
+                    try:
+                        timer = self._timer_factory(
+                            self.linger_seconds,
+                            functools.partial(self._expire, stream),
+                        )
+                        if hasattr(timer, "daemon"):
+                            timer.daemon = True
+                        self._lingering[topic] = (stream, timer)
+                        timer.start()
+                        outcome = "lingering"
+                    except Exception as failure:  # noqa: BLE001 - fall back to closing now
+                        current = self._lingering.get(topic)
+                        if current is not None and current[0] is stream:
+                            del self._lingering[topic]
+                        error = failure
+                        outcome = "timer-failed"
+        if older is not None:
+            self._cancel(older[1])
+            older[0].close()
+        if outcome == "lingering":
+            logger.info(
+                "Trigger subscriptions: stream for topic filter '%s' (trigger "
+                "'%s') kept open for up to %.0f s: last subscriber of this "
+                "filter in the process (Greengrass unsubscribe grace)",
+                topic,
+                stream.node_id,
+                self.linger_seconds,
+            )
+            return
+        if outcome == "timer-failed":
+            stream.close()
+            logger.warning(
+                "Trigger subscriptions: could not arm the unsubscribe grace "
+                "for topic filter '%s' (trigger '%s', %s); closing the "
+                "stream now",
+                topic,
+                stream.node_id,
+                error,
+            )
+            return
+        if outcome == "lingering-released":
+            self._cancel(timer)
+        stream.close()
+        logger.debug(
+            "Trigger subscriptions: stream for topic filter '%s' (trigger "
+            "'%s') closed (%s)",
+            topic,
+            stream.node_id,
+            outcome,
+        )
+
+    def close_all(self) -> None:
+        """Cancel every lingering timer and close every lingering stream
+        (live streams belong to running workers and are untouched)."""
+        with self._lock:
+            entries = list(self._lingering.values())
+            self._lingering.clear()
+        for stream, timer in entries:
+            self._cancel(timer)
+            stream.close()
+
+    def live_count(self, topic: str) -> int:
+        """Open streams registered by running workers for one filter."""
+        with self._lock:
+            return len(self._live.get(topic, ()))
+
+    def lingering_topics(self) -> List[str]:
+        """The filters whose last stream is lingering (sorted)."""
+        with self._lock:
+            return sorted(self._lingering)
+
+    # ------------------------------------------------------------------
+
+    def _expire(self, stream: _IpcStream) -> None:
+        """Timer callback: close the lingering stream unless it was released
+        or taken over meanwhile (a second invocation is a no-op)."""
+        topic = stream.topic
+        with self._lock:
+            entry = self._lingering.get(topic)
+            if entry is None or entry[0] is not stream:
+                return
+            del self._lingering[topic]
+        stream.close()
+        logger.info(
+            "Trigger subscriptions: lingering stream for topic filter '%s' "
+            "(trigger '%s') closed after %.0f s; no trigger in this process "
+            "subscribes it",
+            topic,
+            stream.node_id,
+            self.linger_seconds,
+        )
+
+    @staticmethod
+    def _cancel(timer: Any) -> None:
+        cancel = getattr(timer, "cancel", None)
+        if not callable(cancel):
+            return
+        try:
+            cancel()
+        except Exception:  # noqa: BLE001 - bookkeeping must always finish
+            logger.debug(
+                "Cancelling the unsubscribe grace timer %r failed",
+                timer,
+                exc_info=True,
+            )
+
+
+#: The registry every :class:`GreengrassIpcSubscriber` uses unless one is
+#: injected (``stream_registry=``); one per process = one per component.
+DEFAULT_STREAM_REGISTRY = GreengrassStreamRegistry()
+
 
 def greengrass_subscribe_denial_message(topic: str) -> str:
     """The actionable Trigger_Health error for a Greengrass nucleus
@@ -1938,6 +2323,18 @@ class GreengrassIpcSubscriber:
       ``retry_limit`` or overwriting the denial health (Requirement 8.7:
       authorization does not self-heal by retrying).
 
+    The confirmed stream (operation + IPC client) is registered with a
+    :class:`GreengrassStreamRegistry` (the module's
+    :data:`DEFAULT_STREAM_REGISTRY` unless ``stream_registry`` is injected).
+    ``stop()`` hands the stream to the registry: it closes at once unless it
+    is the last open stream of its topic filter in this process, which then
+    lingers for :data:`GREENGRASS_STREAM_LINGER_SECONDS` (deliveries to a
+    stopped worker are dropped) so a replacement subscribing the same
+    filter never races the nucleus's cloud UNSUBSCRIBE. A reconnect tears
+    its lost stream down without lingering (the nucleus already dropped
+    it), and a reconnect whose subscribe completes after ``stop()`` hands
+    the late stream to the registry too, so nothing leaks.
+
     ``ipc_connect`` is an injection seam (``() -> ipc client``) so tests
     substitute a stub without the SDK or a nucleus socket.
     """
@@ -1949,6 +2346,7 @@ class GreengrassIpcSubscriber:
         on_connection_lost: Callable[[BaseException], None],
         health: TriggerHealth,
         ipc_connect: Optional[Callable[[], Any]] = None,
+        stream_registry: Optional[GreengrassStreamRegistry] = None,
     ) -> None:
         parameters = parameters or {}
         self.topic = str(parameters.get("topic") or "")
@@ -1957,9 +2355,16 @@ class GreengrassIpcSubscriber:
         self._on_connection_lost = on_connection_lost
         self._health = health
         self._ipc_connect = ipc_connect
+        self._registry = (
+            stream_registry
+            if stream_registry is not None
+            else DEFAULT_STREAM_REGISTRY
+        )
         self._lock = threading.Lock()
-        self._ipc_client: Any = None
-        self._operation: Any = None
+        #: The confirmed subscription stream while this worker owns it
+        #: (None before the subscribe, after a teardown, and once a
+        #: stopped worker's stream was handed to the registry).
+        self._stream: Optional[_IpcStream] = None
         #: Bumped on every (re)subscribe and teardown so a stale stream
         #: handler (from a torn-down operation) can never route a
         #: spurious loss signal into the reconnect engine.
@@ -1985,10 +2390,12 @@ class GreengrassIpcSubscriber:
         self._subscribe()
 
     def stop(self) -> None:
-        """Close the operation and IPC client quietly."""
+        """Stop delivering and hand the stream to the registry, which
+        closes it quietly — at once, or after the unsubscribe grace when it
+        is the last open stream of the topic filter in this process."""
         with self._lock:
             self._stopping = True
-        self._teardown_transport()
+        self._teardown_transport(linger=True)
 
     def reconnect(self) -> Any:
         """One reconnect attempt (the engine's late-bound callable):
@@ -2013,7 +2420,9 @@ class GreengrassIpcSubscriber:
                 error=greengrass_subscribe_denial_message(self.topic),
             )
             return RECONNECT_PARK
-        self._teardown_transport()
+        # The lost stream is already out of the nucleus's subscriptions:
+        # holding it cannot keep the filter alive, so it closes now.
+        self._teardown_transport(linger=False)
         if not self._subscribe():
             # _subscribe returns False only on a denial (anything else
             # raises): health is already ``failed`` with the actionable
@@ -2071,15 +2480,38 @@ class GreengrassIpcSubscriber:
             with self._lock:
                 self._generation += 1
             self._mark_denied()
-            self._close_quietly(operation, ipc_client)
+            _close_ipc_quietly(operation, ipc_client)
             return False
         except Exception:
-            self._close_quietly(operation, ipc_client)
+            _close_ipc_quietly(operation, ipc_client)
             raise
 
+        stream = _IpcStream(
+            self.topic, self._health.node_id, operation, ipc_client
+        )
         with self._lock:
-            self._ipc_client = ipc_client
-            self._operation = operation
+            stale = self._stopping or generation != self._generation
+            if not stale:
+                self._stream = stream
+        if stale:
+            # stop() (or another teardown) ran while this subscribe was in
+            # flight — a reconnect attempt straddling the group's stop. The
+            # fresh stream is handed over exactly as a stopped worker's
+            # stream: it lingers when it is the filter's last, closes at
+            # once otherwise; no health write and no INFO line for a
+            # stopped worker, and nothing leaks.
+            self._registry.register(stream)
+            self._registry.release(stream, linger=True)
+            logger.debug(
+                "Trigger '%s' subscribe to topic filter '%s' completed after "
+                "the worker stopped; stream handed to the unsubscribe grace",
+                self._health.node_id,
+                self.topic,
+            )
+            return True
+        # Closes a stream lingering on this filter, if any: this one holds
+        # the filter now.
+        self._registry.register(stream)
         self._health.set_state(HEALTH_SUBSCRIBED)
         logger.info(
             "Trigger '%s' subscribed to IoT Core topic filter '%s' (qos %d)",
@@ -2124,7 +2556,19 @@ class GreengrassIpcSubscriber:
         """Build the MQTT Trigger_Context ``{topic, payload, qos,
         timestamp}`` from one ``IoTCoreMessage`` and deliver it
         (Requirement 6.8); a bad event is logged, never raised into the
-        SDK's event loop."""
+        SDK's event loop. A stopped worker drops the event: its stream may
+        still be open for the unsubscribe grace."""
+        with self._lock:
+            stopping = self._stopping
+        if stopping:
+            logger.debug(
+                "Trigger '%s' dropped a message from topic filter '%s': the "
+                "worker is stopped (stream kept open for the Greengrass "
+                "unsubscribe grace)",
+                self._health.node_id,
+                self.topic,
+            )
+            return
         try:
             message = getattr(event, "message", None)
             topic = getattr(message, "topic_name", None) or self.topic
@@ -2174,30 +2618,21 @@ class GreengrassIpcSubscriber:
         self._health.set_state(HEALTH_FAILED, error=message)
         logger.error("%s", message)
 
-    def _teardown_transport(self) -> None:
-        """Release the current operation/IPC client quietly, invalidating
-        their stream handlers first (generation bump) so the deliberate
-        close never looks like a connection loss."""
+    def _teardown_transport(self, linger: bool = False) -> None:
+        """Hand the current stream to the registry (closed quietly — now,
+        or after the unsubscribe grace when ``linger`` and it is the
+        filter's last), invalidating its stream handler first (generation
+        bump) so the deliberate close never looks like a connection loss."""
         with self._lock:
             self._generation += 1
-            operation = self._operation
-            ipc_client = self._ipc_client
-            self._operation = None
-            self._ipc_client = None
-        self._close_quietly(operation, ipc_client)
+            stream = self._stream
+            self._stream = None
+        if stream is not None:
+            self._registry.release(stream, linger=linger)
 
     @staticmethod
     def _close_quietly(*closables: Any) -> None:
-        for closable in closables:
-            close = getattr(closable, "close", None)
-            if not callable(close):
-                continue
-            try:
-                close()
-            except Exception:  # noqa: BLE001 - teardown must always finish
-                logger.debug(
-                    "Quiet close of %r failed", closable, exc_info=True
-                )
+        _close_ipc_quietly(*closables)
 
 
 # ---------------------------------------------------------------------------
