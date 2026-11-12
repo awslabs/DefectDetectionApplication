@@ -20,6 +20,10 @@ ComponentConfiguration:
     # S3 configuration (will be set by deployment)
     s3Bucket: ''  # e.g., dda-inference-results-198226511894
     s3Prefix: ''  # e.g., usecase-id/device-id
+    # The account that must own s3Bucket (sent as ExpectedBucketOwner on every
+    # upload). Empty: a dda-inference-results-<account> bucket is asserted to
+    # belong to the account in its name; any other bucket is not asserted.
+    s3BucketOwner: ''
     
     # AWS region
     awsRegion: 'us-east-1'

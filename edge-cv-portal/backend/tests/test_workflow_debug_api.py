@@ -388,9 +388,11 @@ class TestCreation:
         # The region probe ran through image-read (decision P4), not media-retention-read.
         assert ("s3", "image-read", "dda-inference-results-" + PORTAL_ACCOUNT) in api.purposes
         assert all(p[1] != "media-retention-read" for p in api.purposes)
+        # The derived default Results_Bucket is asserted to belong to the use
+        # case's account on the probe (S3 bucket-squatting fix).
         assert api.s3.calls[0] == ("list_objects_v2", {"Bucket": "dda-inference-results-" + PORTAL_ACCOUNT,
                                                       "Prefix": "dda-telemetry/debug/" + api.usecase_id + "/",
-                                                      "MaxKeys": 1})
+                                                      "MaxKeys": 1, "ExpectedBucketOwner": PORTAL_ACCOUNT})
         assert ("iot-data", "debug-control", None) in api.purposes
 
     def test_deployment_values_from_the_environment_reach_the_shadow(self, api, monkeypatch):

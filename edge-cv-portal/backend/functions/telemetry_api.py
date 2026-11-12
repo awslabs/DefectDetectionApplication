@@ -984,6 +984,10 @@ def _head_clips(usecase: Dict[str, Any], entries: List[Dict[str, Any]]) -> Dict[
     if not candidates:
         return {}
     bucket = media.results_bucket(usecase)
+    # Derived bucket name: every HEAD and list asserts the owner (S3 bucket-
+    # squatting fix); a bucket of that name under another account answers
+    # 403, which the mapping below reports as ``forbidden``.
+    owner = media.owner_args(usecase, bucket)
     try:
         s3 = credentials.client("s3", usecase, "media-read", bucket=bucket)
     except Exception as error:  # noqa: BLE001 - no credential, no HEADs: entries stay unchecked
@@ -993,7 +997,7 @@ def _head_clips(usecase: Dict[str, Any], entries: List[Dict[str, Any]]) -> Dict[
     def head(entry: Dict[str, Any]) -> Tuple[str, str]:
         key = _plain(entry["media"])["key"]
         try:
-            s3.head_object(Bucket=bucket, Key=key)
+            s3.head_object(Bucket=bucket, Key=key, **owner)
             return str(entry["sk"]), "found"
         except ClientError as error:
             code = str((error.response.get("Error") or {}).get("Code") or "")
@@ -1001,7 +1005,7 @@ def _head_clips(usecase: Dict[str, Any], entries: List[Dict[str, Any]]) -> Dict[
                 return str(entry["sk"]), "missing"
             if code in ("403", "AccessDenied", "Forbidden"):
                 try:
-                    listed = s3.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1)
+                    listed = s3.list_objects_v2(Bucket=bucket, Prefix=key, MaxKeys=1, **owner)
                     if not listed.get("KeyCount"):
                         return str(entry["sk"]), "missing"
                 except (ClientError, BotoCoreError):
@@ -1110,6 +1114,23 @@ def get_clip_media(event: Dict[str, Any], user: Dict[str, Any], item: Dict[str, 
     if not _CLIP_FILE_RE.match(clip_id):
         clip_id = "clip"
     s3 = credentials.client("s3", usecase, "media-read", bucket=binding.bucket)
+    # A presigned GET carries no header a browser could send, so when the
+    # Results_Bucket is the derived default its ownership is verified first
+    # (HeadObject with ExpectedBucketOwner): a bucket of that name under
+    # another account (S3 bucket squatting) answers 403 and no URL pointing
+    # at that account's object is ever issued.
+    owner = media.owner_args(usecase, binding.bucket)
+    if owner:
+        try:
+            s3.head_object(Bucket=binding.bucket, Key=binding.key, **owner)
+        except ClientError as error:
+            code = str((error.response.get("Error") or {}).get("Code") or "")
+            if code in ("403", "AccessDenied", "Forbidden"):
+                logger.error("clip media bucket %s is not owned by account %s (possible S3 bucket squatting)",
+                             binding.bucket, owner["ExpectedBucketOwner"])
+                raise Refusal(409, "clip_media_unavailable", "The clip's media bucket is not owned by the use case's account",
+                              reason="bucket_owner_mismatch")
+            # A missing object is reported by the URL itself, as before.
     video_url = s3.generate_presigned_url("get_object", Params={"Bucket": binding.bucket, "Key": binding.key,
                                                                 "ResponseContentType": "video/mp4"}, ExpiresIn=CLIP_PRESIGN_SECONDS)
     download_url = s3.generate_presigned_url("get_object", Params={
@@ -1211,7 +1232,9 @@ def get_live(event: Dict[str, Any], item: Dict[str, Any], usecase: Dict[str, Any
         return _ok(200, {"frame": None, "frame_token": have, "age_s": age_s, "unavailable": "not_allowed", "reason": binding.reason})
     s3 = credentials.client("s3", usecase, "media-read", bucket=binding.bucket)
     try:
-        head = s3.head_object(Bucket=binding.bucket, Key=binding.key)
+        # bind_key admitted only the Results_Bucket; the HEAD asserts its
+        # owner when that bucket is the derived default (bucket-squatting fix).
+        head = s3.head_object(Bucket=binding.bucket, Key=binding.key, **media.owner_args(usecase, binding.bucket))
     except ClientError as error:
         code = str((error.response.get("Error") or {}).get("Code") or "")
         logger.info("live frame HEAD refused for %s: %s", device_id, code)

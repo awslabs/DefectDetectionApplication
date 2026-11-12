@@ -18,7 +18,10 @@ from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
     check_user_access, is_super_user, get_usecase,
     get_usecase_client, get_usecase_region,
-    rbac_manager, Permission
+    rbac_manager, Permission,
+    # The default inference-results bucket is a derived name, so the S3 calls
+    # against it assert the use case's account as the owner.
+    results_bucket_owner, expected_owner_args,
 )
 # Deployment guard for Workflow_Components (Requirements 4.7, 4.10):
 # a workflow version may only be deployed when it has a recorded
@@ -1686,6 +1689,12 @@ def create_deployment(body, user):
             
             inference_uploader_config = {
                 's3Bucket': s3_bucket,
+                # The account that must own s3Bucket: the use case's account for
+                # the derived default (the component sends it as
+                # ExpectedBucketOwner on every upload, so a bucket of that name
+                # pre-created by another account refuses the uploads); empty for
+                # an admin-configured override, whose owner is not derivable.
+                's3BucketOwner': results_bucket_owner(usecase, s3_bucket) or '',
                 'uploadIntervalSeconds': upload_interval,
                 'batchSize': usecase.get('inference_uploader_batch_size', 100),
                 'localRetentionDays': usecase.get('inference_uploader_retention_days', 7),
@@ -3314,10 +3323,16 @@ def apply_workflow_tuning_lifecycle(usecase, bucket, region=None,
     try:
         s3_client = get_usecase_client(
             's3', usecase, session_name=session_name, region=region)
+        # The default Sample_Store is the DERIVED dda-inference-results-
+        # <account> bucket, which nothing creates for the operator: both
+        # lifecycle calls assert the use case's account as the owner, so a
+        # bucket of that name under another account (S3 bucket squatting)
+        # answers 403 instead of receiving the portal's rules.
+        owner = expected_owner_args(results_bucket_owner(usecase, bucket))
         existing = []
         try:
             current = s3_client.get_bucket_lifecycle_configuration(
-                Bucket=bucket)
+                Bucket=bucket, **owner)
             existing = list(current.get('Rules') or [])
         except ClientError as e:
             code = e.response.get('Error', {}).get('Code', '')
@@ -3330,7 +3345,7 @@ def apply_workflow_tuning_lifecycle(usecase, bucket, region=None,
         if not changed:
             return {'status': 'unchanged', 'bucket': bucket, 'rules': rules}
         s3_client.put_bucket_lifecycle_configuration(
-            Bucket=bucket, LifecycleConfiguration={'Rules': rules})
+            Bucket=bucket, LifecycleConfiguration={'Rules': rules}, **owner)
         logger.info(
             f"Applied the workflow-tuning lifecycle rules to {bucket} "
             f"(samples expire after "

@@ -291,9 +291,12 @@ class FakeS3:
         self.rules = list(rules) if rules is not None else None
         self.get_calls = []
         self.put_calls = []
+        # The owner each call asserted (S3 bucket-squatting fix).
+        self.asserted_owners = []
 
-    def get_bucket_lifecycle_configuration(self, Bucket):
+    def get_bucket_lifecycle_configuration(self, Bucket, ExpectedBucketOwner=None):
         self.get_calls.append(Bucket)
+        self.asserted_owners.append(ExpectedBucketOwner)
         if self.rules is None:
             raise ClientError({"Error": {
                 "Code": "NoSuchLifecycleConfiguration",
@@ -302,7 +305,9 @@ class FakeS3:
         return {"Rules": copy.deepcopy(self.rules)}
 
     def put_bucket_lifecycle_configuration(self, Bucket,
-                                           LifecycleConfiguration):
+                                           LifecycleConfiguration,
+                                           ExpectedBucketOwner=None):
+        self.asserted_owners.append(ExpectedBucketOwner)
         self.put_calls.append((Bucket,
                                copy.deepcopy(LifecycleConfiguration)))
         self.rules = copy.deepcopy(LifecycleConfiguration["Rules"])

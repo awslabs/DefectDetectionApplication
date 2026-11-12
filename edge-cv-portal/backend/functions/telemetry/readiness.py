@@ -239,7 +239,10 @@ def probe_media_location(usecase: Dict[str, Any], bucket: str, *, client: Any = 
     region = None
     try:
         s3 = client if client is not None else credentials.client("s3", usecase, "media-read", bucket=bucket)
-        response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+        # Derived bucket name: the probe asserts the owner (S3 bucket-squatting
+        # fix); a bucket of that name under another account answers 403 and the
+        # "Media location" item reports it denied instead of ready.
+        response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1, **media.owner_args(usecase, bucket))
         region = _header_region(response)
     except ClientError as caught:
         region = _header_region(caught.response)
@@ -272,15 +275,16 @@ def _media_location(usecase: Dict[str, Any]) -> Dict[str, Any]:
 
 def _media_retention(usecase: Dict[str, Any], clip_days: Optional[int]) -> Dict[str, Any]:
     bucket = media.results_bucket(usecase)
+    owner = media.owner_args(usecase, bucket)
     try:
         s3 = credentials.client("s3", usecase, "media-retention-read", bucket=bucket)
         try:
-            rules = list(s3.get_bucket_lifecycle_configuration(Bucket=bucket).get("Rules") or [])
+            rules = list(s3.get_bucket_lifecycle_configuration(Bucket=bucket, **owner).get("Rules") or [])
         except ClientError as error:
             if _code(error) != "NoSuchLifecycleConfiguration":
                 raise
             rules = []
-        versioning = s3.get_bucket_versioning(Bucket=bucket).get("Status")
+        versioning = s3.get_bucket_versioning(Bucket=bucket, **owner).get("Status")
     except ClientError as error:
         return _item("media_retention", False, remedy=REMEDIES["media_retention"], reason="lifecycle_unreadable",
                      error=_code(error))

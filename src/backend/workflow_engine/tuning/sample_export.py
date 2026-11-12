@@ -82,6 +82,7 @@ from typing import (
 )
 
 from workflow_engine.llm_inference import PLACEHOLDER_RE
+from workflow_engine.s3_bucket_owner import owner_args
 from workflow_engine.vendor.workflow_core.anomaly_invocation import (
     prompt_fingerprint,
 )
@@ -624,11 +625,16 @@ class SampleExporter:
         client = self._s3()
         sidecar_key, input_key, reference_key = object_keys(
             config.prefix, sample, self._thing_name)
+        # A derived dda-inference-results-<account> Sample_Store must belong
+        # to the account in its name (s3_bucket_owner): S3 refuses every PUT
+        # with 403 when another account owns it.
+        owner = owner_args(config.bucket)
         client.put_object(
             Bucket=config.bucket,
             Key=input_key,
             Body=sample.input_bytes,
             ContentType=IMAGE_CONTENT_TYPE,
+            **owner,
         )
         if reference_key is not None:
             client.put_object(
@@ -636,6 +642,7 @@ class SampleExporter:
                 Key=reference_key,
                 Body=sample.reference_bytes,
                 ContentType=IMAGE_CONTENT_TYPE,
+                **owner,
             )
         document = build_sidecar(sample, self._thing_name, config.prefix)
         client.put_object(
@@ -643,6 +650,7 @@ class SampleExporter:
             Key=sidecar_key,
             Body=json.dumps(document, sort_keys=True).encode("utf-8"),
             ContentType=SIDECAR_CONTENT_TYPE,
+            **owner,
         )
         logger.debug(
             "Exported tuning sample %s (execution %s, node %s)",

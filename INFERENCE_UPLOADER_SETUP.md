@@ -103,6 +103,7 @@ components the device already runs:
 ```json
 {
   "s3Bucket": "dda-inference-results-<usecase-account-id>",
+  "s3BucketOwner": "<usecase-account-id>",
   "s3Prefix": "{usecase-id}/{device-id}",
   "uploadIntervalSeconds": 300,
   "batchSize": 100,
@@ -126,6 +127,7 @@ components the device already runs:
 | `inferenceResultsPath` | `/aws_dda/inference-results` | Local directory to monitor |
 | `s3Bucket` | (required) | Target S3 bucket |
 | `s3Prefix` | (optional) | S3 key prefix for organization |
+| `s3BucketOwner` | (optional) | AWS account that must own `s3Bucket`; sent as `ExpectedBucketOwner` on every upload, so a bucket of that name owned by any other account refuses the uploads (S3 bucket-squatting protection). When empty, a `dda-inference-results-<account>` bucket is asserted to belong to the account in its name; any other bucket is not asserted. The portal sets it for the default bucket. |
 | `awsRegion` | `us-east-1` | AWS region |
 
 ## S3 Structure

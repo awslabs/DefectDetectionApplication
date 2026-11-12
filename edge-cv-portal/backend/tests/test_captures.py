@@ -108,10 +108,13 @@ class _FakeBody:
 
 
 class _FakePaginator:
-    def __init__(self, keys):
+    def __init__(self, keys, owners=None):
         self._keys = list(keys)
+        # The ExpectedBucketOwner each list asserted (S3 bucket-squatting fix).
+        self._owners = owners if owners is not None else []
 
-    def paginate(self, Bucket=None, Prefix=None):
+    def paginate(self, Bucket=None, Prefix=None, ExpectedBucketOwner=None):
+        self._owners.append(("list", ExpectedBucketOwner))
         contents = [
             {"Key": k}
             for k in self._keys
@@ -131,15 +134,20 @@ class FakeS3:
         self._objects = dict(objects or {})
         self._presign_raises = presign_raises
         self.presigned_calls = []
+        # ("list" | "get", ExpectedBucketOwner) per call: the derived
+        # dda-inference-results-<account> bucket must be asserted on every
+        # list and read (S3 bucket-squatting fix).
+        self.owner_assertions = []
 
-    def get_object(self, Bucket=None, Key=None):
+    def get_object(self, Bucket=None, Key=None, ExpectedBucketOwner=None):
+        self.owner_assertions.append(("get", ExpectedBucketOwner))
         if Key not in self._objects:
             raise KeyError(f"NoSuchKey: {Key}")
         return {"Body": _FakeBody(self._objects[Key])}
 
     def get_paginator(self, name):
         assert name == "list_objects_v2"
-        return _FakePaginator(self._objects.keys())
+        return _FakePaginator(self._objects.keys(), self.owner_assertions)
 
     def generate_presigned_url(self, op, Params=None, ExpiresIn=None):
         self.presigned_calls.append((op, Params, ExpiresIn))
@@ -451,6 +459,39 @@ def test_list_captures_returns_parsed_captures(monkeypatch):
     assert caps["cap2"]["detections"] == []
     assert caps["cap2"]["mask_url"] is not None
     assert caps["cap2"]["overlay_url"] is None
+    # The bucket is the DERIVED default (dda-inference-results-<account>), so
+    # the list and both metadata reads asserted the use case's account as the
+    # owner (S3 bucket-squatting fix); the presigned GETs carry no assertion
+    # (a browser cannot send the signed header).
+    assert payload["bucket"] == "dda-inference-results-123456789012"
+    assert fake.owner_assertions == [("list", "123456789012"),
+                                     ("get", "123456789012"), ("get", "123456789012")]
+
+
+def test_list_captures_asserts_no_owner_for_an_override_bucket(monkeypatch):
+    """An admin-configured override is not a derived name: no assertion."""
+    original = captures.get_usecase
+    monkeypatch.setattr(captures, "get_usecase", lambda usecase_id: {
+        **original(usecase_id), "inference_uploader_s3_bucket": "customer-results"})
+    fake = FakeS3(objects={"dev/cap1.jsonl": build_jsonl(build_metadata(
+        summary={"Inference result": "Detection", "Detection_count": 1},
+        block={"detections": {"0": _detection_entry("17", "dog", [1, 2, 3, 4], 0.9)}}))})
+    monkeypatch.setattr(captures.boto3, "client", lambda *a, **k: fake)
+    response = captures.list_captures(
+        {"queryStringParameters": {"usecase_id": "uc1", "prefix": "dev"}})
+    assert response["statusCode"] == 200
+    assert json.loads(response["body"])["bucket"] == "customer-results"
+    assert fake.owner_assertions == [("list", None), ("get", None)]
+
+
+def test_results_bucket_owner_args_only_for_the_derived_default():
+    usecase = {"account_id": "123456789012"}
+    assert captures.results_bucket_owner_args(
+        usecase, "dda-inference-results-123456789012") == {"ExpectedBucketOwner": "123456789012"}
+    assert captures.results_bucket_owner_args(usecase, "customer-results") == {}
+    assert captures.results_bucket_owner_args(
+        usecase, "dda-inference-results-999999999999") == {}
+    assert captures.results_bucket_owner_args({}, "dda-inference-results-") == {}
 
 
 def test_list_captures_requires_usecase_and_prefix():
