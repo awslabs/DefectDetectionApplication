@@ -199,6 +199,8 @@ class TestCatalogAdditivity:
             "attempts", "attempt_timeout_s", "budget_s", "box_scale",
             "on_error", "error_verdict", "enabled", "max_image_dimension",
             "annotate",
+            # bedrock-additional-model-request-fields: appended last.
+            "additional_model_request_fields",
         ]
 
     def test_ports_and_identity_are_untouched(self):

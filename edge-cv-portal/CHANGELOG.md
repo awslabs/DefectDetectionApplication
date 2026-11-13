@@ -4,6 +4,15 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Added - Model request fields on the Bedrock Inference node (2026-11-12)
+
+The **Bedrock Inference** workflow node has a new optional parameter, `additional_model_request_fields`: a JSON object sent as the Converse API `additionalModelRequestFields`. It carries request fields that only some models accept. The first use is `{"thinking": {"type": "disabled"}}`, which turns off extended thinking on a Claude model that thinks by default (Claude Haiku 5.5, for example), so each call returns sooner and uses fewer output tokens.
+
+- **Opt-in per node.** Empty, the default, sends no field, so every existing workflow makes exactly the request it made before. The fields are model-specific: a model that does not accept one refuses the call with a `ValidationException` before generating anything (Amazon Nova refuses `thinking`), and the node records that error. Set only fields the selected model supports.
+- **Validation.** A value that is not a JSON object is a save-time error, `BEDROCK_REQUEST_FIELDS_JSON`, on the node. A device that receives such a value anyway makes no Bedrock call: the legacy formats fail the run naming the node, and the `inspection` format records the failure per `on_error`.
+- **Prompt tuning.** The Bedrock_Scorer builds its requests with the same shared code, so a tuning replay sends the node's fields too.
+- **Not overridable.** The parameter is not in the `WorkflowNodeOverrides` allow list. An override that switches `model` to a model that refuses the node's fields makes that node fail with the `ValidationException`.
+
 ### Security - Component bucket ownership is asserted on every S3 call (2026-11-12)
 
 The Greengrass component artifact bucket is named from the portal account id and region (`dda-component-<region>-<account>`). S3 bucket names are global, so a third party who knows an account id could create that exact name in their own account before the account's first publish; the publish scripts then found the name reachable, uploaded the component artifacts into it, and the component recipe pointed every edge device at that bucket (S3 bucket squatting). Every S3 call against the derived name now asserts `ExpectedBucketOwner` (the caller's own account), and a bucket of that name owned by another account is a hard error that is never adopted:

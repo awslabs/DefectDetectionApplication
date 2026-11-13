@@ -9,6 +9,7 @@ from .checks import (
     CODE_BEDROCK_BUDGET_TOO_SMALL,
     CODE_BEDROCK_EXPECTED_COUNT_PATH,
     CODE_BEDROCK_INSPECTION_INPUTS,
+    CODE_BEDROCK_REQUEST_FIELDS_JSON,
     CODE_MODEL_REF_UNRESOLVED,
     CODE_MQTT_PAYLOAD_TEMPLATE_JSON,
     CODE_S3_UPLOAD_SOURCE_NO_BEDROCK,
@@ -101,6 +102,8 @@ __all__ = [
     "CODE_BEDROCK_EXPECTED_COUNT_PATH",
     "CODE_BEDROCK_INSPECTION_INPUTS",
     "CODE_BEDROCK_BUDGET_TOO_SMALL",
+    # bedrock-additional-model-request-fields
+    "CODE_BEDROCK_REQUEST_FIELDS_JSON",
     # parameter predicate
     "ParameterViolation",
     "check_parameter_value",
