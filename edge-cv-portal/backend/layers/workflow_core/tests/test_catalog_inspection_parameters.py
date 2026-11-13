@@ -54,8 +54,14 @@ class TestBedrockInferenceAppendedParameters:
         names = _names("bedrock_inference")
         assert tuple(names[:len(_LEGACY_BEDROCK_PARAMETERS)]) == \
             _LEGACY_BEDROCK_PARAMETERS
-        assert names[len(_LEGACY_BEDROCK_PARAMETERS):] == \
+        start = len(_LEGACY_BEDROCK_PARAMETERS)
+        assert names[start:start + len(NEW_BEDROCK_PARAMETERS)] == \
             list(NEW_BEDROCK_PARAMETERS)
+        # Later features append after this feature's block
+        # (bedrock-additional-model-request-fields:
+        # test_bedrock_request_fields.py).
+        assert names[start + len(NEW_BEDROCK_PARAMETERS):] == [
+            "additional_model_request_fields"]
 
     def test_each_parameter_type_default_and_constraints(self):
         params = _params_by_name("bedrock_inference")

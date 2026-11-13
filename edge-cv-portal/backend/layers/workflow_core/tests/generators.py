@@ -473,6 +473,11 @@ def node_parameters_strategy(draw, descriptor, forced: Optional[Dict[str, Any]] 
         parameters.pop("answer_format", None)
         parameters.pop("expected_count_path", None)
         parameters.pop("budget_s", None)
+        # bedrock-additional-model-request-fields: a freely drawn string
+        # is rarely a JSON object (BEDROCK_REQUEST_FIELDS_JSON error); the
+        # empty default sends no fields and fires no rule.
+        # test_bedrock_request_fields.py exercises the parameter directly.
+        parameters.pop("additional_model_request_fields", None)
 
     # bedrock-inspection-chain: payload_format=json requires a
     # payload_template that parses as a JSON object/array

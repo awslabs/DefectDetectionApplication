@@ -14,6 +14,7 @@
             ],
             "nodeId": "bedrock",
             "parameters": {
+              "additional_model_request_fields": "",
               "allowed_uri_prefixes": "",
               "annotate": false,
               "anomaly_mode": true,
@@ -213,6 +214,7 @@
             ],
             "nodeId": "bedrock",
             "parameters": {
+              "additional_model_request_fields": "",
               "allowed_uri_prefixes": "",
               "annotate": false,
               "anomaly_mode": true,
@@ -405,6 +407,7 @@
             ],
             "nodeId": "bedrock",
             "parameters": {
+              "additional_model_request_fields": "",
               "allowed_uri_prefixes": "",
               "annotate": false,
               "anomaly_mode": true,
@@ -578,6 +581,7 @@
             ],
             "nodeId": "bedrock",
             "parameters": {
+              "additional_model_request_fields": "",
               "allowed_uri_prefixes": "",
               "annotate": false,
               "anomaly_mode": true,
@@ -770,6 +774,7 @@
             ],
             "nodeId": "bedrock",
             "parameters": {
+              "additional_model_request_fields": "",
               "allowed_uri_prefixes": "",
               "annotate": false,
               "anomaly_mode": true,
@@ -969,6 +974,7 @@
             ],
             "nodeId": "bedrock",
             "parameters": {
+              "additional_model_request_fields": "",
               "allowed_uri_prefixes": "",
               "annotate": false,
               "anomaly_mode": true,

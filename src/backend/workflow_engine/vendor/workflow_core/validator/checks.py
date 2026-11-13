@@ -52,6 +52,10 @@ from ..catalog.models import (
     PARAM_TYPE_MODEL_REF,
     PORT_TYPES,
 )
+from ..anomaly_invocation import (
+    ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER,
+    resolve_additional_model_request_fields,
+)
 from ..catalog.nodes import SOURCE_KIND_TO_SOURCE_TYPE
 from ..serializer.models import Node, WorkflowGraph
 from ..stream_url import SCHEMES_BY_NODE_TYPE, check_stream_url
@@ -293,6 +297,15 @@ CODE_BEDROCK_EXPECTED_COUNT_PATH = "BEDROCK_EXPECTED_COUNT_PATH"
 CODE_BEDROCK_INSPECTION_INPUTS = "BEDROCK_INSPECTION_INPUTS"
 CODE_BEDROCK_BUDGET_TOO_SMALL = "BEDROCK_BUDGET_TOO_SMALL"
 
+# Model request fields check (bedrock-additional-model-request-fields):
+# - BEDROCK_REQUEST_FIELDS_JSON (error): ``additional_model_request_fields``
+#   set to anything other than a JSON object. Fires only when the
+#   parameter is non-empty, so every pre-existing graph produces identical
+#   findings. Whether the selected model ACCEPTS the fields cannot be
+#   known here; Bedrock answers that with a ValidationException at run
+#   time, recorded against the node.
+CODE_BEDROCK_REQUEST_FIELDS_JSON = "BEDROCK_REQUEST_FIELDS_JSON"
+
 # Model-reference resolution against a registry snapshot
 # (vllm-triton-inference Requirements 6.5, 6.12): the reference names no
 # record in the snapshot, or the record's model type does not match the
@@ -510,6 +523,7 @@ def validate(
     findings.extend(_check_v13_analytics_config(graph, typed_nodes))
     findings.extend(_check_w3_analytics_no_detector(graph))
     findings.extend(_check_inspection_chain(graph, typed_nodes))
+    findings.extend(_check_bedrock_request_fields(graph, typed_nodes))
     if model_registry is not None:
         findings.extend(_check_model_references(graph, typed_nodes, model_registry))
 
@@ -1540,6 +1554,39 @@ def _check_inspection_chain(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTyp
                         node.id, budget, attempt_timeout),
                     node_id=node.id,
                 ))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# Model request fields check (bedrock-additional-model-request-fields)
+# --------------------------------------------------------------------------
+
+def _check_bedrock_request_fields(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+    """BEDROCK_REQUEST_FIELDS_JSON: at most one error per
+    ``bedrock_inference`` node whose ``additional_model_request_fields``
+    is set but is not a JSON object. Judged by the same rule the
+    Invocation_Builder applies before the Converse call
+    (:func:`~workflow_core.anomaly_invocation.resolve_additional_model_request_fields`),
+    so a graph this check accepts never fails on that parameter at run
+    time. An empty value (the default) produces no finding."""
+    findings = []
+    for node in graph.nodes:
+        descriptor = typed_nodes.get(node.id)
+        if descriptor is None or node.type != TYPE_BEDROCK_INFERENCE:
+            continue
+        value = _parameter_value(
+            node, descriptor, ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER)
+        try:
+            resolve_additional_model_request_fields(value)
+        except ValueError as error:
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_BEDROCK_REQUEST_FIELDS_JSON,
+                "Node '{0}': {1} (write it as a JSON object such as "
+                '{{"thinking": {{"type": "disabled"}}}}, or leave it '
+                "empty)".format(node.id, error),
+                node_id=node.id,
+            ))
     return findings
 
 
