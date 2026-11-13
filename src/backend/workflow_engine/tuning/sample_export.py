@@ -596,6 +596,9 @@ class SampleExporter:
         self._client: Any = None
         self._worker: Optional[threading.Thread] = None
         self._stopping = False
+        #: Set by :meth:`close_and_take`: the exporter accepts no sample
+        #: and forwards each one to the installed exporter.
+        self._closed = False
         self._in_flight = 0
         #: The bytes the queued samples hold (bounded by MAX_QUEUE_BYTES).
         self._queued_bytes = 0
@@ -655,7 +658,11 @@ class SampleExporter:
                 )
                 return
             with self._condition:
-                while len(self._queue) >= self._queue_size:
+                # A closed exporter (relocated or disabled) keeps nothing:
+                # the sample goes to the installed exporter, outside the
+                # lock, below.
+                closed = self._closed
+                while not closed and len(self._queue) >= self._queue_size:
                     dropped = self._queue.popleft()
                     self._queued_bytes -= _sample_bytes(dropped)
                     logger.warning(
@@ -664,7 +671,7 @@ class SampleExporter:
                         self._queue_size, dropped.execution_id,
                         dropped.node_id,
                     )
-                while self._queue and (
+                while not closed and self._queue and (
                         self._queued_bytes + size > MAX_QUEUE_BYTES):
                     dropped = self._queue.popleft()
                     self._queued_bytes -= _sample_bytes(dropped)
@@ -675,9 +682,13 @@ class SampleExporter:
                         MAX_QUEUE_BYTES, dropped.execution_id,
                         dropped.node_id,
                     )
-                self._queue.append(sample)
-                self._queued_bytes += size
-                self._condition.notify()
+                if not closed:
+                    self._queue.append(sample)
+                    self._queued_bytes += size
+                    self._condition.notify()
+            if closed:
+                self._forward(sample)
+                return
             self.start()
         except Exception:  # noqa: BLE001 - export never touches the run
             logger.debug(
@@ -685,6 +696,37 @@ class SampleExporter:
                 "execution %s; the run is unaffected",
                 getattr(sample, "execution_id", None), exc_info=True,
             )
+
+    def _forward(self, sample: ExportedSample) -> None:
+        """Hand a sample that reached this closed exporter to the
+        installed one (an executor thread may have fetched this exporter
+        just before a relocation), or drop it when export is disabled."""
+        current = sample_exporter()
+        if current is not None and current is not self:
+            current.enqueue(sample)
+            return
+        logger.debug(
+            "Tuning sample export was reconfigured; dropped the sample for "
+            "execution %s (node %s)", sample.execution_id, sample.node_id)
+
+    def close_and_take(self) -> List[ExportedSample]:
+        """Close the exporter and return every queued sample, oldest
+        first (live tuning configuration: the caller re-enqueues them
+        into the new exporter, or counts them as dropped).
+
+        The worker finishes the upload in flight and exits; a later
+        :meth:`enqueue` forwards to the installed exporter. Never raises.
+        """
+        with self._condition:
+            self._closed = True
+            self._stopping = True
+            taken: List[ExportedSample] = []
+            if self._queue is not None:
+                taken = list(self._queue)
+                self._queue.clear()
+                self._queued_bytes = 0
+            self._condition.notify_all()
+        return taken
 
     # -- worker lifecycle ------------------------------------------------
     def start(self) -> None:

@@ -207,6 +207,9 @@ class BackfillSummary:
     skipped: Dict[str, int] = field(default_factory=dict)
     #: A contained failure of the walk itself, if any.
     error: Optional[str] = None
+    #: True when the walk stopped because its exporter was replaced
+    #: (``abort_if_replaced``); never part of the marker document.
+    aborted: bool = False
 
     def skip(self, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
@@ -603,6 +606,7 @@ def run_backfill(
     clock: Callable[[], float] = time.time,
     sleep: Callable[[float], None] = time.sleep,
     pace_wait_seconds: float = PACE_WAIT_SECONDS,
+    abort_if_replaced: bool = False,
 ) -> BackfillSummary:
     """Export, once, the Tuning_Samples derivable from existing
     Run_Artifacts (Requirement 2.7).
@@ -612,6 +616,11 @@ def run_backfill(
     marker already exists (a second start exports nothing). Never
     raises: any failure is contained, recorded in the summary and
     logged.
+
+    With ``abort_if_replaced`` the walk stops as soon as ``exporter`` is
+    no longer the installed one (export was disabled or relocated by a
+    configuration update), and no marker is written, so the backfill
+    runs again when export is next enabled.
     """
     summary = BackfillSummary()
     try:
@@ -639,12 +648,19 @@ def run_backfill(
                 clock=clock,
                 sleep=sleep,
                 pace_wait_seconds=pace_wait_seconds,
+                abort_if_replaced=abort_if_replaced,
             )
         except Exception as error:  # noqa: BLE001 - contained per 11.2
             summary.error = str(error)
             logger.exception(
                 "Tuning sample backfill failed; workflow runs and live "
                 "sample export are unaffected")
+        if abort_if_replaced and (
+                summary.aborted or sample_exporter() is not exporter):
+            logger.info(
+                "Tuning sample backfill stopped: export was reconfigured; "
+                "it runs again when export is next enabled")
+            return summary
         logger.info(
             "Tuning sample backfill finished: %d sample(s) enqueued from %d "
             "execution(s) across %d registration(s) / %d tunable node(s); "
@@ -670,9 +686,11 @@ def _walk(
     clock: Callable[[], float],
     sleep: Callable[[float], None],
     pace_wait_seconds: float,
+    abort_if_replaced: bool = False,
 ) -> None:
     """Read-only walk of every registration's newest executions,
-    enqueueing one sample per (tunable node, usable execution)."""
+    enqueueing one sample per (tunable node, usable execution); returns
+    as soon as ``summary.aborted`` is set."""
     from workflow_engine.models import WorkflowExecution, WorkflowRegistration
 
     with session_factory() as session:
@@ -708,7 +726,10 @@ def _walk(
                     exporter, summary, registration, execution, nodes,
                     clock=clock, sleep=sleep,
                     pace_wait_seconds=pace_wait_seconds,
+                    abort_if_replaced=abort_if_replaced,
                 )
+                if summary.aborted:
+                    return
 
 
 def _graph_document(registration: Any) -> Optional[dict]:
@@ -736,11 +757,14 @@ def _backfill_execution(
     clock: Callable[[], float],
     sleep: Callable[[float], None],
     pace_wait_seconds: float,
+    abort_if_replaced: bool = False,
 ) -> None:
     """Enqueue this execution's samples for every tunable node.
 
     Contained per execution: an unreadable run keeps the rest of the
-    backfill going.
+    backfill going. With ``abort_if_replaced``, an ``exporter`` that is no
+    longer the installed one sets ``summary.aborted`` instead of
+    enqueueing (a flag, because every exception here is contained).
     """
     try:
         output_dir = getattr(execution, "output_dir", None)
@@ -773,6 +797,9 @@ def _backfill_execution(
             if sample is None:
                 continue
             _pace(exporter, pace_wait_seconds, sleep, clock)
+            if abort_if_replaced and sample_exporter() is not exporter:
+                summary.aborted = True
+                return
             exporter.enqueue(sample)
             summary.exported += 1
     except Exception:  # noqa: BLE001 - contained per 11.2

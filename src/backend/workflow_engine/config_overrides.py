@@ -92,6 +92,8 @@ READ_FAILURE_WARNING_INTERVAL_SECONDS = 60.0
 #: One WARNING per ignored override key per this many seconds (the apply
 #: path runs once per run; the same misconfiguration must not log per run).
 IGNORED_OVERRIDE_WARNING_INTERVAL_SECONDS = 60.0
+#: One WARNING per failing configuration listener per this many seconds.
+LISTENER_FAILURE_WARNING_INTERVAL_SECONDS = 60.0
 
 #: Per node type, the ONLY parameters a configuration override may set.
 #: Everything that decides the verdict (prompt, answer_format,
@@ -339,8 +341,21 @@ class WorkflowOverridesConfig:
         self._last_raw: Any = _UNREAD
         self._read_failure_warned_at: Optional[float] = None
         self._ignored_warned_at: Dict[str, float] = {}
+        #: Called with the raw configuration after every good read.
+        self._listeners: List[Callable[[Any], None]] = []
+        self._listener_warned_at: Dict[int, float] = {}
         self._stop_event = threading.Event()
         self._poll_thread: Optional[threading.Thread] = None
+
+    def add_listener(self, listener: Callable[[Any], None]) -> None:
+        """Call ``listener(configuration)`` with the raw component
+        configuration mapping after every successful, non-empty read —
+        including reads whose overrides subtrees did not change — on the
+        thread that called :meth:`refresh`. A failing listener is
+        contained (one WARNING per minute per listener) and never affects
+        the overrides or the other listeners."""
+        with self._lock:
+            self._listeners.append(listener)
 
     # ----------------------------------------------------------- reads
 
@@ -480,6 +495,7 @@ class WorkflowOverridesConfig:
             self._warn_read_failure(error)
             return self.snapshot()
         self._read_failure_warned_at = None
+        self._notify_listeners(raw)
         subtrees = (raw.get(NODE_OVERRIDES_KEY), raw.get(DISABLED_KEY))
         with self._lock:
             if self._last_raw is not _UNREAD and subtrees == self._last_raw:
@@ -529,7 +545,27 @@ class WorkflowOverridesConfig:
                 logger.exception(
                     "Unexpected error in the workflow overrides poller")
 
+    def _notify_listeners(self, raw: Mapping) -> None:
+        with self._lock:
+            listeners = list(self._listeners)
+        for index, listener in enumerate(listeners):
+            try:
+                listener(raw)
+            except Exception:  # noqa: BLE001 - one listener never affects the rest
+                self._warn_listener_failure(index)
+
     # ----------------------------------------------------- rate limits
+
+    def _warn_listener_failure(self, index: int) -> None:
+        now = self._clock()
+        with self._lock:
+            last = self._listener_warned_at.get(index)
+            if last is not None and now - last < LISTENER_FAILURE_WARNING_INTERVAL_SECONDS:
+                return
+            self._listener_warned_at[index] = now
+        logger.warning(
+            "A workflow configuration listener failed; overrides and the "
+            "other listeners are unaffected", exc_info=True)
 
     def _warn_read_failure(self, error: BaseException) -> None:
         now = self._clock()

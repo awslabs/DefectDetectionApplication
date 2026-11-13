@@ -39,6 +39,10 @@ _trigger_manager = None
 _stream_lease_keeper = None
 _continuous_manager = None
 _lock = threading.Lock()
+# The workflow-tuning shadow subscription, made once per process by the
+# first job runner (later runners reuse it through the forwarding proxy).
+_tuning_shadow_subscription = None
+_tuning_subscription_lock = threading.Lock()
 
 
 def start_workflow_engine() -> Optional[WorkflowWatcher]:
@@ -103,48 +107,53 @@ def start_workflow_engine() -> Optional[WorkflowWatcher]:
                 "Tuning sample export could not be configured; workflow "
                 "runs proceed without exporting tuning samples"
             )
+        # Live workflowTuning configuration: the reconciler adopts the
+        # startup exporter, which starts the one-shot backfill of the runs
+        # this device already performed (Requirement 2.7; a daemon thread,
+        # marker-guarded, stopped without a marker if export is
+        # reconfigured) and the Device_Score_Job runner (Requirements 6.4,
+        # 6.9, 6.15; its first reconciliation on this thread, as before).
+        # Each start is contained inside adopt; without an exporter
+        # nothing starts, no shadow is subscribed and no S3 client is
+        # created. The poller below then applies later changes of the
+        # section without a restart.
+        reconciler = None
+        try:
+            from workflow_engine.tuning.backfill import start_backfill
+            from workflow_engine.tuning.live_config import (
+                TuningExportReconciler,
+            )
+
+            reconciler = TuningExportReconciler(
+                start_backfill=start_backfill,
+                start_job_runner=_start_job_runner,
+                stop_job_runner=_stop_job_runner,
+            )
+            reconciler.adopt(exporter)
+        except Exception:  # noqa: BLE001 - feature isolation (11.3)
+            logger.exception(
+                "Tuning sample backfill and job runner could not start; "
+                "live sample export and workflow runs are unaffected"
+            )
         # Configuration-only switches (bedrock-inspection-chain): the
         # WorkflowNodeOverrides / WorkflowDisabled poller, handed to the
         # executor and the trigger manager below. Its own contained block:
         # without it (or where the IPC reader is unavailable the poller's
         # snapshot simply stays empty) both consumers behave exactly as
         # before the feature. The poller alone touches IPC, on its thread.
+        # Every good read also goes to the tuning reconciler.
         overrides_config = None
         try:
-            overrides_config = _start_overrides_config()
+            overrides_config = _start_overrides_config(
+                listeners=(
+                    [reconciler.on_configuration]
+                    if reconciler is not None else ()
+                )
+            )
         except Exception:  # noqa: BLE001 - feature isolation
             logger.exception(
                 "Workflow configuration overrides unavailable; runs execute "
                 "the deployed parameters and no workflow is disabled"
-            )
-        # One-shot backfill of the samples derivable from the runs this
-        # device has already performed (Requirement 2.7). Its own
-        # contained block, on a daemon thread so startup never waits for
-        # it; a no-op without a configured exporter and after the marker
-        # file records that it ran once.
-        try:
-            if exporter is not None:
-                from workflow_engine.tuning.backfill import start_backfill
-
-                start_backfill(exporter)
-        except Exception:  # noqa: BLE001 - feature isolation (11.3)
-            logger.exception(
-                "Tuning sample backfill could not start; live sample export "
-                "and workflow runs are unaffected"
-            )
-        # Device_Score_Job runner (Requirements 6.4, 6.9, 6.15). Its own
-        # contained block: with tuning unconfigured no runner is
-        # installed, no shadow is subscribed and no S3 client is created,
-        # so LocalServer behaves exactly as before the feature. Job
-        # replay runs on the runner's own worker, never on an executor
-        # thread.
-        try:
-            if exporter is not None:
-                _start_job_runner(exporter)
-        except Exception:  # noqa: BLE001 - feature isolation (11.3)
-            logger.exception(
-                "Tuning job runner could not start; workflow runs and sample "
-                "export are unaffected"
             )
         # Continuous run retention (rtsp-rtmp-stream-cameras Requirement
         # 12). Its own contained block, created before the executor so the
@@ -317,22 +326,42 @@ def _configure_sample_export():
     return configure_sample_exporter(configuration)
 
 
-def _start_overrides_config():
+def _start_overrides_config(listeners=()):
     """Create and start the ``WorkflowNodeOverrides`` / ``WorkflowDisabled``
     poller (``config_overrides.WorkflowOverridesConfig``,
     bedrock-inspection-chain): one immediate read, then a daemon re-poll
     every 5 s, all on the poller's thread. The default reader opens the
     IPC configuration client lazily, so where it is unavailable the first
     read fails (one WARNING per minute) and the snapshot stays empty —
-    nothing overridden, nothing disabled."""
+    nothing overridden, nothing disabled. ``listeners`` are added before
+    the first read, so each sees every good read."""
     from workflow_engine.config_overrides import WorkflowOverridesConfig
 
     config = WorkflowOverridesConfig()
+    for listener in listeners:
+        config.add_listener(listener)
     config.start()
     return config
 
 
-def _start_job_runner(exporter):
+class _InstalledJobRunnerProxy:
+    """The tuning shadow subscription's target: it forwards each delta to
+    whichever runner is installed at that moment, so one subscription
+    serves every runner a live configuration change starts."""
+
+    def __init__(self, thing_name, shadow_name):
+        self.thing_name = thing_name
+        self.shadow_name = shadow_name
+
+    def on_delta(self, message=None):
+        from workflow_engine.tuning.job_runner import job_runner
+
+        runner = job_runner()
+        if runner is not None:
+            runner.on_delta(message)
+
+
+def _start_job_runner(exporter, handled_jobs=None, sync=True):
     """Install the Device_Score_Job runner and subscribe to the
     ``dda-workflow-tuning`` shadow delta (quality-prompt-tuning
     Requirements 6.4, 6.9, 6.15).
@@ -340,11 +369,16 @@ def _start_job_runner(exporter):
     Follows the camera-bindings wiring exactly: the runner reads the
     shadow through the device's existing ``IoTShadowAccessor`` and the
     delta arrives on the MQTT ``SubscriptionHandler`` pattern, whose
-    blocking ``subscribe()`` gets its own daemon thread. Imports are
-    deferred: ``utils.server_setup`` connects Greengrass IPC at import
-    time, which only exists on-device — everywhere else this raises and
-    the caller degrades to no job runner.
+    blocking ``subscribe()`` gets its own daemon thread. The subscription
+    is made once per process and forwards to the installed runner.
+    ``handled_jobs`` are the ids a closed runner already accepted; with
+    ``sync=False`` the runner reads no shadow here (the caller runs its
+    first reconciliation on another thread). Imports are deferred:
+    ``utils.server_setup`` connects Greengrass IPC at import time, which
+    only exists on-device — everywhere else this raises and the caller
+    degrades to no job runner.
     """
+    global _tuning_shadow_subscription
     from utils import server_setup
     from workflow_engine.tuning.job_runner import (
         make_tuning_shadow_handler,
@@ -353,17 +387,24 @@ def _start_job_runner(exporter):
     )
 
     runner = start_job_runner(
-        exporter, shadow_accessor=server_setup.iot_shadow_accessor)
+        exporter, shadow_accessor=server_setup.iot_shadow_accessor,
+        sync=sync, handled_jobs=handled_jobs)
     if runner is None:
         return None
+    with _tuning_subscription_lock:
+        if _tuning_shadow_subscription is not None:
+            return runner
 
-    from mqtt.SubscriptionHandler import SubscriptionHandler
+        from mqtt.SubscriptionHandler import SubscriptionHandler
 
-    subscription = SubscriptionHandler(
-        tuning_delta_topic_prefix(runner.thing_name, runner.shadow_name),
-        make_tuning_shadow_handler(runner),
-        server_setup.publish_handler,
-    )
+        subscription = SubscriptionHandler(
+            tuning_delta_topic_prefix(runner.thing_name, runner.shadow_name),
+            make_tuning_shadow_handler(
+                _InstalledJobRunnerProxy(runner.thing_name,
+                                         runner.shadow_name)),
+            server_setup.publish_handler,
+        )
+        _tuning_shadow_subscription = subscription
 
     def _subscribe():
         try:
@@ -379,6 +420,20 @@ def _start_job_runner(exporter):
         daemon=True,
     ).start()
     return runner
+
+
+def _stop_job_runner(reason):
+    """Uninstall the Device_Score_Job runner and close it with ``reason``
+    (its accepted, unfinished jobs report ``failed``); returns the job ids
+    it handled, ``{}`` when none was installed. The shadow subscription
+    stays: it forwards to the next installed runner."""
+    from workflow_engine.tuning.job_runner import job_runner, set_job_runner
+
+    runner = job_runner()
+    set_job_runner(None)
+    if runner is None:
+        return {}
+    return runner.close(reason)
 
 
 def _camera_binding_dependencies():
