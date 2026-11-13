@@ -148,6 +148,14 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: regenerated per the same maintenance path; every other recording,
 #: ``mqtt_publish`` included, is untouched, and the additivity is pinned by
 #: ``test_catalog_custom_python_wall_clock.py`` / ``test_catalog_s3_upload.py``.
+#:
+#: The inspection-format tuning fix rewrote the ``bedrock_inference``
+#: descriptions of ``reference_payload_path``, ``allowed_uri_prefixes``,
+#: ``answer_format`` and ``max_image_dimension``, added examples to
+#: ``reference_payload_path``, and set ``multiline`` on
+#: ``reference_payload_path`` and ``allowed_uri_prefixes``. Only that entry
+#: was regenerated per the same maintenance path; ONLY those fields moved,
+#: and every other recording, ``mqtt_publish`` included, is untouched.
 _LLM_PRESERVED_PARAMETERS = (
     "modelName",
     "prompt_template",
