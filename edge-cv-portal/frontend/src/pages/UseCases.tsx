@@ -802,7 +802,7 @@ export default function UseCases() {
 
           <FormField
             label="Tuning sample export"
-            description="Let devices upload the exact images and verdicts of every anomaly-mode Bedrock/VLM inspection to workflow-tuning/samples/ in this use case's inference results bucket, for prompt tuning. Takes effect the next time the devices are deployed to."
+            description={`Let devices upload the exact images and verdicts of every anomaly-mode Bedrock/VLM inspection and every inspection-format Bedrock inspection to workflow-tuning/samples/ in this use case's inference results bucket, for prompt tuning. Takes effect when the devices are next deployed to. A LocalServer built from the release in the Portal CHANGELOG entry "Workflow tuning for inspection-format Bedrock nodes, reference files and live tuning configuration", or from a later one, applies it within seconds, without restarting; an older LocalServer applies it only after LocalServer restarts.`}
             stretch
           >
             <Toggle

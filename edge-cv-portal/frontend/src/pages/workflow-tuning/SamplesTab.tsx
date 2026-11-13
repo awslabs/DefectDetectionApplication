@@ -37,12 +37,25 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../../services/api';
 import { getErrorMessage } from '../../utils/errorHandling';
+import ReferenceList from './ReferenceList';
 import type {
   LabelCounts,
   ListTuningSamplesParams,
   TuningLabel,
   TuningSampleView,
 } from './types';
+
+/**
+ * Why the Synthetic negatives toggle is off for an inspection-format node
+ * (the session page passes it as `syntheticUnsupportedReason`).
+ */
+export const SYNTHETIC_UNSUPPORTED_REASON =
+  'Not available for inspection-format nodes: their reference image (for '
+  + 'example a legend) is not a per-part golden sample, so cross-paired '
+  + 'images are not defects.';
+
+/** The badge of a verdict recovered from a backfilled sample's answer. */
+export const RECOVERED_BADGE_TEXT = 'Recovered from the recorded answer';
 
 /** Requirement 4.7's warning: a run needs both classes to be meaningful. */
 export const ZERO_CLASS_WARNING =
@@ -91,6 +104,11 @@ interface SamplesTabProps {
   /** Devices that exported the samples — the VLM run's device picker. */
   onDevicesSeen: (devices: string[]) => void;
   onSyntheticChange: (enabled: boolean) => void;
+  /**
+   * Set when the session's node cannot use Synthetic_Negatives: the toggle
+   * is then disabled and shows this reason.
+   */
+  syntheticUnsupportedReason?: string;
 }
 
 export default function SamplesTab({
@@ -100,6 +118,7 @@ export default function SamplesTab({
   onCountsChange,
   onDevicesSeen,
   onSyntheticChange,
+  syntheticUnsupportedReason,
 }: SamplesTabProps) {
   const [samples, setSamples] = useState<TuningSampleView[]>([]);
   const [matched, setMatched] = useState(0);
@@ -251,14 +270,20 @@ export default function SamplesTab({
   const card = (sample: TuningSampleView) => {
     const isSelected = selected.includes(sample.sampleId);
     const recorded = sample.recorded || {};
+    // An inspection-format sample's verdict, recorded or recovered from the
+    // answer, is shown as the node published it.
     const verdictText =
-      recorded.isAnomalous === null || recorded.isAnomalous === undefined
-        ? recorded.parseError
-          ? `No verdict (parser: ${recorded.parseError})`
-          : 'No verdict recorded'
-        : recorded.isAnomalous
-          ? 'Anomalous'
-          : 'Normal';
+      recorded.verdict === 'pass'
+        ? 'Pass'
+        : recorded.verdict === 'fail'
+          ? 'Fail'
+          : recorded.isAnomalous === null || recorded.isAnomalous === undefined
+            ? recorded.parseError
+              ? `No verdict (parser: ${recorded.parseError})`
+              : 'No verdict recorded'
+            : recorded.isAnomalous
+              ? 'Anomalous'
+              : 'Normal';
     const confidenceText =
       recorded.confidence === null || recorded.confidence === undefined
         ? '—'
@@ -335,7 +360,12 @@ export default function SamplesTab({
           )}
           <ColumnLayout columns={2}>
             {image(sample.input?.url, `Input image of ${sample.executionId}`, 'Input')}
-            {sample.singleImage ? (
+            {sample.references ? (
+              <SpaceBetween size="xxs">
+                <Box variant="awsui-key-label">References</Box>
+                <ReferenceList references={sample.references} />
+              </SpaceBetween>
+            ) : sample.singleImage ? (
               <SpaceBetween size="xxs">
                 <Box variant="awsui-key-label">Reference</Box>
                 <Box variant="p" data-testid={`single-image-${sample.sampleId}`}>
@@ -353,7 +383,17 @@ export default function SamplesTab({
           <ColumnLayout columns={3} variant="text-grid">
             <SpaceBetween size="xxs">
               <Box variant="awsui-key-label">Recorded verdict</Box>
-              <Box variant="p">{verdictText}</Box>
+              <SpaceBetween direction="horizontal" size="xs">
+                <Box variant="p">{verdictText}</Box>
+                {recorded.recovered && (
+                  <Badge
+                    color="blue"
+                    data-testid={`recovered-badge-${sample.sampleId}`}
+                  >
+                    {RECOVERED_BADGE_TEXT}
+                  </Badge>
+                )}
+              </SpaceBetween>
               <Box variant="awsui-key-label">Confidence</Box>
               <Box variant="p">{confidenceText}</Box>
             </SpaceBetween>
@@ -458,7 +498,8 @@ export default function SamplesTab({
           {/* Requirements 4.5, 4.6. */}
           <Toggle
             checked={syntheticEnabled}
-            disabled={busy}
+            disabled={busy || !!syntheticUnsupportedReason}
+            description={syntheticUnsupportedReason}
             onChange={({ detail }) => toggleSynthetic(detail.checked)}
             data-testid="synthetic-toggle"
           >
@@ -591,8 +632,9 @@ export default function SamplesTab({
           {!loading && !samples.length && (
             <Box variant="p" data-testid="no-samples">
               No sample matches these filters. Devices export samples after
-              every anomaly-mode invocation; use &quot;Refresh samples&quot; to
-              index newly exported ones.
+              every anomaly-mode or inspection-format invocation that returns
+              an answer; use &quot;Refresh samples&quot; to index newly
+              exported ones.
             </Box>
           )}
           {samples.map(card)}

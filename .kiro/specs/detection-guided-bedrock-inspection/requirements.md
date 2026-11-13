@@ -209,6 +209,14 @@ against.
    the run's Trigger_Context `payload_json` (for example `refs.0.image`);
    an absent value SHALL keep today's reference-port behavior
    byte-identical.
+
+   *Amendment (reference files):* `reference_payload_path` is a list of
+   references, one per line, each a fixed URI, a file uploaded in the
+   workflow editor and shipped with the workflow
+   (`upload://<sha256>.<ext>`), or a dotted payload path; a list and
+   documents apply to `answer_format: inspection` only; every reference
+   must load, or the node records an error (Requirement 3.5 and Property 4
+   apply to each file).
 2. WHEN the resolved payload value is a string beginning with `s3://`,
    `http://`, or `https://`, THE LocalServer SHALL fetch the referenced
    object and use its bytes as the reference image.

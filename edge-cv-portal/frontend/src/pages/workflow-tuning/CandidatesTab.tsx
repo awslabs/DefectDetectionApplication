@@ -32,6 +32,12 @@ import {
 import { apiService } from '../../services/api';
 import { getErrorMessage } from '../../utils/errorHandling';
 import {
+  ANSWER_FORMAT_INSPECTION,
+  coerceParameterValue,
+  isInspectionFormat,
+  isTruthyParameterValue,
+} from './eligibility';
+import {
   STARTER_CANDIDATE,
   draftWarnings,
   projectMaxTokens,
@@ -60,6 +66,19 @@ export const BASELINE_READ_ONLY_NOTE =
 export const DELETE_CANDIDATE_WARNING =
   'Deleting this candidate also deletes its score runs. Every other '
   + 'candidate, score run, sample and label is left unchanged.';
+
+/** The prompt description of an inspection-format node that renders it. */
+export const INSPECTION_RENDER_DESCRIPTION =
+  'Placeholders are rendered per run against the trigger payload and the '
+  + 'image size; the preview shows the template unrendered.';
+
+/** `render_prompt` as the executor reads it: absent or blank is off. */
+function renderPromptOn(parameters: Record<string, unknown> | undefined): boolean {
+  const raw = parameters?.render_prompt;
+  if (raw === null || raw === undefined) return false;
+  if (typeof raw === 'string' && !raw.trim()) return false;
+  return isTruthyParameterValue(coerceParameterValue(raw));
+}
 
 interface Draft {
   name: string;
@@ -113,6 +132,11 @@ export default function CandidatesTab({
 
   const active = candidates.find((c) => c.candidateId === activeId) || null;
   const editingBaseline = !!active?.isBaseline;
+  // An inspection-format node answers the inspection JSON: its projection,
+  // warnings and preview texts follow that contract, and the anomaly-mode
+  // starter template does not apply to it.
+  const inspection = isInspectionFormat(node?.parameters);
+  const answerFormat = inspection ? ANSWER_FORMAT_INSPECTION : undefined;
 
   // Open the first editable Candidate (or the baseline) on arrival.
   useEffect(() => {
@@ -286,7 +310,7 @@ export default function CandidatesTab({
   // own rules; once saved the route's answer replaces it (Requirement 5.3).
   const showDraftPreview = dirty || creating;
   const userMessage = showDraftPreview
-    ? projectUserMessage(draft.prompt)
+    ? projectUserMessage(draft.prompt, answerFormat)
     : preview?.userMessage ?? '';
   const systemText = showDraftPreview
     ? projectSystemText(draft.systemPrompt)
@@ -298,9 +322,13 @@ export default function CandidatesTab({
     ? draftWarnings(
         draft.prompt,
         draft.systemPrompt.trim() ? draft.systemPrompt : null,
-        maxTokensValue
+        maxTokensValue,
+        answerFormat
       )
     : preview?.warnings ?? [];
+  // The request's blocks do not depend on the prompt, so the saved
+  // preview's list also describes an unsaved draft.
+  const attachments = preview?.attachments ?? [];
 
   return (
     <SpaceBetween size="l">
@@ -382,13 +410,15 @@ export default function CandidatesTab({
               }
               actions={
                 <SpaceBetween direction="horizontal" size="xs">
-                  <Button
-                    onClick={insertStarter}
-                    disabled={editingBaseline}
-                    data-testid="insert-starter"
-                  >
-                    Insert starter template
-                  </Button>
+                  {!inspection && (
+                    <Button
+                      onClick={insertStarter}
+                      disabled={editingBaseline}
+                      data-testid="insert-starter"
+                    >
+                      Insert starter template
+                    </Button>
+                  )}
                   <Button
                     variant="primary"
                     loading={saving}
@@ -431,7 +461,9 @@ export default function CandidatesTab({
               description={
                 node?.nodeType === 'llm_inference'
                   ? 'Placeholders are rendered against the run metadata on the device; the preview shows the template unrendered.'
-                  : undefined
+                  : inspection && renderPromptOn(node?.parameters)
+                    ? INSPECTION_RENDER_DESCRIPTION
+                    : undefined
               }
             >
               <Textarea
@@ -518,6 +550,20 @@ export default function CandidatesTab({
               </pre>
             </Box>
           </FormField>
+          {attachments.length > 0 && (
+            <FormField
+              label="Attached files, in request order"
+              description="The prompt refers to the reference files by these labels."
+            >
+              <ul data-testid="preview-attachments" style={{ margin: 0 }}>
+                {attachments.map((attachment, index) => (
+                  <li key={`${index}-${attachment.label}`}>
+                    {`${attachment.label} · ${attachment.kind} · ${attachment.format.toUpperCase()}`}
+                  </li>
+                ))}
+              </ul>
+            </FormField>
+          )}
           <FormField label="System text">
             <Box variant="code" data-testid="preview-system-text">
               <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
@@ -540,8 +586,12 @@ export default function CandidatesTab({
             </div>
             <div>
               <Box variant="awsui-key-label">Template rendered</Box>
-              <Box variant="p">
-                {preview?.templateRendered === false ? 'No (device renders it)' : 'Yes'}
+              <Box variant="p" data-testid="preview-template-rendered">
+                {preview?.templateRendered === false
+                  ? inspection
+                    ? 'No (rendered per sample when scored)'
+                    : 'No (device renders it)'
+                  : 'Yes'}
               </Box>
             </div>
           </ColumnLayout>

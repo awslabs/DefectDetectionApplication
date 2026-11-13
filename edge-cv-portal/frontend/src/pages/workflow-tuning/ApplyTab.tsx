@@ -37,11 +37,11 @@ export const NEEDS_COMPLETED_RUN =
   'The selected candidate needs at least one completed score run before it '
   + 'can be applied. Start a run on the Score runs tab.';
 
-/** Requirement 8.4's wording when the node is gone or out of Anomaly_Mode. */
+/** Requirement 8.4's wording when the node is gone or no longer tunable. */
 export const NODE_NOT_TUNABLE_MESSAGE =
   'The target node no longer exists in the latest workflow version, or is no '
-  + 'longer an anomaly-mode Bedrock or VLM inspection node, so the prompt set '
-  + 'cannot be applied.';
+  + 'longer an anomaly-mode Bedrock or VLM inspection node or an '
+  + 'inspection-format Bedrock node, so the prompt set cannot be applied.';
 
 /** Requirement 8.5: applying is a save, nothing more. */
 export const NOT_DEPLOYED_NOTE =
