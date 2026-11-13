@@ -75,17 +75,29 @@ from typing import (
 
 from workflow_engine import run_artifacts
 from workflow_engine.discovery import WORKFLOW_FILE
-from workflow_engine.output_bindings import sanitize_node_id_for_artifact
+from workflow_engine.output_bindings import (
+    image_dimensions,
+    sanitize_node_id_for_artifact,
+)
 from workflow_engine.tuning.sample_export import (
     SOURCE_BACKFILL,
+    ExportedReference,
     ExportedSample,
+    ReferenceRecord,
     SampleExporter,
+    inline_reference_paths,
+    inspection_metadata_snippet_json,
     metadata_snippet,
     sample_exporter,
 )
 from workflow_engine.vendor.workflow_core.anomaly_invocation import (
+    ANSWER_FORMAT_INSPECTION,
+    BEDROCK_IMAGE_FORMAT,
+    KIND_DOCUMENT,
+    KIND_IMAGE,
     NODE_TYPE_BEDROCK_INFERENCE,
     NODE_TYPE_LLM_INFERENCE,
+    is_inspection_format,
     is_tunable_node,
     prompt_fingerprint,
 )
@@ -122,10 +134,14 @@ _ANSWER_KEY = {
 #: bytes actually sent (``original``, written by
 #: ``BedrockInferenceProcessor._persist_original_frame``) when the
 #: outcome names a detection, else the captured primary frame (``in``),
-#: plus the optional reference frame.
+#: plus the optional reference frame. An ``answer_format: inspection``
+#: node sent the downscaled ``input`` frame when one was persisted, and
+#: each image of a reference list as ``reference_{n}``.
 PORT_ORIGINAL = "original"
 PORT_IN = "in"
+PORT_INPUT = "input"
 PORT_REFERENCE = "reference"
+PORT_REFERENCE_LIST = "reference_{n}"
 
 #: Skip reasons counted in the summary and the marker document.
 SKIP_NO_ARTIFACTS = "no_artifacts"
@@ -142,6 +158,14 @@ SKIP_REASONS = (
     SKIP_UNREADABLE_INPUT,
     SKIP_UNREADABLE_REFERENCE,
 )
+
+#: Skip reasons of an ``answer_format: inspection`` run that recorded the
+#: references it sent, counted in the summary like the reasons above: a
+#: run that sent a document (documents are not persisted per run, so the
+#: sample cannot be rebuilt), and a run whose recorded reference image
+#: frame is missing.
+SKIP_DOCUMENT_REFERENCE = "document_reference_not_persisted"
+SKIP_REFERENCE_FRAME_MISSING = "reference_frame_missing"
 
 #: Queue-pacing bounds. The exporter's queue is deliberately small (200
 #: entries, oldest dropped) because it protects live runs; a backfill of
@@ -288,7 +312,8 @@ def tunable_nodes(graph_document: Any) -> List[TunableNode]:
         parameters = (
             dict(parameters) if isinstance(parameters, Mapping) else {}
         )
-        if not is_tunable_node(node_type, parameters.get("anomaly_mode")):
+        if not is_tunable_node(node_type, parameters.get("anomaly_mode"),
+                               parameters.get("answer_format")):
             continue
         node_id = node.get("id")
         if node_id is None or str(node_id) == "":
@@ -362,19 +387,39 @@ def build_sample(
     and the fingerprint from the node's registered Prompt_Set, so the
     sample is indistinguishable from a live one apart from its
     ``source``.
+
+    An ``answer_format: inspection`` entry (it carries ``verdict``)
+    records the verdict (``is_anomalous`` = ``verdict == "fail"``), takes
+    the ``input`` frame (the downscaled bytes sent) when one was
+    persisted, else ``in``, records the image sizes and the metadata
+    snippet the Portal renders from. When the entry records the
+    ``references`` it sent, their frames are ``reference`` (one image) or
+    ``reference_{n}`` (a list); a document reference or a missing frame
+    skips the entry, because only the image bytes sent were persisted.
+    Error bodies (an ``error`` key, or ``outcome: "error"``) are skipped.
     """
-    if outcome.get("error"):
+    if outcome.get("error") or outcome.get("outcome") == "error":
         return None, SKIP_ERROR_OUTCOME
     safe_node_id = sanitize_node_id_for_artifact(node.node_id)
+    inspection = (
+        node.node_type == NODE_TYPE_BEDROCK_INFERENCE
+        and is_inspection_format(node.parameters)
+        and "verdict" in outcome)
     detection_id = outcome.get("detection_id")
     detection_id = (
         str(detection_id)
         if detection_id is not None and str(detection_id) != ""
         else None
     )
-    input_port = PORT_ORIGINAL if detection_id is not None else PORT_IN
-    input_path = run_artifacts.node_image_path(
-        output_dir, capture_id, safe_node_id, input_port)
+    if inspection:
+        input_path = run_artifacts.node_image_path(
+            output_dir, capture_id, safe_node_id, PORT_INPUT
+        ) or run_artifacts.node_image_path(
+            output_dir, capture_id, safe_node_id, PORT_IN)
+    else:
+        input_port = PORT_ORIGINAL if detection_id is not None else PORT_IN
+        input_path = run_artifacts.node_image_path(
+            output_dir, capture_id, safe_node_id, input_port)
     if not input_path:
         return None, SKIP_MISSING_INPUT
     input_bytes, readable = _read_frame(input_path)
@@ -383,14 +428,47 @@ def build_sample(
     if not input_bytes:
         # An empty frame file carries no image: nothing to replay.
         return None, SKIP_MISSING_INPUT
-    reference_path = run_artifacts.node_image_path(
-        output_dir, capture_id, safe_node_id, PORT_REFERENCE)
-    reference_bytes, reference_readable = _read_frame(reference_path)
-    if not reference_bytes:
-        reference_bytes = None
+    recorded = outcome.get("references") if inspection else None
+    references: Tuple[ExportedReference, ...] = ()
+    reference_bytes: Optional[bytes] = None
+    reference_path = None
+    reference_readable = True
+    if isinstance(recorded, list) and recorded:
+        # A run that recorded the references it sent: only the image
+        # bytes sent were persisted, as reference / reference_{n}.
+        if any(isinstance(item, Mapping)
+               and item.get("kind") == KIND_DOCUMENT for item in recorded):
+            return None, SKIP_DOCUMENT_REFERENCE
+        frames = []
+        for index, _ in enumerate(recorded, start=1):
+            port = (PORT_REFERENCE if len(recorded) == 1
+                    else PORT_REFERENCE_LIST.format(n=index))
+            data, _ = _read_frame(run_artifacts.node_image_path(
+                output_dir, capture_id, safe_node_id, port))
+            if not data:
+                return None, SKIP_REFERENCE_FRAME_MISSING
+            frames.append(data)
+        if len(recorded) == 1:
+            reference_bytes = frames[0]
+        else:
+            references = tuple(
+                _backfilled_reference(index, item, data)
+                for index, (item, data) in enumerate(
+                    zip(recorded, frames), start=1))
+    else:
+        reference_path = run_artifacts.node_image_path(
+            output_dir, capture_id, safe_node_id, PORT_REFERENCE)
+        reference_bytes, reference_readable = _read_frame(reference_path)
+        if not reference_bytes:
+            reference_bytes = None
     answer = outcome.get(_ANSWER_KEY.get(node.node_type, ""))
     verdict: Optional[Dict[str, Any]] = None
-    if "is_anomalous" in outcome:
+    if inspection:
+        verdict = {
+            "is_anomalous": outcome.get("verdict") == "fail",
+            "confidence": outcome.get("confidence"),
+        }
+    elif "is_anomalous" in outcome:
         verdict = {
             "is_anomalous": outcome.get("is_anomalous"),
             "confidence": outcome.get("confidence"),
@@ -399,6 +477,25 @@ def build_sample(
     if node.node_type == NODE_TYPE_LLM_INFERENCE:
         snippet = metadata_snippet(
             node.parameters.get("prompt_template"), metadata)
+    inspection_fields: Dict[str, Any] = {}
+    if inspection:
+        omitted = inline_reference_paths(node.parameters, metadata)
+        reference_size = (image_dimensions(reference_bytes)
+                          if reference_bytes is not None else None)
+        inspection_fields = {
+            "answer_format": ANSWER_FORMAT_INSPECTION,
+            "recorded_verdict": outcome.get("verdict"),
+            "input_size": image_dimensions(input_bytes),
+            "reference_record": (
+                ReferenceRecord(
+                    width=reference_size[0] if reference_size else None,
+                    height=reference_size[1] if reference_size else None)
+                if reference_bytes is not None else None),
+            "references": references,
+            "metadata_snippet_json": inspection_metadata_snippet_json(
+                node.parameters, metadata, omit=omitted),
+            "metadata_snippet_omitted": tuple(omitted),
+        }
     sample = ExportedSample(
         workflow_id=workflow_id,
         node_id=node.node_id,
@@ -422,12 +519,31 @@ def build_sample(
         # describes an old run — dating it "now" would let a backfill
         # crowd genuinely newer live samples out of the index bound.
         exported_at=int(started_at) if started_at is not None else None,
+        **inspection_fields,
     )
     if reference_path and not reference_readable:
         # Exported single-image (the executor's own degradation for an
         # unreadable reference frame), counted so the summary shows it.
         return sample, SKIP_UNREADABLE_REFERENCE
     return sample, None
+
+
+def _backfilled_reference(index: int, recorded: Any,
+                          data: bytes) -> ExportedReference:
+    """One image of a backfilled list-form sample: the recorded label and
+    format, the persisted bytes sent and their size; the source and the
+    preparation steps were not persisted."""
+    recorded = recorded if isinstance(recorded, Mapping) else {}
+    size = image_dimensions(data)
+    return ExportedReference(
+        index=index,
+        label=str(recorded.get("label") or "Reference {0}".format(index)),
+        kind=KIND_IMAGE,
+        format=str(recorded.get("format") or BEDROCK_IMAGE_FORMAT),
+        data=data,
+        width=size[0] if size else None,
+        height=size[1] if size else None,
+    )
 
 
 def _coerce_slot(raw: Any) -> Optional[int]:
@@ -698,13 +814,17 @@ __all__: List[str] = [
     "MAX_EXECUTIONS_PER_NODE",
     "PACE_WAIT_SECONDS",
     "PORT_IN",
+    "PORT_INPUT",
     "PORT_ORIGINAL",
     "PORT_REFERENCE",
+    "PORT_REFERENCE_LIST",
+    "SKIP_DOCUMENT_REFERENCE",
     "SKIP_ERROR_OUTCOME",
     "SKIP_MISSING_INPUT",
     "SKIP_NO_ARTIFACTS",
     "SKIP_NO_OUTCOME",
     "SKIP_REASONS",
+    "SKIP_REFERENCE_FRAME_MISSING",
     "SKIP_UNREADABLE_INPUT",
     "SKIP_UNREADABLE_REFERENCE",
     "TunableNode",

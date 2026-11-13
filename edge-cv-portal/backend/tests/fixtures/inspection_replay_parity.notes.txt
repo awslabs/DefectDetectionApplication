@@ -1,0 +1,3 @@
+Reference 1 is a legend of the part shapes.
+The roof is red and sits on the left; the panel is blue.
+Judge only the Input image.

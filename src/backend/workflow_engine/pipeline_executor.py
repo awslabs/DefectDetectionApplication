@@ -2454,6 +2454,10 @@ class WorkflowExecutor:
                     capture_id=capture_id,
                     graph_document=graph_document,
                     node_status=collector,
+                    # The version directory: uploaded reference files are
+                    # read from its references/ and verified against its
+                    # manifest.json.
+                    artifact_path=registration.artifact_path,
                 )
                 try:
                     tag_values = self._bedrock_processor.process(

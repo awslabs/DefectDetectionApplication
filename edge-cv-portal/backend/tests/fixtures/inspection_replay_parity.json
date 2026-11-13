@@ -1,0 +1,172 @@
+{
+  "schema": 1,
+  "regenerateWith": "DDA_WRITE_INSPECTION_PARITY_FIXTURE=1 python -m pytest test/backend-test/workflow_engine/test_inspection_replay_parity_device.py (device lane), then review the diff",
+  "cases": [
+    {
+      "name": "single_legend",
+      "sidecarBody": "{\"answerFormat\": \"inspection\", \"detectionId\": null, \"detectionSlot\": null, \"executionId\": \"exec-single-legend\", \"exportedAt\": 1794510000, \"input\": {\"bytes\": 11041, \"height\": 480, \"key\": \"workflow-tuning/samples/wf-parity/check/device-under-test/exec-single-legend.input.jpg\", \"sha256\": \"5fec0b99cc27d19b5d84c56c7a4c1bb6a99cef3a6de16b572af45d8f942d844e\", \"width\": 640}, \"metadataSnippetJson\": \"{\\\"trigger\\\":{\\\"topic\\\":\\\"plant/line1/evaluate\\\",\\\"payload\\\":\\\"{\\\\\\\"order_id\\\\\\\": \\\\\\\"o-1\\\\\\\", \\\\\\\"body\\\\\\\": {\\\\\\\"qc_stage\\\\\\\": \\\\\\\"qc2\\\\\\\", \\\\\\\"scale\\\\\\\": 2.0, \\\\\\\"order\\\\\\\": {\\\\\\\"items\\\\\\\": [{\\\\\\\"shape\\\\\\\": \\\\\\\"roof\\\\\\\", \\\\\\\"color\\\\\\\": \\\\\\\"red\\\\\\\"}, {\\\\\\\"shape\\\\\\\": \\\\\\\"panel\\\\\\\", \\\\\\\"color\\\\\\\": \\\\\\\"blue\\\\\\\"}]}}}\\\",\\\"payload_json\\\":{\\\"order_id\\\":\\\"o-1\\\",\\\"body\\\":{\\\"qc_stage\\\":\\\"qc2\\\",\\\"scale\\\":2.0,\\\"order\\\":{\\\"items\\\":[{\\\"shape\\\":\\\"roof\\\",\\\"color\\\":\\\"red\\\"},{\\\"shape\\\":\\\"panel\\\",\\\"color\\\":\\\"blue\\\"}]}}},\\\"qos\\\":1}}\", \"nodeId\": \"check\", \"nodeType\": \"bedrock_inference\", \"promptFingerprint\": \"sha256:3315a8513fa8040d517b09b1c1de4d0f8abec3f28ecaed29149a5cf5f2fbdd28\", \"recorded\": {\"answer\": \"{\\\"verdict\\\": \\\"pass\\\", \\\"confidence\\\": 0.91, \\\"reason\\\": \\\"both parts match\\\", \\\"objects\\\": [{\\\"name\\\": \\\"roof\\\", \\\"qc\\\": \\\"OK\\\", \\\"reason\\\": \\\"red, left\\\", \\\"bounding_box\\\": {\\\"x_min\\\": 60, \\\"y_min\\\": 80, \\\"x_max\\\": 260, \\\"y_max\\\": 220}}, {\\\"name\\\": \\\"panel\\\", \\\"qc\\\": \\\"OK\\\", \\\"reason\\\": \\\"blue, right\\\", \\\"bounding_box\\\": {\\\"x_min\\\": 340, \\\"y_min\\\": 200, \\\"x_max\\\": 580, \\\"y_max\\\": 400}}]}\", \"confidence\": 0.91, \"isAnomalous\": false, \"parseError\": null, \"verdict\": \"pass\"}, \"reference\": {\"bytes\": 4753, \"height\": 200, \"key\": \"workflow-tuning/samples/wf-parity/check/device-under-test/exec-single-legend.reference.jpg\", \"sha256\": \"2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753\", \"source\": \"file:///fixture/inspection_replay_parity.legend.jpg\", \"sourceSha256\": \"2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753\", \"transform\": [], \"width\": 320}, \"schemaVersion\": 1, \"source\": \"live\", \"thingName\": \"device-under-test\", \"version\": 7, \"workflowId\": \"wf-parity\"}",
+      "objects": {
+        "workflow-tuning/samples/wf-parity/check/device-under-test/exec-single-legend.input.jpg": {
+          "sha256": "5fec0b99cc27d19b5d84c56c7a4c1bb6a99cef3a6de16b572af45d8f942d844e",
+          "length": 11041
+        },
+        "workflow-tuning/samples/wf-parity/check/device-under-test/exec-single-legend.reference.jpg": {
+          "sha256": "2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753",
+          "length": 4753
+        }
+      },
+      "region": "us-west-2",
+      "converseKwargs": {
+        "modelId": "us.amazon.nova-pro-v1:0",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "text": "Order o-1: the parts [{\"shape\":\"roof\",\"color\":\"red\"},{\"shape\":\"panel\",\"color\":\"blue\"}] at scale 2.0, on an image 640 px wide.\n\nRespond with exactly one JSON object and nothing else: {\"verdict\": \"pass\"|\"fail\", \"confidence\": 0..1, \"reason\": \"<one sentence>\", \"objects\": [{\"name\": \"<part>\", \"qc\": \"OK\"|\"NOK\", \"reason\": \"<short>\", \"bounding_box\": {\"x_min\": <int>, \"y_min\": <int>, \"x_max\": <int>, \"y_max\": <int>}}, ...]} with one entry in objects per expected part."
+              },
+              {
+                "text": "Input image:"
+              },
+              {
+                "image": {
+                  "format": "jpeg",
+                  "source": {
+                    "bytes": {
+                      "sha256": "5fec0b99cc27d19b5d84c56c7a4c1bb6a99cef3a6de16b572af45d8f942d844e",
+                      "length": 11041
+                    }
+                  }
+                }
+              },
+              {
+                "text": "Reference image:"
+              },
+              {
+                "image": {
+                  "format": "jpeg",
+                  "source": {
+                    "bytes": {
+                      "sha256": "2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753",
+                      "length": 4753
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "inferenceConfig": {
+          "maxTokens": 600
+        },
+        "system": [
+          {
+            "text": "You inspect stage qc2."
+          }
+        ]
+      }
+    },
+    {
+      "name": "mixed_references",
+      "sidecarBody": "{\"answerFormat\": \"inspection\", \"detectionId\": null, \"detectionSlot\": null, \"executionId\": \"exec-mixed-references\", \"exportedAt\": 1794510000, \"input\": {\"bytes\": 11041, \"height\": 480, \"key\": \"workflow-tuning/samples/wf-parity/check/device-under-test/exec-mixed-references.input.jpg\", \"sha256\": \"5fec0b99cc27d19b5d84c56c7a4c1bb6a99cef3a6de16b572af45d8f942d844e\", \"width\": 640}, \"metadataSnippetJson\": \"{\\\"trigger\\\":{\\\"topic\\\":\\\"plant/line1/evaluate\\\",\\\"payload\\\":\\\"{\\\\\\\"order_id\\\\\\\": \\\\\\\"o-1\\\\\\\", \\\\\\\"body\\\\\\\": {\\\\\\\"qc_stage\\\\\\\": \\\\\\\"qc2\\\\\\\", \\\\\\\"scale\\\\\\\": 2.0, \\\\\\\"order\\\\\\\": {\\\\\\\"items\\\\\\\": [{\\\\\\\"shape\\\\\\\": \\\\\\\"roof\\\\\\\", \\\\\\\"color\\\\\\\": \\\\\\\"red\\\\\\\"}, {\\\\\\\"shape\\\\\\\": \\\\\\\"panel\\\\\\\", \\\\\\\"color\\\\\\\": \\\\\\\"blue\\\\\\\"}]}}}\\\",\\\"payload_json\\\":{\\\"order_id\\\":\\\"o-1\\\",\\\"body\\\":{\\\"qc_stage\\\":\\\"qc2\\\",\\\"scale\\\":2.0,\\\"order\\\":{\\\"items\\\":[{\\\"shape\\\":\\\"roof\\\",\\\"color\\\":\\\"red\\\"},{\\\"shape\\\":\\\"panel\\\",\\\"color\\\":\\\"blue\\\"}]}}},\\\"qos\\\":1}}\", \"nodeId\": \"check\", \"nodeType\": \"bedrock_inference\", \"promptFingerprint\": \"sha256:3315a8513fa8040d517b09b1c1de4d0f8abec3f28ecaed29149a5cf5f2fbdd28\", \"recorded\": {\"answer\": \"{\\\"verdict\\\": \\\"pass\\\", \\\"confidence\\\": 0.91, \\\"reason\\\": \\\"both parts match\\\", \\\"objects\\\": [{\\\"name\\\": \\\"roof\\\", \\\"qc\\\": \\\"OK\\\", \\\"reason\\\": \\\"red, left\\\", \\\"bounding_box\\\": {\\\"x_min\\\": 60, \\\"y_min\\\": 80, \\\"x_max\\\": 260, \\\"y_max\\\": 220}}, {\\\"name\\\": \\\"panel\\\", \\\"qc\\\": \\\"OK\\\", \\\"reason\\\": \\\"blue, right\\\", \\\"bounding_box\\\": {\\\"x_min\\\": 340, \\\"y_min\\\": 200, \\\"x_max\\\": 580, \\\"y_max\\\": 400}}]}\", \"confidence\": 0.91, \"isAnomalous\": false, \"parseError\": null, \"verdict\": \"pass\"}, \"references\": [{\"bytes\": 4753, \"format\": \"jpeg\", \"height\": 200, \"index\": 1, \"key\": \"workflow-tuning/samples/wf-parity/check/device-under-test/exec-mixed-references.reference-1.jpg\", \"kind\": \"image\", \"label\": \"Reference 1\", \"sha256\": \"2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753\", \"source\": \"file:///fixture/inspection_replay_parity.legend.jpg\", \"sourceSha256\": \"2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753\", \"transform\": [], \"width\": 320}, {\"bytes\": 129, \"format\": \"txt\", \"index\": 2, \"key\": \"workflow-tuning/samples/wf-parity/check/device-under-test/exec-mixed-references.reference-2.txt\", \"kind\": \"document\", \"label\": \"Reference 2\", \"sha256\": \"c83d9a22a1d5d7eb38aac4c625dc1c3a7fd853b22dd6dbbce2f266b74eb1ba72\", \"source\": \"file:///fixture/inspection_replay_parity.notes.txt\", \"sourceSha256\": \"c83d9a22a1d5d7eb38aac4c625dc1c3a7fd853b22dd6dbbce2f266b74eb1ba72\"}, {\"bytes\": 606, \"format\": \"pdf\", \"index\": 3, \"key\": \"workflow-tuning/samples/wf-parity/check/device-under-test/exec-mixed-references.reference-3.pdf\", \"kind\": \"document\", \"label\": \"Reference 3\", \"sha256\": \"b15164f72cb52c9c02370e53f4f15fc0ef1c0748cdc70a6f417358a7af7b4133\", \"source\": \"file:///fixture/inspection_replay_parity.sheet.pdf\", \"sourceSha256\": \"b15164f72cb52c9c02370e53f4f15fc0ef1c0748cdc70a6f417358a7af7b4133\"}], \"schemaVersion\": 1, \"source\": \"live\", \"thingName\": \"device-under-test\", \"version\": 7, \"workflowId\": \"wf-parity\"}",
+      "objects": {
+        "workflow-tuning/samples/wf-parity/check/device-under-test/exec-mixed-references.input.jpg": {
+          "sha256": "5fec0b99cc27d19b5d84c56c7a4c1bb6a99cef3a6de16b572af45d8f942d844e",
+          "length": 11041
+        },
+        "workflow-tuning/samples/wf-parity/check/device-under-test/exec-mixed-references.reference-1.jpg": {
+          "sha256": "2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753",
+          "length": 4753
+        },
+        "workflow-tuning/samples/wf-parity/check/device-under-test/exec-mixed-references.reference-2.txt": {
+          "sha256": "c83d9a22a1d5d7eb38aac4c625dc1c3a7fd853b22dd6dbbce2f266b74eb1ba72",
+          "length": 129
+        },
+        "workflow-tuning/samples/wf-parity/check/device-under-test/exec-mixed-references.reference-3.pdf": {
+          "sha256": "b15164f72cb52c9c02370e53f4f15fc0ef1c0748cdc70a6f417358a7af7b4133",
+          "length": 606
+        }
+      },
+      "region": "us-west-2",
+      "converseKwargs": {
+        "modelId": "us.amazon.nova-pro-v1:0",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "text": "Order o-1: the parts [{\"shape\":\"roof\",\"color\":\"red\"},{\"shape\":\"panel\",\"color\":\"blue\"}] at scale 2.0, on an image 640 px wide.\n\nRespond with exactly one JSON object and nothing else: {\"verdict\": \"pass\"|\"fail\", \"confidence\": 0..1, \"reason\": \"<one sentence>\", \"objects\": [{\"name\": \"<part>\", \"qc\": \"OK\"|\"NOK\", \"reason\": \"<short>\", \"bounding_box\": {\"x_min\": <int>, \"y_min\": <int>, \"x_max\": <int>, \"y_max\": <int>}}, ...]} with one entry in objects per expected part."
+              },
+              {
+                "text": "Input image:"
+              },
+              {
+                "image": {
+                  "format": "jpeg",
+                  "source": {
+                    "bytes": {
+                      "sha256": "5fec0b99cc27d19b5d84c56c7a4c1bb6a99cef3a6de16b572af45d8f942d844e",
+                      "length": 11041
+                    }
+                  }
+                }
+              },
+              {
+                "text": "Reference 1:"
+              },
+              {
+                "image": {
+                  "format": "jpeg",
+                  "source": {
+                    "bytes": {
+                      "sha256": "2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753",
+                      "length": 4753
+                    }
+                  }
+                }
+              },
+              {
+                "text": "Reference 2:"
+              },
+              {
+                "document": {
+                  "format": "txt",
+                  "name": "Reference 2",
+                  "source": {
+                    "bytes": {
+                      "sha256": "c83d9a22a1d5d7eb38aac4c625dc1c3a7fd853b22dd6dbbce2f266b74eb1ba72",
+                      "length": 129
+                    }
+                  }
+                }
+              },
+              {
+                "text": "Reference 3:"
+              },
+              {
+                "document": {
+                  "format": "pdf",
+                  "name": "Reference 3",
+                  "source": {
+                    "bytes": {
+                      "sha256": "b15164f72cb52c9c02370e53f4f15fc0ef1c0748cdc70a6f417358a7af7b4133",
+                      "length": 606
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "inferenceConfig": {
+          "maxTokens": 600
+        },
+        "system": [
+          {
+            "text": "You inspect stage qc2."
+          }
+        ]
+      }
+    }
+  ]
+}
