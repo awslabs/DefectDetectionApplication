@@ -10,6 +10,8 @@ and audit code (conftest's aws_stack); the module's S3 client
 keeps every call's arguments and can fail a chosen call. The test plays the
 browser: it PUTs the staged object with the conftest client. moto does not
 verify presigned signatures, so the SigV4 assertions read the URL's query.
+moto 5.1 does not evaluate CopySourceIfMatch either, so the recorder answers
+a copy whose source ETag differs with S3's 412 PreconditionFailed.
 
 On the device's commit c299a6e1, workflows.handler does not route the three
 resources: they answer 404 NOT_FOUND, so the route tests fail on the missing
@@ -28,7 +30,7 @@ import zlib
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 #: PORTAL_ACCOUNT_ID in these tests (moto's default account).
 OWNER = "123456789012"
@@ -187,15 +189,21 @@ def bedrock_definition(reference=""):
 
 class RecordingS3:
     """The module's real (moto-backed) client, recording (operation, kwargs)
-    of every call and raising a ClientError from a call `fail` matches."""
+    of every call, raising a ClientError (or `error`) from a call `fail`
+    matches, running an `after` hook once a call returned, and evaluating a
+    copy's CopySourceIfMatch as S3 does."""
 
     def __init__(self, real):
         self._real = real
         self.calls = []
         self._failures = {}
+        self._hooks = {}
 
-    def fail(self, operation, predicate, code="InternalError"):
-        self._failures[operation] = (predicate, code)
+    def fail(self, operation, predicate, code="InternalError", error=None):
+        self._failures[operation] = (predicate, code, error)
+
+    def after(self, operation, hook):
+        self._hooks[operation] = hook
 
     def __getattr__(self, name):
         attr = getattr(self._real, name)
@@ -206,9 +214,22 @@ class RecordingS3:
             self.calls.append((name, kwargs))
             failure = self._failures.get(name)
             if failure is not None and failure[0](kwargs):
+                if failure[2] is not None:
+                    raise failure[2]
                 raise ClientError({"Error": {"Code": failure[1], "Message": "simulated"},
                                    "ResponseMetadata": {"HTTPStatusCode": 500}}, name)
-            return attr(*args, **kwargs)
+            if name == "copy_object" and "CopySourceIfMatch" in kwargs:
+                source = kwargs["CopySource"]
+                etag = self._real.head_object(Bucket=source["Bucket"], Key=source["Key"])["ETag"]
+                if etag != kwargs["CopySourceIfMatch"]:
+                    raise ClientError({"Error": {"Code": "PreconditionFailed",
+                                                 "Message": "simulated"},
+                                       "ResponseMetadata": {"HTTPStatusCode": 412}}, name)
+            result = attr(*args, **kwargs)
+            hook = self._hooks.get(name)
+            if hook is not None:
+                hook(kwargs)
+            return result
 
         return call
 
@@ -664,3 +685,116 @@ class TestImmutabilityDuplicateDelete:
         status, body = refs.invoke("DELETE", "/workflows/{id}")
         assert status == 200, body
         assert refs.stored_names() == []
+
+
+# --------------------------------------------------------------------------
+# AC-38: only checked bytes are stored; S3 failures (design §16, §18)
+# --------------------------------------------------------------------------
+
+def transport_error():
+    return EndpointConnectionError(endpoint_url="https://s3.example.invalid")
+
+
+def make_owner_unknown(monkeypatch, refs):
+    from shared_utils import BucketOwnerUnknown
+
+    def unknown():
+        raise BucketOwnerUnknown("no account id")
+
+    monkeypatch.setattr(refs.module, "component_bucket_owner", unknown)
+
+
+class TestStoreRace:
+    def test_bytes_put_to_the_staging_key_after_the_check_are_never_stored(self, refs):
+        checked = png_bytes(width=8, height=8, seed=21)
+        status, answer = refs.request_upload("legend.png")
+        assert status == 200 and "stagingKey" in answer, (status, answer)
+        staging_key = answer["stagingKey"]
+        checked_etag = refs.s3.put_object(Bucket=refs.bucket, Key=staging_key,
+                                          Body=checked)["ETag"]
+        if refs.recorder is not None:
+            def swap(kwargs):  # the browser PUTs again once the route read the object
+                if kwargs["Key"] == staging_key:
+                    refs.s3.put_object(Bucket=refs.bucket, Key=staging_key, Body=b"\x00" * 4096)
+
+            refs.recorder.after("get_object", swap)
+        status, body = refs.invoke("POST", FILES, body={"stagingKey": staging_key,
+                                                        "fileName": "legend.png"})
+        assert status == 502, body
+        assert body["error"]["code"] == "REFERENCE_FILE_STORE_FAILED"
+        assert refs.stored_names() == []
+        assert not refs.exists(staging_key)
+        copies = [kwargs for name, kwargs in refs.recorder.calls if name == "copy_object"]
+        assert [kwargs["CopySourceIfMatch"] for kwargs in copies] == [checked_etag]
+        # The content-addressed name is not taken: the same file uploads again.
+        refs.recorder.after("get_object", lambda kwargs: None)
+        record = refs.stored("legend.png", checked)
+        assert record["name"] == f"{hashlib.sha256(checked).hexdigest()}.png"
+        assert refs.read(refs.prefix() + record["name"]) == checked
+
+
+class TestS3Failures:
+    @pytest.mark.parametrize("failure", ["listing", "record read", "transport", "owner unknown"])
+    def test_a_failed_listing_answers_502_reference_files_load_failed(
+            self, refs, monkeypatch, caplog, failure):
+        refs.stored("legend.png", png_bytes(seed=31))
+        if refs.recorder is not None:
+            if failure == "listing":
+                refs.recorder.fail("list_objects_v2", lambda kwargs: True)
+            elif failure == "record read":
+                refs.recorder.fail("get_object", lambda kwargs: kwargs["Key"].endswith(".json"))
+            elif failure == "transport":
+                refs.recorder.fail("list_objects_v2", lambda kwargs: True, error=transport_error())
+            else:
+                make_owner_unknown(monkeypatch, refs)
+        with caplog.at_level(logging.INFO):
+            status, body = refs.invoke("GET", FILES)
+        assert status == 502, body
+        assert body["error"]["code"] == "REFERENCE_FILES_LOAD_FAILED"
+        assert [r.levelno for r in caplog.records
+                if "reference files of workflow" in r.getMessage()] == [logging.ERROR]
+
+    @pytest.mark.parametrize("operation", ["head_object", "get_object", "copy_object"])
+    def test_a_transport_error_while_storing_answers_502_and_deletes_the_staged_object(
+            self, refs, operation):
+        if refs.recorder is not None:
+            refs.recorder.fail(operation, lambda kwargs: True, error=transport_error())
+        status, body, staging_key = refs.upload("legend.png", png_bytes(seed=32))
+        assert status == 502, body
+        assert body["error"]["code"] == "REFERENCE_FILE_STORE_FAILED"
+        assert not refs.exists(staging_key)
+        assert refs.stored_names() == []
+
+    def test_a_transport_error_while_duplicating_answers_500_and_creates_nothing(self, refs):
+        named = refs.stored("legend.png", png_bytes(seed=33))
+        refs.save(named["line"])
+        if refs.recorder is not None:
+            refs.recorder.fail("copy_object", lambda kwargs: kwargs["Key"].endswith(".json"),
+                               error=transport_error())
+        status, body = refs.invoke("POST", "/workflows/{id}/duplicate", body={"name": "copy"})
+        assert status == 500, body
+        assert body["error"]["code"] == "REFERENCE_FILE_COPY_FAILED"
+        workflows = refs.env.workflows.query_workflows_by_usecase(refs.usecase_id)
+        assert [w["workflow_id"] for w in workflows] == [refs.workflow_id]
+        source_prefix = f"workflows/{refs.usecase_id}/{refs.workflow_id}/"
+        assert [k for k in refs.keys(f"workflows/{refs.usecase_id}/")
+                if not k.startswith(source_prefix)] == []
+
+    def test_an_unknown_bucket_owner_fails_complete_and_duplicate_without_an_s3_call(
+            self, refs, monkeypatch):
+        named = refs.stored("legend.png", png_bytes(seed=34))
+        refs.save(named["line"])
+        status, answer = refs.request_upload("other.png")
+        assert status == 200 and "stagingKey" in answer, (status, answer)
+        refs.s3.put_object(Bucket=refs.bucket, Key=answer["stagingKey"], Body=png_bytes(seed=35))
+        make_owner_unknown(monkeypatch, refs)
+        refs.recorder.calls.clear()
+        status, body = refs.invoke("POST", FILES, body={"stagingKey": answer["stagingKey"],
+                                                        "fileName": "other.png"})
+        assert status == 502, body
+        assert body["error"]["code"] == "REFERENCE_FILE_STORE_FAILED"
+        status, body = refs.invoke("POST", "/workflows/{id}/duplicate", body={"name": "copy"})
+        assert status == 500, body
+        assert body["error"]["code"] == "REFERENCE_FILE_COPY_FAILED"
+        assert refs.recorder.calls == []
+        assert refs.stored_names() == [named["name"], f"{named['name']}.json"]

@@ -45,14 +45,14 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 # Import shared utilities (Lambda layer)
 import sys
 sys.path.append('/opt/python')
 from shared_utils import (
-    BUCKET_OWNER_MISMATCH_MESSAGE, component_bucket_owner, create_response,
-    is_bucket_owner_mismatch, log_audit_event
+    BUCKET_OWNER_MISMATCH_MESSAGE, BucketOwnerUnknown, component_bucket_owner,
+    create_response, is_bucket_owner_mismatch, log_audit_event
 )
 from workflow_core.anomaly_invocation import (
     KIND_DOCUMENT, KIND_IMAGE, MAX_DOCUMENT_BYTES, MAX_IMAGE_SIDE_PX,
@@ -621,7 +621,15 @@ def complete_upload(event: Dict, user: Dict, item: Dict) -> Dict:
         return err
 
     s3 = reference_s3_client()
-    owner = component_bucket_owner()
+    try:
+        owner = component_bucket_owner()
+    except BucketOwnerUnknown as e:
+        # Every call asserts the owner, so the staged object is left to the
+        # one-day lifecycle rule.
+        logger.error(f"Reference file store failed for workflow {workflow_id}: "
+                     f"the bucket owner is unknown ({e})")
+        return error_response(502, 'REFERENCE_FILE_STORE_FAILED',
+                              'The reference file could not be stored; upload it again')
     limit = size_limit(file_name)
 
     def reject(status: int, code: str, message: str, reason: str) -> Dict:
@@ -633,7 +641,7 @@ def complete_upload(event: Dict, user: Dict, item: Dict) -> Dict:
     try:
         head = s3.head_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=staging_key,
                               ExpectedBucketOwner=owner)
-    except ClientError as e:
+    except (ClientError, BotoCoreError) as e:
         if _is_not_found(e):
             return error_response(
                 400, 'STAGED_UPLOAD_NOT_FOUND',
@@ -644,9 +652,11 @@ def complete_upload(event: Dict, user: Dict, item: Dict) -> Dict:
         return reject(400, 'REFERENCE_FILE_TOO_LARGE', too_large,
                       f'{head.get("ContentLength")} bytes')
     try:
-        data = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=staging_key,
-                             ExpectedBucketOwner=owner)['Body'].read()
-    except ClientError as e:
+        staged = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=staging_key,
+                               ExpectedBucketOwner=owner)
+        staged_etag = staged['ETag']
+        data = staged['Body'].read()
+    except (ClientError, BotoCoreError) as e:
         return _store_failure(s3, staging_key, owner, workflow_id, e, 'GetObject')
     if len(data) > limit:  # defense in depth over the HeadObject check
         return reject(400, 'REFERENCE_FILE_TOO_LARGE', too_large, f'{len(data)} bytes')
@@ -680,17 +690,21 @@ def complete_upload(event: Dict, user: Dict, item: Dict) -> Dict:
                 record = build_record(name, sha256, info, len(data), file_name, user)
                 _put_record(s3, json_key, record, owner)
         else:
+            # The presigned URL can still overwrite the staging key, so the
+            # copy only runs on the object that was read and checked: S3
+            # answers 412 for any other, which is a store failure here.
             operation = 'CopyObject'
             s3.copy_object(
                 Bucket=PORTAL_ARTIFACTS_BUCKET, Key=key,
                 CopySource={'Bucket': PORTAL_ARTIFACTS_BUCKET, 'Key': staging_key},
+                CopySourceIfMatch=staged_etag,
                 MetadataDirective='REPLACE', ContentType=CONTENT_TYPES[info['ext']],
                 ExpectedBucketOwner=owner, ExpectedSourceBucketOwner=owner,
             )
             operation = 'PutObject'
             record = build_record(name, sha256, info, len(data), file_name, user)
             _put_record(s3, json_key, record, owner)
-    except ClientError as e:
+    except (ClientError, BotoCoreError) as e:
         return _store_failure(s3, staging_key, owner, workflow_id, e, operation)
     _delete_staged(s3, staging_key, owner)
 
@@ -714,21 +728,29 @@ def complete_upload(event: Dict, user: Dict, item: Dict) -> Dict:
 def list_files(event: Dict, user: Dict, item: Dict) -> Dict:
     """GET /workflows/{id}/reference-files
     The workflow's upload records, sorted by uploadedAt, then name. A record
-    that does not parse, or whose name differs from its key, is skipped."""
+    that does not parse, or whose name differs from its key, is skipped; a
+    failed listing or record read answers 502 REFERENCE_FILES_LOAD_FAILED."""
     s3 = reference_s3_client()
-    owner = component_bucket_owner()
     prefix = stored_prefix(item['usecase_id'], item['workflow_id'])
     records = []
-    for key in list(_list_keys(s3, prefix, owner)):
-        name = key[len(prefix):]
-        if not name.endswith('.json') or '/' in name:
-            continue
-        name = name[:-len('.json')]
-        record = _read_record(s3, key, name, owner)
-        if record is None:
-            logger.warning(f"Skipping the unreadable reference file record {key}")
-            continue
-        records.append(record)
+    try:
+        owner = component_bucket_owner()
+        for key in list(_list_keys(s3, prefix, owner)):
+            name = key[len(prefix):]
+            if not name.endswith('.json') or '/' in name:
+                continue
+            name = name[:-len('.json')]
+            record = _read_record(s3, key, name, owner)
+            if record is None:
+                logger.warning(f"Skipping the unreadable reference file record {key}")
+                continue
+            records.append(record)
+    except (ClientError, BotoCoreError, BucketOwnerUnknown) as e:
+        logger.error(f"Listing the reference files of workflow {item['workflow_id']} "
+                     f"failed: {_error_code(e)}")
+        return error_response(502, 'REFERENCE_FILES_LOAD_FAILED',
+                              'The reference files of the workflow could not be loaded; '
+                              'try again')
     records.sort(key=lambda r: (r['uploadedAt'] if isinstance(r.get('uploadedAt'), (int, float))
                                 else 0, r['name']))
     return create_response(200, {'files': records})
@@ -741,7 +763,12 @@ def copy_reference_files(usecase_id: str, source_workflow_id: str,
     the objects already copied are deleted best-effort and
     ReferenceFileCopyError is raised."""
     s3 = reference_s3_client()
-    owner = component_bucket_owner()
+    try:
+        owner = component_bucket_owner()
+    except BucketOwnerUnknown as e:
+        logger.error(f"Copying reference files from workflow {source_workflow_id} to "
+                     f"{target_workflow_id} failed: the bucket owner is unknown ({e})")
+        raise ReferenceFileCopyError(type(e).__name__) from e
     copied: List[str] = []
     try:
         for name in names:
@@ -756,7 +783,7 @@ def copy_reference_files(usecase_id: str, source_workflow_id: str,
                     ExpectedBucketOwner=owner, ExpectedSourceBucketOwner=owner,
                 )
                 copied.append(target)
-    except ClientError as e:
+    except (ClientError, BotoCoreError) as e:
         logger.error(f"Copying reference files from workflow {source_workflow_id} to "
                      f"{target_workflow_id} failed: {_error_code(e)}")
         for key in copied:
