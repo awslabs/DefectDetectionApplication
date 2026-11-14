@@ -2,8 +2,11 @@
 # Build and push the per-architecture dda-plugin-build images (custom-node-designer).
 #
 # Usage:
-#   ./build-and-push.sh                 # build + push all six architectures
-#   ./build-and-push.sh arm64_jp5       # build + push one architecture
+#   AWS_ACCOUNT_ID=123456789012 ./build-and-push.sh             # build + push all six architectures
+#   AWS_ACCOUNT_ID=123456789012 ./build-and-push.sh arm64_jp5   # build + push one architecture
+#
+# AWS_ACCOUNT_ID is required: it names the account that owns the ECR
+# repository (AWS_REGION defaults to us-east-1, ECR_REPO to dda-plugin-build).
 #
 # The image tag is the architecture name, matching the default tag the
 # CodeBuild projects in node-designer-stack.ts pull (override the tag
@@ -17,7 +20,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-164152369890}"
+AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:?set AWS_ACCOUNT_ID}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ECR_REPO="${ECR_REPO:-dda-plugin-build}"
 TAG_SUFFIX="${TAG_SUFFIX:-}"

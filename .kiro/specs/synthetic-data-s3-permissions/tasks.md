@@ -53,7 +53,7 @@ graph TD
   - Assertions match the Expected Behavior Properties from design (Property 1)
   - Run `npx jest test/synthetic-data-s3-permissions.test.ts` in `edge-cv-portal/infrastructure` on the UNFIXED stack
   - **EXPECTED OUTCOME**: Both test cases FAIL (this is correct - it proves the bug: zero statements with any `s3:*` action are attached to the handler role)
-  - Document counterexamples found (e.g., "handler role policy set contains no S3 statement; live counterexample: `s3:GetObject` on `arn:aws:s3:::ryvan-cookies/training-images/anomaly-12.jpg` denied on account 164152369890")
+  - Document counterexamples found (e.g., "handler role policy set contains no S3 statement; live counterexample: `s3:GetObject` on `arn:aws:s3:::example-bucket/training-images/anomaly-12.jpg` denied on account 123456789012")
   - Mark task complete when test is written, run, and failure is documented
   - _Requirements: 1.1, 1.2, 1.3, 2.1, 2.2, 2.3_
 
@@ -121,4 +121,4 @@ graph TD
 - The behavior under test is deterministic synth-time template generation, so the preservation tests achieve the property-based all-inputs guarantee by quantifying over ALL statements in the synthesized template (e.g., "no statement anywhere on the handler role contains an S3 control-plane action") rather than sampling randomized examples
 - The universal no-control-plane assertion (task 2, test case 2) must hold both before AND after the fix — the new grants are data-plane only with no `aws:ResourceTag` condition (documented past regression: S3 does not honor it for bucket-level actions)
 - The normalization block is deliberately duplicated from `compute-stack.ts`'s `createLambdaRole` (~lines 557–612) rather than extracted, because Requirement 3.4 requires the compute stack's output to be byte-identical
-- Post-fix live verification (deploy and re-run a generation session on account 164152369890) is an orchestrator task outside this repo's test suite
+- Post-fix live verification (deploy and re-run a generation session on account 123456789012) is an orchestrator task outside this repo's test suite

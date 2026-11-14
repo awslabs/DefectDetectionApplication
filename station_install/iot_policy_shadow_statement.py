@@ -57,7 +57,7 @@ REQUIRED_ACTIONS = frozenset({
 })
 
 # The statement appended by augment(). Matches the verified manual production
-# fix (policy version 3 in account 164152369890): no policy variables, so it
+# fix (policy version 3 in account 123456789012): no policy variables, so it
 # authorizes the certificate-authenticated HTTPS data plane.
 SHADOW_STATEMENT = {
     "Sid": "ShadowManagerHttpsDataPlaneSync",

@@ -51,7 +51,7 @@ vi.mock('../components/CompilationTab', () => ({
 }));
 
 const TRAINING_ID = 'cnv-1';
-const CHECKPOINT_S3 = 's3://ryvan-cookies/converted-models/ppe_detection-1a2b3c4d/checkpoint.pt';
+const CHECKPOINT_S3 = 's3://example-bucket/converted-models/ppe_detection-1a2b3c4d/checkpoint.pt';
 
 /** A Completed Conversion_Record, as the finalize leaves it (design "Data model"). */
 const CONVERSION_RECORD = {
@@ -65,10 +65,10 @@ const CONVERSION_RECORD = {
   status: 'Completed',
   progress: 100,
   instance_type: 'ml.m5.xlarge',
-  training_job_arn: 'arn:aws:sagemaker:us-east-1:164152369890:training-job/ppe_detection-cnv-20261001120000',
-  artifact_s3: 's3://ryvan-cookies/models/conversion/ppe_detection-cnv-20261001120000/output/model.tar.gz',
+  training_job_arn: 'arn:aws:sagemaker:us-east-1:123456789012:training-job/ppe_detection-cnv-20261001120000',
+  artifact_s3: 's3://example-bucket/models/conversion/ppe_detection-cnv-20261001120000/output/model.tar.gz',
   dataset_manifest_s3: '',
-  algorithm_uri: '164152369890.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export@sha256:0814',
+  algorithm_uri: '123456789012.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export@sha256:0814',
   hyperparameters: {},
   metrics: {},
   created_by: 'scientist@example.com',

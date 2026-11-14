@@ -1,7 +1,7 @@
 # Grounded-SAM Prompt Tuning Preview — Task 6.2 Live Verification Notes
 
 Spec: `.kiro/specs/grounded-sam-prompt-tuning-preview` (feature)
-Account 164152369890, us-east-1. Portal `https://d23v4ltibogb5x.cloudfront.net`,
+Account 123456789012, us-east-1. Portal `https://d23v4ltibogb5x.cloudfront.net`,
 rest-api `yqvyoowugk`. Date: 2026-09-07 (all times UTC).
 
 - Deploy under test: 2026-09-07 13:46–13:50Z (`EdgeCVPortalComputeStack`
@@ -31,7 +31,7 @@ grounded-sam-prompt-guardrails-and-prelabel-retry task-8.2 precedent):
 (plus `email` / `cognito:username` fillers for `get_user_from_event`). RBAC
 resolved scope from the real tables against
 `usecase_id = 645504ce-a60a-4009-8349-7548c0025cd3` (dataset
-`s3://ryvan-cookies`).
+`s3://example-bucket`).
 
 Routes exercised: `POST /labeling-preview/runs` (resource
 `/labeling-preview/runs`) and `GET /labeling-preview/runs/{runId}`

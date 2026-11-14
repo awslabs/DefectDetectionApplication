@@ -1,7 +1,7 @@
 # Labeling Jobs Epoch 1970 Dates — Task 5 Live Verification Notes
 
 Spec: `.kiro/specs/labeling-jobs-epoch-1970-dates` (bugfix)
-Account 164152369890, us-east-1. Portal `https://d23v4ltibogb5x.cloudfront.net`,
+Account 123456789012, us-east-1. Portal `https://d23v4ltibogb5x.cloudfront.net`,
 rest-api `yqvyoowugk`. Date: 2026-09-08 (all times UTC).
 
 - Deploy under test: 2026-09-08 06:05–06:08Z via `./deploy-frontend.sh`, log

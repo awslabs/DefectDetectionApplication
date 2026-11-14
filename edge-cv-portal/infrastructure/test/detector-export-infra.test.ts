@@ -36,7 +36,7 @@ import { StorageStack } from '../lib/storage-stack';
 
 const TRUSTED = ['111111111111', '222222222222'];
 const IMAGE =
-  '164152369890.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export@sha256:' +
+  '123456789012.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export@sha256:' +
   '0814885ea1ee171e06f1231f4ed9fba1aa740557b1bf0d0946df6d8c1a3bcdab';
 
 function synthCompute(context: Record<string, unknown>) {
@@ -202,8 +202,8 @@ describe('DETECTOR_EXPORT_IMAGE (Requirement 4.8)', () => {
     expect(detectorExportImage('   ')).toBe('');
     expect(detectorExportImage(` ${IMAGE}\n`)).toBe(IMAGE);
     for (const bad of [
-      '164152369890.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export:latest',
-      '164152369890.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export@sha256:abc',
+      '123456789012.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export:latest',
+      '123456789012.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export@sha256:abc',
       'docker.io/library/python@sha256:' + 'a'.repeat(64),
       'public.ecr.aws/x/y@sha256:' + 'a'.repeat(64),
       `${IMAGE} extra`,

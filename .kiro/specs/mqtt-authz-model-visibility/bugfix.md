@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Two defects observed on the JP6 device (thing `ryanorinagxdevkithomelabjp622`, `aws.edgeml.dda.LocalServer.arm64JP6` v1.0.45, account 164152369890, us-east-1):
+Two defects observed on the JP6 device (thing `ryanorinagxdevkithomelabjp622`, `aws.edgeml.dda.LocalServer.arm64JP6` v1.0.45, account 123456789012, us-east-1):
 
 **Defect 1 — MQTT publish output binding fails with UnauthorizedError.** Workflow execution `85bf7a61` failed in the `mqtt_publish` output binding. The workflow engine (inside the backend flask-app container) publishes through Greengrass IPC `PublishToIoTCore` (`output_bindings.py` `_default_greengrass_publisher`), using the LocalServer component's identity. All LocalServer recipe variants authorize `aws.greengrass.ipc.mqttproxy` operations (`SubscribeToIoTCore` + `PublishToIoTCore`) only on the shadow topic resource `$aws/things/*/shadow/name/*`. The `mqtt_publish` node's `topic` parameter is free-form and user-configured (e.g. `factory/line1/inspection`), so publishes to any workflow topic fall outside the authorized resources and Greengrass denies them with `awsiot.greengrasscoreipc.model.UnauthorizedError`. Verified on-device: the deployed 1.0.45 recipe carries exactly one mqttproxy policy with resource `$aws/things/*/shadow/name/*`.
 

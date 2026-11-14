@@ -135,7 +135,7 @@ published weights — training from the wrong base is worse than failing.
 
 ```python
 import boto3, datetime, subprocess
-BUCKET = 'ryvan-cookies'
+BUCKET = 'example-bucket'
 job = 'blue-plate-yolo-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
 prefix = f'models/detection/{job}'
 
@@ -151,7 +151,7 @@ boto3.client('sagemaker', region_name='us-east-1').create_training_job(
                          'pytorch-training:2.5.1-gpu-py311-cu124-ubuntu22.04-sagemaker',
         'TrainingInputMode': 'File',
     },
-    RoleArn='arn:aws:iam::164152369890:role/DDASageMakerExecutionRole',
+    RoleArn='arn:aws:iam::123456789012:role/DDASageMakerExecutionRole',
     HyperParameters={
         'sagemaker_program': 'train.py',
         'sagemaker_submit_directory': f's3://{BUCKET}/{prefix}/sourcedir.tar.gz',
@@ -178,7 +178,7 @@ Same request, different bundle, entry point and environment:
 
 ```python
 import boto3, datetime, subprocess
-BUCKET = 'ryvan-cookies'
+BUCKET = 'example-bucket'
 job = 'blue-plate-rfdetr-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
 prefix = f'models/detection/{job}'
 
@@ -194,7 +194,7 @@ boto3.client('sagemaker', region_name='us-east-1').create_training_job(
                          'pytorch-training:2.5.1-gpu-py311-cu124-ubuntu22.04-sagemaker',
         'TrainingInputMode': 'File',
     },
-    RoleArn='arn:aws:iam::164152369890:role/DDASageMakerExecutionRole',
+    RoleArn='arn:aws:iam::123456789012:role/DDASageMakerExecutionRole',
     HyperParameters={
         'sagemaker_program': 'train_rfdetr.py',
         'sagemaker_submit_directory': f's3://{BUCKET}/{prefix}/sourcedir.tar.gz',
@@ -274,7 +274,7 @@ option just wastes less of the input on padding.
 `blue-plate-yolo-20260912-231818` (us-east-1), `Completed`, 1227s billable on
 one `ml.g4dn.xlarge`. Built from the four-file YOLO bundle of the time
 (verified by sha256 against
-`s3://ryvan-cookies/models/detection/blue-plate-yolo-20260912-231818/sourcedir.tar.gz`);
+`s3://example-bucket/models/detection/blue-plate-yolo-20260912-231818/sourcedir.tar.gz`);
 today's bundle adds `_common.py`.
 
 | metric | value |

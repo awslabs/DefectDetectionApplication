@@ -191,7 +191,7 @@ dedicated AMD64 build) remain separate explicit user-approval gates.
 ## Task 12 deployment evidence
 
 - Date/time: 2026-08-08 ~20:44 UTC (backend) / ~20:56–21:05 UTC (frontend + smoke checks, after credential refresh)
-- Account/region: 164152369890 / us-east-1 (verified via `aws sts get-caller-identity` before each phase)
+- Account/region: 123456789012 / us-east-1 (verified via `aws sts get-caller-identity` before each phase)
 - Status: COMPLETE — backend deployed, frontend deployed, all smoke checks passed.
 
 ### Backend/infrastructure deploy (COMPLETE)
@@ -201,10 +201,10 @@ dedicated AMD64 build) remain separate explicit user-approval gates.
   - Lambda functions updated: BuildFleetHandler, BuildConfigHandler, BuildEventsHandler, BuildDispatcherHandler, BuildJobsHandler
   - IAM policies updated: BuildEventsRole/DefaultPolicy, BuildDispatcherRole/DefaultPolicy (per-handler roles)
   - Events rule updated: BuildSsmCommandStatusRule (SSM Success event rule)
-  - Stack ARN: arn:aws:cloudformation:us-east-1:164152369890:stack/EdgeCVPortalBuildFleetStack/b73ecc90-91aa-11f1-a9aa-0e8f068eab59
+  - Stack ARN: arn:aws:cloudformation:us-east-1:123456789012:stack/EdgeCVPortalBuildFleetStack/b73ecc90-91aa-11f1-a9aa-0e8f068eab59
 
 ### Frontend deploy (COMPLETE)
-- First attempt failed on AWS session expiry; retried after credential refresh (identity re-verified, account 164152369890).
+- First attempt failed on AWS session expiry; retried after credential refresh (identity re-verified, account 123456789012).
 - Command: `./deploy-frontend.sh` (from `edge-cv-portal`, credentials exported via `aws configure export-credentials`). Exit 0.
 - config.json regenerated from stack outputs (API URL https://yqvyoowugk.execute-api.us-east-1.amazonaws.com/v1), `npm ci` + `npm run build`, S3 sync with `--delete`, index.html/config.json uploaded no-cache, CloudFront invalidation issued.
 - Script's expected Step 6 ran: EdgeCVPortalComputeStack redeployed with `-c cloudFrontDomain=d23v4ltibogb5x.cloudfront.net` for auto-CORS — UPDATE_COMPLETE (deployment time 58s), outputs unchanged.
@@ -236,7 +236,7 @@ dedicated AMD64 build) remain separate explicit user-approval gates.
 
 ## Task 13 live build evidence
 
-Date: 2026-08-08 (~21:09–21:14 UTC). AWS account 164152369890, us-east-1, portal API `https://yqvyoowugk.execute-api.us-east-1.amazonaws.com/v1`.
+Date: 2026-08-08 (~21:09–21:14 UTC). AWS account 123456789012, us-east-1, portal API `https://yqvyoowugk.execute-api.us-east-1.amazonaws.com/v1`.
 
 ### Approved scope (restated)
 Exactly ONE live build: target AMD64, execution mode dedicated, source_ref `feature/portal-build-fleet-and-workflow-gates` (mandatory — agent script absent from upstream main). No queued follower, no JP5/JP6 builds, no timeout-setting changes, no extra artifact publication, no git commits/pushes, no instance start/terminate by the operator. All respected.

@@ -8,7 +8,7 @@ full context. Newest-relevant first.
   python-only Triton v2.45.0 + the CWD-independent lyra import fix. **No rebuild
   needed.** (The JP4 "build the tensorrt backend" attempt was reverted — see
   `PIVOT-FINDINGS.md`.)
-- Portal Lambdas deployed in account 164152369890 (us-east-1): `ComponentsHandler`,
+- Portal Lambdas deployed in account 123456789012 (us-east-1): `ComponentsHandler`,
   `SharedComponentsHandler`, `DeploymentsHandler` — all updated and Active.
 
 ## RESOLVED — JP4.6 TensorRT runtime (device-verified)

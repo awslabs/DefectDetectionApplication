@@ -2,7 +2,7 @@
 
 ## Introduction
 
-The dataset discovery endpoint (`GET /datasets`, handled by `edge-cv-portal/backend/functions/datasets.py`) returns an empty dataset list for every use case, causing the "Dataset" dropdown in the Synthetic Data wizard to show "No datasets found" even when the use case's data bucket contains qualifying image prefixes (e.g., `training-images/` with `anomaly-*.jpg` in the `ryvan-cookies` bucket for the cookies use case).
+The dataset discovery endpoint (`GET /datasets`, handled by `edge-cv-portal/backend/functions/datasets.py`) returns an empty dataset list for every use case, causing the "Dataset" dropdown in the Synthetic Data wizard to show "No datasets found" even when the use case's data bucket contains qualifying image prefixes (e.g., `training-images/` with `anomaly-*.jpg` in the `example-bucket` bucket for the cookies use case).
 
 The root cause is that commit 1d42698 ("Support for single account setup") changed `get_data_bucket_and_credentials(usecase)` to return `(bucket, None, credentials)`, dropping the prefix that was previously derived from the use case's `s3_prefix` (or `data_s3_prefix` for data-account setups). The caller `list_datasets` composes `search_prefix = f"{base_prefix}{filter_prefix}".strip('/')` — with `base_prefix = None`, Python string interpolation yields the literal string `"None"`, which becomes `"None/"` after the trailing-slash append. Dataset discovery therefore scans the nonexistent S3 prefix `"None/"` (or `"None{filter}/"` when a filter is supplied), finds nothing, and returns an empty list with HTTP 200 — a silent failure with no error surfaced to the UI.
 

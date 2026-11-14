@@ -20,9 +20,9 @@ def _context_event(**ctx):
 
 def test_cognito_claims_with_email_unchanged():
     user = su.get_user_from_event(_claims_event(
-        sub="sub-1", email="ryvan@amazon.com", **{"cognito:username": "ryvan"}))
-    assert user == {"user_id": "sub-1", "email": "ryvan@amazon.com",
-                    "username": "ryvan", "role": "Viewer"}
+        sub="sub-1", email="user@example.com", **{"cognito:username": "user"}))
+    assert user == {"user_id": "sub-1", "email": "user@example.com",
+                    "username": "user", "role": "Viewer"}
 
 
 def test_cognito_claims_without_email_falls_back_to_username():

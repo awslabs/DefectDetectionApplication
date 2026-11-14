@@ -1,6 +1,6 @@
 # Unified Input Camera Binding: Verification Notes
 
-Date: 2026-09-29, all times UTC. Portal account 164152369890, us-east-1, use case `645504ce-a60a-4009-8349-7548c0025cd3`.
+Date: 2026-09-29, all times UTC. Portal account 123456789012, us-east-1, use case `645504ce-a60a-4009-8349-7548c0025cd3`.
 
 ## Tests
 
@@ -110,7 +110,7 @@ The thor1 log shows that the binding, not the typed id, chose the camera.
 - Each device's saved deployment was redeployed, removing the test workflow: thor1 `8d3e2d2e`, the Orin `5fa2217e`. Both COMPLETED at 01:50Z with the original component sets: thor1 21 components with 8 workflows, the Orin 13 with 4.
 - On the devices, the test workflow and capture directories were removed, the test registrations are gone, and the test keys in `dda-camera-bindings` were nulled. The other keys are unchanged.
 - In the Portal, all four test workflows were deleted. The two repro workflows answered 409 at first. After the workflow page's deployment listing synced their superseded deployments to INACTIVE, they deleted normally.
-- The 8 component versions were deleted, and so were the 12 component zips in `ryvan-cookies`. No test objects remain in the Portal artifacts bucket.
+- The 8 component versions were deleted, and so were the 12 component zips in `example-bucket`. No test objects remain in the Portal artifacts bucket.
 - The four deployment records remain in `dda-portal-deployments` as INACTIVE history.
 - The temporary principal is gone: 0 users, 0 `kiro-uicb-verify-*` clients and 0 role rows with its marker. The password, token and SSH login files are shredded.
 - **Models.**

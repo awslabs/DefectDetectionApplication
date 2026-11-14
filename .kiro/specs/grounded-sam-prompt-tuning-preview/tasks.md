@@ -16,7 +16,7 @@ Same-file discipline: `dda_labeling.py` (1.1), `api.ts` (2.1), `PreviewResultCan
     { "id": 2, "description": "The wizard gate (needs the panel), the panel-level guardrail property, and the panel example suite.", "tasks": ["2.4", "2.6", "2.8"] },
     { "id": 3, "description": "Wizard-level properties (need the gate) and the declared rebaseline amendments (the amended suites exercise the wizard with the preview mounting under grounded-sam).", "tasks": ["2.7", "4.1"] },
     { "id": 4, "description": "Routine-shaped deploy after the checkpoint — compute stack WITH the mandatory worker flag, then the frontend bundle via deploy-frontend.sh steps 1-5 only.", "tasks": ["6.1"] },
-    { "id": 5, "description": "Live verification: the tune loop proven against s3://ryvan-cookies with two prompts and differing results.", "tasks": ["6.2"] }
+    { "id": 5, "description": "Live verification: the tune loop proven against s3://example-bucket with two prompts and differing results.", "tasks": ["6.2"] }
   ]
 }
 ```
@@ -47,7 +47,7 @@ flowchart TD
     T32 --> T5
     T41 --> T5
     T5 --> T61["6.1 Deploy<br/>compute WITH -c deployGroundedSamWorker=true<br/>+ frontend steps 1-5"]
-    T61 --> T62["6.2 Live verification<br/>tune loop on ryvan-cookies"]
+    T61 --> T62["6.2 Live verification<br/>tune loop on example-bucket"]
 ```
 
 ## Tasks
@@ -161,8 +161,8 @@ flowchart TD
     - _Requirements: 8.1, 8.3_
 
   - [x] 6.2 Live verification — the tune loop proven against the cookie dataset
-    - Account 164152369890, us-east-1, portal `https://d23v4ltibogb5x.cloudfront.net`, rest-api `yqvyoowugk`. Record everything in `.kiro/specs/grounded-sam-prompt-tuning-preview/verification-notes.md` (the mask-offset precedent)
-    - Start a Grounded_SAM_Preview_Run via the deployed routes (the synthesized-event precedent from the prior specs' verification notes) against the use case backed by `s3://ryvan-cookies/training-images/` with `label_set: ["cookie_gap"]`, `prompt_overrides: {"cookie_gap": "gap between broken cookie pieces"}`, modality Segmentation, 2-3 sample images; poll `GET /labeling-preview/runs/{runId}` to Completed; verify each resolved sample's payload carries validated regions (Label_Set class, non-empty RLE decodable by the shared `dda_manifest.rle_decode`, worker-reported dimensions)
+    - Account 123456789012, us-east-1, portal `https://d23v4ltibogb5x.cloudfront.net`, rest-api `yqvyoowugk`. Record everything in `.kiro/specs/grounded-sam-prompt-tuning-preview/verification-notes.md` (the mask-offset precedent)
+    - Start a Grounded_SAM_Preview_Run via the deployed routes (the synthesized-event precedent from the prior specs' verification notes) against the use case backed by `s3://example-bucket/training-images/` with `label_set: ["cookie_gap"]`, `prompt_overrides: {"cookie_gap": "gap between broken cookie pieces"}`, modality Segmentation, 2-3 sample images; poll `GET /labeling-preview/runs/{runId}` to Completed; verify each resolved sample's payload carries validated regions (Label_Set class, non-empty RLE decodable by the shared `dda_manifest.rle_decode`, worker-reported dimensions)
     - Start a second run over the same samples with `prompt_overrides: {"cookie_gap": "crack"}`; poll to Completed; verify the two runs' region sets differ (mask count, RLE bytes, or scores) — the tune loop proven live; note warm/cold per-sample timings against the 240 s bound
     - Verify the deployed bundle carries the grounded-sam preview surface (the bundle-grep precedent: fetch the hashed JS from CloudFront and grep for the grounded-sam timing-note marker), and spot-check in the portal UI that the preview renders under grounded-sam with the sample picker
     - _Requirements: 2.2, 4.1, 4.2, 4.3, 5.1, 7.1_

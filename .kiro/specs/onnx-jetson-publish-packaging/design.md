@@ -636,7 +636,7 @@ flight, and move `edge-cv-portal/infrastructure/cdk.out` aside before running
 the security guard suite.
 
 Post-deploy verification on `https://d23v4ltibogb5x.cloudfront.net`
-(account 164152369890, us-east-1), with the user's concrete models:
+(account 123456789012, us-east-1), with the user's concrete models:
 
 - **Package → publish**: for `yolo_test` v7 (training
   `6a43ff2b-50ec-4441-b5f0-d84ccfef1400`) and `rf-detr` v7 (training

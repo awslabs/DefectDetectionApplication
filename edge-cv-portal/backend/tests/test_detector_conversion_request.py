@@ -30,9 +30,9 @@ from fixtures.detector_probes import (
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _EXPORT_DIR = os.path.abspath(os.path.join(_HERE, "..", "..", "..", "datasets", "detection_training"))
-IMAGE = ("164152369890.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export@sha256:"
+IMAGE = ("123456789012.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export@sha256:"
          + "ab" * 32)
-ROLE = "arn:aws:iam::164152369890:role/DDASageMakerExecutionRole"
+ROLE = "arn:aws:iam::123456789012:role/DDASageMakerExecutionRole"
 PREFIX = "s3://uc-bucket/converted-models/ppe_detection-1a2b3c4d/"
 
 PPE = dc.assess_checkpoint(PPE_PROBE)
@@ -287,7 +287,7 @@ def _record(assessment=PPE, body=None, fine_tunable=FINE_TUNABLE):
         training_id="t-1", usecase_id="uc-1", model_name="ppe-detection", model_version="1.0.0",
         created_by="ds@example.com", params=params, assessment=assessment,
         fine_tunable=fine_tunable, job_name="ppe-detection-cnv-20261001120000",
-        job_arn="arn:aws:sagemaker:us-east-1:164152369890:training-job/ppe-detection-cnv-20261001120000",
+        job_arn="arn:aws:sagemaker:us-east-1:123456789012:training-job/ppe-detection-cnv-20261001120000",
         image_uri=IMAGE, source_s3="s3://uc-bucket/model-uploads/0000/best.pt",
         source_sha256=PPE_SHA256, source_bytes=5475290, model_file="best.pt", now_ms=1790000000000)
 

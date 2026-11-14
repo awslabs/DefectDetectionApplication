@@ -114,7 +114,7 @@
 
 - [x] 10. USER ACTION — portal deploy
   - No component build running; `cdk.out` aside; guards green; infra + frontend deploy with `-c deployGroundedSamWorker=false`; verify `TrainingHandler` bundle contains `train_rfdetr.py` and `_common.py`.
-    - Deployed 2026-09-18 15:02 UTC (account 164152369890, alongside the quality-prompt-tuning deploy). Verified 2026-09-22: `TrainingHandler` bundle has `detection_training/train_rfdetr.py`, `_common.py`, `requirements-rfdetr.txt`; SharedLayer v80 has `checkpoint_probe.py`; Packaging / ModelConverter / ModelImport handlers updated the same minute; frontend `dda-portal-frontend-164152369890` main bundle carries `rf_detr`, "Fine-tuned from", "Fine-tunable". No RF-DETR job has been launched through the portal yet (training-jobs table holds only the two YOLO runs).
+    - Deployed 2026-09-18 15:02 UTC (account 123456789012, alongside the quality-prompt-tuning deploy). Verified 2026-09-22: `TrainingHandler` bundle has `detection_training/train_rfdetr.py`, `_common.py`, `requirements-rfdetr.txt`; SharedLayer v80 has `checkpoint_probe.py`; Packaging / ModelConverter / ModelImport handlers updated the same minute; frontend `dda-portal-frontend-123456789012` main bundle carries `rf_detr`, "Fine-tuned from", "Fine-tunable". No RF-DETR job has been launched through the portal yet (training-jobs table holds only the two YOLO runs).
     - _Requirements: 8.4_
 
 - [x] 11. USER ACTION — on-device verification

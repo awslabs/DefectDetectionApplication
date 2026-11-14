@@ -1,7 +1,7 @@
 # Task 1 — Live read-only evidence
 
-Account **164152369890**, region **us-east-1**, caller
-`arn:aws:sts::164152369890:assumed-role/admin-iam/i-06378d9cfa0907e3c`
+Account **123456789012**, region **us-east-1**, caller
+`arn:aws:sts::123456789012:assumed-role/admin-iam/i-06378d9cfa0907e3c`
 (confirmed with `aws sts get-caller-identity`). Gathered 2026-09-10 via boto3
 1.43.83 under `~/.dda-test-venv/bin/python` (the `aws ssm` CLI subcommand is
 broken on this host; every call below is a `greengrassv2` read).
@@ -191,7 +191,7 @@ use exactly `arm64_jp4` / `arm64_jp5` / `arm64_jp6` / `arm64_jp7`.
 
 ```
 $ aws greengrassv2 get-deployment --deployment-id 1982ad02-c3eb-4803-8b19-2b41f28bc391
-  revisionId 6, targetArn arn:aws:iot:us-east-1:164152369890:thing/adlink-dlap-701
+  revisionId 6, targetArn arn:aws:iot:us-east-1:123456789012:thing/adlink-dlap-701
   created 2026-09-01T19:46:36.602Z, deploymentName ssh-tunnel-on-adlink-dlap-701
   deploymentPolicies: {componentUpdatePolicy: {NOTIFY_COMPONENTS, 60s},
                        failureHandlingPolicy: ROLLBACK}

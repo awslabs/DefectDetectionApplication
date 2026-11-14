@@ -1,7 +1,7 @@
 # Labeling Job Cleanup, Work Stealing, and Podium — Task 5.2 Live Verification Notes
 
 Spec: `.kiro/specs/labeling-job-cleanup-work-stealing-and-podium` (feature)
-Account 164152369890, us-east-1. Portal `https://d23v4ltibogb5x.cloudfront.net`,
+Account 123456789012, us-east-1. Portal `https://d23v4ltibogb5x.cloudfront.net`,
 rest-api `yqvyoowugk`. Date: 2026-09-07 (all times UTC).
 
 - Deploy under test: compute 17:10–17:14Z (`EdgeCVPortalComputeStack`
@@ -54,8 +54,8 @@ membership resolution inside the handlers.
   which is exactly what the seeded MEMBER# items exercise)
 
 Use_Case `645504ce-a60a-4009-8349-7548c0025cd3` ("cookies", dataset
-`s3://ryvan-cookies`, prefix `training-images/`; the use case's
-`s3_bucket` output bucket is the same `ryvan-cookies` bucket — the
+`s3://example-bucket`, prefix `training-images/`; the use case's
+`s3_bucket` output bucket is the same `example-bucket` bucket — the
 `labeled/` output prefix is disjoint from `training-images/` by key).
 
 ## 2. Scratch fixtures (direct DynamoDB/S3 seed, 17:30:53Z)
@@ -66,12 +66,12 @@ existing job, team, or dataset object touched at any point.
 | Fixture | Value |
 |---|---|
 | Team | `team-scratch-verify-44da1b` (META + MEMBER# items for A and B) in `dda-portal-labeling-teams` |
-| Job | `labeling-scr44da1b` in `dda-portal-labeling-jobs`: DDA, Classification, InProgress, `label_set [normal, anomaly]`, `image_count 4`, `dataset_bucket ryvan-cookies`, `dataset_prefix training-images/`, `team_id` set, `submitted_count 2` (matching the seeded Submitted pair, so the live counter stays exact) |
+| Job | `labeling-scr44da1b` in `dda-portal-labeling-jobs`: DDA, Classification, InProgress, `label_set [normal, anomaly]`, `image_count 4`, `dataset_bucket example-bucket`, `dataset_prefix training-images/`, `team_id` set, `submitted_count 2` (matching the seeded Submitted pair, so the live counter stays exact) |
 | Tasks | `task-0001`/`task-0002` **Assigned to A** (anomaly-1.jpg, anomaly-10.jpg); `task-0003`/`task-0004` **Submitted by B** at staggered epochs 1788801653 / 1788801753 (inline Classification annotations) — B "done", A holding the stealable work |
-| Artifacts | 3 synthetic objects under `labeling/645504ce…/labeling-scr44da1b/` in `dda-portal-artifacts-164152369890-us-east-1` (2 × `prelabels/task-000{1,2}.json`, 1 × `annotations/seed-marker.json`) |
+| Artifacts | 3 synthetic objects under `labeling/645504ce…/labeling-scr44da1b/` in `dda-portal-artifacts-123456789012-us-east-1` (2 × `prelabels/task-000{1,2}.json`, 1 × `annotations/seed-marker.json`) |
 
 **Dataset baseline recorded before anything ran**:
-`aws s3 ls s3://ryvan-cookies/training-images/ --recursive | wc -l` →
+`aws s3 ls s3://example-bucket/training-images/ --recursive | wc -l` →
 **74** objects (73 images + the zero-byte prefix marker), listing saved
 to `dataset-before.txt`.
 
@@ -112,7 +112,7 @@ All calls against the deployed `DdaLabelingHandler` as **B**:
    `job_submitted_count: 4`** (17:33:21.585Z). The counter reaching
    `image_count` async-invoked the **real** manifest generation: worker
    log `generate_manifest` 17:33:22.581Z → manifest written
-   17:33:22.742Z — `s3://ryvan-cookies/labeled/labeling-scr44da1b/output.manifest`,
+   17:33:22.742Z — `s3://example-bucket/labeled/labeling-scr44da1b/output.manifest`,
    1236 bytes, **4 records** — and the job reached **Completed through
    the shipped flow** (no direct status write was needed;
    `job_completed` audit 17:33:22.731Z)

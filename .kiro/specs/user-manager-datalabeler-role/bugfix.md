@@ -44,12 +44,12 @@ frontend role array (plus ONE conscious pinned-test repoint), and one
 missing IAM grant in the CDK compute stack. No device-side `src/` file, no
 component build; rollout is a portal deploy.
 
-### Incident Record (verified evidence, 2026-08-17, live portal https://d23v4ltibogb5x.cloudfront.net, account 164152369890)
+### Incident Record (verified evidence, 2026-08-17, live portal https://d23v4ltibogb5x.cloudfront.net, account 123456789012)
 
 - **Defect 1**: user screenshot confirms the role dropdown offers only the
   five original roles. The live pool `us-east-1_2r9jpbWIe` had ZERO
   DataLabeler users until a manual remediation created `ryan-labeler`
-  (DataLabeler, ryvan+labeler@amazon.com) via direct Lambda invoke on
+  (DataLabeler, user+labeler@example.com) via direct Lambda invoke on
   2026-08-17 — the only way past the UI gap.
 - **Defect 2**: during that remediation create (POST /api/v1/admin/users
   via Lambda `EdgeCVPortalComputeStack-UserAdminHandlerEC759CBB-k6owDXSRir3G`,
@@ -58,7 +58,7 @@ component build; rollout is a portal deploy.
   invite sent), then the handler crashed:
   `AccessDeniedException ... UserAdminRole2557D264 ... is not authorized
   to perform: dynamodb:Query on resource:
-  arn:aws:dynamodb:us-east-1:164152369890:table/dda-portal-audit-log` →
+  arn:aws:dynamodb:us-east-1:123456789012:table/dda-portal-audit-log` →
   HTTP 500 "Internal server error" returned to the caller even though the
   account was created; the audit event is presumably stuck 'pending'.
 - Code evidence: `UserAdminRole2557D264` = `createLambdaRole('UserAdmin')`

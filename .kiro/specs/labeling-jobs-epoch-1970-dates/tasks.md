@@ -117,7 +117,7 @@ touched.
 - [x] 5. Deploy frontend and verify live
   - **Frontend-only deploy** via `./deploy-frontend.sh` from `edge-cv-portal/` — safe end-to-end after the portal-deploy-flag-hardening spec (it passes no worker flag and the default is now flag-on); zero backend/infrastructure changes to deploy
   - Follow the `.kiro/steering/builds.md` gates first: confirm no component build is running (`pgrep -af "gdk component build"` and `pgrep -af "build-custom.sh"` must both return nothing) — do NOT run a portal deploy while a component build is in progress
-  - Live verification on `d23v4ltibogb5x.cloudfront.net` (account 164152369890, us-east-1): open the Data Labeling page for the cookies use case — the jobs list (list endpoint returns `created_at` in seconds) must show current-year dates for the existing jobs (e.g. `sdfsdasdfadfs`, `tttttasdf`, created 2026-09-08 ~10:5x per the screenshot's times), not `1/21/1970`
+  - Live verification on `d23v4ltibogb5x.cloudfront.net` (account 123456789012, us-east-1): open the Data Labeling page for the cookies use case — the jobs list (list endpoint returns `created_at` in seconds) must show current-year dates for the existing jobs (e.g. `sdfsdasdfadfs`, `tttttasdf`, created 2026-09-08 ~10:5x per the screenshot's times), not `1/21/1970`
   - Open one job's detail page: Created / Completed / Stopped values show current-era dates and the Duration is a realistic hour count
   - Spot-check the datasets table on the same page still shows correct dates (Requirement 3.1 live)
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.3_

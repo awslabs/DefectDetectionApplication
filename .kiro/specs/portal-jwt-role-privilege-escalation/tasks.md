@@ -760,7 +760,7 @@ preservation rebaseline is owed.
       token to `POST /builds`, expect 403, then delete it and confirm the
       denial's audit row names it
     - _Requirements: 1.1, 2.3, 7.1, 7.2, 7.3_
-    - **OUTCOME (2026-09-22, account 164152369890): enforcement is ON, and
+    - **OUTCOME (2026-09-22, account 123456789012): enforcement is ON, and
       closing it exposed a second claim-trusting gate that this task also
       fixed.**
     - Backfill: `backfill_portal_registry.py` dry-run then `--apply` against

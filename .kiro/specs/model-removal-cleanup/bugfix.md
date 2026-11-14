@@ -58,7 +58,7 @@ this spec's own Requirement 3.1. See *Bug Condition* for the side-by-side.
 ### Incident record (jetson-thor1) — corrected
 
 Device: Greengrass core `jetson-thor1`, JetPack 7 / `arm64_jp7` (R39, 122 GiB
-unified memory), account 164152369890, us-east-1. Model component
+unified memory), account 123456789012, us-east-1. Model component
 `model-vllm-qwen3-5-9b-jetson-xavier-jp7`, model name `qwen3-5-9b`.
 
 **The removal was revision 21, not 22.** Revision 21 of

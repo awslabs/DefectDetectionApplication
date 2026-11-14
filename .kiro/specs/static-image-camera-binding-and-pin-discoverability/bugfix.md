@@ -98,7 +98,7 @@ healthy end to end, and the original report of it "missing" is explained by it b
 
 ### Current Behavior (Defect)
 
-Observed on the deployed portal `d23v4ltibogb5x.cloudfront.net` (account 164152369890, us-east-1,
+Observed on the deployed portal `d23v4ltibogb5x.cloudfront.net` (account 123456789012, us-east-1,
 rest-api `yqvyoowugk`) and confirmed against the shipped source.
 
 1.1 WHEN a Camera_Source entry of type `StaticImage` is resolved for the Aravis picker — the shipped device shape, with an empty `params` block and the id under `capabilities.staticImage.id` — THEN the system resolves no camera id at all, because `cameraIdValue()` reads only `params.cameraId` and returns null

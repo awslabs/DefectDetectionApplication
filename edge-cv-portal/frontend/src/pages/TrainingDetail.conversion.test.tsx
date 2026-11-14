@@ -56,7 +56,7 @@ vi.mock('../components/CompilationTab', () => ({
 const TRAINING_ID = 'cnv-1';
 const JOB_NAME = 'ppe_detection-cnv-20261001120000';
 const EXPORT_IMAGE =
-  '164152369890.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export@sha256:0814885ea1ee171e06f1231f4ed9fba1aa740557b1bf0d0946df6d8c1a3bcdab';
+  '123456789012.dkr.ecr.us-east-1.amazonaws.com/dda-detector-export@sha256:0814885ea1ee171e06f1231f4ed9fba1aa740557b1bf0d0946df6d8c1a3bcdab';
 const SOURCE_SHA = 'a00b6fce' + '0'.repeat(52) + '2119';
 const ONNX_SHA = '5f2c' + '1'.repeat(60);
 const TARGETS = ['jetson-xavier-jp5', 'jetson-xavier-jp6', 'jetson-xavier-jp7', 'x86_64-cpu'];
@@ -72,7 +72,7 @@ const IN_PROGRESS = {
   status: 'InProgress',
   progress: 10,
   training_job_name: JOB_NAME,
-  training_job_arn: `arn:aws:sagemaker:us-east-1:164152369890:training-job/${JOB_NAME}`,
+  training_job_arn: `arn:aws:sagemaker:us-east-1:123456789012:training-job/${JOB_NAME}`,
   instance_type: 'ml.m5.xlarge',
   algorithm_uri: EXPORT_IMAGE,
   created_by: 'scientist@example.com',
@@ -101,7 +101,7 @@ const IN_PROGRESS = {
     fine_tunable: {
       arch: 'yolo',
       kind: 'ultralytics_checkpoint',
-      checkpoint_s3: 's3://ryvan-cookies/converted-models/ppe_detection-1a2b3c4d/checkpoint.pt',
+      checkpoint_s3: 's3://example-bucket/converted-models/ppe_detection-1a2b3c4d/checkpoint.pt',
       class_names: ['helmet', 'human', 'no-helmet', 'vest'],
       num_classes: 4,
     },
@@ -110,7 +110,7 @@ const IN_PROGRESS = {
     status: 'InProgress',
     job_name: JOB_NAME,
     export_image: EXPORT_IMAGE,
-    source_s3: 's3://ryvan-cookies/model-uploads/5b0c7a51/best.pt',
+    source_s3: 's3://example-bucket/model-uploads/5b0c7a51/best.pt',
     source_sha256: SOURCE_SHA,
     source_bytes: 5_475_290,
     source_framework: 'ultralytics',
@@ -122,7 +122,7 @@ const IN_PROGRESS = {
 const FINALIZING = {
   ...IN_PROGRESS,
   progress: 80,
-  artifact_s3: `s3://ryvan-cookies/models/conversion/${JOB_NAME}/${JOB_NAME}/output/model.tar.gz`,
+  artifact_s3: `s3://example-bucket/models/conversion/${JOB_NAME}/${JOB_NAME}/output/model.tar.gz`,
   conversion: { ...IN_PROGRESS.conversion, status: 'Finalizing', finalizing_at: 1_790_000_200_000 },
 };
 
@@ -336,7 +336,7 @@ describe('TrainingDetail — conversion Import Metadata', () => {
     apiMocks.getTrainingJob.mockResolvedValue(IN_PROGRESS);
     const { container } = await renderRecord();
 
-    expect(kvValue(container, 'Checkpoint')).toBe('s3://ryvan-cookies/model-uploads/5b0c7a51/best.pt');
+    expect(kvValue(container, 'Checkpoint')).toBe('s3://example-bucket/model-uploads/5b0c7a51/best.pt');
     expect(kvValue(container, 'Checkpoint SHA-256')).toBe(SOURCE_SHA);
     expect(kvValue(container, 'Checkpoint size')).toBe('5.2 MiB');
     expect(kvValue(container, 'Saved by')).toBe('ultralytics 8.4.2');

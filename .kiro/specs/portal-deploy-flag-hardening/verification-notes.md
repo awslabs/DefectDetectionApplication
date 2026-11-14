@@ -1,7 +1,7 @@
 # Portal Deploy Flag Hardening — Task 6.2 Live Verification Notes
 
 Spec: `.kiro/specs/portal-deploy-flag-hardening` (feature)
-Account 164152369890, us-east-1. Portal `https://d23v4ltibogb5x.cloudfront.net`,
+Account 123456789012, us-east-1. Portal `https://d23v4ltibogb5x.cloudfront.net`,
 rest-api `yqvyoowugk`. Date: 2026-09-08 (all times UTC). HEAD `420e9a7`
 (`integration/all-specs`).
 
@@ -57,7 +57,7 @@ EdgeCVPortalComputeStack-DdaGroundedSamWorkerA3B13-9paW7gMXvjg2`:
   Architectures `['x86_64']`, no Environment block (the shipped
   configuration, Req 1.6)
 - ImageUri
-  `…/cdk-hnb659fds-container-assets-164152369890-us-east-1:6261b9e39448b5e93bcf49b91e6f5a38effbbc29006a5b9b4615a665513f8eae`
+  `…/cdk-hnb659fds-container-assets-123456789012-us-east-1:6261b9e39448b5e93bcf49b91e6f5a38effbbc29006a5b9b4615a665513f8eae`
   (ECR-cached fingerprint, unchanged)
 - CloudFormation agrees (`list-stack-resources`, 274 resources —
   `describe-stack-resources` truncates at 100 and misses these):
@@ -94,7 +94,7 @@ Both healthy (non-deleted), timestamps pre-deploy — untouched.
 ## 5. Check 4 — domain configuration uncorrupted
 
 - `aws s3api get-bucket-cors` on
-  `dda-portal-artifacts-164152369890-us-east-1`: one rule, `AllowedOrigins`
+  `dda-portal-artifacts-123456789012-us-east-1`: one rule, `AllowedOrigins`
   exactly `["https://d23v4ltibogb5x.cloudfront.net"]` — **one** scheme, no
   trailing slash (Req 3.3); methods GET/PUT/POST/HEAD
 - `UseCasesHandler` (`…-UseCasesHandler9D45DC90-CbpY0ir1Jjfs`)
@@ -117,7 +117,7 @@ real deployed `DdaLabelingHandler` invoked with API-Gateway-shaped events,
 `requestContext.authorizer.claims` carrying
 `sub = a4b804e8-5061-7004-12f2-38a0149dcd4c`, `custom:role = UseCaseAdmin`;
 Use_Case `645504ce-a60a-4009-8349-7548c0025cd3` (dataset
-`s3://ryvan-cookies`). Body: `dataset_prefix "training-images/"`, model
+`s3://example-bucket`). Body: `dataset_prefix "training-images/"`, model
 `grounded-sam`, task_type `Segmentation`, `label_set ["cookie_gap"]`,
 `prompt_overrides {"cookie_gap": "crack"}`, **1 sample image**
 (`training-images/anomaly-1.jpg`, 576×768).

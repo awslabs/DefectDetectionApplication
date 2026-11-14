@@ -2,13 +2,13 @@
 
 ## Introduction
 
-Synthetic data generation fails at the generate step in single-account portal deployments with an S3 `AccessDenied` error. Verified on live account 164152369890 (us-east-1):
+Synthetic data generation fails at the generate step in single-account portal deployments with an S3 `AccessDenied` error. Verified on live account 123456789012 (us-east-1):
 
 ```
 An error occurred (AccessDenied) when calling the GetObject operation: User:
-arn:aws:sts::164152369890:assumed-role/EdgeCVPortalSyntheticData-SyntheticDataHandlerRoleA-ObZAyr8XI3GD/dda-synthetic-data-handler
+arn:aws:sts::123456789012:assumed-role/EdgeCVPortalSyntheticData-SyntheticDataHandlerRoleA-ObZAyr8XI3GD/dda-synthetic-data-handler
 is not authorized to perform: s3:GetObject on resource:
-arn:aws:s3:::ryvan-cookies/training-images/anomaly-12.jpg because no
+arn:aws:s3:::example-bucket/training-images/anomaly-12.jpg because no
 identity-based policy allows the s3:GetObject action
 ```
 
@@ -100,4 +100,4 @@ FOR ALL X WHERE NOT isBugCondition(X) DO
 END FOR
 ```
 
-**Counterexample** (verified on live account 164152369890, us-east-1): a single-account generate request whose worker calls `s3:GetObject` on `arn:aws:s3:::ryvan-cookies/training-images/anomaly-12.jpg` — denied because no identity-based policy on the handler role allows the action.
+**Counterexample** (verified on live account 123456789012, us-east-1): a single-account generate request whose worker calls `s3:GetObject` on `arn:aws:s3:::example-bucket/training-images/anomaly-12.jpg` — denied because no identity-based policy on the handler role allows the action.

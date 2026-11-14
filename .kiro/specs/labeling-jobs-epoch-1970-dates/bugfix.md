@@ -3,7 +3,7 @@
 ## Introduction
 
 On the portal's Data Labeling page (live at `d23v4ltibogb5x.cloudfront.net`, account
-164152369890, us-east-1), every labeling job's Created column shows a January 1970 date
+123456789012, us-east-1), every labeling job's Created column shows a January 1970 date
 (e.g. `1/21/1970, 10:54:03 AM`) instead of the job's actual creation date. The screenshot
 shows the jobs table (Job Name, Task Type, Progress, Status, Created) with every row on
 1/21/1970. The labeling job detail page has the same defect on its Created / Completed /

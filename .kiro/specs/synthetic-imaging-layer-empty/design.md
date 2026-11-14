@@ -36,7 +36,7 @@ END FUNCTION
 ### Examples
 
 - Generation session 6525c09c with `stability.stable-image-inpaint-v1:0`: generation worker reached `_render_mask_png`, `from PIL import Image, ImageDraw` raised `ModuleNotFoundError: No module named 'PIL'`, session recorded a generation failure and ended in `awaiting_review`.
-- Deployed layer `arn:aws:lambda:us-east-1:164152369890:layer:SyntheticImagingLayer6E5D81DF:1` contains only `build.sh` and `requirements.txt` — no `python/` directory.
+- Deployed layer `arn:aws:lambda:us-east-1:123456789012:layer:SyntheticImagingLayer6E5D81DF:1` contains only `build.sh` and `requirements.txt` — no `python/` directory.
 - Fresh clone + `cdk deploy` (without manually running `build.sh`) reproduces the empty layer deterministically.
 - Edge case: a developer who *did* run `build.sh` gets a working layer — the bug is deploy-environment-dependent, which is exactly why it must be fixed at synth time.
 
@@ -159,5 +159,5 @@ END FOR
 
 ### Integration Tests
 
-- `cdk deploy` of the synthetic-data stack (account 164152369890, us-east-1), honoring `.kiro/steering/builds.md` (no concurrent component builds; move `cdk.out` aside per steering)
-- Live verification: new imaging layer version attached to `dda-synthetic-data-handler`; deployed layer zip contains `python/PIL`; a direct Lambda invoke exercising the PIL import path succeeds (real user claims: user_id `a4b804e8-5061-7004-12f2-38a0149dcd4c`, usecase `645504ce-a60a-4009-8349-7548c0025cd3`, bucket `ryvan-cookies`)
+- `cdk deploy` of the synthetic-data stack (account 123456789012, us-east-1), honoring `.kiro/steering/builds.md` (no concurrent component builds; move `cdk.out` aside per steering)
+- Live verification: new imaging layer version attached to `dda-synthetic-data-handler`; deployed layer zip contains `python/PIL`; a direct Lambda invoke exercising the PIL import path succeeds (real user claims: user_id `a4b804e8-5061-7004-12f2-38a0149dcd4c`, usecase `645504ce-a60a-4009-8349-7548c0025cd3`, bucket `example-bucket`)

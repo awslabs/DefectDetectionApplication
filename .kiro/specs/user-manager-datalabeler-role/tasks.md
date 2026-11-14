@@ -4,7 +4,7 @@
 
 Close the two verified gaps that leave dda-data-labeling unusable
 end-to-end and break the deployed user-admin API contract (bugfix.md
-Incident Record, 2026-08-17, account 164152369890):
+Incident Record, 2026-08-17, account 123456789012):
 
 1. **Defect 1 — frontend role vocabulary** (design Decision 1 + 2): append
    `'DataLabeler'` to `PORTAL_ROLES` in
@@ -28,7 +28,7 @@ lists (vitest), the finalize path's Query + terminal-result behavior
 reproducible host-side), and the synthesized template's grant (jest CDK
 static assertions, the synthetic-data-s3-permissions precedent). The real
 deployed-IAM claims — a UI-created DataLabeler account, a 200 response, a
-terminal audit entry in account 164152369890, a labeling team gaining a
+terminal audit entry in account 123456789012, a labeling team gaining a
 member — belong exclusively to the USER ACTION verification task (task 8).
 Do not write a test that pretends to exercise the real account.
 
@@ -125,7 +125,7 @@ New files this plan creates:
     { "wave": 5, "description": "Gates: frontend vitest (touched + admin suites) + npm run build; infra jest suites; backend user-admin suites at baseline counts; security guard pair + verify the no-rebaseline claim; checkpoint with git scope check (NOTHING committed).", "tasks": ["5"] },
     { "wave": 6, "description": "USER ACTION: commit + push (branch spec/jetpack7-support).", "tasks": ["6"] },
     { "wave": 7, "description": "USER ACTION: portal deploy (infrastructure + frontend) — strictly never while a component build runs (builds.md); move the regenerated cdk.out aside afterwards.", "tasks": ["7"] },
-    { "wave": 8, "description": "USER ACTION: live verification in account 164152369890 — UI-create a DataLabeler account (200, terminal audit entry), convert-role path, LabelingTeams add-member gains a candidate; check/remediate the stuck-pending 2026-08-17 audit entry.", "tasks": ["8"] }
+    { "wave": 8, "description": "USER ACTION: live verification in account 123456789012 — UI-create a DataLabeler account (200, terminal audit entry), convert-role path, LabelingTeams add-member gains a candidate; check/remediate the stuck-pending 2026-08-17 audit entry.", "tasks": ["8"] }
   ]
 }
 ```
@@ -318,7 +318,7 @@ graph TD
   - Stage exactly the task-5-verified change set on branch `spec/jetpack7-support`; commit message cites this spec, the two defects, and the ONE conscious pinned-test repoint (five → six, dda-data-labeling Req 2.1); push
   - **OUTCOME (2026-08-18, branch `spec/jetpack7-support`)**: committed and pushed; scope exact; no forced update.
     - **Pre-commit gate (builds.md)**: `pgrep -af "gdk component build"` → empty (exit 1); `pgrep -af "build-custom.sh"` → empty (exit 1). No component build running, so a commit (and the task-7 portal deploy) is safe to sequence.
-    - **Git identity verified**: `Ryan Vanderwerf <ryvan@amazon.com>`. Pre-commit HEAD = `966359f` (= origin/spec/jetpack7-support = origin/spec/vlm-anomaly-reference-parity = origin/integration/all-specs tip).
+    - **Git identity verified**: `Ryan Vanderwerf <user@example.com>`. Pre-commit HEAD = `966359f` (= origin/spec/jetpack7-support = origin/spec/vlm-anomaly-reference-parity = origin/integration/all-specs tip).
     - **Staged set — EXPLICIT paths only (never `git add .`), exactly the task-5-verified change set (7 entries / 10 files)**:
       1. `edge-cv-portal/frontend/src/pages/admin/UserManagerModals.tsx` (M, +2/-1 — `'DataLabeler'` appended LAST to `PORTAL_ROLES` + doc comment)
       2. `edge-cv-portal/frontend/src/pages/admin/UserManagerModals.test.tsx` (M, +31/-3 — the ONE conscious repoint)
@@ -333,46 +333,46 @@ graph TD
     - **Push verified**: `git branch -r --contains 370ca34` → `origin/integration/all-specs`, `origin/spec/jetpack7-support`, `origin/spec/vlm-anomaly-reference-parity` — all three remotes carry the commit.
     - **Doc-only follow-up** (this OUTCOME's sha/push lines could only be written after the commit existed): `3a9c8e310a7956f13f93ed866d11ae0a4f795915` (`3a9c8e3`), "user-manager-datalabeler-role task 6: record commit sha 370ca34 and the three-branch push verification in the task-6 OUTCOME (doc only)" — 1 file, tasks.md only; pushed the same way, three fast-forwards `370ca34..3a9c8e3`, verified on all three remotes. Code/test change set is entirely in `370ca34`.
     - **Post-commit worktree**: only the unrelated pre-existing items listed above remain. No spec source file left uncommitted.
-    - **Still deploy-gated**: task 7 (portal deploy: ComputeStack grant + frontend bundle, never mid-component-build, move the regenerated `cdk.out` aside afterwards) and task 8 (live verification in account 164152369890 — the deployed-IAM truth per design Decision 5).
+    - **Still deploy-gated**: task 7 (portal deploy: ComputeStack grant + frontend bundle, never mid-component-build, move the regenerated `cdk.out` aside afterwards) and task 8 (live verification in account 123456789012 — the deployed-IAM truth per design Decision 5).
   - _Requirements: all_
 
 - [x] 7. USER ACTION: portal deploy
   - builds.md is binding: confirm NO component build is running first (`pgrep -af "gdk component build"` and `pgrep -af "build-custom.sh"` both empty); never deploy mid-build
   - Deploy infrastructure (the ComputeStack grant) and frontend (the modals bundle); bundle with any other pending spec's portal deploy if one is queued — one deploy serves all
   - Afterwards move the regenerated `cdk.out` aside (`mv cdk.out cdk.out.bak-$(date +%Y%m%dT%H%M%SZ)`) — drift-guard discipline
-  - **OUTCOME (2026-08-17 20:36–20:47Z, account 164152369890, region us-east-1 — DEPLOY SUCCEEDED; live IAM and frontend bundle both verified)**
+  - **OUTCOME (2026-08-17 20:36–20:47Z, account 123456789012, region us-east-1 — DEPLOY SUCCEEDED; live IAM and frontend bundle both verified)**
     - **Pre-deploy gate (builds.md, re-confirmed immediately before start)**: `pgrep -af "gdk component build"` → empty (exit 1); `pgrep -af "build-custom.sh"` → empty (exit 1); `edge-cv-portal/infrastructure/cdk.out` ABSENT (only pre-existing `cdk.out.bak-*` dirs). Orchestrator had additionally confirmed the fleet build-jobs table `dda-portal-build-jobs` shows 0 queued/building of 87. No component build was running at any point during the deploy. The gate was re-checked inside the driver and recorded in the log.
     - **Deployed tree**: HEAD `9f3acab` (doc-only tip); the code change set is commit `370ca34` (present on all three remotes) — `compute-stack.ts` audit Query grant (verified at ~L1695 in the deployed working tree) + `UserManagerModals.tsx` six-role `PORTAL_ROLES` (verified at L68).
     - **Driver + log** (repo pattern, infra→frontend, single tee'd log, run as a BACKGROUND process and polled): uncommitted `edge-cv-portal/.deploy-user-manager-datalabeler-role-driver.sh` → `edge-cv-portal/deploy-user-manager-datalabeler-role-20260817T203639Z.out`. Legs: `deploy-infrastructure.sh` **exit=0** (20:36:39 → 20:44:38Z, `cdk deploy --all --require-approval never --force`, "✅ Deployment completed successfully!"), `deploy-frontend.sh` **exit=0** (20:44:38 → 20:46:45Z, incl. its ComputeStack redeploy with the CloudFront domain for auto-CORS). Zero occurrences of `ROLLBACK` / `UPDATE_FAILED` / `CREATE_FAILED` in the whole log; `EdgeCVPortalComputeStack` and all nested stacks (UserAdminApi, QuickSetupApi, DdaLabelingApi, CameraRegistryApi, WorkflowManagerGapsApi, ApiGateway) reached `UPDATE_COMPLETE`.
-    - **LIVE IAM VERIFIED (the point of defect 2, boto3 against account 164152369890)**: Lambda `EdgeCVPortalComputeStack-UserAdminHandlerEC759CBB-k6owDXSRir3G` → Role ARN `arn:aws:iam::164152369890:role/EdgeCVPortalComputeStack-UserAdminRole2557D264-bYYsNd3xlGmZ` (= the `UserAdminRole2557D264` named in the 2026-08-17 AccessDeniedException); function LastModified `2026-08-17T20:40:24Z`. Iterating inline + attached policies found exactly ONE statement granting Query on the audit table — attached policy `EdgeCVPortalComputeStack-UserAdminRoleOverflowPolicy2A8B29A62-dSaChUgUc7PT`:
+    - **LIVE IAM VERIFIED (the point of defect 2, boto3 against account 123456789012)**: Lambda `EdgeCVPortalComputeStack-UserAdminHandlerEC759CBB-k6owDXSRir3G` → Role ARN `arn:aws:iam::123456789012:role/EdgeCVPortalComputeStack-UserAdminRole2557D264-bYYsNd3xlGmZ` (= the `UserAdminRole2557D264` named in the 2026-08-17 AccessDeniedException); function LastModified `2026-08-17T20:40:24Z`. Iterating inline + attached policies found exactly ONE statement granting Query on the audit table — attached policy `EdgeCVPortalComputeStack-UserAdminRoleOverflowPolicy2A8B29A62-dSaChUgUc7PT`:
       ```json
       {
         "Action": "dynamodb:Query",
         "Resource": [
-          "arn:aws:dynamodb:us-east-1:164152369890:table/dda-portal-audit-log",
-          "arn:aws:dynamodb:us-east-1:164152369890:table/dda-portal-audit-log/index/*"
+          "arn:aws:dynamodb:us-east-1:123456789012:table/dda-portal-audit-log",
+          "arn:aws:dynamodb:us-east-1:123456789012:table/dda-portal-audit-log/index/*"
         ],
         "Effect": "Allow"
       }
       ```
       Exactly the action `finalize_audit_event`'s range-key recovery Query needs, on exactly the table that denied it — narrower than `grantReadData` (no Scan/GetItem). The live gap behind defect 1.4 is closed.
-    - **FRONTEND BUNDLE VERIFIED**: `deploy-frontend.sh` built `dist/assets/index-CBwQHl-3.js` (2,036.15 kB / gzip 574.99 kB), uploaded it plus `index-BcxTwsXV.css` and a no-cache `index.html` to `s3://dda-portal-frontend-164152369890/`, deleted the superseded `assets/index-BNSsYpLS.js`, and issued CloudFront invalidation `I4D1NIRKJR5K39HZACA5X6TIO9` (`/*`). Live checks against `https://d23v4ltibogb5x.cloudfront.net`: `index.html` (last-modified `Mon, 17 Aug 2026 20:45:17 GMT`, x-cache Miss) references the FRESH `assets/index-CBwQHl-3.js`; fetching that bundle (2,036,597 bytes) shows **6 occurrences of `DataLabeler`**, including the literal six-role array `"PortalAdmin","UseCaseAdmin","DataScientist","Operator","Viewer","DataLabeler"` — the modals' vocabulary shipped.
+    - **FRONTEND BUNDLE VERIFIED**: `deploy-frontend.sh` built `dist/assets/index-CBwQHl-3.js` (2,036.15 kB / gzip 574.99 kB), uploaded it plus `index-BcxTwsXV.css` and a no-cache `index.html` to `s3://dda-portal-frontend-123456789012/`, deleted the superseded `assets/index-BNSsYpLS.js`, and issued CloudFront invalidation `I4D1NIRKJR5K39HZACA5X6TIO9` (`/*`). Live checks against `https://d23v4ltibogb5x.cloudfront.net`: `index.html` (last-modified `Mon, 17 Aug 2026 20:45:17 GMT`, x-cache Miss) references the FRESH `assets/index-CBwQHl-3.js`; fetching that bundle (2,036,597 bytes) shows **6 occurrences of `DataLabeler`**, including the literal six-role array `"PortalAdmin","UseCaseAdmin","DataScientist","Operator","Viewer","DataLabeler"` — the modals' vocabulary shipped.
     - **cdk.out handling (drift-guard discipline)**: `deploy-infrastructure.sh` clears and regenerates `cdk.out`; afterwards moved aside → `edge-cv-portal/infrastructure/cdk.out.bak-20260817T204902Z`; `cdk.out` now ABSENT. Guard pair re-run post-move (`test_preservation_out_of_scope_guard.py` + `test_preservation_secrets_out_of_scope_guard.py`, `--noconftest`) → **4 passed, 3 skipped** = exactly the task-5 baseline, so no cdk.out baseline entries are needed and a component build may now be safely sequenced.
     - **Not done, deliberately**: nothing committed (the deploy log `deploy-user-manager-datalabeler-role-20260817T203639Z.out` and the driver script stay uncommitted per the do-not-commit list); no component build started; no retry needed (both legs succeeded first pass).
     - **Next**: task 8 (live verification in the portal UI — DataLabeler create/convert returning 200 with terminal audit entries, LabelingTeams add-member candidates, and the stuck-'pending' 2026-08-17 entry, request id 79dc2dd8-2e10-486a-a0e6-aec5ef805d37).
   - _Requirements: 2.1, 2.2, 2.4_
 
-- [x] 8. USER ACTION: live verification in account 164152369890 (the deployed-IAM truth, design Decision 5)
+- [x] 8. USER ACTION: live verification in account 123456789012 (the deployed-IAM truth, design Decision 5)
   - On https://d23v4ltibogb5x.cloudfront.net as a PortalAdmin:
     1. Create-user modal offers DataLabeler; create a labeler account → HTTP 200 (NOT 500) and the invite confirmation renders (proves the finalize Query succeeded — the exact remediation-create path that crashed on 2026-08-17)
     2. Audit Logs (or the table) shows that account_create entry at a TERMINAL result with `completed_at` — not stuck 'pending'
     3. Change-role modal converts an account to DataLabeler → 200, terminal audit entry
     4. LabelingTeams add-member now lists the labeler account(s) (incl. `ryan-labeler`) — the dda-data-labeling end-to-end unblock
   - Check the stuck-'pending' audit entry from the 2026-08-17 remediation create (request id 79dc2dd8-2e10-486a-a0e6-aec5ef805d37, ~17:03Z): confirm its state and finalize/annotate it as you decide (the fix does not retroactively finalize old entries)
-  - **OUTCOME (2026-08-17, post-deploy, account 164152369890 — BOTH defects verified fixed against the LIVE deployed stack)**: the API-level legs were driven through the DEPLOYED `UserAdminHandler` Lambda (the same invocation shape the UI's authenticated calls produce, PortalAdmin claims); the browser render of the six-option dropdown is the user's own spot-check (the shipped bundle was already proven to contain the literal six-role array in task 7).
-    1. **Create a DataLabeler account → 201, NOT 500**: `POST /api/v1/admin/users` `{username: ryan-labeler2, email: ryvan+labeler2@amazon.com, role: DataLabeler}` → **HTTP 201**, body "Account created for ryan-labeler2; an invitation with a temporary password was sent to ryvan+labeler2@amazon.com", `role: DataLabeler`. This is the EXACT path that returned 500 "Internal server error" on 2026-08-17 17:03Z after its Cognito effect — defect 1.4 closed live.
+  - **OUTCOME (2026-08-17, post-deploy, account 123456789012 — BOTH defects verified fixed against the LIVE deployed stack)**: the API-level legs were driven through the DEPLOYED `UserAdminHandler` Lambda (the same invocation shape the UI's authenticated calls produce, PortalAdmin claims); the browser render of the six-option dropdown is the user's own spot-check (the shipped bundle was already proven to contain the literal six-role array in task 7).
+    1. **Create a DataLabeler account → 201, NOT 500**: `POST /api/v1/admin/users` `{username: ryan-labeler2, email: user+labeler2@example.com, role: DataLabeler}` → **HTTP 201**, body "Account created for ryan-labeler2; an invitation with a temporary password was sent to user+labeler2@example.com", `role: DataLabeler`. This is the EXACT path that returned 500 "Internal server error" on 2026-08-17 17:03Z after its Cognito effect — defect 1.4 closed live.
     2. **Audit entry TERMINAL, not stuck 'pending'**: that create's entry `datalabeler-postfix-verify_1786999860825_d1463fc7` = `account_create`, **result `success`, `completed_at` 1786999862146** — the finalize Query now succeeds under the deployed role.
-    3. **Convert-role path → 200 + terminal audit**: `PUT /admin/users/{username}/role` converted `ryvan+demoviewer@amazon.com` Viewer → **DataLabeler (200)**, then REVERTED it back to Viewer (**200**) to leave the demo account exactly as found; both role_change entries terminal `success` with `completed_at` (1786999885026, 1786999901766). All three post-fix entries from this verification are terminal — zero new 'pending'.
-    4. **LabelingTeams add-member candidates exist**: the pool now holds **3 DataLabeler accounts** — `ryan-labeler` (ryvan+labeler@amazon.com, FORCE_CHANGE_PASSWORD), `ryan-labeler2` (ryvan+labeler2@amazon.com, FORCE_CHANGE_PASSWORD), and (transiently during leg 3) demoViewer. `LabelingTeams`' add-member modal filters `listAdminUsers()` to `role === 'DataLabeler'`, so it now has candidates — the dda-data-labeling end-to-end unblock. The user still creates a team on the Labeling Teams page and adds a member (the `dda-portal-labeling-teams` table was empty at last check).
+    3. **Convert-role path → 200 + terminal audit**: `PUT /admin/users/{username}/role` converted `user+demoviewer@example.com` Viewer → **DataLabeler (200)**, then REVERTED it back to Viewer (**200**) to leave the demo account exactly as found; both role_change entries terminal `success` with `completed_at` (1786999885026, 1786999901766). All three post-fix entries from this verification are terminal — zero new 'pending'.
+    4. **LabelingTeams add-member candidates exist**: the pool now holds **3 DataLabeler accounts** — `ryan-labeler` (user+labeler@example.com, FORCE_CHANGE_PASSWORD), `ryan-labeler2` (user+labeler2@example.com, FORCE_CHANGE_PASSWORD), and (transiently during leg 3) demoViewer. `LabelingTeams`' add-member modal filters `listAdminUsers()` to `role === 'DataLabeler'`, so it now has candidates — the dda-data-labeling end-to-end unblock. The user still creates a team on the Labeling Teams page and adds a member (the `dda-portal-labeling-teams` table was empty at last check).
     - **Stuck-'pending' entries (the fix is not retroactive — reported, NOT altered)**: 4 remain in `dda-portal-audit-log`, all pre-dating the fix: `datalabeler-role-unblock_1786986183111_ca47af19` (account_create ryan-labeler — the 2026-08-17 17:03Z remediation create whose AccessDeniedException exposed defect 2) plus **three from 2026-07-14** — `..._1784418229187_c656ca8a` (account_create demoDataScientist), `..._1784418105016_70c292e2` (account_create demoadmin), `..._1784418453234_b49fa65b` (password_change demoadmin). **Notable finding**: those July entries are independent evidence that the IAM gap had been silently breaking EVERY user-admin mutation's audit finalize (and returning 500s) since at least 2026-07-14 — the defect is older than the labeling work that surfaced it. Left as-is pending the user's call on whether to backfill/annotate them.
   - _Requirements: 2.1, 2.2, 2.3, 2.4_

@@ -222,7 +222,7 @@ G_BEGIN_DECLS
 #define PACKAGE_NAME "emlvideocapture"
 #endif
 #ifndef GST_PACKAGE_ORIGIN
-#define GST_PACKAGE_ORIGIN "https://alpha.www.docs.aws.a2z.com/edgeml-sdk/v1/1.0/index.html"
+#define GST_PACKAGE_ORIGIN "https://github.com/awslabs/DefectDetectionApplication"
 #endif
 
 typedef struct _GstEmlvideocapture GstEmlvideocapture;

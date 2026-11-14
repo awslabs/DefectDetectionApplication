@@ -130,7 +130,7 @@ in the model's engine configuration").
   transitive deps float, and the Jetson index can republish a wheel under the same
   version string), and the actual profiling numbers 1.0.61 produced. The 1.0.61
   image was pruned from the device but can be re-pulled for inspection from
-  `164152369890.dkr.ecr.us-east-1.amazonaws.com/dda/flask-app:1.0.61`; a
+  `123456789012.dkr.ecr.us-east-1.amazonaws.com/dda/flask-app:1.0.61`; a
   `pip freeze` diff against the on-device 1.0.59 image plus a
   `limit_mm_per_prompt` grep settles both questions definitively.
 
