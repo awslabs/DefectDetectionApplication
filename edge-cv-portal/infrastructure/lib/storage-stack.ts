@@ -812,6 +812,16 @@ export class StorageStack extends cdk.Stack {
           expiration: cdk.Duration.days(1),
           noncurrentVersionExpiration: cdk.Duration.days(1),
         },
+        {
+          // Staged reference-file uploads the complete route never consumed
+          // (tuning-inspection-export, Q38 b): the pin-staging precedent.
+          id: 'ExpireWorkflowReferenceStaging',
+          prefix: 'workflow-reference-staging/',
+          enabled: true,
+          expiration: cdk.Duration.days(1),
+          noncurrentVersionExpiration: cdk.Duration.days(1),
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        },
       ],
     });
 

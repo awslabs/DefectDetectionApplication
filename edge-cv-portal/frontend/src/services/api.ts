@@ -252,6 +252,41 @@ export function isTelemetryApiError(err: unknown): err is TelemetryApiError {
 // portal-usecase-bucket-config, design §5.3, §5.5, §10.1).
 
 /** Response of PUT /usecases/{id} with additional_s3_buckets_add / _remove. */
+/**
+ * The record of a reference file uploaded for a Bedrock Inference node
+ * (workflow_reference_files.py): `line` is what the node's
+ * `reference_payload_path` carries, `fileName` the name it was uploaded
+ * under (shown in the editor only).
+ */
+export interface ReferenceFileRecord {
+  schema: number;
+  /** `{sha256}.{ext}` */
+  name: string;
+  /** `upload://{sha256}.{ext}` */
+  line: string;
+  sha256: string;
+  ext: string;
+  kind: 'image' | 'document';
+  /** `jpeg` or `png` for an image, else the document format. */
+  format: string;
+  bytes: number;
+  width?: number;
+  height?: number;
+  fileName: string;
+  uploadedBy: string;
+  uploadedAt: number;
+}
+
+/** The answer of POST /workflows/{id}/reference-files/upload-url. */
+export interface ReferenceFileUploadUrlResponse {
+  uploadUrl: string;
+  /** Headers the PUT must send: the signed `x-amz-expected-bucket-owner`. */
+  uploadHeaders: Record<string, string>;
+  stagingKey: string;
+  expiresInSeconds: number;
+  maxBytes: number;
+}
+
 export interface UsecaseBucketUpdateResponse {
   message: string;
   added: string[];
@@ -4956,6 +4991,36 @@ class ApiService {
     count: number;
   }> {
     return this.request(`/workflows/${encodeURIComponent(workflowId)}/versions`);
+  }
+
+  // Reference files of Bedrock Inference nodes (workflow_reference_files.py).
+  // A presigned SigV4 PUT to a staging key for the named file; the caller
+  // PUTs the bytes with `uploadHeaders`, then completes the upload.
+  async getReferenceFileUploadUrl(
+    workflowId: string,
+    fileName: string
+  ): Promise<ReferenceFileUploadUrlResponse> {
+    return this.request(
+      `/workflows/${encodeURIComponent(workflowId)}/reference-files/upload-url`,
+      { method: 'POST', body: JSON.stringify({ fileName }) }
+    );
+  }
+
+  // Checks a staged upload's content and stores it with the workflow:
+  // `created` is false when the same file was already stored.
+  async completeReferenceFileUpload(
+    workflowId: string,
+    body: { stagingKey: string; fileName: string }
+  ): Promise<{ file: ReferenceFileRecord; created: boolean }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/reference-files`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  }
+
+  // The workflow's uploaded reference files, oldest first.
+  async listReferenceFiles(workflowId: string): Promise<{ files: ReferenceFileRecord[] }> {
+    return this.request(`/workflows/${encodeURIComponent(workflowId)}/reference-files`);
   }
 
   // Run all backend Workflow_Validator checks on a stored version and

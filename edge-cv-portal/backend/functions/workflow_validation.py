@@ -43,8 +43,9 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    rbac_manager, Permission
+    rbac_manager, Permission, BucketOwnerUnknown, component_bucket_owner
 )
+from workflow_core.anomaly_invocation import uploaded_reference_names
 from workflow_core.catalog import (
     NODE_CATALOG, GstMapping, NodeTypeDescriptor,
     ParameterDescriptor, PortDescriptor
@@ -352,6 +353,39 @@ def load_model_registry_snapshot(usecase_id: str) -> Optional[Dict[str, Dict]]:
 
 
 # --------------------------------------------------------------------------
+# Uploaded reference files (workflow_reference_files.py key layout)
+# --------------------------------------------------------------------------
+
+def has_upload_lines(graph) -> bool:
+    """True when a bedrock_inference node's reference_payload_path names an
+    uploaded file (a well-formed upload://{sha256}.{ext} line)."""
+    return any(uploaded_reference_names(node.parameters)
+               for node in graph.nodes if node.type == 'bedrock_inference')
+
+
+def stored_reference_names(usecase_id: str, workflow_id: str) -> set:
+    """The names ("{sha256}.{ext}") of the reference files stored for a
+    workflow, without their .json upload records."""
+    prefix = f"{WORKFLOWS_S3_PREFIX}/{usecase_id}/{workflow_id}/references/"
+    owner = component_bucket_owner()
+    names = set()
+    continuation_token = None
+    while True:
+        kwargs = {'Bucket': PORTAL_ARTIFACTS_BUCKET, 'Prefix': prefix,
+                  'ExpectedBucketOwner': owner}
+        if continuation_token:
+            kwargs['ContinuationToken'] = continuation_token
+        listed = s3.list_objects_v2(**kwargs)
+        for entry in listed.get('Contents', []):
+            name = entry['Key'][len(prefix):]
+            if name and '/' not in name and not name.endswith('.json'):
+                names.add(name)
+        if not listed.get('IsTruncated'):
+            return names
+        continuation_token = listed.get('NextContinuationToken')
+
+
+# --------------------------------------------------------------------------
 # Validate endpoint (Requirements 4.6, 4.10)
 # --------------------------------------------------------------------------
 
@@ -439,8 +473,26 @@ def validate_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                               'Model registry could not be loaded for '
                               'model-reference validation')
 
+    # Uploaded reference files (workflow_reference_files.py): only a
+    # definition with an upload line lists the files the workflow stores, so
+    # the validator can report each line naming a file that is not stored
+    # (BEDROCK_REFERENCE_UPLOAD_MISSING); every other definition makes no S3
+    # call and skips the check. Fail closed, as for the registry snapshot.
+    reference_uploads = None
+    if has_upload_lines(result.graph):
+        try:
+            reference_uploads = stored_reference_names(item['usecase_id'], workflow_id)
+        except (ClientError, BucketOwnerUnknown) as e:
+            logger.error(
+                f"Error listing the uploaded reference files of {workflow_id}: {str(e)}"
+            )
+            return error_response(500, 'REFERENCE_FILES_LOAD_FAILED',
+                                  'The uploaded reference files of the workflow could '
+                                  'not be listed for validation')
+
     findings = run_validator(result.graph, catalog=catalog,
-                             model_registry=model_registry)
+                             model_registry=model_registry,
+                             reference_uploads=reference_uploads)
     wire_findings = [f.to_dict() for f in findings]
     error_count = sum(1 for f in findings if f.severity == SEVERITY_ERROR)
     warning_count = sum(1 for f in findings if f.severity == SEVERITY_WARNING)

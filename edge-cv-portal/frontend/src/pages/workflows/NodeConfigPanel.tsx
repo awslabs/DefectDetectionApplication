@@ -77,7 +77,11 @@ import { apiService, type CodeAssistContract } from '../../services/api';
 import { useUsecase } from '../../contexts/UsecaseContext';
 import CodeAssistPanel from '../../components/code-assist/CodeAssistPanel';
 import PromptTuningNodeEntry from '../workflow-tuning/PromptTuningNodeEntry';
-import { isTunableWorkflowNode } from '../workflow-tuning/eligibility';
+import {
+  NODE_TYPE_BEDROCK_INFERENCE,
+  isTunableWorkflowNode,
+} from '../workflow-tuning/eligibility';
+import ReferenceFilesField, { REFERENCE_PAYLOAD_PATH_PARAMETER } from './ReferenceFilesField';
 import { canAccessWorkflowTuning } from '../../utils/workflowTuningAccess';
 import type { Device, UserRole } from '../../types';
 import type { BuilderNode } from './builderGraph';
@@ -1947,6 +1951,21 @@ export default function NodeConfigPanel({
                       : onParametersChange(node.id, updated)
                   }
                   modelOptions={modelOptions}
+                />
+              ) : descriptor.typeId === NODE_TYPE_BEDROCK_INFERENCE &&
+                parameter.name === REFERENCE_PAYLOAD_PATH_PARAMETER ? (
+                // A Bedrock Inference node's reference list renders as the
+                // reference-files field (uploads, order, labels); keyed by
+                // node id so switching nodes resets its state.
+                <ReferenceFilesField
+                  key={`${node.id}:${parameter.name}`}
+                  descriptor={parameter}
+                  nodeParameterDescriptors={descriptor.parameters}
+                  label={optionalLabel(parameter)}
+                  parameters={parameters}
+                  workflowId={workflowId}
+                  role={role}
+                  onParametersChange={(updated) => onParametersChange(node.id, updated)}
                 />
               ) : (
                 <SpaceBetween key={parameter.name} size="s">
