@@ -33,8 +33,9 @@ export const WORKFLOW_TUNING_TOOLS: readonly WorkflowTuningTool[] = [
     href: '/workflow-tuning/anomaly',
     description:
       'Collect the images your anomaly-mode Bedrock and VLM inspection '
-      + 'nodes really sent, label them, score candidate prompts against '
-      + 'them, and apply the winner as a new workflow version.',
+      + 'nodes and your inspection-format Bedrock nodes really sent, label '
+      + 'them, score candidate prompts against them, and apply the winner as '
+      + 'a new workflow version.',
   },
 ];
 

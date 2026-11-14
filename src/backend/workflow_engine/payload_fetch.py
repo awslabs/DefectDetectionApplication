@@ -62,6 +62,7 @@ helpers live in a subprocess source string and cannot be shared.
 
 import base64
 import functools
+import hashlib
 import logging
 import os
 import re
@@ -69,7 +70,18 @@ import ssl
 import stat
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Iterable, Optional, Sequence
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
+
+# Reference files of an inspection-format node (one per line of
+# reference_payload_path): the document size cap and format check, and
+# the uploaded-file names, shared with the Portal (standard library only).
+from workflow_engine.vendor.workflow_core.anomaly_invocation import (
+    MANIFEST_REFERENCE_FILES_KEY,
+    MAX_DOCUMENT_BYTES,
+    PACKAGED_REFERENCES_DIR,
+    UPLOAD_REFERENCE_SCHEME,
+    document_signature_problem,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -210,11 +222,14 @@ def resolve_payload_path(payload_json: Any, dotted_path: str) -> Any:
 
 def describe_reference_source(value: Any) -> str:
     """The loggable source string for a resolved payload value: the
-    redacted URI (:func:`_redact`) for URI values, :data:`BASE64_SOURCE`
-    for everything else — never decoded bytes (Requirement 3.8) or URL
-    credentials and queries."""
+    redacted URI (:func:`_redact`) for URI values, an ``upload://`` line
+    as it is (it names a packaged file by its checksum, nothing secret),
+    :data:`BASE64_SOURCE` for everything else — never decoded bytes
+    (Requirement 3.8) or URL credentials and queries."""
     if isinstance(value, str) and value.startswith(_URI_SCHEMES):
         return _redact(value)
+    if isinstance(value, str) and value.startswith(UPLOAD_REFERENCE_SCHEME):
+        return value
     return BASE64_SOURCE
 
 
@@ -277,6 +292,127 @@ def fetch_reference_bytes(
             )
         )
     _validate_image(source, data)
+    return data
+
+
+def fetch_reference_document(
+    value: Any,
+    fmt: str,
+    allowed_prefixes: Optional[Iterable[str]] = None,
+    s3_client=None,
+) -> bytes:
+    """Document bytes for a typed reference URI (``s3://``,
+    ``http(s)://`` or ``file://``) of an inspection node's reference list;
+    documents never come from a payload.
+
+    The gates of :func:`fetch_reference_bytes` apply unchanged: the
+    ``file://`` allow-list and ``realpath`` containment, regular files
+    only, the remote prefix check and the redirect checks. The size cap
+    is :data:`MAX_DOCUMENT_BYTES`. The bytes must then pass the format
+    check of ``fmt`` (:func:`_validate_document`). Raises
+    :class:`PayloadReferenceError` identifying the source and the reason
+    — never the bytes."""
+    if not isinstance(value, str) or not value.startswith(_URI_SCHEMES):
+        raise PayloadReferenceError(
+            "a document reference must be an s3://, http(s):// or file:// "
+            "URI")
+    allowed_prefixes = tuple(allowed_prefixes or ())
+    if value.startswith(FILE_SCHEME):
+        data = _fetch_file(value, allowed_prefixes, MAX_DOCUMENT_BYTES)
+    else:
+        if value.startswith(("http://", "https://")) and _has_userinfo(value):
+            raise PayloadReferenceError(
+                "reference fetch denied: URLs with embedded credentials are "
+                "not supported {0}".format(_scheme_and_host(value))
+            )
+        _check_allowed(value, allowed_prefixes)
+        if value.startswith("s3://"):
+            data = _fetch_s3(value, s3_client, MAX_DOCUMENT_BYTES)
+        else:
+            data = _fetch_http(value, allowed_prefixes, MAX_DOCUMENT_BYTES)
+    if len(data) > MAX_DOCUMENT_BYTES:
+        raise PayloadReferenceError(
+            "reference from {0} exceeds the {1}-byte size cap".format(
+                _quote(value), MAX_DOCUMENT_BYTES
+            )
+        )
+    _validate_document(value, fmt, data)
+    return data
+
+
+def read_packaged_reference(
+    artifact_path: Optional[str],
+    name: str,
+    manifest: Optional[Mapping[str, Any]],
+    max_bytes: int,
+) -> bytes:
+    """The bytes of the uploaded reference file ``name``
+    (``"{sha256}.{ext}"``, an ``upload://`` line without its scheme) of
+    this run's workflow version, verified against its ``manifest.json``.
+
+    The Portal stores the file with the workflow, packages it as
+    ``references/{name}`` and records its sha256 and size under the
+    manifest's ``referenceFiles``; Greengrass installs it in the version
+    directory ``artifact_path``. Before every use the file must be listed
+    with the name's digest, lie inside ``<artifact_path>/references/``
+    after ``realpath`` (so a symlink cannot leave it), be a regular file
+    of the recorded size and at most ``max_bytes``, and hash to the
+    recorded digest. ``allowed_uri_prefixes`` does not apply: the file is
+    part of the workflow component itself. Raises
+    :class:`PayloadReferenceError` with the reason."""
+    line = UPLOAD_REFERENCE_SCHEME + str(name)
+    if not artifact_path:
+        raise PayloadReferenceError(
+            "this run has no workflow package directory, so uploaded "
+            "reference files cannot be read")
+    if manifest is None:
+        raise PayloadReferenceError(
+            "could not read the workflow package's manifest.json")
+    files = (manifest.get(MANIFEST_REFERENCE_FILES_KEY)
+             if isinstance(manifest, Mapping) else None)
+    entry = (files.get(PACKAGED_REFERENCES_DIR + "/" + str(name))
+             if isinstance(files, Mapping) else None)
+    if (not isinstance(entry, Mapping)
+            or entry.get("sha256") != str(name).split(".", 1)[0]):
+        raise PayloadReferenceError(
+            "the workflow package's manifest.json does not list uploaded "
+            "reference file {0}".format(line))
+    root = os.path.realpath(os.path.join(artifact_path, PACKAGED_REFERENCES_DIR))
+    path = os.path.realpath(
+        os.path.join(artifact_path, PACKAGED_REFERENCES_DIR, str(name)))
+    missing = PayloadReferenceError(
+        "uploaded reference file {0} is missing from the workflow "
+        "package".format(line))
+    if not path.startswith(root + os.sep):
+        raise missing
+    try:
+        st = os.stat(path)
+    except OSError:
+        raise missing from None
+    if not stat.S_ISREG(st.st_mode):
+        raise PayloadReferenceError(
+            "uploaded reference file {0} is not a regular file".format(line))
+    if st.st_size != entry.get("bytes"):
+        raise PayloadReferenceError(
+            "uploaded reference file {0} is {1} bytes; the manifest records "
+            "{2}".format(line, st.st_size, entry.get("bytes")))
+    if st.st_size > max_bytes:
+        raise PayloadReferenceError(
+            "uploaded reference file {0} exceeds the {1}-byte size "
+            "cap".format(line, max_bytes))
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(max_bytes + 1)
+    except OSError as e:
+        raise PayloadReferenceError(
+            "could not read uploaded reference file {0}: {1}".format(
+                line, e.strerror or e)) from None
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != entry.get("sha256"):
+        raise PayloadReferenceError(
+            "uploaded reference file {0} does not match its checksum: "
+            "manifest records {1}, file is {2}".format(
+                line, entry.get("sha256"), actual))
     return data
 
 
@@ -413,12 +549,14 @@ def _build_opener(
 # ---------------------------------------------------------------------------
 
 def _fetch_http(
-    source: str, allowed_prefixes: Optional[Iterable[str]] = None
+    source: str, allowed_prefixes: Optional[Iterable[str]] = None,
+    max_bytes: int = MAX_REFERENCE_BYTES,
 ) -> bytes:
     """HTTP(S) fetch through :func:`_build_opener` with the bounded
     timeout (Requirement 3.7); non-success status, timeout, connection
     failures and refused redirects raise :class:`PayloadReferenceError`
-    naming the redacted source.
+    naming the redacted source. At most ``max_bytes + 1`` bytes are read,
+    so the caller's size check sees an oversized body.
 
     ``https://`` fetches verify against :func:`https_ssl_context` — the
     images lack an OS trust store, so relying on Python's default would
@@ -438,7 +576,7 @@ def _fetch_http(
                     "could not fetch reference {0}: HTTP status {1} "
                     "is not a success".format(_quote(source), status)
                 )
-            data = response.read(MAX_REFERENCE_BYTES + 1)
+            data = response.read(max_bytes + 1)
     except PayloadReferenceError:
         raise
     except Exception as e:
@@ -449,10 +587,11 @@ def _fetch_http(
     return data
 
 
-def _fetch_s3(source: str, s3_client=None) -> bytes:
+def _fetch_s3(source: str, s3_client=None,
+              max_bytes: int = MAX_REFERENCE_BYTES) -> bytes:
     """``s3://bucket/key`` fetch through boto3 ``get_object``, streamed
-    in chunks so the size cap abandons an oversized object early
-    (Requirement 3.7)."""
+    in chunks so the size cap (``max_bytes``) abandons an oversized
+    object early (Requirement 3.7)."""
     remainder = source[len("s3://"):]
     bucket, _, key = remainder.partition("/")
     if not bucket or not key:
@@ -481,10 +620,10 @@ def _fetch_s3(source: str, s3_client=None) -> bytes:
             if not chunk:
                 break
             total += len(chunk)
-            if total > MAX_REFERENCE_BYTES:
+            if total > max_bytes:
                 raise PayloadReferenceError(
                     "reference from {0} exceeds the {1}-byte size "
-                    "cap".format(_quote(source), MAX_REFERENCE_BYTES)
+                    "cap".format(_quote(source), max_bytes)
                 )
             chunks.append(chunk)
     except PayloadReferenceError:
@@ -538,15 +677,17 @@ def _allowed_file_roots(allowed_prefixes):
     return roots
 
 
-def _fetch_file(source: str, allowed_prefixes) -> bytes:
-    """Read a local reference image named by a ``file://`` URI.
+def _fetch_file(source: str, allowed_prefixes,
+                max_bytes: int = MAX_REFERENCE_BYTES) -> bytes:
+    """Read a local reference file named by a ``file://`` URI.
 
     The allow-list is MANDATORY here: with no ``file://`` prefix
     configured the fetch is refused, because the URI comes from the
     run's Trigger_Context (untrusted MQTT input) and the bytes are sent
     to a cloud model. The path is canonicalized with ``realpath`` before
     the prefix check, so ``..`` segments and symlinks cannot escape the
-    allowed root, and only regular files are read.
+    allowed root, and only regular files of at most ``max_bytes`` are
+    read.
     """
     path = _local_path(source)
     roots = _allowed_file_roots(allowed_prefixes)
@@ -580,15 +721,15 @@ def _fetch_file(source: str, allowed_prefixes) -> bytes:
             "local reference {0} is not a regular file".format(
                 _quote(source))
         )
-    if st.st_size > MAX_REFERENCE_BYTES:
+    if st.st_size > max_bytes:
         raise PayloadReferenceError(
             "reference from {0} exceeds the {1}-byte size cap".format(
-                _quote(source), MAX_REFERENCE_BYTES
+                _quote(source), max_bytes
             )
         )
     try:
         with open(resolved, "rb") as handle:
-            data = handle.read(MAX_REFERENCE_BYTES + 1)
+            data = handle.read(max_bytes + 1)
     except OSError as e:
         raise PayloadReferenceError(
             "could not read local reference {0}: {1}".format(
@@ -648,6 +789,35 @@ def _validate_image(source: str, data: bytes) -> None:
                 _quote(source)
             )
         )
+
+
+#: What a binary document that fails its signature check is not.
+_DOCUMENT_KIND_NAMES = {
+    "pdf": "a PDF",
+    "docx": "a DOCX/XLSX file", "xlsx": "a DOCX/XLSX file",
+    "doc": "a DOC/XLS file", "xls": "a DOC/XLS file",
+}
+
+
+def _validate_document(source: str, fmt: str, data: bytes) -> None:
+    """Raise :class:`PayloadReferenceError` naming the source and the
+    check when ``data`` fails the format check of ``fmt`` — the shared
+    ``document_signature_problem``, which the Portal's upload validation
+    applies too: a PDF starts with ``%PDF-``, DOCX/XLSX are ZIP
+    archives, DOC/XLS are OLE2 compound files, and the text formats are
+    UTF-8 (a byte-order mark allowed) and not blank. The documents are
+    not parsed; Bedrock does that."""
+    problem = document_signature_problem(fmt, data)
+    if problem is None:
+        return
+    if fmt in _DOCUMENT_KIND_NAMES:
+        message = "reference {0} is not {1} ({2})".format(
+            _quote(source), _DOCUMENT_KIND_NAMES[fmt], problem)
+    elif problem == "it is empty":
+        message = "reference {0} is empty".format(_quote(source))
+    else:
+        message = "reference {0} is not UTF-8 text".format(_quote(source))
+    raise PayloadReferenceError(message)
 
 
 def _quote(source: str) -> str:

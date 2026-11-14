@@ -856,26 +856,77 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
         ParameterDescriptor("reference_payload_path", "string", required=False,
                             default="",
                             constraints={},
-                            description="Optional dotted path resolved "
-                                        "against the trigger payload's "
-                                        "parsed JSON — dict keys and "
-                                        "integer list indices, e.g. "
-                                        "refs.0.image — selecting this "
-                                        "node's reference image: an "
-                                        "s3:// URI, an http(s):// URL, a "
-                                        "file:// path to an image already "
-                                        "on the device, or base64-encoded "
-                                        "image data (bare or a data: "
-                                        "URL). Mutually "
+                            description="Optional reference files sent "
+                                        "after the input image, one per "
+                                        "line. A URI (file:///…, s3://…, "
+                                        "https://…) names one fixed file, "
+                                        "loaded on every run: a file:// "
+                                        "URI needs an allowed_uri_prefixes "
+                                        "entry naming its directory, and "
+                                        "an s3:// or http(s):// URI must "
+                                        "match an entry when that list is "
+                                        "set. Any other line is a dotted "
+                                        "path resolved against the "
+                                        "trigger payload's parsed JSON — "
+                                        "dict keys and integer list "
+                                        "indices, e.g. refs.0.image — "
+                                        "whose value is an s3:// URI, an "
+                                        "http(s):// URL, a file:// path to "
+                                        "an image already on the device, "
+                                        "or base64-encoded image data "
+                                        "(bare or a data: URL). A single "
+                                        "image is sent labelled \"Reference "
+                                        "image\"; in inspection format "
+                                        "nothing else is added, so the "
+                                        "prompt must say what it shows, "
+                                        "for example a legend of part "
+                                        "shapes. A fixed image is sent as "
+                                        "an upright JPEG, with "
+                                        "transparency flattened onto "
+                                        "white. Several lines form a "
+                                        "list, sent in order and labelled "
+                                        "\"Reference 1\", \"Reference 2\" "
+                                        "and so on; the prompt refers to "
+                                        "the files by those labels. A "
+                                        "fixed URI ending in .pdf, .txt, "
+                                        ".md, .csv, .html, .doc, .docx, "
+                                        ".xls or .xlsx is sent as a "
+                                        "document; everything else is an "
+                                        "image. Lists and documents need "
+                                        "answer_format inspection; the "
+                                        "limits are 5 documents of 4.5 MB "
+                                        "each and 19 images besides the "
+                                        "input. A file uploaded in the "
+                                        "workflow editor appears as a "
+                                        "line upload://<sha256>.<ext>: it "
+                                        "is stored with the workflow, "
+                                        "shipped inside the workflow "
+                                        "component, verified by its "
+                                        "checksum on the device, and "
+                                        "needs no allowed_uri_prefixes "
+                                        "entry. It needs a LocalServer "
+                                        "built from the release in the "
+                                        "Portal CHANGELOG entry "
+                                        "\"Workflow tuning for "
+                                        "inspection-format Bedrock nodes, "
+                                        "reference files and live tuning "
+                                        "configuration\", or a later one; "
+                                        "an older one sends the request "
+                                        "without it, or records an error "
+                                        "on the legacy path. Mutually "
                                         "exclusive with a connected "
-                                        "reference frame port; a "
-                                        "resolution, fetch, or decode "
-                                        "failure records an error outcome "
-                                        "for this node (never a "
+                                        "reference frame port; if any "
+                                        "file cannot be resolved, fetched "
+                                        "or decoded, the node records an "
+                                        "error outcome (never a "
                                         "single-image fallback). Empty "
                                         "keeps today's reference-port "
                                         "behavior.",
-                            examples=["refs.0.image", "reference.image_url"]),
+                            examples=["refs.0.image", "reference.image_url",
+                                      "file:///aws_dda/reference-images/legend.jpg",
+                                      "file:///aws_dda/reference/legend.jpg\n"
+                                      "file:///aws_dda/reference/assembly.pdf"],
+                            multiline=True),
         ParameterDescriptor("allowed_uri_prefixes", "string", required=False,
                             default="",
                             constraints={},
@@ -900,9 +951,16 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                                         "payload point the fetch at any "
                                         "remote source, so setting "
                                         "prefixes for the sources you "
-                                        "use is recommended.",
+                                        "use is recommended. It applies "
+                                        "to both forms of "
+                                        "reference_payload_path and to "
+                                        "every typed line of it. A "
+                                        "file:// entry names a directory. "
+                                        "Files uploaded in the workflow "
+                                        "editor need no entry.",
                             examples=["s3://plant-images/\nhttps://mes.local/",
-                                      "file:///aws_dda/reference-images/"]),
+                                      "file:///aws_dda/reference-images/"],
+                            multiline=True),
         # Appended (additive — bedrock-inspection-chain inspection mode): every
         # pre-existing parameter keeps its position and content, and
         # every default below reproduces today's single legacy Converse
@@ -922,7 +980,14 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                                         "instruction instead of the anomaly "
                                         "one, ignores anomaly_mode and "
                                         "exposes the parsed answer as "
-                                        "bedrock.{nodeId}.* metadata.",
+                                        "bedrock.{nodeId}.* metadata. "
+                                        "Reference files, if configured, "
+                                        "are attached after the input "
+                                        "image, labelled as "
+                                        "reference_payload_path "
+                                        "describes, with no comparison "
+                                        "instruction: the prompt says how "
+                                        "to use them.",
                             examples=["legacy", "inspection"]),
         ParameterDescriptor("render_prompt", "bool", required=False,
                             default=False,
@@ -1020,11 +1085,14 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
         ParameterDescriptor("max_image_dimension", "int", required=False,
                             default=0,
                             constraints={"min": 0, "max": 8000},
-                            description="Downscale the input image so its "
-                                        "longer edge is at most this many "
-                                        "pixels before sending and drawing "
-                                        "(0-8000), e.g. 1280. 0 sends the "
-                                        "frame unmodified.",
+                            description="Downscale the input image, and in "
+                                        "inspection format the reference "
+                                        "image, so their longer edge is "
+                                        "at most this many pixels before "
+                                        "sending and drawing (0-8000), "
+                                        "e.g. 1280; images are never "
+                                        "upscaled. 0 sends the frame "
+                                        "unmodified.",
                             examples=[0, 1280]),
         ParameterDescriptor("annotate", "bool", required=False, default=False,
                             constraints={},

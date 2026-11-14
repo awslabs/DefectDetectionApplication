@@ -32,14 +32,26 @@ callers) omit the argument and the resolution check is skipped.
 from __future__ import annotations
 
 import json
+import posixpath
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    AbstractSet, Any, Dict, List, Mapping, Optional, Sequence, Tuple,
+)
 
 from ..analytics.scene import (
     MAX_CLASS_LIST_ITEMS,
     MAX_REQUIRED_CLASSES,
     parse_label_list,
     parse_zone,
+)
+from ..anomaly_invocation import (
+    ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER,
+    BEDROCK_DEFAULT_MODEL,
+    KIND_DOCUMENT,
+    UPLOAD_REFERENCE_SCHEME,
+    parse_reference_list,
+    reference_list_problems,
+    resolve_additional_model_request_fields,
 )
 from ..catalog import NODE_CATALOG
 from ..catalog import metadata_config
@@ -51,10 +63,6 @@ from ..catalog.models import (
     NodeTypeDescriptor,
     PARAM_TYPE_MODEL_REF,
     PORT_TYPES,
-)
-from ..anomaly_invocation import (
-    ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER,
-    resolve_additional_model_request_fields,
 )
 from ..catalog.nodes import SOURCE_KIND_TO_SOURCE_TYPE
 from ..serializer.models import Node, WorkflowGraph
@@ -271,6 +279,29 @@ CODE_W2_METADATA_NO_TRIGGER = "W2_METADATA_NO_TRIGGER"
 CODE_BEDROCK_REFERENCE_CONFLICT = "BEDROCK_REFERENCE_CONFLICT"
 CODE_BEDROCK_CROP_NO_MODEL = "BEDROCK_CROP_NO_MODEL"
 CODE_BEDROCK_PAYLOAD_NO_TRIGGER = "BEDROCK_PAYLOAD_NO_TRIGGER"
+# Reference lists (inspection-format tuning fix): ``reference_payload_path``
+# holds one reference per line — an uploaded file (``upload://``), a fixed
+# URI or a payload path.
+# - BEDROCK_REFERENCE_URI_NOT_ALLOWED (error): a fixed URI line that the
+#   device's allow-list would refuse (the lexical ``file://`` rule, or no
+#   ``s3://``/``http(s)://`` prefix entry when the list is non-empty).
+# - BEDROCK_REFERENCE_LIST_INVALID (error): a statically known list
+#   problem (``anomaly_invocation.reference_list_problems``).
+# - BEDROCK_REFERENCE_UPLOAD_MISSING (error): an upload line naming a file
+#   the workflow does not store; checked only when the caller supplies
+#   the stored names (``reference_uploads``).
+# - BEDROCK_REFERENCE_MODEL_UNVERIFIED (warning): a list with a document
+#   and a model this Portal does not know to accept documents.
+CODE_BEDROCK_REFERENCE_URI_NOT_ALLOWED = "BEDROCK_REFERENCE_URI_NOT_ALLOWED"
+CODE_BEDROCK_REFERENCE_LIST_INVALID = "BEDROCK_REFERENCE_LIST_INVALID"
+CODE_BEDROCK_REFERENCE_UPLOAD_MISSING = "BEDROCK_REFERENCE_UPLOAD_MISSING"
+CODE_BEDROCK_REFERENCE_MODEL_UNVERIFIED = "BEDROCK_REFERENCE_MODEL_UNVERIFIED"
+
+#: Lowercased model-id substrings of the models known to accept document
+#: blocks in Bedrock Converse (``us.`` profiles and ARNs match too).
+DOCUMENT_CAPABLE_MODEL_MARKERS = (
+    "amazon.nova-lite", "amazon.nova-pro", "amazon.nova-premier",
+    "amazon.nova-2-lite", "anthropic.claude")
 
 # Built-in inspection chain checks (bedrock-inspection-chain): every rule fires
 # only on a node that sets one of the NEW parameters off its default, so
@@ -287,7 +318,8 @@ CODE_BEDROCK_PAYLOAD_NO_TRIGGER = "BEDROCK_PAYLOAD_NO_TRIGGER"
 #   BEDROCK_PAYLOAD_NO_TRIGGER: no trigger payload to resolve against).
 # - BEDROCK_INSPECTION_INPUTS (error): ``answer_format: inspection`` with
 #   ``crop_detection_index`` set or a connected ``reference`` port — the
-#   inspection path is whole-frame, single-image by design.
+#   inspection path judges the whole frame, and its references come only
+#   from ``reference_payload_path``.
 # - BEDROCK_BUDGET_TOO_SMALL (warning): ``0 < budget_s <
 #   attempt_timeout_s`` — the first attempt would always overrun the
 #   budget. Range violations stay with V4 (descriptor min/max).
@@ -470,6 +502,7 @@ def validate(
     graph: WorkflowGraph,
     catalog: Sequence[NodeTypeDescriptor] = NODE_CATALOG,
     model_registry: Optional[Mapping[str, Any]] = None,
+    reference_uploads: Optional[AbstractSet[str]] = None,
 ) -> List[ValidationFinding]:
     """Run all validator checks on ``graph`` and return every finding.
 
@@ -484,6 +517,13 @@ def validate(
     resolved against it with the model-type/node-family rule
     (vllm-triton-inference Requirements 6.5, 6.12); when omitted (the
     default) the resolution check is skipped and behavior is unchanged.
+
+    ``reference_uploads`` is the set of uploaded reference file names
+    (``"{sha256}.{ext}"``) the workflow stores. When supplied, every
+    well-formed ``upload://`` line of a ``bedrock_inference`` node's
+    ``reference_payload_path`` must name one of them
+    (``BEDROCK_REFERENCE_UPLOAD_MISSING``); when omitted the existence
+    check is skipped.
     """
     descriptors: Dict[str, NodeTypeDescriptor] = {d.type_id: d for d in catalog}
 
@@ -517,7 +557,8 @@ def validate(
     findings.extend(_check_v9(graph, typed_nodes))
     findings.extend(_check_v10_metadata(graph, typed_nodes))
     findings.extend(_check_w2_metadata_no_trigger(graph, typed_nodes))
-    findings.extend(_check_bedrock_inspection(graph, typed_nodes))
+    findings.extend(_check_bedrock_inspection(
+        graph, typed_nodes, reference_uploads=reference_uploads))
     findings.extend(_check_v11_stream_url(graph, typed_nodes))
     findings.extend(_check_v12_continuous_activation(graph, typed_nodes))
     findings.extend(_check_v13_analytics_config(graph, typed_nodes))
@@ -1320,11 +1361,39 @@ def _check_w2_metadata_no_trigger(graph: WorkflowGraph, typed_nodes: Dict[str, N
 # (detection-guided-bedrock-inspection Requirements 3.6, 6.2, 6.3, 6.4)
 # --------------------------------------------------------------------------
 
-def _check_bedrock_inspection(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTypeDescriptor]) -> List[ValidationFinding]:
+def _check_bedrock_inspection(
+    graph: WorkflowGraph,
+    typed_nodes: Dict[str, NodeTypeDescriptor],
+    reference_uploads: Optional[AbstractSet[str]] = None,
+) -> List[ValidationFinding]:
     """Validate the detection-guided inspection parameters on every
-    ``bedrock_inference`` node — at most one finding per rule per node.
+    ``bedrock_inference`` node — at most one finding per rule per node
+    (per line for the per-line reference rules).
 
-    Three rules:
+    ``reference_payload_path`` is a list of references, one per line
+    (``anomaly_invocation.parse_reference_list``): uploaded files, fixed
+    URIs and payload paths. The reference rules:
+
+    - ``BEDROCK_REFERENCE_LIST_INVALID`` (error): each text of
+      ``reference_list_problems`` — a malformed upload line, a list or a
+      document on a node not in inspection format, counts over the
+      Converse limits.
+    - ``BEDROCK_REFERENCE_URI_NOT_ALLOWED`` (error), at most once per
+      fixed-URI line: the device's ``file://`` rule applied lexically
+      (empty or ``localhost`` authority, an absolute path, a permitting
+      ``file://`` directory entry after ``posixpath.normpath``), and its
+      ``s3://``/``http(s)://`` string-prefix rule when
+      ``allowed_uri_prefixes`` is non-empty. Upload lines are exempt:
+      the device reads them from the workflow version's own directory.
+      The device's ``realpath`` check stays authoritative (symlinks are
+      invisible here).
+    - ``BEDROCK_REFERENCE_MODEL_UNVERIFIED`` (warning): a list with a
+      document and a model outside ``DOCUMENT_CAPABLE_MODEL_MARKERS``.
+    - ``BEDROCK_REFERENCE_UPLOAD_MISSING`` (error), only when
+      ``reference_uploads`` is a set: a well-formed upload line whose
+      file the workflow does not store.
+
+    Three earlier rules:
 
     - ``BEDROCK_REFERENCE_CONFLICT`` (error, Requirement 3.6): the node
       sets ``reference_payload_path`` AND its ``reference`` input port is
@@ -1334,11 +1403,12 @@ def _check_bedrock_inspection(graph: WorkflowGraph, typed_nodes: Dict[str, NodeT
       ``crop_detection_index`` in a graph with no ``model_inference``
       node, so no detection model can populate the Detection_List the
       index selects from at runtime.
-    - ``BEDROCK_PAYLOAD_NO_TRIGGER`` (warning, Requirement 6.3): the node
-      sets ``reference_payload_path`` in a graph with no
+    - ``BEDROCK_PAYLOAD_NO_TRIGGER`` (warning, Requirement 6.3): the
+      node's list holds a payload-path line in a graph with no
       ``CATEGORY_TRIGGER`` node, so no trigger payload will exist to
       resolve the dotted path against at runtime (mirroring W2's
-      trigger-presence rule for metadata mappings).
+      trigger-presence rule for metadata mappings). Fixed URIs and
+      upload lines need no trigger.
 
     Range constraints — a negative ``crop_detection_index`` or a
     ``crop_margin_percent`` outside 0-100 (Requirement 6.4) — are
@@ -1378,6 +1448,8 @@ def _check_bedrock_inspection(graph: WorkflowGraph, typed_nodes: Dict[str, NodeT
         has_payload_path = (
             isinstance(payload_path, str) and payload_path.strip() != ""
         )
+        specs = parse_reference_list(payload_path)
+        has_payload_line = any(not spec.static for spec in specs)
         has_crop_index = values.get("crop_detection_index") is not None
 
         if has_payload_path and node.id in fed_reference_nodes:
@@ -1401,7 +1473,7 @@ def _check_bedrock_inspection(graph: WorkflowGraph, typed_nodes: Dict[str, NodeT
                 node_id=node.id,
             ))
 
-        if has_payload_path and not has_trigger:
+        if has_payload_line and not has_trigger:
             findings.append(ValidationFinding(
                 SEVERITY_WARNING,
                 CODE_BEDROCK_PAYLOAD_NO_TRIGGER,
@@ -1410,6 +1482,118 @@ def _check_bedrock_inspection(graph: WorkflowGraph, typed_nodes: Dict[str, NodeT
                 "exist to resolve the path against at "
                 "runtime".format(node.id),
                 node_id=node.id,
+            ))
+
+        if specs:
+            findings.extend(_reference_list_findings(
+                node.id, values, specs, reference_uploads))
+    return findings
+
+
+def _allowed_prefix_entries(raw: Any) -> Tuple[str, ...]:
+    """The non-empty stripped lines of ``allowed_uri_prefixes``, as the
+    device splits them."""
+    if not isinstance(raw, str):
+        return ()
+    return tuple(line.strip() for line in raw.splitlines() if line.strip())
+
+
+def _file_reference_problem(uri: str, entries: Sequence[str]) -> Optional[str]:
+    """Why the device's ``file://`` rule refuses ``uri``, applied
+    lexically (``payload_fetch._local_path`` / ``_allowed_file_roots``),
+    or ``None`` when an entry permits it."""
+    remainder = uri[len("file://"):]
+    authority, sep, tail = remainder.partition("/")
+    if authority not in ("", "localhost"):
+        return ("names the host '{0}' (only file:/// or file://localhost/ "
+                "name a file on the device)".format(authority))
+    path = "/" + tail if sep else ""
+    if not path or path == "/":
+        return "names no absolute path (expected file:///absolute/path)"
+    uri_path = posixpath.normpath(path)
+    for entry in entries:
+        if not entry.startswith("file://"):
+            continue
+        raw = entry[len("file://"):]
+        if raw.startswith("localhost/"):
+            raw = raw[len("localhost"):]
+        if not raw.startswith("/"):
+            continue
+        root = posixpath.normpath(raw)
+        if uri_path == root or uri_path.startswith(root.rstrip("/") + "/"):
+            return None
+    return ("no allowed_uri_prefixes entry permits it (a file:// reference "
+            "needs an explicit file:// entry naming its directory)")
+
+
+def _reference_list_findings(
+    node_id: str,
+    values: Mapping[str, Any],
+    specs: Sequence[Any],
+    reference_uploads: Optional[AbstractSet[str]],
+) -> List[ValidationFinding]:
+    """The reference-list rules of one ``bedrock_inference`` node (see
+    :func:`_check_bedrock_inspection`)."""
+    findings: List[ValidationFinding] = []
+    for problem in reference_list_problems(specs, values.get("answer_format")):
+        findings.append(ValidationFinding(
+            SEVERITY_ERROR,
+            CODE_BEDROCK_REFERENCE_LIST_INVALID,
+            "Node '{0}': {1}".format(node_id, problem),
+            node_id=node_id,
+        ))
+
+    entries = _allowed_prefix_entries(values.get("allowed_uri_prefixes"))
+    several = len(specs) > 1
+    for spec in specs:
+        if not spec.static or spec.uploaded:
+            continue
+        where = ("line {0} of 'reference_payload_path'".format(spec.index)
+                 if several else "'reference_payload_path'")
+        if spec.text.startswith("file://"):
+            problem = _file_reference_problem(spec.text, entries)
+        elif entries and not any(spec.text.startswith(e) for e in entries):
+            problem = "no allowed_uri_prefixes entry is a prefix of it"
+        else:
+            problem = None
+        if problem is not None:
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_BEDROCK_REFERENCE_URI_NOT_ALLOWED,
+                "Node '{0}': {1} is the fixed URI {2} but {3}".format(
+                    node_id, where, spec.text, problem),
+                node_id=node_id,
+            ))
+
+    if any(spec.kind == KIND_DOCUMENT for spec in specs):
+        model = str(values.get("model") or BEDROCK_DEFAULT_MODEL)
+        if not any(marker in model.lower()
+                   for marker in DOCUMENT_CAPABLE_MODEL_MARKERS):
+            findings.append(ValidationFinding(
+                SEVERITY_WARNING,
+                CODE_BEDROCK_REFERENCE_MODEL_UNVERIFIED,
+                "Node '{0}' sends documents, but this Portal does not know "
+                "whether model '{1}' accepts documents in Bedrock Converse; "
+                "if it does not, every run records an error.".format(
+                    node_id, model),
+                node_id=node_id,
+            ))
+
+    if isinstance(reference_uploads, (set, frozenset)):
+        for spec in specs:
+            if spec.upload_name is None or spec.upload_name in reference_uploads:
+                continue
+            digest, _, extension = spec.upload_name.partition(".")
+            findings.append(ValidationFinding(
+                SEVERITY_ERROR,
+                CODE_BEDROCK_REFERENCE_UPLOAD_MISSING,
+                "Node '{0}': line {1} of 'reference_payload_path' names an "
+                "uploaded file that this workflow does not store "
+                "({2}{3}\u2026.{4}); upload the file again in this "
+                "workflow".format(node_id, spec.index,
+                                  UPLOAD_REFERENCE_SCHEME, digest[:12],
+                                  extension),
+                node_id=node_id,
             ))
     return findings
 
@@ -1535,8 +1719,9 @@ def _check_inspection_chain(graph: WorkflowGraph, typed_nodes: Dict[str, NodeTyp
                         SEVERITY_ERROR,
                         CODE_BEDROCK_INSPECTION_INPUTS,
                         "Node '{0}': 'answer_format' is inspection but {1} "
-                        "— the inspection answer is a whole-frame, "
-                        "single-image check".format(
+                        "— the inspection answer judges the whole captured "
+                        "frame, and its reference image can only come from "
+                        "reference_payload_path".format(
                             node.id, " and ".join(conflicts)),
                         node_id=node.id,
                     ))

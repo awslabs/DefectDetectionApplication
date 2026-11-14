@@ -13,6 +13,10 @@ Routes (API Gateway REST):
     DELETE /workflows/{id}               Delete workflow + versions             (5.5, 5.6)
     POST   /workflows/{id}/duplicate     Duplicate under a new name             (5.7)
     GET    /workflows/{id}/versions      List version history                   (5.2)
+    POST   /workflows/{id}/reference-files/upload-url   Presigned staging PUT for a reference file
+    POST   /workflows/{id}/reference-files              Check and store a staged reference file
+    GET    /workflows/{id}/reference-files              List the workflow's reference files
+           (the three reference-file routes are served by workflow_reference_files.py)
 
 Storage layout:
     Workflows table         (WORKFLOWS_TABLE)          PK workflow_id, GSI usecase-workflows-index
@@ -56,6 +60,9 @@ from node_catalog_resolution import (
     load_registered_node_types,
     referenced_node_type_versions,
 )
+# Reference files uploaded for Bedrock Inference nodes (same bundle): the
+# three reference-file routes and the copy duplicate_workflow makes.
+import workflow_reference_files
 
 # Configure logging
 logger = logging.getLogger()
@@ -748,6 +755,19 @@ def duplicate_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     new_workflow_id = str(uuid.uuid4())
     timestamp = now_ms()
 
+    # The uploaded reference files the definition's upload lines name are
+    # copied to the new workflow before any of its documents or records
+    # exist, so a failed copy leaves nothing behind.
+    reference_names = workflow_reference_files.definition_reference_names(
+        json.loads(canonical_json))
+    if reference_names:
+        try:
+            workflow_reference_files.copy_reference_files(
+                usecase_id, workflow_id, new_workflow_id, reference_names)
+        except workflow_reference_files.ReferenceFileCopyError:
+            return error_response(500, 'REFERENCE_FILE_COPY_FAILED',
+                                  'The reference files uploaded to the workflow could not be copied')
+
     s3_key = put_definition(usecase_id, new_workflow_id, 1, canonical_json)
     put_version_item(new_workflow_id, 1, s3_key, user,
                      custom_node_type_references(usecase_id, canonical_json))
@@ -825,6 +845,20 @@ def list_versions(event: Dict, user: Dict, workflow_id: str) -> Dict:
     })
 
 
+def reference_files_route(event: Dict, user: Dict, workflow_id: str,
+                          permission: Permission, route) -> Dict:
+    """A reference-file route of workflow_reference_files.py on an existing
+    workflow, authorized like every workflow route: the uniform 404 without
+    workflow:read, a 403 with the denied-access audit without `permission`."""
+    item = get_workflow_item(workflow_id)
+    if not item:
+        return not_found_response()
+    err = authorize_workflow_access(user, event, item, permission)
+    if err:
+        return err
+    return route(event, user, item)
+
+
 def handler(event: Dict, context: Any) -> Dict:
     """Main Lambda handler - routes to the appropriate operation"""
     try:
@@ -869,6 +903,17 @@ def handler(event: Dict, context: Any) -> Dict:
         elif resource == '/workflows/{id}/versions' and workflow_id:
             if http_method == 'GET':
                 return list_versions(event, user, workflow_id)
+        elif resource == '/workflows/{id}/reference-files' and workflow_id:
+            if http_method == 'GET':
+                return reference_files_route(event, user, workflow_id, Permission.WORKFLOW_READ,
+                                             workflow_reference_files.list_files)
+            if http_method == 'POST':
+                return reference_files_route(event, user, workflow_id, Permission.WORKFLOW_EDIT,
+                                             workflow_reference_files.complete_upload)
+        elif resource == '/workflows/{id}/reference-files/upload-url' and workflow_id:
+            if http_method == 'POST':
+                return reference_files_route(event, user, workflow_id, Permission.WORKFLOW_EDIT,
+                                             workflow_reference_files.upload_url)
 
         return error_response(404, 'NOT_FOUND', 'Not found')
 

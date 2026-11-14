@@ -30,6 +30,7 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../../services/api';
 import { getErrorMessage } from '../../utils/errorHandling';
+import ReferenceList from './ReferenceList';
 import type {
   OutcomeCategory,
   SampleOutcomeView,
@@ -231,7 +232,9 @@ export default function CompareTab({
             ) : (
               <Box variant="p">Input image unavailable</Box>
             )}
-            {sample && !sample.singleImage && sample.reference?.url ? (
+            {sample?.references ? (
+              <ReferenceList references={sample.references} maxImageHeight={200} />
+            ) : sample && !sample.singleImage && sample.reference?.url ? (
               <img
                 src={sample.reference.url}
                 alt={`Reference image of ${outcome.sampleId}`}

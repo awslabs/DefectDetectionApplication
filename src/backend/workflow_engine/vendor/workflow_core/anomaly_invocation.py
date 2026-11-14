@@ -16,8 +16,13 @@ inline in ``BedrockInferenceProcessor._run_one`` /
 ``LlmInferenceProcessor._run_one`` and their default transports, so the
 extraction is behaviour-neutral (Requirements 11.1, 11.2, Property 7).
 What stays in the executor: image resolution (detection crops, payload
-references, capturePaths, the fail-closed rules), ``render_prompt``,
-artifact persistence, metadata assembly and the transports themselves.
+references, capturePaths, the fail-closed rules), artifact persistence,
+metadata assembly and the transports themselves. The prompt renderers
+(``render_prompt``, ``render_prompt_text``) and the inspection request
+preparation live here, so the device and the Portal's replay of an
+``answer_format: inspection`` node render and count the same way; the
+reference-list parsing and the attachment blocks of a list of reference
+files live here too, for the same reason.
 
 Pure module: standard library only — no boto3, no HTTP, no filesystem,
 no logging, and no imports outside this package (the inspection answer
@@ -104,14 +109,37 @@ def is_anomaly_mode(node_type: Any, anomaly_mode: Any) -> bool:
     return False
 
 
-def is_tunable_node(node_type: Any, anomaly_mode: Any) -> bool:
+#: The ``bedrock_inference`` parameter selecting the answer contract.
+ANSWER_FORMAT_PARAMETER = "answer_format"
+
+
+def is_inspection_format(parameters: Mapping[str, Any]) -> bool:
+    """True when ``parameters`` select ``answer_format: inspection``.
+
+    ``str(parameters.get("answer_format") or "") == "inspection"``: the
+    executor's own comparison (no strip, no case folding).
+    """
+    return (str(parameters.get(ANSWER_FORMAT_PARAMETER) or "")
+            == ANSWER_FORMAT_INSPECTION)
+
+
+def is_tunable_node(node_type: Any, anomaly_mode: Any,
+                    answer_format: Any = None) -> bool:
     """True when the node is a Tunable_Node (Requirement 1.5).
 
-    A Tunable_Node is an Inspection_Node in Anomaly_Mode, so this is
-    :func:`is_anomaly_mode` under the tuning-facing name; both exist so
-    the executor and the Portal each read the rule in their own terms
-    while sharing one implementation (Property 1).
+    A ``bedrock_inference`` node whose ``answer_format`` is exactly
+    ``inspection`` (``str(answer_format or "")``, the executor's
+    comparison) is tunable whatever its ``anomaly_mode``: the executor
+    exports every answered inspection run. Otherwise a Tunable_Node is an
+    Inspection_Node in Anomaly_Mode, so this is :func:`is_anomaly_mode`
+    under the tuning-facing name; both exist so the executor and the
+    Portal each read the rule in their own terms while sharing one
+    implementation (Property 1). Two-argument callers get the
+    Anomaly_Mode answer, unchanged.
     """
+    if (node_type == NODE_TYPE_BEDROCK_INFERENCE
+            and str(answer_format or "") == ANSWER_FORMAT_INSPECTION):
+        return True
     return is_anomaly_mode(node_type, anomaly_mode)
 
 
@@ -242,6 +270,78 @@ BEDROCK_IMAGE_FORMAT = "jpeg"
 #: per node and never defaulted or inferred from the model id.
 ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER = "additional_model_request_fields"
 
+# ---------------------------------------------------------------------------
+# Reference lists: one reference per line of reference_payload_path
+# ---------------------------------------------------------------------------
+
+#: The two kinds of a reference file.
+KIND_IMAGE, KIND_DOCUMENT = "image", "document"
+
+#: Extension of a static reference's URI path -> Converse document format.
+DOCUMENT_FORMATS_BY_EXTENSION = {
+    ".pdf": "pdf", ".txt": "txt", ".md": "md", ".markdown": "md",
+    ".csv": "csv", ".html": "html", ".htm": "html", ".doc": "doc",
+    ".docx": "docx", ".xls": "xls", ".xlsx": "xlsx"}
+
+#: Converse limits of one request.
+MAX_DOCUMENT_REFERENCES = 5          # up to five documents
+MAX_IMAGE_REFERENCES = 19            # up to 20 images, input included
+MAX_DOCUMENT_BYTES = 4_500_000       # 4.5 MB per document
+MAX_SENT_IMAGE_BYTES = 3_750_000     # 3.75 MB per image
+MAX_IMAGE_SIDE_PX = 8000             # 8000 px per side
+
+#: Label of each reference of a list form (1-based position).
+LIST_REFERENCE_LABEL = "Reference {n}"
+
+#: A file uploaded in the workflow editor and packaged with the workflow:
+#: ``upload://{sha256}.{ext}``. Not one of REFERENCE_URI_SCHEMES: it is
+#: resolved against the workflow package only, never fetched as a URI.
+UPLOAD_REFERENCE_SCHEME = "upload://"
+UPLOAD_IMAGE_EXTENSIONS = ("jpg", "png")
+UPLOAD_DOCUMENT_EXTENSIONS = ("pdf", "txt", "md", "csv", "html",
+                              "doc", "docx", "xls", "xlsx")
+UPLOAD_LINE_RE = re.compile(
+    r"^upload://([0-9a-f]{64})\.(jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx)$")
+#: Directory of the uploaded files inside the workflow version's directory.
+PACKAGED_REFERENCES_DIR = "references"
+#: Key of the uploaded files' checksums in the package's manifest.json.
+MANIFEST_REFERENCE_FILES_KEY = "referenceFiles"
+
+#: The URI schemes of a static reference — the device's
+#: ``payload_fetch._URI_SCHEMES`` (case-sensitive).
+REFERENCE_URI_SCHEMES = ("s3://", "http://", "https://", "file://")
+
+#: The four ``document_signature_problem`` reasons and the OLE2 magic.
+_OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_ZIP_MAGIC = b"PK\x03\x04"
+_PDF_MAGIC = b"%PDF-"
+_TEXT_DOCUMENT_FORMATS = ("txt", "md", "csv", "html")
+
+#: The malformed-upload-line problem text (``{n}`` = the line's position).
+_MALFORMED_UPLOAD_LINE = (
+    "line {n} of reference_payload_path is not a valid uploaded-file "
+    "reference: expected upload://<64 lowercase hex characters>."
+    "<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>")
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """One labelled file of a list-form request, after the input image."""
+
+    label: str
+    kind: str       # KIND_IMAGE or KIND_DOCUMENT
+    format: str     # "jpeg" for an image; the document format
+    data: bytes
+
+
+@dataclass(frozen=True)
+class ReferenceFile:
+    """One loaded reference, as :func:`build_bedrock_invocation` takes it."""
+
+    kind: str
+    format: str
+    data: bytes     # an image as prepared for sending; a document unchanged
+
 
 @dataclass(frozen=True)
 class BedrockInvocation:
@@ -258,6 +358,10 @@ class BedrockInvocation:
     non-empty object (see :func:`resolve_additional_model_request_fields`)
     or ``None`` when the request carries no such field; kept as text so
     the invocation stays immutable and hashable.
+    ``attachments`` is the list form of several reference files (the
+    input image first, then every reference with its label); it is empty
+    for a request with at most one reference image, which ``images``
+    describes alone.
     """
 
     model: str
@@ -269,6 +373,21 @@ class BedrockInvocation:
     anomaly_mode: bool = True
     answer_format: str = ANSWER_FORMAT_LEGACY
     additional_model_request_fields: Optional[str] = None
+    attachments: Tuple[Attachment, ...] = ()
+
+    @property
+    def image_count(self) -> int:
+        """The number of image blocks, the input image included."""
+        if self.attachments:
+            return sum(1 for item in self.attachments
+                       if item.kind == KIND_IMAGE)
+        return len(self.images)
+
+    @property
+    def document_count(self) -> int:
+        """The number of document blocks."""
+        return sum(1 for item in self.attachments
+                   if item.kind == KIND_DOCUMENT)
 
     def converse_kwargs(self) -> Dict[str, Any]:
         """The exact ``client.converse(**kwargs)`` keyword arguments.
@@ -282,17 +401,38 @@ class BedrockInvocation:
         pre-feature invocation); ``additionalModelRequestFields`` only
         when the node configures a non-empty object (a fresh dict per
         call, so a caller mutating the kwargs never changes the
-        invocation).
+        invocation). A list form renders ``attachments`` instead of
+        ``images``: per attachment the ``"{label}:"`` text block, then
+        the image block or a ``document`` block named by the label.
         """
         content: List[Dict[str, Any]] = [{"text": self.prompt}]
-        for label, data in self.images:
-            content.append({"text": "{0}:".format(label)})
-            content.append({
-                "image": {
-                    "format": BEDROCK_IMAGE_FORMAT,
-                    "source": {"bytes": data},
-                },
-            })
+        if self.attachments:
+            for attachment in self.attachments:
+                content.append({"text": "{0}:".format(attachment.label)})
+                if attachment.kind == KIND_DOCUMENT:
+                    content.append({
+                        "document": {
+                            "format": attachment.format,
+                            "name": attachment.label,
+                            "source": {"bytes": attachment.data},
+                        },
+                    })
+                else:
+                    content.append({
+                        "image": {
+                            "format": BEDROCK_IMAGE_FORMAT,
+                            "source": {"bytes": attachment.data},
+                        },
+                    })
+        else:
+            for label, data in self.images:
+                content.append({"text": "{0}:".format(label)})
+                content.append({
+                    "image": {
+                        "format": BEDROCK_IMAGE_FORMAT,
+                        "source": {"bytes": data},
+                    },
+                })
         kwargs: Dict[str, Any] = dict(
             modelId=self.model,
             messages=[{"role": "user", "content": content}],
@@ -355,6 +495,7 @@ def build_bedrock_invocation(
     parameters: Mapping[str, Any],
     input_image: bytes,
     reference_image: Optional[bytes] = None,
+    references: Optional[Iterable[ReferenceFile]] = None,
 ) -> BedrockInvocation:
     """Build a :class:`BedrockInvocation` from a node's parameters.
 
@@ -385,7 +526,22 @@ def build_bedrock_invocation(
       a JSON object is sent as ``additionalModelRequestFields`` in every
       format (:func:`resolve_additional_model_request_fields`, which
       raises ``ValueError`` on anything that is not a JSON object).
+    - ``references`` (:class:`ReferenceFile` items, mutually exclusive
+      with ``reference_image``; passing both raises ``ValueError``):
+      exactly one image reference is built exactly as
+      ``reference_image=`` its bytes, with ``attachments`` empty; any
+      other non-empty list is the list form: ``attachments`` holds the
+      input image, then each reference labelled by
+      :func:`reference_labels`, and ``images`` holds the image
+      attachments as ``(label, data)`` pairs in the same order.
     """
+    if reference_image is not None and references is not None:
+        raise ValueError(
+            "reference_image and references are mutually exclusive")
+    reference_files = tuple(references or ())
+    if len(reference_files) == 1 and reference_files[0].kind == KIND_IMAGE:
+        reference_image = reference_files[0].data
+        reference_files = ()
     answer_format = str(parameters.get("answer_format") or ANSWER_FORMAT_LEGACY)
     prompt = str(parameters.get("prompt") or "")
     if answer_format == ANSWER_FORMAT_INSPECTION:
@@ -399,8 +555,18 @@ def build_bedrock_invocation(
             prompt = (prompt + ANOMALY_INSTRUCTION_SEPARATOR
                       + BEDROCK_JSON_INSTRUCTION)
     images: List[Tuple[str, bytes]] = [(INPUT_IMAGE_LABEL, input_image)]
+    attachments: List[Attachment] = []
     if reference_image is not None:
         images.append((REFERENCE_IMAGE_LABEL, reference_image))
+    elif reference_files:
+        labels = reference_labels([item.kind for item in reference_files])
+        attachments.append(Attachment(
+            INPUT_IMAGE_LABEL, KIND_IMAGE, BEDROCK_IMAGE_FORMAT, input_image))
+        for label, item in zip(labels, reference_files):
+            attachments.append(
+                Attachment(label, item.kind, item.format, item.data))
+        images = [(item.label, item.data) for item in attachments
+                  if item.kind == KIND_IMAGE]
     return BedrockInvocation(
         model=str(parameters.get("model") or BEDROCK_DEFAULT_MODEL),
         prompt=prompt,
@@ -412,7 +578,196 @@ def build_bedrock_invocation(
         answer_format=answer_format,
         additional_model_request_fields=resolve_additional_model_request_fields(
             parameters.get(ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER)),
+        attachments=tuple(attachments),
     )
+
+
+def is_static_reference(value: Any) -> bool:
+    """True when ``value`` is a str whose stripped text starts with one of
+    :data:`REFERENCE_URI_SCHEMES` (case-sensitive, like the device's
+    ``fetch_reference_bytes``)."""
+    return isinstance(value, str) and value.strip().startswith(
+        REFERENCE_URI_SCHEMES)
+
+
+def is_inline_reference_value(value: Any) -> bool:
+    """True when ``value`` is a str that does not start with one of
+    :data:`REFERENCE_URI_SCHEMES`: base64 or a data: URL. This is the
+    device's ``describe_reference_source`` rule."""
+    return isinstance(value, str) and not value.startswith(
+        REFERENCE_URI_SCHEMES)
+
+
+@dataclass(frozen=True)
+class ReferenceSpec:
+    """One line of a ``reference_payload_path`` list."""
+
+    index: int      # 1-based position in the list
+    text: str       # the trimmed line
+    static: bool    # is_static_reference(text) or uploaded
+    uploaded: bool  # text starts with UPLOAD_REFERENCE_SCHEME
+    upload_name: Optional[str]   # "{sha256}.{ext}" of a well-formed upload line
+    kind: str       # KIND_IMAGE or KIND_DOCUMENT
+    format: str     # "jpeg" for an image; the document format
+    label: str      # REFERENCE_IMAGE_LABEL or "Reference {n}"
+
+
+def parse_upload_line(text: Any) -> Optional[Tuple[str, str]]:
+    """``(sha256, ext)`` when ``text`` matches :data:`UPLOAD_LINE_RE`
+    exactly (lowercase hex, one of the eleven extensions, nothing else);
+    ``None`` otherwise."""
+    if not isinstance(text, str):
+        return None
+    match = UPLOAD_LINE_RE.match(text)
+    if match is None or match.end() != len(text):
+        return None
+    return match.group(1), match.group(2)
+
+
+def document_format_of(text: Any) -> Optional[str]:
+    """The Converse document format a reference line names, or ``None``.
+
+    An upload line: its extension when it is one of
+    :data:`UPLOAD_DOCUMENT_EXTENSIONS` (already the Converse format).
+    Another static reference: the format of the extension of the URI's
+    path (the part before any ``?`` or ``#``, compared
+    case-insensitively), from :data:`DOCUMENT_FORMATS_BY_EXTENSION`.
+    ``None`` for every other text, payload paths included.
+    """
+    if not isinstance(text, str):
+        return None
+    line = text.strip()
+    upload = parse_upload_line(line)
+    if upload is not None:
+        return upload[1] if upload[1] in UPLOAD_DOCUMENT_EXTENSIONS else None
+    if not is_static_reference(line):
+        return None
+    scheme = next(s for s in REFERENCE_URI_SCHEMES if line.startswith(s))
+    rest = re.split(r"[?#]", line[len(scheme):], maxsplit=1)[0]
+    slash = rest.find("/")
+    if slash < 0:
+        return None
+    # The extension as posixpath.splitext reads it (leading dots of the
+    # file name are not an extension), without importing posixpath.
+    name = rest[slash:].rsplit("/", 1)[-1].lstrip(".")
+    dot = name.rfind(".")
+    extension = name[dot:].lower() if dot >= 0 else ""
+    return DOCUMENT_FORMATS_BY_EXTENSION.get(extension)
+
+
+def document_signature_problem(fmt: str, data: bytes) -> Optional[str]:
+    """The format check of a document as a pure rule: ``None`` when
+    ``data`` passes for ``fmt``, otherwise the reason — "it does not
+    start with %PDF-", "it is not a ZIP archive", "it is not an OLE2
+    compound file", "it is not UTF-8 text" or "it is empty". Shared by
+    the device and the Portal's upload validation. An unknown ``fmt`` is
+    a caller defect (``ValueError``)."""
+    data = bytes(data or b"")
+    if fmt == "pdf":
+        return None if data.startswith(_PDF_MAGIC) else (
+            "it does not start with %PDF-")
+    if fmt in ("docx", "xlsx"):
+        return None if data.startswith(_ZIP_MAGIC) else (
+            "it is not a ZIP archive")
+    if fmt in ("doc", "xls"):
+        return None if data.startswith(_OLE2_MAGIC) else (
+            "it is not an OLE2 compound file")
+    if fmt in _TEXT_DOCUMENT_FORMATS:
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return "it is not UTF-8 text"
+        return None if text.strip() else "it is empty"
+    raise ValueError("unsupported document format {0!r}".format(fmt))
+
+
+def reference_labels(kinds: Iterable[str]) -> Tuple[str, ...]:
+    """``("Reference image",)`` when ``kinds`` is exactly
+    ``(KIND_IMAGE,)``; otherwise ``("Reference 1", ..., "Reference N")``."""
+    kinds = tuple(kinds)
+    if kinds == (KIND_IMAGE,):
+        return (REFERENCE_IMAGE_LABEL,)
+    return tuple(LIST_REFERENCE_LABEL.format(n=index)
+                 for index in range(1, len(kinds) + 1))
+
+
+def parse_reference_list(value: Any) -> Tuple[ReferenceSpec, ...]:
+    """The non-blank lines of ``value`` (``\\n``, ``\\r\\n`` or ``\\r``
+    separated), each stripped, in order. A line's origin: uploaded
+    (starts with ``upload://``; a malformed one keeps ``uploaded`` with
+    no ``upload_name`` and counts as an image), static URI (one of
+    :data:`REFERENCE_URI_SCHEMES`; kind by extension), else a payload
+    path (always an image). Labels from :func:`reference_labels`. A
+    non-str or blank value gives ``()``."""
+    if not isinstance(value, str) or not value.strip():
+        return ()
+    lines = [line.strip() for line in re.split(r"\r\n|\r|\n", value)]
+    lines = [line for line in lines if line]
+    entries = []
+    for line in lines:
+        uploaded = line.startswith(UPLOAD_REFERENCE_SCHEME)
+        upload = parse_upload_line(line) if uploaded else None
+        fmt = document_format_of(line)
+        entries.append((
+            line,
+            uploaded or is_static_reference(line),
+            uploaded,
+            "{0}.{1}".format(*upload) if upload is not None else None,
+            KIND_DOCUMENT if fmt is not None else KIND_IMAGE,
+            fmt if fmt is not None else BEDROCK_IMAGE_FORMAT,
+        ))
+    labels = reference_labels([entry[4] for entry in entries])
+    return tuple(
+        ReferenceSpec(index=index, text=text, static=static,
+                      uploaded=uploaded, upload_name=upload_name,
+                      kind=kind, format=fmt, label=label)
+        for index, ((text, static, uploaded, upload_name, kind, fmt), label)
+        in enumerate(zip(entries, labels), start=1))
+
+
+def reference_list_problems(specs: Iterable[ReferenceSpec],
+                            answer_format: Any) -> Tuple[str, ...]:
+    """The statically known problems of a parsed list, in this order:
+    each malformed upload line; a list form or a document on a node
+    whose ``answer_format`` is not ``inspection``; more than
+    :data:`MAX_DOCUMENT_REFERENCES` documents; more than
+    :data:`MAX_IMAGE_REFERENCES` images. Each text is the reason the
+    device records and the message the validator reports."""
+    specs = tuple(specs)
+    problems: List[str] = []
+    for spec in specs:
+        if spec.uploaded and spec.upload_name is None:
+            problems.append(_MALFORMED_UPLOAD_LINE.format(n=spec.index))
+    documents = sum(1 for spec in specs if spec.kind == KIND_DOCUMENT)
+    images = len(specs) - documents
+    if (str(answer_format or "") != ANSWER_FORMAT_INSPECTION
+            and (len(specs) > 1 or documents)):
+        problems.append(
+            "reference_payload_path lists {0} reference(s) or a document; "
+            "only answer_format inspection accepts several references or "
+            "documents".format(len(specs)))
+    if documents > MAX_DOCUMENT_REFERENCES:
+        problems.append(
+            "reference_payload_path lists {0} documents; Bedrock Converse "
+            "accepts at most {1} per request".format(
+                documents, MAX_DOCUMENT_REFERENCES))
+    if images > MAX_IMAGE_REFERENCES:
+        problems.append(
+            "reference_payload_path lists {0} images; with the input image "
+            "that is more than the {1} images Bedrock Converse accepts per "
+            "request".format(images, MAX_IMAGE_REFERENCES + 1))
+    return tuple(problems)
+
+
+def uploaded_reference_names(parameters: Mapping[str, Any]) -> Tuple[str, ...]:
+    """The ``"{sha256}.{ext}"`` names of the well-formed upload lines of
+    ``parameters["reference_payload_path"]``, in list order, without
+    duplicates; ``()`` when there are none."""
+    names: List[str] = []
+    for spec in parse_reference_list(parameters.get("reference_payload_path")):
+        if spec.upload_name is not None and spec.upload_name not in names:
+            names.append(spec.upload_name)
+    return tuple(names)
 
 
 def normalize_system_prompt(raw: Any) -> Optional[str]:
@@ -844,6 +1199,356 @@ def parse_inspection_answer(
         "expected_count": (None if expected_count is None
                            else int(expected_count)),
     }
+
+
+def inspection_verdict(parsed: Mapping[str, Any]) -> Dict[str, Any]:
+    """The :func:`categorize_outcome` input of a parsed inspection answer:
+    ``fail`` counts as anomalous."""
+    return {
+        "is_anomalous": parsed["verdict"] == "fail",
+        "confidence": float(parsed["confidence"]),
+        "verdict": parsed["verdict"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Prompt rendering, moved verbatim from the device (llm_inference.py and
+# output_bindings.py, which import them back under their old names)
+# ---------------------------------------------------------------------------
+
+#: A placeholder: '{' + identifier (optionally dotted) + '}'.
+PLACEHOLDER_RE = re.compile(r'\{([A-Za-z_][A-Za-z0-9_.]*)\}')
+
+
+class UnresolvedPlaceholderError(Exception):
+    """A Prompt_Template placeholder has no value in the upstream
+    Inference_Metadata (Requirement 7.5)."""
+
+    def __init__(self, name: str):
+        super().__init__("unresolved placeholder {0}".format(name))
+        #: The full (possibly dotted) placeholder name that failed.
+        self.name = name
+
+
+def _resolve(name: str, metadata: Dict[str, Any]) -> Any:
+    """Resolve a possibly dotted placeholder name against nested dicts."""
+    value: Any = metadata
+    for part in name.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise UnresolvedPlaceholderError(name)
+        value = value[part]
+    return value
+
+
+def render_prompt(template: str, metadata: Dict[str, Any]) -> str:
+    """Render a Prompt_Template against upstream Inference_Metadata.
+
+    Strict substitution: every ``{placeholder}`` is replaced by
+    ``str(metadata[name])`` (dotted names resolve nested keys); literal
+    text is preserved; ``'{{'``/``'}}'`` escape a literal brace. Raises
+    :class:`UnresolvedPlaceholderError` on the first missing key
+    (Requirements 7.3, 7.5).
+    """
+    rendered = []
+    position = 0
+    length = len(template)
+    while position < length:
+        char = template[position]
+        if char == "{":
+            if template.startswith("{{", position):
+                rendered.append("{")
+                position += 2
+                continue
+            match = PLACEHOLDER_RE.match(template, position)
+            if match:
+                rendered.append(str(_resolve(match.group(1), metadata)))
+                position = match.end()
+                continue
+            rendered.append(char)
+            position += 1
+        elif char == "}":
+            if template.startswith("}}", position):
+                rendered.append("}")
+                position += 2
+                continue
+            rendered.append(char)
+            position += 1
+        else:
+            rendered.append(char)
+            position += 1
+    return "".join(rendered)
+
+
+def resolve_field_path(document: Any, dotted_path: Any) -> Tuple[bool, Any]:
+    """Resolve a dotted field path (``a.b.c``) against a parsed JSON
+    document, segment by segment (Requirements 7.2, 7.3).
+
+    - a dict is traversed by key;
+    - a list is traversed by a numeric segment used as an index
+      (``items.0.id``);
+    - any other intermediate value, a missing key, a non-numeric or
+      out-of-range index, or an empty path fails the resolution.
+
+    Returns ``(found, value)`` so a resolved JSON ``null`` (``None``) is
+    distinguishable from "not found" (Requirement 7.2 attaches resolved
+    nulls; Requirement 7.3 omits unresolved keys).
+    """
+    if not isinstance(dotted_path, str):
+        return False, None
+    path = dotted_path.strip()
+    if not path:
+        return False, None
+    current = document
+    for segment in path.split("."):
+        if isinstance(current, dict):
+            if segment not in current:
+                return False, None
+            current = current[segment]
+        elif isinstance(current, list):
+            try:
+                index = int(segment)
+            except ValueError:
+                return False, None
+            if not 0 <= index < len(current):
+                return False, None
+            current = current[index]
+        else:
+            return False, None
+    return True, current
+
+
+#: A ``{json:<dotted.path>}`` token of a rendered prompt — the compact
+#: JSON of the run-metadata value replaces it (:func:`render_prompt_text`).
+JSON_TOKEN_RE = re.compile(r"\{json:([A-Za-z_][A-Za-z0-9_.]*)\}")
+
+
+def render_prompt_text(template: str, values: Dict[str, Any]) -> str:
+    """Render an ``answer_format: inspection`` prompt against the run
+    metadata, segment-wise so no substituted text is ever scanned again.
+
+    The raw template is split at its ``{json:<dotted.path>}`` tokens;
+    each literal segment is rendered with the LLM node's strict
+    :func:`render_prompt` (``{identifier}``
+    / ``{dotted.path}`` substitution, ``{{``/``}}`` → one brace, other
+    braces literal); each token becomes the compact
+    ``json.dumps(value, ensure_ascii=False, separators=(",", ":"))`` of
+    the value :func:`resolve_field_path` finds. Raises
+    :class:`UnresolvedPlaceholderError` (``name`` = the identifier, or
+    ``json:<path>``) on the first value that does not resolve.
+    """
+    text = str(template or "")
+    pieces: List[str] = []
+    position = 0
+    for match in JSON_TOKEN_RE.finditer(text):
+        pieces.append(render_prompt(text[position:match.start()], values))
+        found, value = resolve_field_path(values, match.group(1))
+        if not found:
+            raise UnresolvedPlaceholderError("json:" + match.group(1))
+        pieces.append(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        position = match.end()
+    pieces.append(render_prompt(text[position:], values))
+    return "".join(pieces)
+
+
+def resolve_box_scale(raw: Any, model: Any) -> str:
+    """The coordinate convention of the answer's bounding boxes:
+    ``auto`` (or absent) → ``normalized_1000`` when the effective model id
+    contains ``amazon.nova`` (the 0-1000 grid Nova answers on), else
+    ``pixels``; an explicit convention is returned unchanged."""
+    value = str(raw or "auto").strip() or "auto"
+    if value != "auto":
+        return value
+    if "amazon.nova" in str(model or "").lower():
+        return BOX_SCALE_NORMALIZED_1000
+    return BOX_SCALE_PIXELS
+
+
+def resolve_expected_count(found: bool, value: Any) -> Optional[int]:
+    """The ONE expected-count rule: a list → its length, an int (not a
+    bool) → itself, and the result must be >= 1; anything else (path not
+    found, other type, empty list, 0, negative) is ``None``."""
+    if not found:
+        return None
+    if isinstance(value, list):
+        count = len(value)
+    elif isinstance(value, int) and not isinstance(value, bool):
+        count = value
+    else:
+        return None
+    return count if count >= 1 else None
+
+
+# ---------------------------------------------------------------------------
+# Inspection request preparation, shared by the device's inspection path
+# and the Portal's replay of an inspection-format sample
+# ---------------------------------------------------------------------------
+
+class InspectionRequestError(ValueError):
+    """A pre-call failure of an inspection request; ``str()`` is the exact
+    message the executor records."""
+
+
+def inspection_expected_count(parameters: Mapping[str, Any],
+                              values: Any) -> Optional[int]:
+    """``expected_count_path`` resolved against ``values`` by
+    :func:`resolve_field_path` + :func:`resolve_expected_count`; ``None``
+    when no path is configured. Raises :class:`InspectionRequestError`
+    when the path does not resolve to a positive count."""
+    count_path = str(parameters.get("expected_count_path") or "").strip()
+    if not count_path:
+        return None
+    found, value = resolve_field_path(values, count_path)
+    expected_count = resolve_expected_count(found, value)
+    if expected_count is None:
+        raise InspectionRequestError(
+            "expected count path {0} did not resolve to a positive "
+            "count".format(count_path))
+    return expected_count
+
+
+def _render_prompt_enabled(raw: Any) -> bool:
+    """``render_prompt`` as the device reads it: absent or blank is off,
+    anything else is ``bool(coerce_parameter_value(raw))``."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return False
+    return bool(coerce_parameter_value(raw))
+
+
+def render_inspection_parameters(
+    parameters: Mapping[str, Any],
+    values: Mapping[str, Any],
+    image_size: Optional[Tuple[int, int]],
+) -> Mapping[str, Any]:
+    """The parameters an inspection request is built from.
+
+    ``render_prompt`` off: the SAME mapping. On: a copy whose ``prompt``
+    and (non-blank) ``system_prompt`` are :func:`render_prompt_text`
+    against ``dict(values)`` plus ``{"image": {"width", "height"}}`` when
+    ``image_size`` is given. Raises :class:`InspectionRequestError`
+    ("unresolved prompt placeholder {name}") on the first placeholder
+    that does not resolve.
+    """
+    if not _render_prompt_enabled(parameters.get("render_prompt")):
+        return parameters
+    merged = dict(values)
+    if image_size is not None:
+        merged["image"] = {"width": image_size[0], "height": image_size[1]}
+    rendered = dict(parameters)
+    try:
+        rendered["prompt"] = render_prompt_text(
+            str(parameters.get("prompt") or ""), merged)
+        system_prompt = parameters.get("system_prompt")
+        if system_prompt is not None and str(system_prompt).strip():
+            rendered["system_prompt"] = render_prompt_text(
+                str(system_prompt), merged)
+    except UnresolvedPlaceholderError as error:
+        raise InspectionRequestError(
+            "unresolved prompt placeholder {0}".format(error.name))
+    return rendered
+
+
+@dataclass(frozen=True)
+class InspectionRequest:
+    """What an inspection request needs besides the images."""
+
+    parameters: Mapping[str, Any]
+    expected_count: Optional[int]
+    box_scale: str
+
+
+def prepare_inspection_request(
+    parameters: Mapping[str, Any],
+    values: Mapping[str, Any],
+    image_size: Optional[Tuple[int, int]],
+) -> InspectionRequest:
+    """The three steps in the executor's order: the expected count, the
+    rendering, the box scale (:func:`resolve_box_scale` of ``box_scale``
+    and the effective model). Raises :class:`InspectionRequestError`."""
+    expected_count = inspection_expected_count(parameters, values)
+    rendered = render_inspection_parameters(parameters, values, image_size)
+    box_scale = resolve_box_scale(
+        parameters.get("box_scale"),
+        parameters.get("model") or BEDROCK_DEFAULT_MODEL)
+    return InspectionRequest(parameters=rendered,
+                             expected_count=expected_count,
+                             box_scale=box_scale)
+
+
+def _placeholder_names(template: str) -> List[str]:
+    """The PLACEHOLDER_RE names :func:`render_prompt` would resolve in
+    ``template``, in order, skipping the ``{{`` and ``}}`` escapes."""
+    names: List[str] = []
+    position = 0
+    length = len(template)
+    while position < length:
+        char = template[position]
+        if char == "{":
+            if template.startswith("{{", position):
+                position += 2
+                continue
+            match = PLACEHOLDER_RE.match(template, position)
+            if match:
+                names.append(match.group(1))
+                position = match.end()
+                continue
+        elif char == "}" and template.startswith("}}", position):
+            position += 2
+            continue
+        position += 1
+    return names
+
+
+def prompt_field_paths(text: Any) -> Tuple[str, ...]:
+    """Every dotted path ``text`` would render, read exactly as
+    :func:`render_prompt_text` reads it: the :data:`JSON_TOKEN_RE`
+    tokens, then the :data:`PLACEHOLDER_RE` matches of the literal
+    segments, skipping ``{{`` and ``}}`` escapes. Order of first
+    appearance, without duplicates."""
+    text = str(text or "")
+    found: List[str] = []
+    position = 0
+    for match in JSON_TOKEN_RE.finditer(text):
+        found.extend(_placeholder_names(text[position:match.start()]))
+        found.append(match.group(1))
+        position = match.end()
+    found.extend(_placeholder_names(text[position:]))
+    unique: List[str] = []
+    for path in found:
+        if path not in unique:
+            unique.append(path)
+    return tuple(unique)
+
+
+def inspection_metadata_roots(parameters: Mapping[str, Any]) -> Tuple[str, ...]:
+    """Sorted top-level keys a replay needs: the first segment of every
+    :func:`prompt_field_paths` entry of ``prompt`` and ``system_prompt``,
+    and of ``expected_count_path``, plus ``"trigger"``; never ``"image"``
+    (injected from the image size)."""
+    roots = {"trigger"}
+    for key in ("prompt", "system_prompt"):
+        for path in prompt_field_paths(parameters.get(key)):
+            roots.add(path.split(".", 1)[0])
+    count_path = str(parameters.get("expected_count_path") or "").strip()
+    if count_path:
+        roots.add(count_path.split(".", 1)[0])
+    roots.discard("image")
+    return tuple(sorted(roots))
+
+
+def omitted_path_conflict(paths: Iterable[str],
+                          omitted: Iterable[str]) -> Optional[str]:
+    """The first omitted path ``o`` that some rendered path ``p`` equals,
+    lies inside (``p`` starts with ``o + "."``) or contains (``o`` starts
+    with ``p + "."``); ``None`` when there is none."""
+    paths = tuple(paths)
+    for omitted_path in omitted:
+        for path in paths:
+            if (path == omitted_path
+                    or path.startswith(omitted_path + ".")
+                    or omitted_path.startswith(path + ".")):
+                return omitted_path
+    return None
 
 
 # ---------------------------------------------------------------------------

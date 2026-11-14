@@ -211,14 +211,34 @@ export interface TuningSampleView {
     confidence: number | null;
     answer: string | null;
     parseError: string | null;
+    /** An inspection-format sample's verdict, recorded or recovered. */
+    verdict?: 'pass' | 'fail' | null;
+    /** True when the verdict was recovered from the recorded answer. */
+    recovered?: boolean;
   };
   input: TuningSampleImage;
   reference: TuningSampleImage | null;
   singleImage: boolean;
+  /** A list-form sample's reference files, in request order. */
+  references?: ReferenceView[];
   /** Images expired from the Sample_Store (Requirement 3.7). */
   unavailable?: boolean;
-  /** Only with `include_metadata`: the `llm_inference` render context. */
+  /** Only with `include_metadata`: the render context of the sample. */
   metadataSnippet?: Record<string, unknown> | null;
+}
+
+/** One reference file of a list-form sample (`sample_view` `references`). */
+export interface ReferenceView {
+  index: number;
+  label: string;
+  kind: 'image' | 'document';
+  /** `jpeg` for an image, else the document format (`pdf`, `txt`, …). */
+  format: string;
+  bytes: number;
+  width?: number | null;
+  height?: number | null;
+  /** Presigned GET URL, set on the routes that presign. */
+  url?: string | null;
 }
 
 /** One Sample_Outcome (`outcome_view`, Requirements 7.2, 7.4). */
@@ -407,9 +427,21 @@ export interface CandidatePreviewResponse {
   maxTokens: number | null;
   model: string | null;
   region?: string | null;
-  /** False for `llm_inference`: the template is shown unrendered. */
+  /**
+   * False for `llm_inference`, and for an inspection-format node with
+   * `render_prompt` on: the template is shown unrendered.
+   */
   templateRendered: boolean;
+  /** Inspection-format nodes: the request's blocks, input image first. */
+  attachments?: PreviewAttachment[];
   warnings: CandidatePreviewWarning[];
+}
+
+/** One image or document block of a previewed inspection request. */
+export interface PreviewAttachment {
+  label: string;
+  kind: 'image' | 'document';
+  format: string;
 }
 
 // --------------------------------------------------------------------------

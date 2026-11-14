@@ -19,7 +19,7 @@ export interface WorkflowManagerGapsApiStackProps extends cdk.NestedStackProps {
   userPool: cognito.IUserPool;
   /** workflow_generator.py handler — serves GET /workflows/generate/{job_id}. */
   workflowGeneratorHandler: lambda.Function;
-  /** workflows.py handler — serves PATCH /workflows/{id}/name. */
+  /** workflows.py handler — serves PATCH /workflows/{id}/name and the reference-files routes. */
   workflowsHandler: lambda.Function;
 }
 
@@ -38,6 +38,9 @@ export interface WorkflowManagerGapsApiStackProps extends cdk.NestedStackProps {
  * Route table (design "Infrastructure", workflow_generator.py / workflows.py):
  * - GET   /workflows/generate/{job_id}  (generation job status; Req 2.1)
  * - PATCH /workflows/{id}/name          (metadata-only rename;  Req 5.1)
+ * - GET   /workflows/{id}/reference-files             (uploaded reference files)
+ * - POST  /workflows/{id}/reference-files             (check and store a staged upload)
+ * - POST  /workflows/{id}/reference-files/upload-url  (presigned staging PUT)
  */
 export class WorkflowManagerGapsApiStack extends cdk.NestedStack {
   constructor(scope: Construct, id: string, props: WorkflowManagerGapsApiStackProps) {
@@ -135,6 +138,20 @@ export class WorkflowManagerGapsApiStack extends cdk.NestedStack {
     });
     addMethod(nameResource, 'PATCH', workflowsIntegration);
 
+    // GET/POST /workflows/{id}/reference-files and
+    // POST /workflows/{id}/reference-files/upload-url — reference files
+    // uploaded for Bedrock Inference nodes (workflow_reference_files.py,
+    // served by the workflows.py handler).
+    const referenceFilesResource = workflowResource.addResource('reference-files', {
+      defaultCorsPreflightOptions: corsOptions,
+    });
+    addMethod(referenceFilesResource, 'GET', workflowsIntegration);
+    addMethod(referenceFilesResource, 'POST', workflowsIntegration);
+    const referenceUploadUrlResource = referenceFilesResource.addResource('upload-url', {
+      defaultCorsPreflightOptions: corsOptions,
+    });
+    addMethod(referenceUploadUrlResource, 'POST', workflowsIntegration);
+
     // ------------------------------------------------------------------
     // Deployment re-pointing the existing stage so the routes above go
     // live. The logical id is salted with the route table: any route change
@@ -164,5 +181,8 @@ export class WorkflowManagerGapsApiStack extends cdk.NestedStack {
     deployment.node.addDependency(authorizer);
     deployment.node.addDependency(jobResource);
     deployment.node.addDependency(nameResource);
+    // The upload-url child, the methods, their OPTIONS preflights and the
+    // methods' Lambda permissions all lie in this resource's subtree.
+    deployment.node.addDependency(referenceFilesResource);
   }
 }

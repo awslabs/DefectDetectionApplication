@@ -36,7 +36,8 @@ import {
 } from '@cloudscape-design/components';
 import { apiService } from '../../services/api';
 import { getErrorMessage } from '../../utils/errorHandling';
-import SamplesTab from './SamplesTab';
+import { isInspectionFormat } from './eligibility';
+import SamplesTab, { SYNTHETIC_UNSUPPORTED_REASON } from './SamplesTab';
 import CandidatesTab from './CandidatesTab';
 import ScoreRunsTab from './ScoreRunsTab';
 import CompareTab from './CompareTab';
@@ -240,6 +241,11 @@ export default function AnomalyTuningSession() {
                   onCountsChange={setCounts}
                   onDevicesSeen={setDevicesSeen}
                   onSyntheticChange={setSynthetic}
+                  syntheticUnsupportedReason={
+                    isInspectionFormat(node?.parameters)
+                      ? SYNTHETIC_UNSUPPORTED_REASON
+                      : undefined
+                  }
                 />
               ) : null,
             },

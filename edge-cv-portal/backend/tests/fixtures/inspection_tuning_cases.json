@@ -1,0 +1,6839 @@
+{
+  "feature": "inspection-format tuning",
+  "rule": [
+    "A bedrock_inference node whose answer_format is exactly the string 'inspection' (no trimming, no case folding) is a Tunable_Node, whatever its anomaly_mode.",
+    "Every other node, an llm_inference node with answer_format 'inspection' included, is tunable exactly when the eligibility table's expectedTunable says so (Requirement 1.5, Property 1)."
+  ],
+  "generatedBy": "edge-cv-portal/backend/tests/test_property_tuning_inspection_format.py",
+  "regenerateWith": "DDA_WRITE_INSPECTION_TUNING_FIXTURE=1 python -m pytest tests/test_property_tuning_inspection_format.py",
+  "consumedBy": [
+    "edge-cv-portal/backend/tests/test_property_tuning_inspection_format.py",
+    "edge-cv-portal/frontend/src/pages/workflow-tuning/eligibility.inspection.property.test.ts",
+    "edge-cv-portal/frontend/src/utils/referenceFiles.mirror.test.ts"
+  ],
+  "inspectionJsonInstruction": "Respond with exactly one JSON object and nothing else: {\"verdict\": \"pass\"|\"fail\", \"confidence\": 0..1, \"reason\": \"<one sentence>\", \"objects\": [{\"name\": \"<part>\", \"qc\": \"OK\"|\"NOK\", \"reason\": \"<short>\", \"bounding_box\": {\"x_min\": <int>, \"y_min\": <int>, \"x_max\": <int>, \"y_max\": <int>}}, ...]} with one entry in objects per expected part.",
+  "anomalyInstructionSeparator": "\n\n",
+  "answerFormats": [
+    {
+      "id": "absent",
+      "present": false,
+      "value": null
+    },
+    {
+      "id": "inspection",
+      "present": true,
+      "value": "inspection"
+    },
+    {
+      "id": "legacy",
+      "present": true,
+      "value": "legacy"
+    },
+    {
+      "id": "Inspection",
+      "present": true,
+      "value": "Inspection"
+    },
+    {
+      "id": "space-inspection",
+      "present": true,
+      "value": " inspection"
+    },
+    {
+      "id": "empty",
+      "present": true,
+      "value": ""
+    },
+    {
+      "id": "null",
+      "present": true,
+      "value": null
+    }
+  ],
+  "cases": [
+    {
+      "id": "bedrock_inference#absent",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#null",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#true",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#false",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": true,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference#str-true",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-false",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": true,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference#str-True",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-FALSE",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": true,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference#str-TrUe",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-pad-true",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-pad-false",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": true,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference#str-1",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-0",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": true,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference#str-minus-1",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-0.0",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": true,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference#str-1.5",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-empty",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": true,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference#str-space",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-yes",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-no",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-off",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-null",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#str-None",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#int-0",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": true,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference#int-1",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#int-minus-1",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#float-0.0",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": true,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference#float-1.0",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "bedrock_inference#float-0.5",
+      "nodeType": "bedrock_inference",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#absent",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#null",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#true",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#false",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#str-true",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-false",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#str-True",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-FALSE",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#str-TrUe",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-pad-true",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-pad-false",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#str-1",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-0",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#str-minus-1",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-0.0",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#str-1.5",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-empty",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#str-space",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-yes",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-no",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-off",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-null",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#str-None",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#int-0",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#int-1",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#int-minus-1",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#float-0.0",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "llm_inference#float-1.0",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "llm_inference#float-0.5",
+      "nodeType": "llm_inference",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": true,
+        "inspection": true,
+        "legacy": true,
+        "Inspection": true,
+        "space-inspection": true,
+        "empty": true,
+        "null": true
+      }
+    },
+    {
+      "id": "model_inference#absent",
+      "nodeType": "model_inference",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#null",
+      "nodeType": "model_inference",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#true",
+      "nodeType": "model_inference",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#false",
+      "nodeType": "model_inference",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-true",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-false",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-True",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-FALSE",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-TrUe",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-pad-true",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-pad-false",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-1",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-0",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-minus-1",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-0.0",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-1.5",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-empty",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-space",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-yes",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-no",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-off",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-null",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#str-None",
+      "nodeType": "model_inference",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#int-0",
+      "nodeType": "model_inference",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#int-1",
+      "nodeType": "model_inference",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#int-minus-1",
+      "nodeType": "model_inference",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#float-0.0",
+      "nodeType": "model_inference",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#float-1.0",
+      "nodeType": "model_inference",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "model_inference#float-0.5",
+      "nodeType": "model_inference",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#absent",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#null",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#true",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#false",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-true",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-false",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-True",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-FALSE",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-TrUe",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-pad-true",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-pad-false",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-1",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-0",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-minus-1",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-0.0",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-1.5",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-empty",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-space",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-yes",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-no",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-off",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-null",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#str-None",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#int-0",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#int-1",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#int-minus-1",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#float-0.0",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#float-1.0",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "inference_filter#float-0.5",
+      "nodeType": "inference_filter",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#absent",
+      "nodeType": "conditional",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#null",
+      "nodeType": "conditional",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#true",
+      "nodeType": "conditional",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#false",
+      "nodeType": "conditional",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-true",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-false",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-True",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-FALSE",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-TrUe",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-pad-true",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-pad-false",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-1",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-0",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-minus-1",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-0.0",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-1.5",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-empty",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-space",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-yes",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-no",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-off",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-null",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#str-None",
+      "nodeType": "conditional",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#int-0",
+      "nodeType": "conditional",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#int-1",
+      "nodeType": "conditional",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#int-minus-1",
+      "nodeType": "conditional",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#float-0.0",
+      "nodeType": "conditional",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#float-1.0",
+      "nodeType": "conditional",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "conditional#float-0.5",
+      "nodeType": "conditional",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#absent",
+      "nodeType": "custom_python",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#null",
+      "nodeType": "custom_python",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#true",
+      "nodeType": "custom_python",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#false",
+      "nodeType": "custom_python",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-true",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-false",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-True",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-FALSE",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-TrUe",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-pad-true",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-pad-false",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-1",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-0",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-minus-1",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-0.0",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-1.5",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-empty",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-space",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-yes",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-no",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-off",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-null",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#str-None",
+      "nodeType": "custom_python",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#int-0",
+      "nodeType": "custom_python",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#int-1",
+      "nodeType": "custom_python",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#int-minus-1",
+      "nodeType": "custom_python",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#float-0.0",
+      "nodeType": "custom_python",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#float-1.0",
+      "nodeType": "custom_python",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "custom_python#float-0.5",
+      "nodeType": "custom_python",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#absent",
+      "nodeType": "capture",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#null",
+      "nodeType": "capture",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#true",
+      "nodeType": "capture",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#false",
+      "nodeType": "capture",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-true",
+      "nodeType": "capture",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-false",
+      "nodeType": "capture",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-True",
+      "nodeType": "capture",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-FALSE",
+      "nodeType": "capture",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-TrUe",
+      "nodeType": "capture",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-pad-true",
+      "nodeType": "capture",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-pad-false",
+      "nodeType": "capture",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-1",
+      "nodeType": "capture",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-0",
+      "nodeType": "capture",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-minus-1",
+      "nodeType": "capture",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-0.0",
+      "nodeType": "capture",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-1.5",
+      "nodeType": "capture",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-empty",
+      "nodeType": "capture",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-space",
+      "nodeType": "capture",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-yes",
+      "nodeType": "capture",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-no",
+      "nodeType": "capture",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-off",
+      "nodeType": "capture",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-null",
+      "nodeType": "capture",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#str-None",
+      "nodeType": "capture",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#int-0",
+      "nodeType": "capture",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#int-1",
+      "nodeType": "capture",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#int-minus-1",
+      "nodeType": "capture",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#float-0.0",
+      "nodeType": "capture",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#float-1.0",
+      "nodeType": "capture",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "capture#float-0.5",
+      "nodeType": "capture",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#absent",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#null",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#true",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#false",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-true",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-false",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-True",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-FALSE",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-TrUe",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-pad-true",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-pad-false",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-1",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-0",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-minus-1",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-0.0",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-1.5",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-empty",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-space",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-yes",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-no",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-off",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-null",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#str-None",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#int-0",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#int-1",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#int-minus-1",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#float-0.0",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#float-1.0",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "mqtt_publish#float-0.5",
+      "nodeType": "mqtt_publish",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#absent",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#null",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#true",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#false",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-true",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-false",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-True",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-FALSE",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-TrUe",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-pad-true",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-pad-false",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-1",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-0",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-minus-1",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-0.0",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-1.5",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-empty",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-space",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-yes",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-no",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-off",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-null",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#str-None",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#int-0",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#int-1",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#int-minus-1",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#float-0.0",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#float-1.0",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "Bedrock_Inference#float-0.5",
+      "nodeType": "Bedrock_Inference",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #absent",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #null",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #true",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #false",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-true",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-false",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-True",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-FALSE",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-TrUe",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-pad-true",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-pad-false",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-1",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-0",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-minus-1",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-0.0",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-1.5",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-empty",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-space",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-yes",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-no",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-off",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-null",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #str-None",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #int-0",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #int-1",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #int-minus-1",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #float-0.0",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #float-1.0",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "bedrock_inference #float-0.5",
+      "nodeType": "bedrock_inference ",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#absent",
+      "nodeType": "",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#null",
+      "nodeType": "",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#true",
+      "nodeType": "",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#false",
+      "nodeType": "",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-true",
+      "nodeType": "",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-false",
+      "nodeType": "",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-True",
+      "nodeType": "",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-FALSE",
+      "nodeType": "",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-TrUe",
+      "nodeType": "",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-pad-true",
+      "nodeType": "",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-pad-false",
+      "nodeType": "",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-1",
+      "nodeType": "",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-0",
+      "nodeType": "",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-minus-1",
+      "nodeType": "",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-0.0",
+      "nodeType": "",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-1.5",
+      "nodeType": "",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-empty",
+      "nodeType": "",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-space",
+      "nodeType": "",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-yes",
+      "nodeType": "",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-no",
+      "nodeType": "",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-off",
+      "nodeType": "",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-null",
+      "nodeType": "",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#str-None",
+      "nodeType": "",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#int-0",
+      "nodeType": "",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#int-1",
+      "nodeType": "",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#int-minus-1",
+      "nodeType": "",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#float-0.0",
+      "nodeType": "",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#float-1.0",
+      "nodeType": "",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "<empty>#float-0.5",
+      "nodeType": "",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#absent",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "absent",
+      "anomalyModePresent": false,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#null",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "null",
+      "anomalyModePresent": true,
+      "anomalyMode": null,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#true",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "true",
+      "anomalyModePresent": true,
+      "anomalyMode": true,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#false",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "false",
+      "anomalyModePresent": true,
+      "anomalyMode": false,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-true",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-true",
+      "anomalyModePresent": true,
+      "anomalyMode": "true",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-false",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "false",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-True",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-True",
+      "anomalyModePresent": true,
+      "anomalyMode": "True",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-FALSE",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-FALSE",
+      "anomalyModePresent": true,
+      "anomalyMode": "FALSE",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-TrUe",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-TrUe",
+      "anomalyModePresent": true,
+      "anomalyMode": "TrUe",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-pad-true",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-pad-true",
+      "anomalyModePresent": true,
+      "anomalyMode": " true ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-pad-false",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-pad-false",
+      "anomalyModePresent": true,
+      "anomalyMode": "  false  ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-1",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-0",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-minus-1",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": "-1",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-0.0",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": "0.0",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-1.5",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-1.5",
+      "anomalyModePresent": true,
+      "anomalyMode": "1.5",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-empty",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-empty",
+      "anomalyModePresent": true,
+      "anomalyMode": "",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-space",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-space",
+      "anomalyModePresent": true,
+      "anomalyMode": " ",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-yes",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-yes",
+      "anomalyModePresent": true,
+      "anomalyMode": "yes",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-no",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-no",
+      "anomalyModePresent": true,
+      "anomalyMode": "no",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-off",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-off",
+      "anomalyModePresent": true,
+      "anomalyMode": "off",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-null",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-null",
+      "anomalyModePresent": true,
+      "anomalyMode": "null",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#str-None",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "str-None",
+      "anomalyModePresent": true,
+      "anomalyMode": "None",
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#int-0",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "int-0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#int-1",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "int-1",
+      "anomalyModePresent": true,
+      "anomalyMode": 1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#int-minus-1",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "int-minus-1",
+      "anomalyModePresent": true,
+      "anomalyMode": -1,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#float-0.0",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "float-0.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#float-1.0",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "float-1.0",
+      "anomalyModePresent": true,
+      "anomalyMode": 1.0,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    },
+    {
+      "id": "not_a_node_type#float-0.5",
+      "nodeType": "not_a_node_type",
+      "anomalyModeId": "float-0.5",
+      "anomalyModePresent": true,
+      "anomalyMode": 0.5,
+      "expectedTunable": {
+        "absent": false,
+        "inspection": false,
+        "legacy": false,
+        "Inspection": false,
+        "space-inspection": false,
+        "empty": false,
+        "null": false
+      }
+    }
+  ],
+  "referenceListCases": [
+    {
+      "id": "null#inspection",
+      "value": null,
+      "answerFormat": "inspection",
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "null#legacy",
+      "value": null,
+      "answerFormat": "legacy",
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "null#null",
+      "value": null,
+      "answerFormat": null,
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "number#inspection",
+      "value": 7,
+      "answerFormat": "inspection",
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "number#legacy",
+      "value": 7,
+      "answerFormat": "legacy",
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "number#null",
+      "value": 7,
+      "answerFormat": null,
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "empty#inspection",
+      "value": "",
+      "answerFormat": "inspection",
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "empty#legacy",
+      "value": "",
+      "answerFormat": "legacy",
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "empty#null",
+      "value": "",
+      "answerFormat": null,
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "blank-lines#inspection",
+      "value": "  \n \n",
+      "answerFormat": "inspection",
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "blank-lines#legacy",
+      "value": "  \n \n",
+      "answerFormat": "legacy",
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "blank-lines#null",
+      "value": "  \n \n",
+      "answerFormat": null,
+      "kinds": [],
+      "labels": [],
+      "problems": []
+    },
+    {
+      "id": "payload-path#inspection",
+      "value": "refs.0.image",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "payload-path#legacy",
+      "value": "refs.0.image",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "payload-path#null",
+      "value": "refs.0.image",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "payload-path-named-like-a-pdf#inspection",
+      "value": "refs.0.pdf",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "payload-path-named-like-a-pdf#legacy",
+      "value": "refs.0.pdf",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "payload-path-named-like-a-pdf#null",
+      "value": "refs.0.pdf",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "file-jpg#inspection",
+      "value": "file:///aws_dda/images/source.jpg",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "file-jpg#legacy",
+      "value": "file:///aws_dda/images/source.jpg",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "file-jpg#null",
+      "value": "file:///aws_dda/images/source.jpg",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "s3-png#inspection",
+      "value": "s3://reference-bucket/legend.png",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "s3-png#legacy",
+      "value": "s3://reference-bucket/legend.png",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "s3-png#null",
+      "value": "s3://reference-bucket/legend.png",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "https-pdf-query-fragment#inspection",
+      "value": "https://example.com/docs/sheet.PDF?X-Amz-Signature=abc#page=2",
+      "answerFormat": "inspection",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": []
+    },
+    {
+      "id": "https-pdf-query-fragment#legacy",
+      "value": "https://example.com/docs/sheet.PDF?X-Amz-Signature=abc#page=2",
+      "answerFormat": "legacy",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "https-pdf-query-fragment#null",
+      "value": "https://example.com/docs/sheet.PDF?X-Amz-Signature=abc#page=2",
+      "answerFormat": null,
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "file-docx-upper-case#inspection",
+      "value": "file:///aws_dda/reference/Assembly.DOCX",
+      "answerFormat": "inspection",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": []
+    },
+    {
+      "id": "file-docx-upper-case#legacy",
+      "value": "file:///aws_dda/reference/Assembly.DOCX",
+      "answerFormat": "legacy",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "file-docx-upper-case#null",
+      "value": "file:///aws_dda/reference/Assembly.DOCX",
+      "answerFormat": null,
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "file-markdown#inspection",
+      "value": "file:///aws_dda/reference/notes.markdown",
+      "answerFormat": "inspection",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": []
+    },
+    {
+      "id": "file-markdown#legacy",
+      "value": "file:///aws_dda/reference/notes.markdown",
+      "answerFormat": "legacy",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "file-markdown#null",
+      "value": "file:///aws_dda/reference/notes.markdown",
+      "answerFormat": null,
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "file-htm#inspection",
+      "value": "file:///aws_dda/reference/page.htm",
+      "answerFormat": "inspection",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": []
+    },
+    {
+      "id": "file-htm#legacy",
+      "value": "file:///aws_dda/reference/page.htm",
+      "answerFormat": "legacy",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "file-htm#null",
+      "value": "file:///aws_dda/reference/page.htm",
+      "answerFormat": null,
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "file-xls#inspection",
+      "value": "file:///aws_dda/reference/parts.xls",
+      "answerFormat": "inspection",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": []
+    },
+    {
+      "id": "file-xls#legacy",
+      "value": "file:///aws_dda/reference/parts.xls",
+      "answerFormat": "legacy",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "file-xls#null",
+      "value": "file:///aws_dda/reference/parts.xls",
+      "answerFormat": null,
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "leading-dot-name#inspection",
+      "value": "file:///aws_dda/reference/.pdf",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "leading-dot-name#legacy",
+      "value": "file:///aws_dda/reference/.pdf",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "leading-dot-name#null",
+      "value": "file:///aws_dda/reference/.pdf",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "uri-without-path#inspection",
+      "value": "https://example.com",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "uri-without-path#legacy",
+      "value": "https://example.com",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "uri-without-path#null",
+      "value": "https://example.com",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "upper-case-scheme#inspection",
+      "value": "FILE:///aws_dda/reference/sheet.pdf",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "upper-case-scheme#legacy",
+      "value": "FILE:///aws_dda/reference/sheet.pdf",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "upper-case-scheme#null",
+      "value": "FILE:///aws_dda/reference/sheet.pdf",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "upload-png#inspection",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "upload-png#legacy",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "upload-png#null",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": []
+    },
+    {
+      "id": "upload-pdf#inspection",
+      "value": "upload://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pdf",
+      "answerFormat": "inspection",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": []
+    },
+    {
+      "id": "upload-pdf#legacy",
+      "value": "upload://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pdf",
+      "answerFormat": "legacy",
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "upload-pdf#null",
+      "value": "upload://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.pdf",
+      "answerFormat": null,
+      "kinds": [
+        "document"
+      ],
+      "labels": [
+        "Reference 1"
+      ],
+      "problems": [
+        "reference_payload_path lists 1 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "upload-upper-case-hex#inspection",
+      "value": "upload://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.png",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-upper-case-hex#legacy",
+      "value": "upload://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.png",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-upper-case-hex#null",
+      "value": "upload://AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.png",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-63-hex#inspection",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-63-hex#legacy",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-63-hex#null",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-gif#inspection",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.gif",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-gif#legacy",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.gif",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-gif#null",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.gif",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-slash#inspection",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-slash#legacy",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "upload-slash#null",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+      "answerFormat": null,
+      "kinds": [
+        "image"
+      ],
+      "labels": [
+        "Reference image"
+      ],
+      "problems": [
+        "line 1 of reference_payload_path is not a valid uploaded-file reference: expected upload://<64 lowercase hex characters>.<jpg|png|pdf|txt|md|csv|html|doc|docx|xls|xlsx>"
+      ]
+    },
+    {
+      "id": "legend-and-pdf#inspection",
+      "value": "file:///aws_dda/reference/legend.jpg\nfile:///aws_dda/reference/assembly.pdf",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2"
+      ],
+      "problems": []
+    },
+    {
+      "id": "legend-and-pdf#legacy",
+      "value": "file:///aws_dda/reference/legend.jpg\nfile:///aws_dda/reference/assembly.pdf",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2"
+      ],
+      "problems": [
+        "reference_payload_path lists 2 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "legend-and-pdf#null",
+      "value": "file:///aws_dda/reference/legend.jpg\nfile:///aws_dda/reference/assembly.pdf",
+      "answerFormat": null,
+      "kinds": [
+        "image",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2"
+      ],
+      "problems": [
+        "reference_payload_path lists 2 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "png-txt-pdf-mixed-newlines#inspection",
+      "value": "file:///aws_dda/reference/legend.png\r\nfile:///aws_dda/reference/notes.txt\rfile:///aws_dda/reference/sheet.pdf",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image",
+        "document",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2",
+        "Reference 3"
+      ],
+      "problems": []
+    },
+    {
+      "id": "png-txt-pdf-mixed-newlines#legacy",
+      "value": "file:///aws_dda/reference/legend.png\r\nfile:///aws_dda/reference/notes.txt\rfile:///aws_dda/reference/sheet.pdf",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image",
+        "document",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2",
+        "Reference 3"
+      ],
+      "problems": [
+        "reference_payload_path lists 3 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "png-txt-pdf-mixed-newlines#null",
+      "value": "file:///aws_dda/reference/legend.png\r\nfile:///aws_dda/reference/notes.txt\rfile:///aws_dda/reference/sheet.pdf",
+      "answerFormat": null,
+      "kinds": [
+        "image",
+        "document",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2",
+        "Reference 3"
+      ],
+      "problems": [
+        "reference_payload_path lists 3 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "spaces-and-blank-lines#inspection",
+      "value": "  refs.0.image  \n\n\t file:///aws_dda/reference/notes.txt \n",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2"
+      ],
+      "problems": []
+    },
+    {
+      "id": "spaces-and-blank-lines#legacy",
+      "value": "  refs.0.image  \n\n\t file:///aws_dda/reference/notes.txt \n",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2"
+      ],
+      "problems": [
+        "reference_payload_path lists 2 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "spaces-and-blank-lines#null",
+      "value": "  refs.0.image  \n\n\t file:///aws_dda/reference/notes.txt \n",
+      "answerFormat": null,
+      "kinds": [
+        "image",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2"
+      ],
+      "problems": [
+        "reference_payload_path lists 2 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "upload-and-uri#inspection",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png\nfile:///aws_dda/reference/sheet.pdf",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2"
+      ],
+      "problems": []
+    },
+    {
+      "id": "upload-and-uri#legacy",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png\nfile:///aws_dda/reference/sheet.pdf",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2"
+      ],
+      "problems": [
+        "reference_payload_path lists 2 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "upload-and-uri#null",
+      "value": "upload://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png\nfile:///aws_dda/reference/sheet.pdf",
+      "answerFormat": null,
+      "kinds": [
+        "image",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2"
+      ],
+      "problems": [
+        "reference_payload_path lists 2 reference(s) or a document; only answer_format inspection accepts several references or documents"
+      ]
+    },
+    {
+      "id": "six-documents#inspection",
+      "value": "file:///aws_dda/reference/doc0.pdf\nfile:///aws_dda/reference/doc1.pdf\nfile:///aws_dda/reference/doc2.pdf\nfile:///aws_dda/reference/doc3.pdf\nfile:///aws_dda/reference/doc4.pdf\nfile:///aws_dda/reference/doc5.pdf",
+      "answerFormat": "inspection",
+      "kinds": [
+        "document",
+        "document",
+        "document",
+        "document",
+        "document",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2",
+        "Reference 3",
+        "Reference 4",
+        "Reference 5",
+        "Reference 6"
+      ],
+      "problems": [
+        "reference_payload_path lists 6 documents; Bedrock Converse accepts at most 5 per request"
+      ]
+    },
+    {
+      "id": "six-documents#legacy",
+      "value": "file:///aws_dda/reference/doc0.pdf\nfile:///aws_dda/reference/doc1.pdf\nfile:///aws_dda/reference/doc2.pdf\nfile:///aws_dda/reference/doc3.pdf\nfile:///aws_dda/reference/doc4.pdf\nfile:///aws_dda/reference/doc5.pdf",
+      "answerFormat": "legacy",
+      "kinds": [
+        "document",
+        "document",
+        "document",
+        "document",
+        "document",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2",
+        "Reference 3",
+        "Reference 4",
+        "Reference 5",
+        "Reference 6"
+      ],
+      "problems": [
+        "reference_payload_path lists 6 reference(s) or a document; only answer_format inspection accepts several references or documents",
+        "reference_payload_path lists 6 documents; Bedrock Converse accepts at most 5 per request"
+      ]
+    },
+    {
+      "id": "six-documents#null",
+      "value": "file:///aws_dda/reference/doc0.pdf\nfile:///aws_dda/reference/doc1.pdf\nfile:///aws_dda/reference/doc2.pdf\nfile:///aws_dda/reference/doc3.pdf\nfile:///aws_dda/reference/doc4.pdf\nfile:///aws_dda/reference/doc5.pdf",
+      "answerFormat": null,
+      "kinds": [
+        "document",
+        "document",
+        "document",
+        "document",
+        "document",
+        "document"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2",
+        "Reference 3",
+        "Reference 4",
+        "Reference 5",
+        "Reference 6"
+      ],
+      "problems": [
+        "reference_payload_path lists 6 reference(s) or a document; only answer_format inspection accepts several references or documents",
+        "reference_payload_path lists 6 documents; Bedrock Converse accepts at most 5 per request"
+      ]
+    },
+    {
+      "id": "twenty-images#inspection",
+      "value": "refs.0.image\nrefs.1.image\nrefs.2.image\nrefs.3.image\nrefs.4.image\nrefs.5.image\nrefs.6.image\nrefs.7.image\nrefs.8.image\nrefs.9.image\nrefs.10.image\nrefs.11.image\nrefs.12.image\nrefs.13.image\nrefs.14.image\nrefs.15.image\nrefs.16.image\nrefs.17.image\nrefs.18.image\nrefs.19.image",
+      "answerFormat": "inspection",
+      "kinds": [
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2",
+        "Reference 3",
+        "Reference 4",
+        "Reference 5",
+        "Reference 6",
+        "Reference 7",
+        "Reference 8",
+        "Reference 9",
+        "Reference 10",
+        "Reference 11",
+        "Reference 12",
+        "Reference 13",
+        "Reference 14",
+        "Reference 15",
+        "Reference 16",
+        "Reference 17",
+        "Reference 18",
+        "Reference 19",
+        "Reference 20"
+      ],
+      "problems": [
+        "reference_payload_path lists 20 images; with the input image that is more than the 20 images Bedrock Converse accepts per request"
+      ]
+    },
+    {
+      "id": "twenty-images#legacy",
+      "value": "refs.0.image\nrefs.1.image\nrefs.2.image\nrefs.3.image\nrefs.4.image\nrefs.5.image\nrefs.6.image\nrefs.7.image\nrefs.8.image\nrefs.9.image\nrefs.10.image\nrefs.11.image\nrefs.12.image\nrefs.13.image\nrefs.14.image\nrefs.15.image\nrefs.16.image\nrefs.17.image\nrefs.18.image\nrefs.19.image",
+      "answerFormat": "legacy",
+      "kinds": [
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2",
+        "Reference 3",
+        "Reference 4",
+        "Reference 5",
+        "Reference 6",
+        "Reference 7",
+        "Reference 8",
+        "Reference 9",
+        "Reference 10",
+        "Reference 11",
+        "Reference 12",
+        "Reference 13",
+        "Reference 14",
+        "Reference 15",
+        "Reference 16",
+        "Reference 17",
+        "Reference 18",
+        "Reference 19",
+        "Reference 20"
+      ],
+      "problems": [
+        "reference_payload_path lists 20 reference(s) or a document; only answer_format inspection accepts several references or documents",
+        "reference_payload_path lists 20 images; with the input image that is more than the 20 images Bedrock Converse accepts per request"
+      ]
+    },
+    {
+      "id": "twenty-images#null",
+      "value": "refs.0.image\nrefs.1.image\nrefs.2.image\nrefs.3.image\nrefs.4.image\nrefs.5.image\nrefs.6.image\nrefs.7.image\nrefs.8.image\nrefs.9.image\nrefs.10.image\nrefs.11.image\nrefs.12.image\nrefs.13.image\nrefs.14.image\nrefs.15.image\nrefs.16.image\nrefs.17.image\nrefs.18.image\nrefs.19.image",
+      "answerFormat": null,
+      "kinds": [
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image"
+      ],
+      "labels": [
+        "Reference 1",
+        "Reference 2",
+        "Reference 3",
+        "Reference 4",
+        "Reference 5",
+        "Reference 6",
+        "Reference 7",
+        "Reference 8",
+        "Reference 9",
+        "Reference 10",
+        "Reference 11",
+        "Reference 12",
+        "Reference 13",
+        "Reference 14",
+        "Reference 15",
+        "Reference 16",
+        "Reference 17",
+        "Reference 18",
+        "Reference 19",
+        "Reference 20"
+      ],
+      "problems": [
+        "reference_payload_path lists 20 reference(s) or a document; only answer_format inspection accepts several references or documents",
+        "reference_payload_path lists 20 images; with the input image that is more than the 20 images Bedrock Converse accepts per request"
+      ]
+    }
+  ]
+}

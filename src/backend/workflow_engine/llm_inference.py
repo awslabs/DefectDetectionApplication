@@ -35,67 +35,14 @@ Stdlib-only on purpose: this module is imported by the workflow engine's
 post-run processing and must stay importable everywhere.
 """
 
-import re
-from typing import Any, Dict
-
-#: A placeholder: '{' + identifier (optionally dotted) + '}'.
-PLACEHOLDER_RE = re.compile(r'\{([A-Za-z_][A-Za-z0-9_.]*)\}')
-
-
-class UnresolvedPlaceholderError(Exception):
-    """A Prompt_Template placeholder has no value in the upstream
-    Inference_Metadata (Requirement 7.5)."""
-
-    def __init__(self, name: str):
-        super().__init__("unresolved placeholder {0}".format(name))
-        #: The full (possibly dotted) placeholder name that failed.
-        self.name = name
-
-
-def _resolve(name: str, metadata: Dict[str, Any]) -> Any:
-    """Resolve a possibly dotted placeholder name against nested dicts."""
-    value: Any = metadata
-    for part in name.split("."):
-        if not isinstance(value, dict) or part not in value:
-            raise UnresolvedPlaceholderError(name)
-        value = value[part]
-    return value
-
-
-def render_prompt(template: str, metadata: Dict[str, Any]) -> str:
-    """Render a Prompt_Template against upstream Inference_Metadata.
-
-    Strict substitution: every ``{placeholder}`` is replaced by
-    ``str(metadata[name])`` (dotted names resolve nested keys); literal
-    text is preserved; ``'{{'``/``'}}'`` escape a literal brace. Raises
-    :class:`UnresolvedPlaceholderError` on the first missing key
-    (Requirements 7.3, 7.5).
-    """
-    rendered = []
-    position = 0
-    length = len(template)
-    while position < length:
-        char = template[position]
-        if char == "{":
-            if template.startswith("{{", position):
-                rendered.append("{")
-                position += 2
-                continue
-            match = PLACEHOLDER_RE.match(template, position)
-            if match:
-                rendered.append(str(_resolve(match.group(1), metadata)))
-                position = match.end()
-                continue
-            rendered.append(char)
-            position += 1
-        elif char == "}":
-            if template.startswith("}}", position):
-                rendered.append("}")
-                position += 2
-                continue
-            rendered.append(char)
-            position += 1
-        else:
-            rendered.append(char)
-            position += 1
-    return "".join(rendered)
+# The renderer moved verbatim to the shared workflow_core package
+# (anomaly_invocation, standard library only), so the device's
+# inspection path and the Portal's replay of an inspection-format sample
+# render with one implementation. The names are re-exported here: every
+# importer keeps working, and the exception class (with its ``name``
+# attribute) is the same object everywhere.
+from workflow_engine.vendor.workflow_core.anomaly_invocation import (  # noqa: F401
+    PLACEHOLDER_RE,
+    UnresolvedPlaceholderError,
+    render_prompt,
+)

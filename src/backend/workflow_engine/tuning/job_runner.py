@@ -137,6 +137,8 @@ STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
+#: A job reported in one of these is finished; no progress report follows.
+_FINAL_STATUSES = (STATUS_FAILED, STATUS_CANCELLED, STATUS_COMPLETED)
 
 #: Outcome-batch document schema version.
 OUTCOME_SCHEMA_VERSION = 1
@@ -377,6 +379,7 @@ class JobRunner:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        handled_jobs: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._config = config
         self._shadow = shadow_accessor
@@ -398,8 +401,15 @@ class JobRunner:
         self._client: Any = None
         self._worker: Optional[threading.Thread] = None
         self._stopping = False
+        #: Set by :meth:`close`: no job is accepted any more, and the job
+        #: that stops reports ``failed`` with ``_close_reason``.
+        self._closed = False
+        self._close_reason: Optional[str] = None
         self._running_job: Optional[str] = None
         self._condition = threading.Condition()
+        #: Serializes the status updates and shadow writes of
+        #: :meth:`_report`; never taken while ``_condition`` is held.
+        self._report_lock = threading.Lock()
         #: Job ids accepted but not yet executed, in arrival order. Only
         #: allocated for a configured runner.
         self._pending: Optional[Deque[Tuple[str, Dict[str, Any]]]] = (
@@ -407,8 +417,9 @@ class JobRunner:
         )
         #: Job ids this process already accepted (a job stays in
         #: ``desired`` until the Portal finalizes it, so it must not be
-        #: re-executed on every delta).
-        self._handled: Dict[str, str] = {}
+        #: re-executed on every delta). ``handled_jobs`` carries the ids a
+        #: closed runner of this process already accepted.
+        self._handled: Dict[str, str] = dict(handled_jobs or {})
         #: Job ids whose ``desired`` entry requests cancellation.
         self._cancelled: set = set()
 
@@ -435,6 +446,12 @@ class JobRunner:
         with self._condition:
             return self._running_job
 
+    def handled_jobs(self) -> Dict[str, str]:
+        """A copy of the job ids this runner accepted, with their last
+        recorded status."""
+        with self._condition:
+            return dict(self._handled)
+
     # -- shadow ----------------------------------------------------------
     def on_delta(self, message: Optional[Mapping[str, Any]] = None) -> None:
         """Shadow delta notification: re-read ``desired`` and act on it.
@@ -456,7 +473,7 @@ class JobRunner:
         Cheap and non-blocking — the accepted jobs execute on the worker
         thread, so the delta handler never waits for a replay.
         """
-        if self._pending is None:
+        if self._pending is None or self._closed:
             return
         state = self._read_shadow()
         if state is None:
@@ -465,6 +482,10 @@ class JobRunner:
         reported = _jobs_of(state.get("reported"))
         accepted: List[Tuple[str, Dict[str, Any]]] = []
         with self._condition:
+            if self._closed:
+                # Closed while the shadow was read: the next runner's
+                # first reconciliation accepts these jobs, once.
+                return
             for job_id, entry in desired.items():
                 if _truthy(entry.get("cancel")):
                     self._cancelled.add(job_id)
@@ -552,10 +573,16 @@ class JobRunner:
         }
         if error is not None:
             entry["error"] = str(error)[:512]
-        with self._condition:
-            if job_id in self._handled:
-                self._handled[job_id] = status
-        self._update_shadow({job_id: entry})
+        with self._report_lock:
+            with self._condition:
+                if (self._handled.get(job_id) in _FINAL_STATUSES
+                        and status in (STATUS_QUEUED, STATUS_RUNNING)):
+                    # A late progress report (a sync that accepted the
+                    # job just before close) never replaces a final one.
+                    return
+                if job_id in self._handled:
+                    self._handled[job_id] = status
+            self._update_shadow({job_id: entry})
 
     # -- worker lifecycle ------------------------------------------------
     def start(self) -> None:
@@ -589,6 +616,37 @@ class JobRunner:
             except Exception:  # noqa: BLE001 - shutdown is best-effort
                 logger.debug(
                     "Tuning job worker join failed", exc_info=True)
+
+    def close(self, reason: str) -> Dict[str, str]:
+        """Retire this runner (live tuning configuration): accept no more
+        jobs, report every pending job ``failed`` with ``reason``, and stop
+        the running job at its next invocation with the same report.
+
+        Returns at once, with a copy of the handled job ids, so the next
+        runner never re-runs one; the reports go out on the daemon thread
+        ``workflow-tuning-job-close``, never on the calling thread.
+        """
+        with self._condition:
+            self._closed = True
+            self._stopping = True
+            self._close_reason = reason
+            taken: List[str] = []
+            while self._pending:
+                job_id, _ = self._pending.popleft()
+                taken.append(job_id)
+                self._handled[job_id] = STATUS_FAILED
+            self._condition.notify_all()
+            handled = dict(self._handled)
+        if taken:
+            def _report_closed() -> None:
+                for job_id in taken:
+                    self._report(job_id, STATUS_FAILED, 0, None, reason)
+
+            threading.Thread(
+                target=_report_closed, name="workflow-tuning-job-close",
+                daemon=True,
+            ).start()
+        return handled
 
     def wait_idle(self, timeout: float = 30.0) -> bool:
         """Block until no job is pending or running (test/shutdown
@@ -729,6 +787,14 @@ class JobRunner:
                     # flight: the outcomes already produced are kept
                     # (Requirement 6.11).
                     if not flush():
+                        return
+                    reason = self._close_reason
+                    if reason is not None:
+                        logger.info(
+                            "Workflow-tuning job %s failed after %d/%d "
+                            "invocation(s): %s", job_id, done, total, reason)
+                        self._report(
+                            job_id, STATUS_FAILED, done, total, reason)
                         return
                     logger.info(
                         "Workflow-tuning job %s cancelled after %d/%d "
@@ -1190,7 +1256,8 @@ def start_job_runner(
     that has not enabled tuning behaves exactly as before the feature
     (Requirements 2.6, 11.3). ``sync`` performs the initial reconciliation
     so jobs delivered while the device was down are picked up without
-    waiting for a delta.
+    waiting for a delta. ``kwargs`` go to :class:`JobRunner`, including
+    ``handled_jobs`` (the ids a closed runner already accepted).
     """
     exporter = exporter if exporter is not None else sample_exporter()
     config = getattr(exporter, "config", None)

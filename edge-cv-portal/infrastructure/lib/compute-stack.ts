@@ -3264,6 +3264,11 @@ export class ComputeStack extends cdk.Stack {
       },
       layers: [sharedLayer, workflowCoreLayer],
       timeout: cdk.Duration.seconds(60),
+      // The reference-file content check (workflow_reference_files.py)
+      // inflates a PNG's image data up to the length its header declares,
+      // at most 512 MB for an 8000 x 8000 px image; 1024 MB brings the CPU
+      // share that keeps the slowest accepted file within a few seconds.
+      memorySize: 1024,
     });
 
     // Workflow Validation Lambda Handler (validate endpoint + node catalog)

@@ -141,6 +141,8 @@ class SampleExporter:
 ```
 `ExportedSample` carries the exact `input_bytes`, `reference_bytes`, `answer`, `verdict` (or `parse_error`), `execution_id`, `workflow_id`, `version`, `node_id`, `node_type`, `prompt_fingerprint`, `detection_id`, `detection_slot`, `input_sha256`, `source`. The processors call `enqueue` right after the invocation returns, inside the existing containment (`try/except` logged at debug), so an exporter failure can never touch the run (Req 11.1, 11.2). `ExportConfig` is read once at startup from the LocalServer component configuration key `workflowTuning`; absent/disabled ⇒ `SampleExporter` is `None` and no queue exists (Req 2.6, 11.3).
 
+**Amendment (inspection-format nodes), also of the "Config malformed" row of the device error table:** A LocalServer built from the release in the Portal CHANGELOG entry "Workflow tuning for inspection-format Bedrock nodes, reference files and live tuning configuration", or from a later one, also re-reads `workflowTuning` on every 5-second configuration poll, and applies enabling, disabling and a change of bucket or prefix without a restart. A malformed section disables export and logs the WARNING once per change. An older LocalServer reads it only at startup.
+
 **`backfill.py`** (Req 2.7): on the enabled→configured transition (a marker file under `/aws_dda/workflow-tuning/backfilled.json` prevents repeats), for every registration's `workflow.json` tunable node, take the newest 500 executions (`started_at DESC, id DESC`), pair `original`-when-`detection_id`-else-`in` with `reference` when present, skip error outcomes and missing inputs, and enqueue with `source: backfill`.
 
 **`job_runner.py`** (Req 6.4, 6.9, 6.11, 6.15): subscribes to the `dda-workflow-tuning` named shadow delta exactly as `camera_binding_store.py` does for `dda-camera-bindings`; for each new `desired.jobs[job_id]`, reads `workflow-tuning/jobs/{job_id}/manifest.json`, resolves the current registration's Node_Parameters for the node, and for each sample × repeat: `GET` the images, `render_prompt` against the sample's recorded metadata snippet carried in the manifest (unresolved placeholder → `invocation_error`), `build_llm_invocation`, POST to the local Text_Generation_API through the executor's transport, `parse_verdict`, `categorize_outcome`; appends outcome batches (≤ 20) to `workflow-tuning/sessions/{session}/runs/{run}/outcomes-{n}.json`, updates `reported.jobs[job_id] = {status, done, total, updatedAt}`, honours `desired.jobs[job_id].cancel`, runs on its own single-thread worker.
@@ -208,6 +210,8 @@ Routes (Cognito-authorized; every handler resolves the workflow item and calls `
   "metadataSnippet": {"detections": [...], "trigger": {"payload_json": {...}}}     // llm_inference only, for render_prompt
 }
 ```
+
+**Amendment (inspection-format nodes).** The inspection sidecar adds `answerFormat`, `recorded.verdict`, `input.width` and `height`, `reference.width` and `height`, the live-only `reference.source`, `sourceSha256` and `transform`, `metadataSnippetJson` (a JSON string) and `metadataSnippetOmitted`. A list-form sidecar carries `references` instead of `reference`. A reference uploaded in the Portal records `source` as its `upload://{sha256}.{ext}` line, never a file name.
 
 ### DynamoDB `dda-portal-workflow-tuning` (single table, `pk`/`sk`)
 

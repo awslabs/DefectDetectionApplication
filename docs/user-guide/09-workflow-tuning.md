@@ -2,9 +2,9 @@
 
 **Who:** DataScientist, UseCaseAdmin and PortalAdmin. **Video:** [Module 10: Prompt Tuning](https://youtu.be/ZnxGwMxCB1M).
 
-Workflows that judge images with a prompt, through a **Bedrock Inference** or **VLM/LLM Inference** node in anomaly mode, are only as good as their prompt. **Workflow Tuning** lets you improve such a prompt against the images your devices really sent: label the real samples OK or NOK, write candidate prompts, score each candidate against the labelled samples, compare the outcomes, and apply the winner as a new workflow version.
+Workflows that judge images with a prompt, through a **Bedrock Inference** or **VLM/LLM Inference** node in anomaly mode, or a **Bedrock Inference** node in inspection format, are only as good as their prompt. **Workflow Tuning** lets you improve such a prompt against the images your devices really sent: label the real samples OK or NOK, write candidate prompts, score each candidate against the labelled samples, compare the outcomes, and apply the winner as a new workflow version.
 
-**Prerequisite.** Tuning works on exported samples. Turn on **Tuning sample export** for the use case (**Use Cases → Edit → Workflow Tuning**, see [2.3](02-use-cases.md#23-edit-a-use-case)) and redeploy the devices; from then on every anomaly-mode inspection uploads its image and verdict to `workflow-tuning/samples/` in the inference-results bucket. The overview page tells you when export is disabled.
+**Prerequisite.** Tuning works on exported samples. Turn on **Tuning sample export** for the use case (**Use Cases → Edit → Workflow Tuning**, see [2.3](02-use-cases.md#23-edit-a-use-case)) and redeploy the devices; from then on every inspection by a node in anomaly mode or inspection format uploads its image and verdict to `workflow-tuning/samples/` in the inference-results bucket. The overview page tells you when export is disabled.
 
 ## 9.1 Overview
 
@@ -17,6 +17,18 @@ Each deployed workflow of the use case that has a tunable node is a panel listin
 ## 9.2 A tuning session
 
 A session belongs to one node of one workflow. Its header shows the workflow, the node and the model, with **Latest version** and **Baseline** badges, and **Refresh samples** pulls newly exported samples. The work runs through five tabs.
+
+**Inspection-format nodes.** A Bedrock Inference node whose `answer_format` is `inspection` is tunable whatever its `anomaly_mode`. A LocalServer built from the release in the [Portal CHANGELOG](../../edge-cv-portal/CHANGELOG.md) entry "Workflow tuning for inspection-format Bedrock nodes, reference files and live tuning configuration", or from a later one, exports a sample for every inspection-format run that returned an answer; an older LocalServer exports these nodes' samples only when it backfills past runs, without a verdict. Tuning such a node differs in these points:
+- The prompt is rendered per sample from the trigger payload the device recorded with the sample, and from the image size.
+- Signed URL parameters in that recorded payload are stored masked, so a prompt that renders one is scored with the masked value.
+- Configuration overrides applied on the device (`model`, `region`, `max_tokens`, `box_scale`) are not replayed: scoring uses the latest workflow version's parameters.
+- The answer must be the inspection JSON, and `fail` counts as anomalous.
+- Each sample and repeat is scored with one attempt, because the node's retry policy is not replayed.
+- Samples recorded without the reference image the node now sends, or with a different number of reference files than it now sends, are reported as errors.
+- A sample whose trigger payload carried a reference as inline data has that value left out of its recorded metadata, so a candidate prompt that renders it is reported as an error.
+- Samples show every reference file, images as images and documents as links, and scoring sends them as the device did.
+- Verdicts recovered from samples that an older LocalServer backfilled without a verdict carry a **Recovered from the recorded answer** badge. A `pass` is recovered only when the node's `error_verdict` is `error`.
+- The starter template and synthetic negatives are for anomaly-mode nodes only.
 
 ### Samples
 

@@ -70,7 +70,7 @@ import tempfile
 import time
 import uuid
 import zipfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
 from datetime import datetime
 from decimal import Decimal
 import boto3
@@ -81,7 +81,15 @@ import sys
 sys.path.append('/opt/python')
 from shared_utils import (
     create_response, get_user_from_event, log_audit_event,
-    get_usecase, get_usecase_client, rbac_manager, Permission
+    get_usecase, get_usecase_client, rbac_manager, Permission,
+    component_bucket_owner
+)
+# Uploaded reference files (workflow_reference_files.py): the names a node's
+# upload lines carry, and where the package and its manifest hold them.
+from workflow_core.anomaly_invocation import (
+    MANIFEST_REFERENCE_FILES_KEY,
+    PACKAGED_REFERENCES_DIR,
+    uploaded_reference_names,
 )
 from workflow_core.serializer import parse as parse_definition
 from workflow_core.compiler import compile as compile_workflow, CompileContext
@@ -466,6 +474,78 @@ class PackagingError(Exception):
         super().__init__(message)
         self.artifact = artifact
         self.message = message
+
+
+class PackagedReference(NamedTuple):
+    """One uploaded reference file staged for packaging."""
+    name: str        # "{sha256}.{ext}", the upload line without "upload://"
+    local_path: str  # the downloaded copy under {work_dir}/references/
+    sha256: str      # 64 lowercase hex, verified against the name
+    size: int        # bytes
+
+
+#: The node type whose reference_payload_path may name uploaded files.
+BEDROCK_INFERENCE_TYPE_ID = 'bedrock_inference'
+
+
+def gather_uploaded_reference_names(graph) -> List[str]:
+    """The sorted union of the uploaded file names the upload lines of the
+    graph's bedrock_inference nodes carry; empty for every workflow without
+    upload lines."""
+    names = set()
+    for node in graph.nodes:
+        if node.type == BEDROCK_INFERENCE_TYPE_ID:
+            names.update(uploaded_reference_names(node.parameters))
+    return sorted(names)
+
+
+def download_uploaded_references(usecase_id: str, workflow_id: str,
+                                 names: Sequence[str],
+                                 work_dir: str) -> List[PackagedReference]:
+    """Stream each named stored file of the workflow (Portal artifacts
+    bucket, owner asserted) to {work_dir}/references/{name} while hashing it.
+    A missing file, or bytes whose sha256 is not the name's, raises
+    PackagingError naming references/{name}."""
+    files: List[PackagedReference] = []
+    if not names:
+        return files
+    directory = os.path.join(work_dir, PACKAGED_REFERENCES_DIR)
+    os.makedirs(directory, exist_ok=True)
+    owner = component_bucket_owner()
+    for name in names:
+        artifact_label = f"{PACKAGED_REFERENCES_DIR}/{name}"
+        key = f"{WORKFLOWS_S3_PREFIX}/{usecase_id}/{workflow_id}/references/{name}"
+        local_path = os.path.join(directory, name)
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            response = s3.get_object(Bucket=PORTAL_ARTIFACTS_BUCKET, Key=key,
+                                     ExpectedBucketOwner=owner)
+            with open(local_path, 'wb') as target:
+                body = response['Body']
+                while True:
+                    chunk = body.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    size += len(chunk)
+                    target.write(chunk)
+        except ClientError as e:
+            code = e.response.get('Error', {}).get('Code', '')
+            if code not in ('NoSuchKey', '404'):
+                raise PackagingError(
+                    artifact_label,
+                    f"Uploaded reference file upload://{name} could not be read: "
+                    f"{code or str(e)}")
+            digest = None
+        if digest is None or digest.hexdigest() != name.split('.', 1)[0]:
+            raise PackagingError(
+                artifact_label,
+                f"Uploaded reference file upload://{name} is missing from this "
+                "workflow or does not match its checksum; upload it again and "
+                "save a new version")
+        files.append(PackagedReference(name, local_path, digest.hexdigest(), size))
+    return files
 
 
 def decimal_to_native(obj):
@@ -2162,7 +2242,8 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
                    component_version: Optional[str] = None,
                    workflow_name: Optional[str] = None,
                    subscribed_topics: Optional[List[str]] = None,
-                   stream_features: bool = False) -> Dict:
+                   stream_features: bool = False, *,
+                   reference_files: Optional[Sequence[PackagedReference]] = None) -> Dict:
     """manifest.json content: what WorkflowWatcher needs to register the
     workflow and what the deployment compatibility check reads (8.4).
 
@@ -2181,7 +2262,12 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
     Scene_Analytics_Node, so BOTH version floors this manifest carries —
     the arch-scoped scalar and the per-arch map the device prefers — are
     raised to the maximum of the architecture floor and the feature floor.
-    False (the default) stamps both exactly as before (18.1)."""
+    False (the default) stamps both exactly as before (18.1).
+
+    ``reference_files``: the uploaded reference files the package carries,
+    recorded as ``referenceFiles`` {"references/{name}": {sha256, bytes}} for
+    the device's checksum check ONLY when non-empty, so every other manifest
+    stays byte-identical."""
     manifest = {
         'componentName': component_name_for(workflow_id),
         # The resolved (possibly patch-bumped) version when provided, else the
@@ -2217,18 +2303,29 @@ def build_manifest(workflow_id: str, workflow_version: int, arch: str,
     }
     if subscribed_topics:
         manifest['subscribed_topics'] = list(subscribed_topics)
+    if reference_files:
+        manifest[MANIFEST_REFERENCE_FILES_KEY] = {
+            f"{PACKAGED_REFERENCES_DIR}/{reference.name}": {
+                'sha256': reference.sha256, 'bytes': reference.size}
+            for reference in reference_files
+        }
     return manifest
 
 
 def build_arch_zip(zip_path: str, arch: str, manifest: Dict, definition_json: str,
                    compiled_json: str, gst_plugins: List[str],
-                   custom_python_nodes: List[Dict]) -> None:
+                   custom_python_nodes: List[Dict], *,
+                   reference_files: Optional[Sequence[PackagedReference]] = None) -> None:
     """
     Assemble one architecture's artifact zip on local disk (Requirement 7.1).
 
     Plugin binaries are resolved from the curated plugin library in portal
     S3; a missing or unreadable plugin artifact fails packaging with that
     artifact identified (Requirement 7.5).
+
+    Each uploaded reference file of ``reference_files`` is written once, from
+    its downloaded copy, as references/{name}; absent, None or empty adds
+    nothing.
     """
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr('manifest.json', json.dumps(manifest, sort_keys=True, indent=2))
@@ -2263,6 +2360,9 @@ def build_arch_zip(zip_path: str, arch: str, manifest: Dict, definition_json: st
         for node in custom_python_nodes:
             zf.writestr(f"python/{node['node_id']}/handler.py", node['code'])
             zf.writestr(f"python/{node['node_id']}/requirements.txt", node['requirements'])
+
+        for reference in reference_files or ():
+            zf.write(reference.local_path, f"{PACKAGED_REFERENCES_DIR}/{reference.name}")
 
 
 # --------------------------------------------------------------------------
@@ -2753,6 +2853,14 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
     # objects, even when promotion itself failed partway (Requirement 7.5).
     final_prefix = f"{COMPONENT_S3_PREFIX}/{workflow_id}/{version}"
     try:
+        # Uploaded reference files the version's upload lines name: each is
+        # downloaded and verified against its name's sha256 before anything is
+        # staged, and shipped once per arch zip under references/ with its
+        # checksum in the manifest. A workflow without upload lines skips
+        # this and packages exactly as before.
+        reference_files = download_uploaded_references(
+            usecase_id, workflow_id, gather_uploaded_reference_names(graph), work_dir)
+
         # Workflow dependency edges (edge-deploy-reliability 2.8, 2.9, 3.8
         # — Defect C): resolve the workflow's model_ref values to their
         # published model components (fail closed on unpublished models via
@@ -2834,11 +2942,12 @@ def package_workflow(event: Dict, user: Dict, workflow_id: str) -> Dict:
                 component_version=resolved_component_version,
                 workflow_name=item.get('name'),
                 subscribed_topics=subscribed_topics,
-                stream_features=stream_features)
+                stream_features=stream_features,
+                reference_files=reference_files)
             zip_path = os.path.join(work_dir, zip_artifact_name(arch))
             build_arch_zip(zip_path, arch, manifest, packaged_definition_json,
                            arch_compiled_json[arch], gst_plugins,
-                           custom_python_nodes)
+                           custom_python_nodes, reference_files=reference_files)
             arch_zip_paths[arch] = zip_path
 
         final_prefix, final_keys = stage_and_promote_artifacts(

@@ -113,16 +113,31 @@ from shared_utils import (  # noqa: E402
 )
 from workflow_core.anomaly_invocation import (  # noqa: E402
     BEDROCK_DEFAULT_REGION,
+    BEDROCK_IMAGE_FORMAT,
     BEDROCK_READ_TIMEOUT_SEC,
     DEFAULT_MAX_TOKENS,
+    DOCUMENT_FORMATS_BY_EXTENSION,
+    KIND_DOCUMENT,
+    KIND_IMAGE,
     LABEL_NOK,
     LABEL_OK,
+    NODE_TYPE_BEDROCK_INFERENCE,
     NODE_TYPE_LLM_INFERENCE,
+    InspectionRequestError,
+    ReferenceFile,
     build_bedrock_invocation,
     build_llm_invocation,
     categorize_outcome,
+    coerce_parameter_value,
+    inspection_verdict,
+    is_inspection_format,
     is_tunable_node,
+    omitted_path_conflict,
+    parse_inspection_answer,
+    parse_reference_list,
     parse_verdict,
+    prepare_inspection_request,
+    prompt_field_paths,
     prompt_fingerprint,
     summarize_outcomes,
 )
@@ -219,6 +234,28 @@ REFERENCE_SUFFIX = '.reference.jpg'
 #: (which separates the sort-key parts).
 SYNTHETIC_MARKER = '|syn|'
 
+#: Why enabling Synthetic_Negatives is refused for an inspection-format
+#: node (400 SYNTHETIC_NEGATIVES_UNSUPPORTED).
+SYNTHETIC_NEGATIVES_UNSUPPORTED_MESSAGE = (
+    "Synthetic negatives need a per-part golden reference image; an "
+    "inspection-format node's reference image (for example a legend) is "
+    "not one, so cross-paired images are not defects")
+
+#: The ``invocation_error`` texts of an inspection-format replay that
+#: cannot reproduce the device's request; no Bedrock call is made.
+REPLAY_MISSING_REFERENCE = (
+    "the sample was recorded without a reference image, but this node "
+    "sends one (reference_payload_path is set); it cannot be replayed "
+    "faithfully")
+REPLAY_REFERENCE_COUNT = (
+    "the sample was recorded with {recorded} reference file(s), but this "
+    "node now sends {configured}; it cannot be replayed faithfully")
+REPLAY_MALFORMED_REFERENCES = "the sample's recorded references are malformed"
+REPLAY_OMITTED_METADATA = (
+    "the sample's recorded metadata leaves out {path} (inline reference "
+    "image data), which this prompt renders; it cannot be replayed "
+    "faithfully")
+
 # --------------------------------------------------------------------------
 # Score_Run bounds and fixed values (Requirements 6.*, 10.3, 10.4)
 # --------------------------------------------------------------------------
@@ -235,6 +272,14 @@ DEFAULT_REPEATS = 1
 #: Invocations one self-invoked Bedrock execution step issues at most
 #: (Lambda-safe chunking, Requirements 6.8, 10.4).
 CHUNK_INVOCATIONS = 100
+
+#: The recorded sample bytes one step holds at most: a step also ends at
+#: the first unit whose sample would take the distinct samples' total
+#: above this bound (the sidecars' ``bytes`` fields, read before anything
+#: is fetched), so samples that carry several large reference files fit
+#: the 1024 MB Lambda with the in-flight request copies. A step always
+#: keeps at least one unit.
+CHUNK_SAMPLE_BYTES = 128 * 1024 * 1024
 
 #: Concurrent Bedrock invocations inside one step (Requirement 6.8).
 SCORE_THREADS = 4
@@ -602,7 +647,8 @@ def node_is_tunable(node: Optional[Dict]) -> bool:
         return False
     parameters = node.get('parameters')
     parameters = parameters if isinstance(parameters, dict) else {}
-    return is_tunable_node(node.get('type'), parameters.get('anomaly_mode'))
+    return is_tunable_node(node.get('type'), parameters.get('anomaly_mode'),
+                           parameters.get('answer_format'))
 
 
 def tunable_nodes(document: Any) -> List[Dict]:
@@ -869,21 +915,48 @@ def put_baseline_candidate(session_id: str, node: Dict, version: int,
     return item
 
 
+def node_error_verdict(node: Optional[Dict]) -> str:
+    """The node's ``error_verdict`` as the session META records it
+    (``errorVerdict``): which verdicts may be recovered from a recorded
+    answer depends on it (:func:`effective_recorded`)."""
+    parameters = (node or {}).get('parameters') or {}
+    return str(parameters.get('error_verdict') or 'error')
+
+
 def refresh_baseline(session: Dict, node: Dict, version: int,
                      user: Dict) -> Dict:
     """Keep the session's Baseline_Candidate on the latest version
-    (Requirement 5.1). Returns the (possibly updated) session item."""
+    (Requirement 5.1), and its ``errorVerdict`` on the latest node.
+    Returns the (possibly updated) session item."""
+    error_verdict = node_error_verdict(node)
     if session.get('baselineVersion') == version:
-        return session
+        if session.get('errorVerdict') == error_verdict:
+            return session
+        # A session created before errorVerdict was recorded gets it the
+        # next time it is opened. Best effort: without it only a recorded
+        # "fail" is recovered.
+        try:
+            updated = table().update_item(
+                Key={'pk': session_pk(session['sessionId']), 'sk': 'META'},
+                UpdateExpression='SET errorVerdict = :e, updatedAt = :u',
+                ExpressionAttributeValues={':e': error_verdict,
+                                           ':u': now_ms()},
+                ReturnValues='ALL_NEW',
+            )
+        except Exception as exc:  # noqa: BLE001 - the session still opens
+            logger.warning(f"Could not record errorVerdict on tuning session "
+                           f"{session['sessionId']}: {exc}")
+            return session
+        return decimal_to_native(updated['Attributes'])
     baseline = put_baseline_candidate(session['sessionId'], node, version, user)
     updated = table().update_item(
         Key={'pk': session_pk(session['sessionId']), 'sk': 'META'},
         UpdateExpression=(
             'SET baselineVersion = :v, baselineFingerprint = :f, '
-            'nodeType = :t, updatedAt = :u'),
+            'nodeType = :t, errorVerdict = :e, updatedAt = :u'),
         ExpressionAttributeValues={
             ':v': version, ':f': baseline['fingerprint'],
-            ':t': node.get('type'), ':u': now_ms()},
+            ':t': node.get('type'), ':e': error_verdict, ':u': now_ms()},
         ReturnValues='ALL_NEW',
     )
     return decimal_to_native(updated['Attributes'])
@@ -1087,17 +1160,119 @@ def build_sample_item(session_id: str, sample_id: str, sidecar_key: str,
     }
 
 
+#: The document formats a recorded list-form reference may carry.
+REFERENCE_DOCUMENT_FORMATS = frozenset(DOCUMENT_FORMATS_BY_EXTENSION.values())
+
+
+def is_recorded_reference(entry: Any) -> bool:
+    """True for a sidecar ``references`` entry the scorer and the sample
+    view may use: a string ``key``, and an ``image`` declared ``jpeg`` or a
+    ``document`` in one of the Converse document formats. Sidecars are
+    device-written data, so no unchecked format ever reaches Bedrock."""
+    if not isinstance(entry, dict):
+        return False
+    key = entry.get('key')
+    if not isinstance(key, str) or not key:
+        return False
+    if entry.get('kind') == KIND_IMAGE:
+        return entry.get('format') == BEDROCK_IMAGE_FORMAT
+    if entry.get('kind') == KIND_DOCUMENT:
+        return entry.get('format') in REFERENCE_DOCUMENT_FORMATS
+    return False
+
+
+def snippet_values(sidecar: Dict) -> Optional[Dict]:
+    """``json.loads(metadataSnippetJson)`` when it is a string that decodes
+    to a JSON object, else ``None``. The string keeps the key order and the
+    integral floats of the device's metadata, which the DynamoDB copy of
+    the sidecar map does not."""
+    raw = sidecar.get('metadataSnippetJson')
+    if not isinstance(raw, str):
+        return None
+    try:
+        values = json.loads(raw)
+    except ValueError:
+        return None
+    return values if isinstance(values, dict) else None
+
+
+def effective_recorded(sidecar: Any,
+                       error_verdict: Optional[str]) -> Dict[str, Any]:
+    """``{isAnomalous, confidence, verdict, recovered}`` of a stored sidecar.
+
+    The recorded values, unless the sample is a ``bedrock_inference``
+    sample whose verdict was recorded as null with no parse error while its
+    recorded answer is a schema-valid inspection answer (an older
+    LocalServer's backfill recorded every inspection verdict as null). Then
+    the verdict is recovered from the answer under the inspection rule:
+    ``fail`` always, because under ``error_verdict: fail`` a rejected answer
+    was published as ``fail`` anyway; ``pass`` only when the node's
+    ``error_verdict`` is known and is not ``fail``, because under ``fail``
+    the old backfill also exported answers the device had rejected.
+    Nothing is rewritten: the view and the filters apply this on read.
+    """
+    sidecar = sidecar if isinstance(sidecar, dict) else {}
+    recorded = sidecar.get('recorded')
+    recorded = recorded if isinstance(recorded, dict) else {}
+    verdict = recorded.get('verdict')
+    kept = {'isAnomalous': recorded.get('isAnomalous'),
+            'confidence': recorded.get('confidence'),
+            'verdict': verdict if verdict in ('pass', 'fail') else None,
+            'recovered': False}
+    answer = recorded.get('answer')
+    if (sidecar.get('nodeType') != NODE_TYPE_BEDROCK_INFERENCE
+            or recorded.get('isAnomalous') is not None
+            or recorded.get('parseError')
+            or not isinstance(answer, str)):
+        return kept
+    try:
+        recovered = inspection_verdict(parse_inspection_answer(answer))
+    except ValueError:
+        return kept
+    if recovered['verdict'] == 'pass' and error_verdict in (None, 'fail'):
+        return kept
+    return {'isAnomalous': recovered['is_anomalous'],
+            'confidence': recovered['confidence'],
+            'verdict': recovered['verdict'],
+            'recovered': True}
+
+
 def sample_view(item: Dict, baseline_fingerprint: Optional[str],
                 client=None, bucket: Optional[str] = None,
                 urls: bool = False, include_metadata: bool = False,
-                unavailable: Optional[bool] = None) -> Dict:
-    """The public shape of an indexed Tuning_Sample (Requirement 4.1)."""
+                unavailable: Optional[bool] = None,
+                error_verdict: Optional[str] = None) -> Dict:
+    """The public shape of an indexed Tuning_Sample (Requirement 4.1).
+    ``error_verdict`` is the session's ``errorVerdict``, which governs the
+    recovered verdicts (:func:`effective_recorded`)."""
     sidecar = item.get('sidecar') or {}
     recorded = sidecar.get('recorded') or {}
+    effective = effective_recorded(sidecar, error_verdict)
     input_block = dict(sidecar.get('input') or {})
     reference_block = sidecar.get('reference')
     reference_block = dict(reference_block) if isinstance(
         reference_block, dict) else None
+    references = None
+    if isinstance(sidecar.get('references'), list):
+        # A list form: every reference file in recorded order; an entry
+        # that is not a usable reference is left out.
+        reference_block = None
+        references = []
+        for entry in sidecar['references']:
+            if not is_recorded_reference(entry):
+                continue
+            view_entry = {
+                'index': entry.get('index'),
+                'label': entry.get('label'),
+                'kind': entry['kind'],
+                'format': entry['format'],
+                'bytes': entry.get('bytes'),
+                'width': entry.get('width'),
+                'height': entry.get('height'),
+            }
+            if urls:
+                view_entry['url'] = presign(client, bucket, entry['key'])
+            references.append(view_entry)
     if item.get('synthetic'):
         # A Synthetic_Negative borrows a sibling node's Reference_Image;
         # its own recorded verdict is the source sample's.
@@ -1108,6 +1283,15 @@ def sample_view(item: Dict, baseline_fingerprint: Optional[str],
         if reference_block:
             reference_block['url'] = presign(client, bucket,
                                              reference_block.get('key'))
+    recorded_view = {
+        'isAnomalous': effective['isAnomalous'],
+        'confidence': effective['confidence'],
+        'answer': recorded.get('answer'),
+        'parseError': recorded.get('parseError'),
+    }
+    if effective['verdict'] is not None:
+        recorded_view['verdict'] = effective['verdict']
+        recorded_view['recovered'] = effective['recovered']
     fingerprint = item.get('promptFingerprint')
     view = {
         'sampleId': item.get('sampleId'),
@@ -1129,20 +1313,19 @@ def sample_view(item: Dict, baseline_fingerprint: Optional[str],
         'detectionId': item.get('detectionId'),
         'detectionSlot': item.get('detectionSlot'),
         'promptFingerprint': fingerprint,
-        'recorded': {
-            'isAnomalous': recorded.get('isAnomalous'),
-            'confidence': recorded.get('confidence'),
-            'answer': recorded.get('answer'),
-            'parseError': recorded.get('parseError'),
-        },
+        'recorded': recorded_view,
         'input': input_block,
         'reference': reference_block,
-        'singleImage': reference_block is None,
+        'singleImage': reference_block is None and references is None,
     }
+    if references is not None:
+        view['references'] = references
     if unavailable is not None:
         view['unavailable'] = unavailable
     if include_metadata:
-        view['metadataSnippet'] = sidecar.get('metadataSnippet')
+        values = snippet_values(sidecar)
+        view['metadataSnippet'] = (values if values is not None
+                                   else sidecar.get('metadataSnippet'))
     return view
 
 
@@ -1330,10 +1513,12 @@ def create_or_get_session(event: Dict, user: Dict) -> Dict:
         parameters = (node or {}).get('parameters') or {}
         raise TuningError(
             400, 'NODE_NOT_TUNABLE',
-            f"Node '{node_id}' is not an anomaly-mode Bedrock or VLM "
-            f"inspection node in version {version}",
+            f"Node '{node_id}' is not tunable in version {version}: tuning "
+            f"needs a Bedrock node in anomaly mode or inspection format, or "
+            f"a VLM node in anomaly mode",
             {'nodeId': node_id, 'nodeType': (node or {}).get('type'),
              'anomaly_mode': parameters.get('anomaly_mode'),
+             'answer_format': parameters.get('answer_format'),
              'version': version})
 
     lookup = lookup_key(str(workflow_id), str(node_id))
@@ -1375,6 +1560,7 @@ def create_or_get_session(event: Dict, user: Dict) -> Dict:
         'workflowId': str(workflow_id),
         'nodeId': str(node_id),
         'nodeType': node.get('type'),
+        'errorVerdict': node_error_verdict(node),
         'baselineVersion': version,
         'baselineCandidateId': BASELINE_CANDIDATE_ID,
         'baselineFingerprint': candidate_fingerprint(node.get('type'),
@@ -1640,6 +1826,12 @@ def list_samples(event: Dict, user: Dict, session_id: str) -> Dict:
                                               Permission.WORKFLOW_READ)
     params = event.get('queryStringParameters') or {}
     baseline_fingerprint = session.get('baselineFingerprint')
+    error_verdict = session.get('errorVerdict')
+
+    def recorded_anomalous(item):
+        # The verdict shown, recovered verdicts included (design §10.6).
+        return effective_recorded(item.get('sidecar'),
+                                  error_verdict)['isAnomalous']
 
     items = sample_items(session_id)
     all_items = list(items)
@@ -1661,7 +1853,7 @@ def list_samples(event: Dict, user: Dict, session_id: str) -> Dict:
             wanted_verdict = False
         if wanted_verdict is not None:
             items = [i for i in items
-                     if bool(i.get('recordedIsAnomalous')) is wanted_verdict]
+                     if bool(recorded_anomalous(i)) is wanted_verdict]
     device = params.get('device')
     if device:
         items = [i for i in items if i.get('thingName') == device]
@@ -1693,7 +1885,7 @@ def list_samples(event: Dict, user: Dict, session_id: str) -> Dict:
             label_value = item.get('label')
             if label_value not in ('OK', 'NOK'):
                 return False
-            recorded = bool(item.get('recordedIsAnomalous'))
+            recorded = bool(recorded_anomalous(item))
             return (label_value == 'NOK') != recorded
         items = [i for i in items if disagrees(i) is disagree]
 
@@ -1720,7 +1912,8 @@ def list_samples(event: Dict, user: Dict, session_id: str) -> Dict:
                                 urls=True,
                                 include_metadata=include_metadata,
                                 unavailable=availability.get(
-                                    item['sampleId']))
+                                    item['sampleId']),
+                                error_verdict=error_verdict)
                     for item in page],
         'count': len(page),
         'matched': len(items),
@@ -1842,9 +2035,11 @@ def toggle_synthetic_negatives(event: Dict, user: Dict,
     the same execution on the same device), each linked to its source
     (Requirement 4.5). Disabling removes every Synthetic_Negative and
     leaves every indexed sample and Label unchanged (Requirement 4.6).
+    Enabling is refused for an inspection-format node, whose reference
+    image (for example a legend) is not a per-part golden sample.
     """
-    session, _workflow_item = session_context(user, event, session_id,
-                                              Permission.WORKFLOW_EDIT)
+    session, workflow_item = session_context(user, event, session_id,
+                                             Permission.WORKFLOW_EDIT)
     body = parse_body(event)
     if 'enabled' not in body or not isinstance(body['enabled'], bool):
         raise TuningError(400, 'MISSING_FIELDS',
@@ -1862,6 +2057,13 @@ def toggle_synthetic_negatives(event: Dict, user: Dict,
             'removed': removed,
             'labelCounts': label_counts(sample_items(session_id)),
         })
+
+    _version, document = load_latest_definition(workflow_item)
+    node = find_node(document, session['nodeId'])
+    if node is not None and is_inspection_format(node.get('parameters')
+                                                 or {}):
+        raise TuningError(400, 'SYNTHETIC_NEGATIVES_UNSUPPORTED',
+                          SYNTHETIC_NEGATIVES_UNSUPPORTED_MESSAGE)
 
     usecase = get_usecase(session['usecaseId'])
     client, bucket = sample_store(usecase)
@@ -2131,7 +2333,8 @@ def delete_candidate(event: Dict, user: Dict, session_id: str,
 # ==========================================================================
 
 def preview_warnings(prompt: str, system_prompt: Optional[str],
-                     max_tokens: Any) -> List[Dict[str, str]]:
+                     max_tokens: Any,
+                     answer_format: Any = None) -> List[Dict[str, str]]:
     """The Candidate's parser-hostile-settings warnings, never blocking
     (Requirements 5.4, 5.5).
 
@@ -2140,7 +2343,11 @@ def preview_warnings(prompt: str, system_prompt: Optional[str],
       naming ``is_anomalous``: the Verdict_Parser needs a JSON object
       carrying that key, and the model tends to obey the operator's schema
       over the appended Verdict_Instruction (the blue-plate finding).
+    - for an inspection-format node (``answer_format`` exactly
+      ``inspection``), the same test names ``verdict`` instead: its parser
+      needs the inspection answer object.
     """
+    inspection = str(answer_format or '') == 'inspection'
     warnings: List[Dict[str, str]] = []
     try:
         budget = int(max_tokens)
@@ -2158,6 +2365,18 @@ def preview_warnings(prompt: str, system_prompt: Optional[str],
             continue
         lowered = str(text).lower()
         demands_json = 'json' in lowered or ('{' in text and '}' in text)
+        if inspection:
+            if demands_json and 'verdict' not in lowered:
+                warnings.append({
+                    'code': 'answer_schema_missing_verdict',
+                    'field': field,
+                    'message': (f'The {field} specifies an answer format '
+                                f'that does not include "verdict". An '
+                                f"inspection-format node's parser requires "
+                                f'exactly one JSON object with verdict, '
+                                f'confidence, reason and objects.'),
+                })
+            continue
         if demands_json and 'is_anomalous' not in lowered:
             warnings.append({
                 'code': 'answer_schema_missing_is_anomalous',
@@ -2168,6 +2387,15 @@ def preview_warnings(prompt: str, system_prompt: Optional[str],
                             f'is_anomalous (and optionally confidence).'),
             })
     return warnings
+
+
+def render_prompt_enabled(parameters: Dict[str, Any]) -> bool:
+    """``render_prompt`` as the executor reads it: absent or blank is off,
+    anything else is the truth of its coerced value."""
+    raw = parameters.get('render_prompt')
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return False
+    return bool(coerce_parameter_value(raw))
 
 
 def build_preview(node: Dict, prompt_set: Dict[str, Any]) -> Dict:
@@ -2185,6 +2413,34 @@ def build_preview(node: Dict, prompt_set: Dict[str, Any]) -> Dict:
                 'maxTokens': invocation.generation.get('max_tokens'),
                 'model': invocation.model_name,
                 'templateRendered': False}
+    if is_inspection_format(parameters):
+        # Placeholder bytes for the input and every configured reference:
+        # the preview never sends a file. The template is shown as it is;
+        # with render_prompt on, the device renders it per run.
+        references = [
+            ReferenceFile(spec.kind, spec.format,
+                          PREVIEW_PLACEHOLDER_IMAGE
+                          if spec.kind == KIND_IMAGE else b'')
+            for spec in parse_reference_list(
+                parameters.get('reference_payload_path'))]
+        invocation = build_bedrock_invocation(
+            parameters, PREVIEW_PLACEHOLDER_IMAGE,
+            references=references or None)
+        if invocation.attachments:
+            attachments = [{'label': item.label, 'kind': item.kind,
+                            'format': item.format}
+                           for item in invocation.attachments]
+        else:
+            attachments = [{'label': label, 'kind': KIND_IMAGE,
+                            'format': BEDROCK_IMAGE_FORMAT}
+                           for label, _data in invocation.images]
+        return {'userMessage': invocation.prompt,
+                'systemText': invocation.system_prompt,
+                'maxTokens': invocation.max_tokens,
+                'model': invocation.model,
+                'region': invocation.region,
+                'templateRendered': not render_prompt_enabled(parameters),
+                'attachments': attachments}
     invocation = build_bedrock_invocation(
         parameters, PREVIEW_PLACEHOLDER_IMAGE, PREVIEW_PLACEHOLDER_IMAGE)
     return {'userMessage': invocation.prompt,
@@ -2237,9 +2493,10 @@ def preview_candidate(event: Dict, user: Dict, candidate_id: str) -> Dict:
                   'systemPrompt': candidate.get('systemPrompt'),
                   'maxTokens': candidate.get('maxTokens')}
     preview = build_preview(node, prompt_set)
-    preview['warnings'] = preview_warnings(prompt_set['prompt'],
-                                           prompt_set['systemPrompt'],
-                                           prompt_set['maxTokens'])
+    preview['warnings'] = preview_warnings(
+        prompt_set['prompt'], prompt_set['systemPrompt'],
+        prompt_set['maxTokens'],
+        (node.get('parameters') or {}).get('answer_format'))
     preview['candidateId'] = candidate_id
     preview['sessionId'] = str(session_id)
     preview['nodeType'] = node.get('type')
@@ -2313,7 +2570,18 @@ def outcome_view(item: Dict) -> Dict:
         'latencyMs': item.get('latencyMs'),
         'error': item.get('error'),
         'thingName': item.get('thingName'),
+        **inspection_outcome_fields(item),
     }
+
+
+#: The outcome fields an inspection-format replay adds; a legacy outcome
+#: carries none of them, so its item and view are unchanged.
+INSPECTION_OUTCOME_FIELDS = ('verdict', 'imageCount', 'documentCount')
+
+
+def inspection_outcome_fields(outcome: Dict) -> Dict[str, Any]:
+    return {key: outcome[key] for key in INSPECTION_OUTCOME_FIELDS
+            if outcome.get(key) is not None}
 
 
 def outcome_item(run_id: str, session_id: str, outcome: Dict) -> Dict:
@@ -2337,6 +2605,7 @@ def outcome_item(run_id: str, session_id: str, outcome: Dict) -> Dict:
         'latencyMs': outcome.get('latencyMs'),
         'error': outcome.get('error'),
         'thingName': outcome.get('thingName'),
+        **inspection_outcome_fields(outcome),
         'recordedAt': now_s(),
         'ttl': now_s() + OUTCOME_TTL_SECONDS,
     }
@@ -2616,10 +2885,12 @@ def start_score_run(event: Dict, user: Dict, session_id: str) -> Dict:
         parameters = (node or {}).get('parameters') or {}
         raise TuningError(
             400, 'NODE_NOT_TUNABLE',
-            f"Node '{session['nodeId']}' is not an anomaly-mode Bedrock or "
-            f"VLM inspection node in version {version}",
+            f"Node '{session['nodeId']}' is not tunable in version "
+            f"{version}: tuning needs a Bedrock node in anomaly mode or "
+            f"inspection format, or a VLM node in anomaly mode",
             {'nodeId': session['nodeId'], 'nodeType': (node or {}).get('type'),
              'anomaly_mode': parameters.get('anomaly_mode'),
+             'answer_format': parameters.get('answer_format'),
              'version': version})
 
     samples = scored_samples(session_id)
@@ -2838,9 +3109,10 @@ def invoke_bedrock(client, invocation) -> Tuple[str, Optional[int]]:
 
 def replay_bedrock_unit(client, parameters: Dict[str, Any], sample_id: str,
                         label: str, repeat: int,
-                        images: Tuple[Optional[bytes], Optional[bytes]],
+                        images: Tuple[Any, ...],
                         read_error: Optional[str],
-                        thing_name: Optional[str] = None) -> Dict:
+                        thing_name: Optional[str] = None,
+                        sidecar: Optional[Dict] = None) -> Dict:
     """Replay one Candidate on one sample once: the Sample_Outcome.
 
     The whole path is the executor's (Requirements 6.1, 6.2, 6.5): the
@@ -2848,6 +3120,13 @@ def replay_bedrock_unit(client, parameters: Dict[str, Any], sample_id: str,
     Node_Parameters with the Candidate's Prompt_Set laid over them, the
     shared parser reads the answer and the shared categorizer assigns
     exactly one category.
+
+    ``images`` is ``(input_bytes, reference_bytes[, reference_list])``;
+    ``reference_list`` holds a list-form sample's reference files in the
+    order of its sidecar's ``references``. An inspection-format node
+    (``answer_format: inspection``) is replayed under the inspection
+    contract (:func:`_replay_inspection_unit`), from the indexed
+    ``sidecar``.
     """
     outcome: Dict[str, Any] = {'sampleId': sample_id, 'repeat': int(repeat),
                                'label': label, 'thingName': thing_name}
@@ -2864,7 +3143,12 @@ def replay_bedrock_unit(client, parameters: Dict[str, Any], sample_id: str,
                                                        read_error),
                         'error': read_error})
         return outcome
-    input_bytes, reference_bytes = images
+    input_bytes, reference_bytes = images[0], images[1]
+    reference_list = tuple(images[2]) if len(images) > 2 else ()
+    if is_inspection_format(parameters):
+        return _replay_inspection_unit(
+            client, parameters, outcome, input_bytes, reference_bytes,
+            reference_list, sidecar if isinstance(sidecar, dict) else {})
     invocation = build_bedrock_invocation(parameters, input_bytes or b'',
                                          reference_bytes)
     started = time.time()
@@ -2889,6 +3173,183 @@ def replay_bedrock_unit(client, parameters: Dict[str, Any], sample_id: str,
     outcome['isAnomalous'] = bool(verdict.get('is_anomalous'))
     outcome['confidence'] = verdict.get('confidence')
     return outcome
+
+
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) \
+        and value > 0
+
+
+def _replay_inspection_unit(client, parameters: Dict[str, Any],
+                            outcome: Dict[str, Any],
+                            input_bytes: Optional[bytes],
+                            reference_bytes: Optional[bytes],
+                            reference_list: Tuple[Optional[bytes], ...],
+                            sidecar: Dict) -> Dict:
+    """Replay one Candidate on one inspection-format sample once.
+
+    The device's request is rebuilt from what the sample recorded, with the
+    executor's own rules from ``workflow_core``: the Candidate's texts
+    rendered from the sample's ``metadataSnippetJson`` and image size, the
+    expected count and box scale, and the recorded reference files in
+    recorded order with their kinds and formats. The answer is read by
+    ``parse_inspection_answer``, and ``fail`` counts as anomalous. A sample
+    that cannot reproduce the device's request is an ``invocation_error``
+    with no Bedrock call. WorkflowNodeOverrides are not replayed.
+    """
+    label = outcome['label']
+
+    def refuse(message: str) -> Dict:
+        outcome.update({'category': categorize_outcome(label, None, message),
+                        'error': message})
+        return outcome
+
+    # 1. The reference rule: the node's configured count against the
+    # sample's recorded references (none configured: replay single-image).
+    configured = len(parse_reference_list(
+        parameters.get('reference_payload_path')))
+    recorded_list = sidecar.get('references')
+    if isinstance(recorded_list, list):
+        recorded = len(recorded_list)
+    else:
+        recorded = 1 if isinstance(sidecar.get('reference'), dict) else 0
+    references: List[ReferenceFile] = []
+    if configured:
+        if not recorded:
+            return refuse(REPLAY_MISSING_REFERENCE)
+        if recorded != configured:
+            return refuse(REPLAY_REFERENCE_COUNT.format(
+                recorded=recorded, configured=configured))
+        if isinstance(recorded_list, list):
+            if (len(reference_list) != recorded
+                    or not all(is_recorded_reference(entry)
+                               for entry in recorded_list)
+                    or any(data is None for data in reference_list)):
+                return refuse(REPLAY_MALFORMED_REFERENCES)
+            references = [ReferenceFile(entry['kind'], entry['format'], data)
+                          for entry, data in zip(recorded_list,
+                                                 reference_list)]
+        elif reference_bytes is None:
+            return refuse(REPLAY_MALFORMED_REFERENCES)
+        else:
+            references = [ReferenceFile(KIND_IMAGE, BEDROCK_IMAGE_FORMAT,
+                                        reference_bytes)]
+
+    # 2. The rendering values and the image size the device rendered with.
+    values = snippet_values(sidecar) or {}
+    input_block = sidecar.get('input')
+    input_block = input_block if isinstance(input_block, dict) else {}
+    width, height = input_block.get('width'), input_block.get('height')
+    image_size = ((width, height)
+                  if _positive_int(width) and _positive_int(height) else None)
+
+    # 2a. Metadata the device left out of the snippet (inline reference
+    # data) must not be rendered: the replay would send a value the device
+    # never sent. The prompts render only with render_prompt on; the
+    # expected count path is always resolved.
+    omitted = sidecar.get('metadataSnippetOmitted')
+    if not (isinstance(omitted, list)
+            and all(isinstance(path, str) for path in omitted)):
+        omitted = []
+    paths: List[str] = []
+    if render_prompt_enabled(parameters):
+        paths.extend(prompt_field_paths(parameters.get('prompt')))
+        paths.extend(prompt_field_paths(parameters.get('system_prompt')))
+    count_path = str(parameters.get('expected_count_path') or '').strip()
+    if count_path:
+        paths.append(count_path)
+    conflict = omitted_path_conflict(paths, omitted)
+    if conflict is not None:
+        return refuse(REPLAY_OMITTED_METADATA.format(path=conflict))
+
+    # 3. The executor's preparation: expected count, rendering, box scale.
+    try:
+        request = prepare_inspection_request(parameters, values, image_size)
+    except InspectionRequestError as exc:
+        return refuse(str(exc))
+
+    # 4. The request.
+    invocation = build_bedrock_invocation(request.parameters,
+                                         input_bytes or b'',
+                                         references=references or None)
+    outcome['imageCount'] = invocation.image_count
+    if invocation.document_count > 0:
+        outcome['documentCount'] = invocation.document_count
+
+    # 5. One Converse call.
+    started = time.time()
+    try:
+        text, tokens = invoke_bedrock(client, invocation)
+    except Exception as exc:  # noqa: BLE001 - one outcome, the run continues
+        outcome['latencyMs'] = int((time.time() - started) * 1000)
+        return refuse(f"{type(exc).__name__}: {exc}")
+    outcome['latencyMs'] = int((time.time() - started) * 1000)
+    outcome['rawAnswer'] = text
+    outcome['outputTokens'] = tokens
+
+    # 6. The inspection parser and the categorization.
+    try:
+        parsed = parse_inspection_answer(text, request.expected_count,
+                                         request.box_scale)
+    except ValueError as exc:
+        outcome['category'] = categorize_outcome(label, None, None)
+        outcome['parseError'] = str(exc)
+        return outcome
+    verdict = inspection_verdict(parsed)
+    outcome['category'] = categorize_outcome(label, verdict, None)
+    outcome['isAnomalous'] = verdict['is_anomalous']
+    outcome['confidence'] = verdict['confidence']
+    outcome['verdict'] = verdict['verdict']
+    return outcome
+
+
+def recorded_reference_keys(sidecar: Any) -> List[Optional[str]]:
+    """The object keys of a list-form sample's references, in sidecar
+    order; ``None`` for an entry that is not a usable reference (its
+    replay is then refused as malformed). ``[]`` without a list."""
+    references = (sidecar.get('references')
+                  if isinstance(sidecar, dict) else None)
+    if not isinstance(references, list):
+        return []
+    return [entry['key'] if is_recorded_reference(entry) else None
+            for entry in references]
+
+
+def recorded_sample_bytes(sidecar: Any) -> int:
+    """The bytes a sample's files hold by its sidecar's ``bytes`` fields:
+    the input, the reference and every list-form reference."""
+    sidecar = sidecar if isinstance(sidecar, dict) else {}
+    blocks = [sidecar.get('input'), sidecar.get('reference')]
+    if isinstance(sidecar.get('references'), list):
+        blocks.extend(sidecar['references'])
+    total = 0
+    for block in blocks:
+        if isinstance(block, dict) and _positive_int(block.get('bytes')):
+            total += block['bytes']
+    return total
+
+
+def bounded_chunk(chunk: List[Tuple[int, Tuple[str, str, int]]],
+                  sample_index: Dict[str, Dict]
+                  ) -> List[Tuple[int, Tuple[str, str, int]]]:
+    """``chunk`` cut at the first unit whose sample would take the distinct
+    samples' recorded bytes above :data:`CHUNK_SAMPLE_BYTES`; at least one
+    unit is always kept, and a repeat of a sample already taken adds
+    nothing."""
+    taken: List[Tuple[int, Tuple[str, str, int]]] = []
+    seen = set()
+    total = 0
+    for entry in chunk:
+        sample_id = entry[1][0]
+        if sample_id not in seen:
+            size = recorded_sample_bytes(
+                (sample_index.get(sample_id) or {}).get('sidecar'))
+            if taken and total + size > CHUNK_SAMPLE_BYTES:
+                break
+            seen.add(sample_id)
+            total += size
+        taken.append(entry)
+    return taken
 
 
 def execute_score_run(event: Dict) -> Dict:
@@ -2926,11 +3387,12 @@ def execute_score_run(event: Dict) -> Dict:
         return {'status': run.get('status'), 'runId': run_id,
                 'done': run.get('done')}
     chunk = remaining[:CHUNK_INVOCATIONS]
-    next_cursor = chunk[-1][0] + 1
 
     usecase = get_usecase(session['usecaseId'])
     client, bucket = sample_store(usecase)
     sample_index = {i['sampleId']: i for i in sample_items(session_id)}
+    chunk = bounded_chunk(chunk, sample_index)
+    next_cursor = chunk[-1][0] + 1
     parameters = invocation_parameters(
         {'type': run.get('nodeType'),
          'parameters': run.get('nodeParameters') or {}},
@@ -2942,18 +3404,25 @@ def execute_score_run(event: Dict) -> Dict:
     wanted = list(dict.fromkeys(unit[0] for _index, unit in chunk))
 
     def load(sample_id: str):
+        # (input, reference, reference_list): a list-form sample's files
+        # are read in the order of its sidecar's references. A failed read
+        # names the key that failed.
         item = sample_index.get(sample_id) or {}
         key = item.get('inputKey')
         try:
             input_bytes = read_sample_bytes(client, bucket, key)
             if input_bytes is None:
-                return sample_id, (None, None), (
+                return sample_id, (None, None, ()), (
                     'the sample has no input image key')
-            reference_bytes = read_sample_bytes(client, bucket,
-                                                item.get('referenceKey'))
-            return sample_id, (input_bytes, reference_bytes), None
+            key = item.get('referenceKey')
+            reference_bytes = read_sample_bytes(client, bucket, key)
+            reference_list = []
+            for key in recorded_reference_keys(item.get('sidecar')):
+                reference_list.append(read_sample_bytes(client, bucket, key))
+            return sample_id, (input_bytes, reference_bytes,
+                               tuple(reference_list)), None
         except Exception as exc:  # noqa: BLE001 - per-sample outcome
-            return sample_id, (None, None), (
+            return sample_id, (None, None, ()), (
                 f"could not read the sample image {key}: "
                 f"{type(exc).__name__}: {exc}")
 
@@ -2967,9 +3436,10 @@ def execute_score_run(event: Dict) -> Dict:
     def replay(entry):
         _index, (sample_id, label, repeat) = entry
         payload, error = images.get(sample_id, ((None, None), None))
+        item = sample_index.get(sample_id) or {}
         return replay_bedrock_unit(
             bedrock, parameters, sample_id, label, repeat, payload, error,
-            (sample_index.get(sample_id) or {}).get('thingName'))
+            item.get('thingName'), sidecar=item.get('sidecar'))
 
     with ThreadPoolExecutor(max_workers=SCORE_THREADS) as pool:
         outcomes = list(pool.map(replay, chunk))
@@ -3409,7 +3879,8 @@ def list_run_outcomes(event: Dict, user: Dict, run_id: str) -> Dict:
             if item.get('sampleId') in wanted_ids:
                 samples[item['sampleId']] = sample_view(
                     item, baseline, client, bucket,
-                    urls=client is not None)
+                    urls=client is not None,
+                    error_verdict=session.get('errorVerdict'))
 
     return create_response(200, {
         'runId': run_id,
@@ -3723,12 +4194,13 @@ def apply_candidate(event: Dict, user: Dict, session_id: str) -> Dict:
         parameters = (node or {}).get('parameters') or {}
         raise TuningError(
             409, 'NODE_NOT_TUNABLE',
-            f"Node '{session['nodeId']}' no longer exists in version "
-            f"{version} of this workflow or is no longer in anomaly mode, "
-            f"so the tuned prompt cannot be applied",
+            f"Node '{session['nodeId']}' is not tunable in version "
+            f"{version}: tuning needs a Bedrock node in anomaly mode or "
+            f"inspection format, or a VLM node in anomaly mode",
             {'nodeId': session['nodeId'],
              'nodeType': (node or {}).get('type'),
              'anomaly_mode': parameters.get('anomaly_mode'),
+             'answer_format': parameters.get('answer_format'),
              'version': version})
 
     prompt_set = {'prompt': candidate.get('prompt'),

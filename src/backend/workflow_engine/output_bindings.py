@@ -53,6 +53,7 @@ Pipeline_Configuration path (Requirement 13.7). Hardware/network clients
 are imported lazily so this module stays importable everywhere.
 """
 
+import hashlib
 import inspect
 import json
 import logging
@@ -75,9 +76,15 @@ from workflow_engine.llm_inference import (
     render_prompt,
 )
 from workflow_engine.payload_fetch import (
+    MAX_DOCUMENT_BYTES,
+    MAX_REFERENCE_BYTES,
     PayloadReferenceError,
+    _validate_document,
+    _validate_image,
     describe_reference_source,
     fetch_reference_bytes,
+    fetch_reference_document,
+    read_packaged_reference,
     resolve_payload_path,
 )
 # Sample_Export (quality-prompt-tuning Requirement 2.2): after every
@@ -90,6 +97,7 @@ from workflow_engine.payload_fetch import (
 from workflow_engine.tuning.sample_export import (
     ExportContext,
     export_bedrock_sample,
+    export_inspection_sample,
     export_llm_sample,
 )
 # The shared Invocation_Builder (quality-prompt-tuning Requirements 6.1,
@@ -101,25 +109,47 @@ from workflow_engine.tuning.sample_export import (
 # the fail-closed rules, artifact persistence, metadata assembly and the
 # transports themselves — stays here.
 from workflow_engine import scene_analytics
+# The inspection path's prompt renderer, field-path resolver and
+# expected-count and box_scale rules moved to the same vendored package
+# verbatim, so the Portal's replay of an inspection-format sample
+# prepares the request exactly as this executor does. They are imported
+# back under their historical names (``_JSON_TOKEN_RE`` included), so
+# every existing importer keeps working.
 from workflow_engine.vendor.workflow_core.anomaly_invocation import (
     ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER,
     ANSWER_FORMAT_INSPECTION,
     BEDROCK_CONNECT_TIMEOUT_SEC,
     BEDROCK_DEFAULT_MODEL,
+    BEDROCK_IMAGE_FORMAT,
     BEDROCK_JSON_INSTRUCTION,
     BEDROCK_READ_TIMEOUT_SEC,
     BOX_SCALE_NORMALIZED_1000,
     BOX_SCALE_PIXELS,
     DEFAULT_MAX_TOKENS,
+    JSON_TOKEN_RE,
+    KIND_DOCUMENT,
+    KIND_IMAGE,
     LLM_GENERATION_PARAMETERS,
+    MAX_IMAGE_SIDE_PX,
+    MAX_SENT_IMAGE_BYTES,
     NORMALIZED_BOX_MAX,
     BedrockInvocation,
+    InspectionRequestError,
     LlmInvocation,
+    ReferenceFile,
     build_bedrock_invocation,
     build_llm_invocation,
+    inspection_expected_count,
     parse_inspection_answer,
+    parse_reference_list,
     parse_verdict,
+    reference_list_problems,
+    render_inspection_parameters,
+    render_prompt_text,
     resolve_additional_model_request_fields,
+    resolve_box_scale,
+    resolve_expected_count,
+    resolve_field_path,
     resolve_max_image_dimension,
     resolve_output_token_budget,
 )
@@ -591,45 +621,10 @@ def _preview(text: str, limit: int = DETAIL_PREVIEW_LIMIT) -> str:
 # with a pre-parsed ``payload_json``) supplies the resolution source.
 # Resolution NEVER raises — a metadata problem degrades (static-only /
 # omitted keys) and is logged, and the run always continues.
+#
+# ``resolve_field_path`` (the dotted-path resolver) is the shared
+# workflow_core function, imported above under its historical name.
 # ---------------------------------------------------------------------------
-
-
-def resolve_field_path(document: Any, dotted_path: Any) -> Tuple[bool, Any]:
-    """Resolve a dotted field path (``a.b.c``) against a parsed JSON
-    document, segment by segment (Requirements 7.2, 7.3).
-
-    - a dict is traversed by key;
-    - a list is traversed by a numeric segment used as an index
-      (``items.0.id``);
-    - any other intermediate value, a missing key, a non-numeric or
-      out-of-range index, or an empty path fails the resolution.
-
-    Returns ``(found, value)`` so a resolved JSON ``null`` (``None``) is
-    distinguishable from "not found" (Requirement 7.2 attaches resolved
-    nulls; Requirement 7.3 omits unresolved keys).
-    """
-    if not isinstance(dotted_path, str):
-        return False, None
-    path = dotted_path.strip()
-    if not path:
-        return False, None
-    current = document
-    for segment in path.split("."):
-        if isinstance(current, dict):
-            if segment not in current:
-                return False, None
-            current = current[segment]
-        elif isinstance(current, list):
-            try:
-                index = int(segment)
-            except ValueError:
-                return False, None
-            if not 0 <= index < len(current):
-                return False, None
-            current = current[index]
-        else:
-            return False, None
-    return True, current
 
 
 def resolve_metadata_binding(
@@ -1715,6 +1710,7 @@ def _default_bedrock_invoker(
     timeouts: Optional[Tuple[int, int]] = None,
     retries: Optional[Dict[str, Any]] = None,
     additional_model_request_fields: Optional[str] = None,
+    attachments: Optional[Tuple[Any, ...]] = None,
 ) -> str:
     """Invoke the Bedrock runtime converse API and return the model's
     text answer. ``images`` is a list of ``(label, image_bytes)`` pairs
@@ -1746,7 +1742,13 @@ def _default_bedrock_invoker(
     so this transport and the Portal's Bedrock_Scorer send the identical
     request for the identical invocation. The transport keeps owning the
     client construction (region, read timeout, no retries) and the
-    answer extraction."""
+    answer extraction.
+
+    ``attachments`` (default None → today's request) carries the list
+    form of an inspection node's reference files: the input image, then
+    every reference with its label, images and documents. The request is
+    then built from them, so the document blocks reach Bedrock exactly
+    as the Portal's replay sends them."""
     import boto3
     from botocore.config import Config as BotoConfig
 
@@ -1777,6 +1779,7 @@ def _default_bedrock_invoker(
         max_tokens=max_tokens,
         system_prompt=system_prompt,
         additional_model_request_fields=additional_model_request_fields,
+        attachments=tuple(attachments or ()),
     )
     response = client.converse(**invocation.converse_kwargs())
     parts = (response.get("output", {}).get("message", {}).get("content", []))
@@ -2266,7 +2269,11 @@ class RunContext:
     - ``graph_document``: the registration's ``workflow.json`` graph
       (Detection_Sort_Order resolution);
     - ``node_status``: the run's NodeStatusCollector, for recorded
-      per-node error outcomes.
+      per-node error outcomes;
+    - ``artifact_path``: the registration's workflow version directory,
+      whose ``references/`` holds the reference files uploaded in the
+      workflow editor (``upload://{sha256}.{ext}`` lines), verified
+      against its ``manifest.json``.
 
     Every field defaults to ``None`` so partially-populated contexts
     (and the absent-context legacy path) degrade to today's behavior.
@@ -2277,6 +2284,143 @@ class RunContext:
     capture_id: Optional[str] = None
     graph_document: Optional[dict] = None
     node_status: Optional[Any] = None
+    artifact_path: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PreparedReference:
+    """One reference file of an ``answer_format: inspection`` node, loaded
+    and prepared for sending (the single-image form, or one entry of a
+    list)."""
+
+    index: int                      # 1-based position in the list
+    label: str                      # "Reference image" or "Reference {n}"
+    kind: str                       # KIND_IMAGE or KIND_DOCUMENT
+    format: str                     # "jpeg", or the document format
+    data: bytes                     # the bytes sent
+    source: str                     # redacted URI, upload line or "base64 payload data"
+    source_sha256: str              # sha256 of the bytes as loaded
+    transform: Tuple[str, ...] = ()  # prepare_reference_image steps; () for documents
+    width: Optional[int] = None     # of the bytes sent; None for documents
+    height: Optional[int] = None
+
+    def as_file(self) -> ReferenceFile:
+        """The shared builder's input for this reference."""
+        return ReferenceFile(kind=self.kind, format=self.format, data=self.data)
+
+    def summary(self) -> Dict[str, Any]:
+        """The run-metadata record of this reference, without content."""
+        return {
+            "label": self.label, "kind": self.kind, "format": self.format,
+            "source": self.source,
+            "sha256": hashlib.sha256(self.data).hexdigest(),
+            "bytes": len(self.data),
+        }
+
+
+def prepare_reference_image(
+    data: bytes, max_dim: Optional[int]
+) -> Tuple[bytes, Tuple[str, ...], Tuple[int, int]]:
+    """``(bytes to send, transforms applied, (width, height) sent)`` of a
+    reference image.
+
+    Every image block is declared ``jpeg``, so a reference that is not a
+    plain upright JPEG within ``max_dim`` is re-encoded once as JPEG at
+    :data:`CROP_JPEG_QUALITY`, applying the needed steps in this order
+    and recording each: ``exif_transposed`` (EXIF orientation other than
+    1), ``flattened_alpha`` (transparency composited onto white, so a
+    transparent legend does not arrive black), ``reencoded_jpeg`` (the
+    source is not a JPEG in RGB or L mode) and ``downscaled`` (longer
+    edge above ``max_dim``; LANCZOS, the :func:`downscale_image_bytes`
+    rule; never upscaled). Otherwise the bytes are returned unchanged
+    with no transform. ``max_dim`` None or 0 caps nothing. Raises on a
+    decode or encode failure (the caller records it). Pillow is imported
+    lazily so this module stays importable everywhere."""
+    import io
+
+    from PIL import Image, ImageOps
+
+    cap = int(max_dim) if max_dim else 0
+    with Image.open(io.BytesIO(data)) as source:
+        width, height = source.size
+        orientation = source.getexif().get(0x0112)
+        plain_jpeg = source.format == "JPEG" and source.mode in ("RGB", "L")
+        upright = orientation in (None, 1)
+        if plain_jpeg and upright and (cap <= 0 or max(width, height) <= cap):
+            return data, (), (int(width), int(height))
+        transparent = (source.mode in ("RGBA", "LA", "PA")
+                       or "transparency" in source.info)
+        transforms: List[str] = []
+        image = source
+        if not upright:
+            image = ImageOps.exif_transpose(image)
+            transforms.append("exif_transposed")
+        if transparent:
+            rgba = image.convert("RGBA")
+            flattened = Image.new("RGB", rgba.size, (255, 255, 255))
+            flattened.paste(rgba, mask=rgba.split()[3])
+            image = flattened
+            transforms.append("flattened_alpha")
+        if not plain_jpeg:
+            if image.mode not in ("RGB", "L"):
+                image = image.convert("RGB")
+            transforms.append("reencoded_jpeg")
+        width, height = image.size
+        if cap > 0 and max(width, height) > cap:
+            if width >= height:
+                new_size = (cap, max(1, round(height * cap / float(width))))
+            else:
+                new_size = (max(1, round(width * cap / float(height))), cap)
+            resampling = getattr(Image, "Resampling", Image)
+            image = image.resize(new_size, resampling.LANCZOS)
+            transforms.append("downscaled")
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=CROP_JPEG_QUALITY)
+        width, height = image.size
+    return buffer.getvalue(), tuple(transforms), (int(width), int(height))
+
+
+def _allowed_uri_prefixes(parameters: Dict[str, Any]) -> Tuple[str, ...]:
+    """The node's newline-separated ``allowed_uri_prefixes``, trimmed."""
+    raw_prefixes = parameters.get("allowed_uri_prefixes")
+    if not isinstance(raw_prefixes, str):
+        return ()
+    return tuple(
+        line.strip() for line in raw_prefixes.splitlines() if line.strip())
+
+
+def _reference_display(spec: Any) -> str:
+    """How a reference line is named in the run log and in its error: the
+    upload line itself, the redacted URI, or ``payload path '<path>'``."""
+    if spec.uploaded:
+        return spec.text
+    if spec.static:
+        return describe_reference_source(spec.text)
+    return "payload path '{0}'".format(spec.text)
+
+
+def _sent_image_problem(reference: PreparedReference,
+                        single: bool) -> Optional[str]:
+    """The Converse per-image limits, checked on the bytes as sent
+    (3.75 MB, 8000 px per side): the error text, or ``None``."""
+    if reference.kind != KIND_IMAGE:
+        return None
+    size = len(reference.data)
+    width, height = reference.width or 0, reference.height or 0
+    if (size <= MAX_SENT_IMAGE_BYTES and width <= MAX_IMAGE_SIDE_PX
+            and height <= MAX_IMAGE_SIDE_PX):
+        return None
+    subject = ("its reference image" if single
+               else "reference {0}".format(reference.index))
+    return (
+        "{0} is {1} bytes and {2}\u00d7{3} px as sent; Bedrock Converse "
+        "accepts at most 3.75 MB and 8000 px per side".format(
+            subject, size, width, height))
+
+
+#: The workflow version directory's manifest, which lists the uploaded
+#: reference files' checksums (``referenceFiles``).
+PACKAGE_MANIFEST_FILE = "manifest.json"
 
 
 #: Upper bound on the Bedrock branch thread pool
@@ -2298,7 +2442,8 @@ BEDROCK_MAX_POOL_WORKERS = 4
 
 #: A ``{json:<dotted.path>}`` token of a rendered prompt — the compact
 #: JSON of the run-metadata value replaces it (:func:`render_prompt_text`).
-_JSON_TOKEN_RE = re.compile(r"\{json:([A-Za-z_][A-Za-z0-9_.]*)\}")
+#: The shared ``JSON_TOKEN_RE``, under this module's historical name.
+_JSON_TOKEN_RE = JSON_TOKEN_RE
 
 #: ``on_error`` values of a bedrock_inference node.
 BEDROCK_ON_ERROR_FAIL_RUN = "fail_run"
@@ -2328,62 +2473,17 @@ BEDROCK_DISABLED_MESSAGE = "bedrock check disabled by configuration"
 #: ``max_image_dimension`` downscaled the captured frame.
 INPUT_FRAME_ARTIFACT_TEMPLATE = "{capture_id}.node.{safe_node_id}.input.jpg"
 
+#: Run-artifact filename of a reference image the inspection path sent,
+#: written verbatim: port ``reference`` for the single-image form (the
+#: legacy Reference_Image name, so the run view and the HMI show it
+#: unchanged) and ``reference_{n}`` for each image of a list.
+SENT_REFERENCE_ARTIFACT_TEMPLATE = (
+    "{capture_id}.node.{safe_node_id}.{port}.jpg"
+)
 
-def render_prompt_text(template: str, values: Dict[str, Any]) -> str:
-    """Render an ``answer_format: inspection`` prompt against the run
-    metadata, segment-wise so no substituted text is ever scanned again.
-
-    The raw template is split at its ``{json:<dotted.path>}`` tokens;
-    each literal segment is rendered with the LLM node's strict
-    :func:`workflow_engine.llm_inference.render_prompt` (``{identifier}``
-    / ``{dotted.path}`` substitution, ``{{``/``}}`` → one brace, other
-    braces literal); each token becomes the compact
-    ``json.dumps(value, ensure_ascii=False, separators=(",", ":"))`` of
-    the value :func:`resolve_field_path` finds. Raises
-    :class:`UnresolvedPlaceholderError` (``name`` = the identifier, or
-    ``json:<path>``) on the first value that does not resolve.
-    """
-    text = str(template or "")
-    pieces: List[str] = []
-    position = 0
-    for match in _JSON_TOKEN_RE.finditer(text):
-        pieces.append(render_prompt(text[position:match.start()], values))
-        found, value = resolve_field_path(values, match.group(1))
-        if not found:
-            raise UnresolvedPlaceholderError("json:" + match.group(1))
-        pieces.append(
-            json.dumps(value, ensure_ascii=False, separators=(",", ":")))
-        position = match.end()
-    pieces.append(render_prompt(text[position:], values))
-    return "".join(pieces)
-
-
-def resolve_box_scale(raw: Any, model: Any) -> str:
-    """The coordinate convention of the answer's bounding boxes:
-    ``auto`` (or absent) → ``normalized_1000`` when the effective model id
-    contains ``amazon.nova`` (the 0-1000 grid Nova answers on), else
-    ``pixels``; an explicit convention is returned unchanged."""
-    value = str(raw or "auto").strip() or "auto"
-    if value != "auto":
-        return value
-    if "amazon.nova" in str(model or "").lower():
-        return BOX_SCALE_NORMALIZED_1000
-    return BOX_SCALE_PIXELS
-
-
-def resolve_expected_count(found: bool, value: Any) -> Optional[int]:
-    """The ONE expected-count rule: a list → its length, an int (not a
-    bool) → itself, and the result must be >= 1; anything else (path not
-    found, other type, empty list, 0, negative) is ``None``."""
-    if not found:
-        return None
-    if isinstance(value, list):
-        count = len(value)
-    elif isinstance(value, int) and not isinstance(value, bool):
-        count = value
-    else:
-        return None
-    return count if count >= 1 else None
+# ``render_prompt_text``, ``resolve_box_scale`` and ``resolve_expected_count``
+# are the shared workflow_core functions, imported above under their
+# historical names.
 
 
 def _truthy(value: Any) -> bool:
@@ -2870,7 +2970,8 @@ class BedrockInferenceProcessor:
             return self._recorded_error(
                 node_id, BEDROCK_DISABLED_MESSAGE, run_context)
         if inspection:
-            return self._run_inspection(binding, work_dir, run_context)
+            return self._run_inspection(
+                binding, work_dir, run_context, export_context)
 
         # Detection crop (Requirement 2): a binding carrying
         # ``crop_detection_index`` sends the Detection_Crop as its
@@ -3106,17 +3207,21 @@ class BedrockInferenceProcessor:
         binding: dict,
         work_dir: Optional[str],
         run_context: Optional[RunContext],
+        export_context: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         """The ``answer_format: inspection`` path (bedrock-inspection-
-        chain): whole-frame, single-image; the frame read, the optional
-        downscale, the expected-count rule and the per-run prompt
-        rendering happen BEFORE the Converse call (each a terminal
-        pre-call failure); the call runs under the attempt/budget policy
-        (:meth:`_invoke_with_policy`); the accepted answer is the
-        structured verdict of ``parse_inspection_answer``; the OK/NOK
-        overlay is drawn on the whole frame. Every failure goes through
-        :meth:`_inspection_failure` (recorded, or raised, per
-        ``on_error``)."""
+        chain): whole-frame; the frame read, the optional downscale, the
+        configured reference files (``reference_payload_path``: one
+        image, or a list of images and documents), the expected-count
+        rule and the per-run prompt rendering happen BEFORE the Converse
+        call (each a terminal pre-call failure); the call runs under the
+        attempt/budget policy (:meth:`_invoke_with_policy`); the accepted
+        answer is the structured verdict of ``parse_inspection_answer``;
+        the OK/NOK overlay is drawn on the whole frame. Every failure
+        goes through :meth:`_inspection_failure` (recorded, or raised,
+        per ``on_error``). An invocation where an attempt returned text
+        is exported as a tuning sample when export is configured
+        (``export_context``)."""
         node_id = binding.get("nodeId")
         parameters = dict(binding.get("parameters") or {})
         capture_paths = binding.get("capturePaths") or {}
@@ -3198,9 +3303,19 @@ class BedrockInferenceProcessor:
             entry["input_image_path"] = input_path
         entry["input_width"] = width
         entry["input_height"] = height
+
+        # 3. The configured reference files, every one loaded and
+        #    prepared before the call, or none sent: a reference that
+        #    cannot be loaded fails the node (never a single-image
+        #    fallback). No reference configured: () and today's request.
+        reference_error, references = self._inspection_references(
+            node_id, parameters, run_context, max_dim)
+        if reference_error is not None:
+            return failure(reference_error)
         return self._run_inspection_call(
             node_id, parameters, run_metadata, sent_image, width, height,
-            box_scale, entry, failure, run_context)
+            box_scale, entry, failure, run_context, references=references,
+            export_context=export_context)
 
     def _run_inspection_call(
         self,
@@ -3214,41 +3329,31 @@ class BedrockInferenceProcessor:
         entry: Dict[str, Any],
         failure: Callable[..., Dict[str, Any]],
         run_context: Optional[RunContext],
+        references: Tuple[PreparedReference, ...] = (),
+        export_context: Optional[ExportContext] = None,
     ) -> Dict[str, Any]:
         """Second half of :meth:`_run_inspection`: the expected-count rule,
         the per-run prompt rendering, the Converse call under the attempt
-        policy, the pixel-space boxes, the overlay and the metadata."""
-        # 3. expected_count_path, resolved BEFORE the call by the one rule
+        policy, the tuning-sample export, the pixel-space boxes, the
+        overlay and the metadata. The expected count and the rendering
+        are the shared workflow_core steps the Portal's replay runs."""
+        # 4. expected_count_path, resolved BEFORE the call by the one rule
         #    (list → len, non-bool int → itself, >= 1).
-        expected_count: Optional[int] = None
-        count_path = str(parameters.get("expected_count_path") or "").strip()
-        if count_path:
-            found, value = resolve_field_path(run_metadata, count_path)
-            expected_count = resolve_expected_count(found, value)
-            if expected_count is None:
-                return failure(
-                    "expected count path {0} did not resolve to a positive "
-                    "count".format(count_path))
+        try:
+            expected_count = inspection_expected_count(
+                parameters, run_metadata)
+        except InspectionRequestError as error:
+            return failure(str(error))
+        if expected_count is not None:
             entry["expected_count"] = expected_count
 
-        # 4. render_prompt: prompt and system_prompt rendered per run
+        # 5. render_prompt: prompt and system_prompt rendered per run
         #    against the run metadata + the size of the image sent.
-        invocation_parameters = parameters
-        if _bool_parameter(parameters.get("render_prompt"), False):
-            values = dict(run_metadata)
-            values["image"] = {"width": width, "height": height}
-            rendered = dict(parameters)
-            try:
-                rendered["prompt"] = render_prompt_text(
-                    str(parameters.get("prompt") or ""), values)
-                system_prompt = parameters.get("system_prompt")
-                if system_prompt is not None and str(system_prompt).strip():
-                    rendered["system_prompt"] = render_prompt_text(
-                        str(system_prompt), values)
-            except UnresolvedPlaceholderError as error:
-                return failure(
-                    "unresolved prompt placeholder {0}".format(error.name))
-            invocation_parameters = rendered
+        try:
+            invocation_parameters = render_inspection_parameters(
+                parameters, run_metadata, (width, height))
+        except InspectionRequestError as error:
+            return failure(str(error))
         # An additional_model_request_fields value that is not a JSON
         # object (bedrock-additional-model-request-fields) is a terminal
         # pre-call failure like the rules above: recorded or raised per
@@ -3260,21 +3365,39 @@ class BedrockInferenceProcessor:
         except ValueError as error:
             return failure(str(error))
         invocation = build_bedrock_invocation(
-            invocation_parameters, sent_image, None)
+            invocation_parameters, sent_image,
+            references=[reference.as_file() for reference in references]
+            or None)
+        if references:
+            # Recorded before the call, so a failed call records it too.
+            entry["references"] = [
+                reference.summary() for reference in references]
+        if invocation.attachments and not _accepts_keyword(
+                self._invoker, "attachments"):
+            return failure(
+                "the configured Bedrock invoker cannot send a list of "
+                "reference files")
 
-        # 5. The Converse call under the attempt/budget policy.
+        # 6. The Converse call under the attempt/budget policy.
         outcome = self._invoke_with_policy(
             node_id, invocation, parameters,
             lambda text: parse_inspection_answer(
                 text, expected_count, box_scale))
         entry["attempts"] = outcome["attempts"]
         entry["latency_ms"] = outcome["latency_ms"]
+        # Sample_Export: one tuning sample when any attempt returned text,
+        # accepted or malformed, BEFORE a failure is recorded or raised
+        # (``on_error: fail_run`` raises after the export). Contained and
+        # inert unless export is configured.
+        self._export_inspection(
+            export_context, node_id, invocation, parameters, outcome,
+            (width, height), references, run_metadata)
         if outcome.get("parsed") is None:
             return failure(outcome["failure"], outcome.get("malformed_text"))
         parsed = outcome["parsed"]
         answer = outcome["answer"]
 
-        # 6. Pixel-space boxes (box_scale) — clamping stays in the drawer.
+        # 7. Pixel-space boxes (box_scale) — clamping stays in the drawer.
         objects_px = [
             {
                 "name": obj.get("name"), "qc": obj.get("qc"),
@@ -3284,11 +3407,11 @@ class BedrockInferenceProcessor:
             }
             for obj in parsed["objects"]
         ]
-        # 7. The OK/NOK overlay on the whole frame sent.
+        # 8. The OK/NOK overlay on the whole frame sent.
         annotated_path = self._persist_annotated_frame(
             run_context, node_id, sent_image, answer,
             objects=objects_px, verdict=parsed["verdict"])
-        # 8. Metadata: nested bedrock.<nodeId>.* plus the flat
+        # 9. Metadata: nested bedrock.<nodeId>.* plus the flat
         #    compatibility keys (is_anomalous = verdict is fail).
         verdict = parsed["verdict"]
         entry.update({
@@ -3326,7 +3449,19 @@ class BedrockInferenceProcessor:
         one failed attempt. Returns ``{"attempts", "latency_ms"}`` plus
         either ``"answer"``/``"parsed"`` (accepted) or ``"failure"`` (the
         text) and, when the last failure was a malformed answer, its
-        ``"malformed_text"``."""
+        ``"malformed_text"``.
+
+        A list-form invocation (``invocation.attachments``) also passes
+        ``attachments=`` to the invoker, which sends exactly those
+        content blocks, and an invocation carrying model request fields
+        passes ``additional_model_request_fields=``; every other
+        invocation keeps today's call. Every attempt whose invoker
+        returned a ``str`` (including ``""``) sets
+        ``"last_text"`` to it and ``"last_parse_error"`` to the parser's
+        message for it (without the ``malformed Bedrock answer: ``
+        prefix), or ``None`` when it was accepted; a later attempt that
+        raises leaves both as they are (the tuning sample export reads
+        them)."""
         attempts = _policy_int(
             parameters.get("attempts"), BEDROCK_DEFAULT_ATTEMPTS, 1)
         attempt_timeout_s = _policy_int(
@@ -3342,6 +3477,9 @@ class BedrockInferenceProcessor:
             "timeouts": (BEDROCK_CONNECT_TIMEOUT_SEC, attempt_timeout_s),
             "retries": {"total_max_attempts": 1, "mode": "standard"},
         }
+        if invocation.attachments:
+            # The list form only: the invoker sends the request built.
+            client_options["attachments"] = invocation.attachments
         client_options.update(_request_fields_kwargs(invocation))
         invoker_args = (
             invocation.model, invocation.prompt,
@@ -3366,12 +3504,18 @@ class BedrockInferenceProcessor:
                     type(error).__name__, error)[:300]
                 terminal = is_terminal_bedrock_error(error)
             else:
+                returned_text = isinstance(answer, str)
+                if returned_text:
+                    outcome["last_text"] = answer
+                    outcome["last_parse_error"] = None
                 try:
                     parsed = parse(answer)
                 except ValueError as error:
                     outcome["failure"] = "malformed Bedrock answer: {0}".format(
                         error)
                     outcome["malformed_text"] = answer
+                    if returned_text:
+                        outcome["last_parse_error"] = str(error)
                 else:
                     outcome["answer"] = answer
                     outcome["parsed"] = parsed
@@ -3478,24 +3622,79 @@ class BedrockInferenceProcessor:
         run_context: Optional[RunContext],
     ) -> Tuple[Optional[str], Optional[bytes]]:
         """Resolve the binding's ``reference_payload_path`` to
-        reference-image bytes: ``(error_message, reference_bytes)``
-        (Requirements 3.2, 3.3, 3.4, 3.7).
+        reference-image bytes on the legacy path: ``(error_message,
+        reference_bytes)`` (Requirements 3.2, 3.3, 3.4, 3.7).
 
-        The dotted path resolves against the run's Trigger_Context
-        ``payload_json`` (``tag_values["trigger"]["payload_json"]``);
-        the resolved value fetches/decodes through
-        :mod:`workflow_engine.payload_fetch`, gated by the binding's
-        newline-separated ``allowed_uri_prefixes``. On success the
-        error message is ``None``. On ANY failure (missing trigger
-        payload, unresolvable path, prefix denial, fetch failure, size
-        cap, timeout, non-image bytes) the error message is set naming
-        the node and the reason and the caller records it — never
-        raises, never falls back to single-image inference (Requirement
-        3.5, design Property 4). Only the resolved source string (the
-        URI or ``"base64 payload data"``) is ever logged — never the
-        decoded bytes (Requirement 3.8)."""
-        dotted_path = str(
-            parameters.get("reference_payload_path") or "").strip()
+        The value is read as a reference list first: several lines, a
+        document or a malformed ``upload://`` line are refused before any
+        fetch (a list form is inspection-only). The one line is then:
+
+        - a dotted path (payload reference): it resolves against the
+          run's Trigger_Context ``payload_json``
+          (``tag_values["trigger"]["payload_json"]``) and the resolved
+          value fetches/decodes through :mod:`workflow_engine.payload_fetch`;
+          the bytes are returned unchanged, exactly as before;
+        - a typed URI (``file://``, ``s3://``, ``http(s)://``) or an
+          uploaded file (``upload://``): it is fetched or read directly,
+          and prepared by :func:`prepare_reference_image` without a size
+          cap, so the image block's ``jpeg`` declaration holds.
+
+        URI fetches are gated by the binding's newline-separated
+        ``allowed_uri_prefixes``. On success the error message is
+        ``None``. On ANY failure the error message is set naming the
+        node and the reason and the caller records it — never raises,
+        never falls back to single-image inference (Requirement 3.5,
+        design Property 4). Only the source string (the redacted URI,
+        the upload line or ``"base64 payload data"``) is ever logged —
+        never the decoded bytes (Requirement 3.8)."""
+        specs = parse_reference_list(parameters.get("reference_payload_path"))
+        if not specs:
+            # A non-string value: read as a dotted path, as before.
+            message, _, data, _ = self._payload_line_reference(
+                node_id,
+                str(parameters.get("reference_payload_path") or "").strip(),
+                parameters, run_context)
+            return message, data
+        problems = reference_list_problems(
+            specs, parameters.get("answer_format"))
+        if problems:
+            return problems[0], None
+        spec = specs[0]
+        if not spec.static:
+            message, _, data, _ = self._payload_line_reference(
+                node_id, spec.text, parameters, run_context)
+            return message, data
+        reason, data, source = self._resolve_reference(
+            node_id, spec, parameters, run_context, {})
+        if reason is not None:
+            return (
+                "Bedrock inference node '{0}' could not load its reference "
+                "image: {1}".format(node_id, reason),
+                None)
+        try:
+            prepared, _, _ = prepare_reference_image(data, None)
+        except Exception as error:  # noqa: BLE001 - recorded by the caller
+            return (
+                "Bedrock inference node '{0}' could not prepare its "
+                "reference image from {1}: {2}: {3}".format(
+                    node_id, source, type(error).__name__, error),
+                None)
+        return None, prepared
+
+    def _payload_line_reference(
+        self,
+        node_id: Optional[str],
+        dotted_path: str,
+        parameters: Dict[str, Any],
+        run_context: Optional[RunContext],
+    ) -> Tuple[Optional[str], Optional[str], Optional[bytes], Optional[str]]:
+        """One payload reference line (a dotted path into the trigger
+        payload): the Payload_Reference flow, byte for byte. Returns
+        ``(message, reason, data, source)``: on failure ``message`` is the
+        legacy path's recorded text and ``reason`` the same failure
+        without the node prefix; on success both are ``None``, ``data``
+        holds the fetched bytes, unchanged, and ``source`` describes the
+        resolved value."""
         trigger = None
         if run_context is not None and isinstance(
             run_context.tag_values, dict
@@ -3515,48 +3714,323 @@ class BedrockInferenceProcessor:
                 trigger.get("payload") if isinstance(trigger, dict) else None
             )
             if isinstance(raw_payload, str) and raw_payload.strip():
-                return (
-                    "Bedrock inference node '{0}' requested "
-                    "reference_payload_path '{1}' but the trigger payload "
-                    "is not parseable JSON (payload_json is None); check the "
-                    "publisher's JSON — JSON allows only space, tab, CR and "
-                    "LF as whitespace, so indentation made of non-breaking "
-                    "spaces is rejected".format(node_id, dotted_path),
-                    None)
+                reason = (
+                    "requested reference_payload_path '{0}' but the trigger "
+                    "payload is not parseable JSON (payload_json is None); "
+                    "check the publisher's JSON — JSON allows only space, "
+                    "tab, CR and LF as whitespace, so indentation made of "
+                    "non-breaking spaces is rejected".format(dotted_path))
+            else:
+                reason = (
+                    "requested reference_payload_path '{0}' but the run has "
+                    "no trigger payload_json to resolve it against".format(
+                        dotted_path))
             return (
-                "Bedrock inference node '{0}' requested "
-                "reference_payload_path '{1}' but the run has no trigger "
-                "payload_json to resolve it against".format(
-                    node_id, dotted_path),
-                None)
-        raw_prefixes = parameters.get("allowed_uri_prefixes")
-        allowed_prefixes: Tuple[str, ...] = ()
-        if isinstance(raw_prefixes, str):
-            allowed_prefixes = tuple(
-                line.strip() for line in raw_prefixes.splitlines()
-                if line.strip()
-            )
+                "Bedrock inference node '{0}' {1}".format(node_id, reason),
+                reason, None, None)
+        allowed_prefixes = _allowed_uri_prefixes(parameters)
         try:
             value = resolve_payload_path(payload_json, dotted_path)
+            source = describe_reference_source(value)
             # The run log records the resolved source string — the URI
             # or "base64 payload data" — never the decoded bytes
             # (Requirement 3.8).
             logger.info(
                 "Bedrock inference node '%s': resolving Payload_Reference "
-                "'%s' from %s", node_id, dotted_path,
-                describe_reference_source(value))
+                "'%s' from %s", node_id, dotted_path, source)
             data = fetch_reference_bytes(value, allowed_prefixes)
-        except PayloadReferenceError as e:
-            return (
-                "Bedrock inference node '{0}' could not load its "
-                "Payload_Reference: {1}".format(node_id, e),
-                None)
         except Exception as e:  # noqa: BLE001 - contained per Req. 3.5
             return (
                 "Bedrock inference node '{0}' could not load its "
                 "Payload_Reference: {1}".format(node_id, e),
-                None)
-        return None, data
+                str(e), None, None)
+        return None, None, data, source
+
+    @staticmethod
+    def _log_reference_load(
+        node_id: Optional[str],
+        display: str,
+        position: Optional[Tuple[int, int]],
+    ) -> None:
+        """The INFO line before a reference is fetched or read: "loading
+        its reference image" in the single-image form, "loading reference
+        n of N" in a list. ``display`` is redacted (never bytes)."""
+        if position is None:
+            logger.info(
+                "Bedrock inference node '%s': loading its reference image "
+                "from %s", node_id, display)
+        else:
+            logger.info(
+                "Bedrock inference node '%s': loading reference %d of %d "
+                "from %s", node_id, position[0], position[1], display)
+
+    def _resolve_reference(
+        self,
+        node_id: Optional[str],
+        spec: Any,
+        parameters: Dict[str, Any],
+        run_context: Optional[RunContext],
+        manifest_cache: Dict[str, Any],
+        position: Optional[Tuple[int, int]] = None,
+    ) -> Tuple[Optional[str], Optional[bytes], Optional[str]]:
+        """``(reason, bytes, source)`` of one image reference line
+        ``spec``; ``reason`` is the bare failure text, without any node
+        prefix, or ``None``. Shared by the legacy and inspection paths.
+
+        - uploaded line: :func:`read_packaged_reference` against the
+          run's workflow package, then the image check; ``source`` is the
+          line itself;
+        - typed URI: :func:`fetch_reference_bytes` with the node's
+          ``allowed_uri_prefixes``; ``source`` is the redacted URI;
+        - payload path: the Payload_Reference flow, byte-identical;
+          ``source`` describes the resolved value.
+
+        ``position`` ``(n, N)`` names a list entry in the INFO line."""
+        display = _reference_display(spec)
+        if spec.static or position is not None:
+            self._log_reference_load(node_id, display, position)
+        if spec.uploaded:
+            try:
+                data = self._read_uploaded_reference(
+                    spec, run_context, manifest_cache, MAX_REFERENCE_BYTES)
+                _validate_image(spec.text, data)
+            except Exception as error:  # noqa: BLE001 - recorded by the caller
+                return str(error), None, spec.text
+            return None, data, spec.text
+        if spec.static:
+            try:
+                data = fetch_reference_bytes(
+                    spec.text, _allowed_uri_prefixes(parameters))
+            except Exception as error:  # noqa: BLE001 - recorded by the caller
+                return str(error), None, display
+            return None, data, display
+        _, reason, data, source = self._payload_line_reference(
+            node_id, spec.text, parameters, run_context)
+        return reason, data, source
+
+    def _read_uploaded_reference(
+        self,
+        spec: Any,
+        run_context: Optional[RunContext],
+        manifest_cache: Dict[str, Any],
+        max_bytes: int,
+    ) -> bytes:
+        """The verified bytes of an ``upload://`` line from the run's
+        workflow version directory. ``manifest.json`` is read once per
+        call (``manifest_cache``) and only for an upload line; nothing is
+        cached across runs. Raises :class:`PayloadReferenceError`."""
+        artifact_path = (
+            run_context.artifact_path if run_context is not None else None)
+        manifest = None
+        if artifact_path:
+            if "manifest" not in manifest_cache:
+                manifest_cache["manifest"] = self._read_package_manifest(
+                    artifact_path)
+            manifest = manifest_cache["manifest"]
+        return read_packaged_reference(
+            artifact_path, spec.upload_name, manifest, max_bytes)
+
+    @staticmethod
+    def _read_package_manifest(artifact_path: str) -> Optional[Dict[str, Any]]:
+        """The version directory's ``manifest.json`` object, or ``None``
+        when it cannot be read or is not an object."""
+        try:
+            with open(os.path.join(artifact_path, PACKAGE_MANIFEST_FILE),
+                      "r", encoding="utf-8") as handle:
+                document = json.load(handle)
+        except Exception:  # noqa: BLE001 - "unreadable" is the answer
+            logger.debug(
+                "Could not read the workflow package manifest in %s",
+                artifact_path, exc_info=True)
+            return None
+        return document if isinstance(document, dict) else None
+
+    def _inspection_references(
+        self,
+        node_id: Optional[str],
+        parameters: Dict[str, Any],
+        run_context: Optional[RunContext],
+        max_dim: Optional[int],
+    ) -> Tuple[Optional[str], Tuple[PreparedReference, ...]]:
+        """``(error, prepared)``: the inspection path's configured
+        reference files (``reference_payload_path``, one per line).
+
+        No reference configured: ``(None, ())`` and today's request. The
+        statically known problems (a count over a Converse limit, a
+        malformed upload line) fail before any file is read. Then every
+        reference is loaded in list order, on every run: an image is
+        resolved, prepared (:func:`prepare_reference_image`, capped at
+        ``max_dim``) and checked as sent; a document is fetched or read
+        and checked. The first failure ends the loading (later files are
+        never opened) and is the node's error, without a node prefix.
+        Every image sent is persisted verbatim (port ``reference``, or
+        ``reference_{n}`` in a list); documents are not persisted."""
+        specs = parse_reference_list(parameters.get("reference_payload_path"))
+        if not specs:
+            return None, ()
+        problems = reference_list_problems(specs, ANSWER_FORMAT_INSPECTION)
+        if problems:
+            return problems[0], ()
+        single = len(specs) == 1 and specs[0].kind == KIND_IMAGE
+        total = len(specs)
+        manifest_cache: Dict[str, Any] = {}
+        prepared: List[PreparedReference] = []
+        for spec in specs:
+            position = None if single else (spec.index, total)
+            if spec.kind == KIND_DOCUMENT:
+                reason, reference = self._load_reference_document(
+                    node_id, spec, parameters, run_context, manifest_cache,
+                    position)
+            else:
+                reason, reference = self._load_reference_image(
+                    node_id, spec, parameters, run_context, manifest_cache,
+                    max_dim, position)
+            if reason is not None:
+                if single:
+                    return (
+                        "could not load its reference image: {0}".format(
+                            reason), ())
+                return (
+                    "could not load reference {0} of {1} ({2}): {3}".format(
+                        spec.index, total, _reference_display(spec), reason),
+                    ())
+            limit_error = _sent_image_problem(reference, single)
+            if limit_error is not None:
+                return limit_error, ()
+            prepared.append(reference)
+        for reference in prepared:
+            if reference.kind == KIND_IMAGE:
+                self._persist_sent_reference_frame(
+                    run_context, node_id,
+                    "reference" if single
+                    else "reference_{0}".format(reference.index),
+                    reference.data)
+        return None, tuple(prepared)
+
+    def _load_reference_image(
+        self,
+        node_id: Optional[str],
+        spec: Any,
+        parameters: Dict[str, Any],
+        run_context: Optional[RunContext],
+        manifest_cache: Dict[str, Any],
+        max_dim: Optional[int],
+        position: Optional[Tuple[int, int]],
+    ) -> Tuple[Optional[str], Optional[PreparedReference]]:
+        """``(reason, prepared)`` of one image reference of the
+        inspection path: resolved, then prepared for sending."""
+        reason, data, source = self._resolve_reference(
+            node_id, spec, parameters, run_context, manifest_cache, position)
+        if reason is not None:
+            return reason, None
+        try:
+            sent, transform, (width, height) = prepare_reference_image(
+                data, max_dim)
+        except Exception as error:  # noqa: BLE001 - a pre-call failure
+            return (
+                "could not prepare the image: {0}: {1}".format(
+                    type(error).__name__, error), None)
+        return None, PreparedReference(
+            index=spec.index, label=spec.label, kind=KIND_IMAGE,
+            format=BEDROCK_IMAGE_FORMAT, data=sent, source=source,
+            source_sha256=hashlib.sha256(data).hexdigest(),
+            transform=transform, width=width, height=height)
+
+    def _load_reference_document(
+        self,
+        node_id: Optional[str],
+        spec: Any,
+        parameters: Dict[str, Any],
+        run_context: Optional[RunContext],
+        manifest_cache: Dict[str, Any],
+        position: Optional[Tuple[int, int]],
+    ) -> Tuple[Optional[str], Optional[PreparedReference]]:
+        """``(reason, prepared)`` of one document reference: a typed URI
+        through :func:`fetch_reference_document`, an uploaded file from
+        the workflow package, each checked for its format and sent
+        unchanged."""
+        display = _reference_display(spec)
+        self._log_reference_load(node_id, display, position)
+        try:
+            if spec.uploaded:
+                data = self._read_uploaded_reference(
+                    spec, run_context, manifest_cache, MAX_DOCUMENT_BYTES)
+                _validate_document(spec.text, spec.format, data)
+            else:
+                data = fetch_reference_document(
+                    spec.text, spec.format, _allowed_uri_prefixes(parameters))
+        except Exception as error:  # noqa: BLE001 - recorded by the caller
+            return str(error), None
+        return None, PreparedReference(
+            index=spec.index, label=spec.label, kind=KIND_DOCUMENT,
+            format=spec.format, data=data, source=display,
+            source_sha256=hashlib.sha256(data).hexdigest())
+
+    @staticmethod
+    def _persist_sent_reference_frame(
+        run_context: Optional[RunContext],
+        node_id: Optional[str],
+        port: str,
+        data: bytes,
+    ) -> None:
+        """Persist a reference image the inspection path sends, verbatim,
+        as ``{capture_id}.node.{safeNodeId}.{port}.jpg`` beside the run's
+        other node artifacts. Contained: a missing output_dir/capture_id
+        writes nothing, and a write failure is logged and never affects
+        the inspection."""
+        try:
+            output_dir = run_context.output_dir if run_context else None
+            capture_id = run_context.capture_id if run_context else None
+            if not output_dir or not capture_id:
+                return
+            path = os.path.join(
+                output_dir,
+                SENT_REFERENCE_ARTIFACT_TEMPLATE.format(
+                    capture_id=capture_id,
+                    safe_node_id=sanitize_node_id_for_artifact(node_id),
+                    port=port,
+                ),
+            )
+            with open(path, "wb") as frame_file:
+                frame_file.write(data)
+        except Exception:  # noqa: BLE001 - contained; never affects the run
+            logger.warning(
+                "Bedrock inference node '%s': could not persist the "
+                "reference image it sends (%s); the inspection proceeds on "
+                "the bytes in memory", node_id, port, exc_info=True)
+
+    @staticmethod
+    def _export_inspection(
+        export_context: Optional[ExportContext],
+        node_id: Optional[str],
+        invocation: BedrockInvocation,
+        parameters: Dict[str, Any],
+        outcome: Dict[str, Any],
+        input_size: Tuple[int, int],
+        references: Tuple[PreparedReference, ...],
+        run_metadata: Dict[str, Any],
+    ) -> None:
+        """Hand the invocation to Sample_Export when an attempt returned
+        text: the accepted answer and its verdict, else the last text
+        with its parse error. No text, no sample. Contained."""
+        try:
+            if outcome.get("parsed") is not None:
+                export_inspection_sample(
+                    export_context, node_id, invocation, parameters,
+                    outcome.get("answer"), parsed=outcome["parsed"],
+                    input_size=input_size, references=references,
+                    metadata=run_metadata)
+            elif outcome.get("last_text") is not None:
+                export_inspection_sample(
+                    export_context, node_id, invocation, parameters,
+                    outcome["last_text"],
+                    parse_error=outcome.get("last_parse_error"),
+                    input_size=input_size, references=references,
+                    metadata=run_metadata)
+        except Exception:  # noqa: BLE001 - export never touches the run
+            logger.debug(
+                "Tuning sample export skipped for bedrock node %s; the run "
+                "is unaffected", node_id, exc_info=True)
 
     def _detection_crop(
         self,

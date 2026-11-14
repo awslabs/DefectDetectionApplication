@@ -21,6 +21,7 @@
  * reason (they must fire on the draft, not one save later); the route's
  * warnings replace them once the draft is saved.
  */
+import { ANSWER_FORMAT_INSPECTION } from './eligibility';
 import type { CandidatePreviewWarning } from './types';
 
 /**
@@ -30,6 +31,19 @@ import type { CandidatePreviewWarning } from './types';
  */
 export const VERDICT_INSTRUCTION =
   'Respond with JSON: {"is_anomalous": true|false, "confidence": 0..1}.';
+
+/**
+ * The instruction the Invocation_Builder appends instead of the
+ * Verdict_Instruction for an inspection-format node
+ * (`workflow_core.anomaly_invocation.INSPECTION_JSON_INSTRUCTION`, pinned by
+ * the published fixture `inspection_tuning_cases.json`).
+ */
+export const INSPECTION_INSTRUCTION =
+  'Respond with exactly one JSON object and nothing else: {"verdict": '
+  + '"pass"|"fail", "confidence": 0..1, "reason": "<one sentence>", '
+  + '"objects": [{"name": "<part>", "qc": "OK"|"NOK", "reason": "<short>", '
+  + '"bounding_box": {"x_min": <int>, "y_min": <int>, "x_max": <int>, '
+  + '"y_max": <int>}}, ...]} with one entry in objects per expected part.';
 
 /** Separator between the operator's prompt and the Verdict_Instruction. */
 export const INSTRUCTION_SEPARATOR = '\n\n';
@@ -42,10 +56,14 @@ export const DEFAULT_MAX_TOKENS = 256;
 
 /**
  * The user message the Invocation_Builder will send for `prompt`: the
- * prompt, a blank line, the Verdict_Instruction.
+ * prompt, a blank line, and the Verdict_Instruction — or, for an
+ * inspection-format node (`answerFormat` exactly `inspection`), the
+ * inspection instruction. The prompt is shown unrendered.
  */
-export function projectUserMessage(prompt: string): string {
-  return `${prompt ?? ''}${INSTRUCTION_SEPARATOR}${VERDICT_INSTRUCTION}`;
+export function projectUserMessage(prompt: string, answerFormat?: unknown): string {
+  const instruction =
+    answerFormat === ANSWER_FORMAT_INSPECTION ? INSPECTION_INSTRUCTION : VERDICT_INSTRUCTION;
+  return `${prompt ?? ''}${INSTRUCTION_SEPARATOR}${instruction}`;
 }
 
 /**
@@ -66,13 +84,17 @@ export function projectMaxTokens(maxTokens: number | null | undefined): number {
 
 /**
  * Requirements 5.4 and 5.5's non-blocking warnings for a draft Prompt_Set,
- * with the codes and wording of `workflow_tuning.preview_warnings`.
+ * with the codes and wording of `workflow_tuning.preview_warnings`. For an
+ * inspection-format node the schema warning names `verdict` instead of
+ * `is_anomalous`.
  */
 export function draftWarnings(
   prompt: string,
   systemPrompt: string | null,
-  maxTokens: number | null
+  maxTokens: number | null,
+  answerFormat?: unknown
 ): CandidatePreviewWarning[] {
+  const inspection = answerFormat === ANSWER_FORMAT_INSPECTION;
   const warnings: CandidatePreviewWarning[] = [];
   const budget =
     maxTokens === null || maxTokens === undefined || Number.isNaN(Number(maxTokens))
@@ -99,6 +121,20 @@ export function draftWarnings(
     const lowered = text.toLowerCase();
     const demandsJson =
       lowered.includes('json') || (text.includes('{') && text.includes('}'));
+    if (inspection) {
+      if (demandsJson && !lowered.includes('verdict')) {
+        warnings.push({
+          code: 'answer_schema_missing_verdict',
+          field,
+          message:
+            `The ${field} specifies an answer format that does not include `
+            + '"verdict". An inspection-format node\'s parser requires '
+            + 'exactly one JSON object with verdict, confidence, reason and '
+            + 'objects.',
+        });
+      }
+      continue;
+    }
     if (demandsJson && !lowered.includes('is_anomalous')) {
       warnings.push({
         code: 'answer_schema_missing_is_anomalous',

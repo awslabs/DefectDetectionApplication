@@ -2,9 +2,11 @@
  * Tunable_Node classification — the frontend half of the one rule
  * (quality-prompt-tuning, Requirement 1.5, Property 1).
  *
- * A node is a Tunable_Node exactly when it is an Inspection_Node — node type
- * `bedrock_inference` or `llm_inference`, matched exactly, with no trimming
- * and no case folding — running in Anomaly_Mode:
+ * A node is a Tunable_Node exactly when it is a `bedrock_inference` node in
+ * inspection format (`answer_format` exactly `inspection`, whatever its
+ * `anomaly_mode`), or an Inspection_Node — node type `bedrock_inference` or
+ * `llm_inference`, matched exactly, with no trimming and no case folding —
+ * running in Anomaly_Mode:
  *
  *   - `bedrock_inference`: an absent `anomaly_mode` parameter (and a stored
  *     `null`) defaults to Anomaly_Mode; any other value is coerced and taken
@@ -12,6 +14,10 @@
  *   - `llm_inference`: Anomaly_Mode only when the coerced value is truthy —
  *     absent, `null` and `false` all keep the freeform path.
  *   - every other node type: never tunable.
+ *
+ * The inspection clause has its own shared case table,
+ * `edge-cv-portal/backend/tests/fixtures/inspection_tuning_cases.json`,
+ * consumed by `eligibility.inspection.property.test.ts`.
  *
  * This is a faithful port of the shared Python rule
  * (`workflow_core.anomaly_invocation.coerce_parameter_value` /
@@ -43,6 +49,24 @@ export const INSPECTION_NODE_TYPES: readonly string[] = [
 
 /** The node parameter that selects Anomaly_Mode. */
 export const ANOMALY_MODE_PARAMETER = 'anomaly_mode';
+
+/** The `bedrock_inference` parameter that selects the answer contract. */
+export const ANSWER_FORMAT_PARAMETER = 'answer_format';
+
+/** The `answer_format` value of an inspection-format node. */
+export const ANSWER_FORMAT_INSPECTION = 'inspection';
+
+/**
+ * True when the parameters select the inspection format. The executor's
+ * comparison is `str(answer_format or "") == "inspection"`; for every JSON
+ * value that is exactly strict equality with the string, because only the
+ * string "inspection" stringifies to "inspection" in Python.
+ */
+export function isInspectionFormat(
+  parameters: Record<string, unknown> | null | undefined
+): boolean {
+  return parameters?.[ANSWER_FORMAT_PARAMETER] === ANSWER_FORMAT_INSPECTION;
+}
 
 /**
  * The executor's parameter coercion (`_coerce` / `coerce_parameter_value`):
@@ -114,12 +138,21 @@ export function isAnomalyMode(nodeType: unknown, anomalyMode: unknown): boolean 
 }
 
 /**
- * True when the node is a Tunable_Node (Requirement 1.5) — an
- * Inspection_Node in Anomaly_Mode. Named for the tuning surfaces;
- * `isAnomalyMode` is the same rule under the executor's name, exactly as
- * the shared Python module keeps both names over one implementation.
+ * True when the node is a Tunable_Node (Requirement 1.5): a
+ * `bedrock_inference` node whose `answer_format` is exactly `inspection`,
+ * whatever its `anomaly_mode`, or an Inspection_Node in Anomaly_Mode.
+ * Without `answerFormat` this is `isAnomalyMode`, the same rule under the
+ * executor's name, exactly as the shared Python module keeps both names
+ * over one implementation.
  */
-export function isTunableNode(nodeType: unknown, anomalyMode: unknown): boolean {
+export function isTunableNode(
+  nodeType: unknown,
+  anomalyMode: unknown,
+  answerFormat?: unknown
+): boolean {
+  if (nodeType === NODE_TYPE_BEDROCK_INFERENCE && answerFormat === ANSWER_FORMAT_INSPECTION) {
+    return true;
+  }
   return isAnomalyMode(nodeType, anomalyMode);
 }
 
@@ -130,12 +163,16 @@ export interface TunableNodeLike {
   parameters?: Record<string, unknown> | null;
 }
 
-/** `isTunableNode` reading the type and `anomaly_mode` off a node. */
+/** `isTunableNode` reading the type, `anomaly_mode` and `answer_format` off a node. */
 export function isTunableWorkflowNode(node: TunableNodeLike | null | undefined): boolean {
   if (node === null || node === undefined) {
     return false;
   }
-  return isTunableNode(node.type, node.parameters?.[ANOMALY_MODE_PARAMETER]);
+  return isTunableNode(
+    node.type,
+    node.parameters?.[ANOMALY_MODE_PARAMETER],
+    node.parameters?.[ANSWER_FORMAT_PARAMETER]
+  );
 }
 
 /** The ids of a definition's Tunable_Nodes, in document order. */

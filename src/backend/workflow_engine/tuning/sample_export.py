@@ -28,6 +28,15 @@ objects per sample to the Use_Case's Sample_Store::
 so the Portal's tuning workspace works from what the model really saw
 without anyone logging into a device (Requirements 2.2, 2.3).
 
+An ``answer_format: inspection`` ``bedrock_inference`` node exports one
+sample whenever an attempt returned answer text
+(:func:`export_inspection_sample`); its sidecar adds the inspection keys
+(``answerFormat``, ``recorded.verdict``, the image sizes, the reference
+provenance and ``metadataSnippetJson``), and a node that sends a list of
+reference files writes ``{executionId}.reference-{n}.{ext}`` per
+reference instead of ``.reference.jpg``. Legacy and ``llm_inference``
+samples never carry these keys.
+
 Design constraints this module implements literally:
 
 - **Inert unless configured** (Requirements 2.6, 11.3). The
@@ -84,7 +93,14 @@ from typing import (
 from workflow_engine.llm_inference import PLACEHOLDER_RE
 from workflow_engine.s3_bucket_owner import owner_args
 from workflow_engine.vendor.workflow_core.anomaly_invocation import (
+    ANSWER_FORMAT_INSPECTION,
+    KIND_IMAGE,
+    inspection_metadata_roots,
+    inspection_verdict,
+    is_inline_reference_value,
+    parse_reference_list,
     prompt_fingerprint,
+    resolve_field_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,6 +111,12 @@ CONFIG_KEY = "workflowTuning"
 
 #: Bounded export queue depth (Requirement 2.4).
 DEFAULT_QUEUE_SIZE = 200
+
+#: Bound on the bytes the queue holds (the input and every reference of
+#: each queued sample): a node that sends several large documents while
+#: S3 is unreachable cannot exhaust memory. The oldest samples are
+#: dropped first, each with its own WARNING.
+MAX_QUEUE_BYTES = 256 * 1024 * 1024
 
 #: Per-image size cap; a larger input or reference skips the sample
 #: (Requirement 2.10).
@@ -121,9 +143,30 @@ SIDECAR_SUFFIX = ".json"
 INPUT_SUFFIX = ".input.jpg"
 REFERENCE_SUFFIX = ".reference.jpg"
 
+#: Object suffix of each reference of a list form: n is the 1-based
+#: position, ext ``jpg`` for an image or the document's format.
+REFERENCE_LIST_SUFFIX = ".reference-{n}.{ext}"
+
 #: Content types of the uploaded objects.
 SIDECAR_CONTENT_TYPE = "application/json"
 IMAGE_CONTENT_TYPE = "image/jpeg"
+
+#: Content type of each document format of a list form. HTML is stored
+#: as plain text, so a presigned link shows its source instead of
+#: running it (the Sample_Store is not a web host).
+DOCUMENT_CONTENT_TYPES = {
+    "pdf": "application/pdf",
+    "txt": "text/plain; charset=utf-8",
+    "md": "text/markdown; charset=utf-8",
+    "csv": "text/csv; charset=utf-8",
+    "html": "text/plain; charset=utf-8",
+    "doc": "application/msword",
+    "docx": ("application/vnd.openxmlformats-officedocument."
+             "wordprocessingml.document"),
+    "xls": "application/vnd.ms-excel",
+    "xlsx": ("application/vnd.openxmlformats-officedocument."
+             "spreadsheetml.sheet"),
+}
 
 #: Serialized size cap of an ``llm_inference`` sample's
 #: ``metadataSnippet`` (the Run_Metadata fragment a Device_Score_Job
@@ -217,6 +260,38 @@ class ExportContext:
 
 
 @dataclass(frozen=True)
+class ReferenceRecord:
+    """What an inspection sample records about its single reference image
+    besides the bytes: the size of the bytes sent and, for a live
+    sample, where it came from (the redacted source, the digest of the
+    bytes as loaded, the preparation steps applied). A backfilled sample
+    knows only the size."""
+
+    source: Optional[str] = None
+    source_sha256: Optional[str] = None
+    transform: Optional[Tuple[str, ...]] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ExportedReference:
+    """One reference file of a list-form inspection sample, with the bytes
+    the invocation sent (an image as prepared, a document unchanged)."""
+
+    index: int
+    label: str
+    kind: str
+    format: str
+    data: bytes
+    width: Optional[int] = None
+    height: Optional[int] = None
+    source: Optional[str] = None
+    source_sha256: Optional[str] = None
+    transform: Optional[Tuple[str, ...]] = None
+
+
+@dataclass(frozen=True)
 class ExportedSample:
     """One Anomaly_Mode invocation, as exported (Requirement 2.2).
 
@@ -224,6 +299,11 @@ class ExportedSample:
     invocation sent — the Detection_Crop or captured ``in`` frame, and
     the captured/payload-resolved reference, downscaled when the node
     downscales — so a replay sees what the model saw.
+
+    The fields after ``exported_at`` are set only for an
+    ``answer_format: inspection`` sample (``answer_format``); every other
+    sample leaves them at their defaults, so its sidecar is unchanged.
+    ``references`` replaces ``reference_bytes`` for a list form.
     """
 
     workflow_id: str
@@ -243,6 +323,13 @@ class ExportedSample:
     input_sha256: Optional[str] = None
     source: str = SOURCE_LIVE
     exported_at: Optional[int] = None
+    answer_format: Optional[str] = None
+    recorded_verdict: Optional[str] = None
+    input_size: Optional[Tuple[int, int]] = None
+    reference_record: Optional[ReferenceRecord] = None
+    references: Tuple[ExportedReference, ...] = ()
+    metadata_snippet_json: Optional[str] = None
+    metadata_snippet_omitted: Tuple[str, ...] = ()
 
     @property
     def oversize(self) -> bool:
@@ -288,6 +375,29 @@ def object_keys(
     return base + SIDECAR_SUFFIX, base + INPUT_SUFFIX, reference_key
 
 
+def reference_list_key(base: str, reference: ExportedReference) -> str:
+    """``{base}.reference-{n}.{ext}`` of one reference of a list form."""
+    extension = "jpg" if reference.kind == KIND_IMAGE else reference.format
+    return base + REFERENCE_LIST_SUFFIX.format(
+        n=reference.index, ext=extension)
+
+
+def reference_content_type(reference: ExportedReference) -> str:
+    """The stored content type of one reference of a list form."""
+    if reference.kind == KIND_IMAGE:
+        return IMAGE_CONTENT_TYPE
+    return DOCUMENT_CONTENT_TYPES.get(
+        reference.format, "application/octet-stream")
+
+
+def _sample_bytes(sample: ExportedSample) -> int:
+    """The bytes a queued sample holds: its input and every reference."""
+    total = len(sample.input_bytes or b"") + len(sample.reference_bytes or b"")
+    for reference in sample.references or ():
+        total += len(reference.data or b"")
+    return total
+
+
 def _normalize_version(version: Any) -> Any:
     """The registration version as the sidecar records it.
 
@@ -331,6 +441,7 @@ def build_sidecar(
         prefix, sample, thing_name)
     # The sidecar never references itself.
     del sidecar_key
+    inspection = sample.answer_format is not None
     verdict = sample.verdict if isinstance(sample.verdict, Mapping) else None
     document: Dict[str, Any] = {
         "schemaVersion": SIDECAR_SCHEMA_VERSION,
@@ -374,9 +485,65 @@ def build_sidecar(
             "sha256": _digest(sample.reference_bytes),
             "bytes": len(sample.reference_bytes or b""),
         }
-    if sample.metadata_snippet is not None:
+    if inspection:
+        _add_inspection_keys(document, sample, prefix, thing_name)
+    elif sample.metadata_snippet is not None:
         document["metadataSnippet"] = dict(sample.metadata_snippet)
     return document
+
+
+def _add_inspection_keys(
+    document: Dict[str, Any],
+    sample: ExportedSample,
+    prefix: str,
+    thing_name: str,
+) -> None:
+    """The sidecar keys of an ``answer_format: inspection`` sample: the
+    answer format, the recorded verdict, the input and reference sizes,
+    the live reference provenance or the ``references`` list, and the
+    metadata snippet as a JSON string (never a ``metadataSnippet``
+    object, whose key order the uploader's ``sort_keys`` would lose)."""
+    document["answerFormat"] = sample.answer_format
+    document["recorded"]["verdict"] = sample.recorded_verdict
+    size = sample.input_size
+    document["input"]["width"] = size[0] if size else None
+    document["input"]["height"] = size[1] if size else None
+    record = sample.reference_record
+    if "reference" in document and record is not None:
+        reference = document["reference"]
+        reference["width"] = record.width
+        reference["height"] = record.height
+        if record.source is not None:
+            reference["source"] = record.source
+        if record.source_sha256 is not None:
+            reference["sourceSha256"] = record.source_sha256
+        if record.transform is not None:
+            reference["transform"] = list(record.transform)
+    if sample.references:
+        base = object_key_base(prefix, sample, thing_name)
+        entries = []
+        for item in sample.references:
+            entry: Dict[str, Any] = {
+                "index": item.index, "label": item.label, "kind": item.kind,
+                "format": item.format, "key": reference_list_key(base, item),
+                "sha256": _digest(item.data), "bytes": len(item.data or b""),
+            }
+            if item.kind == KIND_IMAGE:
+                entry["width"] = item.width
+                entry["height"] = item.height
+            if item.source is not None:
+                entry["source"] = item.source
+            if item.source_sha256 is not None:
+                entry["sourceSha256"] = item.source_sha256
+            if item.transform is not None:
+                entry["transform"] = list(item.transform)
+            entries.append(entry)
+        document["references"] = entries
+    if sample.metadata_snippet_json is not None:
+        document["metadataSnippetJson"] = sample.metadata_snippet_json
+    if sample.metadata_snippet_omitted:
+        document["metadataSnippetOmitted"] = list(
+            sample.metadata_snippet_omitted)
 
 
 # ---------------------------------------------------------------------------
@@ -429,7 +596,12 @@ class SampleExporter:
         self._client: Any = None
         self._worker: Optional[threading.Thread] = None
         self._stopping = False
+        #: Set by :meth:`close_and_take`: the exporter accepts no sample
+        #: and forwards each one to the installed exporter.
+        self._closed = False
         self._in_flight = 0
+        #: The bytes the queued samples hold (bounded by MAX_QUEUE_BYTES).
+        self._queued_bytes = 0
         self._condition = threading.Condition()
         #: Allocated ONLY for a configured exporter, so a disabled one
         #: holds no queue at all (Property 3).
@@ -468,12 +640,14 @@ class SampleExporter:
         skipped with an INFO naming the execution (Requirement 2.10).
         When the queue is at its bound the OLDEST entry is dropped with a
         WARNING naming its execution, so the newest samples survive a
-        stalled uploader (Requirement 2.4).
+        stalled uploader (Requirement 2.4). The queue's bytes are bounded
+        the same way by :data:`MAX_QUEUE_BYTES`, with its own WARNING.
         """
         if self._queue is None:
             return
         try:
-            if sample.oversize:
+            size = _sample_bytes(sample)
+            if sample.oversize or size > MAX_QUEUE_BYTES:
                 logger.info(
                     "Tuning sample export skipped for execution %s (node "
                     "%s): an image exceeds the %d-byte cap (input %d bytes, "
@@ -484,16 +658,37 @@ class SampleExporter:
                 )
                 return
             with self._condition:
-                while len(self._queue) >= self._queue_size:
+                # A closed exporter (relocated or disabled) keeps nothing:
+                # the sample goes to the installed exporter, outside the
+                # lock, below.
+                closed = self._closed
+                while not closed and len(self._queue) >= self._queue_size:
                     dropped = self._queue.popleft()
+                    self._queued_bytes -= _sample_bytes(dropped)
                     logger.warning(
                         "Tuning sample export queue is full (%d entries); "
                         "dropped the oldest sample (execution %s, node %s)",
                         self._queue_size, dropped.execution_id,
                         dropped.node_id,
                     )
-                self._queue.append(sample)
-                self._condition.notify()
+                while not closed and self._queue and (
+                        self._queued_bytes + size > MAX_QUEUE_BYTES):
+                    dropped = self._queue.popleft()
+                    self._queued_bytes -= _sample_bytes(dropped)
+                    logger.warning(
+                        "Tuning sample export queue holds more than %d bytes "
+                        "of samples; dropped the oldest sample (execution "
+                        "%s, node %s)",
+                        MAX_QUEUE_BYTES, dropped.execution_id,
+                        dropped.node_id,
+                    )
+                if not closed:
+                    self._queue.append(sample)
+                    self._queued_bytes += size
+                    self._condition.notify()
+            if closed:
+                self._forward(sample)
+                return
             self.start()
         except Exception:  # noqa: BLE001 - export never touches the run
             logger.debug(
@@ -501,6 +696,37 @@ class SampleExporter:
                 "execution %s; the run is unaffected",
                 getattr(sample, "execution_id", None), exc_info=True,
             )
+
+    def _forward(self, sample: ExportedSample) -> None:
+        """Hand a sample that reached this closed exporter to the
+        installed one (an executor thread may have fetched this exporter
+        just before a relocation), or drop it when export is disabled."""
+        current = sample_exporter()
+        if current is not None and current is not self:
+            current.enqueue(sample)
+            return
+        logger.debug(
+            "Tuning sample export was reconfigured; dropped the sample for "
+            "execution %s (node %s)", sample.execution_id, sample.node_id)
+
+    def close_and_take(self) -> List[ExportedSample]:
+        """Close the exporter and return every queued sample, oldest
+        first (live tuning configuration: the caller re-enqueues them
+        into the new exporter, or counts them as dropped).
+
+        The worker finishes the upload in flight and exits; a later
+        :meth:`enqueue` forwards to the installed exporter. Never raises.
+        """
+        with self._condition:
+            self._closed = True
+            self._stopping = True
+            taken: List[ExportedSample] = []
+            if self._queue is not None:
+                taken = list(self._queue)
+                self._queue.clear()
+                self._queued_bytes = 0
+            self._condition.notify_all()
+        return taken
 
     # -- worker lifecycle ------------------------------------------------
     def start(self) -> None:
@@ -557,6 +783,7 @@ class SampleExporter:
                         return
                     continue
                 sample = self._queue.popleft()
+                self._queued_bytes -= _sample_bytes(sample)
                 self._in_flight += 1
             try:
                 self._upload_with_retries(sample)
@@ -644,6 +871,18 @@ class SampleExporter:
                 ContentType=IMAGE_CONTENT_TYPE,
                 **owner,
             )
+        if sample.references:
+            # A list form: every reference, in list order, still before
+            # the sidecar.
+            base = object_key_base(config.prefix, sample, self._thing_name)
+            for reference in sample.references:
+                client.put_object(
+                    Bucket=config.bucket,
+                    Key=reference_list_key(base, reference),
+                    Body=reference.data,
+                    ContentType=reference_content_type(reference),
+                    **owner,
+                )
         document = build_sidecar(sample, self._thing_name, config.prefix)
         client.put_object(
             Bucket=config.bucket,
@@ -819,6 +1058,153 @@ def metadata_snippet(
 
 
 # ---------------------------------------------------------------------------
+# Run_Metadata snippet for inspection-format replay
+# ---------------------------------------------------------------------------
+
+def inline_reference_paths(parameters: Mapping[str, Any],
+                           metadata: Any) -> Tuple[str, ...]:
+    """The snippet paths that hold inline reference data (base64 or a
+    ``data:`` URL), which must never travel in the sidecar.
+
+    For each payload reference of the node's ``reference_payload_path``
+    list, ``trigger.payload_json.<path>`` when the path resolves under
+    ``metadata["trigger"]["payload_json"]`` to an inline value; plus
+    ``trigger.payload`` (the raw payload text, which holds the same data)
+    first when any was found. ``()`` otherwise; never raises."""
+    try:
+        trigger = (metadata.get("trigger")
+                   if isinstance(metadata, Mapping) else None)
+        payload_json = (trigger.get("payload_json")
+                        if isinstance(trigger, Mapping) else None)
+        if payload_json is None:
+            return ()
+        paths: List[str] = []
+        for spec in parse_reference_list(
+                parameters.get("reference_payload_path")):
+            if spec.static:
+                continue
+            found, value = resolve_field_path(payload_json, spec.text)
+            path = "trigger.payload_json." + spec.text
+            if found and is_inline_reference_value(value) and (
+                    path not in paths):
+                paths.append(path)
+        return ("trigger.payload",) + tuple(paths) if paths else ()
+    except Exception:  # noqa: BLE001 - never touches the run
+        logger.debug(
+            "Tuning sample export could not read the inline reference "
+            "paths", exc_info=True)
+        return ()
+
+
+def _omit_path(view: Any, path: str) -> Any:
+    """``view`` with the value at the dotted ``path`` left out: the
+    containers along the path are copied, a dict entry is removed and a
+    list element is replaced by ``None`` (later indices keep their
+    positions). A path that does not resolve leaves ``view`` as it is."""
+    segments = path.split(".")
+
+    def omit(node: Any, depth: int) -> Tuple[Any, bool]:
+        segment = segments[depth]
+        last = depth == len(segments) - 1
+        if isinstance(node, dict):
+            if segment not in node:
+                return node, False
+            if last:
+                copy = dict(node)
+                del copy[segment]
+                return copy, True
+            child, changed = omit(node[segment], depth + 1)
+            if not changed:
+                return node, False
+            copy = dict(node)
+            copy[segment] = child
+            return copy, True
+        if isinstance(node, list):
+            try:
+                index = int(segment)
+            except ValueError:
+                return node, False
+            if not 0 <= index < len(node):
+                return node, False
+            copy_list = list(node)
+            if last:
+                copy_list[index] = None
+                return copy_list, True
+            child, changed = omit(node[index], depth + 1)
+            if not changed:
+                return node, False
+            copy_list[index] = child
+            return copy_list, True
+        return node, False
+
+    result, _ = omit(view, 0)
+    return result
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                      allow_nan=False)
+
+
+def inspection_metadata_snippet_json(
+    parameters: Mapping[str, Any],
+    metadata: Any,
+    omit: Tuple[str, ...] = (),
+    max_bytes: int = METADATA_SNIPPET_MAX_BYTES,
+) -> Optional[str]:
+    """The Run_Metadata fragment the Portal renders an inspection-format
+    Candidate from, as one JSON string, or ``None``.
+
+    The roots a replay needs (``inspection_metadata_roots``: the trigger
+    and every root the prompts or ``expected_count_path`` name) are
+    projected in sorted order, signed query values are masked
+    (``trigger_runtime.redacted_run_view``), the ``omit`` paths are left
+    out, and each root is JSON-projected (``_json_safe``). The string is
+    encoded once, without ``sort_keys``, so every key keeps the run
+    metadata's order and every number its type through the uploader's
+    ``sort_keys`` and DynamoDB; while it exceeds ``max_bytes`` the root
+    whose own encoding is longest is dropped. An empty snippet, or any
+    failure (NaN, a recursion limit, a type error), gives ``None``."""
+    try:
+        if not isinstance(metadata, Mapping):
+            return None
+        projected = {
+            root: metadata[root]
+            for root in inspection_metadata_roots(parameters)
+            if root in metadata
+        }
+        # Imported here, as output_bindings._mask_destination does, so
+        # this module stays importable without the trigger runtime.
+        from workflow_engine.trigger_runtime import redacted_run_view
+
+        view = redacted_run_view(projected)
+        for path in omit or ():
+            view = _omit_path(view, path)
+        snippet: Dict[str, Any] = {}
+        for root, value in view.items():
+            safe = _json_safe(value)
+            if safe is None and value is not None:
+                continue
+            snippet[root] = safe
+        while snippet:
+            encoded = _compact_json(snippet)
+            if len(encoded.encode("utf-8")) <= max_bytes:
+                return encoded
+            longest = max(
+                snippet, key=lambda key: len(_compact_json(snippet[key])))
+            logger.debug(
+                "Tuning sample export: dropping metadata snippet key '%s' "
+                "to stay within %d bytes", longest, max_bytes)
+            snippet.pop(longest)
+        return None
+    except Exception:  # noqa: BLE001 - never touches the run
+        logger.debug(
+            "Tuning sample export could not build the inspection metadata "
+            "snippet", exc_info=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Executor call sites (Requirements 2.2, 11.1, 11.2)
 #
 # Both helpers are TOTALLY contained: they return immediately when no
@@ -943,18 +1329,122 @@ def export_llm_sample(
             "unaffected", node_id, exc_info=True)
 
 
+def export_inspection_sample(
+    context: Optional[ExportContext],
+    node_id: Optional[str],
+    invocation: Any,
+    parameters: Mapping[str, Any],
+    answer: Optional[str],
+    parsed: Optional[Mapping[str, Any]] = None,
+    parse_error: Optional[str] = None,
+    input_size: Optional[Tuple[int, int]] = None,
+    references: Any = (),
+    metadata: Any = None,
+    exporter: Optional[SampleExporter] = None,
+) -> None:
+    """Export one ``answer_format: inspection`` ``bedrock_inference``
+    invocation where an attempt returned answer text: the accepted
+    answer with its verdict (``parsed``), or the last text with its
+    ``parse_error``.
+
+    The cheap checks come first, so a device without export does no work
+    on the run path: no exporter or no ``context``, a non-inspection
+    invocation or one without an image return before the metadata
+    snippet is built. The bytes come from the built invocation, so the
+    exported input and references are by construction the bytes sent
+    (the input image, then ``images[1:]`` in the single-image form or
+    ``attachments[1:]`` in a list form); ``references`` (the executor's
+    prepared references, matched by position) supply only their
+    metadata. ``parameters`` are the node's parameters before rendering,
+    which the Portal's Baseline_Candidate fingerprints. Totally
+    contained."""
+    try:
+        exporter = exporter if exporter is not None else sample_exporter()
+        if exporter is None or context is None:
+            return
+        if getattr(invocation, "answer_format", "") != ANSWER_FORMAT_INSPECTION:
+            return
+        images = list(getattr(invocation, "images", ()) or ())
+        if not images:
+            return
+        prepared = tuple(references or ())
+        attachments = tuple(getattr(invocation, "attachments", ()) or ())
+        sent = attachments[1:] if attachments else images[1:]
+        if len(sent) != len(prepared):
+            logger.debug(
+                "Tuning sample export skipped for bedrock node %s: %d "
+                "reference(s) sent, %d prepared", node_id, len(sent),
+                len(prepared))
+            return
+        reference_bytes = None
+        reference_record = None
+        exported: Tuple[ExportedReference, ...] = ()
+        if attachments:
+            exported = tuple(
+                ExportedReference(
+                    index=item.index, label=block.label, kind=block.kind,
+                    format=block.format, data=block.data,
+                    width=item.width, height=item.height,
+                    source=item.source, source_sha256=item.source_sha256,
+                    transform=(tuple(item.transform)
+                               if block.kind == KIND_IMAGE else None))
+                for item, block in zip(prepared, sent))
+        elif sent:
+            item = prepared[0]
+            reference_bytes = sent[0][1]
+            reference_record = ReferenceRecord(
+                source=item.source, source_sha256=item.source_sha256,
+                transform=tuple(item.transform), width=item.width,
+                height=item.height)
+        omitted = inline_reference_paths(parameters, metadata)
+        snippet = inspection_metadata_snippet_json(
+            parameters, metadata, omit=omitted)
+        exporter.enqueue(ExportedSample(
+            workflow_id=context.workflow_id,
+            node_id=node_id,
+            node_type="bedrock_inference",
+            execution_id=context.execution_id,
+            input_bytes=images[0][1],
+            version=context.version,
+            reference_bytes=reference_bytes,
+            answer=answer,
+            verdict=inspection_verdict(parsed) if parsed is not None else None,
+            parse_error=parse_error,
+            prompt_fingerprint=prompt_fingerprint(parameters),
+            answer_format=ANSWER_FORMAT_INSPECTION,
+            recorded_verdict=(
+                parsed["verdict"] if parsed is not None else None),
+            input_size=(
+                (int(input_size[0]), int(input_size[1]))
+                if input_size is not None else None),
+            reference_record=reference_record,
+            references=exported,
+            metadata_snippet_json=snippet,
+            metadata_snippet_omitted=tuple(omitted),
+        ))
+    except Exception:  # noqa: BLE001 - export never touches the run
+        logger.debug(
+            "Tuning sample export skipped for bedrock node %s; the run is "
+            "unaffected", node_id, exc_info=True)
+
+
 __all__: List[str] = [
     "BACKOFF_BASE_SECONDS",
     "CONFIG_KEY",
     "DEFAULT_QUEUE_SIZE",
+    "DOCUMENT_CONTENT_TYPES",
     "ExportConfig",
     "ExportContext",
+    "ExportedReference",
     "ExportedSample",
     "INPUT_SUFFIX",
     "MAX_IMAGE_BYTES",
+    "MAX_QUEUE_BYTES",
     "MAX_UPLOAD_ATTEMPTS",
     "METADATA_SNIPPET_MAX_BYTES",
+    "REFERENCE_LIST_SUFFIX",
     "REFERENCE_SUFFIX",
+    "ReferenceRecord",
     "SIDECAR_SCHEMA_VERSION",
     "SIDECAR_SUFFIX",
     "SOURCE_BACKFILL",
@@ -963,10 +1453,15 @@ __all__: List[str] = [
     "build_sidecar",
     "configure_sample_exporter",
     "export_bedrock_sample",
+    "export_inspection_sample",
     "export_llm_sample",
+    "inline_reference_paths",
+    "inspection_metadata_snippet_json",
     "metadata_snippet",
     "object_key_base",
     "object_keys",
+    "reference_content_type",
+    "reference_list_key",
     "sample_exporter",
     "set_sample_exporter",
     "shutdown_sample_exporter",

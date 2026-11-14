@@ -56,7 +56,8 @@ export const USECASE_SETTINGS_HREF = '/usecases';
 /** Empty state when no workflow of the Use_Case has a Tunable_Node. */
 export const NO_TUNABLE_WORKFLOWS_MESSAGE =
   'No workflow in this use case has an anomaly-mode Bedrock or VLM '
-  + 'inspection node in its latest version.';
+  + 'inspection node, or an inspection-format Bedrock node, in its latest '
+  + 'version.';
 
 /** Human label for a Tunable_Node's type (Requirement 1.5's two types). */
 export function nodeTypeLabel(nodeType: string): string {
@@ -225,7 +226,7 @@ export default function AnomalyTuningOverview() {
       header={
         <Header
           variant="h1"
-          description="Tune the prompts of anomaly-mode Bedrock and VLM inspection nodes against the images your devices really sent"
+          description="Tune the prompts of anomaly-mode Bedrock and VLM inspection nodes, and of inspection-format Bedrock nodes, against the images your devices really sent"
           actions={
             <SpaceBetween direction="horizontal" size="xs">
               <Select
@@ -307,7 +308,7 @@ export default function AnomalyTuningOverview() {
         {!loading && overview && workflows.length === 0 && (
           <Box variant="p" data-testid="no-tunable-workflows">
             {preselectedWorkflowId
-              ? `Workflow ${preselectedWorkflowId} has no anomaly-mode Bedrock or VLM inspection node in its latest version.`
+              ? `Workflow ${preselectedWorkflowId} has no anomaly-mode Bedrock or VLM inspection node, or inspection-format Bedrock node, in its latest version.`
               : NO_TUNABLE_WORKFLOWS_MESSAGE}
           </Box>
         )}
