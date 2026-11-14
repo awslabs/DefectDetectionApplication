@@ -1103,6 +1103,31 @@ BEDROCK_INFERENCE = NodeTypeDescriptor(
                                         "path (implied by answer_format "
                                         "inspection).",
                             examples=[True, False]),
+        # Appended (additive — bedrock-additional-model-request-fields):
+        # model-specific Converse request fields. Empty (the default)
+        # sends no additionalModelRequestFields, so every existing node
+        # makes today's request byte for byte. The fields are opt-in per
+        # node because they are model-specific: Amazon Nova refuses the
+        # Claude 'thinking' object with a ValidationException.
+        ParameterDescriptor("additional_model_request_fields", "string",
+                            required=False, default="",
+                            constraints={},
+                            description="Optional JSON object sent as the "
+                                        "Converse API "
+                                        "additionalModelRequestFields, for "
+                                        "request fields only some models "
+                                        "accept, e.g. "
+                                        '{"thinking": {"type": "disabled"}} '
+                                        "to turn off extended thinking on a "
+                                        "Claude model that thinks by "
+                                        "default. A model that does not "
+                                        "accept a field refuses the call "
+                                        "with a ValidationException, so set "
+                                        "only fields the selected model "
+                                        "supports. Empty sends none.",
+                            examples=['{"thinking": {"type": "disabled"}}',
+                                      '{"inferenceConfig": {"topK": 20}}'],
+                            multiline=True),
     ],
     # Executor-level on every physical device architecture: the node has
     # no GStreamer element of its own. The compiler terminates each

@@ -139,6 +139,13 @@ _MQTT_RELAXED_PARAMETER = "broker_host"
 #: chains moved); every other recording, ``mqtt_publish`` included, is
 #: untouched.
 #:
+#: The bedrock-additional-model-request-fields feature appended one
+#: parameter, ``additional_model_request_fields``, to ``bedrock_inference``.
+#: Only that entry was regenerated per the same maintenance path; ONLY that
+#: parameter was appended (prior parameter order preserved as a prefix,
+#: every other field byte-identical) — the additivity is pinned by
+#: ``test_bedrock_request_fields.py``.
+#:
 #: The s3-upload output node appended one descriptor (``s3_upload``) and
 #: additively extended the two bridged Custom Python descriptors
 #: (``custom_python``, ``custom_python_preprocess``): the optional

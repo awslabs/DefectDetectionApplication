@@ -689,6 +689,20 @@
         "name": "annotate",
         "param_type": "bool",
         "required": false
+      },
+      {
+        "constraints": {},
+        "default": "",
+        "depends_on": null,
+        "description": "Optional JSON object sent as the Converse API additionalModelRequestFields, for request fields only some models accept, e.g. {\"thinking\": {\"type\": \"disabled\"}} to turn off extended thinking on a Claude model that thinks by default. A model that does not accept a field refuses the call with a ValidationException, so set only fields the selected model supports. Empty sends none.",
+        "examples": [
+          "{\"thinking\": {\"type\": \"disabled\"}}",
+          "{\"inferenceConfig\": {\"topK\": 20}}"
+        ],
+        "multiline": true,
+        "name": "additional_model_request_fields",
+        "param_type": "string",
+        "required": false
       }
     ],
     "type_id": "bedrock_inference"

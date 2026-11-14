@@ -260,6 +260,16 @@ BEDROCK_CONNECT_TIMEOUT_SEC = 2
 #: Image format of every attached content block.
 BEDROCK_IMAGE_FORMAT = "jpeg"
 
+#: The ``bedrock_inference`` parameter whose JSON object is sent as the
+#: Converse ``additionalModelRequestFields`` (bedrock-additional-model-
+#: request-fields): request fields one model family understands and
+#: another refuses, e.g. ``{"thinking": {"type": "disabled"}}`` for a
+#: Claude model that thinks by default. Amazon Nova refuses that same
+#: object with a ``ValidationException`` ("extraneous key [thinking] is
+#: not permitted") before generating anything, so the fields are opt-in
+#: per node and never defaulted or inferred from the model id.
+ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER = "additional_model_request_fields"
+
 # ---------------------------------------------------------------------------
 # Reference lists: one reference per line of reference_payload_path
 # ---------------------------------------------------------------------------
@@ -344,6 +354,10 @@ class BedrockInvocation:
     ``None`` when no system parameter is sent. ``answer_format`` tells
     the caller how to parse the answer; ``anomaly_mode`` is ``False`` in
     inspection format because the legacy verdict parser does not apply.
+    ``additional_model_request_fields`` is the compact JSON text of a
+    non-empty object (see :func:`resolve_additional_model_request_fields`)
+    or ``None`` when the request carries no such field; kept as text so
+    the invocation stays immutable and hashable.
     ``attachments`` is the list form of several reference files (the
     input image first, then every reference with its label); it is empty
     for a request with at most one reference image, which ``images``
@@ -358,6 +372,7 @@ class BedrockInvocation:
     system_prompt: Optional[str] = None
     anomaly_mode: bool = True
     answer_format: str = ANSWER_FORMAT_LEGACY
+    additional_model_request_fields: Optional[str] = None
     attachments: Tuple[Attachment, ...] = ()
 
     @property
@@ -383,10 +398,12 @@ class BedrockInvocation:
         ``inferenceConfig={"maxTokens": ...}``; the top-level ``system``
         parameter only when a system prompt is present (so a
         system-prompt-less request stays byte-identical to the
-        pre-feature invocation). A list form renders ``attachments``
-        instead of ``images``: per attachment the ``"{label}:"`` text
-        block, then the image block or a ``document`` block named by the
-        label.
+        pre-feature invocation); ``additionalModelRequestFields`` only
+        when the node configures a non-empty object (a fresh dict per
+        call, so a caller mutating the kwargs never changes the
+        invocation). A list form renders ``attachments`` instead of
+        ``images``: per attachment the ``"{label}:"`` text block, then
+        the image block or a ``document`` block named by the label.
         """
         content: List[Dict[str, Any]] = [{"text": self.prompt}]
         if self.attachments:
@@ -423,7 +440,55 @@ class BedrockInvocation:
         )
         if self.system_prompt:
             kwargs["system"] = [{"text": self.system_prompt}]
+        if self.additional_model_request_fields:
+            kwargs["additionalModelRequestFields"] = json.loads(
+                self.additional_model_request_fields)
         return kwargs
+
+
+def resolve_additional_model_request_fields(raw: Any) -> Optional[str]:
+    """Normalize a configured ``additional_model_request_fields`` value.
+
+    Absent/``None``/empty/whitespace-only text, and an empty object, ⇒
+    ``None``: the request carries no ``additionalModelRequestFields`` and
+    stays byte-identical to the pre-feature request. A JSON object —
+    given as its JSON text (the catalog's ``string`` parameter, as the
+    designer stores it) or as an already-parsed mapping — ⇒ its compact
+    JSON text (``separators=(",", ":")``, key order kept).
+
+    Anything else (unparseable text, or JSON that is not an object) raises
+    ``ValueError`` naming the parameter: the validator rejects such a
+    value at save time (``BEDROCK_REQUEST_FIELDS_JSON``), so this only
+    fires on a document that bypassed validation, and it fails closed
+    instead of silently sending the request without the fields.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, Mapping):
+        parsed: Any = dict(raw)
+    else:
+        text = str(raw)
+        if not text.strip():
+            return None
+        try:
+            parsed = json.loads(text)
+        except ValueError as exc:
+            raise ValueError(
+                "{0} is not valid JSON ({1})".format(
+                    ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER, exc))
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            "{0} must be a JSON object, got {1}".format(
+                ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER,
+                type(parsed).__name__))
+    if not parsed:
+        return None
+    try:
+        return json.dumps(parsed, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:  # a mapping holding non-JSON values
+        raise ValueError(
+            "{0} is not JSON-serializable ({1})".format(
+                ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER, exc))
 
 
 def build_bedrock_invocation(
@@ -456,6 +521,11 @@ def build_bedrock_invocation(
       keeps every rule above byte for byte; ``inspection`` appends
       :data:`INSPECTION_JSON_INSTRUCTION` (same separator) INSTEAD of the
       Verdict_Instruction and ignores ``anomaly_mode``.
+    - ``additional_model_request_fields`` (bedrock-additional-model-
+      request-fields): absent/empty keeps every rule above byte for byte;
+      a JSON object is sent as ``additionalModelRequestFields`` in every
+      format (:func:`resolve_additional_model_request_fields`, which
+      raises ``ValueError`` on anything that is not a JSON object).
     - ``references`` (:class:`ReferenceFile` items, mutually exclusive
       with ``reference_image``; passing both raises ``ValueError``):
       exactly one image reference is built exactly as
@@ -506,6 +576,8 @@ def build_bedrock_invocation(
         system_prompt=normalize_system_prompt(parameters.get("system_prompt")),
         anomaly_mode=anomaly_mode,
         answer_format=answer_format,
+        additional_model_request_fields=resolve_additional_model_request_fields(
+            parameters.get(ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER)),
         attachments=tuple(attachments),
     )
 

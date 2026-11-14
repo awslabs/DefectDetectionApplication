@@ -116,6 +116,7 @@ from workflow_engine import scene_analytics
 # back under their historical names (``_JSON_TOKEN_RE`` included), so
 # every existing importer keeps working.
 from workflow_engine.vendor.workflow_core.anomaly_invocation import (
+    ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER,
     ANSWER_FORMAT_INSPECTION,
     BEDROCK_CONNECT_TIMEOUT_SEC,
     BEDROCK_DEFAULT_MODEL,
@@ -145,6 +146,7 @@ from workflow_engine.vendor.workflow_core.anomaly_invocation import (
     reference_list_problems,
     render_inspection_parameters,
     render_prompt_text,
+    resolve_additional_model_request_fields,
     resolve_box_scale,
     resolve_expected_count,
     resolve_field_path,
@@ -1707,6 +1709,7 @@ def _default_bedrock_invoker(
     system_prompt: Optional[str] = None,
     timeouts: Optional[Tuple[int, int]] = None,
     retries: Optional[Dict[str, Any]] = None,
+    additional_model_request_fields: Optional[str] = None,
     attachments: Optional[Tuple[Any, ...]] = None,
 ) -> str:
     """Invoke the Bedrock runtime converse API and return the model's
@@ -1724,6 +1727,14 @@ def _default_bedrock_invoker(
     ``timeouts=(connect_timeout, read_timeout)`` seconds and the
     botocore ``retries`` mapping (``{"total_max_attempts": 1, "mode":
     "standard"}`` — SDK retries off, the node owns the budget).
+
+    ``additional_model_request_fields`` (bedrock-additional-model-request-
+    fields; default None → byte-identical kwargs) is the compact JSON text
+    of the node's object, carried by
+    :attr:`BedrockInvocation.additional_model_request_fields` and sent as
+    the Converse ``additionalModelRequestFields``. The callers pass it
+    only when the node sets it, so injected invokers that predate the
+    keyword keep working.
 
     The kwargs themselves come from
     :meth:`BedrockInvocation.converse_kwargs` — the shared
@@ -1767,6 +1778,7 @@ def _default_bedrock_invoker(
         region=region,
         max_tokens=max_tokens,
         system_prompt=system_prompt,
+        additional_model_request_fields=additional_model_request_fields,
         attachments=tuple(attachments or ()),
     )
     response = client.converse(**invocation.converse_kwargs())
@@ -1810,6 +1822,16 @@ def converse_image_format(data: bytes) -> str:
     if len(prefix) >= 12 and prefix[:4] == b"RIFF" and prefix[8:12] == b"WEBP":
         return "webp"
     return "jpeg"
+
+
+def _request_fields_kwargs(invocation: BedrockInvocation) -> Dict[str, Any]:
+    """The invoker keyword carrying the node's model request fields
+    (bedrock-additional-model-request-fields): ``{}`` when the node sets
+    none, so the invoker is called exactly as before the feature."""
+    if invocation.additional_model_request_fields is None:
+        return {}
+    return {"additional_model_request_fields":
+            invocation.additional_model_request_fields}
 
 
 def _accepts_keyword(func: Callable, name: str) -> bool:
@@ -3079,12 +3101,17 @@ class BedrockInferenceProcessor:
             invocation.region,
             invocation.max_tokens,
         )
+        # bedrock-additional-model-request-fields: the keyword travels
+        # only when the node sets the fields, so the call (and every
+        # injected fake that predates the keyword) is unchanged otherwise.
+        invoker_kwargs = _request_fields_kwargs(invocation)
         if invocation.system_prompt is not None:
-            answer = self._invoker(*invoker_args, invocation.system_prompt)
+            answer = self._invoker(*invoker_args, invocation.system_prompt,
+                                   **invoker_kwargs)
         else:
             # Pre-feature arity: injected fakes that predate the
             # system_prompt parameter keep working (Requirement 7.3).
-            answer = self._invoker(*invoker_args)
+            answer = self._invoker(*invoker_args, **invoker_kwargs)
         # The nested per-node entry ``bedrock.{nodeId}.*`` (merged by
         # ``process``): the answer ``text`` (freeform's existing key,
         # recorded in both modes) plus, when a Detection_Crop was
@@ -3327,6 +3354,16 @@ class BedrockInferenceProcessor:
                 parameters, run_metadata, (width, height))
         except InspectionRequestError as error:
             return failure(str(error))
+        # An additional_model_request_fields value that is not a JSON
+        # object (bedrock-additional-model-request-fields) is a terminal
+        # pre-call failure like the rules above: recorded or raised per
+        # on_error, with no Bedrock call. Checked on its own so every other
+        # request-construction behaviour stays as it was.
+        try:
+            resolve_additional_model_request_fields(
+                parameters.get(ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER))
+        except ValueError as error:
+            return failure(str(error))
         invocation = build_bedrock_invocation(
             invocation_parameters, sent_image,
             references=[reference.as_file() for reference in references]
@@ -3416,8 +3453,10 @@ class BedrockInferenceProcessor:
 
         A list-form invocation (``invocation.attachments``) also passes
         ``attachments=`` to the invoker, which sends exactly those
-        content blocks; every other invocation keeps today's call. Every
-        attempt whose invoker returned a ``str`` (including ``""``) sets
+        content blocks, and an invocation carrying model request fields
+        passes ``additional_model_request_fields=``; every other
+        invocation keeps today's call. Every attempt whose invoker
+        returned a ``str`` (including ``""``) sets
         ``"last_text"`` to it and ``"last_parse_error"`` to the parser's
         message for it (without the ``malformed Bedrock answer: ``
         prefix), or ``None`` when it was accepted; a later attempt that
@@ -3441,6 +3480,7 @@ class BedrockInferenceProcessor:
         if invocation.attachments:
             # The list form only: the invoker sends the request built.
             client_options["attachments"] = invocation.attachments
+        client_options.update(_request_fields_kwargs(invocation))
         invoker_args = (
             invocation.model, invocation.prompt,
             [(label, data) for label, data in invocation.images],
