@@ -153,7 +153,7 @@ dispatch were all NOT attempted.
 
 ## Task 7 live verification build — re-execution (fix VERIFIED; job failed LATER at a new, out-of-scope step)
 
-Date: 2026-08-09. AWS account 164152369890 (verified via `sts get-caller-identity`
+Date: 2026-08-09. AWS account 123456789012 (verified via `sts get-caller-identity`
 after the user refreshed credentials), us-east-1. Portal API
 `<REDACTED-INTERNAL-ENDPOINT>` (no live endpoints in this file).
 
@@ -165,7 +165,7 @@ same shape as evidence job `3d18ba88`), source_ref `feature/workflow-triggers`
 build. One at a time per steering.
 
 ### Preflight (fresh, per .kiro/steering/builds.md) — ALL PASSED
-- Credentials valid: account 164152369890.
+- Credentials valid: account 123456789012.
 - No concurrent build: build-jobs table scan — 20 jobs total, ZERO non-terminal;
   read-only SSM check on the server (CommandId `cfc471d8-3016-4034-89f6-7023ea072ef0`) —
   `pgrep -af "gdk component build"` and `pgrep -af build-custom.sh` both empty.

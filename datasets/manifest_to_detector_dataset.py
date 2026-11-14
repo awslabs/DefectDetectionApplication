@@ -61,7 +61,7 @@ grouping, negative stratification and split fractions are the same too.
 Usage:
     # COCO, nested layout (most frameworks)
     python3 manifest_to_detector_dataset.py \\
-        --manifest s3://ryvan-cookies/labeled/plates/output.manifest \\
+        --manifest s3://example-bucket/labeled/plates/output.manifest \\
         --images-dir ./frames --out ./dataset
 
     # COCO in the layout RF-DETR's trainer reads

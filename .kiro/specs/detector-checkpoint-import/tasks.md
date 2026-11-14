@@ -49,8 +49,8 @@
     - Task 4.1 needs **no** usecase-account ECR grant: the CDK `DDASageMakerExecutionRole` already pulls from any repository.
   - [x] 1.1 Prototype the Export_Image locally.
     - Base: `python:3.11-slim` from `public.ecr.aws`, torch/torchvision 2.5.1 CPU, a candidate ultralytics 8.4.x, rfdetr 1.10.1 with `[onnx]`, onnx, onnxslim, and a `/opt/ort-floor` venv with `onnxruntime==1.16.3`.
-    - Push it to a scratch ECR repository in 164152369890 / us-east-1.
-    - Stage the fixtures from 1.1(a)–(e) under a scratch prefix in `ryvan-cookies`. Verify the PPE sha256 `a00b6fce…2119` before use, and take `best.pt` and `model.onnx` from the `artifact_s3` of portal job `99f9c131-7a49-4be7-9ce3-ba98f57366a7` (blue-plate-yolo-ft-v3).
+    - Push it to a scratch ECR repository in 123456789012 / us-east-1.
+    - Stage the fixtures from 1.1(a)–(e) under a scratch prefix in `example-bucket`. Verify the PPE sha256 `a00b6fce…2119` before use, and take `best.pt` and `model.onnx` from the `artifact_s3` of portal job `99f9c131-7a49-4be7-9ce3-ba98f57366a7` (blue-plate-yolo-ft-v3).
     - _Requirements: 1.1_
   - [x] 1.2 Run each fixture as a real SageMaker job with `EnableNetworkIsolation=True`, the code baked into the image and a single input channel.
     - Record everything in 1.2: load, shapes, opset/IR, fleet-floor load and run, parity, and wall-clock.

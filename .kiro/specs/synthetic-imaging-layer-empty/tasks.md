@@ -51,8 +51,8 @@
 
 - [x] 5. Deploy and live-verify the fix
   - Follow `.kiro/steering/builds.md`: confirm no component build is running (`pgrep -af "gdk component build"` / `build-custom.sh`); move `cdk.out` aside if needed
-  - `cdk deploy` the SyntheticDataStack from the worktree (account 164152369890, us-east-1)
+  - `cdk deploy` the SyntheticDataStack from the worktree (account 123456789012, us-east-1)
   - Verify a NEW imaging layer version is attached to `dda-synthetic-data-handler` (`aws lambda get-function-configuration`)
   - Verify the deployed layer content contains `python/PIL` (`aws lambda get-layer-version` + zip inspection)
-  - Direct Lambda invoke exercising the PIL import path with real user claims (user_id `a4b804e8-5061-7004-12f2-38a0149dcd4c`, usecase `645504ce-a60a-4009-8349-7548c0025cd3`, bucket `ryvan-cookies`) succeeds with no `No module named 'PIL'`
+  - Direct Lambda invoke exercising the PIL import path with real user claims (user_id `a4b804e8-5061-7004-12f2-38a0149dcd4c`, usecase `645504ce-a60a-4009-8349-7548c0025cd3`, bucket `example-bucket`) succeeds with no `No module named 'PIL'`
   - _Requirements: 2.2, 3.2_

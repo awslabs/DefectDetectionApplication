@@ -13,7 +13,7 @@ behind names nothing but a `sub` that stops resolving the moment the
 Cognito user is deleted. Do not weaken the assertions — the same file,
 unmodified, is the fix check at task 7.
 
-Incident replayed (verified evidence, account 164152369890,
+Incident replayed (verified evidence, account 123456789012,
 2026-09-17T14:26 UTC, pool `us-east-1_2r9jpbWIe`, source IP
 `12.148.187.67`, user agent `aws-cli/1.36.4`):
 

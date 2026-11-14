@@ -68,7 +68,7 @@ vi.mock('../services/api', () => {
 // ---------------------------------------------------------------------------
 
 const USECASE_ID = 'uc-1';
-const PPE_URI = 's3://ryvan-cookies/checkpoints/ppe/best.pt';
+const PPE_URI = 's3://example-bucket/checkpoints/ppe/best.pt';
 const PPE_NAMES = ['helmet', 'human', 'no-helmet', 'vest'];
 
 const PPE: CheckpointAssessment = {
@@ -148,7 +148,7 @@ const CONVERSION_STARTED = {
   fine_tunable: {
     arch: 'yolo',
     kind: 'ultralytics_checkpoint',
-    checkpoint_s3: 's3://ryvan-cookies/converted-models/ppe_detection-1a2b3c4d/checkpoint.pt',
+    checkpoint_s3: 's3://example-bucket/converted-models/ppe_detection-1a2b3c4d/checkpoint.pt',
     class_names: PPE_NAMES,
     num_classes: 4,
   },
@@ -159,7 +159,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   window.localStorage.clear();
   apiMocks.listUseCases.mockResolvedValue({
-    usecases: [{ usecase_id: USECASE_ID, name: 'Cookies', account_id: '164152369890' }],
+    usecases: [{ usecase_id: USECASE_ID, name: 'Cookies', account_id: '123456789012' }],
     count: 1,
   });
   apiMocks.convertModel.mockResolvedValue(CONVERSION_STARTED);
@@ -270,7 +270,7 @@ describe('Checkpoint panel', () => {
   });
 
   it('lists every reason a checkpoint cannot be converted', async () => {
-    await inspectFromS3(YOLO_SEG, 's3://ryvan-cookies/checkpoints/seg/yolo11n-seg.pt');
+    await inspectFromS3(YOLO_SEG, 's3://example-bucket/checkpoints/seg/yolo11n-seg.pt');
 
     expect(screen.getByTestId('checkpoint-verdict').textContent).toContain('Cannot be converted to ONNX');
     const reasons = Array.from(screen.getByTestId('checkpoint-reasons').querySelectorAll('li')).map(li => li.textContent);
@@ -379,7 +379,7 @@ describe('Convertible_Checkpoint', () => {
   });
 
   it('RF-DETR: native resolution, square-resize geometry, and no IoU field or payload key', async () => {
-    const uri = 's3://ryvan-cookies/checkpoints/rfdetr/checkpoint_best_total.pth';
+    const uri = 's3://example-bucket/checkpoints/rfdetr/checkpoint_best_total.pth';
     const { container } = await inspectFromS3(RF_SMALL, uri);
 
     expect(screen.getByTestId('checkpoint-family').textContent).toBe('RF-DETR (small)');
@@ -420,7 +420,7 @@ describe('Convertible_Checkpoint', () => {
 
 describe('non-convertible checkpoint', () => {
   it('disables ONNX with its reasons and keeps the PyTorch base-model import', async () => {
-    const { container } = await inspectFromS3(YOLO_SEG, 's3://ryvan-cookies/checkpoints/seg/yolo11n-seg.pt');
+    const { container } = await inspectFromS3(YOLO_SEG, 's3://example-bucket/checkpoints/seg/yolo11n-seg.pt');
 
     const onnx = tileInput(container, 'Runtime / export format', 'onnx');
     const pytorch = tileInput(container, 'Runtime / export format', 'pytorch');
@@ -438,7 +438,7 @@ describe('non-convertible checkpoint', () => {
   });
 
   it('offers the same auto-compile targets as the Compilation tab, ONNX export included', async () => {
-    const { container } = await inspectFromS3(YOLO_SEG, 's3://ryvan-cookies/checkpoints/seg/yolo11n-seg.pt');
+    const { container } = await inspectFromS3(YOLO_SEG, 's3://example-bucket/checkpoints/seg/yolo11n-seg.pt');
 
     const picker = field(container, 'Compilation Targets').findControl()!.findMultiselect()!;
     picker.openDropdown();
@@ -513,9 +513,9 @@ describe('Upload a file', () => {
   it('gets an upload URL, PUTs with progress, then inspects and converts the returned URI', async () => {
     FakeXhr.instances = [];
     vi.stubGlobal('XMLHttpRequest', FakeXhr);
-    const uploadedUri = 's3://ryvan-cookies/model-uploads/5b0c7a51-0000-4000-8000-000000000001/best.pt';
+    const uploadedUri = 's3://example-bucket/model-uploads/5b0c7a51-0000-4000-8000-000000000001/best.pt';
     apiMocks.getModelUploadUrl.mockResolvedValue({
-      upload_url: 'https://ryvan-cookies.s3.amazonaws.com/model-uploads/5b0c/best.pt?X-Amz-Signature=abc',
+      upload_url: 'https://example-bucket.s3.amazonaws.com/model-uploads/5b0c/best.pt?X-Amz-Signature=abc',
       model_s3_uri: uploadedUri,
       expires_in: 900,
     });
@@ -541,7 +541,7 @@ describe('Upload a file', () => {
     });
     const xhr = FakeXhr.instances[0];
     expect(xhr.method).toBe('PUT');
-    expect(xhr.url).toBe('https://ryvan-cookies.s3.amazonaws.com/model-uploads/5b0c/best.pt?X-Amz-Signature=abc');
+    expect(xhr.url).toBe('https://example-bucket.s3.amazonaws.com/model-uploads/5b0c/best.pt?X-Amz-Signature=abc');
     expect(xhr.body).toBe(file);
 
     // Progress is visible while the PUT runs.

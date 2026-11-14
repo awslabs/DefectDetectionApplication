@@ -25,15 +25,15 @@ already there.
 Usage:
     # Full run
     python3 sync_captures_to_s3.py \\
-        --bucket ryvan-cookies --prefix imts-plates-luggage
+        --bucket example-bucket --prefix imts-plates-luggage
 
     # See what it would do, upload nothing
     python3 sync_captures_to_s3.py \\
-        --bucket ryvan-cookies --prefix imts-plates-luggage --dry-run
+        --bucket example-bucket --prefix imts-plates-luggage --dry-run
 
     # Reuse frames already pulled, skip the ssh step
     python3 sync_captures_to_s3.py \\
-        --bucket ryvan-cookies --prefix imts-plates-luggage --skip-pull
+        --bucket example-bucket --prefix imts-plates-luggage --skip-pull
 
 Requires: ssh access to the device, aws credentials, numpy, and Pillow or
 OpenCV.

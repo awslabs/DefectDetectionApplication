@@ -16,7 +16,7 @@
 Spec: camera-shadow-sync-provisioning — exploration tests written BEFORE the
 fix. They MUST FAIL on the unfixed tree; the failures are the executable
 counterexamples confirming the root cause (already confirmed empirically on
-device ryanorinagxdevkithomelabjp622 in account 164152369890). After the fix
+device ryanorinagxdevkithomelabjp622 in account 123456789012). After the fix
 they encode the expected behavior and must pass.
 
 Gap 1: ``aws.greengrass.ShadowManager`` cloud sync uses the IoT data plane

@@ -126,15 +126,15 @@ describe('normalizeS3Folder', () => {
 });
 
 describe('labelingJobCoversFolder', () => {
-  const folder = 's3://ryvan-cookies/imts-plates-luggage/';
+  const folder = 's3://example-bucket/imts-plates-luggage/';
 
   it('matches a job whose bucket + prefix is the folder, with or without trailing slash', () => {
     expect(labelingJobCoversFolder(
-      { dataset_bucket: 'ryvan-cookies', dataset_prefix: 'imts-plates-luggage/' }, folder)).toBe(true);
+      { dataset_bucket: 'example-bucket', dataset_prefix: 'imts-plates-luggage/' }, folder)).toBe(true);
     expect(labelingJobCoversFolder(
-      { dataset_bucket: 'ryvan-cookies', dataset_prefix: 'imts-plates-luggage' }, folder)).toBe(true);
+      { dataset_bucket: 'example-bucket', dataset_prefix: 'imts-plates-luggage' }, folder)).toBe(true);
     expect(labelingJobCoversFolder(
-      { dataset_bucket: 'ryvan-cookies', dataset_prefix: '/imts-plates-luggage/' }, folder)).toBe(true);
+      { dataset_bucket: 'example-bucket', dataset_prefix: '/imts-plates-luggage/' }, folder)).toBe(true);
   });
 
   it('falls back to the folder bucket when the job recorded only a prefix', () => {
@@ -143,11 +143,11 @@ describe('labelingJobCoversFolder', () => {
 
   it('does NOT match the sibling-prefix collision or a different bucket', () => {
     expect(labelingJobCoversFolder(
-      { dataset_bucket: 'ryvan-cookies', dataset_prefix: 'imts-plates-luggage-other-resolutions/' }, folder)).toBe(false);
+      { dataset_bucket: 'example-bucket', dataset_prefix: 'imts-plates-luggage-other-resolutions/' }, folder)).toBe(false);
     expect(labelingJobCoversFolder(
       { dataset_bucket: 'other-bucket', dataset_prefix: 'imts-plates-luggage/' }, folder)).toBe(false);
     expect(labelingJobCoversFolder(
-      { dataset_bucket: 'ryvan-cookies', dataset_prefix: 'imts-plates-luggage/sub/' }, folder)).toBe(false);
+      { dataset_bucket: 'example-bucket', dataset_prefix: 'imts-plates-luggage/sub/' }, folder)).toBe(false);
   });
 
   it('is false for missing inputs', () => {

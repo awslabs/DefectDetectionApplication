@@ -181,4 +181,4 @@ END FOR
 ### Integration Tests
 
 - Local end-to-end: exploration test green post-fix against the real artifacts (the full `_segment_masks` path: encoder → decoder → threshold → RLE)
-- Post-deploy live verification: direct invoke of the redeployed worker on 2–3 real cookie images (presigned from `s3://ryvan-cookies/training-images/`), Segmentation + ObjectDetection runs of the same payload; assert the mask centroid sits inside the DINO box (or box–mask containment ≥ 0.5); before/after numbers recorded in `verification-notes.md`
+- Post-deploy live verification: direct invoke of the redeployed worker on 2–3 real cookie images (presigned from `s3://example-bucket/training-images/`), Segmentation + ObjectDetection runs of the same payload; assert the mask centroid sits inside the DINO box (or box–mask containment ≥ 0.5); before/after numbers recorded in `verification-notes.md`

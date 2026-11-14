@@ -184,5 +184,5 @@ END FOR
 
 ### Integration Tests
 
-- Redeploy of `EdgeCVPortalComputeStack` (account 164152369890, us-east-1), honoring `.kiro/steering/builds.md` (no portal deploy while a component build runs; handle `cdk.out` drift-guard baselines afterwards)
+- Redeploy of `EdgeCVPortalComputeStack` (account 123456789012, us-east-1), honoring `.kiro/steering/builds.md` (no portal deploy while a component build runs; handle `cdk.out` drift-guard baselines afterwards)
 - Live verification: NEW `ImagingLayer` version attached to the three DDA labeling functions; deployed layer zip contains `python/PIL` and no build tooling; a Prompt Tuning Preview spot check may additionally confirm per-image dimensions render without model errors (non-diagnostic post-mitigation, but confirms end-to-end health)

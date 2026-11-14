@@ -4,7 +4,7 @@
 
 This feature makes the synthetic defect data generation workspace (spec: `synthetic-defect-data-generation`) work again by adding support for the Stability AI inpainting model on Bedrock. This is no longer an addition alongside Amazon Nova Canvas — it is the only path to a working generation pipeline on the portal account.
 
-Verified current state on account 164152369890, us-east-1 (hit live in session e8a08d11; the S3 permission and dataset-discovery fixes from the companion bugfix specs are already deployed):
+Verified current state on account 123456789012, us-east-1 (hit live in session e8a08d11; the S3 permission and dataset-discovery fixes from the companion bugfix specs are already deployed):
 
 - **Nova Canvas is unusable.** `amazon.nova-canvas-v1:0` has lifecycle status LEGACY in us-east-1, and Bedrock rejects `InvokeModel` with a ResourceNotFoundException stating the model is "marked by provider as Legacy and you have not been actively using the model in the last 30 days". The current pipeline therefore has zero usable models: every generation task fails.
 - **Every ACTIVE image model in us-east-1 is a Stability task-specific model**: stable-image-inpaint, outpaint, erase-object, search-replace, search-recolor, control-sketch, control-structure, style-guide, style-transfer, remove-background, and three upscalers. No general text-to-image model and no image-variation model is ACTIVE in-region.

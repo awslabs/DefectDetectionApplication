@@ -8,7 +8,7 @@ Publishing any vLLM model to Greengrass fails with a `ConflictException` from
 > vLLM component publish failed: jetson-xavier-jp6: An error occurred
 > (ConflictException) when calling the CreateComponentVersion operation:
 > Component [model-vllm-qwen3-vl-8b-instruct : 1.0.0] for account
-> [164152369890] already exists and can't be created again with tags.;
+> [123456789012] already exists and can't be created again with tags.;
 > jetson-xavier-jp7: (same ConflictException). Failed step:
 > greengrass_registration
 
@@ -129,7 +129,7 @@ supported architecture set to `[]` and hides the model from every device,
 including the JP7 device it was intended for.
 
 1.9 WHEN the orphan `model-vllm-qwen3-vl-8b-instruct:1.0.0` exists in account
-`164152369890` THEN the affected record cannot be published by any number of
+`123456789012` THEN the affected record cannot be published by any number of
 retries, even after the code defects are fixed, because `1.0.0` remains taken
 for that component name until the orphan is removed or the version derivation
 starts observing it.

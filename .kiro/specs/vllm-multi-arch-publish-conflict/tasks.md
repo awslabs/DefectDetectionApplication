@@ -372,7 +372,7 @@ graph TD
   - **NOT AUTONOMOUS - LIVE AWS MUTATION requiring explicit user confirmation before execution**
   - **Optional**: Path A (the rename in task 3.2) already makes the orphan non-blocking - the record now publishes as `model-vllm-qwen3-vl-8b-instruct-jetson-xavier-jp6` and `…-jetson-xavier-jp7`, both starting at `1.0.0` with empty existing-version sets, and cloud-side version derivation (task 3.3) guarantees the same for any future failed attempt
   - Do it only AFTER the task 10 deploy, so the delete is cleanup rather than a prerequisite
-  - Command, only with explicit confirmation: `aws greengrassv2 delete-component --arn arn:aws:greengrass:us-east-1:164152369890:components:model-vllm-qwen3-vl-8b-instruct:versions:1.0.0`
+  - Command, only with explicit confirmation: `aws greengrassv2 delete-component --arn arn:aws:greengrass:us-east-1:123456789012:components:model-vllm-qwen3-vl-8b-instruct:versions:1.0.0`
   - Residual effect if skipped is cosmetic-plus-confusing: it keeps appearing in managed-component listings and, because no record resolves it, the deploy screen fails closed and hides it
   - _Requirements: 2.15_
 

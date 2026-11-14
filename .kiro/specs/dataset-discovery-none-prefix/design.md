@@ -36,7 +36,7 @@ END FUNCTION
 
 ### Examples
 
-- Cookies use case, bucket `ryvan-cookies` containing `training-images/anomaly-*.jpg`, no filter: expected discovery of `training-images/` (scan from `''`); actual scan of `"None/"` returns `[]`
+- Cookies use case, bucket `example-bucket` containing `training-images/anomaly-*.jpg`, no filter: expected discovery of `training-images/` (scan from `''`); actual scan of `"None/"` returns `[]`
 - Any use case with filter prefix `raw`: expected scan of `"raw/"`; actual scan of `"Noneraw/"` returns `[]`
 - Data-account use case with `data_s3_prefix: "team-a/"`: expected scan of `"team-a/"`; actual scan of `"None/"` returns `[]`
 - Response body: expected `base_prefix: ""` when unset; actual `base_prefix: null`

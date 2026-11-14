@@ -16,7 +16,7 @@ for that very statement, so re-runs never repair a broken policy. The fix extrac
 into a new pure-Python helper (`station_install/iot_policy_shadow_statement.py`, property-tested with
 Hypothesis) and rewrites the ensure block to append the `ShadowManagerHttpsDataPlaneSync` statement to
 the *current* default document (preserving all existing statements, exactly like the verified manual
-production fix in account 164152369890). Step 3.6's IAM `put-role-policy` stays byte-identical (D8);
+production fix in account 123456789012). Step 3.6's IAM `put-role-policy` stays byte-identical (D8);
 only its comment/warning prose is corrected.
 
 **Gap 2 (cloud-side, missing topic rule)**: the `dda_camera_registry_shadow_documents` IoT topic rule
@@ -32,7 +32,7 @@ Baselines to preserve: infrastructure jest 30 passing + `npx tsc --noEmit` clean
 passing, LocalServer `test/backend-test` 204 passed + 3 skipped. The setup-station security golden
 and the `EdgeCVPortalComputeStack` IAM baseline pair are rebaselined per D10 (never weakened; test
 files untouched). The final migration task (deleting the manually created cloud resources in account
-164152369890) touches live cloud resources and runs only with explicit user coordination.
+123456789012) touches live cloud resources and runs only with explicit user coordination.
 
 ## Task Dependency Graph
 
@@ -57,7 +57,7 @@ files untouched). The final migration task (deleting the manually created cloud 
     {
       "wave": 4,
       "tasks": ["5"],
-      "description": "Migration cleanup of the manually created resources in account 164152369890 after the first fixed ComputeStack deploy. REQUIRES USER COORDINATION — live cloud resources; runs only with explicit go-ahead. Depends on wave 3."
+      "description": "Migration cleanup of the manually created resources in account 123456789012 after the first fixed ComputeStack deploy. REQUIRES USER COORDINATION — live cloud resources; runs only with explicit go-ahead. Depends on wave 3."
     }
   ]
 }
@@ -74,7 +74,7 @@ files untouched). The final migration task (deleting the manually created cloud 
   - **CRITICAL**: These tests MUST FAIL on unfixed code — the failures confirm both gaps exist
   - **DO NOT attempt to fix the tests or the code when they fail**
   - **NOTE**: These tests encode the expected behavior — they will validate the fix when they pass after implementation
-  - **GOAL**: Surface executable counterexamples confirming the root-cause analysis (already confirmed empirically on device `ryanorinagxdevkithomelabjp622` and in account 164152369890 — these tests make the confirmation executable)
+  - **GOAL**: Surface executable counterexamples confirming the root-cause analysis (already confirmed empirically on device `ryanorinagxdevkithomelabjp622` and in account 123456789012 — these tests make the confirmation executable)
   - **Scoped PBT Approach**: Both gaps are deterministic configuration defects — scope each property to the concrete failing artifact (the unfixed script's heredoc/grep and the unfixed synthesized templates) as the testable seam; the full Hypothesis quantification over arbitrary policy documents lands with the helper in task 3.2
   - Create `test/backend-test/camera_shadow_sync/test_gap1_exploration.py` (new directory; parses `station_install/setup_station.sh` as text — no AWS calls):
     - Exploration case 1 — heredoc statement is HTTPS-compatible (`isBugCondition_Gap1`, design Bug Details): extract the policy document embedded in the thing-policy ensure block's heredoc (~lines 1170–1185) and assert its shadow statement's resource contains no `${` policy variable — FAILS on unfixed code (resource is `arn:aws:iot:*:*:thing/${iot:Connection.Thing.ThingName}`, which never resolves over HTTPS → every `CloudUpdateSyncRequest` 403s)
@@ -212,7 +212,7 @@ files untouched). The final migration task (deleting the manually created cloud 
   - LocalServer suite: `PYTHONPATH=src/backend:test/backend-test python3 -m pytest test/backend-test` — 204 passed + 3 skipped baseline, plus the new `camera_shadow_sync` tests (exploration, preservation, and Hypothesis property suites)
   - Ensure all tests pass, ask the user if questions arise
 
-- [x] 5. Migration cleanup in account 164152369890 (REQUIRES USER COORDINATION — do not start without explicit go-ahead)
+- [x] 5. Migration cleanup in account 123456789012 (REQUIRES USER COORDINATION — do not start without explicit go-ahead)
   - **NOTE**: This task deletes live cloud resources and depends on the first ComputeStack deploy containing this fix having completed; it is user-coordinated, not automated
   - After the fixed ComputeStack deploy (which creates `dda_camera_registry_shadow_documents_portal`), the manually created resources are superseded — delete them:
     - `aws iot delete-topic-rule --rule-name dda_camera_registry_shadow_documents`
@@ -227,10 +227,10 @@ files untouched). The final migration task (deleting the manually created cloud 
 
 - **Test-first ordering is mandatory**: task 1 (bug conditions) must FAIL and task 2 (preservation) must PASS on the UNFIXED code before implementing task 3. Do not modify `setup_station.sh`, `compute-stack.ts`, or `usecase-account-stack.ts` until the tests are written and their expected outcomes documented.
 - **Property references**: Properties 1–2 (Bug Condition/fix, Gap 1) validate Requirements 2.1–2.3; Properties 3–4 (Bug Condition/fix, Gap 2) validate 2.4–2.6; Properties 5–7 (Preservation) validate 3.1+3.2+3.8, 3.3+3.4+3.7, and 3.5+3.6+3.9 respectively, per the design's Correctness Properties.
-- **Confirmed root causes (file/line evidence)**: HTTPS-incompatible heredoc resource `arn:aws:iot:*:*:thing/${iot:Connection.Thing.ThingName}` and false-idempotent `grep -q "iot:UpdateThingShadow"` in the thing-policy ensure block (`setup_station.sh` ~1101–1195, grep at ~1146); wrong-layer `ShadowManagerSyncPolicy` IAM policy in step 3.6 (~1542–1574); camera-registry topic rule defined only in `usecase-account-stack.ts` (~792) with fixed names, absent from `compute-stack.ts` (Gap 2). Both gaps confirmed empirically: 403s in greengrass.log reproduced with raw curl on device `ryanorinagxdevkithomelabjp622`; no `dda_camera_registry_shadow_documents` rule in account 164152369890 while `dda_user_accounts_shadow_documents` existed.
+- **Confirmed root causes (file/line evidence)**: HTTPS-incompatible heredoc resource `arn:aws:iot:*:*:thing/${iot:Connection.Thing.ThingName}` and false-idempotent `grep -q "iot:UpdateThingShadow"` in the thing-policy ensure block (`setup_station.sh` ~1101–1195, grep at ~1146); wrong-layer `ShadowManagerSyncPolicy` IAM policy in step 3.6 (~1542–1574); camera-registry topic rule defined only in `usecase-account-stack.ts` (~792) with fixed names, absent from `compute-stack.ts` (Gap 2). Both gaps confirmed empirically: 403s in greengrass.log reproduced with raw curl on device `ryanorinagxdevkithomelabjp622`; no `dda_camera_registry_shadow_documents` rule in account 123456789012 while `dda_user_accounts_shadow_documents` existed.
 - **Design decisions in force**: append-not-replace from the live default version (D2); pure-Python 3.6 stdlib helper as the property-tested seam (D3); `GreengrassV2IoTThingPolicy` name first with cert-principal discovery fallback (D4); keep the bash 5-version pruning (D5); CDK-generated role name + `_portal` rule-name suffix in ComputeStack (D6); deploy-time `CfnCondition` — NOT a synth-time `if`, which would break `test_preservation_iam_cdk_synth.py`'s same-account fixture (D7); step 3.6 `put-role-policy` kept byte-identical, prose-only edits (D8); `STACK_VERSION` 1.6.0 (D9); symmetric IAM baseline regeneration preserving the I1–I4 symmetric difference (D10).
 - **Security preservation gate**: `setup_station.sh` is pinned whole-file by the setup-station golden (rebaseline in 3.4, test file untouched); `compute-stack.ts` synth is pinned by the `EdgeCVPortalComputeStack` IAM baseline pair (symmetric regeneration in 3.8); the `DDAPortalUseCaseAccountStack` baselines and `iam_baseline_cdk_i_changes.json` need no change.
 - **Test baselines**: infrastructure jest 30 passing + `npx tsc --noEmit` clean; portal backend 883 passing; LocalServer `test/backend-test` 204 passed + 3 skipped (`PYTHONPATH=src/backend:test/backend-test`). All grow only by the new tests.
 - **PBT conventions**: Hypothesis properties run with minimum 100 iterations and are tagged `**Feature: camera-shadow-sync-provisioning, Property N: {property_text}**`; infrastructure Properties 3, 4, 6 are discharged by jest on deterministic synthesized templates per repo practice.
-- **Migration is user-gated**: task 5 deletes live cloud resources in account 164152369890 and requires the fixed ComputeStack to be deployed first; it runs only with the user's explicit go-ahead and coordination. The manual IoT policy version 3 needs no migration (the predicate recognizes it).
+- **Migration is user-gated**: task 5 deletes live cloud resources in account 123456789012 and requires the fixed ComputeStack to be deployed first; it runs only with the user's explicit go-ahead and coordination. The manual IoT policy version 3 needs no migration (the predicate recognizes it).
 - **On-hardware fresh-provisioning verification is operator-gated**: already verified end to end on the production account via the manual fix this design mirrors; a fresh `setup_station.sh` run on a new device (one policy version created, none on re-run, 200s in greengrass.log) is documented in task 5 as optional operator verification, not automated.

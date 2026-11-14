@@ -248,7 +248,7 @@ Implemented once in `workflow_core.anomaly_invocation.summarize_outcomes` and us
 ### LocalServer component configuration
 
 ```jsonc
-"workflowTuning": {"enabled": true, "bucket": "dda-inference-results-164152369890", "prefix": "workflow-tuning/samples/"}
+"workflowTuning": {"enabled": true, "bucket": "dda-inference-results-123456789012", "prefix": "workflow-tuning/samples/"}
 ```
 Absent, `enabled` not true, empty bucket, or a prefix not ending in `/` ⇒ export disabled (Req 2.6, 11.3).
 

@@ -1,7 +1,7 @@
 # Static Camera Workflow Binding Invisible — Task 6 Hardware Verification Notes
 
 Spec: `.kiro/specs/static-camera-workflow-binding-invisible` (bugfix).
-Device: `jetson-thor1` (JetPack 7, `arm64_jp7`), account 164152369890, us-east-1.
+Device: `jetson-thor1` (JetPack 7, `arm64_jp7`), account 123456789012, us-east-1.
 Date: 2026-09-23, all times UTC.
 
 ## Build and deployment under test

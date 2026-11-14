@@ -4,7 +4,7 @@
 
 The dda-data-labeling feature is dead on arrival in the deployed portal
 because of two small, verified gaps (bugfix.md Incident Record, 2026-08-17,
-account 164152369890):
+account 123456789012):
 
 1. **Frontend role vocabulary drift (Defect 1)**:
    `edge-cv-portal/frontend/src/pages/admin/UserManagerModals.tsx` exports
@@ -250,7 +250,7 @@ AccessDenied is NOT reproducible host-side), and (c) the synthesized
 CloudFormation grants the UserAdmin role `dynamodb:Query` on the audit
 table (jest CDK static assertions — the synthetic-data-s3-permissions
 precedent). The real claims — a UI-created DataLabeler account, a 200
-response, a terminal audit entry in account 164152369890, a labeling team
+response, a terminal audit entry in account 123456789012, a labeling team
 gaining a member — are assigned exclusively to the USER ACTION
 verification task, which also checks/remediates the stuck-'pending' audit
 entry from the 2026-08-17 remediation create. Do not write a test that

@@ -462,7 +462,7 @@ def require_portal_admin(func):
     This gate used to compare `get_user_from_event(event)['role']`
     directly, which made every route below it claim-driven and left the
     escalation open on the whole user-administration surface even with
-    PORTAL_REGISTRY_ENFORCED on (measured on account 164152369890,
+    PORTAL_REGISTRY_ENFORCED on (measured on account 123456789012,
     2026-09-22: a claim-only account with no registry row read
     `GET /admin/users` in full while the enforced `rbac_check` path
     correctly denied it `POST /builds`).

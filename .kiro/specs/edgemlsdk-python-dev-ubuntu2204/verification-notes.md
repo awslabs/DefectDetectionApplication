@@ -149,7 +149,7 @@ and 7 (AMD64 dedicated live build; user-mandated completion criterion:
 
 ## Task 7 live verification build evidence
 
-Date: 2026-08-09 (dispatched 05:14 UTC). AWS account 164152369890, us-east-1,
+Date: 2026-08-09 (dispatched 05:14 UTC). AWS account 123456789012, us-east-1,
 portal API `https://<portal-api-id>.execute-api.us-east-1.amazonaws.com/v1` (redacted).
 
 ### Approved scope (restated)
@@ -177,7 +177,7 @@ build authorized. Builds one at a time per steering.
   ("X86 build server") lifecycle_state `running`; instance
   `i-0865b0697fb050036` (m6i.4xlarge) EC2 `running`, SSM PingStatus `Online`
   (agent 3.3.4793.0).
-- AWS credentials valid (account 164152369890 verified via
+- AWS credentials valid (account 123456789012 verified via
   `sts get-caller-identity`).
 
 ### Portal API auth (temp-user lifecycle honored)

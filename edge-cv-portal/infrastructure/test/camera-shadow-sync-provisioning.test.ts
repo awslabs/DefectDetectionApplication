@@ -2,7 +2,7 @@
  * camera-shadow-sync-provisioning — Gap 2 bug condition exploration tests
  * (written BEFORE the fix; they MUST FAIL on the unfixed tree — the failures
  * are the executable counterexamples confirming the root cause, already
- * confirmed empirically in account 164152369890. After the fix they encode
+ * confirmed empirically in account 123456789012. After the fix they encode
  * the expected behavior and must pass.)
  *
  * Gap 2: the `dda_camera_registry_shadow_documents` IoT topic rule

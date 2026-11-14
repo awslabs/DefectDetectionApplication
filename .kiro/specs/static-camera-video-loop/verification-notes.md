@@ -304,7 +304,7 @@ These were direct thing-deployment revisions. The Orin's first round used the Po
   - They are removed from all deployments.
   - Their leftover `/aws_dda/workflows/<id>` and `/aws_dda/captures/<id>` directories are deleted on each device.
   - The 8 Portal records are deleted.
-  - All 8 Greengrass component versions (JP5, JP6, JP7 and amd64) are deleted, together with their packages in `s3://ryvan-cookies/workflows/components/`.
+  - All 8 Greengrass component versions (JP5, JP6, JP7 and amd64) are deleted, together with their packages in `s3://example-bucket/workflows/components/`.
 - **Scripts.** The device-side test scripts, media and logs in `/tmp` are removed.
 - **The Orin's stale key.** The temporary preview Image_Source key `cfg-w2whc2as` was removed from the shadow by writing a `null` for it, and the Portal registry row went away.
 - **Pin objects.** No pin objects remain under `static-image-pins/`.
@@ -380,7 +380,7 @@ Each device ran the three checks through its device API, then a 30-minute soak. 
 - **Removed workflow components.** Removing a workflow component from a deployment leaves its `/aws_dda/workflows/<id>` artifacts and its registration on the device.
 - **Static image panel.** The panel's metadata comes from the latest Portal pin request. After a device-API pin it lags the device's actual image. The registry row catches up at the next inventory report, which after a device-API replace can be much later (see Deviations).
 - **Orin log noise.** On the Orin, the Plugin checksum errors for two other workflows (`f81a4c66`, `0c7fe31a`) were already logged about 1,436 times an hour on 1.0.69. The `emlcapture.cpp CHECKIF strlen(meta)` capture traces also appear in thor1 logs from August.
-- **Portal deployments.** A Portal deployment adds the `workflowTuning` LocalServer configuration (bucket `dda-inference-results-164152369890`), which comes from a sibling feature.
+- **Portal deployments.** A Portal deployment adds the `workflowTuning` LocalServer configuration (bucket `dda-inference-results-123456789012`), which comes from a sibling feature.
 - **Stale physical-camera keys.** thor1's camera-registry shadow still lists `arv-797b019251e9` and `arv-cf582dea7590`, both Baslers, as present. Both entries were last written on 2026-09-22, and one of those cameras is now on the Orin. The agent does not retire keys it stops reporting, and shadow updates merge. This is the same cause as "Deleted Image_Sources" above.
 - **Orin vLLM model.** After each backend start, `qwen2-5-vl-7b-instruct-awq` loads, reports READY, unloads, and is then `preflight-refused` for memory starvation (4.56 GiB available). The same sequence is in the device's 1.0.69 logs from 2026-09-25 01:37Z and 01:58Z. The three Triton models are READY.
 

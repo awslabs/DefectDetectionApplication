@@ -2609,7 +2609,7 @@ def get_s3_client_for_bucket(usecase: Dict, bucket_name: str, session_name: str 
 # nonetheless gated PortalAdmin-only routes on `user.get('role') ==
 # 'PortalAdmin'`, a second authorization path that never reached
 # `RBACManager` and so stayed claim-driven after PORTAL_REGISTRY_ENFORCED
-# was turned on: verified on account 164152369890 on 2026-09-22, where a
+# was turned on: verified on account 123456789012 on 2026-09-22, where a
 # pool account carrying only `custom:role=PortalAdmin` and no registry row
 # was correctly denied `POST /builds` (the enforced `rbac_check` path) yet
 # still read the whole user directory through `GET /admin/users`. The

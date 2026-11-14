@@ -18,7 +18,7 @@ portal treats as fully trusted. Consequently:
    AWS API call against the pool.
 
 This is not a theoretical hole: it was exercised against the production
-portal (account 164152369890) on 2026-09-17. The build system accepted a
+portal (account 123456789012) on 2026-09-17. The build system accepted a
 LocalServer build request from a principal that no longer exists.
 
 The actor in the recorded incident is believed to be an agent/automation
@@ -27,7 +27,7 @@ used were legitimately held. That does not change the defect: the portal
 must not convert "holds Cognito admin IAM" into "is a portal administrator",
 and must never accept an action it cannot attribute afterwards.
 
-### Incident Record (verified evidence, account 164152369890)
+### Incident Record (verified evidence, account 123456789012)
 
 CloudTrail, source IP `12.148.187.67`, user agent `aws-cli/1.36.4`, all
 against user pool `us-east-1_2r9jpbWIe` (`dda-portal-users`):

@@ -81,7 +81,7 @@ publication (task 7).
 
 ## Task 7 live verification build evidence
 
-Date: 2026-08-09 (dispatched ~00:54 UTC). AWS account 164152369890, us-east-1,
+Date: 2026-08-09 (dispatched ~00:54 UTC). AWS account 123456789012, us-east-1,
 portal API `https://<portal-api-id>.execute-api.us-east-1.amazonaws.com/v1` (redacted).
 
 ### Approved scope (restated)
@@ -110,7 +110,7 @@ steering.
   PingStatus `Online`. Build-jobs table scan: zero non-terminal jobs
   (one-at-a-time honored).
 - AWS session had expired mid-preflight; user refreshed credentials
-  (account 164152369890 re-verified via `sts get-caller-identity`).
+  (account 123456789012 re-verified via `sts get-caller-identity`).
 
 ### Portal API auth (user-selected mechanism)
 Temporary Cognito user `kiro-build-verify-1786236861` (user pool

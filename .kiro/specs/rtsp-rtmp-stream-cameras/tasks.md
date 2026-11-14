@@ -569,7 +569,7 @@ graph TD
     - If the variable does not resolve, stop and bring the scoping options to the owner before relying on tasks 8.2 and 18.2
     - _Requirements: 6.7_
     - **OUTCOME**: The variable resolves, and the per-thing scoping holds on JetPack 6 and JetPack 5.
-      - Setup in account 164152369890, a single-account setup where the devices use `GreengrassV2TokenExchangeRole`:
+      - Setup in account 123456789012, a single-account setup where the devices use `GreengrassV2TokenExchangeRole`:
         - Probe secrets `dda-portal/stream-camera-credentials/{ryanorinagxdevkithomelabjp622,mic730jp513-ryvanlabhome}/probe`, with dummy values.
         - The design's `DDAStreamCameraCredentialRead` inline policy on the TES role.
       - Results, from inside each device's LocalServer backend container with its TES credentials:
@@ -2544,7 +2544,7 @@ graph TD
         4. End to end with the race camera: workflow created, validated, packaged for `arm64_jp6` and deployed with the binding (no warnings). Two triggered runs completed in about 1 s, with output and overlay images. Then cleaned up: the deployment restored to revision 106, the workflow deleted, the component version and its artifact deleted, the device directory and the bindings key removed, and the camera deleted (its secret has a deletion date). The workflow deploy and its restore each recreated the backend container, as on 2026-10-02.
       - **Harness stream stage (test_35)**: 7 of 7 on thor1, the MIC-730 and the Dell (`~/rtsp-verify/run_stream_stage.sh`, results in `results/harness/`).
       - **Credentialed Portal create on thor1**: `cred-thor-033015` stayed `pending` while thor1's IPC connection was down (finding 24). Once the backend restarted it synced, the secret fetch succeeded, and it was deleted: its secret has a deletion date.
-      - **Orphan-secret audit** (2026-10-04 03:4xZ, account 164152369890, us-east-1, the only account with Portal stream cameras): 6 secrets under `dda-portal/stream-camera-credentials/`, and the Camera_Registry scan found no live stream entry that references any of them. Five already had deletion dates: `ryanorinagxdevkithomelabjp622/portal-9588187116b6` (the 10-02 E2E camera, scheduled by hand on 10-02), `portal-be48f52dd98d`, `portal-def8bc9da42d`, `portal-f4ecf391c106` and `jetson-thor1/portal-2a96157065e1` (all scheduled by the task 29 routes today). The sixth is the probe secret `retryprobe-other-thing/probe`, kept for task 30 and force-deleted after it. Nothing else needed scheduling.
+      - **Orphan-secret audit** (2026-10-04 03:4xZ, account 123456789012, us-east-1, the only account with Portal stream cameras): 6 secrets under `dda-portal/stream-camera-credentials/`, and the Camera_Registry scan found no live stream entry that references any of them. Five already had deletion dates: `ryanorinagxdevkithomelabjp622/portal-9588187116b6` (the 10-02 E2E camera, scheduled by hand on 10-02), `portal-be48f52dd98d`, `portal-def8bc9da42d`, `portal-f4ecf391c106` and `jetson-thor1/portal-2a96157065e1` (all scheduled by the task 29 routes today). The sixth is the probe secret `retryprobe-other-thing/probe`, kept for task 30 and force-deleted after it. Nothing else needed scheduling.
       - **Still open**:
         - The task 30 builds and re-checks.
         - A credentialed create on the MIC-730 and, after the finding 25 fix, on the Dell.

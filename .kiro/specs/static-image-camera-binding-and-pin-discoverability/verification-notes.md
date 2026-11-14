@@ -1,7 +1,7 @@
 # Static Image Camera Binding and Pin Discoverability — Task 5 Live Verification Notes
 
 Spec: `.kiro/specs/static-image-camera-binding-and-pin-discoverability` (bugfix)
-Account 164152369890, us-east-1. Portal `https://d23v4ltibogb5x.cloudfront.net`,
+Account 123456789012, us-east-1. Portal `https://d23v4ltibogb5x.cloudfront.net`,
 rest-api `yqvyoowugk`. Date: 2026-09-08 (all times UTC).
 
 **Scope of this run: READ-ONLY.** Task 5 step (b) pins a test image to `jetson-thor1`,
@@ -23,7 +23,7 @@ static analysis of the served bundle. The device was touched only through two re
   (400 lines); frontend bundle `index-Cdb5gJPC.js` (replaces `index-BE4O437x.js`, which
   the sync deleted from S3 along with its map)
 - CloudFront invalidation `I5LJUR3VCXK93X2XXH6HOBW11U` (distribution `E13FEMIUFTIRQ1`,
-  bucket `dda-portal-frontend-164152369890`) created 17:20:41Z, status **Completed**
+  bucket `dda-portal-frontend-123456789012`) created 17:20:41Z, status **Completed**
   before any bundle fetch
 - Compute deploy (script step 6, flag-less): `EdgeCVPortalComputeStack` ✅ UPDATE_COMPLETE
   (185.07 s; 17:21:23–17:24:44Z). **Zero `AWS::Lambda::Function` deletions, zero
@@ -394,7 +394,7 @@ Same synthesized-event method as §1 (real deployed `CameraRegistryHandler…-8w
 | # | step | time (UTC) | outcome |
 |---|---|---|---|
 | 0 | `GET /cameras/static-image` (pre-pin baseline) | 17:37:29 | 200; `latest` = `remove` / **applied** (`01788839397371#6af1b999`); `deviceReported {present: false, absent: true, absentSince: 1788839397466}`; 13 history records |
-| 1 | `POST /cameras/static-image/upload-url` | 17:37:41.276 | **200**; `stagingKey static-image-pins/staging/f92b1b8d08484e00835bd39e56cb71ab`, `bucket dda-component-us-east-1-164152369890`, `expiresInSeconds 900` |
+| 1 | `POST /cameras/static-image/upload-url` | 17:37:41.276 | **200**; `stagingKey static-image-pins/staging/f92b1b8d08484e00835bd39e56cb71ab`, `bucket dda-component-us-east-1-123456789012`, `expiresInSeconds 900` |
 | 2 | `PUT` presigned URL | 17:37:52.871 | **HTTP 200**, 12,063 bytes uploaded |
 | 3 | `POST /cameras/static-image/pin` (`stagingKey` + `fileName`) | 17:37:59.283 → returned 17:38:00.853 | **201**; `pinRequestId 01788889080505#55fe9832`, `status pending` |
 | 4 | device confirmation (recorded on the item) | `createdAt 1788889080505` → `completedAt 1788889081197` | **applied in 692 ms**; `deviceMetadata.pinnedAtEpochMs 1788889081193` |

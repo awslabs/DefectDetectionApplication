@@ -4,10 +4,10 @@
 
 A user compiled a vision model to the `onnx` target
 (`https://d23v4ltibogb5x.cloudfront.net/models/f182a10d-0da7-420a-943c-c370da7ee623`,
-use case bucket `ryvan-cookies`, account `164152369890`) and the export failed
+use case bucket `example-bucket`, account `123456789012`) and the export failed
 to start with:
 
-> `... is not authorized to perform: s3:ListBucket on resource: arn:aws:s3:::ryvan-cookies`
+> `... is not authorized to perform: s3:ListBucket on resource: arn:aws:s3:::example-bucket`
 
 This reason was surfaced — and survived polling — **because** the
 `.kiro/specs/onnx-compile-error-diagnostics/` fix is deployed: that spec's
@@ -45,7 +45,7 @@ but the SageMaker execution role it hands to every job can only reach
 history: commit `43ba6f2` (2026-07-09, "security: IAM least-privilege scoping
 (findings I1–I17)") narrowed the `S3_POLICY` first statement from
 `arn:aws:s3:::*` / `arn:aws:s3:::*/*` to the `dda-*`/`sagemaker-*` union
-(finding I7). The existing training artifact under `ryvan-cookies` was
+(finding I7). The existing training artifact under `example-bucket` was
 produced while the role still carried the pre-scoping wildcard; the ONNX
 export is simply the first SageMaker job to exercise the role against a
 non-`dda-*` bucket since the scoped policy was applied to the live account.
@@ -89,8 +89,8 @@ role to a *data-account* bucket policy — but only for the separate
 data-account flow, never for the use-case bucket itself.
 
 **Operational context.** An immediate unblock is being applied by hand in
-parallel: inline policy `UseCaseBucketAccess-ryvan-cookies` on the role in
-account `164152369890`, scoped to `s3:ListBucket`/`s3:GetBucketLocation` on
+parallel: inline policy `UseCaseBucketAccess-example-bucket` on the role in
+account `123456789012`, scoped to `s3:ListBucket`/`s3:GetBucketLocation` on
 the bucket and `s3:GetObject`/`s3:PutObject` on its objects. That patch lives
 only in the console — no deploy artifact produces or tracks it. The durable
 fix this spec specifies MUST make such hand-applied patches unnecessary going
@@ -151,7 +151,7 @@ reach, indistinguishably from ones it can
 1.4 WHEN `_start_onnx_export_job` launches for a use case whose bucket the
 role's policy does not cover THEN the system fails at `CreateTrainingJob`
 with an authorization validation error (live instance: "not authorized to
-perform: s3:ListBucket on resource: arn:aws:s3:::ryvan-cookies")
+perform: s3:ListBucket on resource: arn:aws:s3:::example-bucket")
 
 1.5 WHEN the Neo compile path calls `create_compilation_job` for such a use
 case THEN the system passes `InputConfig.S3Uri` and `OutputConfig` in the
@@ -181,7 +181,7 @@ all
 
 1.10 WHEN an operator unblocks a stuck use case THEN the system offers no
 managed mechanism, so access is granted by hand-applied console policy (the
-live `UseCaseBucketAccess-ryvan-cookies` inline policy), untracked by any
+live `UseCaseBucketAccess-example-bucket` inline policy), untracked by any
 deploy artifact and silently divergent from the committed policy
 
 ### Expected Behavior (Correct)
@@ -221,7 +221,7 @@ string surfaced minutes later
 **The mechanism is durable, scoped, and consistent**
 
 2.7 WHEN the fix lands THEN the system SHALL make hand-applied per-bucket
-console patches (the live `UseCaseBucketAccess-ryvan-cookies` inline policy)
+console patches (the live `UseCaseBucketAccess-example-bucket` inline policy)
 unnecessary: the mechanism SHALL be expressed in committed deploy artifacts
 (`deploy-account-role.sh`, `usecase-account-stack.ts`, portal code, and/or
 setup documentation), and the existing hand patch SHALL be superseded or

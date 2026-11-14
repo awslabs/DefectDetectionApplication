@@ -320,5 +320,5 @@ graph TD
   - **Deploy to JP7**: revise/create a deployment for an `arm64_jp7` thing (e.g. `jetson-thor1`); confirm the JP7 ONNX component is offered and the JP5/JP6 siblings are labeled incompatible; deploy; confirm the device reaches DEPLOYED, the model converts, and the model log line shows `runtime 'onnx'` (OnnxRunner selected, TensorRT → CUDA → CPU)
   - **Workflow inference**: package a workflow referencing the model for `arm64_jp7`, deploy it, and run inference end-to-end on the Thor device; confirm the backend stays healthy (no crash-loop) for a sustained period, not just at startup
   - **JP6 regression**: publish/deploy an existing Neo JP6 model and confirm names, recipes, and deployment behavior are unchanged
-  - Portal: `https://d23v4ltibogb5x.cloudfront.net` (account 164152369890, us-east-1)
+  - Portal: `https://d23v4ltibogb5x.cloudfront.net` (account 123456789012, us-east-1)
   - _Requirements: 2.1, 2.2, 2.9, 2.11, 2.12, 3.1, 3.11_

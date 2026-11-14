@@ -1,6 +1,6 @@
 # Live Verification Notes — Task 8.2: Incident Replay on `labeling-8022a9dc`
 
-Date: 2026-09-06 (all times UTC). Account `164152369890`, region `us-east-1`.
+Date: 2026-09-06 (all times UTC). Account `123456789012`, region `us-east-1`.
 Executed after the task 8.1 deploy (compute stack + frontend, all Lambdas last-modified 21:32Z, bundle `index-B1kd0eNX.js` shipped 21:38:52Z).
 
 Browser UI automation was unavailable, so deployed behavior was verified by invoking the
@@ -23,7 +23,7 @@ Physical function names (via `aws cloudformation describe-stack-resources --stac
 
 `labeling-8022a9dc`: DDA backend, grounded-sam, `task_type = Segmentation`,
 `label_set = ['cookie_gap']`, 72 tasks, `skip_verification = False`, status `InProgress`,
-dataset `s3://ryvan-cookies`. Persisted broken override (instruction-style, inner periods):
+dataset `s3://example-bucket`. Persisted broken override (instruction-style, inner periods):
 
 > `draw and fill in the gaps between broken cookie pieces with a polygon, at least 3 verticies, all withing the bounds of the image. If there is a large crack fill in the gaps with the polygon. `
 
@@ -86,7 +86,7 @@ Far faster than the 5-140s/image budget — warm containers and high SQS-driven 
 versus 72/72 alignment failures on the original run). Worker log lines show the retried
 invocations: `Grounded-SAM inference: image=576x768 prompts=1 modality=Segmentation`.
 
-Sample artifact — `s3://dda-portal-artifacts-164152369890-us-east-1/labeling/645504ce-a60a-4009-8349-7548c0025cd3/labeling-8022a9dc/prelabels/task-000000.json`:
+Sample artifact — `s3://dda-portal-artifacts-123456789012-us-east-1/labeling/645504ce-a60a-4009-8349-7548c0025cd3/labeling-8022a9dc/prelabels/task-000000.json`:
 
 - top-level keys `{image_height, image_width, modality, regions}`
 - `modality = "Segmentation"`, `image_width = 576` (int), `image_height = 768` (int)
@@ -100,7 +100,7 @@ pre-label attributes changed.
 
 ## Step 5 — Wizard guardrail live proxy (Reqs 1.1, 3.1) — PASS
 
-Deployed bundle `s3://dda-portal-frontend-164152369890/assets/index-B1kd0eNX.js`
+Deployed bundle `s3://dda-portal-frontend-123456789012/assets/index-B1kd0eNX.js`
 (2,080,603 bytes, shipped 21:38:52Z) contains:
 
 - `contains a period` ×2 — both guardrail message variants:

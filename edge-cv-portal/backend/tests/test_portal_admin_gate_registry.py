@@ -7,7 +7,7 @@ Spec: `.kiro/specs/portal-jwt-role-privilege-escalation/`
 
 Why this suite exists
 ---------------------
-Task 5.2 turned `PORTAL_REGISTRY_ENFORCED` on in account 164152369890 on
+Task 5.2 turned `PORTAL_REGISTRY_ENFORCED` on in account 123456789012 on
 2026-09-22 and then verified the incident sequence against the deployed
 portal. The enforced `rbac_check` path denied it correctly — a pool account
 carrying only `custom:role=PortalAdmin`, with no registry row, got 403 from

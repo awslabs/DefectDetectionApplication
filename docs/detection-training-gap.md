@@ -76,8 +76,8 @@ Derived from the actual capture set; a different camera framing changes them.
 | `iou_threshold` | `0.45` | NMS, YOLO-only |
 | Labeled data | 390 boxes / 145 images, mean 2.69 | box short side p50 = 288px at 1280 input; nothing under 32px |
 
-Dataset: `s3://ryvan-cookies/imts-plates-luggage/`
-Labels: `s3://ryvan-cookies/labeled/labeling-9cbcdb4c/output.manifest`
+Dataset: `s3://example-bucket/imts-plates-luggage/`
+Labels: `s3://example-bucket/labeled/labeling-9cbcdb4c/output.manifest`
 
 ---
 
@@ -321,7 +321,7 @@ detections and a healthy backend for a sustained period.
   *removed from the group*, not empty scenes. Good data for varied counts, but
   nothing measures false positives on blue non-plate objects. Add ~20
   background frames if FP control matters.
-- **The `ryvan-cookies` bucket already holds a cookie use case.** Detection
+- **The `example-bucket` bucket already holds a cookie use case.** Detection
   artifacts share the bucket with `training-images/`, `manifests/`, `labeled/`.
 - **Labeling job completion 409s are benign.** The final submission flips the
   job to `Completed`; the browser's next task fetch then 409s with "Labeling

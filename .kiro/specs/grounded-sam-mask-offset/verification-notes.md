@@ -1,7 +1,7 @@
 # Grounded-SAM Mask Offset — Task 6 Live Verification Notes
 
 Spec: `.kiro/specs/grounded-sam-mask-offset` (bugfix)
-Account 164152369890, us-east-1.
+Account 123456789012, us-east-1.
 
 - Fixed worker deployed: 2026-09-07T03:48Z (`EdgeCVPortalComputeStack` UPDATE_COMPLETE,
   log `edge-cv-portal/deploy-gsam-mask-offset-20260907T034556Z.log`)
@@ -65,7 +65,7 @@ context flag is mandatory; without it CDK removes the worker). Consequences:
 ## 3. Live before/after — Segmentation masks vs same-run DINO boxes
 
 Method: presigned the SAME three images
-(`s3://ryvan-cookies/training-images/anomaly-{1,10,11}.jpg`), re-ran the EXACT 5.1
+(`s3://example-bucket/training-images/anomaly-{1,10,11}.jpg`), re-ran the EXACT 5.1
 payloads (`{"image_s3_presigned_url": …, "prompts": [{"label": "cookie_gap",
 "prompt": "gap between broken cookie pieces"}], "modality": "Segmentation" |
 "ObjectDetection"}`) by direct invoke against the fixed worker

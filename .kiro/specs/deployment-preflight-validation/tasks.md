@@ -252,7 +252,7 @@ graph TD
   - **READ-ONLY ONLY**: `describe-component`, `get-component`,
     `list-component-versions`, `get-core-device`, `get-deployment`,
     `list-deployments`, `list-installed-components`. No create/update/delete,
-    no deployment submitted. Account 164152369890, us-east-1 (the shell on
+    no deployment submitted. Account 123456789012, us-east-1 (the shell on
     this build server already assumes `admin-iam`; verified reachable)
   - If any subtask cannot be settled, record it as UNSETTLED with what was
     tried — a resolver that must guess then guesses FAIL-OPEN (2.9), never

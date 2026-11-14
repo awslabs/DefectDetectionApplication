@@ -229,7 +229,7 @@ Confirmed by reading the code — each defect has a single, located cause:
    `DescribeComponent`, `GetComponent`, `ListComponents`,
    `ListComponentVersions`, … but not `DeleteComponent`. The cross-account
    `DDAPortalUseCaseAccountStack` role DOES grant it, which is why this only
-   bites single-account setups — exactly the affected account (164152369890).
+   bites single-account setups — exactly the affected account (123456789012).
 
 3. **History-only version derivation** (`next_vllm_component_version`): reads
    `published_components` / `published_component` from the record. The
@@ -616,7 +616,7 @@ deliverables in the task list, not silent drift.
 ### The orphan: two paths, and which is preferred
 
 The orphan is `model-vllm-qwen3-vl-8b-instruct:1.0.0` in account
-`164152369890` (`us-east-1`), tagged `dda-portal:managed=true` with training-id
+`123456789012` (`us-east-1`), tagged `dda-portal:managed=true` with training-id
 `1e05eb99-ca55-4325-9be0-15874979e6a3`, with no backing publish state.
 
 - **Path A (preferred): let the code fix make it non-blocking.** After the fix
@@ -632,7 +632,7 @@ The orphan is `model-vllm-qwen3-vl-8b-instruct:1.0.0` in account
   because no record resolves it, the deploy screen fails closed and hides it.
   Deleting it is a **live AWS mutation and REQUIRES explicit user confirmation**
   before execution (`aws greengrassv2 delete-component --arn
-  arn:aws:greengrass:us-east-1:164152369890:components:model-vllm-qwen3-vl-8b-instruct:versions:1.0.0`).
+  arn:aws:greengrass:us-east-1:123456789012:components:model-vllm-qwen3-vl-8b-instruct:versions:1.0.0`).
   Do it only after Path A is deployed, so the delete is cleanup rather than a
   prerequisite, and only with confirmation.
 

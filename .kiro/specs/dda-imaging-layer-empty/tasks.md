@@ -87,7 +87,7 @@ flowchart TD
 
 - [x] 5. Deploy and live-verify the fix
   - Follow `.kiro/steering/builds.md`: confirm no component build is running (`pgrep -af "gdk component build"` / `pgrep -af "build-custom.sh"`) before deploying; portal deploys must not overlap component builds
-  - Redeploy the compute stack from this worktree (account 164152369890, us-east-1): `npx cdk deploy EdgeCVPortalComputeStack --require-approval never` from `edge-cv-portal/infrastructure` (bundling now produces the layer content — no manual `build.sh` step)
+  - Redeploy the compute stack from this worktree (account 123456789012, us-east-1): `npx cdk deploy EdgeCVPortalComputeStack --require-approval never` from `edge-cv-portal/infrastructure` (bundling now produces the layer content — no manual `build.sh` step)
   - Verify a NEW `ImagingLayer` version is attached to all three DDA labeling functions (`aws lambda get-function-configuration` on the DdaLabelingWorker / DdaLabelingHandler / DdaAutolabelWorker functions of `EdgeCVPortalComputeStack`)
   - Verify the deployed layer content contains `python/PIL` and NO `build.sh`/`requirements.txt` (`aws lambda get-layer-version` + zip inspection) — this proves the content came from bundling, not host state (the parallel operational mitigation deployed a manually-built layer; the bundled version supersedes it)
   - Optional end-to-end spot check (non-diagnostic post-mitigation): a Prompt Tuning Preview run shows per-image dimensions with no `No module named 'PIL'` model errors

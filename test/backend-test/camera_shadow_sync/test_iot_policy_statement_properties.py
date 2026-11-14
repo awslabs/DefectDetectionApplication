@@ -127,7 +127,7 @@ VARIABLE_ONLY_SHADOW_DOC = {
 }
 
 # The literal manually-deployed production version-3 document (account
-# 164152369890): the original two statements plus the verbatim
+# 123456789012): the original two statements plus the verbatim
 # ShadowManagerHttpsDataPlaneSync statement.
 PRODUCTION_VERSION_3_DOC = {
     "Version": "2012-10-17",

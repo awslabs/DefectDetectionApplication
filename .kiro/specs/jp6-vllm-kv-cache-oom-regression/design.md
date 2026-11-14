@@ -1380,7 +1380,7 @@ no container restarts during design/investigation):
 sudo password `lookout`.
 
 **The 1.0.61 image question.** Re-pulling
-`164152369890.dkr.ecr.us-east-1.amazonaws.com/dda/flask-app:1.0.61` **on the build
+`123456789012.dkr.ecr.us-east-1.amazonaws.com/dda/flask-app:1.0.61` **on the build
 host (never onto the device)** and running `grep -c limit_mm_per_prompt
 /vllm_runtime/manager.py` plus a `pip freeze` diff against 1.0.59 would settle
 both open 1.0.61 questions definitively. **This design does not depend on that

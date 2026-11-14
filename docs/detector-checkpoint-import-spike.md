@@ -1,7 +1,7 @@
 # Detector checkpoint import: exploration spike
 
 Spec: `.kiro/specs/detector-checkpoint-import` (Requirement 1, task 1). Run on
-2026-09-25 in account 164152369890 / us-east-1, on branch
+2026-09-25 in account 123456789012 / us-east-1, on branch
 `spec/detector-checkpoint-import`.
 
 ## Outcome
@@ -41,7 +41,7 @@ cannot load on JP5 or on the CPU / x86 images.
 | YOLO tolerance | Element-wise over the whole `[1, 4+C, N]` tensor: box 0.1 px, score 1e-3 | Worst measured: box 0.0063 px (yolo26x, yolo11n), score 5.4e-6. The one-to-many graph has no data-dependent selection. |
 | RF-DETR tolerance | Detection-level: every query/class pair with score ≥ 0.25 must match one-to-one (same class, nearest box) within box 1e-3 (normalised) and score 5e-3, with no extra pairs. In addition, ≥ 75 % of the 300 query slots must have a one-to-one partner (linear assignment) with the same top class within the same tolerances. | Element-wise comparison is wrong for RF-DETR. On the published nano with `bus.jpg`, onnxruntime 1.16.3 reorders or replaces 15 of 300 tail queries (all scoring < 0.09, worst slot box difference 0.71), while torch and onnxruntime 1.30.0 agree to 2e-5. Every detection ≥ 0.25 still matched to box 8.1e-6 and score 2.0e-5. The slot-agreement floor keeps the check meaningful on inputs with no confident detection. |
 | Checkpoint_Size_Cap | **512 MiB** (not 1 GiB) | Measured in a scratch Lambda shaped like ModelConverter (3,008 MB, 8 GiB `/tmp`, the ModelConverter role). A 1 GiB checkpoint costs 26.8–27.4 s before any SageMaker or DynamoDB call: download 11.2–12.2 s (≈ 90 MB/s), sha256 2.9 s, probe 0.23 s and the sidecar upload 11.6–13.0 s. That leaves no margin under the 29 s API Gateway timeout. 512 MiB costs about 14 s. The largest real fixture (the 366 MB published RF-DETR nano, optimizer state included) costs 7.0 s. The probe itself takes about 0.2 s whatever the size, because it reads only the zip directory and `data.pkl`. |
-| Image delivery | The CDK `DDASageMakerExecutionRole` (usecase-account-stack) already grants `ecr:GetAuthorizationToken`, `BatchCheckLayerAvailability`, `GetDownloadUrlForLayer` and `BatchGetImage` on `*`, so it needs no new grant. The portal repository policy names the trusted use-case accounts' `DDASageMakerExecutionRole` ARNs. | The ten jobs pulled the image from a same-account repository under the deployed role. **Verified single-account only**: both use cases in this deployment (`cookies`, `aliens`) live in 164152369890, and no second account is available. |
+| Image delivery | The CDK `DDASageMakerExecutionRole` (usecase-account-stack) already grants `ecr:GetAuthorizationToken`, `BatchCheckLayerAvailability`, `GetDownloadUrlForLayer` and `BatchGetImage` on `*`, so it needs no new grant. The portal repository policy names the trusted use-case accounts' `DDASageMakerExecutionRole` ARNs. | The ten jobs pulled the image from a same-account repository under the deployed role. **Verified single-account only**: both use cases in this deployment (`cookies`, `aliens`) live in 123456789012, and no second account is available. |
 | Image size | 2.52 GB | The "Downloading" stage, which includes the image pull, took 31–36 s per job. |
 
 ## Per-fixture results
@@ -170,4 +170,4 @@ Components already published keep their IR-10 graph until they are re-packaged a
 ## Cleanup
 
 - Removed after the measurement: the scratch Lambda `dci-spike-size-cap`, its log group, the 1 GiB probe object and the sidecar-upload probe objects under `converted-models/dci-spike-sizecap-test/`.
-- Kept for the final-image re-run (tasks 3.3 and 9.4), then deleted: the ECR repository `dda-detector-export-spike` and the S3 prefix `s3://ryvan-cookies/dci-spike/`.
+- Kept for the final-image re-run (tasks 3.3 and 9.4), then deleted: the ECR repository `dda-detector-export-spike` and the S3 prefix `s3://example-bucket/dci-spike/`.

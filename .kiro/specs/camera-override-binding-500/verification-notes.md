@@ -68,7 +68,7 @@ The DeploymentsHandler log has `Error creating workflow deployment: No module na
   - The test workflow and capture directories were removed, and both registrations show `removed`.
   - `/aws_dda/workflows` matches the pre-test listing, and no `/tmp/cob500-*` files remain.
 - **Portal.**
-  - Both workflows were deleted after their deployment records were listed. Their component versions and the two zips in `ryvan-cookies` were deleted.
+  - Both workflows were deleted after their deployment records were listed. Their component versions and the two zips in `example-bucket` were deleted.
   - Nothing remains in the Portal artifacts bucket or the workflow tables.
   - The records `f4a2b8f9` and `1e22af7a` remain in `dda-portal-deployments` as history.
 - **Temporary principal.** Gone: 0 users, 0 clients and 0 role rows with its marker. The password, token and device password files are shredded.

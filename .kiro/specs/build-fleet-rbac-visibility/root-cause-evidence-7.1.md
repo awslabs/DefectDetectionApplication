@@ -1,7 +1,7 @@
 # Task 7.1 — Root-Cause Evidence Record
 
 Investigation date: 2026-08-06 (~19:36–19:50 UTC)
-Account `164152369890`, region `us-east-1`, AWS identity `assumed-role/ADMIN/ryvan-Isengard`.
+Account `123456789012`, region `us-east-1`, AWS identity `assumed-role/ADMIN/example-session`.
 All AWS calls were read-only (`logs`, `lambda get-function*`, `apigateway get-*`,
 `dynamodb describe-table`/`scan`, presigned GET of the deployed code/layer assets).
 No source file was modified, nothing was deployed, no build was run, no live
@@ -98,7 +98,7 @@ executed at all, the permission loop
 | CodeSize | 1 403 892 | 1 403 892 |
 | LastModified | 2026-08-06T16:40:13Z | 2026-08-06T16:40:02Z |
 | RevisionId | `3361c78e-ca38-4043-bbc8-b06598d0fdb0` | `65bf1b79-7a0d-4413-b84b-aac3a0c2a4fc` |
-| Layer | `arn:aws:lambda:us-east-1:164152369890:layer:BuildFleetSharedLayerC170FCDB:1` | same |
+| Layer | `arn:aws:lambda:us-east-1:123456789012:layer:BuildFleetSharedLayerC170FCDB:1` | same |
 | `BUILD_JOBS_TABLE` | `dda-portal-build-jobs` | `dda-portal-build-jobs` |
 
 Layer `BuildFleetSharedLayerC170FCDB`: exactly **one** version exists (`:1`,
@@ -112,14 +112,14 @@ REST API `yqvyoowugk` ("Edge CV Portal API"), stage `v1`, resource `/builds`
 
 - `authorizationType = COGNITO_USER_POOLS`, authorizer `k1fw58`
 - `integrationType = AWS_PROXY`
-- `uri = arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:164152369890:function:EdgeCVPortalBuildFleetSta-BuildJobsHandlerFC1CBC52-75bkr1HFZkVU/invocations`
+- `uri = arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:EdgeCVPortalBuildFleetSta-BuildJobsHandlerFC1CBC52-75bkr1HFZkVU/invocations`
 
 Confirms `POST /builds` → **BuildJobsHandler**, matching the log evidence in §1.
 
 ## 4. Deployed BuildJobs table schema — the crux
 
 `aws dynamodb describe-table --table-name dda-portal-build-jobs`
-(ARN `arn:aws:dynamodb:us-east-1:164152369890:table/dda-portal-build-jobs`, created
+(ARN `arn:aws:dynamodb:us-east-1:123456789012:table/dda-portal-build-jobs`, created
 2026-08-06T15:23:20Z):
 
 - Table key: `build_job_id` (HASH, `S`)
@@ -314,7 +314,7 @@ BuildJobsHandler  EdgeCVPortalBuildFleetSta-BuildJobsHandlerFC1CBC52-75bkr1HFZkV
 BuildFleetHandler EdgeCVPortalBuildFleetSta-BuildFleetHandler014CDE4-Ki7FXubb6MQe
                   $LATEST  same CodeSha256
                   CODE_VERSION 2026-02-21-build-fleet LastModified 2026-08-06T16:40:02Z
-Layer             arn:aws:lambda:us-east-1:164152369890:layer:BuildFleetSharedLayerC170FCDB:1
+Layer             arn:aws:lambda:us-east-1:123456789012:layer:BuildFleetSharedLayerC170FCDB:1
                   CodeSha256 Cw42URS+5Te7MtxJzRLSXvB9cuHbmRZvxGiK8eGku+o=
 API               yqvyoowugk stage v1, resource /builds (v0qcxd), POST -> BuildJobsHandler
 Table             dda-portal-build-jobs (server-index: server_id S HASH, created_at N RANGE)
