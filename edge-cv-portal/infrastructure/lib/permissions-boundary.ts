@@ -5,7 +5,10 @@ import * as iam from 'aws-cdk-lib/aws-iam';
  * The CDK context value naming the DDA permissions boundary
  * (-c ddaPermissionsBoundary=<policy name>). The deploy scripts pass it when
  * the account was bootstrapped with that boundary
- * (scripts/portal-permissions-boundary.sh, iam/setup-account.sh).
+ * (scripts/portal-permissions-boundary.sh, iam/setup-account.sh):
+ * dda-portal-permissions-boundary for the portal app (bin/app.ts),
+ * dda-usecase-permissions-boundary and dda-data-permissions-boundary for the
+ * UseCase and Data account apps.
  */
 export const PERMISSIONS_BOUNDARY_CONTEXT_KEY = 'ddaPermissionsBoundary';
 

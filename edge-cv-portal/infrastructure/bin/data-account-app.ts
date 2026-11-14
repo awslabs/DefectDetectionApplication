@@ -2,6 +2,7 @@
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
 import { DataAccountStack } from '../lib/data-account-stack';
+import { applyDdaPermissionsBoundary } from '../lib/permissions-boundary';
 
 /**
  * CDK App for deploying the Data Account access roles and bucket policies.
@@ -86,5 +87,9 @@ new DataAccountStack(app, 'DDAPortalDataAccountStack', {
     region: process.env.CDK_DEFAULT_REGION,
   },
 });
+
+// With -c ddaPermissionsBoundary=<name> (deploy-account-role.sh passes the
+// boundary of the account's CDK bootstrap), every role carries that boundary.
+applyDdaPermissionsBoundary(app);
 
 app.synth();

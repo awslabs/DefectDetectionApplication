@@ -1,0 +1,123 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DdaServices",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:*",
+        "ecr:*",
+        "events:*",
+        "greengrass:*",
+        "iot:*",
+        "logs:*",
+        "s3:*",
+        "sagemaker:*",
+        "secretsmanager:*",
+        "sqs:*",
+        "servicequotas:Get*",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "tag:Get*",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadIam",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetAccountSummary",
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:ListEntitiesForPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ChangeDdaRolesAndPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerExecutionRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDAPortalAccessRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDACameraShadowRuleRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDADebugRuleErrorRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDATelemetryRuleErrorRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDAEventBridgeCrossAccountRole",
+        "arn:aws:iam::ACCOUNT_ID:role/GreengrassV2TokenExchangeRole*",
+        "arn:aws:iam::ACCOUNT_ID:policy/DDAPortalComponentAccessPolicy",
+        "arn:aws:iam::ACCOUNT_ID:policy/GreengrassV2TokenExchangeRoleAccess*"
+      ]
+    },
+    {
+      "Sid": "PassDdaRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/DDASageMakerExecutionRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDACameraShadowRuleRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDADebugRuleErrorRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDATelemetryRuleErrorRole",
+        "arn:aws:iam::ACCOUNT_ID:role/DDAEventBridgeCrossAccountRole",
+        "arn:aws:iam::ACCOUNT_ID:role/GreengrassV2TokenExchangeRole*"
+      ]
+    },
+    {
+      "Sid": "PassRolesToSageMakerAndGreengrass",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/*SageMaker*",
+        "arn:aws:iam::ACCOUNT_ID:role/*Greengrass*",
+        "arn:aws:iam::ACCOUNT_ID:role/*GroundTruth*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "sagemaker.amazonaws.com",
+            "greengrass.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "NoRoleWithoutThisBoundary",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePermissionsBoundary"
+      ],
+      "NotResource": "arn:aws:iam::ACCOUNT_ID:role/GreengrassV2TokenExchangeRole",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::ACCOUNT_ID:policy/dda-usecase-permissions-boundary"
+        }
+      }
+    }
+  ]
+}

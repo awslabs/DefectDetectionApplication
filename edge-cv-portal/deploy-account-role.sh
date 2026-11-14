@@ -15,6 +15,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# portal_permissions_boundary: the permissions boundary the account's CDK
+# bootstrap carries (iam/setup-account.sh usecase|data). The UseCase and Data
+# stacks must put it on every role they create.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/portal-permissions-boundary.sh"
+
 # require_admin_bootstrap_opt_in <portal|usecase|data>: a plain `cdk bootstrap`
 # gives the CloudFormation execution role AdministratorAccess, so it runs only
 # when the operator opts in with DDA_ALLOW_ADMIN_BOOTSTRAP. Otherwise stop and
@@ -737,6 +742,12 @@ elif [ "$DEPLOYMENT_TYPE" = "usecase" ]; then
     
     # Build CDK context args
     CDK_CONTEXT="-c portalAccountId=$PORTAL_ACCOUNT_ID -c externalId=$EXTERNAL_ID"
+    # Every role of the stack carries the bootstrap's permissions boundary, if
+    # it has one: its execution role refuses to create a role without it.
+    if ! BOUNDARY=$(portal_permissions_boundary "$CURRENT_REGION"); then
+        exit 1
+    fi
+    if [ -n "$BOUNDARY" ]; then CDK_CONTEXT="$CDK_CONTEXT -c ddaPermissionsBoundary=$BOUNDARY"; fi
     
     # Deploy the stack
     cd infrastructure
@@ -942,6 +953,12 @@ elif [ "$DEPLOYMENT_TYPE" = "data" ]; then
             $CDK_CONTEXT
         cd ..
     fi
+    # Every role of the stack carries the bootstrap's permissions boundary, if
+    # it has one: its execution role refuses to create a role without it.
+    if ! BOUNDARY=$(portal_permissions_boundary "$CURRENT_REGION"); then
+        exit 1
+    fi
+    if [ -n "$BOUNDARY" ]; then CDK_CONTEXT="$CDK_CONTEXT -c ddaPermissionsBoundary=$BOUNDARY"; fi
     
     # Deploy the stack
     cd infrastructure
