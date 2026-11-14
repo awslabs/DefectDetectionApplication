@@ -167,6 +167,75 @@
           }
         ]
       }
+    },
+    {
+      "name": "request_fields",
+      "sidecarBody": "{\"answerFormat\": \"inspection\", \"detectionId\": null, \"detectionSlot\": null, \"executionId\": \"exec-request-fields\", \"exportedAt\": 1794510000, \"input\": {\"bytes\": 11041, \"height\": 480, \"key\": \"workflow-tuning/samples/wf-parity/check/device-under-test/exec-request-fields.input.jpg\", \"sha256\": \"5fec0b99cc27d19b5d84c56c7a4c1bb6a99cef3a6de16b572af45d8f942d844e\", \"width\": 640}, \"metadataSnippetJson\": \"{\\\"trigger\\\":{\\\"topic\\\":\\\"plant/line1/evaluate\\\",\\\"payload\\\":\\\"{\\\\\\\"order_id\\\\\\\": \\\\\\\"o-1\\\\\\\", \\\\\\\"body\\\\\\\": {\\\\\\\"qc_stage\\\\\\\": \\\\\\\"qc2\\\\\\\", \\\\\\\"scale\\\\\\\": 2.0, \\\\\\\"order\\\\\\\": {\\\\\\\"items\\\\\\\": [{\\\\\\\"shape\\\\\\\": \\\\\\\"roof\\\\\\\", \\\\\\\"color\\\\\\\": \\\\\\\"red\\\\\\\"}, {\\\\\\\"shape\\\\\\\": \\\\\\\"panel\\\\\\\", \\\\\\\"color\\\\\\\": \\\\\\\"blue\\\\\\\"}]}}}\\\",\\\"payload_json\\\":{\\\"order_id\\\":\\\"o-1\\\",\\\"body\\\":{\\\"qc_stage\\\":\\\"qc2\\\",\\\"scale\\\":2.0,\\\"order\\\":{\\\"items\\\":[{\\\"shape\\\":\\\"roof\\\",\\\"color\\\":\\\"red\\\"},{\\\"shape\\\":\\\"panel\\\",\\\"color\\\":\\\"blue\\\"}]}}},\\\"qos\\\":1}}\", \"nodeId\": \"check\", \"nodeType\": \"bedrock_inference\", \"promptFingerprint\": \"sha256:3315a8513fa8040d517b09b1c1de4d0f8abec3f28ecaed29149a5cf5f2fbdd28\", \"recorded\": {\"answer\": \"{\\\"verdict\\\": \\\"pass\\\", \\\"confidence\\\": 0.91, \\\"reason\\\": \\\"both parts match\\\", \\\"objects\\\": [{\\\"name\\\": \\\"roof\\\", \\\"qc\\\": \\\"OK\\\", \\\"reason\\\": \\\"red, left\\\", \\\"bounding_box\\\": {\\\"x_min\\\": 60, \\\"y_min\\\": 80, \\\"x_max\\\": 260, \\\"y_max\\\": 220}}, {\\\"name\\\": \\\"panel\\\", \\\"qc\\\": \\\"OK\\\", \\\"reason\\\": \\\"blue, right\\\", \\\"bounding_box\\\": {\\\"x_min\\\": 340, \\\"y_min\\\": 200, \\\"x_max\\\": 580, \\\"y_max\\\": 400}}]}\", \"confidence\": 0.91, \"isAnomalous\": false, \"parseError\": null, \"verdict\": \"pass\"}, \"reference\": {\"bytes\": 4753, \"height\": 200, \"key\": \"workflow-tuning/samples/wf-parity/check/device-under-test/exec-request-fields.reference.jpg\", \"sha256\": \"2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753\", \"source\": \"file:///fixture/inspection_replay_parity.legend.jpg\", \"sourceSha256\": \"2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753\", \"transform\": [], \"width\": 320}, \"schemaVersion\": 1, \"source\": \"live\", \"thingName\": \"device-under-test\", \"version\": 7, \"workflowId\": \"wf-parity\"}",
+      "objects": {
+        "workflow-tuning/samples/wf-parity/check/device-under-test/exec-request-fields.input.jpg": {
+          "sha256": "5fec0b99cc27d19b5d84c56c7a4c1bb6a99cef3a6de16b572af45d8f942d844e",
+          "length": 11041
+        },
+        "workflow-tuning/samples/wf-parity/check/device-under-test/exec-request-fields.reference.jpg": {
+          "sha256": "2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753",
+          "length": 4753
+        }
+      },
+      "region": "us-west-2",
+      "converseKwargs": {
+        "modelId": "us.amazon.nova-pro-v1:0",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "text": "Order o-1: the parts [{\"shape\":\"roof\",\"color\":\"red\"},{\"shape\":\"panel\",\"color\":\"blue\"}] at scale 2.0, on an image 640 px wide.\n\nRespond with exactly one JSON object and nothing else: {\"verdict\": \"pass\"|\"fail\", \"confidence\": 0..1, \"reason\": \"<one sentence>\", \"objects\": [{\"name\": \"<part>\", \"qc\": \"OK\"|\"NOK\", \"reason\": \"<short>\", \"bounding_box\": {\"x_min\": <int>, \"y_min\": <int>, \"x_max\": <int>, \"y_max\": <int>}}, ...]} with one entry in objects per expected part."
+              },
+              {
+                "text": "Input image:"
+              },
+              {
+                "image": {
+                  "format": "jpeg",
+                  "source": {
+                    "bytes": {
+                      "sha256": "5fec0b99cc27d19b5d84c56c7a4c1bb6a99cef3a6de16b572af45d8f942d844e",
+                      "length": 11041
+                    }
+                  }
+                }
+              },
+              {
+                "text": "Reference image:"
+              },
+              {
+                "image": {
+                  "format": "jpeg",
+                  "source": {
+                    "bytes": {
+                      "sha256": "2788e11752d26f6f977ea69009f996cb069a7a490ef02f0f57254d05ee854753",
+                      "length": 4753
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "inferenceConfig": {
+          "maxTokens": 600
+        },
+        "system": [
+          {
+            "text": "You inspect stage qc2."
+          }
+        ],
+        "additionalModelRequestFields": {
+          "inferenceConfig": {
+            "topK": 20
+          }
+        }
+      }
     }
   ]
 }

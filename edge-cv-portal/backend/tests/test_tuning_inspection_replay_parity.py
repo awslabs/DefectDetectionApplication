@@ -14,8 +14,11 @@ under the golden's substitution of every image and document block's bytes by
 ``{"sha256", "length"}``.
 
 ``single_legend`` is A's single legend. ``mixed_references`` is a list of one
-image and two documents ("Reference 1" to "Reference 3"). The trigger payload
-has order items whose keys are not sorted and the integral float ``2.0``,
+image and two documents ("Reference 1" to "Reference 3"). ``request_fields`` is
+the single legend on a node that sets ``additional_model_request_fields``, so
+the replay must send the device's ``additionalModelRequestFields``. The
+trigger payload has order items whose keys are not sorted and the integral
+float ``2.0``,
 which the prompt renders: after the sorted-keys upload and the DynamoDB round
 trip, the Portal must still render ``[{"shape":…,"color":…}]`` and ``2.0``.
 
@@ -74,6 +77,14 @@ CASE_REFERENCES = {
     "single_legend": (STEM + ".legend.jpg",),
     "mixed_references": (STEM + ".legend.jpg", STEM + ".notes.txt",
                          STEM + ".sheet.pdf"),
+    "request_fields": (STEM + ".legend.jpg",),
+}
+#: The parameters a case's node sets on top of NODE_PARAMETERS, restated
+#: from the device half.
+CASE_PARAMETERS = {
+    "request_fields": {
+        "additional_model_request_fields": '{"inferenceConfig": {"topK": 20}}',
+    },
 }
 #: The device half's stubbed answer: a pass naming both ordered parts.
 ANSWER = json.dumps({
@@ -171,8 +182,8 @@ class Env:
         self.regions.append(region)
         return self.bedrock
 
-    def put_version(self, references, version):
-        parameters = dict(NODE_PARAMETERS)
+    def put_version(self, references, version, extra=None):
+        parameters = dict(NODE_PARAMETERS, **(extra or {}))
         parameters["reference_payload_path"] = "\n".join(
             SUBSTITUTED_ROOT + name for name in references)
         node = {"id": NODE_ID, "type": "bedrock_inference",
@@ -312,3 +323,30 @@ def test_the_portal_replay_sends_the_devices_request(env):
     (outcome,) = view["outcomes"]
     assert outcome["category"] == "correct"
     assert (outcome["imageCount"], outcome["documentCount"]) == (2, 2)
+
+    # request_fields: the latest version sets additional_model_request_fields;
+    # the refresh indexes the third sample, and its replay sends the fields.
+    case = cases["request_fields"]
+    env.put_version(CASE_REFERENCES["request_fields"], version=3,
+                    extra=CASE_PARAMETERS["request_fields"])
+    fields_id = put_case_objects(env, case, files)
+    status, body = env.call("POST", f"{ANOMALY}/sessions/{{id}}/refresh",
+                            {"id": session_id})
+    assert status == 200 and body["refresh"]["indexed"] == 1, body
+    for sample_id, label in ((fields_id, "OK"), (mixed_id, "EXCLUDE")):
+        status, body = env.call(
+            "PUT", f"{ANOMALY}/sessions/{{id}}/samples/labels",
+            {"id": session_id}, body={"sampleIds": [sample_id],
+                                      "label": label})
+        assert status == 200 and body["missing"] == [], body
+    env.bedrock.calls.clear()
+    view = env.score_baseline(session_id)
+
+    (kwargs,) = env.bedrock.calls
+    assert env.regions[-1] == case["region"]
+    assert substitute_bytes(kwargs) == case["converseKwargs"]
+    assert kwargs["additionalModelRequestFields"] == {
+        "inferenceConfig": {"topK": 20}}
+    (outcome,) = view["outcomes"]
+    assert outcome["category"] == "correct"
+    assert outcome["imageCount"] == 2

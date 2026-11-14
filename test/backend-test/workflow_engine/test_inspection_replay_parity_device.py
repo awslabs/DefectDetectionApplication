@@ -24,9 +24,11 @@ with the committed golden
 which the Portal's replay is checked against in its own lane. Regenerate
 it with ``DDA_WRITE_INSPECTION_PARITY_FIXTURE=1`` and review the diff.
 
-Two cases share one node: ``single_legend`` (one legend line, as A's
-node) and ``mixed_references`` (the legend, a text file and a PDF,
-"Reference 1" to "Reference 3"). The trigger payload carries order items
+Three cases share one node: ``single_legend`` (one legend line, as A's
+node), ``mixed_references`` (the legend, a text file and a PDF,
+"Reference 1" to "Reference 3") and ``request_fields`` (the single legend
+with ``additional_model_request_fields`` set, so the live request carries
+``additionalModelRequestFields``). The trigger payload carries order items
 whose keys are not sorted and the integral float ``2.0``, which the
 prompt renders.
 
@@ -112,7 +114,15 @@ CASES = (
     ("single_legend", "exec-single-legend", (STEM + ".legend.jpg",)),
     ("mixed_references", "exec-mixed-references",
      (STEM + ".legend.jpg", STEM + ".notes.txt", STEM + ".sheet.pdf")),
+    ("request_fields", "exec-request-fields", (STEM + ".legend.jpg",)),
 )
+#: Node parameters a case sets on top of NODE_PARAMETERS: a model request
+#: field Amazon Nova accepts.
+CASE_PARAMETERS = {
+    "request_fields": {
+        "additional_model_request_fields": '{"inferenceConfig": {"topK": 20}}',
+    },
+}
 ANSWER = json.dumps({
     "verdict": "pass", "confidence": 0.91, "reason": "both parts match",
     "objects": [
@@ -195,7 +205,7 @@ def run_case(tmp_path, monkeypatch, name, execution_id, references):
     for file_name in references:
         shutil.copyfile(os.path.join(fixtures, file_name),
                         str(refs_dir / file_name))
-    parameters = dict(NODE_PARAMETERS)
+    parameters = dict(NODE_PARAMETERS, **CASE_PARAMETERS.get(name, {}))
     parameters["reference_payload_path"] = "\n".join(
         "file://{0}/{1}".format(refs_dir, file_name)
         for file_name in references)
@@ -277,7 +287,18 @@ def test_device_request_and_sidecar_match_the_golden(tmp_path, monkeypatch):
         "regenerate it with {1}=1 and review the diff".format(
             FIXTURE_NAME, WRITE_ENV))
 
-    single, mixed = cases
+    single, mixed, fields = cases
+    # The request fields change the request by that one key and leave the
+    # sample as it is: the sidecar differs only by the execution id.
+    assert "additionalModelRequestFields" not in single["converseKwargs"]
+    assert "additionalModelRequestFields" not in mixed["converseKwargs"]
+    assert fields["converseKwargs"]["additionalModelRequestFields"] == {
+        "inferenceConfig": {"topK": 20}}
+    assert {key: value for key, value in fields["converseKwargs"].items()
+            if key != "additionalModelRequestFields"} == \
+        single["converseKwargs"]
+    assert fields["sidecarBody"].replace(
+        "exec-request-fields", "exec-single-legend") == single["sidecarBody"]
     sidecar = json.loads(single["sidecarBody"])
     assert sidecar["reference"]["source"] == (
         SUBSTITUTED_ROOT + STEM + ".legend.jpg")
