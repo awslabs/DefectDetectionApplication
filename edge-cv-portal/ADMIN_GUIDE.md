@@ -2116,8 +2116,11 @@ these rules and effects:
   be retried.
 - The last enabled PortalAdmin cannot be disabled or deleted: the User Manager
   answers `conflict` with its reason.
-- Create makes the user pool send its invitation email, with a temporary
-  password, to `account_email`. No tool returns a password.
+- Create takes `account_given_name` and `account_family_name`, the first and
+  last name the user pool requires of every account (the same fields as the
+  User Manager's create dialog); a call without either, or with a blank value,
+  is refused `invalid_input`. It makes the user pool send its invitation email,
+  with a temporary password, to `account_email`. No tool returns a password.
 - Disable and enable change the account's standing on synced devices at the
   next sync.
 - A disabled account's existing MCP session keeps the tools that need no

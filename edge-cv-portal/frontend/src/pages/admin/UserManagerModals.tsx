@@ -16,12 +16,16 @@
  *   the account's current role preselected (5.2); success is confirmed by
  *   the parent, which re-fetches the account list (5.7); rejection reasons
  *   (including the last-PortalAdmin guard, 5.3) are shown in the modal.
- * - CreateUserModal: username, email, and role fields with the role a
- *   Select restricted to the five defined Portal_Role values (12.2);
- *   client-side pre-checks mirroring the server validation — non-empty
- *   fields and email shape — keep submit disabled until valid (12.6,
- *   12.7); server rejection reasons (duplicate username 12.5, invalid
- *   email 12.6, missing field 12.7) are surfaced verbatim in the modal.
+ * - CreateUserModal: username, first name, last name, email, and role
+ *   fields with the role a Select restricted to the defined Portal_Role
+ *   values (12.2); the first and last name are the `given_name` and
+ *   `family_name` attributes the user pool requires, so both are required
+ *   here (an account created without them cannot complete its first-login
+ *   password change); client-side pre-checks mirroring the server
+ *   validation — non-empty fields and email shape — keep submit disabled
+ *   until valid (12.6, 12.7); server rejection reasons (duplicate username
+ *   12.5, invalid email 12.6, missing field 12.7) are surfaced verbatim in
+ *   the modal.
  *   Success is reported to the parent, which shows a flashbar stating an
  *   invitation with a temporary password was sent to the account's email
  *   (never the value) and re-fetches the list (12.10).
@@ -111,6 +115,8 @@ export function isValidCreateEmail(email: string): boolean {
 /** Per-field validation errors of a create-user request. */
 export interface CreateUserFieldErrors {
   username?: string;
+  given_name?: string;
+  family_name?: string;
   email?: string;
   role?: string;
 }
@@ -118,18 +124,27 @@ export interface CreateUserFieldErrors {
 /**
  * Pure client-side pre-check mirroring the server's
  * `validate_create_request` (Requirements 12.6, 12.7): every field must
- * be present and non-empty, and the email must have a valid shape.
- * Returns per-field error messages; an empty object means the request is
- * valid.
+ * be present and non-empty — including the first and last name, which
+ * the user pool requires as `given_name` / `family_name` — and the email
+ * must have a valid shape. Returns per-field error messages; an empty
+ * object means the request is valid.
  */
 export function validateCreateUserRequest(fields: {
   username: string;
+  given_name: string;
+  family_name: string;
   email: string;
   role: string;
 }): CreateUserFieldErrors {
   const errors: CreateUserFieldErrors = {};
   if (!fields.username.trim()) {
     errors.username = 'Username is required.';
+  }
+  if (!fields.given_name.trim()) {
+    errors.given_name = 'First name is required.';
+  }
+  if (!fields.family_name.trim()) {
+    errors.family_name = 'Last name is required.';
   }
   if (!fields.email.trim()) {
     errors.email = 'Email address is required.';
@@ -158,12 +173,18 @@ interface CreateUserModalProps {
 
 export function CreateUserModal({ onSuccess, onDismiss }: CreateUserModalProps) {
   const [username, setUsername] = useState('');
+  // The user pool requires given_name and family_name; collected here so
+  // the account can complete its first-login password change.
+  const [givenName, setGivenName] = useState('');
+  const [familyName, setFamilyName] = useState('');
   const [email, setEmail] = useState('');
   // No default role: the administrator must pick one of the five defined
   // Portal_Role values before submission is possible (Requirement 12.2).
   const [role, setRole] = useState('');
   const [touched, setTouched] = useState<{
     username?: boolean;
+    given_name?: boolean;
+    family_name?: boolean;
     email?: boolean;
     role?: boolean;
   }>({});
@@ -172,7 +193,13 @@ export function CreateUserModal({ onSuccess, onDismiss }: CreateUserModalProps) 
 
   // Client-side pre-checks mirror the server validation; submit stays
   // disabled until every field is valid (Requirements 12.6, 12.7).
-  const fieldErrors = validateCreateUserRequest({ username, email, role });
+  const fieldErrors = validateCreateUserRequest({
+    username,
+    given_name: givenName,
+    family_name: familyName,
+    email,
+    role,
+  });
   const isValid = Object.keys(fieldErrors).length === 0;
 
   const submit = async () => {
@@ -185,6 +212,8 @@ export function CreateUserModal({ onSuccess, onDismiss }: CreateUserModalProps) 
       await apiService.createAdminUser({
         username: username.trim(),
         email: email.trim(),
+        given_name: givenName.trim(),
+        family_name: familyName.trim(),
         role,
       });
       // The API response never carries the temporary password value; the
@@ -244,6 +273,28 @@ export function CreateUserModal({ onSuccess, onDismiss }: CreateUserModalProps) 
             onChange={({ detail }) => setUsername(detail.value)}
             onBlur={() => setTouched((t) => ({ ...t, username: true }))}
             ariaLabel="Username"
+          />
+        </FormField>
+        <FormField
+          label="First name"
+          errorText={touched.given_name ? fieldErrors.given_name : undefined}
+        >
+          <Input
+            value={givenName}
+            onChange={({ detail }) => setGivenName(detail.value)}
+            onBlur={() => setTouched((t) => ({ ...t, given_name: true }))}
+            ariaLabel="First name"
+          />
+        </FormField>
+        <FormField
+          label="Last name"
+          errorText={touched.family_name ? fieldErrors.family_name : undefined}
+        >
+          <Input
+            value={familyName}
+            onChange={({ detail }) => setFamilyName(detail.value)}
+            onBlur={() => setTouched((t) => ({ ...t, family_name: true }))}
+            ariaLabel="Last name"
           />
         </FormField>
         <FormField

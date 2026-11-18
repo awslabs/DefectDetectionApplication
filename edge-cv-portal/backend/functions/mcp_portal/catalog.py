@@ -544,6 +544,17 @@ ACCOUNT_USERNAME_NEW = {'type': 'string', 'pattern': PATH_PARAM_PATTERN, 'maxLen
                         'description': ("The new account's username (not an email address; "
                                         "the account's email goes in account_email).")}
 ACCOUNT_EMAIL_PATTERN = r'^[^@\s]+@[^@\s]+\.[^@\s]+$'
+# The standard name attributes the User_Pool marks required
+# (`user_admin.NAME_ATTRIBUTES`): the create route refuses a blank value and
+# trims the rest, so a name needs at least one non-whitespace character. An
+# account created without them cannot complete its first-login password change.
+ACCOUNT_NAME_PATTERN = r'\S'
+ACCOUNT_GIVEN_NAME = {'type': 'string', 'maxLength': 256, 'pattern': ACCOUNT_NAME_PATTERN,
+                      'description': ("The account's first name; written as the User_Pool's "
+                                      'required given_name attribute.')}
+ACCOUNT_FAMILY_NAME = {'type': 'string', 'maxLength': 256, 'pattern': ACCOUNT_NAME_PATTERN,
+                       'description': ("The account's last name; written as the User_Pool's "
+                                       'required family_name attribute.')}
 
 ADMIN: Tuple[ToolSpec, ...] = (
     ToolSpec(
@@ -769,8 +780,9 @@ ADMIN: Tuple[ToolSpec, ...] = (
     ToolSpec(
         name='portal_admin_account_create', domain='admin',
         title='Create a portal account',
-        description=('Creates a Portal account with an account-level role; the User_Pool '
-                     'emails an invitation with a temporary password to account_email.'),
+        description=('Creates a Portal account with an account-level role and the first '
+                     'and last name the User_Pool requires; the User_Pool emails an '
+                     'invitation with a temporary password to account_email.'),
         resource_type='account',
         input_schema=schema({
             'account_username': ACCOUNT_USERNAME_NEW,
@@ -778,13 +790,18 @@ ADMIN: Tuple[ToolSpec, ...] = (
                               'pattern': ACCOUNT_EMAIL_PATTERN,
                               'description': ("The account's email address; the User_Pool "
                                               'sends the invitation there.')},
+            'account_given_name': ACCOUNT_GIVEN_NAME,
+            'account_family_name': ACCOUNT_FAMILY_NAME,
             'role': enum('PortalAdmin', 'UseCaseAdmin', 'DataScientist', 'Operator',
                          'Viewer', 'DataLabeler',
                          description='The account-level Portal role.'),
-        }, required=['account_username', 'account_email', 'role']),
+        }, required=['account_username', 'account_email', 'account_given_name',
+                     'account_family_name', 'role']),
         backend='userAdmin', handler_module='user_admin',
         handler_function='create_account', method='POST', resource='/admin/users',
-        param_map={'account_username': 'username', 'account_email': 'email'},
+        param_map={'account_username': 'username', 'account_email': 'email',
+                   'account_given_name': 'given_name',
+                   'account_family_name': 'family_name'},
         permissions=('manage_users',), scope='global',
         classification=MUTATING, phase=4, idempotent=False,
         handler_audits=True, handler_audits_denials=True,

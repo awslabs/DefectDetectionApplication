@@ -2,16 +2,24 @@
 Unit tests for validate_create_request and POST /api/v1/admin/users in
 user_admin.py (spec: portal-user-manager, task 13.2).
 
-Covers: the pure validation gate (all three fields present and
-non-empty with rejections naming the missing field, email shape, role
-in the five defined Portal_Role values; a rejection performs no
+Covers: the pure validation gate (username, email and role present and
+non-empty with rejections naming the missing field, the pool-required
+given_name and family_name present and non-blank, email shape, role
+in the defined Portal_Role values; a rejection performs no
 User_Pool call), the validate -> audit-pending (account_create) ->
-admin_create_user with custom:role / email / email_verified=true and
-the Cognito-native email invitation (D12: default MessageAction, no
-SES, no portal-generated password, no verifier capture) -> audit-final
-flow, UsernameExistsException -> 409 "username already exists",
-other Cognito errors -> 502 "account was not created" with audit-final
-failure, the audit-before-effect abort, and the PortalAdmin 403 gate.
+admin_create_user with custom:role / email / email_verified=true /
+given_name / family_name and the Cognito-native email invitation (D12:
+default MessageAction, no SES, no portal-generated password, no
+verifier capture) -> audit-final flow, UsernameExistsException -> 409
+"username already exists", other Cognito errors -> 502 "account was not
+created" with audit-final failure, the audit-before-effect abort, and
+the PortalAdmin 403 gate.
+
+The name attributes matter because the user pool marks given_name and
+family_name required: an account created without them is stuck at its
+first-login password change (Cognito answers the NEW_PASSWORD_REQUIRED
+response with "Invalid attributes given, family_name is missing"), so
+the create route must collect them and write them to the account.
 
 Cognito is a recording fake client (same pattern as the other
 test_user_admin_* files); the audit entries and the edge-credentials
@@ -35,8 +43,13 @@ POOL_ID = "us-east-1_testpool"
 VALID_BODY = {
     "username": "newuser1",
     "email": "new.user@example.com",
+    "given_name": "New",
+    "family_name": "User",
     "role": "Operator",
 }
+
+REQUIRED_FIELDS = ["username", "email", "given_name", "family_name", "role"]
+NAME_FIELDS = ["given_name", "family_name"]
 
 
 # ----------------------------------------------------- fake Cognito client
@@ -152,11 +165,11 @@ class TestValidateCreateRequest:
     def test_valid_payload_passes(self, user_admin):
         assert user_admin.validate_create_request(dict(VALID_BODY)) is None
 
-    @pytest.mark.parametrize("field", ["username", "email", "role"])
+    @pytest.mark.parametrize("field", REQUIRED_FIELDS)
     def test_missing_field_rejected_naming_the_field(
             self, user_admin, field):
         """Req 12.7: a missing field is rejected and the rejection names
-        the missing field."""
+        the missing field (the pool-required name attributes included)."""
         body = dict(VALID_BODY)
         del body[field]
         rejection = user_admin.validate_create_request(body)
@@ -164,13 +177,30 @@ class TestValidateCreateRequest:
         assert rejection["field"] == field
         assert field in rejection["message"]
 
-    @pytest.mark.parametrize("field", ["username", "email", "role"])
+    @pytest.mark.parametrize("field", REQUIRED_FIELDS)
     def test_empty_field_rejected_naming_the_field(self, user_admin, field):
         body = dict(VALID_BODY)
         body[field] = ""
         rejection = user_admin.validate_create_request(body)
         assert rejection is not None
         assert rejection["field"] == field
+
+    @pytest.mark.parametrize("field", NAME_FIELDS)
+    @pytest.mark.parametrize("value", ["   ", "\t", None, 42])
+    def test_blank_or_non_string_name_rejected(self, user_admin, field,
+                                               value):
+        """A whitespace-only or non-string name is no name: Cognito would
+        accept the request and leave the account unable to finish its
+        first sign-in, so the gate rejects it naming the field."""
+        body = dict(VALID_BODY)
+        body[field] = value
+        rejection = user_admin.validate_create_request(body)
+        assert rejection is not None
+        assert rejection["field"] == field
+
+    def test_names_with_surrounding_whitespace_pass(self, user_admin):
+        body = dict(VALID_BODY, given_name="  New ", family_name=" User  ")
+        assert user_admin.validate_create_request(body) is None
 
     def test_none_body_rejected(self, user_admin):
         rejection = user_admin.validate_create_request(None)
@@ -244,9 +274,10 @@ class TestCreateSuccess:
             self, user_admin, credentials_table, audit_table,
             install_cognito):
         """Req 12.1, 12.3 (D12): admin_create_user carries the exact
-        submitted username, email (email_verified=true), and custom:role,
-        with the default MessageAction (Cognito sends the invitation)
-        and no portal-generated TemporaryPassword."""
+        submitted username, email (email_verified=true), the
+        pool-required given_name and family_name, and custom:role, with
+        the default MessageAction (Cognito sends the invitation) and no
+        portal-generated TemporaryPassword."""
         fake = install_cognito()
         status, body = invoke(user_admin, create_event(dict(VALID_BODY)))
 
@@ -263,6 +294,8 @@ class TestCreateSuccess:
         assert attrs == {
             "email": VALID_BODY["email"],
             "email_verified": "true",
+            "given_name": VALID_BODY["given_name"],
+            "family_name": VALID_BODY["family_name"],
             "custom:role": VALID_BODY["role"],
         }
         # D12: the Cognito-native invitation is the default MessageAction
@@ -270,6 +303,21 @@ class TestCreateSuccess:
         # password.
         assert "MessageAction" not in call
         assert "TemporaryPassword" not in call
+
+    def test_name_attributes_are_written_trimmed(
+            self, user_admin, credentials_table, audit_table,
+            install_cognito):
+        """Surrounding whitespace is not part of a name: the attributes
+        Cognito receives are the stripped values."""
+        fake = install_cognito()
+        status, _ = invoke(user_admin, create_event(
+            dict(VALID_BODY, given_name="  New ", family_name=" User\t")))
+
+        assert status == 201
+        attrs = {a["Name"]: a["Value"]
+                 for a in fake.calls[0]["UserAttributes"]}
+        assert attrs["given_name"] == "New"
+        assert attrs["family_name"] == "User"
 
     def test_success_finalizes_audit_with_created_account_details(
             self, user_admin, credentials_table, audit_table,
@@ -307,7 +355,7 @@ class TestCreateSuccess:
 
 
 class TestValidationGate:
-    @pytest.mark.parametrize("field", ["username", "email", "role"])
+    @pytest.mark.parametrize("field", REQUIRED_FIELDS)
     def test_missing_field_rejected_400_naming_field_no_pool_call(
             self, user_admin, credentials_table, audit_table,
             install_cognito, field):
@@ -321,6 +369,25 @@ class TestValidationGate:
 
         assert status == 400
         assert resp["field"] == field
+        assert fake.calls == []
+        assert audit_entries(audit_table) == []
+
+    @pytest.mark.parametrize("field", NAME_FIELDS)
+    def test_blank_name_rejected_400_naming_field_no_pool_call(
+            self, user_admin, credentials_table, audit_table,
+            install_cognito, field):
+        """A request without a usable first or last name is a clear 400
+        naming the field and explaining why, not a Cognito error, and
+        it performs no User_Pool call (no stuck account is created)."""
+        fake = install_cognito()
+        status, resp = invoke(user_admin, create_event(
+            dict(VALID_BODY, **{field: "   "})))
+
+        assert status == 400
+        assert resp["error"] == "Invalid account request"
+        assert resp["field"] == field
+        assert field in resp["message"]
+        assert "first sign-in" in resp["message"]
         assert fake.calls == []
         assert audit_entries(audit_table) == []
 

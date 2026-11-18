@@ -104,6 +104,12 @@ VERIFIER_HASH_BYTES = 32
 PORTAL_ROLES = ('PortalAdmin', 'UseCaseAdmin', 'DataScientist',
                 'Operator', 'Viewer', 'DataLabeler')
 
+# The standard name attributes the user pool marks required (AuthStack
+# standardAttributes givenName / familyName), paired with the labels the
+# create form shows for them. Required attributes of an existing pool
+# cannot be changed, so creation must supply both.
+NAME_ATTRIBUTES = (('given_name', 'first name'), ('family_name', 'last name'))
+
 
 def validate_create_request(body: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """
@@ -113,6 +119,11 @@ def validate_create_request(body: Dict[str, Any]) -> Optional[Dict[str, str]]:
     {'field', 'message'} identifying the offending field:
 
     - username, email, and role must all be present and non-empty (12.7)
+    - given_name and family_name must be present and non-blank: the user
+      pool requires both attributes, and an account created without them
+      cannot complete its first-login password change (Cognito rejects
+      the NEW_PASSWORD_REQUIRED response until every required attribute
+      is supplied), so they are collected at creation
     - the email must consist of a non-empty local part, an '@'
       separator, and a non-empty domain containing at least one dot (12.6)
     - the role must be one of the defined Portal_Role values (12.8)
@@ -128,6 +139,16 @@ def validate_create_request(body: Dict[str, Any]) -> Optional[Dict[str, str]]:
             return {
                 'field': field,
                 'message': f'{field} is required and must be non-empty',
+            }
+
+    for field, label in NAME_ATTRIBUTES:
+        value = body.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return {
+                'field': field,
+                'message': f'{field} ({label}) is required: the user pool '
+                           f'requires it and the account could not '
+                           f'complete its first sign-in without it',
             }
 
     parts = body['email'].split('@')
@@ -692,10 +713,13 @@ def create_account(event):
     """
     POST /api/v1/admin/users
 
-    Body {username, email, role}. Flow (audit-before-effect, D10):
+    Body {username, email, given_name, family_name, role}. Flow
+    (audit-before-effect, D10):
     validate_create_request (12.6, 12.7, 12.8 - a rejection performs no
-    User_Pool call) -> audit-pending (account_create) ->
-    admin_create_user with custom:role, email, email_verified=true and
+    User_Pool call; a missing or blank given_name / family_name is a 400
+    naming the field, never a Cognito error) -> audit-pending
+    (account_create) -> admin_create_user with custom:role, email,
+    email_verified=true, the pool-required given_name and family_name and
     the Cognito-native email invitation (D12 - default MessageAction, no
     SES, no portal-generated password, no verifier capture) -> the
     account's global Portal_Identity registry row keyed on its new `sub`
@@ -736,6 +760,10 @@ def create_account(event):
     username = body['username']
     email = body['email']
     role = body['role']
+    # Both names passed the gate above, so they are non-blank strings;
+    # surrounding whitespace is not part of a name.
+    given_name = body['given_name'].strip()
+    family_name = body['family_name'].strip()
 
     acting_user = get_user_from_event(event)
     identity = attribution_from(event, acting_user)
@@ -762,7 +790,9 @@ def create_account(event):
     # Cognito-native invitation (D12): the default MessageAction sends
     # the invitation email with a Cognito-generated policy-conformant
     # temporary password (12.3); the portal never holds it, so no
-    # verifier is captured at creation.
+    # verifier is captured at creation. The pool-required given_name and
+    # family_name are written here so the account's first-login password
+    # change has nothing left to supply.
     try:
         created = cognito_client.admin_create_user(
             UserPoolId=USER_POOL_ID,
@@ -770,6 +800,8 @@ def create_account(event):
             UserAttributes=[
                 {'Name': 'email', 'Value': email},
                 {'Name': 'email_verified', 'Value': 'true'},
+                {'Name': 'given_name', 'Value': given_name},
+                {'Name': 'family_name', 'Value': family_name},
                 {'Name': 'custom:role', 'Value': role},
             ],
             DesiredDeliveryMediums=['EMAIL'],

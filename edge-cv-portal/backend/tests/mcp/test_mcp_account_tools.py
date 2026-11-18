@@ -60,6 +60,9 @@ USERNAME = 'alice-x1'
 OTHER = 'bob-x1'
 TARGET = 'fake-target-1'
 TARGET_EMAIL = 'fake-user-1@example.com'
+# The first and last name the user pool requires of every account.
+TARGET_GIVEN_NAME = 'Fake'
+TARGET_FAMILY_NAME = 'Target'
 MARKER = ('channel', 'mcp_tool', 'mcp_server', 'mcp_client', 'mcp_request_id')
 DENYLISTED = ('password', 'verifier', 'hash')
 
@@ -93,7 +96,9 @@ def call(spec, args, token, view='admin'):
 
 def args_for(spec, target):
     if spec is CREATE:
-        return {'account_username': target, 'account_email': TARGET_EMAIL, 'role': 'Viewer'}
+        return {'account_username': target, 'account_email': TARGET_EMAIL,
+                'account_given_name': TARGET_GIVEN_NAME,
+                'account_family_name': TARGET_FAMILY_NAME, 'role': 'Viewer'}
     return {'account_username': target, 'confirm': target}
 
 
@@ -654,15 +659,37 @@ def test_an_email_alias_target_is_percent_encoded_in_the_path(portal):
     assert_clean_event(event, token, DISABLE)
 
 
-def test_create_sends_the_three_fields_in_the_body(portal):
+def test_create_sends_the_account_fields_and_both_names_in_the_body(portal):
     token = seeded_token(portal.stack)
     assert call(CREATE, args_for(CREATE, TARGET), token).is_error is False
     [event] = portal.events
     assert (event['httpMethod'], event['path']) == ('POST', '/admin/users')
     assert event['pathParameters'] is None and event['queryStringParameters'] is None
+    # The pool-required names reach the handler as given_name / family_name,
+    # the keys `user_admin.validate_create_request` demands.
     assert json.loads(event['body']) == {'username': TARGET, 'email': TARGET_EMAIL,
+                                         'given_name': TARGET_GIVEN_NAME,
+                                         'family_name': TARGET_FAMILY_NAME,
                                          'role': 'Viewer'}
     assert_clean_event(event, token, CREATE)
+
+
+@pytest.mark.parametrize('argument', ['account_given_name', 'account_family_name'])
+@pytest.mark.parametrize('variant', ['absent', 'blank'])
+def test_create_without_a_name_is_refused_before_dispatch(portal, argument, variant):
+    token = seeded_token(portal.stack)
+    args = args_for(CREATE, TARGET)
+    if variant == 'absent':
+        del args[argument]
+    else:
+        args[argument] = '  '
+    result = call(CREATE, args, token)
+    content = result.structured_content
+    assert result.is_error is True
+    assert content['category'] == 'invalid_input'
+    assert content['message'] == (f'{argument} is required' if variant == 'absent'
+                                  else f'{argument} fails pattern')
+    assert portal.calls == []
 
 
 def test_delete_sends_no_body(portal):

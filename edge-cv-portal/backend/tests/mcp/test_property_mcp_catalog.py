@@ -375,11 +375,20 @@ def test_account_lifecycle_fixed_cases():
     assert create.classification == cat.MUTATING and create.destructive is False
     assert create.idempotent is False and create.confirm_target is None
     props = create.input_schema['properties']
-    assert set(props) == {'account_username', 'account_email', 'role'}
-    assert create.input_schema['required'] == ['account_username', 'account_email', 'role']
+    assert set(props) == {'account_username', 'account_email', 'account_given_name',
+                          'account_family_name', 'role'}
+    assert create.input_schema['required'] == ['account_username', 'account_email',
+                                               'account_given_name', 'account_family_name',
+                                               'role']
     assert props['account_username']['maxLength'] == 128
     assert props['account_email']['maxLength'] == 254
     assert props['account_email']['pattern'] == cat.ACCOUNT_EMAIL_PATTERN
+    # The pool-required names: non-blank strings, forwarded as given_name / family_name.
+    for argument in ('account_given_name', 'account_family_name'):
+        assert props[argument]['maxLength'] == 256
+        assert props[argument]['pattern'] == cat.ACCOUNT_NAME_PATTERN
+    assert create.param_map['account_given_name'] == 'given_name'
+    assert create.param_map['account_family_name'] == 'family_name'
     assert props['role']['enum'] == PORTAL_ROLES
     assert (create.method, create.resource) == ('POST', '/admin/users')
     assert render_description(create).endswith('Touches: account. MUTATING.')

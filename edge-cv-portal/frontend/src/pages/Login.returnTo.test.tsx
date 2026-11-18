@@ -49,12 +49,15 @@ const DEEP_LOCATION = '/workflows/builder/abc?tab=nodes#latest';
 interface AuthState {
   isAuthenticated?: boolean;
   needsNewPassword?: boolean;
+  /** Attributes the new-password challenge reported missing. */
+  missingAttributes?: string[];
   role?: UserRole;
 }
 
 function setAuth({
   isAuthenticated = false,
   needsNewPassword = false,
+  missingAttributes = ['given_name', 'family_name'],
   role = 'DataScientist',
 }: AuthState) {
   useAuthMock.mockReturnValue({
@@ -68,6 +71,7 @@ function setAuth({
     isAuthenticated,
     isLoading: false,
     needsNewPassword,
+    missingAttributes,
     login: vi.fn(),
     completeNewPassword: completeNewPasswordMock,
     changePassword: vi.fn(),
@@ -93,10 +97,14 @@ function renderLogin(auth: AuthState = {}) {
   return render(<Login />);
 }
 
-/** Fills the new-password form and submits it. */
+/** Fills the new-password form (the challenge's missing name attributes
+ * included) and submits it. */
 async function submitNewPassword(container: HTMLElement) {
-  fireEvent.change(screen.getByPlaceholderText('Enter your name'), {
+  fireEvent.change(screen.getByLabelText('First name'), {
     target: { value: 'Ada' },
+  });
+  fireEvent.change(screen.getByLabelText('Last name'), {
+    target: { value: 'Lovelace' },
   });
   const passwords = container.querySelectorAll('input[type="password"]');
   expect(passwords).toHaveLength(2);

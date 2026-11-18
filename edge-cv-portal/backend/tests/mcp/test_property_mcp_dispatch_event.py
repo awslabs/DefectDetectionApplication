@@ -160,8 +160,11 @@ def test_account_tool_dispatch_event_faithfulness(call):
     assert (event['httpMethod'], event['resource']) == (spec.method, spec.resource)
     if spec.name == 'portal_admin_account_create':
         assert event['path'] == '/admin/users' and event['pathParameters'] is None
+        # The pool-required names travel under their Cognito attribute names.
         assert json.loads(event['body']) == {'username': username,
                                              'email': args['account_email'],
+                                             'given_name': args['account_given_name'],
+                                             'family_name': args['account_family_name'],
                                              'role': args['role']}
     else:
         assert event['path'] == (f"/admin/users/{quote(username, safe='')}"

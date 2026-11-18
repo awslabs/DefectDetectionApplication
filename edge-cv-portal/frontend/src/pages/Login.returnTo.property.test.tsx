@@ -206,6 +206,7 @@ function setAuth(role: UserRole | undefined) {
     isAuthenticated: true,
     isLoading: false,
     needsNewPassword: false,
+    missingAttributes: [],
     login: vi.fn(),
     completeNewPassword: vi.fn(),
     changePassword: vi.fn(),

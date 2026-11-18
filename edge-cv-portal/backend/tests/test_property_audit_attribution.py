@@ -586,6 +586,7 @@ class TestProperty5EveryAuditEntryCarriesDurableAttribution:
         event = build_event(
             sub, shape, secret, method="POST", resource="/admin/users",
             body={"username": username, "email": f"{username}@example.com",
+                  "given_name": "Test", "family_name": "Account",
                   "role": "Operator"})
         response = user_manager.handler(event, None)
         assert response["statusCode"] == 201, response

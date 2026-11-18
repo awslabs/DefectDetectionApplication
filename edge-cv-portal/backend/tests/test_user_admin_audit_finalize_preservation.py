@@ -43,6 +43,8 @@ POOL_ID = "us-east-1_testpool"
 VALID_BODY = {
     "username": "finalize-preservation-user",
     "email": "finalize.preservation@example.com",
+    "given_name": "Finalize",
+    "family_name": "Preservation",
     "role": "Operator",
 }
 

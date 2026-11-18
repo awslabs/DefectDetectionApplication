@@ -8,6 +8,15 @@ interface AuthContextType {
   isAuthenticated: boolean;
   isLoading: boolean;
   needsNewPassword: boolean;
+  /**
+   * The user attributes the NEW_PASSWORD_REQUIRED challenge reported as
+   * missing (Cognito's `requiredAttributes` challenge parameter, exposed by
+   * Amplify as `nextStep.missingAttributes`): the pool-required attributes
+   * the account lacks, e.g. `given_name` / `family_name`. Cognito rejects
+   * the new password until every one of them is supplied, so the
+   * change-password form must collect each. Empty when nothing is missing.
+   */
+  missingAttributes: string[];
   login: (username: string, password: string) => Promise<void>;
   completeNewPassword: (newPassword: string, userAttributes?: Record<string, string>) => Promise<void>;
   changePassword: (oldPassword: string, newPassword: string) => Promise<void>;
@@ -67,6 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [needsNewPassword, setNeedsNewPassword] = useState(false);
+  const [missingAttributes, setMissingAttributes] = useState<string[]>([]);
 
   useEffect(() => {
     initAuth();
@@ -119,8 +129,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       
       if (result.isSignedIn) {
         setNeedsNewPassword(false);
+        setMissingAttributes([]);
         await checkAuth();
       } else if (result.nextStep?.signInStep === 'CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED') {
+        // The challenge names the pool-required attributes the account
+        // lacks; the change-password form asks for exactly those.
+        setMissingAttributes([...(result.nextStep.missingAttributes ?? [])]);
         setNeedsNewPassword(true);
         setIsLoading(false);
         // Don't throw — the UI will show the change password form
@@ -141,8 +155,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setError(null);
       setIsLoading(true);
       
-      // Cognito may require user attributes (like given_name) when completing the new password challenge.
-      // Pass them as the challengeResponse along with the new password.
+      // Cognito requires every attribute the challenge listed as missing
+      // (see `missingAttributes`) to be supplied together with the new
+      // password; they travel as the challenge's userAttributes.
       const result = await confirmSignIn({ 
         challengeResponse: newPassword,
         options: userAttributes ? { userAttributes } : undefined,
@@ -150,6 +165,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       
       if (result.isSignedIn) {
         setNeedsNewPassword(false);
+        setMissingAttributes([]);
         await checkAuth();
       } else {
         throw new Error('Password change succeeded but sign-in did not complete');
@@ -214,6 +230,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAuthenticated: !!user,
         isLoading,
         needsNewPassword,
+        missingAttributes,
         login,
         completeNewPassword,
         changePassword,
