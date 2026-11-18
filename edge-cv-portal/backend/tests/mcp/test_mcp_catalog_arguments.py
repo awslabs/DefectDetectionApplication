@@ -393,12 +393,17 @@ ACCOUNT_PATH_ROWS = [BY_NAME[name] for name in ('portal_admin_account_disable',
                                                 'portal_admin_account_delete')]
 
 
-def test_create_account_reads_username_email_and_role_from_the_body():
+def test_create_account_reads_username_email_names_and_role_from_the_body():
     r = route('user_admin', 'create_account')
-    assert {(h.BODY, key) for key in ('username', 'email', 'role')} <= r.reads
+    assert {(h.BODY, key) for key in ('username', 'email', 'given_name', 'family_name',
+                                      'role')} <= r.reads
+    # The two pool-required name attributes travel under their Cognito names.
     assert ACCOUNT_CREATE.param_map == {'account_username': 'username',
-                                        'account_email': 'email'}
-    for argument in ('account_username', 'account_email', 'role'):
+                                        'account_email': 'email',
+                                        'account_given_name': 'given_name',
+                                        'account_family_name': 'family_name'}
+    for argument in ('account_username', 'account_email', 'account_given_name',
+                     'account_family_name', 'role'):
         assert ACCOUNT_CREATE.location_of(argument) == 'body', argument
 
 
