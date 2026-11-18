@@ -391,6 +391,7 @@ def create(user_admin, username, role="Viewer", email=None,
     return invoke(user_admin, admin_event(
         "POST", "/api/v1/admin/users",
         body={"username": username, "email": email or f"{username}@example.com",
+              "given_name": "Test", "family_name": "Account",
               "role": role},
         acting_sub=acting_sub))
 

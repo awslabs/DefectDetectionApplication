@@ -15,11 +15,39 @@ import { takeAttemptedLocation } from '../services/sessionRedirect';
 
 type LoginView = 'login' | 'new-password' | 'forgot' | 'reset-code';
 
+/**
+ * Form labels for the standard Cognito attributes a user pool can mark
+ * required. The first-login form renders one field per attribute the
+ * NEW_PASSWORD_REQUIRED challenge reports missing; a key not listed here
+ * (e.g. a custom attribute) gets a readable form of its name, so every
+ * missing attribute always has a field.
+ */
+const REQUIRED_ATTRIBUTE_LABELS: Record<string, string> = {
+  given_name: 'First name',
+  family_name: 'Last name',
+  middle_name: 'Middle name',
+  name: 'Full name',
+  nickname: 'Nickname',
+  preferred_username: 'Preferred username',
+  email: 'Email address',
+  phone_number: 'Phone number',
+  birthdate: 'Date of birth',
+  address: 'Address',
+};
+
+/** The form label for a Cognito attribute key the challenge reported missing. */
+export function requiredAttributeLabel(key: string): string {
+  const known = REQUIRED_ATTRIBUTE_LABELS[key];
+  if (known) return known;
+  const readable = key.replace(/^custom:/, '').replace(/_/g, ' ').trim();
+  return readable ? readable.charAt(0).toUpperCase() + readable.slice(1) : key;
+}
+
 export default function Login() {
   const navigate = useNavigate();
   const {
     login, completeNewPassword, forgotPassword, forgotPasswordSubmit,
-    isAuthenticated, needsNewPassword, error: authError, user,
+    isAuthenticated, needsNewPassword, missingAttributes, error: authError, user,
   } = useAuth();
 
   // DataLabeler-only users land on the labeler workspace instead of the
@@ -33,7 +61,9 @@ export default function Login() {
   const [password, setPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [givenName, setGivenName] = useState('');
+  // Values typed for the attributes the new-password challenge reported
+  // missing, keyed by Cognito attribute name (e.g. given_name).
+  const [attributeValues, setAttributeValues] = useState<Record<string, string>>({});
   const [resetCode, setResetCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -86,11 +116,18 @@ export default function Login() {
     setLoading(true);
     setError('');
     try {
+      // Every attribute the challenge reported missing is required: Cognito
+      // rejects the new password until all of them are supplied.
+      const blank = missingAttributes.find((key) => !(attributeValues[key] ?? '').trim());
+      if (blank) { setError(`Please enter your ${requiredAttributeLabel(blank).toLowerCase()}`); return; }
       if (!newPassword || !confirmPassword) { setError('Please fill in all fields'); return; }
       if (newPassword !== confirmPassword) { setError('Passwords do not match'); return; }
       if (newPassword.length < 8) { setError('Password must be at least 8 characters'); return; }
-      if (!givenName.trim()) { setError('Please enter your name'); return; }
-      await completeNewPassword(newPassword, { given_name: givenName.trim() });
+      // Users whose attributes are already set have nothing to supply.
+      const userAttributes = missingAttributes.length > 0
+        ? Object.fromEntries(missingAttributes.map((key) => [key, attributeValues[key].trim()]))
+        : undefined;
+      await completeNewPassword(newPassword, userAttributes);
       // Same restoration through the new-password challenge (Requirement 2.2).
       navigate(resolveDestination());
     } catch (err: any) { setError(err.message || 'Failed to set password.'); }
@@ -158,11 +195,20 @@ export default function Login() {
 
           {view === 'new-password' && (
             <>
-              <Alert type="info">You must set a new password before continuing.</Alert>
-              <FormField label="Your Name">
-                <Input value={givenName} onChange={({ detail }) => setGivenName(detail.value)}
-                  placeholder="Enter your name" />
-              </FormField>
+              <Alert type="info">
+                You must set a new password before continuing.
+                {missingAttributes.length > 0 && ' Your account is also missing the details below; they are required to complete sign-in.'}
+              </Alert>
+              {missingAttributes.map((key) => {
+                const label = requiredAttributeLabel(key);
+                return (
+                  <FormField key={key} label={label}>
+                    <Input value={attributeValues[key] ?? ''} ariaLabel={label}
+                      onChange={({ detail }) => setAttributeValues((values) => ({ ...values, [key]: detail.value }))}
+                      placeholder={`Enter your ${label.toLowerCase()}`} />
+                  </FormField>
+                );
+              })}
               <FormField label="New Password">
                 <Input type="password" value={newPassword} onChange={({ detail }) => setNewPassword(detail.value)}
                   onKeyDown={(e) => e.detail.key === 'Enter' && handleNewPassword()} />

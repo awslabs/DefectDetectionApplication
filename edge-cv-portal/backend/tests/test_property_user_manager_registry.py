@@ -293,7 +293,9 @@ def apply_operation(user_manager, kind, username, role):
         event = admin_event(
             "POST", "/api/v1/admin/users",
             body={"username": username,
-                  "email": f"{username}@example.com", "role": role})
+                  "email": f"{username}@example.com",
+                  "given_name": "Test", "family_name": "Account",
+                  "role": role})
     elif kind == "role_change":
         event = admin_event(
             "PUT", f"/api/v1/admin/users/{username}/role",

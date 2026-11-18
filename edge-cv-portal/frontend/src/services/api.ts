@@ -1759,12 +1759,16 @@ class ApiService {
    * Create a new portal user account (`user_admin.py`, portal-user-manager
    * Requirement 12.1). Cognito emails the invitation with a temporary
    * password itself — the value never appears in the response (12.10).
-   * A 409 indicates the username already exists (12.5); a 400 identifies
-   * the invalid email or missing field (12.6, 12.7).
+   * `given_name` and `family_name` are the name attributes the user pool
+   * requires; without them the account could not complete its first-login
+   * password change. A 409 indicates the username already exists (12.5);
+   * a 400 identifies the invalid email or missing field (12.6, 12.7).
    */
   async createAdminUser(body: {
     username: string;
     email: string;
+    given_name: string;
+    family_name: string;
     role: string;
   }): Promise<{ message: string }> {
     return this.request<{ message: string }>('/admin/users', {

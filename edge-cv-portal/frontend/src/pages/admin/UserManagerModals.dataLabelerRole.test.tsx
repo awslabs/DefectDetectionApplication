@@ -222,6 +222,12 @@ describe('Property 3: fix check — frontend/backend role vocabulary parity (Req
     fireEvent.change(screen.getByLabelText('Username'), {
       target: { value: 'labeler1' },
     });
+    fireEvent.change(screen.getByLabelText('First name'), {
+      target: { value: 'Label' },
+    });
+    fireEvent.change(screen.getByLabelText('Last name'), {
+      target: { value: 'Maker' },
+    });
     fireEvent.change(screen.getByLabelText('Email'), {
       target: { value: 'labeler1@example.com' },
     });
@@ -233,11 +239,14 @@ describe('Property 3: fix check — frontend/backend role vocabulary parity (Req
     fireEvent.click(screen.getByRole('button', { name: 'Create user' }));
 
     // The same payload shape the existing suites pin for other roles:
-    // { username, email, role } — role carries the new value verbatim.
+    // { username, email, given_name, family_name, role } — role carries
+    // the new value verbatim.
     await waitFor(() =>
       expect(createAdminUser).toHaveBeenCalledWith({
         username: 'labeler1',
         email: 'labeler1@example.com',
+        given_name: 'Label',
+        family_name: 'Maker',
         role: 'DataLabeler',
       })
     );
