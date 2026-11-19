@@ -534,22 +534,31 @@ PY
 # UseCase and Data accounts
 # ============================================================================
 
-@test "usecase: its own execution and installer policies, no boundary" {
+@test "usecase: its own execution and installer policies and permissions boundary" {
     _run_setup usecase --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
     [ "$status" -eq 0 ]
-    [ "$(ls "$STUB_STATE/policies" | sort | tr '\n' ' ')" = "dda-cfn-exec-usecase dda-installer-usecase " ]
-    ! grep -q -- "--custom-permissions-boundary" "$STUB_STATE/cdk.log"
+    [ "$(ls "$STUB_STATE/policies" | sort | tr '\n' ' ')" = "dda-cfn-exec-usecase dda-installer-usecase dda-usecase-permissions-boundary " ]
     [ "$(_policy_default_doc dda-cfn-exec-usecase)" = "$(_filled usecase-cfn-execution-policy.json)" ]
-    grep -qF "|bootstrap aws://${ACCOUNT}/${REGION_NAME} --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-usecase" \
-        "$STUB_STATE/cdk.log"
+    [ "$(_policy_default_doc dda-usecase-permissions-boundary)" = "$(_filled usecase-permissions-boundary-policy.json)" ]
+    ! _policy_default_doc dda-usecase-permissions-boundary | grep -qE 'ACCOUNT_ID|:REGION:'
+    [ "$(cat "$STUB_STATE/cdk.log")" = "$SANDBOX/iam|bootstrap aws://${ACCOUNT}/${REGION_NAME} --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-usecase --custom-permissions-boundary dda-usecase-permissions-boundary" ]
     [[ "$output" == *"./deploy-portal.sh usecase"* ]]
 }
 
-@test "data: its own execution and installer policies, no Marketplace step" {
+@test "usecase and data: the boundary keeps its name with --name-suffix" {
+    _run_setup usecase --installer-principal "$PRINCIPAL" --region "$REGION_NAME" --name-suffix -eu-west-1
+    [ "$status" -eq 0 ]
+    [ "$(ls "$STUB_STATE/policies" | sort | tr '\n' ' ')" = "dda-cfn-exec-usecase-eu-west-1 dda-installer-usecase-eu-west-1 dda-usecase-permissions-boundary " ]
+    grep -qF -- "--custom-permissions-boundary dda-usecase-permissions-boundary" "$STUB_STATE/cdk.log"
+}
+
+@test "data: its own execution and installer policies and permissions boundary, no Marketplace step" {
     sed -i 's/DATA_BUCKET_NAME/my-data-bucket/g' "$SANDBOX/iam/data-cfn-execution-policy.json"
     _run_setup data --installer-principal "$PRINCIPAL" --region "$REGION_NAME"
     [ "$status" -eq 0 ]
-    [ "$(ls "$STUB_STATE/policies" | sort | tr '\n' ' ')" = "dda-cfn-exec-data dda-installer-data " ]
+    [ "$(ls "$STUB_STATE/policies" | sort | tr '\n' ' ')" = "dda-cfn-exec-data dda-data-permissions-boundary dda-installer-data " ]
+    [ "$(_policy_default_doc dda-data-permissions-boundary)" = "$(_filled data-permissions-boundary-policy.json)" ]
+    [ "$(cat "$STUB_STATE/cdk.log")" = "$SANDBOX/iam|bootstrap aws://${ACCOUNT}/${REGION_NAME} --cloudformation-execution-policies ${ARN_PREFIX}/dda-cfn-exec-data --custom-permissions-boundary dda-data-permissions-boundary" ]
     [[ "$output" != *"still names DATA_BUCKET_NAME"* ]]
     [[ "$output" == *"./deploy-portal.sh data"* ]]
     [[ "$output" != *"AWSMarketplaceManageSubscriptions"* ]]
