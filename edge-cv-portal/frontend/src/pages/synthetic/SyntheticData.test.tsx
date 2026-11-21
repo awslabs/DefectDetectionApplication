@@ -12,7 +12,7 @@
  * - At-least-one-source validation (Req 3.6)
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactNode } from 'react';
@@ -83,6 +83,22 @@ const NO_RANDOMIZATION: SyntheticModel = {
   },
 };
 
+/** The Stability inpaint model with its declared input image limits. */
+const STABILITY: SyntheticModel = {
+  model_id: 'stability.stable-image-inpaint-v1:0',
+  display_name: 'Stability Stable Image Inpaint',
+  capabilities: {
+    text_to_image: false,
+    inpainting: true,
+    image_variation: false,
+    seed: true,
+    cfg_scale: false,
+  },
+  max_images_per_call: 1,
+  randomization_defaults: { seed: null, cfg_scale: null },
+  input_image_limits: { min_side: 64, min_pixels: 4096, max_pixels: 9437184 },
+};
+
 beforeAll(() => {
   if (!('ResizeObserver' in globalThis)) {
     (globalThis as any).ResizeObserver = class {
@@ -112,7 +128,9 @@ beforeEach(() => {
     count: 1,
   });
   mocked.listSyntheticSessions.mockResolvedValue({ sessions: [], count: 0 });
-  mocked.listSyntheticModels.mockResolvedValue({ models: [NOVA, NO_RANDOMIZATION] });
+  mocked.listSyntheticModels.mockResolvedValue({
+    models: [NOVA, NO_RANDOMIZATION, STABILITY],
+  });
   mocked.listDatasets.mockResolvedValue({
     datasets: [
       {
@@ -534,6 +552,117 @@ describe('SyntheticData source-image picker pagination', () => {
     expect(screen.getByText(/0 selected/)).toBeInTheDocument();
     // At-least-one-source validation returns (Req 3.6).
     expect(screen.getByText(NO_SOURCES_MESSAGE)).toBeInTheDocument();
+  });
+});
+
+describe('SyntheticData source image size limits', () => {
+  const HANDLING_LABEL = "Images outside the model's size limits";
+
+  /** Simulate a thumbnail load reporting its natural dimensions. */
+  function loadWithNaturalSize(img: HTMLElement, width: number, height: number) {
+    Object.defineProperty(img, 'naturalWidth', { value: width, configurable: true });
+    Object.defineProperty(img, 'naturalHeight', { value: height, configurable: true });
+    fireEvent.load(img);
+  }
+
+  it('offers the handling control for a model that declares input limits', async () => {
+    await openWizard();
+    expect(screen.queryByText(HANDLING_LABEL)).not.toBeInTheDocument();
+
+    await selectModel('Stability Stable Image Inpaint');
+    expect(await screen.findByText(HANDLING_LABEL)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Stability Stable Image Inpaint accepts images between 4,096 and 9,437,184 pixels in total, with each side at least 64 px.'
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('radio', {
+        name: /resize to fit the model, then restore the original size/i,
+      })
+    ).toBeChecked();
+    expect(screen.getByRole('radio', { name: /do not resize/i })).not.toBeChecked();
+
+    // A model without declared limits hides the control.
+    await selectModel('Fixed Example Model');
+    await waitFor(() =>
+      expect(screen.queryByText(HANDLING_LABEL)).not.toBeInTheDocument()
+    );
+  });
+
+  it('warns about selected images outside the selected model limits', async () => {
+    await openWizard();
+    await selectDataset('datasets/castings/');
+    const thumb1 = await screen.findByTestId('source-thumb-img1.png');
+    const thumb2 = screen.getByTestId('source-thumb-img2.png');
+    loadWithNaturalSize(within(thumb1).getByRole('img'), 4608, 3288);
+    loadWithNaturalSize(within(thumb2).getByRole('img'), 1024, 768);
+    await userEvent.click(thumb1);
+    await userEvent.click(thumb2);
+    // No model with limits selected: no warning.
+    expect(screen.queryByTestId('oversize-warning')).not.toBeInTheDocument();
+
+    await selectModel('Stability Stable Image Inpaint');
+    const warning = await screen.findByTestId('oversize-warning');
+    expect(warning).toHaveTextContent(
+      "1 selected image outside the model's size limits"
+    );
+    expect(warning).toHaveTextContent('img1.png: 4608×3288 (15,151,104 pixels)');
+    expect(warning).toHaveTextContent(
+      '15,151,104 pixels exceeds the maximum of 9,437,184 pixels'
+    );
+    expect(warning).not.toHaveTextContent('img2.png');
+    expect(warning).toHaveTextContent(
+      'They will be resized to fit the model and the results restored to their original size.'
+    );
+
+    await userEvent.click(screen.getByRole('radio', { name: /do not resize/i }));
+    expect(screen.getByTestId('oversize-warning')).toHaveTextContent(
+      "Their variations will fail; choose 'Resize to fit the model' to generate from them anyway."
+    );
+
+    // A model without limits: the warning goes away.
+    await selectModel('Amazon Nova Canvas');
+    await waitFor(() =>
+      expect(screen.queryByTestId('oversize-warning')).not.toBeInTheDocument()
+    );
+  });
+
+  async function fillStabilityForm() {
+    await openWizard();
+    await selectModel('Stability Stable Image Inpaint');
+    await userEvent.type(screen.getByLabelText('Object type'), 'toy car pieces');
+    await userEvent.click(screen.getByRole('radio', { name: /normal images/i }));
+    await userEvent.type(screen.getByLabelText('Defect type'), 'scratches');
+    await selectDataset('datasets/castings/');
+    await userEvent.click(await screen.findByTestId('source-thumb-img1.png'));
+  }
+
+  async function submitForm() {
+    const submit = screen.getByRole('button', { name: /^create session$/i });
+    await waitFor(() => expect(submit).toBeEnabled());
+    await userEvent.click(submit);
+    await waitFor(() => expect(mocked.createSyntheticSession).toHaveBeenCalled());
+    return mocked.createSyntheticSession.mock.calls[0][0];
+  }
+
+  it('sends the chosen handling in generation_params', async () => {
+    mocked.createSyntheticSession.mockResolvedValue({
+      session: { session_id: 'sess-1' },
+    } as any);
+    await fillStabilityForm();
+    await userEvent.click(screen.getByRole('radio', { name: /do not resize/i }));
+    const payload = await submitForm();
+    expect(payload.generation_params?.oversize_handling).toBe('fail');
+  });
+
+  it('defaults the handling to resize-and-restore', async () => {
+    mocked.createSyntheticSession.mockResolvedValue({
+      session: { session_id: 'sess-1' },
+    } as any);
+    await fillStabilityForm();
+    const payload = await submitForm();
+    expect(payload.generation_params?.oversize_handling).toBe('resize_restore');
   });
 });
 

@@ -11,9 +11,10 @@ functions: DynamoDB persistence, Bedrock invocation, and the ETag-conditional
 S3 manifest write that gives `append_manifest_lines` its atomicity.
 """
 import json
+import math
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +67,10 @@ MODEL_CATALOG = [
         },
         "max_images_per_call": 1,
         "randomization_defaults": {"seed": None, "cfg_scale": 6.5},
+        # Amazon Nova user guide, "Supported image resolutions": each
+        # side 320-4096 px, fewer than 4,194,304 pixels in total.
+        "input_image_limits": {"min_side": 320, "max_side": 4096,
+                               "max_pixels": 4194303},
     },
     {
         "model_id": "amazon.titan-image-generator-v2:0",
@@ -79,6 +84,9 @@ MODEL_CATALOG = [
         },
         "max_images_per_call": 1,
         "randomization_defaults": {"seed": None, "cfg_scale": 8.0},
+        # Bedrock Titan Image Generator parameters: inpainting /
+        # image-variation input images up to 1,408 px on the longest side.
+        "input_image_limits": {"max_side": 1408},
     },
     {
         "model_id": "stability.stable-image-inpaint-v1:0",
@@ -93,6 +101,11 @@ MODEL_CATALOG = [
         },
         "max_images_per_call": 1,
         "randomization_defaults": {"seed": None},
+        # AWS Stability AI Image Services guide, Inpaint parameters: every
+        # side at least 64 px, 4,096-9,437,184 pixels in total (the bounds
+        # the model's ValidationException quotes).
+        "input_image_limits": {"min_side": 64, "min_pixels": 4096,
+                               "max_pixels": 9437184},
     },
 ]
 
@@ -344,6 +357,149 @@ def derive_mask_rect(task_seed, image_width, image_height):
     left = _mask_offset(_mix64(task_seed, 2), image_width, width)
     top = _mask_offset(_mix64(task_seed, 3), image_height, height)
     return {"left": left, "top": top, "width": width, "height": height}
+
+
+# ---------------------------------------------------------------------------
+# Source image size limits
+# ---------------------------------------------------------------------------
+#
+# Each catalog entry declares the input image sizes its model accepts as
+# ``input_image_limits`` (keys ``min_side``, ``max_side``, ``min_pixels``,
+# ``max_pixels``, every one optional). A source image outside those limits
+# is handled per the ``oversize_handling`` generation parameter: scaled to
+# fit before the model call with the output scaled back to the source
+# dimensions (the default), or recorded as a per-variation failure that
+# names the violated bound without calling the model.
+
+OVERSIZE_HANDLING_RESIZE_RESTORE = "resize_restore"
+OVERSIZE_HANDLING_FAIL = "fail"
+OVERSIZE_HANDLING_CHOICES = (OVERSIZE_HANDLING_RESIZE_RESTORE,
+                             OVERSIZE_HANDLING_FAIL)
+DEFAULT_OVERSIZE_HANDLING = OVERSIZE_HANDLING_RESIZE_RESTORE
+
+
+def resolve_oversize_handling(params) -> str:
+    """The ``oversize_handling`` value of a generation_params mapping:
+    missing or None selects the default; any other value must be one of
+    OVERSIZE_HANDLING_CHOICES."""
+    value = (params or {}).get("oversize_handling")
+    if value is None:
+        return DEFAULT_OVERSIZE_HANDLING
+    if value not in OVERSIZE_HANDLING_CHOICES:
+        raise ValidationError(
+            "oversize_handling must be 'resize_restore' or 'fail'")
+    return value
+
+
+def image_limit_violation(width, height, limits) -> Optional[str]:
+    """Why a ``width`` x ``height`` image violates ``limits``, or None when
+    it is within them (or ``limits`` is empty). Bounds are checked in the
+    order max_pixels, max_side, min_pixels, min_side and the first violated
+    one is reported."""
+    limits = limits or {}
+    pixels = width * height
+    max_pixels = limits.get("max_pixels")
+    if max_pixels is not None and pixels > max_pixels:
+        return (f"{pixels:,} pixels exceeds the maximum of "
+                f"{max_pixels:,} pixels")
+    max_side = limits.get("max_side")
+    if max_side is not None and max(width, height) > max_side:
+        return (f"the longest side ({max(width, height)} px) exceeds the "
+                f"maximum of {max_side:,} px")
+    min_pixels = limits.get("min_pixels")
+    if min_pixels is not None and pixels < min_pixels:
+        return (f"{pixels:,} pixels is below the minimum of "
+                f"{min_pixels:,} pixels")
+    min_side = limits.get("min_side")
+    if min_side is not None and min(width, height) < min_side:
+        return (f"the shortest side ({min(width, height)} px) is below "
+                f"the minimum of {min_side} px")
+    return None
+
+
+def fit_within_limits(width, height, limits) -> Tuple[int, int]:
+    """``(width, height)`` scaled uniformly to satisfy ``limits``.
+
+    Unchanged when already within them. Otherwise one uniform scale is
+    applied: when a maximum is violated, the smallest factor that meets
+    every violated maximum (sides floored, at least 1 px); when only
+    minima are violated, the largest factor that meets every violated
+    minimum (sides rounded up). The aspect ratio is preserved up to the
+    integer rounding of the sides.
+    """
+    limits = limits or {}
+    if image_limit_violation(width, height, limits) is None:
+        return width, height
+    pixels = width * height
+    longest, shortest = max(width, height), min(width, height)
+
+    down = []
+    max_pixels = limits.get("max_pixels")
+    if max_pixels is not None and pixels > max_pixels:
+        down.append(math.sqrt(max_pixels / pixels))
+    max_side = limits.get("max_side")
+    if max_side is not None and longest > max_side:
+        down.append(max_side / longest)
+    if down:
+        scale = min(down)
+        return (max(1, math.floor(width * scale)),
+                max(1, math.floor(height * scale)))
+
+    up = []
+    min_pixels = limits.get("min_pixels")
+    if min_pixels is not None and pixels < min_pixels:
+        up.append(math.sqrt(min_pixels / pixels))
+    min_side = limits.get("min_side")
+    if min_side is not None and shortest < min_side:
+        up.append(min_side / shortest)
+    scale = max(up)
+    return math.ceil(width * scale), math.ceil(height * scale)
+
+
+def describe_image_limits(limits) -> str:
+    """Human-readable form of ``limits``, e.g. ``"images between 4,096 and
+    9,437,184 pixels in total, with each side at least 64 px"``."""
+    limits = limits or {}
+    min_pixels, max_pixels = limits.get("min_pixels"), limits.get("max_pixels")
+    min_side, max_side = limits.get("min_side"), limits.get("max_side")
+
+    pixel_part = None
+    if min_pixels is not None and max_pixels is not None:
+        pixel_part = (f"between {min_pixels:,} and {max_pixels:,} pixels "
+                      f"in total")
+    elif max_pixels is not None:
+        pixel_part = f"up to {max_pixels:,} pixels in total"
+    elif min_pixels is not None:
+        pixel_part = f"at least {min_pixels:,} pixels in total"
+
+    side_part = None
+    if min_side is not None and max_side is not None:
+        side_part = f"each side between {min_side:,} and {max_side:,} px"
+    elif min_side is not None:
+        side_part = f"each side at least {min_side:,} px"
+    elif max_side is not None:
+        side_part = f"the longest side at most {max_side:,} px"
+
+    if pixel_part and side_part:
+        return f"images {pixel_part}, with {side_part}"
+    if pixel_part:
+        return f"images {pixel_part}"
+    if side_part:
+        return f"images with {side_part}"
+    return "images of any size"
+
+
+def oversize_failure_reason(source_key, width, height, model_id,
+                            limits) -> str:
+    """Per-variation failure reason recorded under the ``fail`` handling
+    for a source image outside the model's limits."""
+    violation = image_limit_violation(width, height, limits)
+    return (
+        f"Source image {source_key} is {width}x{height}: {violation}. "
+        f"{model_id} accepts {describe_image_limits(limits)}. Choose "
+        f"'Resize to fit the model' as the size-limit handling to generate "
+        f"from this image anyway."
+    )
 
 
 # ---------------------------------------------------------------------------

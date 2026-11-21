@@ -45,6 +45,7 @@ The form is one page in four panels. A yellow box at the top lists what is still
 | **Variations per source image** | 1–20 generated images per source image; default `5`. Three source images at 5 variations give 15 previews to review. |
 | **Seed** | A randomization seed, or blank for random. Reuse a seed to reproduce a run. |
 | **Guidance strength (cfgScale)** | How strongly the prompt steers the model, when the model exposes it. |
+| **Images outside the model's size limits** | Shown when the selected model declares input limits (for example Stability Stable Image Inpaint: 4,096–9,437,184 pixels, each side at least 64 px). The default **Resize to fit the model, then restore the original size** scales each too-large (or too-small) source image to fit before generation and scales the result back to the original dimensions; **Do not resize** leaves the image untouched and records a failure for each of its variations instead. A warning above the classification lists the selected images that exceed the limits. |
 | **Target manifest key** | The training manifest the approved images will be appended to at integration, for example `training-images/manifests/train.manifest` (an S3 key inside the use case bucket). |
 
 Click **Create session**. Generation runs in the background; the session shows **Generating** and then **Awaiting review** as the previews arrive.
@@ -57,6 +58,7 @@ Open a session from the list.
 
 - The header repeats the **Model**, **Object**, **Defect** and **Status**.
 - **Prompt** shows the template used. Edit it and click **Regenerate** to run another pass over the same source images and compare; each preview is tagged with the pass it came from (**Pass 1**, **Pass 2**, …), so you can keep the better pass and reject the other.
+- **Images outside the model's size limits** sits above **Regenerate** with the same two choices as the wizard, so a session whose pass failed on the model's pixel limits can be rerun with resizing. A preview generated from a resized source notes the model-side and restored dimensions in its full-size view.
 - **Previews** shows every generated image. Click **Approve** or **Reject** under each one, or use **Approve all** / **Reject all**. Judge them as an inspector would: a plausible break with the right lighting and background is approved; a distorted cookie, a changed background or an unconvincing defect is rejected. Only approved images are kept.
 - If any variations fail to generate, a box below the previews lists each one with the model's or the service's error text so you can retry or adjust the prompt; failures never block reviewing the previews that did succeed.
 - **Integrate approved images** copies the approved images into the dataset (under `training-images/synthetic/<session>/`) and appends their manifest lines, labeled with the defect class, to the **Target manifest key**. The green **Integration complete** banner reports how many records were appended and to which manifest. Rejected and pending previews are excluded.

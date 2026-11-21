@@ -4,6 +4,14 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed - Synthetic data: source images outside the generation model's size limits (2026-11-21)
+
+A synthetic data generation pass failed every variation when the source images were larger than the model accepts. The worker sent each source image to Bedrock as-is, so a 4608×3288 photo (15,151,104 pixels) against Stability Stable Image Inpaint, whose inputs must stay between 4,096 and 9,437,184 pixels, was refused with `ValidationException: Image total pixel count 15151104 is invalid` for all 50 variations of the pass.
+
+- **Resize and restore (default).** Each catalog model now declares the input sizes it accepts (`input_image_limits` on `GET /synthetic/models`: Stability 4,096–9,437,184 pixels with each side at least 64 px; Amazon Nova Canvas up to 4,194,303 pixels with each side 320–4,096 px; Amazon Titan Image Generator v2 longest side at most 1,408 px). A source image outside them is scaled uniformly to fit before the model call, together with the Stability inpainting mask, and the generated image is scaled back to the source dimensions, so previews, `mask_region` and integrated records keep the source's coordinates. Images below a minimum are scaled up the same way. The preview records the model-side size as `resized_for_model`, shown in the full-size view. In-limit images are sent byte-for-byte as before.
+- **Option.** The new generation parameter `oversize_handling` (`resize_restore`, the default, or `fail`) is offered as **Images outside the model's size limits** in the create-session wizard, when the selected model declares limits, and on the session page above **Regenerate**, so a session whose pass failed on the limits can be rerun with resizing. Under `fail` the image is not sent and each of its variations is recorded as failed with a reason naming the image, its dimensions, the violated bound and the model's limits. An unknown value is a 400 from the generate endpoint before any plan persists.
+- **Warning.** The wizard lists the selected images whose dimensions violate the selected model's limits, with the violated bound and what the chosen handling will do with them.
+
 ### Fixed - Workflow tuning for inspection-format Bedrock nodes, reference files and live tuning configuration (2026-11-13)
 
 Workflow tuning collected nothing for a **Bedrock Inference** node in inspection format (`answer_format: inspection`). The device skipped the sample export for every Bedrock node whose anomaly mode was off, which an inspection-format node always is, and the inspection path never called the exporter. The Portal listed such a node as tunable only while its `anomaly_mode` was absent or on, and scored candidates with the anomaly-mode contract, so every replay was a parse failure; samples an older LocalServer had backfilled showed "No verdict recorded".

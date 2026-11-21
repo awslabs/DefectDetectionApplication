@@ -55,6 +55,8 @@ from synthetic_core import (
     extract_stability_result, classify_bedrock_invocation_error,
     select_approved, bbox_from_diff,
     build_manifest_record, append_manifest_lines,
+    resolve_oversize_handling, image_limit_violation, fit_within_limits,
+    oversize_failure_reason, OVERSIZE_HANDLING_FAIL,
 )
 
 logger = logging.getLogger()
@@ -654,20 +656,22 @@ def generate(event: Dict) -> Dict:
         body.get('variation_count')
         or (meta.get('generation_params') or {}).get('variation_count'))
 
+    params = dict(meta.get('generation_params') or {})
+    params.update(body.get('generation_params') or {})
+
     # Validate sources / classification / count (Req 3.2, 3.3, 3.6,
-    # 4.1, 4.4) and the model's support for the required generation
-    # method (Req 3.1, 3.5) -- both rejected with 400 before any plan
-    # persists.
+    # 4.1, 4.4), the model's support for the required generation method
+    # (Req 3.1, 3.5) and the size-limit handling choice -- all rejected
+    # with 400 before any plan persists.
     try:
         validated = validate_generation_request(
             sources, source_class, defect_type, variation_count)
         select_generation_method(
             source_class, _model_entry(model_id).get('capabilities', {}))
+        resolve_oversize_handling(params)
     except ValidationError as exc:
         return create_response(400, {'error': str(exc)})
 
-    params = dict(meta.get('generation_params') or {})
-    params.update(body.get('generation_params') or {})
     params['variation_count'] = validated['variation_count']
 
     plan = build_generation_plan(
@@ -751,6 +755,58 @@ def _source_image_dimensions(image_bytes: bytes,
         raise RuntimeError(
             f"Source image {source_key or '<unknown>'} could not be "
             f"decoded to determine its dimensions: {exc}") from exc
+
+
+def _try_source_image_dimensions(
+        image_bytes: bytes) -> Optional[Tuple[int, int]]:
+    """(width, height) of a source image, or None when Pillow cannot
+    decode it (such bytes are sent to the model unchanged)."""
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            return img.size
+    except Exception:
+        return None
+
+
+def _resize_image_bytes(image_bytes: bytes, size: Tuple[int, int]) -> bytes:
+    """``image_bytes`` scaled to ``size`` for the model call. JPEG sources
+    stay JPEG (quality 95) so the request payload remains a few MB rather
+    than a PNG of the full frame; everything else is re-encoded as PNG."""
+    from PIL import Image
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        source_format = img.format
+        resized = img.resize(size, Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    if source_format == 'JPEG':
+        resized.convert('RGB').save(buffer, format='JPEG', quality=95)
+    else:
+        resized.save(buffer, format='PNG')
+    return buffer.getvalue()
+
+
+def _resize_mask_png(mask_png: bytes, size: Tuple[int, int]) -> bytes:
+    """A mask PNG scaled to ``size`` with nearest-neighbour sampling so it
+    stays binary."""
+    from PIL import Image
+    with Image.open(io.BytesIO(mask_png)) as mask:
+        resized = mask.resize(size, Image.Resampling.NEAREST)
+    buffer = io.BytesIO()
+    resized.save(buffer, format='PNG')
+    return buffer.getvalue()
+
+
+def _restore_image_size(image_bytes: bytes, size: Tuple[int, int]) -> bytes:
+    """The generated image scaled back to the source ``size`` as PNG;
+    returned unchanged when it already has that size."""
+    from PIL import Image
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        if img.size == tuple(size):
+            return image_bytes
+        restored = img.resize(tuple(size), Image.Resampling.LANCZOS)
+    buffer = io.BytesIO()
+    restored.save(buffer, format='PNG')
+    return buffer.getvalue()
 
 
 def _invoke_image_model(model_id: str, request_body: Dict) -> bytes:
@@ -845,22 +901,59 @@ def run_generation_worker(event: Dict) -> Dict:
         mask_prompt = (
             f"the {meta.get('defect_type', 'defect')} region on the "
             f"{meta.get('object_type', 'part')}")
+    limits = model_entry.get('input_image_limits') or {}
+    try:
+        oversize_handling = resolve_oversize_handling(
+            meta.get('generation_params') or {})
+    except ValidationError as exc:
+        # generate() validated the value; the worker must never die
+        # before the task loop.
+        logger.warning('Worker: %s; using the default handling', exc)
+        oversize_handling = resolve_oversize_handling({})
 
     def invoke_task(task):
         source_key = _source_key(task.get('source_image'))
         source_obj = s3_client.get_object(Bucket=bucket, Key=source_key)
         source_bytes = source_obj['Body'].read()
-        source_b64 = base64.b64encode(source_bytes).decode()
         invoke_id = (invocation_model_id(model_entry) if model_entry
                      else task['model_id'])
+        provider = task['model_id'].split('.', 1)[0]
+
+        # A source image outside the model's input size limits is scaled
+        # to fit (the generated image is scaled back below) or, under the
+        # 'fail' handling, recorded as a per-variation failure without a
+        # model call. Undecodable bytes skip this step and are sent as-is.
+        size = _try_source_image_dimensions(source_bytes)
+        if size is None and provider == 'stability':
+            # The mask needs the dimensions: raises the decode-failure
+            # reason naming the source image.
+            size = _source_image_dimensions(source_bytes, source_key)
+        model_bytes, model_size, resize_info = source_bytes, size, None
+        if size is not None and limits and image_limit_violation(
+                size[0], size[1], limits) is not None:
+            if oversize_handling == OVERSIZE_HANDLING_FAIL:
+                raise RuntimeError(oversize_failure_reason(
+                    source_key, size[0], size[1], task['model_id'], limits))
+            model_size = fit_within_limits(size[0], size[1], limits)
+            model_bytes = _resize_image_bytes(source_bytes, model_size)
+            resize_info = {
+                'source_width': size[0], 'source_height': size[1],
+                'model_width': model_size[0], 'model_height': model_size[1],
+            }
+        source_b64 = base64.b64encode(model_bytes).decode()
 
         # Provider dispatch on the model-id prefix (Req 2.1).
-        if task['model_id'].split('.', 1)[0] == 'stability':
-            width, height = _source_image_dimensions(source_bytes,
-                                                     source_key)
+        if provider == 'stability':
+            width, height = size
+            # The mask rectangle is derived and recorded in source
+            # coordinates (those of the restored output, which
+            # _annotate_preview consumes); the mask image follows the
+            # source into the model's size.
             rect = derive_mask_rect(task.get('seed'), width, height)
-            mask_b64 = base64.b64encode(
-                _render_mask_png(rect, width, height)).decode()
+            mask_png = _render_mask_png(rect, width, height)
+            if resize_info is not None:
+                mask_png = _resize_mask_png(mask_png, model_size)
+            mask_b64 = base64.b64encode(mask_png).decode()
             request_body = build_stability_inpaint_request_body(
                 task.get('resolved_prompt', ''), source_b64, mask_b64,
                 task.get('seed'))
@@ -884,6 +977,13 @@ def run_generation_worker(event: Dict) -> Dict:
             raise RuntimeError(classify_bedrock_invocation_error(
                 error.get('Code', ''), error.get('Message', ''),
                 invoke_id)) from exc
+
+        if resize_info is not None:
+            # Restore the generated image to the source dimensions so the
+            # preview, its mask_region and the integrated record all share
+            # the source's coordinates.
+            image_bytes = _restore_image_size(image_bytes, size)
+            extra_fields['resized_for_model'] = resize_info
 
         preview_id = str(uuid.uuid4())
         staging_key = f"{STAGING_PREFIX}/{session_id}/{preview_id}.png"
