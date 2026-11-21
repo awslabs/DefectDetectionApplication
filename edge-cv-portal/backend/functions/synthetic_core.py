@@ -707,6 +707,27 @@ def bbox_from_diff(source_px, generated_px, threshold=0):
     return box if box is not None else _full_image_bbox(generated_px)
 
 
+def scale_bbox(bbox, from_size, to_size):
+    """``bbox`` (``{left, top, width, height}`` in the pixel grid of
+    ``from_size``) mapped onto an image of ``to_size`` (both ``(width,
+    height)``): the smallest integer box covering the scaled region,
+    clamped to the image. The identity when the sizes are equal."""
+    from_width, from_height = from_size
+    to_width, to_height = to_size
+    if (from_width, from_height) == (to_width, to_height):
+        return dict(bbox)
+    scale_x = to_width / from_width
+    scale_y = to_height / from_height
+    left = max(0, min(to_width, math.floor(bbox["left"] * scale_x)))
+    top = max(0, min(to_height, math.floor(bbox["top"] * scale_y)))
+    right = max(left, min(to_width, math.ceil(
+        (bbox["left"] + bbox["width"]) * scale_x)))
+    bottom = max(top, min(to_height, math.ceil(
+        (bbox["top"] + bbox["height"]) * scale_y)))
+    return {"left": left, "top": top, "width": right - left,
+            "height": bottom - top}
+
+
 # ---------------------------------------------------------------------------
 # Manifest record building and appending (Req 7.1, 7.4, 7.5, 7.8, 10.3)
 # ---------------------------------------------------------------------------

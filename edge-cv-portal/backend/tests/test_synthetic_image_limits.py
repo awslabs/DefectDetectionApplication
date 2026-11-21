@@ -13,6 +13,11 @@ image is restored to 4608x3288; the ``fail`` handling records the reason
 without calling the model; in-limit and undecodable sources are sent
 unchanged; the generate endpoint rejects an unknown handling value before
 any plan persists.
+
+Integration part: approving and integrating a restored 4608x3288 preview
+annotates it from the image header (mask path, no pixel decode) or from a
+pixel diff bounded to DIFF_PIXEL_BUDGET with the box scaled back, so the
+1024 MB Lambda is not exhausted by full-size previews.
 """
 import base64
 import io
@@ -20,6 +25,7 @@ import json
 import math
 import os
 import sys
+import uuid
 
 import pytest
 from hypothesis import example, given, settings
@@ -31,6 +37,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
 from synthetic_core import (  # noqa: E402
     MODEL_CATALOG, ValidationError, describe_image_limits,
     fit_within_limits, image_limit_violation, resolve_oversize_handling,
+    scale_bbox,
 )
 from synthetic_env import SyntheticEnv  # noqa: E402
 
@@ -167,6 +174,28 @@ class TestResolveOversizeHandling:
     def test_unknown_value_is_a_validation_error(self):
         with pytest.raises(ValidationError, match="oversize_handling"):
             resolve_oversize_handling({"oversize_handling": "bogus"})
+
+
+class TestScaleBbox:
+    def test_identity_when_sizes_are_equal(self):
+        box = {"left": 10, "top": 20, "width": 5, "height": 6}
+        assert scale_bbox(box, (100, 80), (100, 80)) == box
+
+    def test_full_grid_maps_onto_the_full_image(self):
+        diff_size = fit_within_limits(4608, 3288, {"max_pixels": 1 << 20})
+        assert scale_bbox(
+            {"left": 0, "top": 0, "width": diff_size[0],
+             "height": diff_size[1]}, diff_size, (4608, 3288)) == {
+                "left": 0, "top": 0, "width": 4608, "height": 3288}
+
+    def test_scaled_box_covers_the_region_and_stays_inside_the_image(self):
+        scaled = scale_bbox({"left": 3, "top": 2, "width": 1, "height": 1},
+                            (10, 10), (45, 33))
+        assert scaled["left"] <= 3 * 4.5 and scaled["top"] <= 2 * 3.3
+        assert scaled["left"] + scaled["width"] >= 4 * 4.5
+        assert scaled["top"] + scaled["height"] >= 3 * 3.3
+        assert scaled["left"] + scaled["width"] <= 45
+        assert scaled["top"] + scaled["height"] <= 33
 
 
 # ======================================================= worker (moto)
@@ -445,3 +474,135 @@ class TestGenerateOversizeHandling:
             assert meta["generation_params"]["oversize_handling"] == "fail"
         finally:
             restore()
+
+
+# ================================================== integration (moto)
+
+RESTORED_SIZE = (4608, 3288)
+DEFECT_RECT = {"left": 1000, "top": 800, "width": 400, "height": 300}
+
+
+def _painted_png_bytes(source_bytes, rect):
+    """``source_bytes`` decoded, with ``rect`` painted magenta, as PNG."""
+    from PIL import Image, ImageDraw
+    with Image.open(io.BytesIO(source_bytes)) as img:
+        painted = img.convert("RGB")
+    ImageDraw.Draw(painted).rectangle(
+        [rect["left"], rect["top"], rect["left"] + rect["width"] - 1,
+         rect["top"] + rect["height"] - 1], fill=(255, 0, 255))
+    buffer = io.BytesIO()
+    painted.save(buffer, format="PNG", compress_level=1)
+    return buffer.getvalue()
+
+
+def _integrate_restored_preview(senv, usecase_id, user, model_id,
+                                source_bytes, generated_bytes, **preview):
+    """Session awaiting review with one approved preview whose staged
+    image is ``generated_bytes`` (restored to the source size); runs the
+    integrate endpoint and returns the single appended manifest record."""
+    run_id = uuid.uuid4().hex[:12]
+    target_prefix = f"datasets/restored-{run_id}/"
+    manifest_key = f"{target_prefix}manifests/train.manifest"
+    source_key = f"datasets/limits/{run_id}-source.jpg"
+    senv.s3.put_object(Bucket=senv.bucket, Key=source_key, Body=source_bytes)
+    session_id = senv.put_session_meta(
+        usecase_id, status="awaiting_review", defect_type="scratch",
+        generation_model_id=model_id,
+        target_dataset_prefix=target_prefix,
+        target_manifest_key=manifest_key)
+    preview_id = senv.put_preview(
+        session_id, approval_state="approved", source_image_key=source_key,
+        resized_for_model={
+            "source_width": RESTORED_SIZE[0],
+            "source_height": RESTORED_SIZE[1],
+            "model_width": 3636, "model_height": 2594},
+        **preview)
+    senv.s3.put_object(
+        Bucket=senv.bucket,
+        Key=f"synthetic-staging/{session_id}/{preview_id}.png",
+        Body=generated_bytes)
+
+    status, body = senv.invoke(
+        "POST", "/synthetic/sessions/{id}/integrate", user,
+        session_id=session_id)
+    assert status == 200, body
+    content = senv.s3.get_object(
+        Bucket=senv.bucket, Key=manifest_key)["Body"].read().decode()
+    records = [json.loads(line) for line in content.splitlines() if line]
+    assert len(records) == 1
+    return records[0]
+
+
+class TestIntegrationOfRestoredPreviews:
+    def test_mask_region_preview_is_annotated_without_decoding_pixels(
+            self, senv, actor):
+        """A restored 4608x3288 Stability preview is annotated from its
+        header and mask_region: no per-pixel grid is built."""
+        usecase_id, user = actor
+        decode_calls = []
+        restore = _patched(
+            senv, "_decode_image_pixels",
+            lambda *args, **kwargs: decode_calls.append(args) or None)
+        try:
+            record = _integrate_restored_preview(
+                senv, usecase_id, user, STABILITY_MODEL_ID,
+                _fixture_bytes(), _png_bytes(*RESTORED_SIZE),
+                generation_method="inpainting", mask_region=DEFECT_RECT)
+        finally:
+            restore()
+
+        assert decode_calls == []
+        assert record["synthetic-defect"]["image_size"] == [{
+            "width": 4608, "height": 3288, "depth": 3}]
+        annotation = record["synthetic-defect"]["annotations"][0]
+        assert {k: annotation[k] for k in DEFECT_RECT} == DEFECT_RECT
+        assert record["synthetic-defect-metadata"][
+            "bounding-box-source"] == "inpainting_mask"
+
+    def test_image_diff_preview_is_annotated_at_a_bounded_size(
+            self, senv, actor):
+        """A restored 4608x3288 Nova preview is diffed against its source
+        on grids of at most DIFF_PIXEL_BUDGET pixels and the box is scaled
+        back to the preview's coordinates."""
+        usecase_id, user = actor
+        sd = senv.synthetic_data
+        source = _fixture_bytes()
+        grid_sizes = []
+        original_bbox_from_diff = sd.bbox_from_diff
+
+        def recording_bbox_from_diff(source_px, generated_px, **kwargs):
+            grid_sizes.append(((len(source_px[0]), len(source_px)),
+                               (len(generated_px[0]), len(generated_px))))
+            return original_bbox_from_diff(source_px, generated_px, **kwargs)
+
+        restore = _patched(senv, "bbox_from_diff", recording_bbox_from_diff)
+        try:
+            record = _integrate_restored_preview(
+                senv, usecase_id, user, NOVA_MODEL_ID, source,
+                _painted_png_bytes(source, DEFECT_RECT),
+                generation_method="image_variation")
+        finally:
+            restore()
+
+        assert len(grid_sizes) == 1
+        (source_grid, generated_grid), = grid_sizes
+        assert source_grid == generated_grid
+        assert source_grid[0] * source_grid[1] <= sd.DIFF_PIXEL_BUDGET
+        assert source_grid[0] < 4608 and source_grid[1] < 3288
+
+        assert record["synthetic-defect"]["image_size"] == [{
+            "width": 4608, "height": 3288, "depth": 3}]
+        assert record["synthetic-defect-metadata"][
+            "bounding-box-source"] == "image_diff"
+        box = record["synthetic-defect"]["annotations"][0]
+        # The box covers the painted rectangle and overshoots it by at most
+        # two grid cells per side (one source pixel at the diff scale is
+        # 4608 / grid width source pixels).
+        tolerance = 2 * 4608 / source_grid[0]
+        right, bottom = box["left"] + box["width"], box["top"] + box["height"]
+        assert box["left"] <= DEFECT_RECT["left"] < box["left"] + tolerance
+        assert box["top"] <= DEFECT_RECT["top"] < box["top"] + tolerance
+        rect_right = DEFECT_RECT["left"] + DEFECT_RECT["width"]
+        rect_bottom = DEFECT_RECT["top"] + DEFECT_RECT["height"]
+        assert rect_right <= right < rect_right + tolerance
+        assert rect_bottom <= bottom < rect_bottom + tolerance

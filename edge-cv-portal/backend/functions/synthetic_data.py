@@ -53,7 +53,7 @@ from synthetic_core import (
     select_generation_method, derive_mask_rect,
     build_amazon_request_body, build_stability_inpaint_request_body,
     extract_stability_result, classify_bedrock_invocation_error,
-    select_approved, bbox_from_diff,
+    select_approved, bbox_from_diff, scale_bbox,
     build_manifest_record, append_manifest_lines,
     resolve_oversize_handling, image_limit_violation, fit_within_limits,
     oversize_failure_reason, OVERSIZE_HANDLING_FAIL,
@@ -73,6 +73,10 @@ _bedrock_runtime = None
 STAGING_PREFIX = 'synthetic-staging'
 MANIFEST_WRITE_RETRIES = 3
 DIFF_THRESHOLD = 10
+# The pixel-diff annotation compares per-pixel grids (~80 bytes per pixel
+# per image); both images are scaled to at most this many pixels first so
+# a restored full-size preview costs the same as a 1024x1024 one.
+DIFF_PIXEL_BUDGET = 1024 * 1024
 
 MODELS_EMPTY_GUIDANCE = (
     "No image generation models are available. Enable model access for "
@@ -1092,13 +1096,17 @@ def set_preview_approval(event: Dict) -> Dict:
 # Integration endpoint (Req 6.3-6.6, 7.1-7.8, 9.4)
 # ---------------------------------------------------------------------------
 
-def _decode_image_pixels(image_bytes: bytes):
-    """Pixel grid (list of rows of RGB tuples) via Pillow; None when the
-    bytes cannot be decoded (bbox falls back to the full image)."""
+def _decode_image_pixels(image_bytes: bytes,
+                         size: Optional[Tuple[int, int]] = None):
+    """Pixel grid (list of rows of RGB tuples) via Pillow, scaled to
+    ``size`` first when given; None when the bytes cannot be decoded (bbox
+    falls back to the full image)."""
     try:
         from PIL import Image
         with Image.open(io.BytesIO(image_bytes)) as img:
             rgb = img.convert('RGB')
+            if size is not None and rgb.size != tuple(size):
+                rgb = rgb.resize(tuple(size), Image.Resampling.BOX)
             width, height = rgb.size
             data = list(rgb.getdata())
         return [data[row * width:(row + 1) * width] for row in range(height)]
@@ -1110,13 +1118,19 @@ def _annotate_preview(s3_client, bucket: str, preview: Dict,
                       generated_bytes: bytes) -> Tuple[Dict, Dict, str]:
     """(bbox, image_size, bbox_source) for one approved preview: mask
     region when the generation constrained the defect region (Req 7.2),
-    else pixel diff against the source, else the full image (Req 7.1)."""
-    generated_px = _decode_image_pixels(generated_bytes)
-    if generated_px:
-        image_size = {'width': len(generated_px[0]),
-                      'height': len(generated_px)}
+    else pixel diff against the source, else the full image (Req 7.1).
+
+    Independent of the preview's resolution: the size is read from the
+    image header, the mask path decodes no pixels, and the diff compares
+    both images scaled to DIFF_PIXEL_BUDGET with the box scaled back."""
+    generated_size = _try_source_image_dimensions(generated_bytes)
+    if generated_size:
+        image_size = {'width': generated_size[0],
+                      'height': generated_size[1]}
     else:
         image_size = {'width': 1024, 'height': 1024}
+    full_bbox = {'left': 0, 'top': 0, 'width': image_size['width'],
+                 'height': image_size['height']}
 
     mask_region = preview.get('mask_region')
     if mask_region:
@@ -1124,21 +1138,31 @@ def _annotate_preview(s3_client, bucket: str, preview: Dict,
                 for k in ('left', 'top', 'width', 'height')}
         return bbox, image_size, 'inpainting_mask'
 
-    source_px = None
+    source_px = generated_px = diff_size = None
     source_key = preview.get('source_image_key')
-    if source_key and generated_px:
+    if source_key and generated_size:
         try:
             source_obj = s3_client.get_object(Bucket=bucket, Key=source_key)
-            source_px = _decode_image_pixels(source_obj['Body'].read())
+            source_bytes = source_obj['Body'].read()
+            source_size = _try_source_image_dimensions(source_bytes)
         except Exception:
-            source_px = None
+            source_size = None
+        if source_size is not None and source_size != generated_size:
+            # Incomparable images: bbox_from_diff's full-image fallback.
+            return full_bbox, image_size, 'image_diff'
+        if source_size is not None:
+            diff_size = fit_within_limits(
+                generated_size[0], generated_size[1],
+                {'max_pixels': DIFF_PIXEL_BUDGET})
+            source_px = _decode_image_pixels(source_bytes, diff_size)
+            generated_px = _decode_image_pixels(generated_bytes, diff_size)
     if source_px and generated_px:
         bbox = bbox_from_diff(source_px, generated_px,
                               threshold=DIFF_THRESHOLD)
-        return bbox, image_size, 'image_diff'
+        return (scale_bbox(bbox, diff_size, generated_size), image_size,
+                'image_diff')
 
-    return ({'left': 0, 'top': 0, 'width': image_size['width'],
-             'height': image_size['height']}, image_size, 'full_image')
+    return full_bbox, image_size, 'full_image'
 
 
 def integrate_session(event: Dict) -> Dict:
