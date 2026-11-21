@@ -1,6 +1,8 @@
 #include <thread>
 #include <fstream>
 #include <sstream>
+#include <future>
+#include <chrono>
 
 #include <gtest/gtest.h>
 #include <Panorama/apidefs.h>
@@ -1000,4 +1002,87 @@ TEST(Core, MessageBrokerTests)
     TestVideoPayload();
     TestCustomProtocol();
     TestRegex();
+}
+
+// Two pipelines that start at the same instant share one broker instance (one
+// per configuration) and both call Initialize(). The first call is held inside
+// the creation of its second target, after the first target is registered;
+// the second call must wait for it and then be the documented no-op (S_FALSE)
+// instead of creating the targets again ("Multiple targets with the same name").
+TEST(Core, MessageBrokerConcurrentInitialize)
+{
+    HRESULT hr = S_OK;
+    std::string config =
+        "{                                                                  "
+        "    \"targets\": [                                                 "
+        "        {                                                          "
+        "            \"protocol\": \"test_protocol\",                       "
+        "            \"name\": \"concurrent_1\",                            "
+        "            \"test_protocol_options\": {                           "
+        "            }                                                      "
+        "        },                                                         "
+        "        {                                                          "
+        "            \"protocol\": \"test_protocol\",                       "
+        "            \"name\": \"concurrent_2\",                            "
+        "            \"test_protocol_options\": {                           "
+        "            }                                                      "
+        "        }                                                          "
+        "    ],                                                             "
+        "    \"pipes\": [                                                   "
+        "        {                                                          "
+        "            \"message_id\": \"concurrent_message\",                "
+        "            \"destinations\": [                                    "
+        "                {                                                  "
+        "                    \"target_name\": \"concurrent_2\",             "
+        "                    \"test_protocol_message_options\": {           "
+        "                        \"parameter\": \"concurrent\"              "
+        "                    }                                              "
+        "                }                                                  "
+        "            ]                                                      "
+        "        }                                                          "
+        "    ]                                                              "
+        "}                                                                  ";
+
+    ComPtr<IMessageBroker> first;
+    ASSERT_S(MessageBroker::Create(first.AddressOf(), nullptr, config.c_str()));
+
+    ComPtr<TestProtocolFactory> factory;
+    ASSERT_S(TestProtocolFactory::Create(factory.AddressOf(), nullptr));
+    ASSERT_S(first->AddProtocolFactory(factory));
+
+    ManualResetEvent entered;
+    ManualResetEvent release;
+    factory->SetCreateProtocolHook([&](int call_index)
+    {
+        if(call_index == 2)
+        {
+            entered.Set();
+            release.WaitFor(10000);
+        }
+    });
+
+    std::future<HRESULT> initialize_a = std::async(std::launch::async, [&]()
+    {
+        return first->Initialize();
+    });
+    ASSERT_TRUE(entered.WaitFor(10000));
+
+    ComPtr<IMessageBroker> second;
+    ASSERT_S(MessageBroker::Create(second.AddressOf(), nullptr, config.c_str()));
+    ASSERT_EQ(first.Ptr(), second.Ptr());
+
+    std::future<HRESULT> initialize_b = std::async(std::launch::async, [&]()
+    {
+        return second->Initialize();
+    });
+    bool b_returned_while_a_held = initialize_b.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+    release.Set();
+
+    HRESULT hrA = initialize_a.get();
+    HRESULT hrB = initialize_b.get();
+    ASSERT_EQ(hrA, S_OK) << "first Initialize() returned " << ErrorCodeToString(hrA);
+    ASSERT_TRUE(SUCCEEDED(hrB)) << "second Initialize() returned " << ErrorCodeToString(hrB)
+        << (b_returned_while_a_held ? ", while the first call was still inside Initialize()" : "");
+    ASSERT_EQ(hrB, S_FALSE) << "second Initialize() returned " << ErrorCodeToString(hrB);
+    ASSERT_EQ(factory->CreateProtocolCalls(), 2);
 }

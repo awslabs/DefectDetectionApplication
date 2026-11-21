@@ -151,9 +151,18 @@ TestProtocolFactory::~TestProtocolFactory()
 HRESULT TestProtocolFactory::CreateProtocol(IProtocolClient** ppObj, const char* creation_options, ICredentialProvider* credential_provider)
 {
     HRESULT hr = S_OK;
-    CHECKHR(TestProtocolClient::Create(_created_client.AddressOf(), _cb));
-    _created_client.AddRef();
-    *ppObj = _created_client.Ptr();
+    int call_index = ++_create_protocol_calls;
+    if(_create_protocol_hook != nullptr)
+    {
+        _create_protocol_hook(call_index);
+    }
+
+    // Assigning releases the client of an earlier call, so a configuration
+    // with several targets of this protocol leaks none of them.
+    ComPtr<TestProtocolClient> client;
+    CHECKHR(TestProtocolClient::Create(client.AddressOf(), _cb));
+    _created_client = client;
+    *ppObj = client.Detach();
     return hr;
 }
 
@@ -200,4 +209,14 @@ const char* TestProtocolFactory::ProtocolName()
 void TestProtocolFactory::InvokeSubscription(const char* id)
 {
     _created_client->InvokeSubscription(id);
+}
+
+void TestProtocolFactory::SetCreateProtocolHook(std::function<void(int call_index)> hook)
+{
+    _create_protocol_hook = std::move(hook);
+}
+
+int TestProtocolFactory::CreateProtocolCalls()
+{
+    return _create_protocol_calls.load();
 }
