@@ -56,7 +56,8 @@ from synthetic_core import (
     select_approved, bbox_from_diff, scale_bbox,
     build_manifest_record, append_manifest_lines,
     resolve_oversize_handling, image_limit_violation, fit_within_limits,
-    oversize_failure_reason, OVERSIZE_HANDLING_FAIL,
+    oversize_failure_reason, image_variation_output_size,
+    OVERSIZE_HANDLING_FAIL,
 )
 
 logger = logging.getLogger()
@@ -965,10 +966,19 @@ def run_generation_worker(event: Dict) -> Dict:
                             'mask_region': rect}
             invoke = _invoke_stability_model
         else:
+            # An Amazon image-variation output is a fixed square unless a
+            # size is requested; a resized source asks for the permitted
+            # size closest to its aspect ratio so the restore below scales
+            # it back uniformly. In-limit requests stay as they were.
+            output_size = None
+            if resize_info is not None and method == 'image_variation':
+                output_size = image_variation_output_size(
+                    model_size[0], model_size[1],
+                    model_entry.get('image_variation_output'))
             request_body = build_amazon_request_body(
                 model_entry, method, task.get('resolved_prompt', ''),
                 source_b64, task.get('seed'), task.get('params') or {},
-                mask_prompt)
+                mask_prompt, output_size=output_size)
             extra_fields = {'generation_method': method}
             if mask_prompt:
                 extra_fields['mask_prompt'] = mask_prompt

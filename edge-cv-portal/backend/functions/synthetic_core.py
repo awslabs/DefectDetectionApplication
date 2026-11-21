@@ -71,6 +71,12 @@ MODEL_CATALOG = [
         # side 320-4096 px, fewer than 4,194,304 pixels in total.
         "input_image_limits": {"min_side": 320, "max_side": 4096,
                                "max_pixels": 4194303},
+        # Same guide: an IMAGE_VARIATION output defaults to 1024x1024 and
+        # may be any size whose sides are multiples of 16 within 320-4096
+        # px and fewer than 4,194,304 pixels in total.
+        "image_variation_output": {"side_multiple": 16, "min_side": 320,
+                                   "max_side": 4096,
+                                   "max_pixels": 4194303},
     },
     {
         "model_id": "amazon.titan-image-generator-v2:0",
@@ -87,6 +93,17 @@ MODEL_CATALOG = [
         # Bedrock Titan Image Generator parameters: inpainting /
         # image-variation input images up to 1,408 px on the longest side.
         "input_image_limits": {"max_side": 1408},
+        # Same page: an IMAGE_VARIATION output defaults to 1408x1408 and
+        # may only be one of these permitted width x height sizes.
+        "image_variation_output": {"sizes": [
+            [1024, 1024], [768, 768], [512, 512],
+            [768, 1152], [384, 576], [1152, 768], [576, 384],
+            [768, 1280], [384, 640], [1280, 768], [640, 384],
+            [896, 1152], [448, 576], [1152, 896], [576, 448],
+            [768, 1408], [384, 704], [1408, 768], [704, 384],
+            [640, 1408], [320, 704], [1408, 640], [704, 320],
+            [1152, 640], [1173, 640],
+        ]},
     },
     {
         "model_id": "stability.stable-image-inpaint-v1:0",
@@ -502,14 +519,82 @@ def oversize_failure_reason(source_key, width, height, model_id,
     )
 
 
+def _aspect_distance(size, target_ratio):
+    """|log(aspect ratio of ``size``) - log(``target_ratio``)|: the uniform
+    measure of how far two aspect ratios lie apart."""
+    return abs(math.log(size[0] / size[1]) - math.log(target_ratio))
+
+
+def image_variation_output_size(width, height, rules) -> Optional[
+        Tuple[int, int]]:
+    """The IMAGE_VARIATION output size to request for a ``width`` x
+    ``height`` input so the result can be scaled back uniformly.
+
+    Without an explicit size the Amazon models answer a fixed square
+    (Nova Canvas 1024x1024, Titan 1408x1408) whatever the input's shape.
+    ``rules`` is the catalog entry's ``image_variation_output``: either a
+    fixed list of permitted ``sizes`` (Titan), of which the one with the
+    aspect ratio closest to the input's is chosen (the larger on a tie), or
+    a grid (Nova: sides multiples of ``side_multiple`` within ``min_side``
+    .. ``max_side`` with at most ``max_pixels`` in total), where each side
+    of the input is rounded down and up to the grid and the permitted
+    combination closest to the input's aspect ratio is chosen (the one
+    nearest the input's sides on a tie, so an on-grid input is requested
+    as-is). None when ``rules`` is empty or no grid size is permitted.
+    """
+    rules = rules or {}
+    if not rules:
+        return None
+    target_ratio = width / height
+    sizes = rules.get("sizes")
+    if sizes:
+        chosen = min(sizes, key=lambda s: (_aspect_distance(s, target_ratio),
+                                           -(s[0] * s[1])))
+        return int(chosen[0]), int(chosen[1])
+
+    multiple = int(rules.get("side_multiple") or 1)
+    min_side = rules.get("min_side")
+    max_side = rules.get("max_side")
+    max_pixels = rules.get("max_pixels")
+
+    def grid_sides(side):
+        down = (side // multiple) * multiple
+        return {down, down + multiple}
+
+    candidates = []
+    for w in grid_sides(width):
+        for h in grid_sides(height):
+            if min_side is not None and min(w, h) < min_side:
+                continue
+            if max_side is not None and max(w, h) > max_side:
+                continue
+            if max_pixels is not None and w * h > max_pixels:
+                continue
+            candidates.append((w, h))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda s: (
+        _aspect_distance(s, target_ratio),
+        abs(s[0] - width) + abs(s[1] - height)))
+
+
 # ---------------------------------------------------------------------------
 # Bedrock request adapters (Req 2.1-2.4, 7.2, 8.1)
 # ---------------------------------------------------------------------------
 
 def build_amazon_request_body(model_entry: Dict, method: str, prompt: str,
                               source_b64: str, seed, params: Dict,
-                              mask_prompt: Optional[str]) -> Dict:
-    """Bedrock invoke_model JSON body for one task (numberOfImages: 1)."""
+                              mask_prompt: Optional[str],
+                              output_size: Optional[Tuple[int, int]] = None
+                              ) -> Dict:
+    """Bedrock invoke_model JSON body for one task (numberOfImages: 1).
+
+    ``output_size`` (width, height), when given, is requested as
+    ``imageGenerationConfig.width``/``height`` of an image-variation task
+    only: the Amazon models size an inpainting output after its input and
+    the Nova guide says the two fields should not be provided for
+    INPAINTING. Without it the body is unchanged from before the
+    size-limit handling existed."""
     capabilities = model_entry.get('capabilities', {})
     config: Dict[str, Any] = {'numberOfImages': 1}
     if seed is not None and capabilities.get('seed'):
@@ -531,6 +616,9 @@ def build_amazon_request_body(model_entry: Dict, method: str, prompt: str,
             },
             'imageGenerationConfig': config,
         }
+    if output_size is not None:
+        config['width'] = int(output_size[0])
+        config['height'] = int(output_size[1])
     return {
         'taskType': 'IMAGE_VARIATION',
         'imageVariationParams': {

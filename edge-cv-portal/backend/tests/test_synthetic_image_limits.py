@@ -9,10 +9,13 @@ Worker part (moto stack from conftest.py + synthetic_env.py): a 4608x3288
 source -- 15,151,104 pixels, the exact count that made all 50 variations
 of session 6115b94c fail against the Stability inpaint model's 9,437,184
 pixel maximum -- is scaled to fit before the model call and the generated
-image is restored to 4608x3288; the ``fail`` handling records the reason
-without calling the model; in-limit and undecodable sources are sent
-unchanged; the generate endpoint rejects an unknown handling value before
-any plan persists.
+image is restored to 4608x3288; an Amazon image-variation request for a
+resized source asks for the permitted output size closest to the source's
+aspect ratio (the models otherwise answer a fixed square, which the
+restore would stretch); the ``fail`` handling records the reason without
+calling the model; in-limit and undecodable sources are sent unchanged;
+the generate endpoint rejects an unknown handling value before any plan
+persists.
 
 Integration part: approving and integrating a restored 4608x3288 preview
 annotates it from the image header (mask path, no pixel decode) or from a
@@ -35,9 +38,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
                                 "functions"))
 
 from synthetic_core import (  # noqa: E402
-    MODEL_CATALOG, ValidationError, describe_image_limits,
-    fit_within_limits, image_limit_violation, resolve_oversize_handling,
-    scale_bbox,
+    MODEL_CATALOG, ValidationError, build_amazon_request_body,
+    describe_image_limits, fit_within_limits, image_limit_violation,
+    image_variation_output_size, resolve_oversize_handling, scale_bbox,
 )
 from synthetic_env import SyntheticEnv  # noqa: E402
 
@@ -53,10 +56,31 @@ STABILITY_LIMITS = {"min_side": 64, "min_pixels": 4096,
                     "max_pixels": 9437184}
 NOVA_LIMITS = {"min_side": 320, "max_side": 4096, "max_pixels": 4194303}
 TITAN_LIMITS = {"max_side": 1408}
+# IMAGE_VARIATION output sizes the Amazon models permit (Nova user guide
+# "Supported image resolutions"; Titan Image Generator parameters table)
+# and the fixed square each answers when no size is requested.
+NOVA_OUTPUT_RULES = {"side_multiple": 16, "min_side": 320, "max_side": 4096,
+                     "max_pixels": 4194303}
+TITAN_OUTPUT_SIZES = [
+    (1024, 1024), (768, 768), (512, 512), (768, 1152), (384, 576),
+    (1152, 768), (576, 384), (768, 1280), (384, 640), (1280, 768),
+    (640, 384), (896, 1152), (448, 576), (1152, 896), (576, 448),
+    (768, 1408), (384, 704), (1408, 768), (704, 384), (640, 1408),
+    (320, 704), (1408, 640), (704, 320), (1152, 640), (1173, 640),
+]
+AMAZON_DEFAULT_OUTPUT = {NOVA_MODEL_ID: (1024, 1024),
+                         TITAN_MODEL_ID: (1408, 1408)}
 
 
 def _catalog_entry(model_id):
     return next(e for e in MODEL_CATALOG if e["model_id"] == model_id)
+
+
+def _anisotropy(source_size, output_size):
+    """How far restoring ``output_size`` to ``source_size`` departs from a
+    uniform scale: 0 for identical aspect ratios."""
+    return abs((source_size[0] / output_size[0]) /
+               (source_size[1] / output_size[1]) - 1)
 
 
 # ============================================================ pure logic
@@ -176,6 +200,127 @@ class TestResolveOversizeHandling:
             resolve_oversize_handling({"oversize_handling": "bogus"})
 
 
+# ------------------------------- Amazon image-variation output sizes
+
+class TestImageVariationOutputSize:
+    def test_catalog_declares_the_vendor_output_rules(self):
+        assert _catalog_entry(NOVA_MODEL_ID)["image_variation_output"] == \
+            NOVA_OUTPUT_RULES
+        assert [tuple(s) for s in _catalog_entry(TITAN_MODEL_ID)[
+            "image_variation_output"]["sizes"]] == TITAN_OUTPUT_SIZES
+        assert "image_variation_output" not in _catalog_entry(
+            STABILITY_MODEL_ID)
+        assert image_variation_output_size(2424, 1729, None) is None
+        assert image_variation_output_size(2424, 1729, {}) is None
+
+    def test_sample_source_on_nova_asks_for_2416x1728(self):
+        """4608x3288 fits Nova's input limits at 2424x1729; the only
+        16-px grid size around it under the pixel budget is 2416x1728,
+        0.24 % from the source's aspect ratio."""
+        assert fit_within_limits(4608, 3288, NOVA_LIMITS) == (2424, 1729)
+        assert image_variation_output_size(
+            2424, 1729, NOVA_OUTPUT_RULES) == (2416, 1728)
+        assert _anisotropy((4608, 3288), (2416, 1728)) < 0.005
+
+    def test_sample_source_on_titan_asks_for_the_closest_permitted_size(
+            self):
+        """4608x3288 (1.40:1) fits Titan's input limit at 1408x1004; of
+        the permitted output sizes 1152x768 (3:2) is the closest aspect
+        ratio, leaving a 6.6 % residual the restore cannot remove."""
+        assert fit_within_limits(4608, 3288, TITAN_LIMITS) == (1408, 1004)
+        rules = _catalog_entry(TITAN_MODEL_ID)["image_variation_output"]
+        assert image_variation_output_size(1408, 1004, rules) == (1152, 768)
+        assert 0.065 < _anisotropy((4608, 3288), (1152, 768)) < 0.07
+        # Portrait and square inputs pick the mirrored / square entries.
+        assert image_variation_output_size(1004, 1408, rules) == (768, 1152)
+        assert image_variation_output_size(900, 900, rules) == (1024, 1024)
+
+    def test_request_body_carries_the_output_size_for_variation_only(self):
+        nova = _catalog_entry(NOVA_MODEL_ID)
+        body = build_amazon_request_body(
+            nova, "image_variation", "p", "b64", 7, {}, None,
+            output_size=(2416, 1728))
+        assert body["imageGenerationConfig"]["width"] == 2416
+        assert body["imageGenerationConfig"]["height"] == 1728
+        body = build_amazon_request_body(
+            nova, "inpainting", "p", "b64", 7, {}, "the region",
+            output_size=(2416, 1728))
+        assert "width" not in body["imageGenerationConfig"]
+        assert "height" not in body["imageGenerationConfig"]
+        # Without an output size the body is the pre-change one.
+        assert build_amazon_request_body(
+            nova, "image_variation", "p", "b64", 7, {}, None) == \
+            build_amazon_request_body(
+                nova, "image_variation", "p", "b64", 7, {}, None,
+                output_size=None)
+
+
+# Nova inputs: sides 320..4096, aspect within 4:1, fewer than 4,194,304
+# pixels (a 4096 px side leaves no such height: 4096x1024 is the budget).
+_nova_inputs = st.integers(min_value=320, max_value=4095).flatmap(
+    lambda w: st.tuples(st.just(w), st.integers(
+        min_value=max(320, math.ceil(w / 4)),
+        max_value=min(4096, 4 * w, 4194303 // w))))
+
+
+@settings(deadline=None)
+@given(size=_nova_inputs)
+@example(size=(2424, 1729))
+@example(size=(320, 320))
+@example(size=(4095, 1023))
+@example(size=(2047, 2049))
+def test_nova_output_size_is_permitted_and_close_to_the_input_aspect(size):
+    """**Feature: fix-synthetic-image-size-limits, Property 2: the
+    requested Nova image-variation output is permitted and preserves the
+    input's aspect ratio**
+
+    For every input within Nova's input limits (and its 4:1 aspect bound),
+    the requested output has sides that are multiples of 16 within
+    320..4096, fewer than 4,194,304 pixels, lies within one grid step of
+    the input on each side, is the input itself when that is on the grid,
+    and departs from the input's aspect ratio by no more than rounding
+    both sides down to the grid would.
+    """
+    width, height = size
+    output = image_variation_output_size(width, height, NOVA_OUTPUT_RULES)
+    assert output is not None
+    out_w, out_h = output
+    assert out_w % 16 == 0 and out_h % 16 == 0
+    assert 320 <= min(out_w, out_h) and max(out_w, out_h) <= 4096
+    assert out_w * out_h < 4_194_304
+    assert abs(out_w - width) <= 16 and abs(out_h - height) <= 16
+    if width % 16 == 0 and height % 16 == 0:
+        assert output == (width, height)
+    floor_only = ((width // 16) * 16, (height // 16) * 16)
+    assert _anisotropy((width, height), output) <= \
+        _anisotropy((width, height), floor_only) + 1e-12
+
+
+@settings(deadline=None)
+@given(width=st.integers(min_value=1, max_value=1408),
+       height=st.integers(min_value=1, max_value=1408))
+@example(width=1408, height=1004)
+@example(width=1, height=1408)
+def test_titan_output_size_is_the_permitted_size_closest_in_aspect(
+        width, height):
+    """**Feature: fix-synthetic-image-size-limits, Property 3: the
+    requested Titan image-variation output is the permitted size closest
+    to the input's aspect ratio**
+
+    For every input within Titan's input limit, the requested output is
+    one of the documented sizes and no other documented size has an
+    aspect ratio closer to the input's.
+    """
+    rules = _catalog_entry(TITAN_MODEL_ID)["image_variation_output"]
+    output = image_variation_output_size(width, height, rules)
+    assert output in TITAN_OUTPUT_SIZES
+    target = math.log(width / height)
+    chosen_distance = abs(math.log(output[0] / output[1]) - target)
+    for candidate in TITAN_OUTPUT_SIZES:
+        assert abs(math.log(candidate[0] / candidate[1]) - target) >= \
+            chosen_distance - 1e-12
+
+
 class TestScaleBbox:
     def test_identity_when_sizes_are_equal(self):
         box = {"left": 10, "top": 20, "width": 5, "height": 6}
@@ -245,22 +390,31 @@ def _b64_image_size(image_b64):
 
 class _SizedBedrockRuntime:
     """Stubbed bedrock-runtime client: records every invoke_model call
-    (modelId + parsed body) and answers with a solid PNG of the request
-    image's size, as the real models do."""
+    (modelId + parsed body) and answers with a solid PNG sized as the real
+    models size their output: Stability inpaint and Amazon INPAINTING
+    after the input image; Amazon IMAGE_VARIATION after the requested
+    ``imageGenerationConfig`` width/height, or the model's fixed square
+    (Nova 1024x1024, Titan 1408x1408) when none is requested."""
 
     def __init__(self, provider):
         self.provider = provider
         self.calls = []
 
-    def request_image_b64(self, body):
+    def output_size(self, model_id, body):
         if self.provider == "stability":
-            return body["image"]
-        return body["imageVariationParams"]["images"][0]
+            return _b64_image_size(body["image"])
+        if body["taskType"] == "INPAINTING":
+            return _b64_image_size(body["inPaintingParams"]["image"])
+        config = body.get("imageGenerationConfig") or {}
+        if "width" in config or "height" in config:
+            return config["width"], config["height"]
+        return AMAZON_DEFAULT_OUTPUT[model_id]
 
     def invoke_model(self, **kwargs):
         body = json.loads(kwargs["body"])
-        self.calls.append({"modelId": kwargs["modelId"], "body": body})
-        width, height = _b64_image_size(self.request_image_b64(body))
+        width, height = self.output_size(kwargs["modelId"], body)
+        self.calls.append({"modelId": kwargs["modelId"], "body": body,
+                           "output_size": (width, height)})
         image_b64 = base64.b64encode(_png_bytes(width, height)).decode()
         if self.provider == "stability":
             payload = {"images": [image_b64], "seeds": ["1"],
@@ -404,6 +558,11 @@ class TestWorkerSizeLimitHandling:
 
     def test_amazon_oversized_source_resized_and_restored(self, senv,
                                                           actor):
+        """A 4608x3288 'defect' source on Nova (image variation) is sent
+        within the input limits with an output size on Nova's 16-px grid
+        matching its aspect ratio, so the restore to 4608x3288 is uniform
+        (without the explicit size Nova answers 1024x1024 and the restore
+        would stretch it 1.40x horizontally)."""
         usecase_id, _ = actor
         runtime = _SizedBedrockRuntime("amazon")
         result, previews, _ = _run_worker(
@@ -417,6 +576,12 @@ class TestWorkerSizeLimitHandling:
             body["imageVariationParams"]["images"][0])
         assert 320 <= min(width, height) and max(width, height) <= 4096
         assert width * height <= 4_194_303
+        output = runtime.calls[0]["output_size"]
+        assert _anisotropy((4608, 3288), output) < 0.005, (
+            f"the model answered {output[0]}x{output[1]}; restoring it to "
+            f"4608x3288 is not a uniform scale")
+        config = body["imageGenerationConfig"]
+        assert (config["width"], config["height"]) == output == (2416, 1728)
 
         preview = previews[0]
         staged = senv.s3.get_object(
@@ -426,6 +591,85 @@ class TestWorkerSizeLimitHandling:
             "source_width": 4608, "source_height": 3288,
             "model_width": width, "model_height": height,
         }
+
+    def test_titan_oversized_source_asks_for_the_closest_permitted_size(
+            self, senv, actor):
+        """Titan only generates the documented sizes: the request asks for
+        the one closest to the source's aspect ratio (1152x768 for
+        4608x3288) and the restore carries only that 6.6 % residual,
+        instead of the 1.40x stretch of the default 1408x1408 square."""
+        usecase_id, _ = actor
+        runtime = _SizedBedrockRuntime("amazon")
+        result, previews, _ = _run_worker(
+            senv, usecase_id, TITAN_MODEL_ID, "defect", _fixture_bytes(),
+            runtime)
+
+        assert result["completed"] == 1
+        body = runtime.calls[0]["body"]
+        assert body["taskType"] == "IMAGE_VARIATION"
+        width, height = _b64_image_size(
+            body["imageVariationParams"]["images"][0])
+        assert (width, height) == (1408, 1004)
+        output = runtime.calls[0]["output_size"]
+        assert _anisotropy((4608, 3288), output) < 0.07, (
+            f"the model answered {output[0]}x{output[1]}; restoring it to "
+            f"4608x3288 stretches it beyond the closest permitted size's "
+            f"6.6 % residual")
+        config = body["imageGenerationConfig"]
+        assert (config["width"], config["height"]) == output == (1152, 768)
+
+        preview = previews[0]
+        staged = senv.s3.get_object(
+            Bucket=senv.bucket, Key=preview["staging_key"])["Body"].read()
+        assert _image_size(staged) == (4608, 3288)
+        assert preview["resized_for_model"] == {
+            "source_width": 4608, "source_height": 3288,
+            "model_width": 1408, "model_height": 1004,
+        }
+
+    def test_amazon_inpainting_requests_no_output_size(self, senv, actor):
+        """A 'normal' source on Nova is inpainted: the output follows the
+        input size, so no width/height is requested (the Nova guide says
+        not to for INPAINTING) and the restore is uniform."""
+        usecase_id, _ = actor
+        runtime = _SizedBedrockRuntime("amazon")
+        result, previews, _ = _run_worker(
+            senv, usecase_id, NOVA_MODEL_ID, "normal", _fixture_bytes(),
+            runtime)
+
+        assert result["completed"] == 1
+        body = runtime.calls[0]["body"]
+        assert body["taskType"] == "INPAINTING"
+        assert _b64_image_size(body["inPaintingParams"]["image"]) == \
+            (2424, 1729)
+        assert "width" not in body["imageGenerationConfig"]
+        assert "height" not in body["imageGenerationConfig"]
+        staged = senv.s3.get_object(
+            Bucket=senv.bucket,
+            Key=previews[0]["staging_key"])["Body"].read()
+        assert _image_size(staged) == (4608, 3288)
+
+    def test_in_limit_amazon_variation_keeps_the_default_output(
+            self, senv, actor):
+        """An in-limit source is sent byte-for-byte without an output size;
+        Nova's 1024x1024 answer is staged as-is, as before."""
+        usecase_id, _ = actor
+        source = _png_bytes(640, 480)
+        runtime = _SizedBedrockRuntime("amazon")
+        result, previews, _ = _run_worker(
+            senv, usecase_id, NOVA_MODEL_ID, "defect", source, runtime,
+            extension="png")
+
+        assert result["completed"] == 1
+        body = runtime.calls[0]["body"]
+        assert body["imageVariationParams"]["images"] == [
+            base64.b64encode(source).decode()]
+        assert "width" not in body["imageGenerationConfig"]
+        staged = senv.s3.get_object(
+            Bucket=senv.bucket,
+            Key=previews[0]["staging_key"])["Body"].read()
+        assert _image_size(staged) == (1024, 1024)
+        assert "resized_for_model" not in previews[0]
 
     def test_undecodable_amazon_source_is_passed_through(self, senv, actor):
         """Bytes Pillow cannot decode skip the limit step and reach the
