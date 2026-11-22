@@ -116,6 +116,7 @@ def fresh_service():
 CLASSIFICATION_MANIFEST_KEY = "manifests/classification.manifest"
 DETECTION_MANIFEST_KEY = "labeled/labeling-abc/output.manifest"
 GT_DETECTION_MANIFEST_KEY = "labeled/gt-plates/output.manifest"
+INSTANCE_MANIFEST_KEY = "labeled/labeling-inst/output.manifest"
 IMAGE_KEY = "images/frame_0001.jpg"
 
 
@@ -146,6 +147,27 @@ def _detection_line(bucket, attr="bounding-box", class_map=None):
             "human-annotated": "yes",
             "creation-date": "2026-09-12T00:00:00",
             "job-name": attr,
+        },
+    })
+
+
+def _instance_line(bucket):
+    """An Instance_Manifest line (rfdetr-seg-support Req 3.1): an 8x4 image
+    with one 2x2 instance at (1, 1); the rle is its Canonical_RLE."""
+    return json.dumps({
+        "source-ref": f"s3://{bucket}/{IMAGE_KEY}",
+        "instance-segmentation": {
+            "image_size": [{"width": 8, "height": 4, "depth": 3}],
+            "annotations": [{"class_id": 0, "left": 1, "top": 1, "width": 2,
+                             "height": 2, "rle": "5 2 2 2 21"}],
+        },
+        "instance-segmentation-metadata": {
+            "objects": [{"confidence": 1.0}],
+            "class-map": {"0": "blue_plate"},
+            "type": "groundtruth/instance-segmentation",
+            "human-annotated": "yes",
+            "creation-date": "2026-11-22T00:00:00",
+            "job-name": "labeling-inst",
         },
     })
 
@@ -195,6 +217,8 @@ def env(aws_stack):
     s3.put_object(Bucket=USECASE_BUCKET, Key=GT_DETECTION_MANIFEST_KEY,
                   Body=(_detection_line(USECASE_BUCKET, attr="plates-bbox",
                                         class_map={"1": "luggage", "0": "plate"}) + "\n").encode())
+    s3.put_object(Bucket=USECASE_BUCKET, Key=INSTANCE_MANIFEST_KEY,
+                  Body=(_instance_line(USECASE_BUCKET) + "\n").encode())
 
     training = _load_module("training.py", "portal_training_detection")
 
@@ -364,6 +388,65 @@ def test_lfv_detection_manifest_still_goes_through_marketplace_validator(env):
     assert body["error"] == "Manifest validation failed"
     assert "Manifest Transformer" in body["suggestion"]
     assert svc.create_training_calls == []
+
+
+INSTANCE_MISMATCH_ERROR = (
+    "Manifest is an instance-segmentation manifest; it trains RF-DETR-Seg "
+    "(model_type instance_segmentation), not the Marketplace "
+    "classification/segmentation model.")
+
+
+@pytest.mark.parametrize("model_type", ["segmentation", "classification"])
+def test_lfv_rejects_an_instance_manifest_naming_instance_segmentation(env, model_type):
+    """rfdetr-seg-support Req 3.2 / 3.6 (task 3.3): an Instance_Manifest offered
+    to the Marketplace path gets the validator's early-return 400 naming
+    model_type instance_segmentation -- not the Ground Truth "requires
+    transformation" dead end -- and no SageMaker call."""
+    svc = fresh_service()
+    status, body = create(env, lfv_body(
+        env, model_type=model_type,
+        dataset_manifest_s3=f"s3://{USECASE_BUCKET}/{INSTANCE_MANIFEST_KEY}"))
+
+    assert status == 400, body
+    assert body["error"] == "Manifest validation failed"
+    assert body["details"] == [INSTANCE_MISMATCH_ERROR]
+    assert "instance_segmentation" in body["details"][0]
+    assert body["detected_attributes"] == [
+        "source-ref", "instance-segmentation", "instance-segmentation-metadata"]
+    assert body["required_attributes"] == []
+    assert "transformation_needed" not in body
+    assert svc.create_training_calls == []
+
+
+@pytest.mark.parametrize("model_type", ["segmentation", "classification"])
+def test_validate_marketplace_manifest_early_returns_on_an_instance_manifest(env, model_type):
+    """The validator's own result has the task-type-mismatch shape: no
+    transformation_needed, no suggestion, no field mapping (design section 5)."""
+    usecase = {
+        "usecase_id": env.usecase_id, "account_id": ACCOUNT_ID,
+        "s3_bucket": USECASE_BUCKET, "region": REGION,
+        "cross_account_role_arn": f"arn:aws:iam::{ACCOUNT_ID}:root",
+    }
+
+    result = env.training.validate_marketplace_manifest(
+        f"s3://{USECASE_BUCKET}/{INSTANCE_MANIFEST_KEY}", usecase, model_type)
+
+    assert result == {
+        "valid": False,
+        "errors": [INSTANCE_MISMATCH_ERROR],
+        "message": "Task type mismatch: manifest is instance segmentation",
+        "detected_attributes": [
+            "source-ref", "instance-segmentation", "instance-segmentation-metadata"],
+    }
+
+    # The existing paths are untouched: a classification manifest validates,
+    # a bounding-box manifest still takes the transformation branch.
+    ok = env.training.validate_marketplace_manifest(
+        f"s3://{USECASE_BUCKET}/{CLASSIFICATION_MANIFEST_KEY}", usecase, "classification")
+    assert ok["valid"] is True
+    bbox = env.training.validate_marketplace_manifest(
+        f"s3://{USECASE_BUCKET}/{DETECTION_MANIFEST_KEY}", usecase, model_type)
+    assert bbox["valid"] is False and bbox["transformation_needed"] is True
 
 
 def test_lfv_get_does_not_touch_metrics(env):
