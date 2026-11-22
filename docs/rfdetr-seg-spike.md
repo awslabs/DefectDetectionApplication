@@ -306,11 +306,13 @@ the two image runtimes.
 
 ## 6. Cleanup
 
-The scratch directory and the three IR-clamped / stamped ONNX copies on the Build Fleet server, the
-pulled image, the SageMaker sourcedirs, datasets and `model.tar.gz` outputs under the lab use case
-bucket's spike prefix, and the three completed training jobs' records are left for task 0.3, which
-deletes the scratch prefix and the sourcedir once the re-plan is committed (tasks.md 0.3). No
-Portal record, component or device was touched.
+The Build Fleet server was left as found: the spike container (removed by name), the pulled
+Export_Image (removed by digest) and the scratch directory with the exported ONNX copies and the
+downloaded weights (1.4 GB, removed) are gone; the server's three pre-existing images and its
+absence of running builds were verified before and after. The SageMaker sourcedirs, datasets and
+`model.tar.gz` outputs under the lab use case bucket's spike prefix, and the three completed training
+jobs' records, are left for task 0.3, which deletes the scratch prefix and the sourcedir once the
+re-plan is committed (tasks.md 0.3). No Portal record, component or device was touched.
 
 ## 7. Scripts and raw outputs
 
