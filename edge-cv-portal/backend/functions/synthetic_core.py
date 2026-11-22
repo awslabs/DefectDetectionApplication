@@ -11,9 +11,10 @@ functions: DynamoDB persistence, Bedrock invocation, and the ETag-conditional
 S3 manifest write that gives `append_manifest_lines` its atomicity.
 """
 import json
+import math
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +67,16 @@ MODEL_CATALOG = [
         },
         "max_images_per_call": 1,
         "randomization_defaults": {"seed": None, "cfg_scale": 6.5},
+        # Amazon Nova user guide, "Supported image resolutions": each
+        # side 320-4096 px, fewer than 4,194,304 pixels in total.
+        "input_image_limits": {"min_side": 320, "max_side": 4096,
+                               "max_pixels": 4194303},
+        # Same guide: an IMAGE_VARIATION output defaults to 1024x1024 and
+        # may be any size whose sides are multiples of 16 within 320-4096
+        # px and fewer than 4,194,304 pixels in total.
+        "image_variation_output": {"side_multiple": 16, "min_side": 320,
+                                   "max_side": 4096,
+                                   "max_pixels": 4194303},
     },
     {
         "model_id": "amazon.titan-image-generator-v2:0",
@@ -79,6 +90,20 @@ MODEL_CATALOG = [
         },
         "max_images_per_call": 1,
         "randomization_defaults": {"seed": None, "cfg_scale": 8.0},
+        # Bedrock Titan Image Generator parameters: inpainting /
+        # image-variation input images up to 1,408 px on the longest side.
+        "input_image_limits": {"max_side": 1408},
+        # Same page: an IMAGE_VARIATION output defaults to 1408x1408 and
+        # may only be one of these permitted width x height sizes.
+        "image_variation_output": {"sizes": [
+            [1024, 1024], [768, 768], [512, 512],
+            [768, 1152], [384, 576], [1152, 768], [576, 384],
+            [768, 1280], [384, 640], [1280, 768], [640, 384],
+            [896, 1152], [448, 576], [1152, 896], [576, 448],
+            [768, 1408], [384, 704], [1408, 768], [704, 384],
+            [640, 1408], [320, 704], [1408, 640], [704, 320],
+            [1152, 640], [1173, 640],
+        ]},
     },
     {
         "model_id": "stability.stable-image-inpaint-v1:0",
@@ -93,6 +118,11 @@ MODEL_CATALOG = [
         },
         "max_images_per_call": 1,
         "randomization_defaults": {"seed": None},
+        # AWS Stability AI Image Services guide, Inpaint parameters: every
+        # side at least 64 px, 4,096-9,437,184 pixels in total (the bounds
+        # the model's ValidationException quotes).
+        "input_image_limits": {"min_side": 64, "min_pixels": 4096,
+                               "max_pixels": 9437184},
     },
 ]
 
@@ -347,13 +377,224 @@ def derive_mask_rect(task_seed, image_width, image_height):
 
 
 # ---------------------------------------------------------------------------
+# Source image size limits
+# ---------------------------------------------------------------------------
+#
+# Each catalog entry declares the input image sizes its model accepts as
+# ``input_image_limits`` (keys ``min_side``, ``max_side``, ``min_pixels``,
+# ``max_pixels``, every one optional). A source image outside those limits
+# is handled per the ``oversize_handling`` generation parameter: scaled to
+# fit before the model call with the output scaled back to the source
+# dimensions (the default), or recorded as a per-variation failure that
+# names the violated bound without calling the model.
+
+OVERSIZE_HANDLING_RESIZE_RESTORE = "resize_restore"
+OVERSIZE_HANDLING_FAIL = "fail"
+OVERSIZE_HANDLING_CHOICES = (OVERSIZE_HANDLING_RESIZE_RESTORE,
+                             OVERSIZE_HANDLING_FAIL)
+DEFAULT_OVERSIZE_HANDLING = OVERSIZE_HANDLING_RESIZE_RESTORE
+
+
+def resolve_oversize_handling(params) -> str:
+    """The ``oversize_handling`` value of a generation_params mapping:
+    missing or None selects the default; any other value must be one of
+    OVERSIZE_HANDLING_CHOICES."""
+    value = (params or {}).get("oversize_handling")
+    if value is None:
+        return DEFAULT_OVERSIZE_HANDLING
+    if value not in OVERSIZE_HANDLING_CHOICES:
+        raise ValidationError(
+            "oversize_handling must be 'resize_restore' or 'fail'")
+    return value
+
+
+def image_limit_violation(width, height, limits) -> Optional[str]:
+    """Why a ``width`` x ``height`` image violates ``limits``, or None when
+    it is within them (or ``limits`` is empty). Bounds are checked in the
+    order max_pixels, max_side, min_pixels, min_side and the first violated
+    one is reported."""
+    limits = limits or {}
+    pixels = width * height
+    max_pixels = limits.get("max_pixels")
+    if max_pixels is not None and pixels > max_pixels:
+        return (f"{pixels:,} pixels exceeds the maximum of "
+                f"{max_pixels:,} pixels")
+    max_side = limits.get("max_side")
+    if max_side is not None and max(width, height) > max_side:
+        return (f"the longest side ({max(width, height)} px) exceeds the "
+                f"maximum of {max_side:,} px")
+    min_pixels = limits.get("min_pixels")
+    if min_pixels is not None and pixels < min_pixels:
+        return (f"{pixels:,} pixels is below the minimum of "
+                f"{min_pixels:,} pixels")
+    min_side = limits.get("min_side")
+    if min_side is not None and min(width, height) < min_side:
+        return (f"the shortest side ({min(width, height)} px) is below "
+                f"the minimum of {min_side} px")
+    return None
+
+
+def fit_within_limits(width, height, limits) -> Tuple[int, int]:
+    """``(width, height)`` scaled uniformly to satisfy ``limits``.
+
+    Unchanged when already within them. Otherwise one uniform scale is
+    applied: when a maximum is violated, the smallest factor that meets
+    every violated maximum (sides floored, at least 1 px); when only
+    minima are violated, the largest factor that meets every violated
+    minimum (sides rounded up). The aspect ratio is preserved up to the
+    integer rounding of the sides.
+    """
+    limits = limits or {}
+    if image_limit_violation(width, height, limits) is None:
+        return width, height
+    pixels = width * height
+    longest, shortest = max(width, height), min(width, height)
+
+    down = []
+    max_pixels = limits.get("max_pixels")
+    if max_pixels is not None and pixels > max_pixels:
+        down.append(math.sqrt(max_pixels / pixels))
+    max_side = limits.get("max_side")
+    if max_side is not None and longest > max_side:
+        down.append(max_side / longest)
+    if down:
+        scale = min(down)
+        return (max(1, math.floor(width * scale)),
+                max(1, math.floor(height * scale)))
+
+    up = []
+    min_pixels = limits.get("min_pixels")
+    if min_pixels is not None and pixels < min_pixels:
+        up.append(math.sqrt(min_pixels / pixels))
+    min_side = limits.get("min_side")
+    if min_side is not None and shortest < min_side:
+        up.append(min_side / shortest)
+    scale = max(up)
+    return math.ceil(width * scale), math.ceil(height * scale)
+
+
+def describe_image_limits(limits) -> str:
+    """Human-readable form of ``limits``, e.g. ``"images between 4,096 and
+    9,437,184 pixels in total, with each side at least 64 px"``."""
+    limits = limits or {}
+    min_pixels, max_pixels = limits.get("min_pixels"), limits.get("max_pixels")
+    min_side, max_side = limits.get("min_side"), limits.get("max_side")
+
+    pixel_part = None
+    if min_pixels is not None and max_pixels is not None:
+        pixel_part = (f"between {min_pixels:,} and {max_pixels:,} pixels "
+                      f"in total")
+    elif max_pixels is not None:
+        pixel_part = f"up to {max_pixels:,} pixels in total"
+    elif min_pixels is not None:
+        pixel_part = f"at least {min_pixels:,} pixels in total"
+
+    side_part = None
+    if min_side is not None and max_side is not None:
+        side_part = f"each side between {min_side:,} and {max_side:,} px"
+    elif min_side is not None:
+        side_part = f"each side at least {min_side:,} px"
+    elif max_side is not None:
+        side_part = f"the longest side at most {max_side:,} px"
+
+    if pixel_part and side_part:
+        return f"images {pixel_part}, with {side_part}"
+    if pixel_part:
+        return f"images {pixel_part}"
+    if side_part:
+        return f"images with {side_part}"
+    return "images of any size"
+
+
+def oversize_failure_reason(source_key, width, height, model_id,
+                            limits) -> str:
+    """Per-variation failure reason recorded under the ``fail`` handling
+    for a source image outside the model's limits."""
+    violation = image_limit_violation(width, height, limits)
+    return (
+        f"Source image {source_key} is {width}x{height}: {violation}. "
+        f"{model_id} accepts {describe_image_limits(limits)}. Choose "
+        f"'Resize to fit the model' as the size-limit handling to generate "
+        f"from this image anyway."
+    )
+
+
+def _aspect_distance(size, target_ratio):
+    """|log(aspect ratio of ``size``) - log(``target_ratio``)|: the uniform
+    measure of how far two aspect ratios lie apart."""
+    return abs(math.log(size[0] / size[1]) - math.log(target_ratio))
+
+
+def image_variation_output_size(width, height, rules) -> Optional[
+        Tuple[int, int]]:
+    """The IMAGE_VARIATION output size to request for a ``width`` x
+    ``height`` input so the result can be scaled back uniformly.
+
+    Without an explicit size the Amazon models answer a fixed square
+    (Nova Canvas 1024x1024, Titan 1408x1408) whatever the input's shape.
+    ``rules`` is the catalog entry's ``image_variation_output``: either a
+    fixed list of permitted ``sizes`` (Titan), of which the one with the
+    aspect ratio closest to the input's is chosen (the larger on a tie), or
+    a grid (Nova: sides multiples of ``side_multiple`` within ``min_side``
+    .. ``max_side`` with at most ``max_pixels`` in total), where each side
+    of the input is rounded down and up to the grid and the permitted
+    combination closest to the input's aspect ratio is chosen (the one
+    nearest the input's sides on a tie, so an on-grid input is requested
+    as-is). None when ``rules`` is empty or no grid size is permitted.
+    """
+    rules = rules or {}
+    if not rules:
+        return None
+    target_ratio = width / height
+    sizes = rules.get("sizes")
+    if sizes:
+        chosen = min(sizes, key=lambda s: (_aspect_distance(s, target_ratio),
+                                           -(s[0] * s[1])))
+        return int(chosen[0]), int(chosen[1])
+
+    multiple = int(rules.get("side_multiple") or 1)
+    min_side = rules.get("min_side")
+    max_side = rules.get("max_side")
+    max_pixels = rules.get("max_pixels")
+
+    def grid_sides(side):
+        down = (side // multiple) * multiple
+        return {down, down + multiple}
+
+    candidates = []
+    for w in grid_sides(width):
+        for h in grid_sides(height):
+            if min_side is not None and min(w, h) < min_side:
+                continue
+            if max_side is not None and max(w, h) > max_side:
+                continue
+            if max_pixels is not None and w * h > max_pixels:
+                continue
+            candidates.append((w, h))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda s: (
+        _aspect_distance(s, target_ratio),
+        abs(s[0] - width) + abs(s[1] - height)))
+
+
+# ---------------------------------------------------------------------------
 # Bedrock request adapters (Req 2.1-2.4, 7.2, 8.1)
 # ---------------------------------------------------------------------------
 
 def build_amazon_request_body(model_entry: Dict, method: str, prompt: str,
                               source_b64: str, seed, params: Dict,
-                              mask_prompt: Optional[str]) -> Dict:
-    """Bedrock invoke_model JSON body for one task (numberOfImages: 1)."""
+                              mask_prompt: Optional[str],
+                              output_size: Optional[Tuple[int, int]] = None
+                              ) -> Dict:
+    """Bedrock invoke_model JSON body for one task (numberOfImages: 1).
+
+    ``output_size`` (width, height), when given, is requested as
+    ``imageGenerationConfig.width``/``height`` of an image-variation task
+    only: the Amazon models size an inpainting output after its input and
+    the Nova guide says the two fields should not be provided for
+    INPAINTING. Without it the body is unchanged from before the
+    size-limit handling existed."""
     capabilities = model_entry.get('capabilities', {})
     config: Dict[str, Any] = {'numberOfImages': 1}
     if seed is not None and capabilities.get('seed'):
@@ -375,6 +616,9 @@ def build_amazon_request_body(model_entry: Dict, method: str, prompt: str,
             },
             'imageGenerationConfig': config,
         }
+    if output_size is not None:
+        config['width'] = int(output_size[0])
+        config['height'] = int(output_size[1])
     return {
         'taskType': 'IMAGE_VARIATION',
         'imageVariationParams': {
@@ -549,6 +793,27 @@ def bbox_from_diff(source_px, generated_px, threshold=0):
     ]
     box = bbox_from_mask(mask)
     return box if box is not None else _full_image_bbox(generated_px)
+
+
+def scale_bbox(bbox, from_size, to_size):
+    """``bbox`` (``{left, top, width, height}`` in the pixel grid of
+    ``from_size``) mapped onto an image of ``to_size`` (both ``(width,
+    height)``): the smallest integer box covering the scaled region,
+    clamped to the image. The identity when the sizes are equal."""
+    from_width, from_height = from_size
+    to_width, to_height = to_size
+    if (from_width, from_height) == (to_width, to_height):
+        return dict(bbox)
+    scale_x = to_width / from_width
+    scale_y = to_height / from_height
+    left = max(0, min(to_width, math.floor(bbox["left"] * scale_x)))
+    top = max(0, min(to_height, math.floor(bbox["top"] * scale_y)))
+    right = max(left, min(to_width, math.ceil(
+        (bbox["left"] + bbox["width"]) * scale_x)))
+    bottom = max(top, min(to_height, math.ceil(
+        (bbox["top"] + bbox["height"]) * scale_y)))
+    return {"left": left, "top": top, "width": right - left,
+            "height": bottom - top}
 
 
 # ---------------------------------------------------------------------------

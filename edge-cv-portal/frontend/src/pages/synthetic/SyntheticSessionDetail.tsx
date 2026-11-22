@@ -31,6 +31,7 @@ import {
   Input,
   Modal,
   ProgressBar,
+  RadioGroup,
   SpaceBetween,
   Spinner,
   StatusIndicator,
@@ -40,9 +41,11 @@ import { apiService } from '../../services/api';
 import { getErrorMessage } from '../../utils/errorHandling';
 import type {
   SyntheticIntegrateResponse,
+  SyntheticOversizeHandling,
   SyntheticPreview,
   SyntheticSession,
 } from './types';
+import { DEFAULT_OVERSIZE_HANDLING, OVERSIZE_HANDLING_ITEMS } from './imageLimits';
 
 /** Zero-approved rejection message (Req 6.5). */
 export const ZERO_APPROVED_MESSAGE = 'At least one approved image is required';
@@ -62,6 +65,11 @@ export default function SyntheticSessionDetail() {
   const [promptText, setPromptText] = useState('');
   const promptInitialized = useRef(false);
   const [regenerating, setRegenerating] = useState(false);
+  // Handling of source images outside the model's size limits for the
+  // next pass; null until the user picks one (the session's stored value
+  // or the default applies).
+  const [oversizeHandling, setOversizeHandling] =
+    useState<SyntheticOversizeHandling | null>(null);
 
   // Lightbox (Req 5.5, 5.6).
   const [lightbox, setLightbox] = useState<SyntheticPreview | null>(null);
@@ -140,6 +148,10 @@ export default function SyntheticSessionDetail() {
   const approvedCount = completedPreviews.filter(
     (p) => p.approval_state === 'approved'
   ).length;
+  const effectiveOversizeHandling: SyntheticOversizeHandling =
+    oversizeHandling ??
+    session?.generation_params?.oversize_handling ??
+    DEFAULT_OVERSIZE_HANDLING;
 
   // ------------------------------------------------------------- actions
 
@@ -148,9 +160,11 @@ export default function SyntheticSessionDetail() {
     try {
       setRegenerating(true);
       setError(null);
-      // Regeneration uses the edited prompt (Req 5.3).
+      // Regeneration uses the edited prompt (Req 5.3) and the chosen
+      // size-limit handling.
       await apiService.generateSyntheticPreviews(sessionId, {
         prompt_template_text: promptText,
+        generation_params: { oversize_handling: effectiveOversizeHandling },
       });
       await refresh();
     } catch (err) {
@@ -339,6 +353,19 @@ export default function SyntheticSessionDetail() {
               ariaLabel="Prompt template"
             />
           </FormField>
+          <FormField
+            label="Images outside the model's size limits"
+            description="How source images that exceed the selected model's pixel limits are handled in the next pass."
+            stretch
+          >
+            <RadioGroup
+              value={effectiveOversizeHandling}
+              items={OVERSIZE_HANDLING_ITEMS}
+              onChange={({ detail }) =>
+                setOversizeHandling(detail.value as SyntheticOversizeHandling)
+              }
+            />
+          </FormField>
           <Button
             variant="primary"
             onClick={regenerate}
@@ -514,6 +541,8 @@ export default function SyntheticSessionDetail() {
                   Pass {lightbox.generation_pass ?? 1} · Variation{' '}
                   {lightbox.variation_index ?? 0} · Seed {lightbox.seed ?? '—'} ·{' '}
                   {lightbox.generation_method ?? '—'}
+                  {lightbox.resized_for_model &&
+                    ` · Resized to ${lightbox.resized_for_model.model_width}×${lightbox.resized_for_model.model_height} for the model, restored to ${lightbox.resized_for_model.source_width}×${lightbox.resized_for_model.source_height}`}
                 </Box>
               </div>
             </ColumnLayout>

@@ -372,6 +372,82 @@ describe('SyntheticSessionDetail review workspace', () => {
     expect(screen.queryByText(/No module named 'PIL'/)).not.toBeInTheDocument();
   });
 
+  it('regenerates with the chosen size-limit handling, defaulting to the stored one', async () => {
+    respond({
+      session: makeSession({
+        status: 'draft',
+        generation_params: { variation_count: 2, oversize_handling: 'fail' },
+      }),
+      previews: [],
+    });
+    mocked.generateSyntheticPreviews.mockResolvedValue({
+      session_id: 's-1',
+      status: 'generating',
+      generation_pass: 1,
+      task_count: 2,
+    });
+    render(<SyntheticSessionDetail />);
+
+    // The session's stored handling is pre-selected.
+    const noResize = await screen.findByRole('radio', { name: /do not resize/i });
+    expect(noResize).toBeChecked();
+    await userEvent.click(screen.getByRole('button', { name: /start generation/i }));
+    expect(mocked.generateSyntheticPreviews).toHaveBeenCalledWith(
+      's-1',
+      expect.objectContaining({
+        generation_params: { oversize_handling: 'fail' },
+      })
+    );
+
+    // Switching the choice sends the new handling.
+    await userEvent.click(
+      screen.getByRole('radio', {
+        name: /resize to fit the model, then restore the original size/i,
+      })
+    );
+    await userEvent.click(screen.getByRole('button', { name: /start generation/i }));
+    await waitFor(() =>
+      expect(mocked.generateSyntheticPreviews).toHaveBeenLastCalledWith(
+        's-1',
+        expect.objectContaining({
+          generation_params: { oversize_handling: 'resize_restore' },
+        })
+      )
+    );
+  });
+
+  it('defaults the size-limit handling to resize-and-restore without a stored value', async () => {
+    respond({ session: makeSession(), previews: [] });
+    render(<SyntheticSessionDetail />);
+    expect(
+      await screen.findByRole('radio', {
+        name: /resize to fit the model, then restore the original size/i,
+      })
+    ).toBeChecked();
+  });
+
+  it('shows the model-size resize note in the lightbox', async () => {
+    respond({
+      session: makeSession(),
+      previews: [
+        makePreview('p1', {
+          resized_for_model: {
+            source_width: 4608,
+            source_height: 3288,
+            model_width: 3636,
+            model_height: 2594,
+          },
+        }),
+      ],
+    });
+    render(<SyntheticSessionDetail />);
+    await userEvent.click(
+      await screen.findByRole('button', { name: /view preview p1/i })
+    );
+    expect(await screen.findByText(/3636×2594/)).toBeInTheDocument();
+    expect(screen.getByText(/4608×3288/)).toBeInTheDocument();
+  });
+
   it('shows no failed-variations banner when only earlier passes failed', async () => {
     respond({
       session: makeSession({ generation_pass: 3 }),

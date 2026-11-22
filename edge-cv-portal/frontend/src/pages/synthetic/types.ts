@@ -13,6 +13,24 @@ export interface SyntheticModelCapabilities {
   cfg_scale: boolean;
 }
 
+/**
+ * Input image sizes a Generation_Model accepts (`input_image_limits` on the
+ * catalog entry); every bound is optional.
+ */
+export interface SyntheticImageLimits {
+  min_side?: number;
+  max_side?: number;
+  min_pixels?: number;
+  max_pixels?: number;
+}
+
+/**
+ * How a source image outside the model's `input_image_limits` is handled:
+ * scaled to fit with the output scaled back to the source size, or recorded
+ * as a per-variation failure without a model call.
+ */
+export type SyntheticOversizeHandling = 'resize_restore' | 'fail';
+
 /** One Generation_Model of the Model_Catalog (`GET /synthetic/models`). */
 export interface SyntheticModel {
   model_id: string;
@@ -20,6 +38,7 @@ export interface SyntheticModel {
   capabilities: SyntheticModelCapabilities;
   max_images_per_call: number;
   randomization_defaults: { seed: number | null; cfg_scale: number | null };
+  input_image_limits?: SyntheticImageLimits;
 }
 
 /**
@@ -66,6 +85,7 @@ export interface SyntheticGenerationParams {
   variation_count?: number;
   seed?: number | null;
   cfg_scale?: number | null;
+  oversize_handling?: SyntheticOversizeHandling;
 }
 
 /** Result of a completed integration run (Req 7.6). */
@@ -119,6 +139,16 @@ export interface SyntheticPreview {
   staging_key?: string;
   generation_method?: 'inpainting' | 'image_variation';
   mask_region?: { left: number; top: number; width: number; height: number } | null;
+  /**
+   * Present when the source was scaled to the model's input limits for the
+   * call and the generated image scaled back to the source size.
+   */
+  resized_for_model?: {
+    source_width: number;
+    source_height: number;
+    model_width: number;
+    model_height: number;
+  } | null;
   /** Exact prompt text sent to the model for this preview (Req 5.6). */
   resolved_prompt?: string;
   seed?: number;
