@@ -220,6 +220,28 @@ def validate_marketplace_manifest(manifest_uri: str, usecase: Dict, model_type: 
         
         logger.info(f"First manifest entry keys: {list(first_entry.keys())}")
         
+        # Task type mismatch: an instance-segmentation manifest trains
+        # RF-DETR-Seg (model_type instance_segmentation), never the
+        # Marketplace classification/segmentation model (rfdetr-seg-support
+        # Requirements 3.2, 3.5; design section 5). Refused here, before the
+        # required-attribute scan, in the shape of the segmentation/
+        # classification mismatch check below: otherwise the entry's
+        # `instance-segmentation-metadata` key would read as a Ground Truth
+        # manifest "requiring transformation" -- a dead end that names no
+        # modality. No classification or segmentation manifest carries
+        # either key, so those paths are unchanged.
+        if 'instance-segmentation' in first_entry or 'instance-segmentation-metadata' in first_entry:
+            return {
+                'valid': False,
+                'errors': [
+                    'Manifest is an instance-segmentation manifest; it trains '
+                    'RF-DETR-Seg (model_type instance_segmentation), not the '
+                    'Marketplace classification/segmentation model.'
+                ],
+                'message': 'Task type mismatch: manifest is instance segmentation',
+                'detected_attributes': list(first_entry.keys())
+            }
+        
         # Required attributes for all models
         required_attrs = ['source-ref', 'anomaly-label', 'anomaly-label-metadata']
         
