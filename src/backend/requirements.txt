@@ -21,7 +21,11 @@ grpcio==1.71.2
 grpcio-tools==1.71.2
 jsonschema==4.17.3
 numpy==1.24.3
-Pillow==12.3.0
+# Pillow 13.0.0 is the first release that fixes the open Pillow advisories
+# (GHSA-5x8w-8jj5-q52h and the others) and needs Python >= 3.11. The JP6 image's
+# interpreter is Python 3.10, for which no fixed release exists, so it keeps 12.3.0.
+Pillow==13.0.0; python_version >= "3.11"
+Pillow==12.3.0; python_version < "3.11"
 pycairo==1.23.0
 PyGObject==3.42.2
 python-periphery==2.4.1

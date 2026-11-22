@@ -4,6 +4,14 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Security - Pillow 13.0.0 for LocalServer on its Python 3.11 images (2026-11-21)
+
+LocalServer's `src/backend/requirements.txt` pinned Pillow 12.3.0, which the open Pillow advisories affect. The most severe, GHSA-5x8w-8jj5-q52h, is critical: a heap overflow in the FlashPix decoder. Pillow 13.0.0 is the first release that fixes them, and it needs Python 3.11 or later.
+
+- **JP5, JP7, x86_64 and the generic image** run Python 3.11 and install Pillow 13.0.0 from the next LocalServer build.
+- **JP6** runs Python 3.10 and keeps Pillow 12.3.0, because no fixed release exists for Python 3.10; its advisories stay open until the JP6 image moves to Python 3.11. The separate Python 3.11 install in `Dockerfile.jp6` also still pins 12.3.0.
+- The security tests' copy of the requirements file (`test/backend-test/security/baselines/dependency_baseline_requirements.txt`) is updated to match.
+
 ### Added - Configuration overrides can set a Bedrock node's model request fields (2026-11-21)
 
 `WorkflowNodeOverrides` can now set a **Bedrock Inference** node's `additional_model_request_fields`, so turning a Claude model's thinking on or off on one device no longer needs a new workflow version. This replaces the "Not overridable" point of the 2026-11-12 entry.
