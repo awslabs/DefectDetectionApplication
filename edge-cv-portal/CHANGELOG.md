@@ -4,6 +4,17 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed - Synthetic data: generation passes longer than the worker's 15-minute limit (2026-11-22)
+
+A variation costs about 25 s (20 s of model time plus 3–5 s of image work: resize, restore to the source size, PNG upload), so a pass of 10 source images × 5 variations needs about 20 minutes against the generation worker's 900 s Lambda limit. Pass 2 of session 6115b94c ran 43 of its 50 tasks and hit the limit; Lambda's default asynchronous retry policy (two retries, the function had no explicit setting) re-ran the whole plan from the start twice, producing 130 failed previews for 50 tasks with the same seeds, and because the worker only reported **Awaiting review** after the last task the session stayed in **Generating** with **Regenerate** disabled.
+
+- **The worker continues across invocations.** It checks its remaining time before each variation and, when under 2 minutes remain, hands the rest of the plan to a continuation invocation of itself. Every preview record now carries its task index, and a continuation runs only the variations without a record, so a plan larger than one invocation completes without a second click and no task runs twice. A per-pass worker token rejects a duplicate or retried worker event: it runs nothing and writes nothing.
+- **Lambda retries of the worker are off** (`MaximumRetryAttempts 0`; worker events older than 2 minutes are discarded). The worker is idempotent per task and reports a dead pass through the session, so a retry could only re-run or duplicate work.
+- **A dead pass reads Failed, not Generating.** A pass whose worker stopped without reporting (its deadline plus a 3-minute grace has passed) is moved to **Failed** with the reason — the pass, how many preview records were written for how many planned — when the session is next opened. Previews already generated stay reviewable; **Regenerate** starts a new pass. A worker that cannot start its continuation, or has no time left for a single variation, fails the pass the same way instead of leaving it running.
+- **`POST /synthetic/sessions/{id}/generate` answers 409** while a pass is genuinely running (the Portal already disables **Regenerate** then); a stale pass is superseded by the new one.
+- **Unchanged.** The default **Resize to fit the model, then restore the original size**, the aspect-matched Amazon image-variation outputs and the JPEG output for scaled-down Stability sources stand. The frontend is unchanged: the progress bar keeps counting across invocations.
+- **Session 6115b94c.** Opening it moves it from **Generating** to **Failed** with the reason; **Regenerate** runs pass 3 across two worker invocations to **Awaiting review** with 50 previews.
+
 ### Security - Pillow 13.0.0 for the Portal imaging layer, the labeling workers, the detector export image and the JP6 stub interpreter (2026-11-22)
 
 The Portal's imaging layer (`backend/layers/imaging`), its SAM and Grounded-SAM labeling workers, the detector export image and the separate Python 3.11 install in `src/backend/Dockerfile.jp6` pinned Pillow 12.3.0, which the open Pillow advisories affect. The most severe, GHSA-5x8w-8jj5-q52h, is critical: a heap overflow in the FlashPix decoder. Pillow 13.0.0 is the first release that fixes them, and it needs Python 3.11 or later.

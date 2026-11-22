@@ -213,6 +213,14 @@ describe('Property 2: preservation — sibling layers and handler wiring (Requir
     //         'USER_ROLES_TABLE',
     //       ].sort()
     //     );
+    //
+    // CONSCIOUS UPDATE (fix-synthetic-worker-deadline): the handler gained
+    // SYNTHETIC_WORKER_TIMEOUT_SECONDS, exported from the same Duration as
+    // the function's Timeout. The worker reads it to record the deadline a
+    // fresh worker must report by, and the API reads it to judge a worker
+    // that stopped without reporting (a dead pass is moved to `failed`
+    // instead of reading `generating` forever). Exactly that one key is
+    // added; the assertion still forbids any other addition or removal.
     expect(
       Object.keys(handler.Properties.Environment.Variables).sort()
     ).toEqual(
@@ -224,6 +232,7 @@ describe('Property 2: preservation — sibling layers and handler wiring (Requir
         'SETTINGS_TABLE',
         'SYNTHETIC_DATA_FUNCTION_NAME',
         'SYNTHETIC_SESSIONS_TABLE',
+        'SYNTHETIC_WORKER_TIMEOUT_SECONDS',
         'TRAINING_JOBS_TABLE',
         'USECASES_TABLE',
         'USER_ROLES_TABLE',

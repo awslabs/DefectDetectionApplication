@@ -300,6 +300,123 @@ def build_generation_plan(session_meta, source_images, variation_count,
 
 
 # ---------------------------------------------------------------------------
+# Worker deadline, continuation and staleness (fix-synthetic-worker-deadline)
+#
+# A variation costs about 25 s (20 s of model time plus 3-5 s of image
+# work), so a 50-variation pass needs about 20 minutes against the worker
+# Lambda's 900 s timeout. Pass 2 of session 6115b94c ran 43 of 50 tasks,
+# timed out, and Lambda's default asynchronous retry policy (2 retries)
+# re-ran the whole plan from task 0 twice: 130 PREVIEW items for 50 tasks,
+# all with the same seeds, and a session stuck in `generating` because the
+# worker only reports `awaiting_review` after the last task. Lambda also
+# documents that an asynchronous event can be delivered more than once
+# even without an error. The helpers below let the worker stop before the
+# deadline, hand the unfinished tail of the plan to a continuation
+# invocation that runs only the tasks without a PREVIEW record, and let
+# the read path recognise a pass whose worker died without reporting.
+# ---------------------------------------------------------------------------
+
+# Remaining time below which the worker stops starting tasks and hands the
+# rest of the plan to a continuation: one measured task is ~25 s, a hung
+# Bedrock call runs into botocore's 60 s read timeout before it fails, and
+# the hand-over itself is one DynamoDB write and one lambda:Invoke.
+CONTINUATION_RESERVE_MS = 120_000
+
+# Grace after the worker's deadline before a `generating` session counts as
+# dead: the continuation event's 2 min maximum age (synthetic-data-stack.ts)
+# plus a cold start.
+STALE_WORKER_GRACE_MS = 180_000
+
+
+def source_image_key(source_ref) -> str:
+    """S3 key of a Source_Image reference (dict with 'key' or plain str);
+    the same rule as the handler's ``_source_key``."""
+    if isinstance(source_ref, dict):
+        return source_ref.get("key", "")
+    return str(source_ref)
+
+
+def preview_task_identity(preview) -> tuple:
+    """Identity of the plan task a PREVIEW record belongs to:
+    ``('index', task_index)`` when the record carries one, else
+    ``('key', source_image_key, variation_index)`` for records written
+    before task indexes were stored."""
+    task_index = preview.get("task_index")
+    if task_index is not None:
+        return ("index", int(task_index))
+    return ("key", source_image_key(preview.get("source_image_key")),
+            int(preview.get("variation_index") or 0))
+
+
+def remaining_tasks(plan, previews, generation_pass) -> list:
+    """The plan tasks, in plan order, that have no PREVIEW record in
+    ``generation_pass`` -- by task index or by (source key, variation
+    index), so a continuation never repeats a task already written."""
+    wanted_pass = int(generation_pass)
+    done = set()
+    for preview in previews:
+        if int(preview.get("generation_pass", -1)) != wanted_pass:
+            continue
+        done.add(preview_task_identity(preview))
+    pending = []
+    for task in plan:
+        by_index = ("index", int(task.get("task_index")))
+        by_key = ("key", source_image_key(task.get("source_image")),
+                  int(task.get("variation_index") or 0))
+        if by_index in done or by_key in done:
+            continue
+        pending.append(task)
+    return pending
+
+
+def should_hand_over(remaining_ms, reserve_ms=CONTINUATION_RESERVE_MS) -> bool:
+    """True when the invocation has less than ``reserve_ms`` left and must
+    not start another task."""
+    return int(remaining_ms) < int(reserve_ms)
+
+
+def worker_deadline_ms(meta, worker_timeout_ms) -> int:
+    """When the pass's worker must have reported by: the recorded
+    ``worker_deadline_at``, or ``updated_at`` plus the worker timeout for a
+    session written before the field existed."""
+    deadline = meta.get("worker_deadline_at")
+    if deadline is not None:
+        return int(deadline)
+    return int(meta.get("updated_at") or 0) + int(worker_timeout_ms)
+
+
+def generation_is_stale(meta, now_ms, worker_timeout_ms,
+                        grace_ms=STALE_WORKER_GRACE_MS) -> bool:
+    """True iff the session reads ``generating`` but its worker's deadline
+    plus ``grace_ms`` has passed, so no invocation can still be running."""
+    if meta.get("status") != "generating":
+        return False
+    return int(now_ms) > worker_deadline_ms(meta, worker_timeout_ms) + int(
+        grace_ms)
+
+
+def stale_generation_failure_reason(generation_pass, written, planned) -> str:
+    """``last_failure.reason`` for a pass whose worker died without
+    reporting back."""
+    return (
+        f"Generation pass {int(generation_pass)} stopped before it "
+        f"finished: the worker wrote {int(written)} preview record(s) for "
+        f"{int(planned)} planned variation(s) and did not report back "
+        f"within its time limit. Completed previews can still be "
+        f"reviewed; Regenerate starts a new pass."
+    )
+
+
+def running_generation_message(generation_pass, written, planned) -> str:
+    """409 body for a generate request while a pass is still running."""
+    return (
+        f"A generation pass is already running (pass "
+        f"{int(generation_pass)}: {int(written)} of {int(planned)} "
+        f"variations written). Wait for it to finish before regenerating."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Generation method selection (Req 3.1, 3.5)
 # ---------------------------------------------------------------------------
 

@@ -58,6 +58,9 @@ from synthetic_core import (
     resolve_oversize_handling, image_limit_violation, fit_within_limits,
     oversize_failure_reason, image_variation_output_size,
     stability_output_format, OVERSIZE_HANDLING_FAIL,
+    remaining_tasks, should_hand_over, generation_is_stale,
+    stale_generation_failure_reason, running_generation_message,
+    CONTINUATION_RESERVE_MS,
 )
 
 logger = logging.getLogger()
@@ -78,6 +81,12 @@ DIFF_THRESHOLD = 10
 # per image); both images are scaled to at most this many pixels first so
 # a restored full-size preview costs the same as a 1024x1024 one.
 DIFF_PIXEL_BUDGET = 1024 * 1024
+# The worker Lambda's timeout, exported by the CDK stack from the same
+# Duration as the function's `timeout` (synthetic-data-stack.ts,
+# SYNTHETIC_WORKER_TIMEOUT_SECONDS): generate() records the deadline a
+# fresh worker must report by and the read path judges a dead worker by it.
+WORKER_TIMEOUT_MS = int(os.environ.get('SYNTHETIC_WORKER_TIMEOUT_SECONDS',
+                                       '900')) * 1000
 
 MODELS_EMPTY_GUIDANCE = (
     "No image generation models are available. Enable model access for "
@@ -242,11 +251,15 @@ def _data_s3_client(usecase) -> Tuple[Any, str]:
 # Session persistence
 # ---------------------------------------------------------------------------
 
-def _load_session(session_id: str) -> Tuple[Optional[Dict], List[Dict]]:
-    """(META item, PREVIEW items) for a session; (None, []) if absent."""
+def _load_session(session_id: str,
+                  consistent: bool = False) -> Tuple[Optional[Dict], List[Dict]]:
+    """(META item, PREVIEW items) for a session; (None, []) if absent.
+    ``consistent`` asks for a strongly consistent read (a worker
+    continuation must see every preview its predecessor wrote)."""
     from boto3.dynamodb.conditions import Key
     response = _sessions_table().query(
-        KeyConditionExpression=Key('session_id').eq(session_id))
+        KeyConditionExpression=Key('session_id').eq(session_id),
+        ConsistentRead=consistent)
     meta, previews = None, []
     for item in response.get('Items', []):
         if item.get('sk') == 'META':
@@ -275,6 +288,198 @@ def _record_last_failure(session_id: str, reason: str) -> None:
     except ClientError:
         logger.exception('Failed to record last_failure on session %s',
                          session_id)
+
+
+# ---------------------------------------------------------------------------
+# Worker claim, hand-over and staleness (fix-synthetic-worker-deadline)
+#
+# One worker invocation at a time owns a generation pass: generate() writes
+# a random worker_token on the META and in the worker event; the worker's
+# first write swaps it for a fresh token, conditionally on the pass still
+# generating under the event's token, so a redelivered, retried or
+# superseded event finds the token gone and exits without writing. The
+# hand-over to a continuation swaps the token again. worker_deadline_at
+# records when the invocation holding the pass must have reported by; a
+# `generating` session past it (plus grace) is a dead pass and the read
+# path moves it to `failed` instead of leaving it `generating` forever.
+# ---------------------------------------------------------------------------
+
+def _is_conditional_check_failure(exc: ClientError) -> bool:
+    return exc.response.get('Error', {}).get('Code') == \
+        'ConditionalCheckFailedException'
+
+
+def _remaining_time_ms(context):
+    """Callable answering the invocation's remaining milliseconds from the
+    Lambda context; effectively unbounded without one (tests call the
+    worker directly)."""
+    def remaining_ms() -> int:
+        try:
+            return int(context.get_remaining_time_in_millis())
+        except Exception:  # noqa: BLE001 - no context / bare object
+            return 10 ** 9
+    return remaining_ms
+
+
+def _claim_worker(session_id: str, generation_pass: int,
+                  event_token: Optional[str],
+                  deadline_ms: int) -> Optional[str]:
+    """Claim ``generation_pass`` for this invocation: swap the META
+    worker_token for a fresh one and record the invocation's deadline,
+    conditioned on the pass still generating under the token the event
+    carries (or under no token at all: events queued by the pre-token
+    generate()). Returns the fresh token, or None when the pass is not
+    this event's to run (redelivered, retried or superseded event)."""
+    token = str(uuid.uuid4())
+    condition = 'generation_pass = :pass AND #s = :generating AND '
+    values = {
+        ':token': token,
+        ':deadline': int(deadline_ms),
+        ':pass': int(generation_pass),
+        ':generating': 'generating',
+    }
+    if event_token:
+        condition += 'worker_token = :event_token'
+        values[':event_token'] = event_token
+    else:
+        condition += 'attribute_not_exists(worker_token)'
+    try:
+        _sessions_table().update_item(
+            Key={'session_id': session_id, 'sk': 'META'},
+            UpdateExpression=(
+                'SET worker_token = :token, worker_deadline_at = :deadline'),
+            ConditionExpression=condition,
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as exc:
+        if not _is_conditional_check_failure(exc):
+            raise
+        return None
+    return token
+
+
+def _hand_over(session_id: str, generation_pass: int, token: str,
+               continuation: int) -> bool:
+    """Hand the unfinished tail of the plan to a continuation invocation:
+    swap the worker token (this invocation's is spent) and extend the
+    deadline, conditioned on this invocation still holding the pass, then
+    self-invoke with the new token. Returns False without invoking when
+    the pass moved on; an invoke error propagates to the caller."""
+    new_token = str(uuid.uuid4())
+    try:
+        _sessions_table().update_item(
+            Key={'session_id': session_id, 'sk': 'META'},
+            UpdateExpression=(
+                'SET worker_token = :new_token, worker_deadline_at = :deadline'),
+            ConditionExpression=(
+                'generation_pass = :pass AND worker_token = :token'),
+            ExpressionAttributeValues={
+                ':new_token': new_token,
+                ':deadline': _now_ms() + WORKER_TIMEOUT_MS,
+                ':pass': int(generation_pass),
+                ':token': token,
+            },
+        )
+    except ClientError as exc:
+        if not _is_conditional_check_failure(exc):
+            raise
+        logger.info('Worker for pass %s of session %s lost its claim '
+                    'before the hand-over; no continuation started',
+                    generation_pass, session_id)
+        return False
+    _invoke_worker_async({
+        'internal_action': 'generation_worker',
+        'session_id': session_id,
+        'generation_pass': int(generation_pass),
+        'worker_token': new_token,
+        'continuation': int(continuation),
+    })
+    return True
+
+
+def _finish_pass(session_id: str, generation_pass: int, status: str,
+                 reason: Optional[str] = None) -> None:
+    """The worker's final status write, generation_pass-conditional so a
+    stale worker never overwrites a newer pass (Req 5.4); ``reason`` is
+    recorded as last_failure."""
+    now = _now_ms()
+    expression = 'SET #s = :status, updated_at = :t'
+    values = {':status': status, ':pass': int(generation_pass), ':t': now}
+    if reason is not None:
+        expression += ', last_failure = :f'
+        values[':f'] = {'reason': str(reason)[:2000], 'at': now}
+    try:
+        _sessions_table().update_item(
+            Key={'session_id': session_id, 'sk': 'META'},
+            UpdateExpression=expression,
+            ConditionExpression='generation_pass = :pass',
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as exc:
+        if not _is_conditional_check_failure(exc):
+            raise
+        logger.info('Worker for stale pass %s of session %s: status left '
+                    'untouched', generation_pass, session_id)
+
+
+def _reap_stale_generation(meta: Dict, previews: List[Dict]) -> Dict:
+    """Move a `generating` session whose worker deadline plus grace has
+    passed to `failed` with the reason (a pass whose worker died must not
+    read `generating` forever). The write is conditioned on the META still
+    being the one observed (same pass, still generating, same worker
+    token), so a continuation claiming the pass in between wins. Returns
+    the META as the caller should present it."""
+    now = _now_ms()
+    if not generation_is_stale(meta, now, WORKER_TIMEOUT_MS):
+        return meta
+    generation_pass = int(meta.get('generation_pass', 0))
+    written = len([p for p in previews
+                   if int(p.get('generation_pass', -1)) == generation_pass])
+    planned = len(meta.get('generation_plan') or [])
+    failure = {
+        'reason': stale_generation_failure_reason(
+            generation_pass, written, planned),
+        'at': now,
+    }
+    condition = 'generation_pass = :pass AND #s = :generating AND '
+    values = {
+        ':failed': 'failed',
+        ':f': failure,
+        ':t': now,
+        ':pass': generation_pass,
+        ':generating': 'generating',
+    }
+    token = meta.get('worker_token')
+    if token:
+        condition += 'worker_token = :token'
+        values[':token'] = token
+    else:
+        condition += 'attribute_not_exists(worker_token)'
+    try:
+        _sessions_table().update_item(
+            Key={'session_id': meta['session_id'], 'sk': 'META'},
+            UpdateExpression=(
+                'SET #s = :failed, last_failure = :f, updated_at = :t'),
+            ConditionExpression=condition,
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as exc:
+        if not _is_conditional_check_failure(exc):
+            logger.exception('Failed to reap stale generation pass %s of '
+                             'session %s', generation_pass,
+                             meta.get('session_id'))
+        return meta
+    logger.warning('Session %s: generation pass %s reaped to failed (%s '
+                   'preview record(s) written for %s planned; the worker '
+                   'passed its deadline without reporting)',
+                   meta.get('session_id'), generation_pass, written, planned)
+    reaped = dict(meta)
+    reaped.update({'status': 'failed', 'last_failure': failure,
+                   'updated_at': now})
+    return reaped
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +709,9 @@ def _presign_staging_url(s3_client, bucket: str, key: str) -> Optional[str]:
 
 def get_session(event: Dict) -> Dict:
     """GET /synthetic/sessions/{id} - META + previews with presigned
-    thumbnails and per-preview resolved prompt text (Req 10.2, 5.2, 5.6)."""
+    thumbnails and per-preview resolved prompt text (Req 10.2, 5.2, 5.6).
+    A `generating` session whose worker passed its deadline without
+    reporting is moved to `failed` here (the UI polls this route)."""
     session_id = (event.get('pathParameters') or {}).get('id')
     meta, previews = _load_session(session_id)
     if meta is None:
@@ -520,6 +727,7 @@ def get_session(event: Dict) -> Dict:
 
     meta = _from_ddb(meta)
     previews = _from_ddb(previews)
+    meta = _reap_stale_generation(meta, previews)
     try:
         usecase = get_usecase(meta['usecase_id'])
         s3_client, bucket = _data_s3_client(usecase)
@@ -614,8 +822,10 @@ def generate(event: Dict) -> Dict:
     """POST /synthetic/sessions/{id}/generate
 
     Validates, resolves placeholders, persists the plan under an
-    incremented generation_pass, self-invokes the async worker, and
-    returns 202 (Req 5.1)."""
+    incremented generation_pass with a fresh worker token and deadline,
+    self-invokes the async worker, and returns 202 (Req 5.1). Answers 409
+    while a pass is genuinely running (its worker inside its deadline); a
+    pass whose worker died is superseded by the new one."""
     session_id = (event.get('pathParameters') or {}).get('id')
     meta, previews = _load_session(session_id)
     if meta is None:
@@ -626,6 +836,18 @@ def generate(event: Dict) -> Dict:
         return denial
 
     meta = _from_ddb(meta)
+    previews = _from_ddb(previews)
+    if meta.get('status') == 'generating' and not generation_is_stale(
+            meta, _now_ms(), WORKER_TIMEOUT_MS):
+        current_pass = int(meta.get('generation_pass', 0))
+        written = len([p for p in previews
+                       if int(p.get('generation_pass', -1)) == current_pass])
+        return create_response(409, {
+            'error': running_generation_message(
+                current_pass, written, len(meta.get('generation_plan') or [])),
+            'status': 'generating',
+            'generation_pass': current_pass,
+        })
     body = json.loads(event.get('body') or '{}')
 
     model_id = body.get('generation_model_id') or meta.get(
@@ -656,7 +878,7 @@ def generate(event: Dict) -> Dict:
 
     source_class = body.get('source_class') or meta.get('source_class')
     defect_type = body.get('defect_type') or meta.get('defect_type')
-    sources, count_override = _scoped_sources(meta, _from_ddb(previews), body)
+    sources, count_override = _scoped_sources(meta, previews, body)
     variation_count = count_override if count_override is not None else (
         body.get('variation_count')
         or (meta.get('generation_params') or {}).get('variation_count'))
@@ -688,6 +910,10 @@ def generate(event: Dict) -> Dict:
     )
 
     generation_pass = int(meta.get('generation_pass', 0)) + 1
+    # The worker claims the pass by swapping this token (see _claim_worker)
+    # and must report back before the deadline or the pass is dead.
+    worker_token = str(uuid.uuid4())
+    now = _now_ms()
     _sessions_table().update_item(
         Key={'session_id': session_id, 'sk': 'META'},
         UpdateExpression=(
@@ -695,7 +921,8 @@ def generate(event: Dict) -> Dict:
             'generation_plan = :plan, generation_model_id = :model, '
             'generation_params = :params, prompt_template_text = :template, '
             'resolved_prompt = :prompt, source_class = :cls, '
-            'defect_type = :defect, updated_at = :t '
+            'defect_type = :defect, worker_token = :token, '
+            'worker_deadline_at = :deadline, updated_at = :t '
             'REMOVE last_failure'
         ),
         ExpressionAttributeNames={'#s': 'status'},
@@ -709,7 +936,9 @@ def generate(event: Dict) -> Dict:
             ':prompt': resolved_prompt,
             ':cls': source_class,
             ':defect': defect_type,
-            ':t': _now_ms(),
+            ':token': worker_token,
+            ':deadline': now + WORKER_TIMEOUT_MS,
+            ':t': now,
         }),
     )
 
@@ -717,6 +946,7 @@ def generate(event: Dict) -> Dict:
         'internal_action': 'generation_worker',
         'session_id': session_id,
         'generation_pass': generation_pass,
+        'worker_token': worker_token,
     })
     return create_response(202, {
         'session_id': session_id,
@@ -850,22 +1080,30 @@ def _invoke_stability_model(model_id: str, request_body: Dict) -> bytes:
 
 
 def execute_generation_tasks(tasks: List[Dict], invoke_task,
-                             on_result=None) -> Tuple[List[Dict], List[Dict]]:
+                             on_result=None,
+                             should_stop=None) -> Tuple[List[Dict], List[Dict]]:
     """Run the generation plan task-by-task with per-task failure
     isolation (Req 4.5): a failing task records its failure reason and the
     loop continues. Returns (completed_previews, failed_previews), which
-    exactly partition the plan.
+    exactly partition the plan -- or, with ``should_stop``, the head of
+    the plan: the loop ends before the first task ``should_stop()`` refuses
+    and the untouched tail is the caller's to hand over.
 
     ``invoke_task(task) -> dict`` performs the model invocation + staging
     write and returns extra preview fields (staging_key,
     generation_method, mask_region, ...). ``on_result(preview)`` is called
     for every preview as it completes (incremental persistence, Req 5.2).
+    Every preview carries the plan's ``task_index`` so a continuation can
+    tell which tasks are written.
     """
     completed: List[Dict] = []
     failed: List[Dict] = []
     for task in tasks:
+        if should_stop is not None and should_stop():
+            break
         preview = {
             'preview_id': str(uuid.uuid4()),
+            'task_index': task.get('task_index'),
             'source_image_key': _source_key(task.get('source_image')),
             'variation_index': task.get('variation_index'),
             'resolved_prompt': task.get('resolved_prompt'),
@@ -886,19 +1124,42 @@ def execute_generation_tasks(tasks: List[Dict], invoke_task,
     return completed, failed
 
 
-def run_generation_worker(event: Dict) -> Dict:
+def run_generation_worker(event: Dict, context: Any = None) -> Dict:
     """Async worker: processes the persisted plan one Bedrock call per
     task, writing each preview as it completes. Status updates are guarded
     by the generation_pass conditional so a stale worker never overwrites
-    a newer pass (Req 5.4)."""
+    a newer pass (Req 5.4).
+
+    The invocation first claims the pass (worker token, see _claim_worker)
+    and runs only the plan tasks of its pass that have no preview record
+    yet; it stops starting tasks when fewer than CONTINUATION_RESERVE_MS of
+    the Lambda's time remain and hands the rest to a continuation
+    invocation of itself. A pass that cannot continue (no time for a single
+    task, or the continuation cannot be started) ends `failed` with the
+    reason instead of `generating` forever."""
     session_id = event['session_id']
     generation_pass = int(event['generation_pass'])
-    meta, _ = _load_session(session_id)
+    event_token = event.get('worker_token')
+    continuation = int(event.get('continuation', 0))
+    remaining_ms = _remaining_time_ms(context)
+    meta, previews = _load_session(session_id, consistent=True)
     if meta is None:
         logger.error('Worker: session %s not found', session_id)
         return {'status': 'error', 'reason': 'session not found'}
     meta = _from_ddb(meta)
+
+    token = _claim_worker(session_id, generation_pass, event_token,
+                          _now_ms() + remaining_ms())
+    if token is None:
+        logger.warning('Worker for pass %s of session %s (continuation %s): '
+                       'the pass is not generating under this event\'s '
+                       'token (redelivered, retried or superseded event); '
+                       'nothing run', generation_pass, session_id,
+                       continuation)
+        return {'status': 'stale', 'generation_pass': generation_pass,
+                'completed': 0, 'failed': 0}
     tasks = meta.get('generation_plan') or []
+    pending = remaining_tasks(tasks, _from_ddb(previews), generation_pass)
 
     usecase = get_usecase(meta['usecase_id'])
     s3_client, bucket = _data_s3_client(usecase)
@@ -1032,30 +1293,61 @@ def run_generation_worker(event: Dict) -> Dict:
             # Per-variation failure recorded on the session too (Req 1.4).
             _record_last_failure(session_id, item['failure_reason'])
 
-    completed, failed = execute_generation_tasks(tasks, invoke_task,
-                                                 on_result)
+    def should_stop():
+        return should_hand_over(remaining_ms())
 
-    # generation_pass-conditional status update: stale workers never
-    # overwrite a newer pass (Req 5.4).
+    completed, failed = execute_generation_tasks(pending, invoke_task,
+                                                 on_result, should_stop)
+
+    left = len(pending) - len(completed) - len(failed)
+    written = len(tasks) - left
+    if left == 0:
+        _finish_pass(session_id, generation_pass, 'awaiting_review')
+        return {'status': 'done', 'completed': len(completed),
+                'failed': len(failed)}
+    result = {
+        'generation_pass': generation_pass,
+        'continuation': continuation,
+        'completed': len(completed),
+        'failed': len(failed),
+        'remaining': left,
+    }
+    if not completed and not failed:
+        # No time for even one task: handing over again would only chain
+        # empty invocations, so the pass ends here with the reason.
+        reason = (
+            f"The generation worker ran out of time before it could run a "
+            f"single variation of pass {generation_pass} ({left} of "
+            f"{len(tasks)} left; under {CONTINUATION_RESERVE_MS // 1000} s "
+            f"of its time limit remained).")
+        logger.error('Worker for pass %s of session %s: %s', generation_pass,
+                     session_id, reason)
+        _finish_pass(session_id, generation_pass, 'failed', reason)
+        result['status'] = 'failed'
+        return result
     try:
-        _sessions_table().update_item(
-            Key={'session_id': session_id, 'sk': 'META'},
-            UpdateExpression='SET #s = :status, updated_at = :t',
-            ConditionExpression='generation_pass = :pass',
-            ExpressionAttributeNames={'#s': 'status'},
-            ExpressionAttributeValues={
-                ':status': 'awaiting_review',
-                ':pass': generation_pass,
-                ':t': _now_ms(),
-            },
-        )
-    except ClientError as exc:
-        if exc.response['Error']['Code'] != 'ConditionalCheckFailedException':
-            raise
-        logger.info('Worker for stale pass %s of session %s: status left '
-                    'untouched', generation_pass, session_id)
-    return {'status': 'done', 'completed': len(completed),
-            'failed': len(failed)}
+        handed_over = _hand_over(session_id, generation_pass, token,
+                                 continuation + 1)
+    except Exception as exc:  # noqa: BLE001 - any invoke failure ends the pass
+        reason = (
+            f"The generation worker could not start its continuation after "
+            f"{written} of {len(tasks)} variations of pass {generation_pass}: "
+            f"{exc}")
+        logger.exception('Worker for pass %s of session %s: %s',
+                         generation_pass, session_id, reason)
+        _finish_pass(session_id, generation_pass, 'failed', reason)
+        result['status'] = 'failed'
+        return result
+    if not handed_over:
+        result['status'] = 'stale'
+        return result
+    logger.info('Worker for pass %s of session %s handed over after %s of '
+                '%s variations (%s left) to continuation %s',
+                generation_pass, session_id, written, len(tasks), left,
+                continuation + 1)
+    result['status'] = 'continued'
+    result['continuation'] = continuation + 1
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1436,7 +1728,7 @@ def handler(event: Dict, context: Any) -> Dict:
         # Async self-invocation path (generation worker).
         if isinstance(event, dict) and event.get('internal_action') == \
                 'generation_worker':
-            return run_generation_worker(event)
+            return run_generation_worker(event, context)
 
         http_method = event.get('httpMethod')
         resource = event.get('resource', '')
