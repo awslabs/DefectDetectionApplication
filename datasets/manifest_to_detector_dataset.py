@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Convert a DDA / Ground Truth ObjectDetection manifest into a detector
-training dataset (COCO JSON or YOLO txt), split without near-duplicate
-leakage.
+Convert a DDA / Ground Truth ObjectDetection or InstanceSegmentation
+manifest into a detector training dataset (COCO JSON or YOLO txt), split
+without near-duplicate leakage.
 
 Input manifest is JSON Lines, one entry per image, as produced by the
 portal's labeling pipeline (``dda_manifest._serialize_object_detection``)
@@ -24,6 +24,27 @@ named after the job on a native Ground Truth job, so the attribute name is
 auto-detected via its ``-metadata`` sibling's ``type``.
 
 Boxes are absolute pixels: left/top/width/height.
+
+INSTANCE MANIFESTS (RF-DETR-Seg)
+--------------------------------
+An instance-segmentation manifest (``dda_manifest.
+_serialize_instance_segmentation``; metadata ``type``
+``groundtruth/instance-segmentation``) carries the same shape under the
+``instance-segmentation`` attribute, plus one ``rle`` per annotation: the
+COCO-style uncompressed counts of the instance mask, space-separated,
+column-major, background run first, summing to ``width * height``. The
+converter copies those counts one-to-one into the COCO annotation's
+``segmentation`` as ``{"counts": [ints], "size": [height, width]}`` (what
+rfdetr's seg loader hands to ``pycocotools.frPyObjects``), with ``area`` the
+mask pixel count. An instance whose RLE is empty or inconsistent with the
+image size is dropped with a warning naming the image and the instance; an
+image left with no instance is a negative, exactly as a zero-box image is.
+Grouping, negative stratification and splits are the bbox path's: the
+parsed record carries ``boxes`` derived from the instances, so nothing
+downstream of parsing changes. One format per manifest: a manifest mixing
+bounding-box and instance lines is rejected. ``--format yolo`` cannot carry
+masks and refuses an instance manifest; use ``--format coco --coco-layout
+rfdetr``.
 
 WHY THE SPLIT IS NOT RANDOM
 ---------------------------
@@ -90,6 +111,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dedupe_frames  # noqa: E402
 
 OBJECT_DETECTION_TYPE = "groundtruth/object-detection"
+INSTANCE_SEGMENTATION_TYPE = "groundtruth/instance-segmentation"
+
+#: The error `--format yolo` exits with on an instance manifest: the YOLO
+#: layout has no mask representation DDA trains with, and a silent box-only
+#: dataset would train a detector where a segmenter was asked for.
+YOLO_INSTANCE_ERROR = ("error: --format yolo cannot carry instance masks; "
+                       "use --format coco --coco-layout rfdetr")
 
 #: Frames closer than this (mean abs diff on the 64x64 signature) are treated
 #: as the same scene for splitting. Deliberately looser than dedupe's default
@@ -149,15 +177,66 @@ def detect_attribute(entry):
     return None
 
 
+def detect_instance_attribute(entry):
+    """Find the instance-segmentation label attribute name in a manifest entry.
+
+    Sibling of ``detect_attribute``: prefers a key whose ``<key>-metadata``
+    sibling declares the instance-segmentation type; falls back to the DDA
+    literal 'instance-segmentation'. None for a bbox-only (or unlabeled) entry.
+    """
+    for key, value in entry.items():
+        if key.endswith("-metadata"):
+            continue
+        meta = entry.get(f"{key}-metadata")
+        if isinstance(meta, dict) and meta.get("type") == INSTANCE_SEGMENTATION_TYPE:
+            return key
+    if "instance-segmentation" in entry:
+        return "instance-segmentation"
+    return None
+
+
+def _instance_counts(rle, width, height):
+    """Parse one instance's RLE string -> (counts, None) or (None, reason).
+
+    The counts must be non-negative integers summing to ``width * height``
+    (the mask covers the image exactly) and carry at least one foreground
+    run (odd index) longer than zero; anything else is a bad instance the
+    caller drops with a warning rather than letting rfdetr's loader fail an
+    hour into training or, worse, train on a silently corrupt mask.
+    """
+    if not isinstance(rle, str) or not rle.strip():
+        return None, "empty rle"
+    try:
+        counts = [int(token) for token in rle.split()]
+    except ValueError:
+        return None, "non-integer run length in rle"
+    if any(c < 0 for c in counts):
+        return None, "negative run length in rle"
+    total = sum(counts)
+    if total != width * height:
+        return None, (f"rle counts sum to {total}, expected "
+                      f"{width * height} for {width}x{height}")
+    if not any(c > 0 for c in counts[1::2]):
+        return None, "rle has no foreground pixels"
+    return counts, None
+
+
 def parse_entries(lines):
     """Parse manifest lines -> (records, class_names, stats).
 
     A record is {'source_ref', 'file_name', 'width', 'height', 'boxes'}
     where each box is (class_id, left, top, w, h) in absolute pixels.
+
+    An instance-segmentation manifest yields the same record with an added
+    ``'instances'`` list of (class_id, left, top, w, h, counts) -- ``counts``
+    the RLE parsed to ints -- and ``'boxes'`` derived from it, so grouping,
+    splitting and reporting run unchanged. The two line kinds never mix: the
+    first line of the other kind aborts the conversion naming both lines.
     """
     records = []
     class_map = {}
     skipped = defaultdict(int)
+    manifest_kind = None  # ('bbox' | 'instance', line number that set it)
 
     for i, line in enumerate(lines, 1):
         try:
@@ -171,7 +250,10 @@ def parse_entries(lines):
             skipped["no source-ref"] += 1
             continue
 
-        attr = detect_attribute(entry)
+        # Instance attribute first: an instance manifest carries no
+        # bounding-box attribute, and a bbox manifest no instance attribute.
+        instance_attr = detect_instance_attribute(entry)
+        attr = instance_attr if instance_attr is not None else detect_attribute(entry)
         if attr is None:
             # No detection attribute at all: an unlabeled image. Treat as a
             # negative only if it was explicitly labeled as such elsewhere;
@@ -179,6 +261,17 @@ def parse_entries(lines):
             # would teach the model that real plates are background.
             skipped["no detection attribute (unlabeled?)"] += 1
             continue
+
+        kind = "instance" if instance_attr is not None else "bbox"
+        if manifest_kind is None:
+            manifest_kind = (kind, i)
+        elif manifest_kind[0] != kind:
+            first_kind, first_line = manifest_kind
+            raise SystemExit(
+                f"error: manifest mixes {first_kind} and {kind} lines "
+                f"(line {first_line} is {first_kind}, line {i} is {kind}); "
+                "one format per manifest -- bounding-box or "
+                "instance-segmentation, not both")
 
         bb = entry.get(attr) or {}
         meta = entry.get(f"{attr}-metadata") or {}
@@ -192,10 +285,12 @@ def parse_entries(lines):
             continue
         width = int(sizes[0]["width"])
         height = int(sizes[0]["height"])
+        file_name = source_ref.rsplit("/", 1)[-1]
 
         boxes = []
+        instances = [] if kind == "instance" else None
         bad = False
-        for gt in bb.get("annotations") or []:
+        for n, gt in enumerate(bb.get("annotations") or []):
             try:
                 cid = int(gt["class_id"])
                 left, top = int(gt["left"]), int(gt["top"])
@@ -203,6 +298,18 @@ def parse_entries(lines):
             except (KeyError, TypeError, ValueError):
                 bad = True
                 break
+            if kind == "instance":
+                # The box is the tight box the serializer derived from the
+                # mask; the mask itself is what has to be sound. A bad
+                # instance loses the instance, never the image.
+                counts, reason = _instance_counts(gt.get("rle"), width, height)
+                if counts is None:
+                    print(f"WARN: {file_name} instance {n}: {reason}")
+                    skipped["bad instance rle"] += 1
+                    continue
+                instances.append((cid, left, top, bw, bh, counts))
+                boxes.append((cid, left, top, bw, bh))
+                continue
             if bw <= 0 or bh <= 0:
                 skipped["degenerate box (zero area)"] += 1
                 continue
@@ -219,13 +326,16 @@ def parse_entries(lines):
             skipped["malformed annotation"] += 1
             continue
 
-        records.append({
+        record = {
             "source_ref": source_ref,
-            "file_name": source_ref.rsplit("/", 1)[-1],
+            "file_name": file_name,
             "width": width,
             "height": height,
             "boxes": boxes,
-        })
+        }
+        if instances is not None:
+            record["instances"] = instances
+        records.append(record)
 
     if not class_map:
         class_map = {0: "object"}
@@ -380,6 +490,29 @@ def write_coco(assigned, class_names, images_dir, out, link,
                 "width": rec["width"],
                 "height": rec["height"],
             })
+            instances = rec.get("instances")
+            if instances is not None:
+                # Instance record: every annotation carries its mask as the
+                # COCO uncompressed RLE dict -- the manifest's counts copied
+                # one-to-one (same column-major order, background run first)
+                # with size [height, width], which pycocotools reads from the
+                # dict itself. rfdetr decodes an image's masks only when its
+                # first kept annotation has a `segmentation` key, so an
+                # instance annotation is never written without one. `area` is
+                # the mask pixel count (the foreground runs), not the box area.
+                for cid, left, top, bw, bh, counts in instances:
+                    annotations.append({
+                        "id": ann_id,
+                        "image_id": img_id,
+                        "category_id": cid + 1,  # COCO ids are 1-based
+                        "bbox": [left, top, bw, bh],
+                        "area": sum(counts[1::2]),
+                        "iscrowd": 0,
+                        "segmentation": {"counts": list(counts),
+                                         "size": [rec["height"], rec["width"]]},
+                    })
+                    ann_id += 1
+                continue
             for cid, left, top, bw, bh in rec["boxes"]:
                 annotations.append({
                     "id": ann_id,
@@ -404,6 +537,12 @@ def write_coco(assigned, class_names, images_dir, out, link,
 
 
 def write_yolo(assigned, class_names, images_dir, out, link):
+    if any(rec.get("instances") is not None
+           for recs in assigned.values() for rec in recs):
+        # Refused before anything is written: a box-only YOLO dataset built
+        # from an instance manifest would silently train a detector where a
+        # segmenter was asked for.
+        raise SystemExit(YOLO_INSTANCE_ERROR)
     out = Path(out)
     for split, recs in assigned.items():
         if not recs:
@@ -487,7 +626,8 @@ def report(records, assigned, class_names, skipped, n_groups, net_h=1280):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="DDA/GT ObjectDetection manifest -> COCO or YOLO dataset.",
+        description="DDA/GT ObjectDetection or InstanceSegmentation manifest "
+                    "-> COCO or YOLO dataset (instance masks: COCO only).",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", required=True,
                     help="Manifest JSONL (local path or s3:// URI)")
