@@ -145,12 +145,19 @@ describe('isAutoLabelModelCompatible', () => {
 
   it('matches the exported modality lists', () => {
     // The matrix constants the wizard builds its option groups from.
-    expect(SAM_MODALITIES).toEqual(['Segmentation', 'ObjectDetection']);
+    // rfdetr-seg-support Requirement 2.4: the mask-producing families gain
+    // InstanceSegmentation; Bedrock (boxes only) does not.
+    expect(SAM_MODALITIES).toEqual([
+      'Segmentation',
+      'ObjectDetection',
+      'InstanceSegmentation',
+    ]);
     expect(BEDROCK_MODALITIES).toEqual(['Classification', 'ObjectDetection']);
     expect(LLM_MODALITIES).toEqual([
       'Classification',
       'Segmentation',
       'ObjectDetection',
+      'InstanceSegmentation',
     ]);
     expect(MAX_DETECTION_PROMPT_LENGTH).toBe(2000);
   });

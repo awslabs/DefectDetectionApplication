@@ -223,10 +223,13 @@ const ORACLE_MODALITIES: Record<
   'sam' | 'groundedSam' | 'bedrock' | 'llm',
   string[]
 > = {
-  sam: ['Segmentation', 'ObjectDetection'],
-  groundedSam: ['Segmentation', 'ObjectDetection'],
+  // rfdetr-seg-support Requirement 2.4: the mask-producing families also
+  // pre-label InstanceSegmentation; bedrock (boxes only) does not.
+  // `modalityArb` stays over the three pre-feature modalities.
+  sam: ['Segmentation', 'ObjectDetection', 'InstanceSegmentation'],
+  groundedSam: ['Segmentation', 'ObjectDetection', 'InstanceSegmentation'],
   bedrock: ['Classification', 'ObjectDetection'],
-  llm: ['Classification', 'Segmentation', 'ObjectDetection'],
+  llm: ['Classification', 'Segmentation', 'ObjectDetection', 'InstanceSegmentation'],
 };
 
 interface FamilyOption {

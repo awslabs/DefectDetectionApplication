@@ -921,6 +921,21 @@ export interface DdaMaskRegion {
 }
 
 /**
+ * One object instance of an InstanceSegmentation annotation
+ * (rfdetr-seg-support Requirement 2.2): its mask as the canonical RLE
+ * string at source resolution and the tight box derived from it. The box
+ * is advisory on submissions — the server recomputes it from the RLE.
+ */
+export interface DdaInstance {
+  /** Label_Set class; null for an unclassified sam proposal. */
+  class: string | null;
+  /** Canonical_RLE of the instance mask (space-separated counts). */
+  rle: string;
+  /** Tight bounding box derived from `rle`, in image pixels. */
+  box?: { left: number; top: number; width: number; height: number };
+}
+
+/**
  * Modality-tagged annotation payload used for both Pre_Labels returned by
  * the labeler APIs and submissions sent to `POST /labeler/tasks/{id}/submit`
  * (dda-data-labeling Requirements 7.3–7.5, 7.7, 8.3).
@@ -928,8 +943,9 @@ export interface DdaMaskRegion {
 export interface DdaAnnotation {
   /**
    * The job's labeling modality ('Classification' | 'Segmentation' |
-   * 'ObjectDetection'). Required on submissions: the server rejects any
-   * annotation whose modality does not match the job's task type.
+   * 'ObjectDetection' | 'InstanceSegmentation'). Required on submissions:
+   * the server rejects any annotation whose modality does not match the
+   * job's task type.
    */
   modality?: string;
   /** Binary_Classification selection: 'normal' | 'anomaly'. */
@@ -939,8 +955,14 @@ export interface DdaAnnotation {
   /** Semantic_Segmentation regions (RLE-encoded, label-indexed). */
   regions?: DdaMaskRegion[];
   /**
-   * Image bounds for ObjectDetection submissions; the server validates
-   * every box against these dimensions.
+   * Instance_Segmentation instances, one RLE mask per object
+   * (rfdetr-seg-support Requirement 2.2).
+   */
+  instances?: DdaInstance[];
+  /**
+   * Image bounds for ObjectDetection and InstanceSegmentation
+   * submissions; the server validates every box / RLE against these
+   * dimensions.
    */
   image_size?: { width: number; height: number };
   /** Image pixel dimensions the regions/boxes are expressed against. */
@@ -1105,7 +1127,11 @@ export interface StartPreviewRunRequest {
    * has no detection-prompt input (grounded-sam-prompt-tuning-preview).
    */
   detection_prompt?: string;
-  task_type: 'Classification' | 'Segmentation' | 'ObjectDetection';
+  task_type:
+    | 'Classification'
+    | 'Segmentation'
+    | 'ObjectDetection'
+    | 'InstanceSegmentation';
   label_set: string[];
   /** 1..5 entries, each a bare object key or an `s3://` URI. */
   sample_images: string[];

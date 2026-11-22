@@ -13,6 +13,8 @@
  * - Segmentation: `{regions: [{class, rle}]}` decoded through the shared
  *   RLE helpers and painted as translucent per-class fills, with each
  *   region's class name associated in a legend beside the image (req 4.2).
+ *   An InstanceSegmentation run's result has the same shape on the wire
+ *   (rfdetr-seg-support Requirements 2.1, 2.4) and is drawn identically.
  * - Classification: `{label: 'normal' | 'anomaly'}` shown as label text
  *   beside the image (req 4.3).
  *
@@ -124,9 +126,14 @@ export default function PreviewResultCanvas({
   }, [taskType, prelabel.boxes, imageWidth, imageHeight, hasDimensions]);
 
   /* ---------------- Segmentation: translucent per-class fills -------- */
+  // An InstanceSegmentation preview result is Segmentation-shaped on the
+  // wire (`regions`, one per detection — rfdetr-seg-support Req 2.1/2.4),
+  // so it is drawn exactly as a Segmentation result.
+  const drawsRegions =
+    taskType === 'Segmentation' || taskType === 'InstanceSegmentation';
   const regions = useMemo(
-    () => (taskType === 'Segmentation' ? (prelabel.regions ?? []) : []),
-    [taskType, prelabel.regions]
+    () => (drawsRegions ? (prelabel.regions ?? []) : []),
+    [drawsRegions, prelabel.regions]
   );
 
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -168,7 +175,7 @@ export default function PreviewResultCanvas({
   const isEmptyResult =
     taskType === 'ObjectDetection'
       ? (prelabel.boxes ?? []).length === 0
-      : taskType === 'Segmentation'
+      : drawsRegions
         ? regions.length === 0
         : classificationLabel === undefined ||
           classificationLabel === null ||
@@ -187,7 +194,7 @@ export default function PreviewResultCanvas({
         style={{ display: 'block', maxWidth: '100%' }}
         draggable={false}
       />
-      {taskType === 'Segmentation' && (
+      {drawsRegions && (
         <canvas
           ref={maskCanvasRef}
           data-testid="preview-mask-overlay"

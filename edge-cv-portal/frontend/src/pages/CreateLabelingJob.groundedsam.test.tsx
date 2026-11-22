@@ -158,6 +158,7 @@ describe('isAutoLabelModelCompatible — grounded-sam (Req 1.3)', () => {
     expect(GROUNDED_SAM_MODALITIES).toEqual([
       'Segmentation',
       'ObjectDetection',
+      'InstanceSegmentation', // rfdetr-seg-support Requirement 2.4
     ]);
     expect(MAX_PROMPT_OVERRIDE_LENGTH).toBe(256);
   });
