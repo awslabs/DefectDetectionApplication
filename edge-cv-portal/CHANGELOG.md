@@ -4,6 +4,14 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Added - Configuration overrides can set a Bedrock node's model request fields (2026-11-21)
+
+`WorkflowNodeOverrides` can now set a **Bedrock Inference** node's `additional_model_request_fields`, so turning a Claude model's thinking on or off on one device no longer needs a new workflow version. This replaces the "Not overridable" point of the 2026-11-12 entry.
+
+- **Value.** A JSON object, for example `{"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}`, or its JSON text. It is checked with the rule the node's own value has: anything but a JSON object is ignored with a warning and the deployed value stands, and an empty object or empty text sends no fields. The run's log names the overridden parameter, not its value.
+- **Replacing a value.** Greengrass merges nested objects key by key, so a later `merge` adds keys to an earlier object instead of replacing it. Reset `/WorkflowNodeOverrides` in the same deployment revision, or give the value as JSON text.
+- **Older LocalServer.** A LocalServer built before this change ignores the parameter with a warning. Workflow tuning does not replay it, like every other override.
+
 ### Fixed - Workflow tuning scores an inspection node under its attempt policy (2026-11-21)
 
 Workflow tuning replayed every sample of an inspection-format **Bedrock Inference** node (`answer_format: inspection`) with one call and a 30-second read timeout, whatever the node's `attempts`, `attempt_timeout_s` and `budget_s`. The device runs the node under that policy, so a node limited to 14 seconds on the device had 30 seconds in tuning.
