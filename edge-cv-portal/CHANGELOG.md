@@ -4,6 +4,14 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed - Workflow tuning scores an inspection node under its attempt policy (2026-11-21)
+
+Workflow tuning replayed every sample of an inspection-format **Bedrock Inference** node (`answer_format: inspection`) with one call and a 30-second read timeout, whatever the node's `attempts`, `attempt_timeout_s` and `budget_s`. The device runs the node under that policy, so a node limited to 14 seconds on the device had 30 seconds in tuning.
+
+- **Replay.** A score run of an inspection-format node now applies the latest version's policy the way the device's executor does: up to `attempts` calls, each with `attempt_timeout_s` as its read timeout and no automatic retry inside the call. A failed call or an answer that is not valid inspection JSON is retried, except a `ValidationException`, `AccessDeniedException` or `ResourceNotFoundException`. With `budget_s` set, a retry starts only while the budget leaves a whole `attempt_timeout_s`. The outcome is the last attempt's. A node at the default policy (1 attempt, 30 s, no budget) is scored exactly as before, and the legacy answer formats keep one call.
+- **Records.** Each inspection outcome records `attempts`, the number of calls made. The score run records the policy as `attemptPolicy` (`attempts`, `attemptTimeoutS`, `budgetS`) and returns it in its views, and each scoring step logs the policy it applied.
+- **Shared code.** The policy's defaults, its parameter rule and its terminal error codes moved unchanged to the shared `workflow_core` package, which LocalServer vendors, so the device and the Portal resolve the policy with one implementation. The device's behaviour does not change.
+
 ### Fixed - Workflow tuning for inspection-format Bedrock nodes, reference files and live tuning configuration (2026-11-13)
 
 Workflow tuning collected nothing for a **Bedrock Inference** node in inspection format (`answer_format: inspection`). The device skipped the sample export for every Bedrock node whose anomaly mode was off, which an inspection-format node always is, and the inspection path never called the exporter. The Portal listed such a node as tunable only while its `anomaly_mode` was absent or on, and scored candidates with the anomaly-mode contract, so every replay was a parse failure; samples an older LocalServer had backfilled showed "No verdict recorded".

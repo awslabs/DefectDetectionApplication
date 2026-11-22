@@ -114,15 +114,21 @@ from workflow_engine import scene_analytics
 # verbatim, so the Portal's replay of an inspection-format sample
 # prepares the request exactly as this executor does. They are imported
 # back under their historical names (``_JSON_TOKEN_RE`` included), so
-# every existing importer keeps working.
+# every existing importer keeps working. The attempt/budget policy's
+# defaults, terminal error codes, integer rule (``_policy_int``) and its
+# resolution moved there too, so the replay retries as this executor does.
 from workflow_engine.vendor.workflow_core.anomaly_invocation import (
     ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER,
     ANSWER_FORMAT_INSPECTION,
     BEDROCK_CONNECT_TIMEOUT_SEC,
+    BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC,
+    BEDROCK_DEFAULT_ATTEMPTS,
+    BEDROCK_DEFAULT_BUDGET_SEC,
     BEDROCK_DEFAULT_MODEL,
     BEDROCK_IMAGE_FORMAT,
     BEDROCK_JSON_INSTRUCTION,
     BEDROCK_READ_TIMEOUT_SEC,
+    BEDROCK_TERMINAL_ERROR_CODES,
     BOX_SCALE_NORMALIZED_1000,
     BOX_SCALE_PIXELS,
     DEFAULT_MAX_TOKENS,
@@ -137,16 +143,20 @@ from workflow_engine.vendor.workflow_core.anomaly_invocation import (
     InspectionRequestError,
     LlmInvocation,
     ReferenceFile,
+    bedrock_error_code,
     build_bedrock_invocation,
     build_llm_invocation,
     inspection_expected_count,
+    is_terminal_bedrock_error,
     parse_inspection_answer,
     parse_reference_list,
     parse_verdict,
+    policy_int,
     reference_list_problems,
     render_inspection_parameters,
     render_prompt_text,
     resolve_additional_model_request_fields,
+    resolve_attempt_policy,
     resolve_box_scale,
     resolve_expected_count,
     resolve_field_path,
@@ -2452,19 +2462,9 @@ BEDROCK_ON_ERROR_RECORD = "record"
 #: ``error_verdict`` value that exposes a failure as a ``fail`` verdict.
 BEDROCK_ERROR_VERDICT_FAIL = "fail"
 
-#: Catalog defaults of the attempt/budget policy; all three at their
-#: defaults = today's single call through the unchanged client.
-BEDROCK_DEFAULT_ATTEMPTS = 1
-BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC = BEDROCK_READ_TIMEOUT_SEC
-BEDROCK_DEFAULT_BUDGET_SEC = 0
-
-#: botocore ``ClientError`` codes that end the attempt loop at once
-#: (retrying cannot succeed); every other failure is retryable.
-BEDROCK_TERMINAL_ERROR_CODES = frozenset((
-    "ValidationException",
-    "AccessDeniedException",
-    "ResourceNotFoundException",
-))
+# ``BEDROCK_DEFAULT_ATTEMPTS``, ``BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC``,
+# ``BEDROCK_DEFAULT_BUDGET_SEC`` and ``BEDROCK_TERMINAL_ERROR_CODES`` are the
+# shared workflow_core constants of the attempt/budget policy, imported above.
 
 #: Recorded error text of a node with ``enabled: false``.
 BEDROCK_DISABLED_MESSAGE = "bedrock check disabled by configuration"
@@ -2507,16 +2507,9 @@ def _records_errors(binding: dict) -> bool:
             == BEDROCK_ON_ERROR_RECORD)
 
 
-def _policy_int(raw: Any, default: int, minimum: int) -> int:
-    """An integer policy parameter: absent/blank/invalid → ``default``,
-    never below ``minimum``."""
-    if raw is None or (isinstance(raw, str) and not raw.strip()):
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return max(minimum, value)
+#: The shared ``policy_int`` (absent/blank/invalid → default, never below
+#: the minimum), under this module's historical name.
+_policy_int = policy_int
 
 
 def image_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
@@ -2534,24 +2527,9 @@ def image_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
     return int(width), int(height)
 
 
-def bedrock_error_code(error: BaseException) -> Optional[str]:
-    """The ``Error.Code`` of a botocore ``ClientError``-shaped exception,
-    else ``None`` (no botocore import: classified by shape)."""
-    response = getattr(error, "response", None)
-    if not isinstance(response, dict):
-        return None
-    detail = response.get("Error")
-    if not isinstance(detail, dict):
-        return None
-    code = detail.get("Code")
-    return str(code) if code is not None else None
-
-
-def is_terminal_bedrock_error(error: BaseException) -> bool:
-    """True for the ``ClientError`` codes the attempt loop never retries
-    (:data:`BEDROCK_TERMINAL_ERROR_CODES`); transport errors, throttling,
-    5xx, unknown codes and every other exception are retryable."""
-    return bedrock_error_code(error) in BEDROCK_TERMINAL_ERROR_CODES
+# ``bedrock_error_code`` and ``is_terminal_bedrock_error`` (the terminal
+# ClientError classification, by shape) are the shared workflow_core
+# functions, imported above.
 
 
 def scale_box_to_pixels(
@@ -3462,17 +3440,9 @@ class BedrockInferenceProcessor:
         prefix), or ``None`` when it was accepted; a later attempt that
         raises leaves both as they are (the tuning sample export reads
         them)."""
-        attempts = _policy_int(
-            parameters.get("attempts"), BEDROCK_DEFAULT_ATTEMPTS, 1)
-        attempt_timeout_s = _policy_int(
-            parameters.get("attempt_timeout_s"),
-            BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC, 1)
-        budget_s = _policy_int(
-            parameters.get("budget_s"), BEDROCK_DEFAULT_BUDGET_SEC, 0)
-        default_policy = (
-            attempts == BEDROCK_DEFAULT_ATTEMPTS
-            and attempt_timeout_s == BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC
-            and budget_s == BEDROCK_DEFAULT_BUDGET_SEC)
+        policy = resolve_attempt_policy(parameters)
+        attempts, attempt_timeout_s, budget_s = policy
+        default_policy = policy.is_default
         client_options: Dict[str, Any] = {} if default_policy else {
             "timeouts": (BEDROCK_CONNECT_TIMEOUT_SEC, attempt_timeout_s),
             "retries": {"total_max_attempts": 1, "mode": "standard"},

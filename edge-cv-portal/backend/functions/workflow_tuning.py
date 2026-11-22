@@ -112,6 +112,7 @@ from shared_utils import (  # noqa: E402
     results_bucket_owner,
 )
 from workflow_core.anomaly_invocation import (  # noqa: E402
+    BEDROCK_CONNECT_TIMEOUT_SEC,
     BEDROCK_DEFAULT_REGION,
     BEDROCK_IMAGE_FORMAT,
     BEDROCK_READ_TIMEOUT_SEC,
@@ -131,6 +132,7 @@ from workflow_core.anomaly_invocation import (  # noqa: E402
     coerce_parameter_value,
     inspection_verdict,
     is_inspection_format,
+    is_terminal_bedrock_error,
     is_tunable_node,
     omitted_path_conflict,
     parse_inspection_answer,
@@ -139,6 +141,7 @@ from workflow_core.anomaly_invocation import (  # noqa: E402
     prepare_inspection_request,
     prompt_field_paths,
     prompt_fingerprint,
+    resolve_attempt_policy,
     summarize_outcomes,
 )
 from workflow_core.catalog.nodes import get_node_type  # noqa: E402
@@ -497,7 +500,7 @@ def delete_items(keys: List[Dict[str, str]]) -> int:
 # double without patching boto3 itself.
 # ==========================================================================
 
-def bedrock_client(region: str):
+def bedrock_client(region: str, attempt_timeout_s: Optional[int] = None):
     """The Bedrock runtime client the Bedrock_Scorer replays through.
 
     The executor's transport rules, unchanged (Requirement 6.3): the
@@ -505,11 +508,28 @@ def bedrock_client(region: str):
     automatic retries — a throttled or slow invocation becomes one
     ``invocation_error`` outcome instead of silently issuing the same
     request again.
+
+    With ``attempt_timeout_s`` (an inspection-format node whose attempt
+    policy is not the default) it is the executor's policy client: the
+    shared connect timeout, the node's attempt timeout as the read timeout
+    and exactly one HTTP attempt per call, so the replay's attempt loop
+    makes every retry, as on the device.
     """
-    return boto3.client(
-        'bedrock-runtime', region_name=region,
-        config=BotoConfig(read_timeout=BEDROCK_READ_TIMEOUT_SEC,
-                          retries={'max_attempts': 1}))
+    if attempt_timeout_s is None:
+        config = BotoConfig(read_timeout=BEDROCK_READ_TIMEOUT_SEC,
+                            retries={'max_attempts': 1})
+    else:
+        config = BotoConfig(connect_timeout=BEDROCK_CONNECT_TIMEOUT_SEC,
+                            read_timeout=attempt_timeout_s,
+                            retries={'total_max_attempts': 1,
+                                     'mode': 'standard'})
+    return boto3.client('bedrock-runtime', region_name=region, config=config)
+
+
+def replay_clock() -> float:
+    """Monotonic seconds for the replay's attempt loop and its latencies
+    (the executor's ``clock``)."""
+    return time.monotonic()
 
 
 def iot_data_client(usecase: Dict):
@@ -1707,6 +1727,7 @@ def run_view(run: Dict) -> Dict:
         'finishedAt': run.get('finishedAt'),
         'summary': run.get('summary'),
         'error': run.get('error'),
+        'attemptPolicy': run.get('attemptPolicy'),
     }
 
 
@@ -2575,8 +2596,10 @@ def outcome_view(item: Dict) -> Dict:
 
 
 #: The outcome fields an inspection-format replay adds; a legacy outcome
-#: carries none of them, so its item and view are unchanged.
-INSPECTION_OUTCOME_FIELDS = ('verdict', 'imageCount', 'documentCount')
+#: carries none of them, so its item and view are unchanged. ``attempts``
+#: is the number of Converse calls the node's attempt policy made.
+INSPECTION_OUTCOME_FIELDS = ('verdict', 'imageCount', 'documentCount',
+                             'attempts')
 
 
 def inspection_outcome_fields(outcome: Dict) -> Dict[str, Any]:
@@ -2955,6 +2978,12 @@ def start_score_run(event: Dict, user: Dict, session_id: str) -> Dict:
     prompt_set = {'prompt': candidate.get('prompt'),
                   'systemPrompt': candidate.get('systemPrompt'),
                   'maxTokens': candidate.get('maxTokens')}
+    node_parameters = node.get('parameters') or {}
+    # The attempt policy the replay runs an inspection-format node under,
+    # as the device does (every other node: one call per sample).
+    policy = (resolve_attempt_policy(node_parameters)
+              if mode == MODE_BEDROCK and is_inspection_format(node_parameters)
+              else None)
     timestamp = now_s()
     run = {
         'pk': session_pk(session_id),
@@ -2968,7 +2997,11 @@ def start_score_run(event: Dict, user: Dict, session_id: str) -> Dict:
         # Parameters only — never a credential (Requirement 9.3). Snapshotted
         # so every step of the run replays through the same Node_Parameters
         # the run was admitted with (Requirement 6.1).
-        'nodeParameters': node.get('parameters') or {},
+        'nodeParameters': node_parameters,
+        'attemptPolicy': None if policy is None else {
+            'attempts': policy.attempts,
+            'attemptTimeoutS': policy.attempt_timeout_s,
+            'budgetS': policy.budget_s},
         'promptSet': prompt_set,
         'definitionVersion': version,
         'candidateId': str(candidate_id),
@@ -3193,9 +3226,12 @@ def _replay_inspection_unit(client, parameters: Dict[str, Any],
     rendered from the sample's ``metadataSnippetJson`` and image size, the
     expected count and box scale, and the recorded reference files in
     recorded order with their kinds and formats. The answer is read by
-    ``parse_inspection_answer``, and ``fail`` counts as anomalous. A sample
-    that cannot reproduce the device's request is an ``invocation_error``
-    with no Bedrock call. WorkflowNodeOverrides are not replayed.
+    ``parse_inspection_answer``, and ``fail`` counts as anomalous. The call
+    runs under the node's attempt policy as the executor runs it, and the
+    outcome is the last attempt's, with ``attempts`` the calls made. A
+    sample that cannot reproduce the device's request is an
+    ``invocation_error`` with no Bedrock call. WorkflowNodeOverrides are
+    not replayed.
     """
     label = outcome['label']
 
@@ -3276,24 +3312,51 @@ def _replay_inspection_unit(client, parameters: Dict[str, Any],
     if invocation.document_count > 0:
         outcome['documentCount'] = invocation.document_count
 
-    # 5. One Converse call.
-    started = time.time()
-    try:
-        text, tokens = invoke_bedrock(client, invocation)
-    except Exception as exc:  # noqa: BLE001 - one outcome, the run continues
-        outcome['latencyMs'] = int((time.time() - started) * 1000)
-        return refuse(f"{type(exc).__name__}: {exc}")
-    outcome['latencyMs'] = int((time.time() - started) * 1000)
+    # 5. The Converse calls under the node's attempt policy, by the
+    # executor's rules (``_invoke_with_policy``): up to ``attempts`` calls;
+    # a raised error or an answer the inspection parser rejects is one
+    # failed attempt; a terminal ClientError code ends the loop at once;
+    # with a budget, attempt k >= 2 starts only while the budget leaves a
+    # whole attempt timeout. Only the last attempt's result is kept.
+    policy = resolve_attempt_policy(parameters)
+    started = replay_clock()
+    deadline = started + policy.budget_s if policy.budget_s > 0 else None
+    attempt = 0
+    while True:
+        attempt += 1
+        error: Optional[Exception] = None
+        parse_error: Optional[str] = None
+        parsed = None
+        terminal = False
+        try:
+            text, tokens = invoke_bedrock(client, invocation)
+        except Exception as exc:  # noqa: BLE001 - one failed attempt
+            error = exc
+            terminal = is_terminal_bedrock_error(exc)
+        else:
+            try:
+                parsed = parse_inspection_answer(text, request.expected_count,
+                                                 request.box_scale)
+            except ValueError as exc:
+                parse_error = str(exc)
+            else:
+                break
+        if terminal or attempt >= policy.attempts:
+            break
+        if deadline is not None and (
+                deadline - replay_clock() < policy.attempt_timeout_s):
+            break
+    outcome['attempts'] = attempt
+    outcome['latencyMs'] = int(round((replay_clock() - started) * 1000.0))
+    if error is not None:
+        return refuse(f"{type(error).__name__}: {error}")
     outcome['rawAnswer'] = text
     outcome['outputTokens'] = tokens
 
-    # 6. The inspection parser and the categorization.
-    try:
-        parsed = parse_inspection_answer(text, request.expected_count,
-                                         request.box_scale)
-    except ValueError as exc:
+    # 6. The categorization of the last answer.
+    if parse_error is not None:
         outcome['category'] = categorize_outcome(label, None, None)
-        outcome['parseError'] = str(exc)
+        outcome['parseError'] = parse_error
         return outcome
     verdict = inspection_verdict(parsed)
     outcome['category'] = categorize_outcome(label, verdict, None)
@@ -3431,7 +3494,21 @@ def execute_score_run(event: Dict) -> Dict:
         for sample_id, payload, error in pool.map(load, wanted):
             images[sample_id] = (payload, error)
 
-    bedrock = bedrock_client(region)
+    # An inspection-format node is replayed under its attempt policy, with
+    # the executor's policy client when the policy is not the default;
+    # every other node keeps one call through today's client.
+    policy = (resolve_attempt_policy(parameters)
+              if is_inspection_format(parameters) else None)
+    if policy is not None and not policy.is_default:
+        bedrock = bedrock_client(region,
+                                 attempt_timeout_s=policy.attempt_timeout_s)
+    else:
+        bedrock = bedrock_client(region)
+    if policy is not None:
+        logger.info(f"Score run {run_id} step at cursor {cursor} replays "
+                    f"under the attempt policy attempts={policy.attempts}, "
+                    f"attempt_timeout_s={policy.attempt_timeout_s}, "
+                    f"budget_s={policy.budget_s}")
 
     def replay(entry):
         _index, (sample_id, label, repeat) = entry
