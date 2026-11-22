@@ -4,6 +4,18 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Security - Pillow 13.0.0 for the Portal imaging layer, the labeling workers, the detector export image and the JP6 stub interpreter (2026-11-22)
+
+The Portal's imaging layer (`backend/layers/imaging`), its SAM and Grounded-SAM labeling workers, the detector export image and the separate Python 3.11 install in `src/backend/Dockerfile.jp6` pinned Pillow 12.3.0, which the open Pillow advisories affect. The most severe, GHSA-5x8w-8jj5-q52h, is critical: a heap overflow in the FlashPix decoder. Pillow 13.0.0 is the first release that fixes them, and it needs Python 3.11 or later.
+
+- **Both Lambda layers built from `backend/layers/imaging`**, for the labeling and camera registry functions and for the synthetic data handler, install Pillow 13.0.0 for Python 3.12 from the next Portal deploy.
+- **The Grounded-SAM worker** installs it from the next Portal deploy, which rebuilds the worker's image and downloads its models again.
+- **The SAM worker** installs it from its next deploy with `-c deploySamWorker=true`.
+- **The detector export image** installs it from its next `build-and-push.sh` build. Only the Pillow line of `requirements.lock` changed, because `build-and-push.sh --lock` would re-resolve every pin.
+- **The test sandbox** keeps Pillow 12.3.0. Its image runs Ubuntu 22.04's Python 3.10, which its GStreamer bindings and the Triton Python-backend stub need, and no fixed release exists for Python 3.10.
+- **JP6** installs Pillow 13.0.0 for its separate Python 3.11 interpreter, which runs the Triton Python-backend stub, from the next JP6 build. The JP6 backend itself runs Python 3.10 and keeps Pillow 12.3.0 from `src/backend/requirements.txt`, because no fixed release exists for Python 3.10.
+- The test goldens of `src/backend/Dockerfile.jp6` (`test/backend-test/security/baselines/docker_baseline_backend_Dockerfile.jp6_masked.txt` and `test/backend-test/backend_jammy_pkgs/baselines/backend_Dockerfile.jp6.sha256.txt`) are updated to match.
+
 ### Fixed - Synthetic data: Stability response size for resized source images (2026-11-22)
 
 After the 2026-11-21 fix below, a generation pass over 4608×3288 source images against Stability Stable Image Inpaint sent each image at 3636×2594 (9,431,784 pixels, inside the model's limits) and the request was accepted, but every variation of pass 2 of session 6115b94c failed with `ValidationException: {"detail":"Response payload size 18982136 bytes exceeds the maximum allowed size of 16777216 bytes. Please try adjusting the seed, using a different input image, or requesting JPEG output_format"}` (payloads 18,982,136 to 20,276,590 bytes). The worker requested the default PNG output, and a PNG of a 9.4-megapixel photograph (1.5–1.6 bytes per pixel, base64-encoded inside the response) does not fit under Stability's 16 MiB response limit.
