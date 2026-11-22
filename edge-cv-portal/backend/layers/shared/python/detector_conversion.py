@@ -83,12 +83,26 @@ PROGRESS_FOR_STATUS = {
 }
 
 MODEL_TYPE_OBJECT_DETECTION = 'object_detection'
+# RF-DETR-Seg Conversion_Records (spec rfdetr-seg-support, Req 1.3): model
+# type 'instance_segmentation' with detection_arch 'rf_detr_seg'. Mirrors
+# detection_training.MODEL_TYPE_INSTANCE_SEGMENTATION / DETECTION_MODEL_TYPES.
+MODEL_TYPE_INSTANCE_SEGMENTATION = 'instance_segmentation'
+DETECTION_MODEL_TYPES = (MODEL_TYPE_OBJECT_DETECTION, MODEL_TYPE_INSTANCE_SEGMENTATION)
+MODEL_TYPE_FOR_ARCH = {
+    'yolo': MODEL_TYPE_OBJECT_DETECTION,
+    'rf_detr': MODEL_TYPE_OBJECT_DETECTION,
+    'rf_detr_seg': MODEL_TYPE_INSTANCE_SEGMENTATION,
+}
 CHECKPOINT_EXTENSIONS = ('.pt', '.pth')
 UPLOAD_EXTENSIONS = ('.pt', '.pth', '.onnx')
 INPUT_STEP = 32
-INPUT_BOUNDS = {'yolo': (320, 2048), 'rf_detr': (224, 1120)}
-DEFAULT_SCORE_THRESHOLD = {'yolo': 0.25, 'rf_detr': 0.5}
+# rf_detr_seg bounds are for error wording only: a Seg input must be a size's
+# native resolution, and the `% INPUT_STEP` test never applies to it (312,
+# 432, 504 and 624 are not multiples of 32; Seg spec Req 7.3).
+INPUT_BOUNDS = {'yolo': (320, 2048), 'rf_detr': (224, 1120), 'rf_detr_seg': (240, 1152)}
+DEFAULT_SCORE_THRESHOLD = {'yolo': 0.25, 'rf_detr': 0.5, 'rf_detr_seg': 0.5}
 DEFAULT_IOU_THRESHOLD = 0.45
+DEFAULT_MASK_THRESHOLD = 0.5
 RFDETR_TOP_K = 300
 
 # ultralytics: the only model class / head classes the device decodes.
@@ -121,9 +135,29 @@ REJECTED_YOLO_HEAD_REASONS = {
 RFDETR_SIZES = {'nano': 384, 'small': 512, 'medium': 576, 'large': 704}
 RFDETR_CLASS_FOR_SIZE = {'nano': 'RFDETRNano', 'small': 'RFDETRSmall',
                          'medium': 'RFDETRMedium', 'large': 'RFDETRLarge'}
-RFDETR_PML_CLASSES = ('RFDETRXLarge', 'RFDETR2XLarge', 'RFDETRSegXLarge', 'RFDETRSeg2XLarge')
+# PML-licensed (rfdetr_plus) classes: only the two detection sizes. rfdetr
+# 1.10.1 `detr.py:173` lists `rfdetr_plus = ['RFDETRXLarge', 'RFDETR2XLarge']`
+# and `:193-197` applies the PML notice to exactly those; the PyPI README for
+# rfdetr 1.10.1 lists every RF-DETR-Seg size (Nano … 2XLarge) as Apache-2.0
+# (Seg spec D4, Req 1.4).
+RFDETR_PML_CLASSES = ('RFDETRXLarge', 'RFDETR2XLarge')
 RFDETR_LEGACY_CLASSES = ('RFDETRBase', 'RFDETRLargeDeprecated')
 RFDETR_NATIVE_INPUTS = tuple(sorted(set(RFDETR_SIZES.values())))
+# RF-DETR-Seg: all six sizes, their native resolutions, rfdetr classes and
+# decoder query counts (rfdetr 1.10.1 config.py; mirrors
+# detection_training.RFDETR_SEG_*, kept identical by
+# tests/test_rfdetr_seg_vocabulary_parity.py). The natives are pairwise
+# distinct, so RFDETR_SEG_SIZE_FOR_NATIVE names the size from the input a
+# request validated when the probe could not read the size itself.
+RFDETR_SEG_SIZES = {'nano': 312, 'small': 384, 'medium': 432,
+                    'large': 504, 'xlarge': 624, '2xlarge': 768}
+RFDETR_SEG_CLASS_FOR_SIZE = {'nano': 'RFDETRSegNano', 'small': 'RFDETRSegSmall',
+                             'medium': 'RFDETRSegMedium', 'large': 'RFDETRSegLarge',
+                             'xlarge': 'RFDETRSegXLarge', '2xlarge': 'RFDETRSeg2XLarge'}
+RFDETR_SEG_QUERIES_FOR_SIZE = {'nano': 100, 'small': 100, 'medium': 200,
+                               'large': 200, 'xlarge': 300, '2xlarge': 300}
+RFDETR_SEG_NATIVE_INPUTS = tuple(sorted(set(RFDETR_SEG_SIZES.values())))
+RFDETR_SEG_SIZE_FOR_NATIVE = {native: size for size, native in RFDETR_SEG_SIZES.items()}
 
 REASON_TEXT = {
     'torchscript': ('this is a frozen TorchScript graph, not a training checkpoint; export ONNX '
@@ -613,12 +647,13 @@ def build_conversion_record(*, training_id: str, usecase_id: str, model_name: st
 
 
 def is_detector_conversion_record(record: Any) -> bool:
-    """True for a Conversion_Record (Requirement 9.1). Never true for a
-    portal-trained record (no `source`) or a plain ONNX / PyTorch import (no
-    `conversion` block)."""
+    """True for a Conversion_Record (Requirement 9.1) of either detection model
+    type — object_detection or the Seg spec's instance_segmentation. Never
+    true for a portal-trained record (no `source`) or a plain ONNX / PyTorch
+    import (no `conversion` block)."""
     return (isinstance(record, dict)
             and record.get('source') == 'imported'
-            and record.get('model_type') == MODEL_TYPE_OBJECT_DETECTION
+            and record.get('model_type') in DETECTION_MODEL_TYPES
             and str(record.get('runtime', '')).lower() == 'onnx'
             and isinstance(record.get('conversion'), dict))
 

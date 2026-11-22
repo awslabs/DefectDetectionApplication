@@ -112,12 +112,37 @@ RFDETR_SIZE_CLASSES = {
     "medium": "RFDETRMedium",
     "large": "RFDETRLarge",
 }
+# RF-DETR-Seg: all six sizes (Apache-2.0, spec rfdetr-seg-support D4) and
+# their native resolutions, which the pure read_config needs before any torch
+# import. Mirrors detection_training.RFDETR_SEG_CLASS_FOR_SIZE /
+# RFDETR_SEG_SIZES and detector_conversion's tables (kept identical by the
+# portal's tests/test_rfdetr_seg_vocabulary_parity.py).
+RFDETR_SEG_SIZE_CLASSES = {
+    "nano": "RFDETRSegNano",
+    "small": "RFDETRSegSmall",
+    "medium": "RFDETRSegMedium",
+    "large": "RFDETRSegLarge",
+    "xlarge": "RFDETRSegXLarge",
+    "2xlarge": "RFDETRSeg2XLarge",
+}
+RFDETR_SEG_NATIVE_INPUTS = {
+    "nano": 312,
+    "small": 384,
+    "medium": 432,
+    "large": 504,
+    "xlarge": 624,
+    "2xlarge": 768,
+}
 # Keys rfdetr itself treats as intentional schema buffers, never weights.
 RFDETR_IGNORED_KEYS = ("_kp_active_mask",)
 # Recognised by the checkpoint's `model_name` (rfdetr.detr's own class map)
 # only to give a precise reason; a checkpoint without a name must still match
 # an Apache-2.0 size key-for-key and shape-for-shape to convert.
-RFDETR_PML_MODEL_NAMES = ("RFDETRXLarge", "RFDETR2XLarge", "RFDETRSegXLarge", "RFDETRSeg2XLarge")
+# PML-licensed (rfdetr_plus) names are the two detection sizes only: rfdetr
+# 1.10.1 `detr.py:173` lists `rfdetr_plus = ['RFDETRXLarge', 'RFDETR2XLarge']`
+# and `:193-197` applies the PML notice to exactly those; the PyPI README for
+# rfdetr 1.10.1 lists every RF-DETR-Seg size as Apache-2.0 (Seg spec D4).
+RFDETR_PML_MODEL_NAMES = ("RFDETRXLarge", "RFDETR2XLarge")
 RFDETR_NON_DETECTION_PREFIXES = ("RFDETRSeg", "RFDETRKeypoint")
 RFDETR_LEGACY_MODEL_NAMES = ("RFDETRBase", "RFDETRLargeDeprecated")
 
