@@ -57,7 +57,7 @@ from synthetic_core import (
     build_manifest_record, append_manifest_lines,
     resolve_oversize_handling, image_limit_violation, fit_within_limits,
     oversize_failure_reason, image_variation_output_size,
-    OVERSIZE_HANDLING_FAIL,
+    stability_output_format, OVERSIZE_HANDLING_FAIL,
 )
 
 logger = logging.getLogger()
@@ -802,15 +802,20 @@ def _resize_mask_png(mask_png: bytes, size: Tuple[int, int]) -> bytes:
 
 
 def _restore_image_size(image_bytes: bytes, size: Tuple[int, int]) -> bytes:
-    """The generated image scaled back to the source ``size`` as PNG;
-    returned unchanged when it already has that size."""
+    """The generated image scaled back to the source ``size`` as PNG. The
+    staged ``.png`` object is a PNG whatever format the model answered in:
+    a PNG that already has ``size`` is returned unchanged; any other answer
+    (a different size, or a JPEG answer even at matching size) is
+    resized as needed and encoded as PNG."""
     from PIL import Image
     with Image.open(io.BytesIO(image_bytes)) as img:
-        if img.size == tuple(size):
+        if img.size == tuple(size) and img.format == 'PNG':
             return image_bytes
-        restored = img.resize(tuple(size), Image.Resampling.LANCZOS)
-    buffer = io.BytesIO()
-    restored.save(buffer, format='PNG')
+        restored = img
+        if img.size != tuple(size):
+            restored = img.resize(tuple(size), Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        restored.save(buffer, format='PNG')
     return buffer.getvalue()
 
 
@@ -953,7 +958,12 @@ def run_generation_worker(event: Dict) -> Dict:
             # The mask rectangle is derived and recorded in source
             # coordinates (those of the restored output, which
             # _annotate_preview consumes); the mask image follows the
-            # source into the model's size.
+            # source into the model's size. A source scaled down to the
+            # model's pixel cap asks for JPEG output: Stability refuses a
+            # response above 16 MiB and a PNG answer at the cap is 19-20 MB
+            # base64 for a photograph (every variation of session 6115b94c
+            # pass 2 failed that way); in-limit and scaled-up sources keep
+            # the PNG default, so their requests are unchanged.
             rect = derive_mask_rect(task.get('seed'), width, height)
             mask_png = _render_mask_png(rect, width, height)
             if resize_info is not None:
@@ -961,7 +971,8 @@ def run_generation_worker(event: Dict) -> Dict:
             mask_b64 = base64.b64encode(mask_png).decode()
             request_body = build_stability_inpaint_request_body(
                 task.get('resolved_prompt', ''), source_b64, mask_b64,
-                task.get('seed'))
+                task.get('seed'),
+                output_format=stability_output_format(size, model_size))
             extra_fields = {'generation_method': 'inpainting',
                             'mask_region': rect}
             invoke = _invoke_stability_model

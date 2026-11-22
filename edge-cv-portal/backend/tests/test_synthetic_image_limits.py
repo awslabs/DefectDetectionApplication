@@ -31,6 +31,7 @@ import sys
 import uuid
 
 import pytest
+from botocore.exceptions import ClientError
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
@@ -38,9 +39,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
                                 "functions"))
 
 from synthetic_core import (  # noqa: E402
-    MODEL_CATALOG, ValidationError, build_amazon_request_body,
+    MODEL_CATALOG, STABILITY_RESPONSE_MAX_BYTES, ValidationError,
+    build_amazon_request_body, build_stability_inpaint_request_body,
     describe_image_limits, fit_within_limits, image_limit_violation,
     image_variation_output_size, resolve_oversize_handling, scale_bbox,
+    stability_output_format,
 )
 from synthetic_env import SyntheticEnv  # noqa: E402
 
@@ -81,6 +84,17 @@ def _anisotropy(source_size, output_size):
     uniform scale: 0 for identical aspect ratios."""
     return abs((source_size[0] / output_size[0]) /
                (source_size[1] / output_size[1]) - 1)
+
+
+def _log_aspect_distance(source_size, output_size):
+    """|log(aspect of ``output_size``) - log(aspect of ``source_size``)|:
+    the symmetric measure ``image_variation_output_size`` minimises.
+    ``_anisotropy`` (ratio minus one) is asymmetric about the source's
+    ratio, so for two near-tied candidates on opposite sides of it the two
+    measures can disagree on the order, e.g. (835, 1951): (832, 1952) at
+    0.004112 vs (832, 1936) at 0.004119 here, 0.004120 vs 0.004110 there."""
+    return abs(math.log(output_size[0] / output_size[1]) -
+               math.log(source_size[0] / source_size[1]))
 
 
 # ============================================================ pure logic
@@ -269,6 +283,7 @@ _nova_inputs = st.integers(min_value=320, max_value=4095).flatmap(
 @example(size=(320, 320))
 @example(size=(4095, 1023))
 @example(size=(2047, 2049))
+@example(size=(835, 1951))
 def test_nova_output_size_is_permitted_and_close_to_the_input_aspect(size):
     """**Feature: fix-synthetic-image-size-limits, Property 2: the
     requested Nova image-variation output is permitted and preserves the
@@ -278,8 +293,9 @@ def test_nova_output_size_is_permitted_and_close_to_the_input_aspect(size):
     the requested output has sides that are multiples of 16 within
     320..4096, fewer than 4,194,304 pixels, lies within one grid step of
     the input on each side, is the input itself when that is on the grid,
-    and departs from the input's aspect ratio by no more than rounding
-    both sides down to the grid would.
+    and departs from the input's aspect ratio (in log-ratio distance, the
+    measure the selection minimises) by no more than rounding both sides
+    down to the grid would.
     """
     width, height = size
     output = image_variation_output_size(width, height, NOVA_OUTPUT_RULES)
@@ -292,8 +308,8 @@ def test_nova_output_size_is_permitted_and_close_to_the_input_aspect(size):
     if width % 16 == 0 and height % 16 == 0:
         assert output == (width, height)
     floor_only = ((width // 16) * 16, (height // 16) * 16)
-    assert _anisotropy((width, height), output) <= \
-        _anisotropy((width, height), floor_only) + 1e-12
+    assert _log_aspect_distance((width, height), output) <= \
+        _log_aspect_distance((width, height), floor_only) + 1e-12
 
 
 @settings(deadline=None)
@@ -343,6 +359,51 @@ class TestScaleBbox:
         assert scaled["top"] + scaled["height"] <= 33
 
 
+class TestStabilityOutputFormat:
+    """fix-synthetic-response-cap: a source scaled *down* to Stability's
+    pixel cap asks for JPEG output (a PNG answer at 9.43 MP is 19-20 MB
+    base64, above the 16,777,216-byte response cap); in-limit and
+    scaled-up sources keep the lossless PNG default."""
+
+    def test_downscaled_live_source_asks_for_jpeg(self):
+        assert stability_output_format((4608, 3288), (3636, 2594)) == "jpeg"
+
+    def test_in_limit_source_keeps_png(self):
+        assert stability_output_format((128, 96), (128, 96)) == "png"
+
+    def test_upscaled_tiny_source_keeps_png(self):
+        fitted = fit_within_limits(64, 48, STABILITY_LIMITS)
+        assert fitted[0] * fitted[1] > 64 * 48
+        assert stability_output_format((64, 48), fitted) == "png"
+
+    def test_square_downscaled_source_asks_for_jpeg(self):
+        assert stability_output_format((4000, 4000), (3072, 3072)) == "jpeg"
+
+    def test_request_body_carries_the_requested_output_format(self):
+        body = build_stability_inpaint_request_body(
+            "p", "aW1n", "bWFzaw==", 7, output_format="jpeg")
+        assert body["output_format"] == "jpeg"
+        assert set(body) == {"image", "mask", "prompt", "seed",
+                             "output_format"}
+
+    def test_response_cap_is_the_live_value(self):
+        assert STABILITY_RESPONSE_MAX_BYTES == 16_777_216
+
+    @settings(deadline=None)
+    @given(size=_dimensions(2.5))
+    def test_property_jpeg_exactly_for_sources_above_the_pixel_cap(
+            self, size):
+        """**Feature: fix-synthetic-response-cap, Property 1: JPEG exactly
+        for sources above the Stability pixel cap**: with the fitted size
+        the worker sends, the format is JPEG iff the source has more pixels
+        than the cap, and then the fitted pixel count is within the cap."""
+        fitted = fit_within_limits(*size, STABILITY_LIMITS)
+        expected = "jpeg" if size[0] * size[1] > 9_437_184 else "png"
+        assert stability_output_format(size, fitted) == expected
+        if expected == "jpeg":
+            assert 0 < fitted[0] * fitted[1] <= 9_437_184
+
+
 # ======================================================= worker (moto)
 
 @pytest.fixture(scope="module")
@@ -378,6 +439,16 @@ def _png_bytes(width, height):
     return buffer.getvalue()
 
 
+def _image_bytes(width, height, fmt):
+    """A solid-colour image of ``width`` x ``height`` encoded as ``fmt``
+    (``"PNG"`` or ``"JPEG"``)."""
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (120, 120, 120)).save(
+        buffer, format=fmt)
+    return buffer.getvalue()
+
+
 def _image_size(image_bytes):
     from PIL import Image
     with Image.open(io.BytesIO(image_bytes)) as img:
@@ -388,13 +459,40 @@ def _b64_image_size(image_b64):
     return _image_size(base64.b64decode(image_b64))
 
 
+# Bytes per pixel of the Stability answer by output format, taken from the
+# live failure and the real model rather than from the stub's solid-colour
+# image (a flat PNG compresses to nothing). PNG: the densest of the five
+# live payloads of session 6115b94c, 20,276,590 bytes for 9,431,784 px
+# (3636x2594). JPEG: the real model's JPEG answers for the live 4608x3288
+# sample fitted to 3636x2594, measured on 2026-11-22 against
+# us.stability.stable-image-inpaint-v1:0 (seeds 7 and 8: 2,684,074 and
+# 2,713,859 bytes = 0.2846 and 0.2877 B/px; payloads 3,578,819 and
+# 3,618,531 bytes, 21 % of the cap), rounded up.
+LIVE_PNG_BYTES_PER_PIXEL = 1.61
+JPEG_BYTES_PER_PIXEL = 0.29
+
+
+def _stability_payload_bytes(width, height, output_format):
+    """Size of the Stability response JSON for an image of ``width`` x
+    ``height`` in ``output_format``: the base64 of the image bytes (4/3,
+    padded) plus about 70 bytes of JSON scaffolding."""
+    density = (JPEG_BYTES_PER_PIXEL if output_format == "jpeg"
+               else LIVE_PNG_BYTES_PER_PIXEL)
+    return 4 * ((int(width * height * density) + 2) // 3) + 70
+
+
 class _SizedBedrockRuntime:
     """Stubbed bedrock-runtime client: records every invoke_model call
-    (modelId + parsed body) and answers with a solid PNG sized as the real
-    models size their output: Stability inpaint and Amazon INPAINTING
+    (modelId + parsed body) and answers with a solid image sized as the
+    real models size their output: Stability inpaint and Amazon INPAINTING
     after the input image; Amazon IMAGE_VARIATION after the requested
     ``imageGenerationConfig`` width/height, or the model's fixed square
-    (Nova 1024x1024, Titan 1408x1408) when none is requested."""
+    (Nova 1024x1024, Titan 1408x1408) when none is requested.
+
+    The Stability answer honours the request's ``output_format`` and is
+    refused like the live service when its payload, computed at the live
+    PNG density (or the JPEG density), would exceed the 16,777,216-byte
+    response cap; the call records ``output_format`` and ``payload``."""
 
     def __init__(self, provider):
         self.provider = provider
@@ -413,13 +511,30 @@ class _SizedBedrockRuntime:
     def invoke_model(self, **kwargs):
         body = json.loads(kwargs["body"])
         width, height = self.output_size(kwargs["modelId"], body)
-        self.calls.append({"modelId": kwargs["modelId"], "body": body,
-                           "output_size": (width, height)})
-        image_b64 = base64.b64encode(_png_bytes(width, height)).decode()
+        call = {"modelId": kwargs["modelId"], "body": body,
+                "output_size": (width, height)}
+        self.calls.append(call)
         if self.provider == "stability":
+            fmt = body.get("output_format", "png")
+            payload_size = _stability_payload_bytes(width, height, fmt)
+            call["output_format"] = fmt
+            call["payload"] = payload_size
+            if payload_size > STABILITY_RESPONSE_MAX_BYTES:
+                raise ClientError({"Error": {
+                    "Code": "ValidationException",
+                    "Message": json.dumps({"detail": (
+                        f"Response payload size {payload_size} bytes "
+                        f"exceeds the maximum allowed size of 16777216 "
+                        f"bytes. Please try adjusting the seed, using a "
+                        f"different input image, or requesting JPEG "
+                        f"output_format")}, separators=(",", ":")),
+                }}, "InvokeModel")
+            image_b64 = base64.b64encode(_image_bytes(
+                width, height, "JPEG" if fmt == "jpeg" else "PNG")).decode()
             payload = {"images": [image_b64], "seeds": ["1"],
                        "finish_reasons": [None]}
         else:
+            image_b64 = base64.b64encode(_png_bytes(width, height)).decode()
             payload = {"images": [image_b64]}
         return {"body": io.BytesIO(json.dumps(payload).encode())}
 
@@ -542,6 +657,66 @@ class TestWorkerSizeLimitHandling:
         assert meta["last_failure"]["reason"] == reason
         assert meta["status"] == "awaiting_review"
 
+    def test_downscaled_stability_source_requests_jpeg_output_under_the_response_cap(  # noqa: E501
+            self, senv, actor):
+        """fix-synthetic-response-cap, the live failure of session 6115b94c
+        pass 2: the 4608x3288 source fitted to 3636x2594 is accepted by
+        Stability but its PNG answer (19-20 MB base64) exceeds the
+        16,777,216-byte response cap, so every variation failed. The
+        worker asks for JPEG output for the downscaled source, keeps the
+        fitted size, and still stages a PNG restored to 4608x3288."""
+        usecase_id, _ = actor
+        runtime = _SizedBedrockRuntime("stability")
+        result, previews, _ = _run_worker(
+            senv, usecase_id, STABILITY_MODEL_ID, "normal",
+            _fixture_bytes(), runtime)
+
+        assert previews[0].get("failure_reason") is None, \
+            previews[0].get("failure_reason")
+        assert result == {"status": "done", "completed": 1, "failed": 0}
+        assert len(runtime.calls) == 1
+        call = runtime.calls[0]
+        assert call["body"]["output_format"] == "jpeg"
+        assert _b64_image_size(call["body"]["image"]) == (3636, 2594)
+        assert call["payload"] < STABILITY_RESPONSE_MAX_BYTES
+
+        from PIL import Image
+        staged = senv.s3.get_object(
+            Bucket=senv.bucket, Key=previews[0]["staging_key"])["Body"].read()
+        with Image.open(io.BytesIO(staged)) as img:
+            assert img.format == "PNG"
+            assert img.size == (4608, 3288)
+        assert previews[0]["resized_for_model"] == {
+            "source_width": 4608, "source_height": 3288,
+            "model_width": 3636, "model_height": 2594,
+        }
+
+    def test_upscaled_tiny_stability_source_keeps_png_output(
+            self, senv, actor):
+        """A source below Stability's minimums is scaled *up*: the answer
+        is small, so the lossless PNG default is kept and the staged image
+        is a PNG at the source size."""
+        usecase_id, _ = actor
+        runtime = _SizedBedrockRuntime("stability")
+        result, previews, _ = _run_worker(
+            senv, usecase_id, STABILITY_MODEL_ID, "normal",
+            _png_bytes(64, 48), runtime, extension="png")
+
+        assert result["completed"] == 1
+        call = runtime.calls[0]
+        assert call["body"]["output_format"] == "png"
+        width, height = _b64_image_size(call["body"]["image"])
+        assert width * height >= 4_096 and min(width, height) >= 64
+
+        from PIL import Image
+        assert previews[0]["status"] == "completed"
+        staged = senv.s3.get_object(
+            Bucket=senv.bucket, Key=previews[0]["staging_key"])["Body"].read()
+        with Image.open(io.BytesIO(staged)) as img:
+            assert img.format == "PNG"
+            assert img.size == (64, 48)
+        assert "resized_for_model" in previews[0]
+
     def test_in_limit_source_is_sent_unchanged(self, senv, actor):
         usecase_id, _ = actor
         source = _png_bytes(128, 96)
@@ -553,6 +728,7 @@ class TestWorkerSizeLimitHandling:
         assert result["completed"] == 1
         assert runtime.calls[0]["body"]["image"] == \
             base64.b64encode(source).decode()
+        assert runtime.calls[0]["body"]["output_format"] == "png"
         assert previews[0]["status"] == "completed"
         assert "resized_for_model" not in previews[0]
 
@@ -685,6 +861,38 @@ class TestWorkerSizeLimitHandling:
         assert images == [base64.b64encode(b"src").decode()]
         assert previews[0]["status"] == "completed"
         assert "resized_for_model" not in previews[0]
+
+
+class TestRestoreImageSize:
+    """``_restore_image_size`` always yields a PNG: the staged ``.png``
+    object is a PNG whatever format the model answered in (a JPEG answer is
+    transcoded even at matching size); a PNG at the target size is returned
+    byte-for-byte. Sizes are scaled down by 10 from the live 3636x2594 ->
+    4608x3288 case: the ratio is what matters."""
+
+    @staticmethod
+    def _restored(senv, image_bytes, size):
+        from PIL import Image
+        restored = senv.synthetic_data._restore_image_size(image_bytes, size)
+        with Image.open(io.BytesIO(restored)) as img:
+            return restored, img.format, img.size
+
+    def test_smaller_jpeg_answer_is_restored_as_png(self, senv):
+        restored, fmt, size = self._restored(
+            senv, _image_bytes(364, 259, "JPEG"), (461, 329))
+        assert (fmt, size) == ("PNG", (461, 329))
+
+    def test_jpeg_answer_at_the_target_size_is_transcoded_to_png(self, senv):
+        answer = _image_bytes(461, 329, "JPEG")
+        restored, fmt, size = self._restored(senv, answer, (461, 329))
+        assert restored != answer
+        assert (fmt, size) == ("PNG", (461, 329))
+
+    def test_png_answer_at_the_target_size_is_returned_unchanged(self, senv):
+        answer = _image_bytes(461, 329, "PNG")
+        restored, fmt, size = self._restored(senv, answer, (461, 329))
+        assert restored == answer
+        assert (fmt, size) == ("PNG", (461, 329))
 
 
 class TestGenerateOversizeHandling:
