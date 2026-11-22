@@ -44,11 +44,18 @@ import { useUsecase } from '../../contexts/UsecaseContext';
 import { getErrorMessage } from '../../utils/errorHandling';
 import type {
   SyntheticModel,
+  SyntheticOversizeHandling,
   SyntheticSessionStatus,
   SyntheticSessionSummary,
   SyntheticSourceClass,
   SyntheticSourceImage,
 } from './types';
+import {
+  DEFAULT_OVERSIZE_HANDLING,
+  OVERSIZE_HANDLING_ITEMS,
+  describeImageLimits,
+  imageLimitViolation,
+} from './imageLimits';
 
 /** Valid-range message for Variation_Count (Req 4.1, 4.4). */
 export const VARIATION_COUNT_MESSAGE =
@@ -136,6 +143,11 @@ export default function SyntheticData() {
   const [datasets, setDatasets] = useState<DatasetRow[]>([]);
   const [datasetPrefix, setDatasetPrefix] = useState<SelectProps.Option | null>(null);
   const [thumbs, setThumbs] = useState<SourceThumb[]>([]);
+  // Natural dimensions of loaded thumbnails, keyed by source key, for the
+  // size-limit warning.
+  const [imageDims, setImageDims] = useState<
+    Record<string, { width: number; height: number }>
+  >({});
   const [thumbsLoading, setThumbsLoading] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   // Source-image picker pagination (Req 2.2-2.5): 0-based offset of the
@@ -150,6 +162,9 @@ export default function SyntheticData() {
   const [variationCount, setVariationCount] = useState('5');
   const [seed, setSeed] = useState('');
   const [cfgScale, setCfgScale] = useState('');
+  // Handling of source images outside the model's input size limits.
+  const [oversizeHandling, setOversizeHandling] =
+    useState<SyntheticOversizeHandling>(DEFAULT_OVERSIZE_HANDLING);
 
   // Target manifest (used at integration time, editable default).
   const [manifestKey, setManifestKey] = useState('');
@@ -160,6 +175,26 @@ export default function SyntheticData() {
     () => models.find((m) => m.model_id === selectedModelId) ?? null,
     [models, selectedModelId]
   );
+  const limits = selectedModel?.input_image_limits;
+
+  // Selected images whose known natural dimensions violate the selected
+  // model's input size limits.
+  const oversizedSelection = useMemo(() => {
+    if (!limits) return [];
+    const result: {
+      key: string;
+      width: number;
+      height: number;
+      violation: string;
+    }[] = [];
+    for (const key of selectedKeys) {
+      const dims = imageDims[key];
+      if (!dims) continue;
+      const violation = imageLimitViolation(dims.width, dims.height, limits);
+      if (violation) result.push({ key, ...dims, violation });
+    }
+    return result;
+  }, [limits, selectedKeys, imageDims]);
 
   // ----------------------------------------------------------- data loads
 
@@ -362,6 +397,7 @@ export default function SyntheticData() {
           variation_count: Number(variationCount),
           ...(seed !== '' && { seed: Number(seed) }),
           ...(cfgScale !== '' && { cfg_scale: Number(cfgScale) }),
+          ...(limits && { oversize_handling: oversizeHandling }),
         },
         target_dataset_prefix: prefix || undefined,
         target_manifest_key: manifestKey || undefined,
@@ -695,6 +731,18 @@ export default function SyntheticData() {
                             <img
                               src={thumb.presigned_url}
                               alt={thumb.filename}
+                              onLoad={(e) => {
+                                const { naturalWidth, naturalHeight } = e.currentTarget;
+                                if (naturalWidth && naturalHeight) {
+                                  setImageDims((prev) => ({
+                                    ...prev,
+                                    [thumb.key]: {
+                                      width: naturalWidth,
+                                      height: naturalHeight,
+                                    },
+                                  }));
+                                }
+                              }}
                               style={{
                                 width: 96,
                                 height: 96,
@@ -741,6 +789,32 @@ export default function SyntheticData() {
                       </Box>
                     </SpaceBetween>
                   </>
+                )}
+                {/* Selected images outside the model's input size limits. */}
+                {limits && oversizedSelection.length > 0 && (
+                  <Alert
+                    type="warning"
+                    data-testid="oversize-warning"
+                    header={`${oversizedSelection.length} selected image${
+                      oversizedSelection.length === 1 ? '' : 's'
+                    } outside the model's size limits`}
+                  >
+                    <SpaceBetween size="xs">
+                      <ul style={{ margin: 0 }}>
+                        {oversizedSelection.map(({ key, width, height, violation }) => (
+                          <li key={key}>
+                            {key.slice(key.lastIndexOf('/') + 1)}: {width}×{height} (
+                            {(width * height).toLocaleString('en-US')} pixels) — {violation}
+                          </li>
+                        ))}
+                      </ul>
+                      <Box>
+                        {oversizeHandling === 'fail'
+                          ? "Their variations will fail; choose 'Resize to fit the model' to generate from them anyway."
+                          : 'They will be resized to fit the model and the results restored to their original size.'}
+                      </Box>
+                    </SpaceBetween>
+                  </Alert>
                 )}
                 {/* Classification of the selection (Req 3.2-3.4). */}
                 <FormField
@@ -814,6 +888,21 @@ export default function SyntheticData() {
                       value={cfgScale}
                       onChange={({ detail }) => setCfgScale(detail.value)}
                       ariaLabel="Guidance strength"
+                    />
+                  </FormField>
+                )}
+                {selectedModel && limits && (
+                  <FormField
+                    label="Images outside the model's size limits"
+                    description={`${selectedModel.display_name} accepts ${describeImageLimits(limits)}.`}
+                    stretch
+                  >
+                    <RadioGroup
+                      value={oversizeHandling}
+                      items={OVERSIZE_HANDLING_ITEMS}
+                      onChange={({ detail }) =>
+                        setOversizeHandling(detail.value as SyntheticOversizeHandling)
+                      }
                     />
                   </FormField>
                 )}
