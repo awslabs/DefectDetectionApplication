@@ -58,10 +58,13 @@ entry points therefore lower the exported model to IR 10 with
 opset-17 graph itself is unchanged.
 
 `requirements-rfdetr.txt` (RF-DETR): `rfdetr[train,onnx]==1.10.1`,
-`onnx==1.22.0`, `onnxruntime==1.19.2`, `numpy<2`. The `train` extra brings
-pytorch_lightning / torchmetrics / pycocotools for `.train()` and
-`.evaluate()`; `onnx` brings onnxsim / onnx_graphsurgeon for `.export()`.
-There is no `onnxexport` extra in 1.10.1. Both launch examples below use the
+`transformers==5.17.0`, `onnx==1.22.0`, `onnxruntime==1.19.2`, `numpy<2`.
+The `train` extra brings pytorch_lightning / torchmetrics / pycocotools for
+`.train()` and `.evaluate()`; `onnx` brings onnxsim / onnx_graphsurgeon for
+`.export()`. There is no `onnxexport` extra in 1.10.1. `transformers` is
+pinned because rfdetr leaves it open (`<6.0.0,>=5.1.0`) and newer 5.x
+releases dropped the `BackboneConfigMixin` import it needs; 5.17.0 is the
+version the detector-export-image lock already pins. Both launch examples below use the
 same `pytorch-training:2.5.1-gpu-py311-cu124` DLC.
 
 ## Environment contract
