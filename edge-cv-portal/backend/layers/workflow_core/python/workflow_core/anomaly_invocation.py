@@ -46,6 +46,7 @@ from typing import (
     Iterable,
     List,
     Mapping,
+    NamedTuple,
     Optional,
     Tuple,
 )
@@ -256,6 +257,87 @@ BEDROCK_READ_TIMEOUT_SEC = 30
 #: completes well under a second or the network is down. The default
 #: single-call client is untouched by this constant.
 BEDROCK_CONNECT_TIMEOUT_SEC = 2
+
+# The attempt/budget policy of an ``answer_format: inspection`` node
+# (``attempts``, ``attempt_timeout_s``, ``budget_s``): its defaults, its
+# integer rule, its resolution and the terminal error codes, moved here
+# verbatim from the executor so the Portal's replay applies the policy
+# exactly as the device does. The attempt loop itself stays with each
+# caller (it needs a clock and a transport).
+
+#: Catalog defaults of the attempt/budget policy; all three at their
+#: defaults = today's single call through the unchanged client.
+BEDROCK_DEFAULT_ATTEMPTS = 1
+BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC = BEDROCK_READ_TIMEOUT_SEC
+BEDROCK_DEFAULT_BUDGET_SEC = 0
+
+#: botocore ``ClientError`` codes that end the attempt loop at once
+#: (retrying cannot succeed); every other failure is retryable.
+BEDROCK_TERMINAL_ERROR_CODES = frozenset((
+    "ValidationException",
+    "AccessDeniedException",
+    "ResourceNotFoundException",
+))
+
+
+def policy_int(raw: Any, default: int, minimum: int) -> int:
+    """An integer policy parameter: absent/blank/invalid → ``default``,
+    never below ``minimum``."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+class AttemptPolicy(NamedTuple):
+    """A node's resolved attempt/budget policy (:func:`resolve_attempt_policy`)."""
+
+    attempts: int
+    attempt_timeout_s: int
+    budget_s: int
+
+    @property
+    def is_default(self) -> bool:
+        """True when all three are at their catalog defaults: one call
+        through the unchanged client."""
+        return (self.attempts == BEDROCK_DEFAULT_ATTEMPTS
+                and self.attempt_timeout_s == BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC
+                and self.budget_s == BEDROCK_DEFAULT_BUDGET_SEC)
+
+
+def resolve_attempt_policy(parameters: Mapping[str, Any]) -> AttemptPolicy:
+    """The node's ``attempts`` (at least 1), ``attempt_timeout_s`` (at
+    least 1 s) and ``budget_s`` (at least 0; 0 = no budget), each absent,
+    blank or invalid → its catalog default (:func:`policy_int`)."""
+    return AttemptPolicy(
+        policy_int(parameters.get("attempts"), BEDROCK_DEFAULT_ATTEMPTS, 1),
+        policy_int(parameters.get("attempt_timeout_s"),
+                   BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC, 1),
+        policy_int(parameters.get("budget_s"), BEDROCK_DEFAULT_BUDGET_SEC, 0),
+    )
+
+
+def bedrock_error_code(error: BaseException) -> Optional[str]:
+    """The ``Error.Code`` of a botocore ``ClientError``-shaped exception,
+    else ``None`` (no botocore import: classified by shape)."""
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        return None
+    detail = response.get("Error")
+    if not isinstance(detail, dict):
+        return None
+    code = detail.get("Code")
+    return str(code) if code is not None else None
+
+
+def is_terminal_bedrock_error(error: BaseException) -> bool:
+    """True for the ``ClientError`` codes the attempt loop never retries
+    (:data:`BEDROCK_TERMINAL_ERROR_CODES`); transport errors, throttling,
+    5xx, unknown codes and every other exception are retryable."""
+    return bedrock_error_code(error) in BEDROCK_TERMINAL_ERROR_CODES
 
 #: Image format of every attached content block.
 BEDROCK_IMAGE_FORMAT = "jpeg"

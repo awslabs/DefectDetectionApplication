@@ -289,8 +289,9 @@ namespace Panorama
 
     DEF_INTERFACE(IMessageBroker, "{7BF68FD8-8D46-4A7A-A1A4-F2922CEA74FE}", IUnknownAlias)
     {
-        /// @brief Establishes all connections to/from the targets as defined by the pipes.  Subsequent calls result in a no-op.
-        /// @return S_OK if successful.  Error code otherwise
+        /// @brief Establishes all connections to/from the targets as defined by the pipes.  Calls are serialised: once a
+        ///        call has succeeded, later and concurrent calls (pipelines sharing the instance) are no-ops.
+        /// @return S_OK if successful, S_FALSE if already initialized.  Error code otherwise
         virtual HRESULT Initialize() = 0;
 
         /// @brief Synchronously publishes a payload as the source event

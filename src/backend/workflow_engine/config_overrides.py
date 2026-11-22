@@ -33,7 +33,11 @@ change a deployed workflow without a code or workflow redeploy:
     the compiled document at run start. Only the parameters of
     :data:`OVERRIDE_ALLOW_LIST` are honoured; every value is coerced to the
     catalog descriptor's type and checked with the vendored validator's
-    parameter rules (type, enum, min/max, regex). Anything else (another
+    parameter rules (type, enum, min/max, regex). The one non-scalar value,
+    a Bedrock node's ``additional_model_request_fields``, is a JSON object
+    (kept as its compact JSON text) or its JSON text, checked with the rule
+    the executor applies before the call
+    (``resolve_additional_model_request_fields``). Anything else (another
     parameter, a trigger binding's parameter, an unknown node or
     parameter, a node type that is not executor-level, an invalid value,
     an unparseable subtree) is IGNORED with a WARNING naming the key and
@@ -61,6 +65,7 @@ exactly as before the feature.
 """
 
 import copy
+import json
 import logging
 import threading
 import time
@@ -69,6 +74,10 @@ from typing import (
     Tuple,
 )
 
+from workflow_engine.vendor.workflow_core.anomaly_invocation import (
+    ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER,
+    resolve_additional_model_request_fields,
+)
 from workflow_engine.vendor.workflow_core.catalog import get_node_type
 from workflow_engine.vendor.workflow_core.catalog.models import (
     PARAM_TYPE_BOOL,
@@ -101,12 +110,14 @@ LISTENER_FAILURE_WARNING_INTERVAL_SECONDS = 60.0
 #: (destination, source, topic, payload_template, payload_format,
 #: condition) and every trigger-binding parameter (read once at
 #: registration, so an override could never apply consistently) is absent
-#: on purpose.
+#: on purpose. ``additional_model_request_fields`` (model-specific Converse
+#: request fields, such as a Claude model's thinking setting) is allowed,
+#: so an override that changes ``model`` can change the fields with it.
 OVERRIDE_ALLOW_LIST: Dict[str, Tuple[str, ...]] = {
     "bedrock_inference": (
         "model", "region", "enabled", "error_verdict", "attempts",
         "attempt_timeout_s", "budget_s", "max_image_dimension", "max_tokens",
-        "box_scale",
+        "box_scale", ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER,
     ),
     "s3_upload": ("presign_get_expiry_s", "timeout_s", "retries"),
     "mqtt_publish": ("qos", "retain"),
@@ -178,7 +189,10 @@ def parse_node_overrides(
     warnings). Non-map subtrees, non-scalar values and parameter names no
     node type allows are dropped here with a warning each; the per-type
     allow-list, type coercion and the descriptor constraints are applied
-    by :meth:`WorkflowOverridesConfig.apply_overrides`."""
+    by :meth:`WorkflowOverridesConfig.apply_overrides`. The exception is a
+    map given for ``additional_model_request_fields``: it is kept as its
+    compact JSON text (key order kept), so the snapshot holds text either
+    way."""
     if raw is None:
         return {}, []
     if not isinstance(raw, Mapping):
@@ -214,6 +228,9 @@ def parse_node_overrides(
                         "{0} is not an overridable parameter of any node "
                         "type; ignoring it".format(label))
                     continue
+                if (str(name) == ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER
+                        and isinstance(value, Mapping)):
+                    value = json.dumps(value, separators=(",", ":"))
                 if isinstance(value, (Mapping, list, tuple)):
                     warnings.append(
                         "{0} must be a scalar value (got {1}); ignoring "
@@ -454,6 +471,18 @@ class WorkflowOverridesConfig:
                         "{0} = {1!r} rejected ({2}); keeping the deployed "
                         "value".format(label, raw_value, violation.message))
                     continue
+                if name == ADDITIONAL_MODEL_REQUEST_FIELDS_PARAMETER:
+                    # The rule the validator and the executor apply: a JSON
+                    # object, written as its compact text; empty sends none.
+                    try:
+                        fields = resolve_additional_model_request_fields(value)
+                    except ValueError as error:
+                        self._warn_ignored(
+                            "{0} = {1!r} rejected ({2}); keeping the deployed "
+                            "value".format(label, raw_value, error))
+                        continue
+                    if fields is not None:
+                        value = fields
                 changes.append((index, name, value))
         for node_id in merged:
             if node_id not in seen:

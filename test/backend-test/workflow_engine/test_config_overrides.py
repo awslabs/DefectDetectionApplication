@@ -41,16 +41,30 @@ from workflow_engine.config_overrides import (
     parse_disabled,
     parse_node_overrides,
 )
+from test_bedrock_attempt_policy import GOOD, make_binding, write_frame
+from test_bedrock_request_fields import RecordingInvoker
+from workflow_engine.node_status import NodeStatusCollector
+from workflow_engine.output_bindings import BedrockInferenceProcessor, RunContext
 from workflow_engine.pipeline_executor import WorkflowExecutor
 from workflow_engine.trigger_runtime import (
     TriggerPolicy,
     WorkflowActivationCore,
+)
+from workflow_engine.vendor.workflow_core.anomaly_invocation import (
+    resolve_additional_model_request_fields,
 )
 from workflow_engine.vendor.workflow_core.catalog import get_node_type
 
 LOGGER = "workflow_engine.config_overrides"
 WF_A = "wf-a"
 WF_B = "wf-b"
+FIELDS = "additional_model_request_fields"
+#: A deployed value and an override of the Bedrock node's request fields,
+#: with the compact JSON text each one is sent as.
+DEPLOYED_FIELDS = '{"thinking": {"type": "disabled"}}'
+DEPLOYED_COMPACT = '{"thinking":{"type":"disabled"}}'
+OVERRIDE_FIELDS = {"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}
+OVERRIDE_COMPACT = '{"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}}'
 
 #: A compiled document with one binding per allow-listed type plus a
 #: trigger binding and a conditional (executor-level, not overridable).
@@ -186,6 +200,23 @@ class TestParseNodeOverrides:
             "WorkflowNodeOverrides is not a map of workflow ids (got list); treating it as empty"])
         assert parse_node_overrides(None) == ({}, [])
 
+    def test_request_fields_keep_a_map_as_compact_text_and_json_text_as_given(self):
+        parsed, warnings = parse_node_overrides({
+            WF_A: {"check": {FIELDS: OVERRIDE_FIELDS}},
+            WF_B: {"check": {FIELDS: DEPLOYED_FIELDS}}})
+        assert parsed == {WF_A: {"check": {FIELDS: OVERRIDE_COMPACT}},
+                          WF_B: {"check": {FIELDS: DEPLOYED_FIELDS}}}
+        assert warnings == []
+
+    def test_a_list_of_request_fields_and_a_map_for_another_parameter_are_dropped(self):
+        parsed, warnings = parse_node_overrides({WF_A: {
+            "check": {FIELDS: [OVERRIDE_FIELDS]}, "publish": {"qos": {"value": 1}}}})
+        assert parsed == {}
+        assert len(warnings) == 2
+        assert all("must be a scalar value" in w for w in warnings)
+        assert "['additional_model_request_fields'] must be a scalar value (got list)" in warnings[0]
+        assert "['qos'] must be a scalar value (got dict)" in warnings[1]
+
 
 class TestCoercion:
     @pytest.mark.parametrize("node_type, name, raw, expected", [
@@ -213,7 +244,7 @@ class TestCoercion:
         assert OVERRIDE_ALLOW_LIST == {
             "bedrock_inference": ("model", "region", "enabled", "error_verdict", "attempts",
                                   "attempt_timeout_s", "budget_s", "max_image_dimension",
-                                  "max_tokens", "box_scale"),
+                                  "max_tokens", "box_scale", "additional_model_request_fields"),
             "s3_upload": ("presign_get_expiry_s", "timeout_s", "retries"),
             "mqtt_publish": ("qos", "retain"),
         }
@@ -402,6 +433,91 @@ class TestApplyOverrides:
         config = loaded({WF_A: {"check": {"model": "m"}}})
         for document in (None, [], {}, {"executorBindings": "x"}, {"executorBindings": ["x"]}):
             assert config.apply_overrides(document, WF_A, NODE_TYPES) is document
+
+
+def document_with_fields(value):
+    """DOCUMENT with the Bedrock node's deployed request fields set."""
+    document = copy.deepcopy(DOCUMENT)
+    document["executorBindings"][1]["parameters"][FIELDS] = value
+    return document
+
+
+class TestRequestFieldsOverride:
+    @pytest.mark.parametrize("raw", [
+        OVERRIDE_FIELDS, json.dumps(OVERRIDE_FIELDS), json.dumps(OVERRIDE_FIELDS, indent=2)],
+        ids=["map", "json-text", "indented-json-text"])
+    def test_both_forms_land_in_the_run_copy_as_compact_text(self, raw, caplog):
+        config = loaded({WF_A: {"check": {FIELDS: raw}}})
+        document = document_with_fields(DEPLOYED_FIELDS)
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            result = config.apply_overrides(document, WF_A, NODE_TYPES)
+        assert result["executorBindings"][1]["parameters"][FIELDS] == OVERRIDE_COMPACT
+        assert document["executorBindings"][1]["parameters"][FIELDS] == DEPLOYED_FIELDS
+        assert warnings_of(caplog) == []
+        info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert info[-1] == ("Workflow wf-a run applies 1 configuration override(s): "
+                            "check.additional_model_request_fields")
+
+    @pytest.mark.parametrize("raw, reason", [
+        ("{oops", "additional_model_request_fields is not valid JSON"),
+        ("[1, 2]", "additional_model_request_fields must be a JSON object, got list"),
+        ('"thinking"', "additional_model_request_fields must be a JSON object, got str"),
+    ])
+    def test_a_value_that_is_not_a_json_object_is_rejected(self, raw, reason, caplog):
+        config = loaded({WF_A: {"check": {FIELDS: raw}}})
+        document = document_with_fields(DEPLOYED_FIELDS)
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            assert config.apply_overrides(document, WF_A, NODE_TYPES) is document
+        (warning,) = warnings_of(caplog)
+        assert warning.startswith(
+            "WorkflowNodeOverrides for workflow 'wf-a': check.additional_model_request_fields"
+            " = {0!r} rejected (".format(raw))
+        assert reason in warning
+        assert warning.endswith("); keeping the deployed value")
+        assert document["executorBindings"][1]["parameters"][FIELDS] == DEPLOYED_FIELDS
+
+    @pytest.mark.parametrize("raw, written", [({}, "{}"), ("", ""), ("{}", "{}")])
+    def test_an_empty_value_is_written_and_sends_no_fields(self, raw, written, caplog):
+        config = loaded({WF_A: {"check": {FIELDS: raw}}})
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            result = config.apply_overrides(
+                document_with_fields(DEPLOYED_FIELDS), WF_A, NODE_TYPES)
+        assert result["executorBindings"][1]["parameters"][FIELDS] == written
+        assert resolve_additional_model_request_fields(written) is None
+        assert warnings_of(caplog) == []
+
+
+class TestRequestFieldsReachTheInvoker:
+    """The override changes what the device sends, and without it the
+    deployed value is sent (WorkflowNodeOverrides applied to the run copy,
+    then the executor's inspection path)."""
+
+    def invoker_options(self, tmp_path, overrides):
+        write_frame(tmp_path)
+        document = {"schemaVersion": 1,
+                    "executorBindings": [make_binding(**{FIELDS: DEPLOYED_FIELDS})]}
+        document = loaded(overrides).apply_overrides(
+            document, WF_A, {"check": "bedrock_inference"})
+        invoker = RecordingInvoker(GOOD)
+        context = RunContext(
+            tag_values={"trigger": {"topic": "plant/line1/evaluate"}},
+            output_dir=str(tmp_path), capture_id="cap-1",
+            node_status=NodeStatusCollector(extra_node_ids=["check"]))
+        metadata = BedrockInferenceProcessor(invoker=invoker).process(
+            document, dict(context.tag_values), str(tmp_path), run_context=context)
+        assert metadata["bedrock"]["check"]["outcome"] == "pass"
+        (_args, options), = invoker.calls
+        return options
+
+    def test_the_override_is_sent(self, tmp_path):
+        options = self.invoker_options(tmp_path, {WF_A: {"check": {FIELDS: OVERRIDE_FIELDS}}})
+        assert options == {FIELDS: OVERRIDE_COMPACT}
+
+    def test_without_the_override_the_deployed_value_is_sent(self, tmp_path):
+        assert self.invoker_options(tmp_path, {}) == {FIELDS: DEPLOYED_COMPACT}
+
+    def test_an_empty_override_sends_no_fields(self, tmp_path):
+        assert self.invoker_options(tmp_path, {WF_A: {"check": {FIELDS: {}}}}) == {}
 
 
 

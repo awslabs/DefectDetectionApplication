@@ -3,6 +3,7 @@
 
 #include <string>
 #include <functional>
+#include <atomic>
 
 #include <Panorama/comptr.h>
 #include <Panorama/buffer.h>
@@ -77,9 +78,16 @@ namespace Panorama
         const char* ProtocolName() override;
         void InvokeSubscription(const char* id);
 
+        // Called at the start of every CreateProtocol with the 1-based call
+        // count, so a test can hold a broker inside its target creation.
+        void SetCreateProtocolHook(std::function<void(int call_index)> hook);
+        int CreateProtocolCalls();
+
     private:
         test_protocol_cb _cb;
         ComPtr<TestProtocolClient> _created_client;
+        std::function<void(int call_index)> _create_protocol_hook;
+        std::atomic<int> _create_protocol_calls{0};
     };
 }
 

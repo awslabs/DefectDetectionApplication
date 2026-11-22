@@ -4,6 +4,30 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Security - Pillow 13.0.0 for LocalServer on its Python 3.11 images (2026-11-21)
+
+LocalServer's `src/backend/requirements.txt` pinned Pillow 12.3.0, which the open Pillow advisories affect. The most severe, GHSA-5x8w-8jj5-q52h, is critical: a heap overflow in the FlashPix decoder. Pillow 13.0.0 is the first release that fixes them, and it needs Python 3.11 or later.
+
+- **JP5, JP7, x86_64 and the generic image** run Python 3.11 and install Pillow 13.0.0 from the next LocalServer build.
+- **JP6** runs Python 3.10 and keeps Pillow 12.3.0, because no fixed release exists for Python 3.10; its advisories stay open until the JP6 image moves to Python 3.11. The separate Python 3.11 install in `Dockerfile.jp6` also still pins 12.3.0.
+- The security tests' copy of the requirements file (`test/backend-test/security/baselines/dependency_baseline_requirements.txt`) is updated to match.
+
+### Added - Configuration overrides can set a Bedrock node's model request fields (2026-11-21)
+
+`WorkflowNodeOverrides` can now set a **Bedrock Inference** node's `additional_model_request_fields`, so turning a Claude model's thinking on or off on one device no longer needs a new workflow version. This replaces the "Not overridable" point of the 2026-11-12 entry.
+
+- **Value.** A JSON object, for example `{"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}}`, or its JSON text. It is checked with the rule the node's own value has: anything but a JSON object is ignored with a warning and the deployed value stands, and an empty object or empty text sends no fields. The run's log names the overridden parameter, not its value.
+- **Replacing a value.** Greengrass merges nested objects key by key, so a later `merge` adds keys to an earlier object instead of replacing it. Reset `/WorkflowNodeOverrides` in the same deployment revision, or give the value as JSON text.
+- **Older LocalServer.** A LocalServer built before this change ignores the parameter with a warning. Workflow tuning does not replay it, like every other override.
+
+### Fixed - Workflow tuning scores an inspection node under its attempt policy (2026-11-21)
+
+Workflow tuning replayed every sample of an inspection-format **Bedrock Inference** node (`answer_format: inspection`) with one call and a 30-second read timeout, whatever the node's `attempts`, `attempt_timeout_s` and `budget_s`. The device runs the node under that policy, so a node limited to 14 seconds on the device had 30 seconds in tuning.
+
+- **Replay.** A score run of an inspection-format node now applies the latest version's policy the way the device's executor does: up to `attempts` calls, each with `attempt_timeout_s` as its read timeout and no automatic retry inside the call. A failed call or an answer that is not valid inspection JSON is retried, except a `ValidationException`, `AccessDeniedException` or `ResourceNotFoundException`. With `budget_s` set, a retry starts only while the budget leaves a whole `attempt_timeout_s`. The outcome is the last attempt's. A node at the default policy (1 attempt, 30 s, no budget) is scored exactly as before, and the legacy answer formats keep one call.
+- **Records.** Each inspection outcome records `attempts`, the number of calls made. The score run records the policy as `attemptPolicy` (`attempts`, `attemptTimeoutS`, `budgetS`) and returns it in its views, and each scoring step logs the policy it applied.
+- **Shared code.** The policy's defaults, its parameter rule and its terminal error codes moved unchanged to the shared `workflow_core` package, which LocalServer vendors, so the device and the Portal resolve the policy with one implementation. The device's behaviour does not change.
+
 ### Fixed - Synthetic data: source images outside the generation model's size limits (2026-11-21)
 
 A synthetic data generation pass failed every variation when the source images were larger than the model accepts. The worker sent each source image to Bedrock as-is, so a 4608×3288 photo (15,151,104 pixels) against Stability Stable Image Inpaint, whose inputs must stay between 4,096 and 9,437,184 pixels, was refused with `ValidationException: Image total pixel count 15151104 is invalid` for all 50 variations of the pass.

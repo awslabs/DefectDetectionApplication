@@ -23,6 +23,7 @@ from botocore.exceptions import (
 
 import workflow_engine_test_utils  # noqa: F401 - sets COMPONENT_WORK_PATH
 
+from workflow_engine import output_bindings
 from workflow_engine.node_status import NodeStatusCollector
 from workflow_engine.output_bindings import (
     BEDROCK_CONNECT_TIMEOUT_SEC,
@@ -32,6 +33,7 @@ from workflow_engine.output_bindings import (
     RunContext,
     _default_bedrock_invoker,
 )
+from workflow_engine.vendor.workflow_core import anomaly_invocation as shared_invocation
 
 FRAME_NAME = "bedrock_frame_camera.jpg"
 NODE_ID = "check"
@@ -339,3 +341,19 @@ class TestDefaultInvokerClientKwargs:
             *self.ARGS, system_prompt="Be terse.", **NON_DEFAULT_OPTIONS)
         assert stub_boto3["captured"]["config"].kwargs["read_timeout"] == 6
         assert stub_boto3["client"].kwargs[0]["system"] == [{"text": "Be terse."}]
+
+
+# ---------------------------------------------------------------------------
+# The policy primitives are the shared workflow_core objects
+# ---------------------------------------------------------------------------
+
+def test_output_bindings_exposes_the_shared_policy_objects():
+    """The defaults, terminal codes, classification and resolution live in
+    the vendored workflow_core (the Portal's replay uses them too) and are
+    imported back under their historical names: one implementation."""
+    for name in ("BEDROCK_DEFAULT_ATTEMPTS", "BEDROCK_DEFAULT_ATTEMPT_TIMEOUT_SEC",
+                 "BEDROCK_DEFAULT_BUDGET_SEC", "BEDROCK_TERMINAL_ERROR_CODES",
+                 "bedrock_error_code", "is_terminal_bedrock_error",
+                 "resolve_attempt_policy"):
+        assert getattr(output_bindings, name) is getattr(shared_invocation, name), name
+    assert output_bindings._policy_int is shared_invocation.policy_int

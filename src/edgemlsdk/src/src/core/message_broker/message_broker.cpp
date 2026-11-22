@@ -162,6 +162,13 @@ public:
     HRESULT Initialize() override
     {
         HRESULT hr = S_OK;
+
+        // Every element created with the same configuration shares this
+        // instance, and pipelines that start at the same instant call
+        // Initialize() on it concurrently. Serialise the calls so a second
+        // caller waits for the first and then returns S_FALSE, instead of
+        // creating the targets again ("Multiple targets with the same name").
+        std::lock_guard<std::recursive_mutex> lk(_initialize_mtx);
         if(_intialized)
         {
             return S_FALSE;
@@ -462,6 +469,7 @@ private:
     }
 
     bool _intialized = false;
+    std::recursive_mutex _initialize_mtx;
     std::string _config;
     std::map<std::string, TargetContext> _targets;
     std::map<std::string, ComPtr<IProtocolFactory>> _target_factories;
