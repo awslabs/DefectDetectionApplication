@@ -370,6 +370,83 @@ describe('PromptTuningPreview — sample picker', () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* InstanceSegmentation (rfdetr-seg-support Req 2.1)                   */
+/* ------------------------------------------------------------------ */
+
+describe('PromptTuningPreview — InstanceSegmentation (rfdetr-seg-support Req 2.1)', () => {
+  it('accepts an InstanceSegmentation run for both preview families with no modality violation', async () => {
+    // grounded-sam: the family gate admits the new modality and sends it.
+    const gsam = renderPreview({
+      model: 'grounded-sam',
+      detectionPrompt: '',
+      taskType: 'InstanceSegmentation',
+      labelSet: ['scratch', 'dent'],
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+    );
+    fireEvent.click(sampleCheckbox(KEYS[0]));
+    await act(async () => {
+      fireEvent.click(runButton());
+    });
+    expect(screen.queryByTestId('preview-validation-errors')).toBeNull();
+    expect(apiMocks.startPreviewRun).toHaveBeenCalledTimes(1);
+    expect(apiMocks.startPreviewRun.mock.calls[0][0]).toMatchObject({
+      model: 'grounded-sam',
+      task_type: 'InstanceSegmentation',
+      label_set: ['scratch', 'dent'],
+      sample_images: [KEYS[0]],
+    });
+    gsam.unmount();
+
+    // llm: the pre-feature modality rule admits the new modality too.
+    apiMocks.startPreviewRun.mockClear();
+    renderPreview({
+      taskType: 'InstanceSegmentation',
+      labelSet: ['scratch', 'dent'],
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+    );
+    fireEvent.click(sampleCheckbox(KEYS[1]));
+    await act(async () => {
+      fireEvent.click(runButton());
+    });
+    expect(screen.queryByTestId('preview-validation-errors')).toBeNull();
+    expect(apiMocks.startPreviewRun).toHaveBeenCalledTimes(1);
+    expect(apiMocks.startPreviewRun.mock.calls[0][0]).toMatchObject({
+      model: 'llm:us.amazon.nova-pro-v1:0',
+      task_type: 'InstanceSegmentation',
+      detection_prompt: 'Find scratches on the surface',
+    });
+  });
+
+  it('still refuses Classification for grounded-sam, naming the three geometry modalities', async () => {
+    renderPreview({
+      model: 'grounded-sam',
+      detectionPrompt: '',
+      taskType: 'Classification',
+      labelSet: ['normal', 'anomaly'],
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('preview-sample-grid')).toBeInTheDocument()
+    );
+    fireEvent.click(sampleCheckbox(KEYS[0]));
+    await act(async () => {
+      fireEvent.click(runButton());
+    });
+    expect(
+      within(screen.getByTestId('preview-validation-errors'))
+        .getAllByTestId('preview-validation-error')
+        .map((n) => n.textContent)
+    ).toContain(
+      'The grounded-sam family supports Segmentation, InstanceSegmentation and ObjectDetection'
+    );
+    expect(apiMocks.startPreviewRun).not.toHaveBeenCalled();
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* Polling and result rendering                                        */
 /* ------------------------------------------------------------------ */
 
