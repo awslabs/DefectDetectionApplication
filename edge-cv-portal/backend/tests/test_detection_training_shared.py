@@ -384,12 +384,15 @@ RFDETR_RESOLUTION_ERROR = (
 # ---------------------------------------------------------------------------
 
 def test_detection_arch_vocabulary():
-    assert dt.DETECTION_ARCHES == ('yolo', 'rf_detr')
-    assert dt.ENTRY_POINT_FOR_ARCH == {'yolo': 'train.py', 'rf_detr': 'train_rfdetr.py'}
+    assert dt.DETECTION_ARCHES == ('yolo', 'rf_detr', 'rf_detr_seg')
+    assert dt.ENTRY_POINT_FOR_ARCH == {
+        'yolo': 'train.py', 'rf_detr': 'train_rfdetr.py', 'rf_detr_seg': 'train_rfdetr_seg.py'}
     assert dt.REQUIREMENTS_FOR_ARCH == {
-        'yolo': 'requirements.txt', 'rf_detr': 'requirements-rfdetr.txt'}
+        'yolo': 'requirements.txt', 'rf_detr': 'requirements-rfdetr.txt',
+        'rf_detr_seg': 'requirements-rfdetr.txt'}
     assert dt.CHECKPOINT_MEMBER_FOR_ARCH == {
-        'yolo': 'best.pt', 'rf_detr': 'checkpoint_best_total.pth'}
+        'yolo': 'best.pt', 'rf_detr': 'checkpoint_best_total.pth',
+        'rf_detr_seg': 'checkpoint_best_total.pth'}
     assert dt.RFDETR_SIZES == {'nano': 384, 'small': 512, 'medium': 576, 'large': 704}
     assert dt.RFDETR_TOP_K == 300
     assert dt.RFDETR_STAGE_TYPE == 'rf_detr_object_detection'
@@ -647,6 +650,7 @@ def test_job_environment_unknown_arch_rejected():
 _CODE_DIR_FILES = {
     'train.py': '# yolo entry point\n',
     'train_rfdetr.py': '# rf-detr entry point\n',
+    'train_rfdetr_seg.py': '# rf-detr-seg entry point\n',
     'requirements.txt': 'ultralytics==8.3.0\n',
     'requirements-rfdetr.txt': 'rfdetr[onnxexport]==1.3.0\nonnxruntime\nnumpy<2\n',
     '_common.py': '# shared helpers\n',
@@ -723,7 +727,8 @@ def test_build_sourcedir_tarball_tolerates_missing_common(entry_point):
         names = dt.build_sourcedir_tarball(code, out, entry_point=entry_point)
         assert '_common.py' not in names
         assert set(names) == {entry_point, 'requirements.txt',
-                              'manifest_to_detector_dataset.py', 'dedupe_frames.py'}
+                              'manifest_to_detector_dataset.py', 'dedupe_frames.py'} | \
+            set(dt._SIBLINGS_FOR_ENTRY_POINT[entry_point])
 
 
 def test_build_sourcedir_tarball_unknown_entry_point():
