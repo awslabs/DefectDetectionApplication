@@ -1903,8 +1903,8 @@ DATA: Tuple[ToolSpec, ...] = (
         backend='labeling', handler_module='labeling',
         handler_function='list_workteams', method='GET',
         resource='/labeling/workteams', param_map=UC_QUERY,
-        permissions=('view_labeling_jobs',), result_shape='collection',
-        collection_key='workteams'),
+        permissions=('view_labeling_jobs',), handler_audits_denials=True,
+        result_shape='collection', collection_key='workteams'),
     ToolSpec(
         name='portal_data_labeling_job_create', domain='data',
         title='Create a labeling job',

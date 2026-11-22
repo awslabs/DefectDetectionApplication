@@ -118,7 +118,7 @@ def handler(event, context):
             # Extract job_id from path parameters
             job_id = event.get('pathParameters', {}).get('id', '')
             if 'manifest' in path:
-                return get_manifest(job_id)
+                return get_manifest(job_id, get_user_from_event(event))
             return get_labeling_job(job_id, get_user_from_event(event))
         
         return create_response(404, {'error': 'Not found'})
@@ -1190,7 +1190,7 @@ def stop_labeling_job(event, context):
         })
 
 
-def get_manifest(job_id: str):
+def get_manifest(job_id: str, user: Dict):
     """Get the output manifest URL for a completed labeling job."""
     try:
         response = labeling_jobs_table.get_item(Key={'job_id': job_id})
@@ -1199,6 +1199,15 @@ def get_manifest(job_id: str):
             return create_response(404, {'error': 'Labeling job not found'})
         
         job = response['Item']
+        
+        # Membership of the use case the job belongs to, resolved from the
+        # stored job record first (the route carries no usecase_id of its
+        # own), before the job's status or its output manifest location is
+        # answered — the same order as get_labeling_job: 404 first, so an
+        # unknown id is not distinguishable from a forbidden one by order.
+        record_usecase_id = job.get('usecase_id')
+        if not check_user_access(user['user_id'], record_usecase_id):
+            return _insufficient_permissions(record_usecase_id, user, resource_id=job_id)
         
         if job['status'] != 'Completed':
             return create_response(400, {
@@ -1605,6 +1614,14 @@ def list_workteams(event):
         
         if not usecase_id:
             return create_response(400, {'error': 'usecase_id is required'})
+        
+        # Membership of the use case named in the query, before the use case
+        # lookup, its cross-account role assumption or the SageMaker listing
+        # (data-route authorization consistency; mirrors list_labeling_jobs).
+        # Both GET /workteams and GET /labeling/workteams dispatch here.
+        user = get_user_from_event(event)
+        if not check_user_access(user['user_id'], usecase_id):
+            return _insufficient_permissions(usecase_id, user)
         
         # Get use case details
         usecase = get_usecase(usecase_id)

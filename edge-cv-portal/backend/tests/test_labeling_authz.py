@@ -17,6 +17,14 @@ PORTAL_REGISTRY_ENFORCED=true:
   to the DDA create path and stop_labeling_job, so both POST /labeling backends
   enforce identically. A non-member is denied 403 with nothing persisted; a
   member creates the job.
+- GET /workteams and GET /labeling/workteams (list_workteams, one handler behind
+  both routes): the query's use case is membership-checked before its
+  cross-account role is assumed or SageMaker is listed; a non-member is denied
+  403, a member lists the use case's workteams.
+- GET /labeling/{id}/manifest (get_manifest): the job record is read first (404
+  for an unknown id), its use case resolved from the record, then membership
+  checked before the job's status or manifest location is answered; a
+  non-member is denied 403, a member reads the manifest URI.
 
 Runs against the moto-backed stack from conftest.py (real shared_utils role
 resolution, real @rbac_check), SageMaker replaced by a recording fake (moto has
@@ -31,6 +39,7 @@ import boto3 as real_boto3
 import pytest
 
 REGION = "us-east-1"
+MANIFEST_URI = "s3://gt-output/job/manifests/output/output.manifest"
 
 
 @pytest.fixture(scope="module")
@@ -49,16 +58,30 @@ def enforcement_on(aws_stack, monkeypatch):
 
 
 class FakeSageMakerClient:
-    """Recording fake for the one SageMaker API the Ground Truth flow calls."""
+    """Recording fake for the SageMaker APIs the Ground Truth flows call."""
+
+    WORKTEAM = {"WorkteamName": "private-team",
+                "WorkteamArn": (f"arn:aws:sagemaker:{REGION}:123456789012:"
+                                "workteam/private-crowd/private-team"),
+                "Description": "seeded", "MemberDefinitions": [{}, {}]}
 
     def __init__(self):
         self.created = []
+        self.workteam_listings = 0
 
     def create_labeling_job(self, **params):
         self.created.append(params)
         return {"LabelingJobArn":
                 f"arn:aws:sagemaker:{REGION}:123456789012:labeling-job/"
                 f"{params['LabelingJobName']}"}
+
+    def get_paginator(self, operation):
+        assert operation == "list_workteams", operation
+        return SimpleNamespace(paginate=self._list_workteams)
+
+    def _list_workteams(self, **_params):
+        self.workteam_listings += 1
+        return [{"Workteams": [self.WORKTEAM]}]
 
 
 class LabelingAuthzEnv:
@@ -100,14 +123,18 @@ class LabelingAuthzEnv:
                 "usecase_id").eq(self.usecase_id))
         return response.get("Items", [])
 
-    def seed_gt_usecase(self, bucket, prefix="datasets/", image_count=2):
-        """Single-account use case (root ARN -> no STS assume) with a moto S3
-        bucket holding images under the dataset prefix."""
+    def seed_usecase(self, bucket="gt-bucket-unused"):
+        """Single-account use case (root ARN -> no STS assume)."""
         self.stack.tables.usecases.put_item(Item={
             "usecase_id": self.usecase_id, "name": "GT UC",
             "account_id": "123456789012",
             "cross_account_role_arn": "arn:aws:iam::123456789012:root",
             "external_id": "test-external-id", "s3_bucket": bucket})
+
+    def seed_gt_usecase(self, bucket, prefix="datasets/", image_count=2):
+        """seed_usecase plus a moto S3 bucket holding images under the
+        dataset prefix."""
+        self.seed_usecase(bucket)
         s3 = real_boto3.client("s3", region_name=REGION)
         s3.create_bucket(Bucket=bucket)
         for index in range(image_count):
@@ -156,6 +183,15 @@ class LabelingAuthzEnv:
 
     def create_gt(self, user, body):
         return self.invoke(self.event("POST", "/labeling", user, body=body))
+
+    def list_workteams(self, user, resource):
+        return self.invoke(self.event(
+            "GET", resource, user, query={"usecase_id": self.usecase_id}))
+
+    def get_manifest(self, user, job_id):
+        return self.invoke(self.event(
+            "GET", "/labeling/{id}/manifest", user,
+            path=f"/v1/labeling/{job_id}/manifest", path_params={"id": job_id}))
 
     def unauthorized_rows(self, user_id):
         return [item for item in self.stack.tables.audit_log.scan().get("Items", [])
@@ -275,3 +311,72 @@ class TestCreateGroundTruthAuthorization:
         assert len(jobs) == 1
         assert jobs[0]["labeling_backend"] == "GroundTruth"
         assert jobs[0]["job_id"] == body["job_id"]
+
+
+# ------------------------------ GET /workteams, GET /labeling/workteams (list)
+
+@pytest.mark.parametrize("resource", ["/workteams", "/labeling/workteams"])
+class TestListWorkteamsAuthorization:
+    def test_non_member_denied(self, env, enforcement_on, fake_sagemaker, resource):
+        env.seed_usecase()
+        user = env.user()  # no registry rows
+
+        status, body = env.list_workteams(user, resource)
+
+        assert status == 403
+        assert body == {"error": "Insufficient permissions"}
+        denials = env.unauthorized_rows(user["user_id"])
+        assert len(denials) == 1
+        assert denials[0]["details"]["usecase_id"] == env.usecase_id
+        assert fake_sagemaker.workteam_listings == 0
+
+    def test_member_lists_workteams(self, env, enforcement_on, fake_sagemaker,
+                                    resource):
+        env.seed_usecase()
+        user = env.user()
+        env.seed_member(user)
+
+        status, body = env.list_workteams(user, resource)
+
+        assert status == 200, body
+        assert body["count"] == 1
+        assert body["workteams"][0]["name"] == FakeSageMakerClient.WORKTEAM["WorkteamName"]
+        assert fake_sagemaker.workteam_listings == 1
+        assert env.unauthorized_rows(user["user_id"]) == []
+
+
+# ------------------------------------------ GET /labeling/{id}/manifest (get)
+
+class TestGetManifestAuthorization:
+    def test_unknown_job_is_404_before_authorization(self, env, enforcement_on):
+        user = env.user()  # no rows
+
+        status, _ = env.get_manifest(user, f"job-{uuid.uuid4().hex[:12]}")
+
+        assert status == 404
+        assert env.unauthorized_rows(user["user_id"]) == []
+
+    def test_non_member_denied(self, env, enforcement_on):
+        job_id = env.put_job(labeling_backend="GroundTruth", status="Completed",
+                             output_manifest_s3_uri=MANIFEST_URI)
+        user = env.user()
+
+        status, body = env.get_manifest(user, job_id)
+
+        assert status == 403
+        assert body == {"error": "Insufficient permissions"}
+        denials = env.unauthorized_rows(user["user_id"])
+        assert len(denials) == 1
+        assert denials[0]["resource_id"] == job_id
+
+    def test_member_reads_manifest(self, env, enforcement_on):
+        job_id = env.put_job(labeling_backend="GroundTruth", status="Completed",
+                             output_manifest_s3_uri=MANIFEST_URI)
+        user = env.user()
+        env.seed_member(user)
+
+        status, body = env.get_manifest(user, job_id)
+
+        assert status == 200, body
+        assert body == {"manifest_uri": MANIFEST_URI, "job_id": job_id}
+        assert env.unauthorized_rows(user["user_id"]) == []
