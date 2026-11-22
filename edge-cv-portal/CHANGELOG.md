@@ -4,6 +4,14 @@ All notable changes to the DDA Portal will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed - Synthetic data: Stability response size for resized source images (2026-11-22)
+
+After the 2026-11-21 fix below, a generation pass over 4608×3288 source images against Stability Stable Image Inpaint sent each image at 3636×2594 (9,431,784 pixels, inside the model's limits) and the request was accepted, but every variation of pass 2 of session 6115b94c failed with `ValidationException: {"detail":"Response payload size 18982136 bytes exceeds the maximum allowed size of 16777216 bytes. Please try adjusting the seed, using a different input image, or requesting JPEG output_format"}` (payloads 18,982,136 to 20,276,590 bytes). The worker requested the default PNG output, and a PNG of a 9.4-megapixel photograph (1.5–1.6 bytes per pixel, base64-encoded inside the response) does not fit under Stability's 16 MiB response limit.
+
+- **JPEG output for downscaled sources.** A Stability source scaled *down* to the model's pixel limit is now requested with `output_format: "jpeg"`, the remedy the error names, at the same fitted size. A JPEG of the same image is about 0.3 bytes per pixel, so the response stays far under the limit (the real-model check with the live 4608×3288 sample returned payloads of 3,578,819 and 3,618,531 bytes for two seeds, 21 % of the cap, where the same request with PNG output was refused at 20,012,462 bytes). The generated image is scaled back to the source size and stored as PNG, as before, so the staged and integrated files keep their format and dimensions; the model's JPEG encoding is the only difference from the intended output of the earlier fix, and the first output at all for these sources.
+- **Unchanged.** In-limit sources and sources scaled *up* to the model's minimums keep PNG output byte-for-byte. Amazon Nova Canvas and Titan Image Generator v2 have no output-format parameter and their outputs (at most 4,194,304 and 1,982,464 pixels) stay far below any such limit. The default **Resize to fit the model, then restore the original size** and the aspect-matched Amazon image-variation sizes stand.
+- **Known limit.** An in-limit Stability source between about 7.8 and 9.4 megapixels is still sent as-is with PNG output and can hit the same response limit depending on its content, as before.
+
 ### Security - Pillow 13.0.0 for LocalServer on its Python 3.11 images (2026-11-21)
 
 LocalServer's `src/backend/requirements.txt` pinned Pillow 12.3.0, which the open Pillow advisories affect. The most severe, GHSA-5x8w-8jj5-q52h, is critical: a heap overflow in the FlashPix decoder. Pillow 13.0.0 is the first release that fixes them, and it needs Python 3.11 or later.

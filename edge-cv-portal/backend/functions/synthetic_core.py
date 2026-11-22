@@ -629,6 +629,39 @@ def build_amazon_request_body(model_entry: Dict, method: str, prompt: str,
     }
 
 
+# Stability's service refuses to return a response (the JSON carrying the
+# base64 image) above 16,777,216 bytes. The 4608x3288 sources of session
+# 6115b94c, sent at the 9,437,184-px cap as 3636x2594 (9,431,784 px) with
+# the default PNG output, failed every variation with
+#   ValidationException: {"detail":"Response payload size 18982136 bytes
+#   exceeds the maximum allowed size of 16777216 bytes. Please try
+#   adjusting the seed, using a different input image, or requesting JPEG
+#   output_format"}
+# (live payloads 18,982,136 / 19,461,701 / 19,803,661 / 19,836,096 /
+# 20,276,590 bytes: PNGs of 1.51-1.61 bytes per pixel). The payload is 4/3
+# of the image bytes, so a PNG answer fits only below 1.334 B/px at that
+# pixel count, which a photograph does not reach (1.4-1.6 B/px); the JPEG
+# of the same fitted sample is 0.32 B/px at quality 95 (24 % of the cap).
+# So a source scaled *down* to the pixel cap asks for the JPEG output the
+# error text itself names; in-limit sources and sources scaled *up* to the
+# minimums keep the lossless PNG default.
+STABILITY_RESPONSE_MAX_BYTES = 16_777_216
+STABILITY_OUTPUT_FORMAT_DEFAULT = "png"
+STABILITY_OUTPUT_FORMAT_DOWNSCALED = "jpeg"
+
+
+def stability_output_format(source_size, model_size):
+    """``output_format`` of a Stability inpaint request: ``"jpeg"`` when
+    the image sent to the model (``model_size``) has fewer pixels than the
+    source (``source_size``), i.e. the source was scaled down to the pixel
+    cap, where a PNG answer exceeds STABILITY_RESPONSE_MAX_BYTES; ``"png"``
+    otherwise, so in-limit sources and sources scaled up to the minimums
+    keep today's lossless answer."""
+    if model_size[0] * model_size[1] < source_size[0] * source_size[1]:
+        return STABILITY_OUTPUT_FORMAT_DOWNSCALED
+    return STABILITY_OUTPUT_FORMAT_DEFAULT
+
+
 def build_stability_inpaint_request_body(prompt, source_image_b64,
                                          mask_image_b64, seed,
                                          output_format="png"):
@@ -638,7 +671,9 @@ def build_stability_inpaint_request_body(prompt, source_image_b64,
     seed passed unmodified (Task_Seed range 0..858,993,459 is inside
     Stability's 0..4,294,967,294). ``seed=None`` omits the field.
     negative_prompt and guidance parameters are omitted: the entry's
-    capability flags exclude them (Req 2.4).
+    capability flags exclude them (Req 2.4). ``output_format`` is
+    :func:`stability_output_format`'s choice for the task's source and
+    model-side sizes; the default stays ``png``.
     """
     body = {
         "image": source_image_b64,
