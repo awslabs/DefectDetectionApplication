@@ -73,7 +73,10 @@ VALID_PROMPT = "Outline every visible surface defect on the part"
 OTHER_MODELS = ("sam", "bedrock:anthropic.claude-3-haiku", "",
                 "grounded-sam ", "GROUNDED-SAM", "gsam")
 
-GSAM_MODALITIES = ("Segmentation", "ObjectDetection")
+# rfdetr-seg-support Requirement 2.1 / 2.4: the family also pre-labels the
+# InstanceSegmentation modality (Segmentation on the wire); the junk
+# value below stays outside every list.
+GSAM_MODALITIES = ("Segmentation", "ObjectDetection", "InstanceSegmentation")
 ALL_MODALITIES = ("Classification", "Segmentation", "ObjectDetection")
 JUNK_MODALITY = "Detection"
 
@@ -434,10 +437,11 @@ def _expected_violations(spec):
         # must be configured for any grounded-sam start.
         if not spec.worker_deployed:
             expected.append(("Grounded-SAM worker is not deployed",))
-        # Req 3.3: the family's modalities are the two geometry ones.
+        # Req 3.3: the family's modalities are the geometry ones
+        # (rfdetr-seg-support Req 2.1 adds InstanceSegmentation).
         if spec.modality not in GSAM_MODALITIES:
-            expected.append(("grounded-sam family supports Segmentation "
-                             "and ObjectDetection",))
+            expected.append(("grounded-sam family supports Segmentation, "
+                             "InstanceSegmentation and ObjectDetection",))
         # Shared Label_Set rule, always decidable for the family.
         if labels is None:
             expected.append(("label set with between 1 and 10 class "
