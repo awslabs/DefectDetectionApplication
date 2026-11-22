@@ -70,9 +70,11 @@ export interface SyntheticDataStackProps extends cdk.StackProps {
  *   ('{object_type}#{defect_type}').
  * - SyntheticDataHandler Lambda (synthetic_data.py): API routing + async
  *   generation worker via self-invocation (InvocationType='Event'), 1024 MB
- *   and a 15 min timeout for the worker path. Layers: shared utilities, JWT,
- *   and the imaging layer bundling Pillow (image decode/diff for the
- *   bbox_from_diff auto-annotation fallback).
+ *   and a 15 min timeout for the worker path; the worker hands the rest of a
+ *   plan it cannot finish in time to a continuation invocation of itself, so
+ *   asynchronous retries are off (MaximumRetryAttempts 0, 2 min event age).
+ *   Layers: shared utilities, JWT, and the imaging layer bundling Pillow
+ *   (image decode/diff for the bbox_from_diff auto-annotation fallback).
  * - Routes: the /synthetic/... route matrix from the design (models, prompt
  *   templates, sessions CRUD, generate, previews/approval, integrate,
  *   retrain).
@@ -101,6 +103,12 @@ export class SyntheticDataStack extends cdk.Stack {
     // reference — same fixed-name pattern as the NodeDesignerStack's
     // simulator state machine.
     const HANDLER_FUNCTION_NAME = 'dda-synthetic-data-handler';
+    // The worker's time limit, exported to the handler as
+    // SYNTHETIC_WORKER_TIMEOUT_SECONDS from this one Duration: the worker
+    // checks its remaining time and hands the rest of the plan to a
+    // continuation invocation before it runs out, and the API reads the same
+    // value to judge a worker that stopped without reporting (a dead pass).
+    const WORKER_TIMEOUT = cdk.Duration.minutes(15);
     const handlerFunctionArn =
       `arn:aws:lambda:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}` +
       `:function:${HANDLER_FUNCTION_NAME}`;
@@ -395,6 +403,7 @@ export class SyntheticDataStack extends cdk.Stack {
         PROMPT_TEMPLATES_TABLE: this.promptTemplatesTable.tableName,
         TRAINING_JOBS_TABLE: props.trainingJobsTable.tableName,
         SYNTHETIC_DATA_FUNCTION_NAME: HANDLER_FUNCTION_NAME,
+        SYNTHETIC_WORKER_TIMEOUT_SECONDS: WORKER_TIMEOUT.toSeconds().toString(),
         // Shared portal environment (shared_utils + training.py contract,
         // matching the ComputeStack lambdaEnvironment names).
         USECASES_TABLE: props.useCasesTable.tableName,
@@ -416,7 +425,24 @@ export class SyntheticDataStack extends cdk.Stack {
       // Worker path: up to 20 variations x N source images, one Bedrock
       // image generation call each.
       memorySize: 1024,
-      timeout: cdk.Duration.minutes(15),
+      timeout: WORKER_TIMEOUT,
+    });
+    // No asynchronous retries for the worker events. A pass of 50
+    // variations (about 25 s each) outlives the 15 min timeout; under the
+    // Lambda default (2 retries) a timed-out worker re-ran the whole plan
+    // twice (130 preview records for 50 tasks on session 6115b94c). The
+    // worker is now idempotent per task and hands the unfinished tail of
+    // the plan to a continuation invocation itself, and a pass whose
+    // worker stopped without reporting is surfaced through the session
+    // (status `failed` with the reason), so a Lambda-level retry could only
+    // re-run or duplicate work. The 2 min event age bounds how late a
+    // continuation may start (the API's staleness grace covers it). Same
+    // shape as cameraVideoPinHandler.configureAsyncInvoke in
+    // compute-stack.ts; no destination: the session META is the durable
+    // record.
+    this.syntheticDataHandler.configureAsyncInvoke({
+      retryAttempts: 0,
+      maxEventAge: cdk.Duration.minutes(2),
     });
 
     // ------------------------------------------------------------------
