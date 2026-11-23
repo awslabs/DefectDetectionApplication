@@ -613,39 +613,59 @@ selector (YOLO | RF-DETR) only when Model Type = Object Detection;
 
 ### 21.5 Detection model package — RF-DETR manifest shape
 
+The manifest the Portal writes for an RF-DETR `small` (native 512) model with
+two classes, generated from the shared builder
+(`detection_training.build_detection_device_manifest`) and checked against it
+by `edge-cv-portal/backend/tests/test_docs_manifest_examples.py` (the comment
+names the arguments; the builder's `dataset` block is omitted). RF-DETR needs
+`normalize: true` and `preserve_aspect: false` — ImageNet normalisation after
+0..1 scaling and an aspect-destroying square resize, the geometry it trains
+with. `output_shape` is the builder's nominal value, replaced by the packager
+with the exported logits shape (plus `output_shapes` for both tensors); the
+device reads neither.
+
+<!-- manifest: rf_detr small -->
 ```json
 {
   "runtime": "onnx",
   "runtime_artifact": "model.onnx",
-  "task": "object_detection",
-  "detection": {
-    "layout": "rf_detr",
-    "num_classes": 90,
-    "score_threshold": 0.5,
-    "top_k": 300,
-    "network_input": 560,
-    "class_names": ["person", "bicycle", ...]
-  },
   "model_graph": {
     "model_graph_type": "single_stage_model_graph",
     "stages": [{
-      "stage_type": "rf_detr_object_detection",
-      "threshold": 0.5,
-      "image_width": 560,
-      "image_height": 560,
+      "type": "rf_detr_object_detection",
+      "input_shape": [1, 3, 512, 512],
+      "output_shape": [1, 6, 8400],
+      "image_width": 512,
+      "image_height": 512,
       "image_range_scale": true,
-      "normalize": false,
-      "input_shape": [1, 3, 560, 560]
+      "normalize": true,
+      "threshold": 0.5,
+      "num_classes": 2
     }]
+  },
+  "input_shape": [1, 3, 512, 512],
+  "preprocessing": {"resize": [512, 512], "channel_order": "RGB"},
+  "task": "object_detection",
+  "detection": {
+    "layout": "rf_detr",
+    "num_classes": 2,
+    "score_threshold": 0.5,
+    "network_input": 512,
+    "preserve_aspect": false,
+    "top_k": 300,
+    "class_names": ["plate", "scratch"]
   }
 }
 ```
 
-Caveat: the RF-DETR decoder is verified against synthetic two-tensor outputs
-(unit tests). Exact output tensor **names/order** on a real RF-DETR ONNX export
-vary by exporter — the shape-based tensor ID handles order, but a real
-end-to-end export/device run is still pending. RF-DETR normalized-cxcywh and
-sigmoid scoring are the documented DETR-family conventions.
+Verified end to end on 2026-09-22 on a JetPack 7 Jetson AGX Thor devkit: a
+Portal-trained RF-DETR `small` detector, packaged and deployed through the
+Portal, returned the expected three boxes on every successful run
+(`docs/detection-training-gap.md`, "On-device verification (2026-09-22)"); the
+exported graph's output names are `dets` / `labels` in graph order, and the
+shape-based tensor ID of §21.2 handles any exporter that reorders them. A
+three-class detector (`labels [1, Q, 4]`, the same shape as `dets`) is settled
+by `detection.output_names`, see §24.1.
 
 ## 22. vLLM Hugging Face weight cache (persistence & disk cleanup)
 
