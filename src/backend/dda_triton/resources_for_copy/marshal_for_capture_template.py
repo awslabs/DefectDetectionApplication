@@ -78,6 +78,32 @@ except ImportError:  # pragma: no cover - defensive fallback for restricted envs
             pass
         return str(class_index)
 
+# Instance-segmentation colour map and mask fills (rfdetr-seg-support
+# Requirement 10.1, DD12) need the anomaly-mask palette. Guarded separately
+# from the class-label import above on purpose: one `try` for both would let
+# a missing mask-utils package disable `resolve_class_label` for every
+# detection capture, and a missing class-label module would clear this flag
+# although the palette imported fine. On ImportError the marshal degrades to
+# "mask.png without colour maps" (and no mask fills in the overlay).
+try:
+    from lyra_anomalies_mask_utils import (
+        DEFAULT_ANOMALY_MASK_PALETTE,
+        hex_color_string,
+    )
+
+    _MASK_UTILS = True
+except ImportError:  # pragma: no cover - defensive fallback for restricted envs
+    _MASK_UTILS = False
+    DEFAULT_ANOMALY_MASK_PALETTE = None
+    hex_color_string = None
+    log.warning(
+        "lyra_anomalies_mask_utils is not importable; instance-segmentation captures "
+        "will carry mask.png without a colour map."
+    )
+
+#: Alpha of the per-instance mask fill blended into the detection overlay.
+INSTANCE_MASK_FILL_ALPHA = 0.4
+
 
 class TritonPythonModel:
     """Your Python model must use the same class name. Every Python model
@@ -168,6 +194,154 @@ class TritonPythonModel:
             and isinstance(anomalies[0], dict)
             and "bounding_box" in anomalies[0]
         )
+
+    @staticmethod
+    def _has_instance_masks(anomalies) -> bool:
+        """True when the Detection_List carries at least one instance mask
+        (an entry with a Canonical_RLE ``mask_rle`` string). False for plain
+        detection payloads, the zero-object sentinel and anomaly payloads."""
+        return TritonPythonModel._is_detection_list(anomalies) and any(
+            isinstance(entry, dict) and isinstance(entry.get("mask_rle"), str)
+            for entry in anomalies
+        )
+
+    @staticmethod
+    def _instance_class_index(det):
+        """The integer class index of a Detection_List entry (``class_index``
+        preferred, ``class`` otherwise), or ``None`` when neither parses."""
+        for key in ("class_index", "class"):
+            value = det.get(key)
+            if value is None or value == "":
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _palette_row(class_index):
+        """The palette row painting ``class_index`` (row ``class_index + 1``,
+        clamped to the last row exactly as the base model's composite painter
+        clamps it)."""
+        row = min(int(class_index) + 1, len(DEFAULT_ANOMALY_MASK_PALETTE) - 1)
+        return DEFAULT_ANOMALY_MASK_PALETTE[row]
+
+    @staticmethod
+    def _instance_color_map(mask_rgb, entries, label_key):
+        """Instance-mode colour map from the palette mask the marshal already
+        holds and the Detection_List (DD12; Requirement 10.1).
+
+        ``"0"`` is the background (label ``background``, palette row 0, share
+        of mask pixels equal to that row); then one entry per class index
+        present in ``entries``, ascending, labelled with the class's
+        ``class_label`` and carrying the share of mask pixels equal to the
+        class's palette row. ``label_key`` is ``"name"`` for the record's
+        ``internal-color-map`` and ``"class-name"`` for the ``mask_color_map``
+        block. Hex colours are lower-cased ``hex_color_string`` output. Pure:
+        never ``convert_color_mask_to_index_mask`` / ``get_classes_areas``.
+        """
+        mask = np.asarray(mask_rgb)
+        pixel_count = float(mask.shape[0] * mask.shape[1]) if mask.ndim == 3 else 0.0
+
+        def share_of(row):
+            if pixel_count == 0.0:
+                return 0.0
+            return float(np.all(mask == row, axis=-1).sum()) / pixel_count
+
+        labels = {}
+        for det in entries if isinstance(entries, list) else []:
+            if not isinstance(det, dict):
+                continue
+            class_index = TritonPythonModel._instance_class_index(det)
+            if class_index is None or class_index in labels:
+                continue
+            label = det.get("class_label") or ""
+            if not label:
+                label = resolve_class_label(str(class_index), None)
+            if not label:
+                label = str(class_index)
+            labels[class_index] = label
+
+        background_row = DEFAULT_ANOMALY_MASK_PALETTE[0]
+        color_map = {
+            "0": {
+                label_key: "background",
+                "hex-color": hex_color_string(background_row.tolist()).lower(),
+                "total-percentage-area": share_of(background_row),
+            }
+        }
+        for position, class_index in enumerate(sorted(labels), start=1):
+            row = TritonPythonModel._palette_row(class_index)
+            color_map[str(position)] = {
+                label_key: labels[class_index],
+                "hex-color": hex_color_string(row.tolist()).lower(),
+                "total-percentage-area": share_of(row),
+            }
+        return color_map
+
+    @staticmethod
+    def _decode_mask_rle(rle, width, height):
+        """Canonical_RLE (space-separated run lengths over the column-major
+        flattening, background run first) -> ``bool`` mask of shape
+        ``(height, width)``. A deliberate ~10-line numpy duplicate of
+        ``lyra_science_processing_utils.utils.mask_rle.decode`` -- the marshal
+        cannot import that package unguarded -- pinned by the same vector file
+        (``test/fixtures/canonical_rle_vectors.json``). Raises ``ValueError``
+        on a malformed string."""
+        if width < 1 or height < 1:
+            raise ValueError("width and height must be positive")
+        try:
+            counts = np.array([int(token) for token in rle.split()], dtype=np.int64)
+        except (AttributeError, ValueError):
+            raise ValueError("invalid RLE counts")
+        if counts.size and counts.min() < 0:
+            raise ValueError("RLE counts must be non-negative")
+        if int(counts.sum()) != width * height:
+            raise ValueError("RLE counts do not sum to width*height")
+        values = (np.arange(counts.size) % 2) == 1
+        flat = np.repeat(values, counts)
+        return np.ascontiguousarray(flat.reshape(width, height).T)
+
+    @staticmethod
+    def _fill_instance_masks(overlay, entries, alpha=INSTANCE_MASK_FILL_ALPHA):
+        """Blend each instance's mask fill (its class's palette colour, in the
+        channel order of ``overlay``) into a copy of ``overlay``.
+
+        Called on the source frame *before* ``_generate_detection_overlay``
+        draws the boxes, so the fills sit under the boxes and label bands and
+        the R<->B swap that function applies to the whole frame carries the
+        RGB palette rows into the encoder's BGR order. Instances are blended in
+        ascending confidence so the higher-confidence instance wins an overlap,
+        as the Composite_Mask does. Best-effort: an entry whose ``mask_rle``
+        does not decode at the frame size is skipped (logged), and without the
+        palette (``_MASK_UTILS`` false) the frame is returned unchanged."""
+        if not _MASK_UTILS or not isinstance(entries, list):
+            return overlay
+        height, width = overlay.shape[0], overlay.shape[1]
+        filled = np.array(overlay, copy=True)
+        with_masks = [
+            det for det in entries
+            if isinstance(det, dict) and isinstance(det.get("mask_rle"), str)
+        ]
+        for det in sorted(with_masks, key=lambda d: float(d.get("confidence", 0.0) or 0.0)):
+            class_index = TritonPythonModel._instance_class_index(det)
+            if class_index is None:
+                continue
+            try:
+                mask = TritonPythonModel._decode_mask_rle(det["mask_rle"], width, height)
+            except ValueError:
+                log.warning(
+                    "Skipping an instance mask fill: mask_rle does not decode at %dx%d",
+                    width,
+                    height,
+                    exc_info=True,
+                )
+                continue
+            color = TritonPythonModel._palette_row(class_index).astype(np.float32)
+            region = filled[mask].astype(np.float32)
+            filled[mask] = np.rint((1.0 - alpha) * region + alpha * color).astype(filled.dtype)
+        return filled
 
     def _generate_detection_overlay(self, image, detections):
         """Draw bounding boxes + labels onto a copy of the input image."""
@@ -325,14 +499,32 @@ class TritonPythonModel:
                 "file:/", mask_file_path
             )
             anomaly_mask_ref_detected_meta = {}
-            d = {}
-            for i in range(len(inference_anomalies)):
-                detail = {}
-                detail["name"] = inference_anomalies[i]["name"]
-                detail["hex-color"] = inference_anomalies[i]["hex_color"].lower()
-                detail["total-percentage-area"] = inference_anomalies[i]["total_percentage_area"]
-                d[str(i)] = detail
-            anomaly_mask_ref_detected_meta["internal-color-map"] = d
+            if is_detection:
+                # Instance segmentation (rfdetr-seg-support Requirement 10.1):
+                # the payload is the Detection_List, whose entries carry none of
+                # the anomaly keys the loop below reads, so the colour map is
+                # derived from the palette mask and the entries' classes (DD12).
+                # Without the palette package the mask.png is still written and
+                # the colour maps are omitted (one warning per capture).
+                if _MASK_UTILS:
+                    anomaly_mask_ref_detected_meta["internal-color-map"] = self._instance_color_map(
+                        inference_mask, inference_anomalies, "name"
+                    )
+                else:
+                    log.warning(
+                        "lyra_anomalies_mask_utils unavailable: instance capture %s carries "
+                        "mask.png without internal-color-map / mask_color_map",
+                        capture_id,
+                    )
+            else:
+                d = {}
+                for i in range(len(inference_anomalies)):
+                    detail = {}
+                    detail["name"] = inference_anomalies[i]["name"]
+                    detail["hex-color"] = inference_anomalies[i]["hex_color"].lower()
+                    detail["total-percentage-area"] = inference_anomalies[i]["total_percentage_area"]
+                    d[str(i)] = detail
+                anomaly_mask_ref_detected_meta["internal-color-map"] = d
             anomaly_mask_ref_detected_meta["creation-date"] = time_str
             anomaly_mask_ref_detected_meta["human-annotated"] = "no"
             anomaly_mask_ref_detected_meta["type"] = "groundtruth/semantic-segmentation"
@@ -446,11 +638,15 @@ class TritonPythonModel:
             # human-readable class_label.
             det_map = {}
             idx = 0
+            any_mask_truncated = False
             for det in anomalies:
                 box = det.get("bounding_box") or []
                 if len(box) != 4:
                     continue
-                class_index = str(det.get("class", ""))
+                # The explicit integer class_index an instance entry carries
+                # (DD11) wins over `class`, which keeps the detection decoder's
+                # meaning; a plain detection entry has only `class`.
+                class_index = str(det.get("class_index", det.get("class", "")))
                 # Prefer the label the base model embedded in the payload; if it
                 # is missing/empty, re-resolve via the shared util and finally
                 # fall back to the class-index string.
@@ -459,14 +655,33 @@ class TritonPythonModel:
                     class_label = resolve_class_label(class_index, None)
                 if not class_label:
                     class_label = class_index
-                det_map[str(idx)] = {
+                entry = {
                     "class_index": class_index,
                     "class_label": class_label,
                     "bounding_box": box,
                     "confidence": det.get("confidence", 0.0),
                 }
+                # Instance keys (rfdetr-seg-support Requirement 10.1, 10.3) ride
+                # along only when the entry carries them.
+                for instance_key in ("mask_rle", "mask_area", "mask_truncated"):
+                    if instance_key in det:
+                        entry[instance_key] = det[instance_key]
+                if entry.get("mask_truncated"):
+                    any_mask_truncated = True
+                det_map[str(idx)] = entry
                 idx += 1
             detection_data = {"detections": det_map}
+            if any_mask_truncated:
+                # The base model shed mask_rle from some entries at the DD4
+                # ceiling; the block-level marker the readers look for.
+                detection_data["detections_truncated"] = True
+            if mask_file_path and _MASK_UTILS:
+                # A Composite_Mask was written for this instance capture: the
+                # same colour map as internal-color-map, keyed for the readers
+                # (`class-name`, as the anomaly block names it).
+                detection_data["mask_color_map"] = self._instance_color_map(
+                    inference_mask, anomalies, "class-name"
+                )
             # Detections sidecar (detection-guided-bedrock-inspection,
             # design Risk 1 fallback): the capture record only lands at
             # {output_dir}/{capture_id}.jsonl when a terminal emlcapture
@@ -636,14 +851,30 @@ class TritonPythonModel:
                 # task=object_detection: the reused anomalies payload is a list
                 # of detection results. Draw boxes on the input image as the
                 # overlay; emit an empty mask (detection has no pixel mask).
+                # Instance segmentation (rfdetr-seg-support Requirement 10.1)
+                # blends the mask fills under the boxes and forwards the
+                # Composite_Mask the base model painted when it carries one.
+                overlay_source = input1.as_numpy()
+                if self._has_instance_masks(inference_anomalies):
+                    overlay_source = self._fill_instance_masks(
+                        overlay_source, inference_anomalies
+                    )
                 detection_overlay = self._generate_detection_overlay(
-                    input1.as_numpy(), inference_anomalies
+                    overlay_source, inference_anomalies
                 )
                 encoded_overlay = self._encode_overlay(detection_overlay).astype(
                     self.output_overlay_dtype
                 )
                 overlay_tensor = pb_utils.Tensor("overlay", encoded_overlay)
-                mask_tensor = pb_utils.Tensor("mask", np.array([]).astype(self.output_mask_dtype))
+                if self._has_anomaly_mask(inference_mask.as_numpy(), input1.as_numpy()):
+                    encoded_mask = self._encode_mask(inference_mask.as_numpy()).astype(
+                        self.output_mask_dtype
+                    )
+                    mask_tensor = pb_utils.Tensor("mask", encoded_mask)
+                else:
+                    mask_tensor = pb_utils.Tensor(
+                        "mask", np.array([]).astype(self.output_mask_dtype)
+                    )
             elif self._has_anomaly_mask(inference_mask.as_numpy(), input1.as_numpy()):
                 # encode and forward
                 encoded_mask = self._encode_mask(inference_mask.as_numpy()).astype(
