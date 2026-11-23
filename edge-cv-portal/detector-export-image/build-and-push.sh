@@ -12,7 +12,7 @@
 #   -c detectorExportImage=<account>.dkr.ecr.<region>.amazonaws.com/dda-detector-export@sha256:<digest>
 #
 # Only a minimal, staged context is sent to the builder (this directory's
-# Dockerfile + locks and the three entry-point modules from
+# Dockerfile + locks and the four entry-point modules from
 # datasets/detection_training/) -- never the repository root.
 set -euo pipefail
 
@@ -80,7 +80,8 @@ trap '[ -z "$CTX_DIR" ] || rm -rf "$CTX_DIR"' EXIT
 build() {
   CTX_DIR="$(mktemp -d)"
   cp "$HERE/Dockerfile" "$HERE/requirements.lock" "$HERE/ort-floor.lock" "$CTX_DIR/"
-  cp "$CODE_DIR/export_checkpoint.py" "$CODE_DIR/train_rfdetr.py" "$CODE_DIR/_common.py" "$CTX_DIR/"
+  cp "$CODE_DIR/export_checkpoint.py" "$CODE_DIR/train_rfdetr.py" "$CODE_DIR/train_rfdetr_seg.py" \
+     "$CODE_DIR/_common.py" "$CTX_DIR/"
   # linux/amd64 explicitly (SageMaker ml.m5 hosts). Docker: buildx with
   # --provenance=false, so the pushed tag is a plain image manifest rather
   # than an index carrying an attestation (SageMaker expects the former).
