@@ -18,9 +18,10 @@ import type {
   CheckpointAssessment,
   ConversionStatus,
   DetectionArch,
+  RfDetrSegSize,
   RfDetrSize,
 } from '../services/api';
-import { RFDETR_SEG_SIZES, RFDETR_SIZES, RFDETR_SIZE_ORDER, isRfDetrSize } from './detectionBaseModels';
+import { RFDETR_SEG_SIZES, RFDETR_SIZES, RFDETR_SIZE_ORDER, isRfDetrSegSize, isRfDetrSize } from './detectionBaseModels';
 import { isDetectionModelType } from './manifestFormat';
 
 // ---------------------------------------------------------------------------
@@ -198,6 +199,9 @@ export function isConversionActive(status: string | null | undefined): boolean {
 const KIND_LABELS: Record<string, string> = {
   ultralytics_checkpoint: 'Ultralytics YOLO',
   rfdetr_checkpoint: 'RF-DETR',
+  // An rfdetr_checkpoint whose probe saw the mask head (assessment.arch
+  // 'rf_detr_seg'; rfdetr-seg-support Req 7.2).
+  rfdetr_seg_checkpoint: 'RF-DETR-Seg',
   torchscript: 'TorchScript graph',
   state_dict: 'PyTorch state_dict (weights only)',
   legacy_torch: 'Legacy torch file',
@@ -205,9 +209,14 @@ const KIND_LABELS: Record<string, string> = {
   unknown: 'Unrecognised file',
 };
 
-/** "Ultralytics YOLO", "RF-DETR (small)", "TorchScript graph", and so on. */
+/** "Ultralytics YOLO", "RF-DETR (small)", "RF-DETR-Seg (small)", "TorchScript graph", and so on. */
 export function checkpointFamilyLabel(assessment: CheckpointAssessment | null | undefined): string {
   const kind = String(assessment?.kind ?? 'unknown');
+  if (kind === 'rfdetr_checkpoint' && assessment?.arch === 'rf_detr_seg') {
+    const segSize = assessment.rfdetr_seg_size;
+    const label = KIND_LABELS.rfdetr_seg_checkpoint;
+    return isRfDetrSegSize(segSize) ? `${label} (${segSize})` : label;
+  }
   const label = has(KIND_LABELS, kind) ? KIND_LABELS[kind] : KIND_LABELS.unknown;
   const size = assessment?.rfdetr_size;
   if (kind === 'rfdetr_checkpoint' && isRfDetrSize(size)) return `${label} (${size})`;
@@ -233,7 +242,8 @@ export function checkpointLibraryLabel(assessment: CheckpointAssessment | null |
 /** What the Smart Import form locks, and the values it pre-fills, for a Convertible_Checkpoint. */
 export interface ConversionLocks {
   arch: DetectionArch;
-  modelType: 'object_detection';
+  /** object_detection for yolo / rf_detr; instance_segmentation for rf_detr_seg (rfdetr-seg-support Req 7.3). */
+  modelType: 'object_detection' | 'instance_segmentation';
   exportFormat: 'onnx';
   /** Locked: the checkpoint's head. Names may be renamed but not added or removed. */
   numClasses: number;
@@ -242,11 +252,15 @@ export interface ConversionLocks {
   /** The training size, else the arch default; null when the user must choose (RF-DETR of unknown size). */
   networkInput: number | null;
   inputBounds: { min: number; max: number; step: number };
-  /** RF-DETR: the native resolution(s) it converts at. Null for YOLO (any size within the bounds). */
+  /** RF-DETR / RF-DETR-Seg: the native resolution(s) it converts at. Null for YOLO (any size within the bounds). */
   allowedInputs: number[] | null;
   rfdetrSize: RfDetrSize | null;
+  /** RF-DETR-Seg: the inferred Seg size, when the probe could tell; null otherwise. */
+  rfdetrSegSize: RfDetrSegSize | null;
   scoreThreshold: number;
-  /** YOLO only; RF-DETR decodes set-based top-k with no NMS. */
+  /** RF-DETR-Seg only: the mask binarisation threshold pre-fill; null otherwise. */
+  maskThreshold: number | null;
+  /** YOLO only; RF-DETR and RF-DETR-Seg decode set-based top-k with no NMS. */
   iouThreshold: number | null;
   /** Derived from the arch, never chosen (Requirement 4.5). */
   preserveAspect: boolean;
@@ -297,7 +311,9 @@ export function isValidRfDetrSegInput(value: number): boolean {
 export function conversionLocksFor(assessment: CheckpointAssessment | null | undefined): ConversionLocks | null {
   if (!assessment || assessment.convertible !== true) return null;
   const arch: DetectionArch | null =
-    assessment.arch === 'yolo' || assessment.arch === 'rf_detr' ? assessment.arch : null;
+    assessment.arch === 'yolo' || assessment.arch === 'rf_detr' || assessment.arch === 'rf_detr_seg'
+      ? assessment.arch
+      : null;
   const numClasses = assessment.num_classes;
   if (!arch || typeof numClasses !== 'number' || !Number.isInteger(numClasses) || numClasses < 1) {
     return null;
@@ -308,10 +324,17 @@ export function conversionLocksFor(assessment: CheckpointAssessment | null | und
       : Array.from({ length: numClasses }, () => '');
   const trained = assessment.train_input_size;
   const size = isRfDetrSize(assessment.rfdetr_size) ? assessment.rfdetr_size : null;
+  const segSize = isRfDetrSegSize(assessment.rfdetr_seg_size) ? assessment.rfdetr_seg_size : null;
 
   let allowedInputs: number[] | null = null;
   let networkInput: number | null;
-  if (arch === 'rf_detr') {
+  if (arch === 'rf_detr_seg') {
+    // The native-only rule is the whole input rule (Req 7.3): one native for a
+    // known size, the six for an unknown one; never the % INPUT_STEP test.
+    allowedInputs = segSize ? [RFDETR_SEG_SIZES[segSize]] : [...RFDETR_SEG_NATIVE_INPUTS];
+    if (typeof trained === 'number' && allowedInputs.includes(trained)) networkInput = trained;
+    else networkInput = allowedInputs.length === 1 ? allowedInputs[0] : null;
+  } else if (arch === 'rf_detr') {
     allowedInputs = size ? [RFDETR_SIZES[size]] : RFDETR_SIZE_ORDER.map(s => RFDETR_SIZES[s]);
     if (typeof trained === 'number' && allowedInputs.includes(trained)) networkInput = trained;
     else networkInput = allowedInputs.length === 1 ? allowedInputs[0] : null;
@@ -319,17 +342,21 @@ export function conversionLocksFor(assessment: CheckpointAssessment | null | und
     networkInput = typeof trained === 'number' && isValidYoloInput(trained) ? trained : YOLO_FALLBACK_INPUT;
   }
 
+  const isSeg = arch === 'rf_detr_seg';
   return {
     arch,
-    modelType: 'object_detection',
+    modelType: isSeg ? 'instance_segmentation' : 'object_detection',
     exportFormat: 'onnx',
     numClasses,
     classNames,
     networkInput,
-    inputBounds: { ...INPUT_BOUNDS[arch], step: INPUT_STEP },
+    // Seg has no step: its allowed inputs are the natives themselves.
+    inputBounds: { ...INPUT_BOUNDS[arch], step: isSeg ? 1 : INPUT_STEP },
     allowedInputs,
     rfdetrSize: arch === 'rf_detr' ? size : null,
+    rfdetrSegSize: isSeg ? segSize : null,
     scoreThreshold: DEFAULT_SCORE_THRESHOLD[arch],
+    maskThreshold: isSeg ? DEFAULT_MASK_THRESHOLD : null,
     iouThreshold: arch === 'yolo' ? DEFAULT_IOU_THRESHOLD : null,
     preserveAspect: arch === 'yolo',
     geometry: CONVERSION_GEOMETRY[arch].label,
@@ -366,6 +393,11 @@ export function networkInputProblem(locks: ConversionLocks, value: string | numb
   if (!text || !Number.isInteger(n)) return 'Enter the network input size in pixels';
   if (locks.allowedInputs) {
     if (locks.allowedInputs.includes(n)) return null;
+    if (locks.arch === 'rf_detr_seg') {
+      return locks.rfdetrSegSize
+        ? `RF-DETR-Seg ${locks.rfdetrSegSize} converts only at its native ${RFDETR_SEG_SIZES[locks.rfdetrSegSize]}px; got ${n}`
+        : `RF-DETR-Seg converts only at a native resolution (${locks.allowedInputs.join(', ')}); got ${n}`;
+    }
     return locks.rfdetrSize
       ? `RF-DETR ${locks.rfdetrSize} converts only at its native ${RFDETR_SIZES[locks.rfdetrSize]}px; got ${n}`
       : `RF-DETR converts only at a native resolution (${locks.allowedInputs.join(', ')}); got ${n}`;
