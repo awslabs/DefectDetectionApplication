@@ -29,6 +29,7 @@ import {
   conversionStatusOf,
   formatBytes,
 } from '../utils/detectorConversion';
+import { isDetectionModelType } from '../utils/manifestFormat';
 
 /**
  * How often the page refetches a record that is still moving. A
@@ -133,14 +134,32 @@ function ConversionMetadata({ conversion }: { conversion: ConversionDetails }) {
 
 /** Human label for a record's detector family (records without one are YOLO). */
 export function detectionArchLabel(detection: DetectionRecordFields | null | undefined): string {
-  return detection?.detection_arch === 'rf_detr' ? 'RF-DETR' : 'YOLO';
+  switch (detection?.detection_arch) {
+    case 'rf_detr':
+      return 'RF-DETR';
+    case 'rf_detr_seg':
+      return 'RF-DETR-Seg';
+    default:
+      return 'YOLO';
+  }
 }
 
-/** "Object Detection · YOLO (ONNX)" / "Object Detection · RF-DETR (ONNX)". */
+/** "instance output" / "semantic output" from a Seg record's `detection.output_mode` (absent = instance). */
+export function outputModeLabel(detection: DetectionRecordFields | null | undefined): string {
+  return detection?.output_mode === 'semantic' ? 'semantic output' : 'instance output';
+}
+
+/**
+ * "Object Detection · YOLO (ONNX)" / "Object Detection · RF-DETR (ONNX)" /
+ * "Instance Segmentation · RF-DETR-Seg (ONNX) · instance output" (or
+ * "… · semantic output"; rfdetr-seg-support Req 12.3). Other types as-is.
+ */
 export function modelTypeLabel(modelType: string, detection: DetectionRecordFields | null | undefined): string {
-  return modelType === 'object_detection'
-    ? `Object Detection · ${detectionArchLabel(detection)} (ONNX)`
-    : modelType;
+  if (modelType === 'object_detection') return `Object Detection · ${detectionArchLabel(detection)} (ONNX)`;
+  if (modelType === 'instance_segmentation') {
+    return `Instance Segmentation · ${detectionArchLabel(detection)} (ONNX) · ${outputModeLabel(detection)}`;
+  }
+  return modelType;
 }
 
 /** The base a run was fine-tuned from, or null when it started from a published checkpoint. */
@@ -484,7 +503,7 @@ export default function TrainingDetail() {
         </Container>
 
         <Container>
-          {job.model_type === 'object_detection' ? (
+          {isDetectionModelType(job.model_type) ? (
             <>
               {/* Detection jobs report the leakage-safe test split's mAP@50
                   (captured from train.py's TEST METRICS line via SageMaker
@@ -633,30 +652,54 @@ export default function TrainingDetail() {
 
                 {/* Detection_Record_Fields: what the device manifest is built
                     from. YOLO shows imgsz + IoU (NMS); RF-DETR shows size,
-                    resolution and top_k (set-based decoding, no IoU). */}
-                {job.model_type === 'object_detection' && job.detection && (
+                    resolution and top_k (set-based decoding, no IoU);
+                    RF-DETR-Seg adds the mask threshold, the Output_Mode and
+                    the mask mAP metrics (rfdetr-seg-support Req 12.3). */}
+                {isDetectionModelType(job.model_type) && job.detection && (
                   <Container header={<Header variant="h2">Detection</Header>}>
                     <ColumnLayout columns={2} variant="text-grid">
                       <KeyValuePairs
                         columns={1}
                         items={[
                           { label: 'Architecture', value: detectionArchLabel(job.detection) },
-                          ...(job.detection.detection_arch === 'rf_detr'
+                          ...(job.detection.detection_arch === 'rf_detr_seg'
                             ? [
-                                { label: 'Size', value: String(job.detection.rfdetr_size ?? '—') },
+                                { label: 'Size', value: String(job.detection.rfdetr_seg_size ?? '—') },
                                 { label: 'Resolution', value: String(job.detection.resolution ?? job.detection.network_input_width ?? '—') },
                                 { label: 'Top-k', value: String(job.detection.top_k ?? '—') },
+                                { label: 'Mask threshold', value: String(job.detection.mask_threshold ?? '—') },
+                                { label: 'Output', value: outputModeLabel(job.detection) },
                               ]
-                            : [
-                                { label: 'Network input (imgsz)', value: String(job.detection.imgsz ?? job.detection.network_input_width ?? '—') },
-                                { label: 'Base weights', value: String(job.detection.base_weights ?? '—') },
-                                { label: 'IoU threshold', value: String(job.detection.iou_threshold ?? '—') },
-                              ]),
+                            : job.detection.detection_arch === 'rf_detr'
+                              ? [
+                                  { label: 'Size', value: String(job.detection.rfdetr_size ?? '—') },
+                                  { label: 'Resolution', value: String(job.detection.resolution ?? job.detection.network_input_width ?? '—') },
+                                  { label: 'Top-k', value: String(job.detection.top_k ?? '—') },
+                                ]
+                              : [
+                                  { label: 'Network input (imgsz)', value: String(job.detection.imgsz ?? job.detection.network_input_width ?? '—') },
+                                  { label: 'Base weights', value: String(job.detection.base_weights ?? '—') },
+                                  { label: 'IoU threshold', value: String(job.detection.iou_threshold ?? '—') },
+                                ]),
                         ]}
                       />
                       <KeyValuePairs
                         columns={1}
                         items={[
+                          ...(job.detection.detection_arch === 'rf_detr_seg'
+                            ? [
+                                {
+                                  label: 'Test mask mAP@50',
+                                  value: typeof job.metrics?.['test:mask-mAP50'] === 'number'
+                                    ? `${(job.metrics['test:mask-mAP50'] * 100).toFixed(1)}%` : '—',
+                                },
+                                {
+                                  label: 'Test mask mAP@50-95',
+                                  value: typeof job.metrics?.['test:mask-mAP50-95'] === 'number'
+                                    ? `${(job.metrics['test:mask-mAP50-95'] * 100).toFixed(1)}%` : '—',
+                                },
+                              ]
+                            : []),
                           { label: 'Score threshold', value: String(job.detection.score_threshold ?? '—') },
                           { label: 'Preserve aspect (letterbox)', value: job.detection.preserve_aspect ? 'Yes' : 'No (square resize)' },
                           {

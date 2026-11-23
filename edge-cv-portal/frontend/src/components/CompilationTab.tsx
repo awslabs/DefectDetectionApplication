@@ -15,10 +15,15 @@ import {
   Checkbox,
   FormField,
   Input,
+  Select,
+  SelectProps,
 } from '@cloudscape-design/components';
 import { CompilationJob, TrainingJob } from '../types';
 import { apiService } from '../services/api';
+import type { OutputMode } from '../services/api';
+import { getConfig, isRfDetrSegEnabled } from '../config';
 import { conversionStatusOf, isDetectorConversionRecord } from '../utils/detectorConversion';
+import { isDetectionModelType } from '../utils/manifestFormat';
 import { COMPILATION_TARGETS } from '../utils/compilationTargets';
 import {
   normalizeCompilationStatus,
@@ -29,6 +34,18 @@ interface CompilationTabProps {
   trainingId: string;
   trainingJob: TrainingJob;
   onRefresh?: () => void;
+}
+
+// RF-DETR-Seg Output_Mode override for the Package action (rfdetr-seg-support
+// Req 6.4, 12.3): the choice travels as `output_mode` in the package body.
+const OUTPUT_MODE_OPTIONS: SelectProps.Option[] = [
+  { label: 'instance', value: 'instance', description: 'One mask per detected object, beside its box and class.' },
+  { label: 'semantic overlay', value: 'semantic', description: 'All instances merged into one class-coloured mask over the frame.' },
+];
+
+/** A record's stored Output_Mode (absent = instance, the backend default). */
+function storedOutputMode(job: TrainingJob | null | undefined): OutputMode {
+  return job?.detection?.output_mode === 'semantic' ? 'semantic' : 'instance';
 }
 
 // Available compilation targets with descriptions: the one list the import
@@ -56,6 +73,9 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   // Track whether the user has manually edited the version so we don't clobber
   // their input when the existing-versions lookup resolves.
   const [versionUserEdited, setVersionUserEdited] = useState(false);
+  // RF-DETR-Seg only: the Output_Mode the next packaging should build; null =
+  // the record's stored mode (rfdetr-seg-support Req 6.4).
+  const [outputModeOverride, setOutputModeOverride] = useState<OutputMode | null>(null);
 
   // Refresh compilation status
   const refreshCompilationStatus = async () => {
@@ -218,14 +238,18 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
     }
   };
 
-  // Handle manual packaging
+  // Handle manual packaging. A Seg record the trained-detection packager
+  // builds sends its Output_Mode choice (Req 6.4); every other record posts
+  // exactly what it always did.
   const handleStartPackaging = async () => {
     try {
       setPackagingLoading(true);
       setError(null);
       setSuccessMessage(null);
       
-      const response = await apiService.startPackaging(trainingId);
+      const response = segOutputModeSelectable
+        ? await apiService.startPackaging(trainingId, undefined, undefined, { outputMode: packagingOutputMode })
+        : await apiService.startPackaging(trainingId);
       setSuccessMessage(`Packaging completed: ${response.message}`);
       
       if (onRefresh) {
@@ -442,6 +466,19 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
   // (Req 9.7); while Finalizing, Package is how a lost finalize is retried
   // (Req 7.9), so it stays available then.
   const conversionBlocksPackaging = conversionStatus === 'InProgress' || conversionStatus === 'Failed';
+  // RF-DETR-Seg records (rfdetr-seg-support Req 6.4, 12.3): the Output
+  // override is offered while the Seg switch is on, and selectable only for
+  // records the trained-detection packager builds (a trained job or a
+  // Conversion_Record); an imported ONNX Seg record keeps the mode fixed at
+  // import (the packager answers 400 to an override for it), so it shows a
+  // note and posts the plain body.
+  const isSegRecord = isDetectionModelType(tj?.model_type) && tj?.detection?.detection_arch === 'rf_detr_seg';
+  const segOutputModeOffered = isSegRecord && isRfDetrSegEnabled(getConfig());
+  const segOutputModeSelectable = segOutputModeOffered && (isConversionRecord || tj?.source !== 'imported');
+  const recordOutputMode = storedOutputMode(tj);
+  const packagingOutputMode: OutputMode = outputModeOverride ?? recordOutputMode;
+  const lastPackagedOutputMode: string | null =
+    typeof tj?.packaged_output_mode === 'string' && tj.packaged_output_mode ? tj.packaged_output_mode : null;
 
   if (compilationJobs.length === 0 && !isOnnxModel) {
     return (
@@ -706,6 +743,31 @@ export default function CompilationTab({ trainingId, trainingJob, onRefresh }: C
                       <Box color="text-status-success"> ✓ Packaging completed</Box>
                     )}
                   </Box>
+                  {segOutputModeOffered && segOutputModeSelectable && (
+                    <FormField
+                      label="Output"
+                      description={
+                        lastPackagedOutputMode
+                          ? `How the masks are packaged for the device. Last packaged: ${lastPackagedOutputMode}.`
+                          : 'How the masks are packaged for the device (defaults to the mode the record was trained or imported with).'
+                      }
+                    >
+                      <Select
+                        selectedOption={OUTPUT_MODE_OPTIONS.find(o => o.value === packagingOutputMode) ?? OUTPUT_MODE_OPTIONS[0]}
+                        onChange={({ detail }) =>
+                          setOutputModeOverride((detail.selectedOption.value as OutputMode) ?? recordOutputMode)
+                        }
+                        options={OUTPUT_MODE_OPTIONS}
+                        disabled={packagingLoading || publishLoading}
+                        selectedAriaLabel="Selected"
+                      />
+                    </FormField>
+                  )}
+                  {segOutputModeOffered && !segOutputModeSelectable && (
+                    <Box variant="small" color="text-status-inactive" data-testid="output-mode-fixed-note">
+                      {`Output mode is fixed at import (${recordOutputMode}); re-import to change it`}
+                    </Box>
+                  )}
                   <Button
                     onClick={handleStartPackaging}
                     loading={packagingLoading}
