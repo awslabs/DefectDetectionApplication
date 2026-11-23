@@ -10,7 +10,7 @@ Labeling turns a folder of images into a **manifest**: one line per image with i
 
 - **Use Case** selects whose jobs are shown.
 - **Use Ground Truth Labeling** (the default view) lists labeling jobs; **Use Pre-Labeled Dataset** switches to registering manifests that were labeled elsewhere (4.8).
-- The table shows each job's **Job Name**, **Task Type** (Classification, ObjectDetection or Segmentation), **Progress** (images submitted out of the total), **Status** and **Created** date. Click a job name to open it (4.5). Select a job's radio button to **Delete** it.
+- The table shows each job's **Job Name**, **Task Type** (Classification, ObjectDetection, Segmentation or InstanceSegmentation), **Progress** (images submitted out of the total), **Status** and **Created** date. Click a job name to open it (4.5). Select a job's radio button to **Delete** it.
 - **Manage Teams** opens the labeling teams page (4.6); **Create Labeling Job** starts the wizard (4.2).
 
 Statuses: **Pending** (being created), **In Progress**, **Completed** (every image submitted and the output manifest written), **Stopped**, **Failed**, and **Deleting** / **Delete Failed**.
@@ -55,6 +55,7 @@ Click **Create Labeling Job**. The wizard has six steps. If you left an earlier 
 | **Image Classification** | Pass/fail or multi-class decisions about the whole image (good cookie vs. bad cookie). | One class per image. |
 | **Object Detection** | Locating each object or defect with a bounding box (each blue plate, each scratch). | Boxes with classes. |
 | **Semantic Segmentation** | Pixel-exact defect regions, when the shape or area of the defect matters. | A mask per image. Needs mask-capable labeling and more labeling time. |
+| **Instance Segmentation** | One outline per object, when instances must be counted or separated and their exact shape matters (each plate's outline, each scratch as its own region). Labelers draw a polygon per object (click to place vertices, close on the first vertex or by double-click; vertices can be dragged); instances of one class may touch or overlap. Pre-labels come from SAM, Grounded-SAM or a prompt-guided LLM. DDA labeling only — Ground Truth has no built-in instance-segmentation task. Trains **RF-DETR (Roboflow) – Instance Segmentation** ([6. Training](06-training.md)). | A mask and a box per object, with its class (an instance-segmentation manifest). |
 
 For anomaly-style classification name the "normal" category first; the Marketplace training algorithm expects it that way.
 
@@ -109,7 +110,7 @@ A user whose role is **DataLabeler** sees a single page, **My Labeling Tasks**.
 ![My Labeling Tasks](images/04-labeler-workspace.png)
 
 - **Jobs** lists the labeling jobs in which you still have images to label, with **Task type**, **Submitted** and **Remaining** counts. Open a job to start.
-- The workspace shows one image at a time with the job's **Job guidance** (instructions and example images). For classification pick the class; for detection draw or adjust boxes; for segmentation paint or correct the mask. With pre-labeling on, the model's proposal is already drawn and you accept or correct it.
+- The workspace shows one image at a time with the job's **Job guidance** (instructions and example images). For classification pick the class; for detection draw or adjust boxes; for segmentation paint or correct the mask; for instance segmentation draw one polygon per object (a pre-labeled instance can be re-classed or deleted, not reshaped). With pre-labeling on, the model's proposal is already drawn and you accept or correct it.
 - Submit moves to the next image; **All done!** appears when nothing is left. A submission that cannot be saved is reported as **Submission not saved** with a **Retry**.
 
 ## 4.5 Monitoring a job

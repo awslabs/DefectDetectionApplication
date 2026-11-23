@@ -9,8 +9,9 @@ A training job runs on Amazon SageMaker in the use case account and produces a m
 | **AWS Marketplace – Computer Vision Defect Detection** | Anomaly **Classification** (normal/anomaly, optionally "Robust") or **Segmentation** (defect masks, optionally "Robust"). | An AWS Marketplace subscription in the use case account and a manifest with `anomaly-label` attributes. | A model that must then be **compiled** for each device architecture. |
 | **YOLO (Ultralytics) – Object Detection** | A bounding-box detector fine-tuned from a YOLO11 checkpoint. | A bounding-box manifest (a detection labeling job's output). | ONNX for the DDA edge runtime; no compilation step, one package serves JetPack 5/6/7 and x86. |
 | **RF-DETR (Roboflow) – Object Detection** | A transformer detector (DINOv2 backbone, NMS-free). | A bounding-box manifest. | ONNX for the DDA edge runtime; no compilation step. |
+| **RF-DETR (Roboflow) – Instance Segmentation** | RF-DETR-Seg: the same transformer detector with a mask head, giving one mask per detected object beside its box and class. | An instance-segmentation manifest (an Instance Segmentation labeling job's output). | ONNX for the DDA edge runtime; no compilation step. Packaged in **instance** mode (per-object masks) or as a **semantic overlay**. |
 
-Pick Marketplace classification for pass/fail inspection, segmentation when you need the defect's location and area, and a detector (YOLO or RF-DETR) when you count or locate individual objects or defects, such as every blue plate on a tray.
+Pick Marketplace classification for pass/fail inspection, segmentation when you need the defect's location and area, a detector (YOLO or RF-DETR) when you count or locate individual objects or defects, such as every blue plate on a tray, and RF-DETR-Seg instance segmentation when you need both: each object counted and its exact outline and area.
 
 ## 6.1 The Training page
 
@@ -44,7 +45,7 @@ The **Summary** panel repeats the choices, including the training-data and model
 
 ![Start Training Job, YOLO detector](images/06-training-create-yolo-dataset.png)
 
-Choosing a detection source adds a **Detection Settings** panel and changes the instance list. The manifest must carry `source-ref`, `bounding-box` (annotations and image size) and `bounding-box-metadata` (the class map); a Ground Truth bounding-box job's output is accepted as is.
+Choosing a detection source adds a **Detection Settings** panel and changes the instance list. The manifest must carry `source-ref`, `bounding-box` (annotations and image size) and `bounding-box-metadata` (the class map); a Ground Truth bounding-box job's output is accepted as is. The **RF-DETR (Roboflow)** source trains either **Object Detection (bounding boxes)** or **Instance Segmentation (masks + boxes)**, chosen under **Model Type**; the instance-segmentation fields are described in the next section.
 
 | Field | What to enter | YOLO default | RF-DETR default |
 |-------|---------------|--------------|-----------------|
@@ -65,6 +66,25 @@ Choosing a detection source adds a **Detection Settings** panel and changes the 
 
 ![RF-DETR settings](images/06-training-create-rfdetr.png)
 
+### RF-DETR instance segmentation (RF-DETR-Seg)
+
+With the **RF-DETR (Roboflow)** source and **Model Type** **Instance Segmentation (masks + boxes)**, the manifest must be an instance-segmentation manifest: `source-ref`, `instance-segmentation` (one outline per object: a box and an `rle` mask per annotation, plus the image size) and `instance-segmentation-metadata` (the class map). The output of an **Instance Segmentation** labeling job ([4. Labeling](04-labeling.md)) is accepted as is; a bounding-box or semantic manifest is refused, and no transform is offered. Arriving from such a job (**Use for Training**) preselects the RF-DETR source and this model type; a mismatch chosen in the form is listed in the yellow box (for example "This is an instance-segmentation manifest; choose Instance Segmentation (RF-DETR-Seg)").
+
+| Field | What to enter | Default |
+|-------|---------------|---------|
+| **Base model** | A published RF-DETR-Seg COCO checkpoint, one of your completed RF-DETR-Seg models in this use case (to keep training it), or an imported fine-tunable RF-DETR-Seg checkpoint. A trained or imported base fixes the **Size**. | small |
+| **Size** | The RF-DETR-Seg checkpoint family: nano (native 312 px), small (384), medium (432), large (504), xlarge (624) or 2xlarge (768). Larger sizes are more accurate and slower on the device; all six are available (Apache 2.0). | `small` |
+| **Resolution** | The square input the model trains and exports at: a multiple of 12 for nano, of 24 for every other size, between 240 and 1152. The size's native value is recommended and filled in when you pick the size. | the size's native |
+| **Epochs**, **Batch size**, **Gradient accumulation**, **Learning rate**, **Patience** | As for RF-DETR object detection. | `100`, `4`, `4`, `0.0001`, `10` |
+| **Score threshold** | Minimum confidence kept on the device, 0–1. | `0.5` |
+| **Mask threshold** | The cut-off that binarises each kept detection's mask on the device, 0–1. Lower values give fuller masks, higher values tighter ones. | `0.5` |
+| **Output** | How the masks are packaged for the device: **instance** (one mask per object beside its box and class — the device records, HMI, Portal results viewer and the instance-manifest export all show the per-object masks) or **semantic overlay** (every instance merged into one class-coloured mask, the record a segmentation model produces). The choice is recorded on the model and can be changed when packaging ([7. Models](07-models.md)). | instance |
+| **Class names** | Optional, comma-separated, in class-id order. Leave empty to use the manifest's class map. | empty |
+| **Instance Type** | `ml.g4dn.xlarge` for nano, small and medium; `ml.g5.xlarge` is preselected for large, xlarge and 2xlarge. | by size |
+| **Max Runtime (seconds)** | As for RF-DETR. | `10800` |
+
+The job's **Current Metrics** add the mask quality (`test:mask-mAP50`, `test:mask-mAP50-95`) to the four box metrics. RF-DETR-Seg models run only on a LocalServer at or above the per-architecture RF-DETR-Seg feature floor; packaging or deploying a workflow with such a model for an architecture that has no entry yet is refused with the reason `RFDETR_SEG_UNSUPPORTED_ARCH`.
+
 Click **Start Training**. The job appears in the list as **Pending** and moves to **In Progress** when SageMaker starts it.
 
 ## 6.3 Transforming a Ground Truth manifest
@@ -77,8 +97,8 @@ Click a job to open its detail page.
 
 ![Training job detail](images/06-training-detail.png)
 
-- The header cards show **Status**, **Progress**, **Instance Type** and, for detectors, the **Test mAP@50**. **Clone Job** opens the form prefilled with this job's settings so you can rerun with a tweak; **Stop Training** stops a running job.
-- **Overview** tab: **Job Information** (training job ID, model name and version, use case, source, model type, who started it and when), **Algorithm** (the algorithm or training image and the **Dataset Manifest**), **Detection** settings and **Hyperparameters** as submitted, and **Current Metrics** (for detectors `test:mAP50`, `test:mAP50-95`, `test:precision`, `test:recall`; for Marketplace models the algorithm's accuracy metrics).
+- The header cards show **Status**, **Progress**, **Instance Type** and, for detectors (RF-DETR-Seg included), the **Test mAP@50**. **Clone Job** opens the form prefilled with this job's settings so you can rerun with a tweak; **Stop Training** stops a running job.
+- **Overview** tab: **Job Information** (training job ID, model name and version, use case, source, model type, who started it and when), **Algorithm** (the algorithm or training image and the **Dataset Manifest**), **Detection** settings and **Hyperparameters** as submitted, and **Current Metrics** (for detectors `test:mAP50`, `test:mAP50-95`, `test:precision`, `test:recall`, plus `test:mask-mAP50` and `test:mask-mAP50-95` for RF-DETR-Seg; for Marketplace models the algorithm's accuracy metrics).
 - **Logs** tab: the SageMaker training log, refreshed every 10 seconds while the job runs. Logs can take a few minutes to appear after the job starts. If a job fails, the reason is here.
 - **Compilation** tab: for Marketplace models, the compilation jobs started from the model's page (see [7. Models](07-models.md)); for detectors, the ONNX export and its parity check (**Converted ONNX**, **Exporter**, opset, IR version, input shape).
 
