@@ -8,7 +8,8 @@ matches the Seg_Output_Contract ([1,Q,4] + [1,Q,C+1] + [1,Q,H,W] sharing Q),
 with `num_classes = S - 1`, `num_queries`, `mask_grid`, `network_input` and the
 output names in graph order; anything else is `unknown`. `convert_model` admits
 `model_type = instance_segmentation` (ONNX): the switch 403, the `iou_threshold`
-400, the arch default / 400, the class-names rule, the 0.5 defaults, the
+400, the arch default / 400, the request dims against the graph's static input
+/ mask grid (400), the class-names rule, the 0.5 defaults, the
 Output_Mode, the legacy `segmentation + rf_detr` alias with its deprecation
 note, the `segmentation`-with-Seg-graph 400, the manifest built through the
 shared builder (parity per Output_Mode) and the auto-import body's record
@@ -535,6 +536,49 @@ def test_seg_type_over_a_non_seg_graph_is_400_quoting_the_shapes(h):
     assert status == 400 and body["error"].startswith("instance_segmentation needs an RF-DETR-Seg graph")
 
 
+@pytest.mark.parametrize("width,height", [(640, 640), (768, 768), (NATIVE, 432)],
+                         ids=["640", "768", "height-only"])
+def test_seg_request_dims_must_equal_the_static_graph_input(h, width, height):
+    """design 'Validation of external inputs': image_width / image_height must
+    equal the graph input. The package would otherwise carry the request as
+    the stage input -- a tensor the static graph refuses on every frame -- and
+    a mask grid derived from it that the real mask tensor contradicts."""
+    put_graph(h, "uploads/seg.onnx")
+    status, body = convert(h, "uploads/seg.onnx", image_width=width, image_height=height)
+    assert status == 400, body
+    assert body["error"] == (f"image_width/image_height {width}x{height} must equal the graph input "
+                             f"{NATIVE}x{NATIVE}")
+    assert keys(h) == [] and h.lam.payloads == []
+    # the same request over the symbolic-mask export: the static input decides
+    put_graph(h, "uploads/sym.onnx", SYMBOLIC_OUTPUTS)
+    status, body = convert(h, "uploads/sym.onnx", image_width=width, image_height=height)
+    assert status == 400 and body["error"].startswith(f"image_width/image_height {width}x{height} must equal")
+    assert keys(h) == [] and h.lam.payloads == []
+
+
+def test_seg_request_dims_against_a_dynamic_input_graph_follow_the_static_mask_grid(h):
+    """A graph with a dynamic input declares its geometry only through the
+    static mask grid: the request dims // 4 must equal it (400 otherwise);
+    with agreeing dims the manifest takes the request as the stage input and
+    the graph's grid as the mask shape."""
+    put_graph(h, "uploads/dyn.onnx", SEG_OUTPUTS, network_input="height")
+    status, body = convert(h, "uploads/dyn.onnx", image_width=640, image_height=640)
+    assert status == 400, body
+    assert body["error"] == (f"image_width/image_height 640x640 imply a mask grid [160, 160]; "
+                             f"the graph declares [{GRID}, {GRID}]")
+    assert keys(h) == [] and h.lam.payloads == []
+    status, result = convert(h, "uploads/dyn.onnx")
+    assert status == 200, result
+    assert result["model_info"]["input_shapes"] == [[1, 3, None, None]]
+    assert result["model_info"]["network_input"] is None and result["model_info"]["mask_grid"] == [GRID, GRID]
+    manifest = package_members(h, result)[0]
+    assert manifest == builder_manifest("instance")
+    assert manifest["model_graph"]["stages"][0]["input_shape"] == [1, 3, NATIVE, NATIVE]
+    assert manifest["model_graph"]["stages"][0]["output_shapes"][2] == [1, 100, GRID, GRID]
+    assert manifest["detection"]["network_input"] == NATIVE
+    assert h.lam.payloads[-1]["detection"]["network_input_width"] == NATIVE
+
+
 def test_seg_convert_is_403_while_the_switch_is_off(h, monkeypatch):
     put_graph(h, "uploads/seg.onnx")
     monkeypatch.setenv("PORTAL_RFDETR_SEG_ENABLED", "false")
@@ -580,6 +624,11 @@ def test_legacy_alias_keeps_the_seg_rules(h):
     status, body = convert(h, "uploads/seg.onnx", model_type="segmentation", detection_arch="rf_detr",
                            iou_threshold=0.5)
     assert status == 400 and body["error"].startswith("'iou_threshold' does not apply to RF-DETR-Seg")
+    status, body = convert(h, "uploads/seg.onnx", model_type="segmentation", detection_arch="rf_detr",
+                           image_width=640, image_height=640)
+    assert status == 400 and body["error"] == (f"image_width/image_height 640x640 must equal the graph "
+                                               f"input {NATIVE}x{NATIVE}")
+    assert keys(h) == [] and h.lam.payloads == []
 
 
 def test_generic_segmentation_import_is_untouched(h):

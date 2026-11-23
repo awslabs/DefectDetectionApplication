@@ -741,6 +741,33 @@ def _seg_contract_from_outputs(outputs: List[Tuple[Optional[str], List[Optional[
     }, hint
 
 
+def _seg_geometry_problem(model_info: Dict, image_width: int, image_height: int) -> Optional[str]:
+    """The request's image_width / image_height against the inspected Seg
+    graph (rfdetr-seg-support design, "Validation of external inputs": for Seg
+    the dims must equal the graph input -> 400). The package writes the
+    request's dims as the stage input and derives the mask grid from them, so
+    a mismatch would ship a component the device cannot run (onnxruntime
+    refuses the tensor for a static graph) or whose manifest grid contradicts
+    the real mask tensor. Returns the error text, or None when the request
+    agrees with every static dim the graph declares: a static input dim must
+    equal the request's, and a mask grid read from static dims (not inferred
+    from the input, M-1) must equal the request // RFDETR_SEG_MASK_DOWNSAMPLE
+    -- the one check a dynamic-input graph still gets."""
+    graph_w = model_info.get('input_width')
+    graph_h = model_info.get('input_height')
+    if ((isinstance(graph_w, int) and graph_w != image_width)
+            or (isinstance(graph_h, int) and graph_h != image_height)):
+        return (f'image_width/image_height {image_width}x{image_height} must equal the graph input '
+                f'{graph_w}x{graph_h}')
+    mask_dims = next((s for s in model_info.get('output_shapes') or [] if len(s) == 4), None)
+    if mask_dims is not None and isinstance(mask_dims[2], int) and isinstance(mask_dims[3], int):
+        expected = [image_width // RFDETR_SEG_MASK_DOWNSAMPLE, image_height // RFDETR_SEG_MASK_DOWNSAMPLE]
+        if expected != list(model_info['mask_grid']):
+            return (f'image_width/image_height {image_width}x{image_height} imply a mask grid {expected}; '
+                    f'the graph declares {model_info["mask_grid"]}')
+    return None
+
+
 def inspect_onnx_model(model_path: str) -> Dict:
     """Parse an ONNX model's input/output tensor shapes and infer model
     attributes (input size, task/architecture, num_classes) for UI pre-fill.
@@ -1317,8 +1344,10 @@ def convert_model(event: Dict, context: Any) -> Dict:
     }
 
     RF-DETR-Seg (model_type instance_segmentation, ONNX source): the graph is
-    inspected after download and must match the Seg_Output_Contract; class
-    names are required (len == num_classes); score_threshold defaults to 0.5;
+    inspected after download and must match the Seg_Output_Contract, and
+    image_width / image_height must equal its input (a static mask grid must
+    equal them // 4); class names are required (len == num_classes);
+    score_threshold defaults to 0.5;
     iou_threshold is refused; the manifest is built per output_mode through the
     shared builder; the response carries output_mode and the auto-import body
     the record's detection block. The legacy alias model_type 'segmentation' +
@@ -1520,6 +1549,12 @@ def convert_model(event: Dict, context: Any) -> Dict:
                         'error': 'this is an RF-DETR-Seg graph; import it as model_type '
                                  'instance_segmentation'})
                 if is_seg:
+                    # The request's dims must equal the graph input (design
+                    # "Validation of external inputs"): the package takes them
+                    # as the stage input and derives the mask grid from them.
+                    geometry_error = _seg_geometry_problem(model_info, image_width, image_height)
+                    if geometry_error:
+                        return create_response(400, {'error': geometry_error})
                     # num_classes defaults to the graph's S - 1 (the user may
                     # override to S for a foreign graph without a background
                     # slot); class_names are required with exactly that many
