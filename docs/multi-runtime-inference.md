@@ -787,3 +787,374 @@ category) now tell the truth about the post-restart lifecycle:
   schedule is exhausted, the model reports FAILED with the retained
   backend failure reason — never an indefinite "LOADING" with no load in
   flight.
+
+## 24. RF-DETR-Seg (instance and semantic modes)
+
+(Spec: `rfdetr-seg-support`.) RF-DETR-Seg is the segmentation member of the
+RF-DETR family of §21: the same DINOv2 backbone and set-based decoder, plus a
+mask head. One on-device decoder,
+`src/backend/lyra_science_processing_utils/model_processors/rf_detr_seg_postprocessor.py`
+(`RfDetrSegPostProcessor`), serves it in two **Output_Modes** selected per
+model when it is trained, imported or packaged:
+
+- **instance** — one mask per detected object beside its box and class: the
+  detection result contract of §21 extended with `mask_rle` / `mask_area`
+  per entry, plus a Composite_Mask image (§24.5);
+- **semantic** — every instance merged into one class-indexed mask: the
+  record is exactly the LFV segmentation (anomaly) record (§24.11).
+
+The published checkpoints come in six sizes (nano 312, small 384, medium 432,
+large 504, xlarge 624, 2xlarge 768 — native square resolution in pixels),
+all Apache 2.0 in rfdetr 1.10.1 (owner decision D4); training, `.pth`
+conversion and ONNX Smart Import are described in the README and the trainer
+README. This section is the **device contract**.
+
+### 24.1 Output contract (Seg_Output_Contract)
+
+An RF-DETR-Seg ONNX export has one input `input [1, 3, R, R]` and exactly
+three outputs, in graph order:
+
+| name | shape | meaning |
+|---|---|---|
+| `dets` | `[1, Q, 4]` | boxes, cxcywh, **normalised 0..1** |
+| `labels` | `[1, Q, C + 1]` | per-query class logits; the trailing slot is rfdetr's never-positive background slot |
+| `masks` | `[1, Q, R/4, R/4]` | per-query mask logits on the `R/4` grid (rfdetr `mask_downsample_ratio`) |
+
+`Q` is the size's query count (nano / small 100, medium / large 200, xlarge /
+2xlarge 300) and `C` the number of classes. rfdetr 1.10.1 declares the four
+`masks` dims symbolically in the protobuf although every runtime produces
+`[1, Q, R/4, R/4]`; the trainer and the conversion job stamp the static dims
+after export (spike S2), and the device never relies on the declaration:
+
+- **Identification is by run-time shape, not order or name.** After
+  squeezing a leading batch dim of 1 the decoder takes the `[Q, 4]` tensor
+  as boxes, the `[Q, S]` tensor as logits and the `[Q, Hm, Wm]` tensor as
+  masks, in any order. Fewer than three usable tensors, or a `Q` mismatch
+  between them, yields the mode's **empty result** with one warning per
+  processor instance — never a raise, never a failed capture.
+- **The `C + 1 == 4` tie-break.** A three-class model has `labels [Q, 4]`,
+  the same shape as `dets`. The manifest's `detection.output_names` (the
+  graph-order names `["dets", "labels", "masks"]` the packager copies from
+  the trainer's / inspector's `onnx_output_names`) decides which rank-2
+  tensor is which, because the ONNX runner returns outputs in graph order.
+  Without `output_names` the decoder takes the runner's order as
+  `[boxes, logits]` and warns once. The same tie-break was added to the
+  detection decoder of §21 (`rf_detr_object_detection`), which has the
+  identical ambiguity for a three-class detector.
+
+### 24.2 Stage types and `detection.output_mode`
+
+| stage type | codename | mode | returns |
+|---|---|---|---|
+| `rf_detr_instance_segmentation` | `macaron` | instance | `list[InstanceSegmentationResult]` |
+| `rf_detr_semantic_segmentation` | `financier` | semantic | `AnomalyResult` (score + index mask) |
+
+Both map to `RfDetrSegPostProcessor` in `MODEL_NAME_MAP`; the **stage type
+decides the mode**. `detection.output_mode` (`"instance"` / `"semantic"`)
+declares the same choice for readers of the manifest; a contradiction
+between the two is logged once as an error and the stage type wins. A
+manifest written before this contract (stage type
+`rf_detr_semantic_segmentation`, a `detection` block without `output_mode`,
+`top_k` or `output_names`) decodes in semantic mode with the defaults below.
+`rf_detr_semantic_segmentation_postprocessor.py` is now an import shim onto
+the one decoder.
+
+### 24.3 Manifest shape, both modes
+
+The Portal's shared builder (`detection_training.build_detection_device_manifest`)
+writes the manifest for trained, converted and imported Seg models alike. Both
+modes use the **top-level** `detection` block (the Triton base model merges it
+into the stage with `setdefault`): the RF-DETR block (`layout: "rf_detr"` names
+the decoder family, `top_k` = the size's `Q`, no `iou_threshold`) plus
+`mask_threshold`, `output_mode`, `output_names` and, last, `class_names`.
+`model_graph.pixel_level_classes.names` is `["background"] + class_names`
+(exactly `num_classes + 1` names; `class_<i>` placeholders where the trainer
+had no names) in **both** modes, because both write a Composite_Mask through
+the anomaly-mask utilities. Preprocessing is RF-DETR's: square resize
+(`preserve_aspect: false`) and `normalize: true` (ImageNet mean/std after
+0..1 scaling). Instance mode keeps `task: "object_detection"`; semantic mode
+omits `task` (the anomaly default) — the only other difference.
+
+The two examples below are generated from the builder and checked against it
+by `edge-cv-portal/backend/tests/test_docs_manifest_examples.py` (the HTML
+comment names the arguments; the builder's `dataset` block is omitted here).
+`output_shape` is the builder's nominal value: the packager replaces it with
+the exported logits shape and adds `output_shapes` (`[dets, labels, masks]`
+as exported). The device reads neither.
+
+Instance mode, nano, two classes:
+
+<!-- manifest: rf_detr_seg instance nano -->
+```json
+{
+  "runtime": "onnx",
+  "runtime_artifact": "model.onnx",
+  "model_graph": {
+    "model_graph_type": "single_stage_model_graph",
+    "stages": [{
+      "type": "rf_detr_instance_segmentation",
+      "input_shape": [1, 3, 312, 312],
+      "output_shape": [1, 6, 8400],
+      "image_width": 312,
+      "image_height": 312,
+      "image_range_scale": true,
+      "normalize": true,
+      "threshold": 0.5,
+      "num_classes": 2
+    }],
+    "pixel_level_classes": {
+      "names": ["background", "plate", "scratch"],
+      "normal_ids": [0]
+    }
+  },
+  "input_shape": [1, 3, 312, 312],
+  "preprocessing": {"resize": [312, 312], "channel_order": "RGB"},
+  "task": "object_detection",
+  "detection": {
+    "layout": "rf_detr",
+    "num_classes": 2,
+    "score_threshold": 0.5,
+    "network_input": 312,
+    "preserve_aspect": false,
+    "top_k": 100,
+    "mask_threshold": 0.5,
+    "output_mode": "instance",
+    "output_names": ["dets", "labels", "masks"],
+    "class_names": ["plate", "scratch"]
+  }
+}
+```
+
+Semantic mode, same model — the stage type, `output_mode` and the absent
+`task` are the differences:
+
+<!-- manifest: rf_detr_seg semantic nano -->
+```json
+{
+  "runtime": "onnx",
+  "runtime_artifact": "model.onnx",
+  "model_graph": {
+    "model_graph_type": "single_stage_model_graph",
+    "stages": [{
+      "type": "rf_detr_semantic_segmentation",
+      "input_shape": [1, 3, 312, 312],
+      "output_shape": [1, 6, 8400],
+      "image_width": 312,
+      "image_height": 312,
+      "image_range_scale": true,
+      "normalize": true,
+      "threshold": 0.5,
+      "num_classes": 2
+    }],
+    "pixel_level_classes": {
+      "names": ["background", "plate", "scratch"],
+      "normal_ids": [0]
+    }
+  },
+  "input_shape": [1, 3, 312, 312],
+  "preprocessing": {"resize": [312, 312], "channel_order": "RGB"},
+  "detection": {
+    "layout": "rf_detr",
+    "num_classes": 2,
+    "score_threshold": 0.5,
+    "network_input": 312,
+    "preserve_aspect": false,
+    "top_k": 100,
+    "mask_threshold": 0.5,
+    "output_mode": "semantic",
+    "output_names": ["dets", "labels", "masks"],
+    "class_names": ["plate", "scratch"]
+  }
+}
+```
+
+### 24.4 Decode rules
+
+The decoder is pure numpy + cv2, no torch on the hot path:
+
+1. **Scores.** `sigmoid(labels[:, :C])` with `C = min(num_classes, S)`: the
+   first `C` slots are classes, the background slot is never scored. Without
+   `num_classes` every slot is scored (a foreign graph); `num_classes > S`
+   logs an error once and uses `S`.
+2. **Flattened top-k.** Over the `Q × C` (query, class) pairs, keep the
+   `k = min(top_k, Q × C)` highest, then drop pairs below `score_threshold`
+   — exactly the detection decoder's selection, so no NMS. A query kept for
+   two classes yields two instances. `top_k` defaults from
+   `detection.network_input` when the manifest omits it: 312 / 384 → 100,
+   432 / 504 → 200, 624 / 768 → 300, anything else 300.
+3. **Masks, bilinear then threshold.** For each kept pair in descending
+   score order: `sigmoid(masks[q])` on the `R/4` grid, resized with
+   `cv2.INTER_LINEAR` to the **source frame** the graph received
+   (`src_img_size`), then `> mask_threshold` (default 0.5; rfdetr's reference
+   order). `mask_area` is the foreground pixel count at source resolution.
+   **Zero foreground drops the pair** — a box without a mask is never
+   emitted.
+4. **Boxes.** cxcywh → xyxy, scaled from 0..1 to source pixels with the
+   square-resize geometry (no letterbox), as in §21.
+5. **Cap and order.** At most `top_k` instances, score descending. Zero
+   instances is an empty list (instance mode) or an all-background mask
+   (semantic mode).
+
+Semantic mode paints the kept instances into one index mask
+(`paint_composite`, also used by the Triton base model in instance mode):
+instances are painted in **ascending** confidence so the highest score wins an
+overlap, index `= min(class_index + 1, 103)`, index 0 = background. The
+result is `AnomalyResult(score = highest kept confidence, mask = that index
+mask)`. Compared with the pre-Seg semantic decoder two rules changed on
+purpose: bilinear instead of nearest-neighbour upsampling (smoother edges) and
+flattened top-k instead of a per-query argmax (a query can contribute two
+classes).
+
+**Palette limit.** The anomaly-mask palette has 104 rows, so a Composite_Mask
+distinguishes at most **103 classes**; a model with more logs one warning at
+load and classes ≥ 103 share the last colour in the composite. The instance
+records are unaffected — their `class_index` and `mask_rle` are exact; only
+the composite's colours saturate.
+
+### 24.5 Instance result record (the Detection_List)
+
+In instance mode every entry of the detection list carries, beside the §21
+keys (`bounding_box` in source pixels, `class`, `class_label`, `confidence`,
+`confidence_threshold`):
+
+| key | value |
+|---|---|
+| `class_index` | integer class id (`class_names[class_index]` is the label) |
+| `mask_rle` | the mask as **Canonical_RLE at source resolution**: space-separated run lengths of the `height × width` binary mask flattened in column-major order, the first run counting background pixels (a mask whose first pixel is foreground starts with `0`), summing to `width × height` — COCO's uncompressed-RLE order, so the counts drop into `{"counts": [...], "size": [h, w]}` unchanged (`lyra_science_processing_utils/utils/mask_rle.py`, pinned to the Portal encoder by a shared vector file) |
+| `mask_area` | foreground pixels, `int` |
+| `mask_truncated` | `true` only when the ceiling below removed this entry's `mask_rle` |
+
+**The 4 MiB ceiling.** The base model serialises the list and, while it
+exceeds `DETECTION_LIST_MAX_BYTES` (4 MiB), removes `mask_rle` from the
+**lowest-confidence** entry that still has one, marks it
+`mask_truncated: true` and keeps its box and `mask_area`; one warning per
+capture names the count. A box is never dropped and a capture never fails on
+size. The ceiling applies to every serialisation of the list (capture record,
+sidecar, live result), not to the Composite_Mask PNG.
+
+**Capture record** (`marshal_for_capture_template.py`). The `detections`
+block of the label is the map `{"0": {...}, "1": {...}}` as for detection,
+each entry copying `mask_rle`, `mask_area` and `mask_truncated` when present;
+the block gains `detections_truncated: true` when any entry was truncated
+(only then — a YOLO / RF-DETR capture is byte-identical to before) and, when
+a mask was written, `mask_color_map` (`{"0": {background share}, "1": {per
+class}}` with the class's hex colour and pixel share, the same map the label's
+`internal-color-map` carries). The same `detections` block is written to the
+detections sidecar. The overlay image draws the boxes as today and fills each
+mask with its class colour at alpha 0.4 under them; `mask.png` beside it is
+the Composite_Mask (the colourised index mask), written whenever
+`pixel_level_classes` is non-empty. Zero instances produce the zero-object
+sentinel, an empty mask and `output = 0`, exactly as a zero-box detection.
+
+Colours: the class colour of `class_index` is palette row `class_index + 1`
+in both the composite and the overlay fill.
+
+### 24.6 In-process mask memory bound (DD3) and measured cost
+
+Between decode and serialisation up to `top_k` (300) source-resolution masks
+are alive inside the Triton Python stub; dense `bool` arrays at 1920×1080
+would be ~2 MB each, ~600 MB in the worst case. The decoder therefore keeps
+each kept mask only in **packed-bit form** (`np.packbits`, 259,200 B per
+1080p instance) and releases the dense arrays before the next pair;
+`paint_composite` and `serialize()` unpack one mask at a time. The cost is
+the extra pack / unpack per instance; measured in the spike on an x86_64
+Build Fleet server in the Export_Image container (16 vCPU, CPU only,
+1920×1080 frames):
+
+| instances | decode total | resize + threshold + packbits | unpack + paint composite | RLE encode | `mask_rle` text |
+|---|---|---|---|---|---|
+| 10 | 49 ms | 20 ms | 6 ms | 22 ms | 46 KB |
+| 100 | 447 ms | 177 ms | 58 ms | 212 ms | 458 KB |
+
+The Jetson figure (the lab JP6 Orin devkit) is taken during the on-device
+verification of the feature and recorded here with it. These numbers are the
+post-processing cost per frame on top of the ONNX run, and scale with the
+number of kept instances, not with `top_k`.
+
+### 24.7 Where the record goes on the device
+
+- **Live result** (`inference_results_utils.save_image_object`; the HMI live
+  card and the device API / WebSocket): `detections` stays the **map** with the
+  new per-entry keys passing through; `detections_truncated` is copied only
+  when the block carries it; when `mask.png` exists the result also carries
+  `mask_image`, `mask_background` and `anomalies` (the per-class coverage
+  from `mask_color_map`), read exactly as for a segmentation result.
+- **Result history DB**: the `inference_result` table gained a `detections`
+  JSON column (Alembic revision `fe9a273bbe2c`) holding the list form of the
+  block — `[entry_0, entry_1, …]` in key order, `mask_rle` included — written
+  for every capture whose block is a non-empty map; `GET
+  /workflows/{id}/results` and `/results/{capture_id}` return it as
+  `detections`.
+- **Run preview** (`GET /workflows/executions/{execution_id}/overlay`): the
+  body has **four keys**, `{maskImage, maskBackground, instances,
+  detectionsTruncated}`. `instances` is the run's list (sidecar first, record
+  second, entries verbatim including `mask_rle`) and `detectionsTruncated`
+  the block marker; both are `null` for a run without instance results.
+- **Run metadata / conditions** (`workflow_engine/detections.py`): entries
+  gain `mask_area` only when the raw entry carries a finite number; `mask_rle`
+  is never copied into telemetry. The debug-bundle recorder projects only
+  `label`, `confidence`, `box` and `id`, so bundles are unchanged.
+- **HMI**: run results and the result-history detail draw the masks on a
+  canvas over the image (`InstanceMaskLayer`, toggle **Masks + boxes** /
+  **Boxes**); the detected-objects table shows a **Mask area (px)** column
+  when any row has one; the live card lists **Mask coverage** per class under
+  the objects when the result carries the coverage map.
+
+### 24.8 Instance-manifest export
+
+`GET /workflows/{workflow_id}/results/export` takes
+`manifest_format=classification` (the default: today's manifest,
+byte-identical) or `manifest_format=instance`. The instance form writes the
+Portal's **Instance_Manifest** — one line per stored result whose
+`detections` carry at least one `mask_rle`: `source-ref` (the image file
+beside the manifest in the zip), `instance-segmentation` (image size, one
+annotation per mask-carrying entry with `class_id`, the box as left / top /
+width / height and the entry's `rle` verbatim) and
+`instance-segmentation-metadata` (confidences, the export-wide `class-map`,
+`human-annotated: "no"`). Results without a mask-carrying entry, and
+truncated entries, are skipped and counted in the log. Any other value is a
+400. In the HMI the workflow's **Download result images** dialog has a
+**Manifest format** select (Classification / Instance segmentation), and the result
+history's download of selected rows offers **Download with
+instance-segmentation manifest** when a selected row stores an instance
+mask; both append `&manifest_format=instance` to this URL.
+
+### 24.9 Edge MCP
+
+One rule for every edge tool whose result carries the Detection_List: boxes
+and `mask_area` are returned, **`mask_rle` is always dropped** (a few 1080p
+masks as text would exceed the 200 KB object-result cap and the tool would
+answer `result_too_large` instead), and the mask image stays dropped or
+extracted exactly as before — the Composite_Mask reaches the caller as the
+extracted image where a tool extracts one. The drop paths per tool are listed
+in `docs/edge-mcp-server.md`; the live `inferenceResult.detections` is a map,
+so the path grammar gained the `{}` segment (every value of an object) beside
+`[]` (every element of a list).
+
+### 24.10 Feature floor
+
+A LocalServer built before this contract has no `rf_detr_instance_segmentation`
+stage type (instance mode fails at model load) and runs the pre-Seg decoder in
+semantic mode. The Portal therefore keeps a per-architecture **Seg feature
+floor** — the first LocalServer version carrying this section — in one CDK
+literal (`WORKFLOW_RFDETR_SEG_MIN_LOCAL_SERVER_VERSIONS`, read by the
+workflow packager and the deployment gate). A workflow that references an
+RF-DETR-Seg model is packaged with its LocalServer floor raised to the maximum
+of the lineage, stream and Seg floors, and an architecture without an entry is
+refused: `409 RFDETR_SEG_UNSUPPORTED_ARCH` at packaging, the same reason at
+the deployment gate. Workflows without a Seg model are untouched. The entries
+are filled per architecture once its build is verified; an architecture whose
+hardware verification is pending is listed as unverified in the Portal tests
+instead.
+
+### 24.11 Semantic mode is the LFV segmentation record
+
+In semantic mode nothing above §24.4 applies: the decoder returns an
+`AnomalyResult`, the base model emits the anomaly tensors (score, the
+colourised mask from `pixel_level_classes`), the marshal writes the anomaly
+capture record (`mask.png`, `internal-color-map`, `anomaly-mask-ref-detected`,
+no `detections` block), and every reader — live result, DB row, run preview,
+HMI, Portal captures, export — handles it as it handles an LFV segmentation
+model. `mask_rle`, `mask_area`, the `detections` column and the instance
+export do not occur. Switching a model between the modes is a packaging
+choice (**Output** on the model's page), not a retraining.

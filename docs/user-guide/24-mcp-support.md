@@ -59,7 +59,7 @@ The server URL ending in `/mcp` offers every tool. Each view URL offers one area
 
 | View | URL ending | What the tools read | Read-only tools |
 |------|------------|---------------------|-----------------|
-| **data** | `/mcp/data` | Buckets, datasets and folders, captures, labeling jobs and teams, your own labeling tasks, pre-labeled datasets and synthetic-data sessions. | 23 |
+| **data** | `/mcp/data` | Buckets, datasets and folders, captures, labeling jobs and teams, your own labeling tasks, pre-labeled datasets and synthetic-data sessions. Captures from an instance-segmentation model (RF-DETR-Seg) carry `has_masks` and each detection's `mask_area`, but no per-instance mask (`mask_rle`). | 23 |
 | **models** | `/mcp/models` | Models, training jobs and their logs, compilations, model types and format checks. | 11 |
 | **devices** | `/mcp/devices` | Devices, their cameras, components, deployments, logs, registrations and pinned images and videos. | 20 |
 | **workflows** | `/mcp/workflows` | Workflows and versions, test datasets and runs, custom nodes and plugins, builds and build servers. | 27 |
